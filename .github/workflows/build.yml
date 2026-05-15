@@ -1,0 +1,32 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore src/JeebGateway/JeebGateway.csproj
+
+      - name: Build
+        run: dotnet build src/JeebGateway/JeebGateway.csproj -c Release --no-restore
+
+      # Uncomment when test project is added:
+      # - name: Test
+      #   run: dotnet test --no-build -c Release --verbosity normal
+
+      - name: Publish
+        run: dotnet publish src/JeebGateway/JeebGateway.csproj -c Release -o publish --no-build
