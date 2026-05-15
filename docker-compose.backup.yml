@@ -1,0 +1,51 @@
+# Compose overlay that enables PITR + scheduled backups.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.backup.yml up -d
+#
+# Adds two things on top of the base compose file:
+#   1. WAL archiving on the postgres service (archive_command + wal_level=replica)
+#   2. A postgres-backup sidecar that runs pg_backup.sh every 6h
+#
+# Both services share the same named volume so dumps survive a sidecar restart
+# and WAL segments are persisted across postgres restarts.
+version: "3.9"
+
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=/etc/postgresql/pg_wal_archive.sh %p %f
+      - -c
+      - archive_timeout=300
+      - -c
+      - max_wal_senders=3
+    volumes:
+      - jeeb-backups:/var/backups/jeeb
+      - ./db/backup/pg_wal_archive.sh:/etc/postgresql/pg_wal_archive.sh:ro
+    environment:
+      - WAL_ARCHIVE_DIR=/var/backups/jeeb/wal
+
+  postgres-backup:
+    build:
+      context: ./db/backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgres://jeeb:jeeb@postgres:5432/jeeb
+      - BACKUP_DIR=/var/backups/jeeb
+      - BACKUP_RETENTION_HOURS=168
+      - ALERT_WEBHOOK_URL=${BACKUP_ALERT_WEBHOOK_URL:-}
+      - TZ=UTC
+    volumes:
+      - jeeb-backups:/var/backups/jeeb
+    restart: unless-stopped
+
+volumes:
+  jeeb-backups:
