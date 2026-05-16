@@ -13,5 +13,6 @@ public enum NotificationTrigger
     StatusChange,
     Chat,
     KycUpdate,
-    RatingReminder
+    RatingReminder,
+    Promotion
 }

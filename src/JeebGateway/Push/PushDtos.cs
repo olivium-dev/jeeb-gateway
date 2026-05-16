@@ -49,3 +49,21 @@ public sealed class RegisterDeviceRequest
     [JsonPropertyName("token")]
     public string Token { get; init; } = string.Empty;
 }
+
+public sealed class DeliveryTrackingResponse
+{
+    [JsonPropertyName("userId")]
+    public string UserId { get; init; } = string.Empty;
+
+    [JsonPropertyName("trigger")]
+    public string Trigger { get; init; } = string.Empty;
+
+    [JsonPropertyName("outcome")]
+    public string Outcome { get; init; } = string.Empty;
+
+    [JsonPropertyName("attemptsMade")]
+    public int AttemptsMade { get; init; }
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; init; }
+}

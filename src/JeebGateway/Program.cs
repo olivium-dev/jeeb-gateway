@@ -152,8 +152,22 @@ builder.Services.AddSingleton<INotificationPreferencesStore, InMemoryNotificatio
 builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOptions.SectionName));
 builder.Services.AddSingleton<IDeviceTokenStore, InMemoryDeviceTokenStore>();
 builder.Services.AddSingleton<IPushRetryQueue, InMemoryPushRetryQueue>();
-builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Fcm));
-builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
+builder.Services.AddSingleton<InMemoryPushDeliveryTracker>();
+builder.Services.AddSingleton<IPushDeliveryTracker>(sp => sp.GetRequiredService<InMemoryPushDeliveryTracker>());
+
+var pushOpts = builder.Configuration.GetSection(PushOptions.SectionName).Get<PushOptions>() ?? new PushOptions();
+if (pushOpts.UseFcmTransport)
+{
+    builder.Services.AddHttpClient<FcmPushTransport>();
+    builder.Services.AddSingleton<IPushTransport, FcmPushTransport>();
+    builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
+}
+else
+{
+    builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Fcm));
+    builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
+}
+
 builder.Services.AddSingleton<IPushNotificationService, PushNotificationService>();
 builder.Services.AddSingleton<PushRetryQueueProcessor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProcessor>());
@@ -217,6 +231,12 @@ builder.Services.AddSingleton<IAdminAuditLog, InMemoryAdminAuditLog>();
 // via an NSwag-generated client, backed by the schema in 0001 + 0006.
 builder.Services.AddSingleton<InMemoryUsersStore>();
 builder.Services.AddSingleton<IUsersStore>(sp => sp.GetRequiredService<InMemoryUsersStore>());
+
+// Dual-role identity + BR-1 enforcement (T-backend-041).
+// Validates that a user cannot act as both Client and Jeeber simultaneously
+// in the same delivery, and that role switches are gated on having no active
+// deliveries under the current role.
+builder.Services.AddSingleton<IDualRoleService, DualRoleService>();
 
 // Account deletion lifecycle (T-backend-035, GDPR-like).
 // In-memory store for the MVP; production wiring will be a worker that
@@ -306,7 +326,9 @@ builder.Services.AddHealthChecks()
 var app = builder.Build();
 
 app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<RequestValidationMiddleware>();
 app.UseMiddleware<SecurityHeadersMiddleware>();
+app.UseMiddleware<ApiKeyAuthenticationMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {
@@ -324,6 +346,10 @@ app.UseCors(corsPolicyName);
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+// T-backend-041: inject the user's persisted active role into HttpContext.Items
+// and reject tokens with a stale active_role claim.
+app.UseMiddleware<ActiveRoleMiddleware>();
 
 // Rate limiter must run after authentication so the per-user partition can
 // read the JWT sub claim.

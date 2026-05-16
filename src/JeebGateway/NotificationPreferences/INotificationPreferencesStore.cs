@@ -21,4 +21,5 @@ public class NotificationPreferencesPatch
     public bool? Chat { get; init; }
     public bool? StatusChanges { get; init; }
     public bool? RatingReminders { get; init; }
+    public bool? Promotions { get; init; }
 }

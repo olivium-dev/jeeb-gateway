@@ -33,6 +33,7 @@ public class PushNotificationServiceTests
     [InlineData(NotificationTrigger.Chat)]
     [InlineData(NotificationTrigger.KycUpdate)]
     [InlineData(NotificationTrigger.RatingReminder)]
+    [InlineData(NotificationTrigger.Promotion)]
     public async Task Push_Is_Sent_For_Every_Trigger_Category(NotificationTrigger trigger)
     {
         // AC1: every trigger event listed in the AC must fan out to the
@@ -113,7 +114,7 @@ public class PushNotificationServiceTests
         await prefs.UpdateAsync("user-kyc",
             new NotificationPreferencesPatch
             {
-                Offers = false, Chat = false, StatusChanges = false, RatingReminders = false
+                Offers = false, Chat = false, StatusChanges = false, RatingReminders = false, Promotions = false
             }, default);
 
         var service = factory.Services.GetRequiredService<IPushNotificationService>();
@@ -312,6 +313,163 @@ public class PushNotificationServiceTests
         var resp = await client.PostAsJsonAsync("/push/devices", new { platform = "fcm", token = "tok-x" });
 
         resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Promotion_Push_Respects_User_Preference()
+    {
+        // Promotions are user-toggleable — when muted, no push is sent.
+        var factory = NewFactory(out _);
+        await RegisterDevice(factory, "user-promo-muted", DevicePlatform.Fcm, "tok-fcm");
+        var prefs = factory.Services.GetRequiredService<INotificationPreferencesStore>();
+        await prefs.UpdateAsync("user-promo-muted", new NotificationPreferencesPatch { Promotions = false }, default);
+
+        var service = factory.Services.GetRequiredService<IPushNotificationService>();
+        var result = await service.SendAsync(
+            new PushNotificationRequest("user-promo-muted", NotificationTrigger.Promotion, "50% off", "Use code JEEB50"),
+            CancellationToken.None);
+
+        result.Outcome.Should().Be(PushDeliveryOutcome.SuppressedByPreference);
+    }
+
+    [Fact]
+    public async Task Promotion_Push_Delivered_When_Preference_Enabled()
+    {
+        // Default preferences enable promotions — the push should land.
+        var factory = NewFactory(out _);
+        await RegisterDevice(factory, "user-promo-on", DevicePlatform.Fcm, "tok-fcm");
+
+        var service = factory.Services.GetRequiredService<IPushNotificationService>();
+        var result = await service.SendAsync(
+            new PushNotificationRequest("user-promo-on", NotificationTrigger.Promotion, "Deal", "body"),
+            CancellationToken.None);
+
+        result.Outcome.Should().Be(PushDeliveryOutcome.Delivered);
+    }
+
+    [Fact]
+    public async Task Delivery_Tracker_Records_Every_Outcome()
+    {
+        var factory = NewFactory(out _);
+        await RegisterDevice(factory, "user-tracked", DevicePlatform.Fcm, "tok-fcm");
+
+        var service = factory.Services.GetRequiredService<IPushNotificationService>();
+        await service.SendAsync(
+            new PushNotificationRequest("user-tracked", NotificationTrigger.Chat, "hi", "there"),
+            CancellationToken.None);
+        await service.SendAsync(
+            new PushNotificationRequest("user-tracked", NotificationTrigger.NewOffer, "offer", "body"),
+            CancellationToken.None);
+
+        var tracker = factory.Services.GetRequiredService<IPushDeliveryTracker>();
+        var deliveries = await tracker.GetForUserAsync("user-tracked", default);
+        deliveries.Should().HaveCount(2);
+        deliveries.Should().OnlyContain(d => d.Outcome == PushDeliveryOutcome.Delivered);
+    }
+
+    [Fact]
+    public async Task Delivery_Tracker_Records_Suppressed_Outcome()
+    {
+        var factory = NewFactory(out _);
+        await RegisterDevice(factory, "user-track-sup", DevicePlatform.Fcm, "tok-fcm");
+        var prefs = factory.Services.GetRequiredService<INotificationPreferencesStore>();
+        await prefs.UpdateAsync("user-track-sup", new NotificationPreferencesPatch { Chat = false }, default);
+
+        var service = factory.Services.GetRequiredService<IPushNotificationService>();
+        await service.SendAsync(
+            new PushNotificationRequest("user-track-sup", NotificationTrigger.Chat, "hi", "there"),
+            CancellationToken.None);
+
+        var tracker = factory.Services.GetRequiredService<IPushDeliveryTracker>();
+        var deliveries = await tracker.GetForUserAsync("user-track-sup", default);
+        deliveries.Should().ContainSingle()
+            .Which.Outcome.Should().Be(PushDeliveryOutcome.SuppressedByPreference);
+    }
+
+    [Fact]
+    public async Task Deliveries_Endpoint_Returns_User_History()
+    {
+        var factory = NewFactory(out _);
+        await RegisterDevice(factory, "user-hist", DevicePlatform.Fcm, "tok-fcm");
+
+        var service = factory.Services.GetRequiredService<IPushNotificationService>();
+        await service.SendAsync(
+            new PushNotificationRequest("user-hist", NotificationTrigger.Chat, "hi", "body"),
+            CancellationToken.None);
+
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", "user-hist");
+
+        var resp = await client.GetAsync("/push/deliveries");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var deliveries = await resp.Content.ReadFromJsonAsync<DeliveryTrackingResponse[]>();
+        deliveries.Should().ContainSingle()
+            .Which.Outcome.Should().Be(nameof(PushDeliveryOutcome.Delivered));
+    }
+
+    [Fact]
+    public async Task Deliveries_Endpoint_Requires_Identity()
+    {
+        var factory = NewFactory(out _);
+        var client = factory.CreateClient();
+
+        var resp = await client.GetAsync("/push/deliveries");
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Recent_Deliveries_Endpoint_Returns_Cross_User_Results()
+    {
+        var factory = NewFactory(out _);
+        await RegisterDevice(factory, "user-r1", DevicePlatform.Fcm, "tok-1");
+        await RegisterDevice(factory, "user-r2", DevicePlatform.Fcm, "tok-2");
+
+        var service = factory.Services.GetRequiredService<IPushNotificationService>();
+        await service.SendAsync(
+            new PushNotificationRequest("user-r1", NotificationTrigger.Chat, "hi", "body"), default);
+        await service.SendAsync(
+            new PushNotificationRequest("user-r2", NotificationTrigger.NewOffer, "offer", "body"), default);
+
+        var client = factory.CreateClient();
+        var resp = await client.GetAsync("/push/deliveries/recent?limit=10");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var deliveries = await resp.Content.ReadFromJsonAsync<DeliveryTrackingResponse[]>();
+        deliveries.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task Send_Endpoint_Accepts_Promotion_Trigger()
+    {
+        var factory = NewFactory(out _);
+        await RegisterDevice(factory, "user-promo-http", DevicePlatform.Fcm, "tok-fcm");
+
+        var client = factory.CreateClient();
+        var resp = await client.PostAsJsonAsync("/push/send", new
+        {
+            userId = "user-promo-http",
+            trigger = "Promotion",
+            title = "Flash sale",
+            body = "50% off today"
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        var body = await resp.Content.ReadFromJsonAsync<SendPushResponse>();
+        body!.Outcome.Should().Be(nameof(PushDeliveryOutcome.Delivered));
+    }
+
+    [Fact]
+    public async Task Idempotent_Device_Registration_Does_Not_Duplicate()
+    {
+        var factory = NewFactory(out _);
+        var store = factory.Services.GetRequiredService<IDeviceTokenStore>();
+
+        await store.RegisterAsync(new DeviceToken("user-dup", DevicePlatform.Fcm, "same-tok"), default);
+        await store.RegisterAsync(new DeviceToken("user-dup", DevicePlatform.Fcm, "same-tok"), default);
+
+        var devices = await store.GetForUserAsync("user-dup", default);
+        devices.Should().ContainSingle("idempotent registration deduplicates (token, platform) pair");
     }
 
     // -----------------------------------------------------------------

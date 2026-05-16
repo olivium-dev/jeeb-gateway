@@ -27,6 +27,7 @@ public sealed class PushNotificationService : IPushNotificationService
     private readonly IDeviceTokenStore _devices;
     private readonly IReadOnlyDictionary<DevicePlatform, IPushTransport> _transports;
     private readonly IPushRetryQueue _retryQueue;
+    private readonly IPushDeliveryTracker _tracker;
     private readonly PushOptions _options;
     private readonly TimeProvider _clock;
     private readonly ILogger<PushNotificationService> _log;
@@ -36,6 +37,7 @@ public sealed class PushNotificationService : IPushNotificationService
         IDeviceTokenStore devices,
         IEnumerable<IPushTransport> transports,
         IPushRetryQueue retryQueue,
+        IPushDeliveryTracker tracker,
         IOptions<PushOptions> options,
         TimeProvider clock,
         ILogger<PushNotificationService> log)
@@ -44,6 +46,7 @@ public sealed class PushNotificationService : IPushNotificationService
         _devices = devices;
         _transports = transports.ToDictionary(t => t.Platform);
         _retryQueue = retryQueue;
+        _tracker = tracker;
         _options = options.Value;
         _clock = clock;
         _log = log;
@@ -51,7 +54,9 @@ public sealed class PushNotificationService : IPushNotificationService
 
     public async Task<PushDeliveryResult> SendAsync(PushNotificationRequest request, CancellationToken ct)
     {
-        return await SendInternalAsync(request, attempt: 1, ct);
+        var result = await SendInternalAsync(request, attempt: 1, ct);
+        await _tracker.RecordAsync(result, ct);
+        return result;
     }
 
     /// <summary>
@@ -61,7 +66,9 @@ public sealed class PushNotificationService : IPushNotificationService
     /// </summary>
     internal async Task<PushDeliveryResult> SendForRetryAsync(PushNotificationRequest request, CancellationToken ct)
     {
-        return await SendInternalAsync(request, attempt: 2, ct);
+        var result = await SendInternalAsync(request, attempt: 2, ct);
+        await _tracker.RecordAsync(result, ct);
+        return result;
     }
 
     private async Task<PushDeliveryResult> SendInternalAsync(PushNotificationRequest request, int attempt, CancellationToken ct)
