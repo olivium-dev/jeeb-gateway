@@ -464,6 +464,131 @@ public class InMemoryRequestsStore : IRequestsStore
     private static string GenerateOtp() => Random.Shared.Next(0, 1_000_000).ToString("D6");
 
     /// <summary>
+    /// T-backend-024 (JEEB-42): atomic cancellation. The guard read + status
+    /// flip + audit-field stamping all run under the write lock so a racing
+    /// status PATCH or accept cannot land between them.
+    /// </summary>
+    public Task<CancellationStoreResult?> TryCancelAsync(
+        string requestId,
+        IReadOnlySet<string> allowedFromStates,
+        string targetStatus,
+        string cancelledBy,
+        string? reason,
+        DateTimeOffset at,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_requests.TryGetValue(requestId, out var existing))
+            {
+                return Task.FromResult<CancellationStoreResult?>(null);
+            }
+
+            var from = existing.Status;
+            if (!allowedFromStates.Contains(from))
+            {
+                return Task.FromResult<CancellationStoreResult?>(
+                    new CancellationStoreResult(CancellationStoreOutcome.NotCancellable, existing, from));
+            }
+
+            existing.CancellationPreviousStatus = from;
+            existing.CancelledBy = cancelledBy;
+            existing.CancellationReason = reason;
+            existing.CancellationRequestedAt = at;
+            existing.Status = targetStatus;
+            // GPS tracking must stop the moment a delivery is cancelled —
+            // continuing to ingest the Jeeber's location after the row
+            // closes would leak telemetry the user no longer consents to.
+            if (RequestStatus.IsTerminal(targetStatus))
+            {
+                existing.GpsTrackingActive = false;
+            }
+
+            return Task.FromResult<CancellationStoreResult?>(
+                new CancellationStoreResult(CancellationStoreOutcome.Committed, existing, from));
+        }
+    }
+
+    public Task<CancellationStoreResult?> TryDecideCancellationAsync(
+        string requestId,
+        bool approve,
+        DateTimeOffset at,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_requests.TryGetValue(requestId, out var existing))
+            {
+                return Task.FromResult<CancellationStoreResult?>(null);
+            }
+            if (existing.Status != RequestStatus.CancellationRequested)
+            {
+                return Task.FromResult<CancellationStoreResult?>(null);
+            }
+
+            var from = existing.Status;
+            if (approve)
+            {
+                existing.Status = RequestStatus.Cancelled;
+                existing.CancellationApprovedAt = at;
+                existing.GpsTrackingActive = false;
+            }
+            else
+            {
+                // Reject — revert to whatever lane the row was on before
+                // the Client requested the cancel. Without a recorded
+                // previous status (defensive), fall back to picked_up so
+                // the delivery resumes inside the active fulfilment lane
+                // rather than bouncing all the way back to pending.
+                existing.Status = existing.CancellationPreviousStatus ?? RequestStatus.PickedUp;
+                existing.CancellationRejectedAt = at;
+                existing.CancelledBy = null;
+                existing.CancellationReason = null;
+                existing.CancellationRequestedAt = null;
+                existing.CancellationPreviousStatus = null;
+            }
+
+            return Task.FromResult<CancellationStoreResult?>(
+                new CancellationStoreResult(CancellationStoreOutcome.Committed, existing, from));
+        }
+    }
+
+    public Task<(IReadOnlyList<DeliveryRequest> Items, int Total)> ListPendingCancellationsAsync(
+        int page, int pageSize, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            var all = _requests.Values
+                .Where(r => r.Status == RequestStatus.CancellationRequested)
+                .OrderBy(r => r.CancellationRequestedAt ?? DateTimeOffset.MaxValue)
+                .ToArray();
+
+            var skip = (page - 1) * pageSize;
+            IReadOnlyList<DeliveryRequest> items = all
+                .Skip(skip)
+                .Take(pageSize)
+                .ToArray();
+
+            return Task.FromResult((items, all.Length));
+        }
+    }
+
+    public Task<IReadOnlyList<DeliveryRequest>> ListJeeberCancelledAsync(
+        string jeeberId, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            IReadOnlyList<DeliveryRequest> rows = _requests.Values
+                .Where(r => string.Equals(r.JeeberId, jeeberId, StringComparison.Ordinal)
+                            && string.Equals(r.CancelledBy, "jeeber", StringComparison.Ordinal)
+                            && r.Status == RequestStatus.Cancelled)
+                .OrderByDescending(r => r.CancellationRequestedAt ?? DateTimeOffset.MinValue)
+                .ToArray();
+            return Task.FromResult(rows);
+        }
+    }
+
+    /// <summary>
     /// Test/export helper — returns every request currently owned by
     /// <paramref name="clientId"/>, including terminal rows. The
     /// data-export packager (T-backend-042) uses this to include the
@@ -517,6 +642,12 @@ public class InMemoryRequestsStore : IRequestsStore
                     ExpiredAt = existing.ExpiredAt,
                     JeeberId = existing.JeeberId,
                     AcceptedAt = existing.AcceptedAt,
+                    CancelledBy = existing.CancelledBy,
+                    CancellationReason = existing.CancellationReason,
+                    CancellationRequestedAt = existing.CancellationRequestedAt,
+                    CancellationApprovedAt = existing.CancellationApprovedAt,
+                    CancellationRejectedAt = existing.CancellationRejectedAt,
+                    CancellationPreviousStatus = existing.CancellationPreviousStatus,
                     OtpAttemptCount = existing.OtpAttemptCount,
                     OtpLockedAt = existing.OtpLockedAt,
                     ClientUnreachableAt = existing.ClientUnreachableAt,
