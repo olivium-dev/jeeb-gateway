@@ -1,0 +1,37 @@
+# T-backend-050 — per-endpoint p95 latency alert.
+#
+# Fires when the 5-minute rolling p95 of any (method, route) tuple exceeds
+# 400ms for 5 consecutive minutes. The 5-min rate window matches the
+# dashboard query (observability/dashboards/api-latency.json) so the alert
+# and the panel agree on what they're measuring.
+#
+# Scrape granularity: 1 minute. Configure the jeeb-gateway scrape job with
+# `scrape_interval: 1m` (and the global `evaluation_interval: 1m`) so the
+# `for: 5m` window contains five evaluation points.
+groups:
+  - name: jeeb-gateway.latency
+    interval: 1m
+    rules:
+      - alert: JeebGatewayP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, method, route) (
+              rate(jeeb_gateway_http_request_duration_seconds_bucket[5m])
+            )
+          ) > 0.4
+        for: 5m
+        labels:
+          severity: page
+          service: jeeb-gateway
+          slo: api-latency-p95
+        annotations:
+          summary: "jeeb-gateway p95 > 400ms on {{ $labels.method }} {{ $labels.route }}"
+          description: |
+            The 5-minute rolling p95 latency for {{ $labels.method }}
+            {{ $labels.route }} has been above the 400ms SLO for at least
+            5 minutes (current: {{ $value | humanizeDuration }}).
+
+            Dashboard: /d/jeeb-gateway-api-latency
+            Runbook:   docs/runbooks/api-latency-p95.md
+          dashboard_uid: jeeb-gateway-api-latency

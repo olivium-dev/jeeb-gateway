@@ -11,6 +11,8 @@ using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.ProhibitedItems.Scanner;
 using JeebGateway.Push;
 using JeebGateway.Requests;
+using JeebGateway.Requests.Cancellation;
+using JeebGateway.Requests.OtpHandover;
 using JeebGateway.Security;
 using JeebGateway.Tokens;
 using JeebGateway.Tracking;
@@ -116,6 +118,8 @@ builder.Services.AddOpenTelemetry()
         metrics
             .AddAspNetCoreInstrumentation()
             .AddHttpClientInstrumentation()
+            // T-backend-050 — Jeeb-owned per-endpoint latency meter.
+            .AddMeter(RequestLatencyMetrics.MeterName)
             // Explicit buckets keep the 400ms p95 SLO on a bucket boundary so
             // histogram_quantile() does not round across a wide bucket (T-backend-050).
             .AddView(
@@ -128,8 +132,30 @@ builder.Services.AddOpenTelemetry()
                         0.3, 0.4, 0.5, 0.75, 1.0, 2.5, 5.0, 10.0
                     }
                 })
-            .AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
+            // Same boundaries on the Jeeb-owned histogram so dashboards and
+            // alerts can pivot to it without re-bucketing.
+            .AddView(
+                instrumentName: RequestLatencyMetrics.HistogramName,
+                metricStreamConfiguration: new ExplicitBucketHistogramConfiguration
+                {
+                    Boundaries = new[]
+                    {
+                        0.005, 0.01, 0.025, 0.05, 0.1, 0.2,
+                        0.3, 0.4, 0.5, 0.75, 1.0, 2.5, 5.0, 10.0
+                    }
+                })
+            .AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint))
+            // T-backend-050 — Prometheus scrape endpoint mounted on /metrics
+            // (see MapPrometheusScrapingEndpoint below). 1-minute scrape
+            // granularity is enforced from the Prometheus side via the
+            // scrape_interval on the jeeb-gateway job (observability/alerts).
+            .AddPrometheusExporter();
     });
+
+// T-backend-050 — singleton wrapper around the latency Meter. The Meter is
+// owned by DI so its lifetime matches the host's, which keeps the OTel
+// MeterProvider's subscription alive for the life of the process.
+builder.Services.AddSingleton<RequestLatencyMetrics>();
 
 // Typed HttpClient registrations for downstream services will go here.
 // Example:
@@ -186,10 +212,18 @@ builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
 
 // Tier-existence probe consumed by RequestsController to enforce
 // T-backend-007's "validate tier exists" criterion. Distinct interface
-// from JeebGateway.Tiers.ITiersStore (the admin/catalog surface) — the
-// requests-side variant only needs an Exists check, kept minimal so the
-// hot path of request creation does not pull in the full catalog DTOs.
+// from JeebGateway.Tiers.ITiersStore (the admin/catalog surface).
 builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.InMemoryTiersStore>();
+
+// Delivery cancellation pipeline (T-backend-024 / JEEB-42).
+builder.Services.AddSingleton<IJeeberRestrictionStore, InMemoryJeeberRestrictionStore>();
+builder.Services.AddSingleton<ICancellationService, CancellationService>();
+
+// OTP handover verification + admin escalation (T-backend-015 / JEEB-33).
+builder.Services.Configure<OtpHandoverOptions>(builder.Configuration.GetSection(OtpHandoverOptions.SectionName));
+builder.Services.AddSingleton<IAdminEscalationStore, InMemoryAdminEscalationStore>();
+builder.Services.AddSingleton<OtpHandoverSweeper>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper>());
 
 // Geo-matching engine (T-backend-008).
 // Queries online Jeebers within the tier-specific radius (PostGIS-style
@@ -418,6 +452,12 @@ if (app.Environment.IsDevelopment())
 
 app.UseRouting();
 
+// T-backend-050 — per-endpoint latency histogram. Registered immediately
+// after UseRouting so context.GetEndpoint() resolves the matched route
+// template (e.g. "/api/requests/{id}") instead of the raw URL path; this
+// keeps the metric's `route` label cardinality bounded.
+app.UseMiddleware<RequestLatencyMiddleware>();
+
 // CORS must run after UseRouting so endpoint-specific CORS metadata applies,
 // and before UseAuthentication so preflight requests are not rejected as 401.
 var corsPolicyName = (builder.Configuration.GetSection(SecurityOptions.SectionName)
@@ -436,6 +476,11 @@ app.UseMiddleware<ActiveRoleMiddleware>();
 app.UseRateLimiter();
 
 app.MapControllers();
+
+// T-backend-050 — Prometheus scrape endpoint. Returns the OpenMetrics
+// snapshot for the configured MeterProvider (ASP.NET Core HTTP server,
+// HttpClient, and the Jeeb-owned RequestLatencyMetrics histogram).
+app.MapPrometheusScrapingEndpoint("/metrics");
 
 // Real-time chat WebSocket surface (T-backend-012).
 app.MapHub<ChatHub>("/hubs/chat");

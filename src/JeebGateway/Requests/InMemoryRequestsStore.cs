@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using JeebGateway.Requests.OtpHandover;
 
 namespace JeebGateway.Requests;
 
@@ -314,11 +315,278 @@ public class InMemoryRequestsStore : IRequestsStore
     }
 
     /// <summary>
+    /// T-backend-015 dedicated OTP verification. Distinct from
+    /// <see cref="TryTransitionAsync"/> because it owns the
+    /// attempt-counter, lockout, and (via the caller) escalation
+    /// semantics that the plain state-machine PATCH does not carry.
+    /// </summary>
+    public Task<OtpVerificationResult> TryVerifyOtpAsync(
+        string requestId,
+        string otpCode,
+        int maxAttempts,
+        DateTimeOffset at,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_requests.TryGetValue(requestId, out var existing))
+            {
+                return Task.FromResult(new OtpVerificationResult(
+                    OtpVerificationOutcome.NotFound, null, 0, false));
+            }
+
+            // Already locked from a previous attempt — return locked
+            // without incrementing the counter or flipping any state.
+            // JustLockedOut stays false so the controller does NOT
+            // re-create the escalation row.
+            if (existing.OtpLockedAt is not null)
+            {
+                return Task.FromResult(new OtpVerificationResult(
+                    OtpVerificationOutcome.Locked, existing, 0, JustLockedOut: false));
+            }
+
+            // OTP verification is only valid at the documented handover
+            // step. A caller racing the state machine (or hitting the
+            // endpoint at the wrong moment) gets a deterministic 400.
+            if (!string.Equals(existing.Status, RequestStatus.HeadingOff, StringComparison.Ordinal))
+            {
+                return Task.FromResult(new OtpVerificationResult(
+                    OtpVerificationOutcome.NotInHandoverState,
+                    existing,
+                    Math.Max(0, maxAttempts - existing.OtpAttemptCount),
+                    false));
+            }
+
+            // Success path — flip to delivered and zero out the counter
+            // (defensive, in case the row had legitimate attempts
+            // before the correct code landed).
+            if (string.Equals(otpCode, existing.DeliveryOtp, StringComparison.Ordinal))
+            {
+                existing.Status = RequestStatus.Delivered;
+                return Task.FromResult(new OtpVerificationResult(
+                    OtpVerificationOutcome.Verified,
+                    existing,
+                    Math.Max(0, maxAttempts - existing.OtpAttemptCount),
+                    false));
+            }
+
+            // Wrong OTP — increment the counter. If this attempt is the
+            // one that hits the ceiling, stamp the lockout timestamp
+            // and return Locked with JustLockedOut=true so the
+            // controller fires exactly one escalation.
+            existing.OtpAttemptCount++;
+            if (existing.OtpAttemptCount >= maxAttempts)
+            {
+                existing.OtpLockedAt = at;
+                return Task.FromResult(new OtpVerificationResult(
+                    OtpVerificationOutcome.Locked,
+                    existing,
+                    0,
+                    JustLockedOut: true));
+            }
+
+            return Task.FromResult(new OtpVerificationResult(
+                OtpVerificationOutcome.Mismatch,
+                existing,
+                maxAttempts - existing.OtpAttemptCount,
+                false));
+        }
+    }
+
+    public Task<DeliveryRequest?> MarkClientUnreachableAsync(
+        string requestId,
+        DateTimeOffset at,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_requests.TryGetValue(requestId, out var existing))
+            {
+                return Task.FromResult<DeliveryRequest?>(null);
+            }
+            // Terminal rows cannot be flagged — once delivered/rated/
+            // cancelled/expired/disputed, the handover window is over.
+            if (RequestStatus.IsTerminal(existing.Status))
+            {
+                return Task.FromResult<DeliveryRequest?>(null);
+            }
+            // First-flag-wins: idempotent so repeated clicks don't
+            // reset the 15-min sweeper timer.
+            if (existing.ClientUnreachableAt is null)
+            {
+                existing.ClientUnreachableAt = at;
+            }
+            return Task.FromResult<DeliveryRequest?>(existing);
+        }
+    }
+
+    public Task<IReadOnlyList<DeliveryRequest>> ListUnreachableAtOrBeforeAsync(
+        DateTimeOffset cutoff,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            IReadOnlyList<DeliveryRequest> snapshot = _requests.Values
+                .Where(r => r.ClientUnreachableAt is { } u
+                    && u <= cutoff
+                    && r.OtpEscalationId is null
+                    && !RequestStatus.IsTerminal(r.Status))
+                .ToArray();
+            return Task.FromResult(snapshot);
+        }
+    }
+
+    public Task<bool> TrySetEscalationIdAsync(
+        string requestId,
+        string escalationId,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_requests.TryGetValue(requestId, out var existing))
+            {
+                return Task.FromResult(false);
+            }
+            if (existing.OtpEscalationId is not null)
+            {
+                return Task.FromResult(false);
+            }
+            existing.OtpEscalationId = escalationId;
+            return Task.FromResult(true);
+        }
+    }
+
+    /// <summary>
     /// Six-digit numeric hand-off OTP (T-backend-013). MVP uses
     /// <see cref="Random.Shared"/>; production swaps to a cryptographically
     /// random generator hashed at the column.
     /// </summary>
     private static string GenerateOtp() => Random.Shared.Next(0, 1_000_000).ToString("D6");
+
+    /// <summary>
+    /// T-backend-024 (JEEB-42): atomic cancellation. The guard read + status
+    /// flip + audit-field stamping all run under the write lock so a racing
+    /// status PATCH or accept cannot land between them.
+    /// </summary>
+    public Task<CancellationStoreResult?> TryCancelAsync(
+        string requestId,
+        IReadOnlySet<string> allowedFromStates,
+        string targetStatus,
+        string cancelledBy,
+        string? reason,
+        DateTimeOffset at,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_requests.TryGetValue(requestId, out var existing))
+            {
+                return Task.FromResult<CancellationStoreResult?>(null);
+            }
+
+            var from = existing.Status;
+            if (!allowedFromStates.Contains(from))
+            {
+                return Task.FromResult<CancellationStoreResult?>(
+                    new CancellationStoreResult(CancellationStoreOutcome.NotCancellable, existing, from));
+            }
+
+            existing.CancellationPreviousStatus = from;
+            existing.CancelledBy = cancelledBy;
+            existing.CancellationReason = reason;
+            existing.CancellationRequestedAt = at;
+            existing.Status = targetStatus;
+            // GPS tracking must stop the moment a delivery is cancelled —
+            // continuing to ingest the Jeeber's location after the row
+            // closes would leak telemetry the user no longer consents to.
+            if (RequestStatus.IsTerminal(targetStatus))
+            {
+                existing.GpsTrackingActive = false;
+            }
+
+            return Task.FromResult<CancellationStoreResult?>(
+                new CancellationStoreResult(CancellationStoreOutcome.Committed, existing, from));
+        }
+    }
+
+    public Task<CancellationStoreResult?> TryDecideCancellationAsync(
+        string requestId,
+        bool approve,
+        DateTimeOffset at,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_requests.TryGetValue(requestId, out var existing))
+            {
+                return Task.FromResult<CancellationStoreResult?>(null);
+            }
+            if (existing.Status != RequestStatus.CancellationRequested)
+            {
+                return Task.FromResult<CancellationStoreResult?>(null);
+            }
+
+            var from = existing.Status;
+            if (approve)
+            {
+                existing.Status = RequestStatus.Cancelled;
+                existing.CancellationApprovedAt = at;
+                existing.GpsTrackingActive = false;
+            }
+            else
+            {
+                // Reject — revert to whatever lane the row was on before
+                // the Client requested the cancel. Without a recorded
+                // previous status (defensive), fall back to picked_up so
+                // the delivery resumes inside the active fulfilment lane
+                // rather than bouncing all the way back to pending.
+                existing.Status = existing.CancellationPreviousStatus ?? RequestStatus.PickedUp;
+                existing.CancellationRejectedAt = at;
+                existing.CancelledBy = null;
+                existing.CancellationReason = null;
+                existing.CancellationRequestedAt = null;
+                existing.CancellationPreviousStatus = null;
+            }
+
+            return Task.FromResult<CancellationStoreResult?>(
+                new CancellationStoreResult(CancellationStoreOutcome.Committed, existing, from));
+        }
+    }
+
+    public Task<(IReadOnlyList<DeliveryRequest> Items, int Total)> ListPendingCancellationsAsync(
+        int page, int pageSize, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            var all = _requests.Values
+                .Where(r => r.Status == RequestStatus.CancellationRequested)
+                .OrderBy(r => r.CancellationRequestedAt ?? DateTimeOffset.MaxValue)
+                .ToArray();
+
+            var skip = (page - 1) * pageSize;
+            IReadOnlyList<DeliveryRequest> items = all
+                .Skip(skip)
+                .Take(pageSize)
+                .ToArray();
+
+            return Task.FromResult((items, all.Length));
+        }
+    }
+
+    public Task<IReadOnlyList<DeliveryRequest>> ListJeeberCancelledAsync(
+        string jeeberId, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            IReadOnlyList<DeliveryRequest> rows = _requests.Values
+                .Where(r => string.Equals(r.JeeberId, jeeberId, StringComparison.Ordinal)
+                            && string.Equals(r.CancelledBy, "jeeber", StringComparison.Ordinal)
+                            && r.Status == RequestStatus.Cancelled)
+                .OrderByDescending(r => r.CancellationRequestedAt ?? DateTimeOffset.MinValue)
+                .ToArray();
+            return Task.FromResult(rows);
+        }
+    }
 
     /// <summary>
     /// Test/export helper — returns every request currently owned by
@@ -373,7 +641,17 @@ public class InMemoryRequestsStore : IRequestsStore
                     NudgedAt = existing.NudgedAt,
                     ExpiredAt = existing.ExpiredAt,
                     JeeberId = existing.JeeberId,
-                    AcceptedAt = existing.AcceptedAt
+                    AcceptedAt = existing.AcceptedAt,
+                    CancelledBy = existing.CancelledBy,
+                    CancellationReason = existing.CancellationReason,
+                    CancellationRequestedAt = existing.CancellationRequestedAt,
+                    CancellationApprovedAt = existing.CancellationApprovedAt,
+                    CancellationRejectedAt = existing.CancellationRejectedAt,
+                    CancellationPreviousStatus = existing.CancellationPreviousStatus,
+                    OtpAttemptCount = existing.OtpAttemptCount,
+                    OtpLockedAt = existing.OtpLockedAt,
+                    ClientUnreachableAt = existing.ClientUnreachableAt,
+                    OtpEscalationId = existing.OtpEscalationId
                 };
             }
 

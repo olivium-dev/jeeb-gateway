@@ -20,6 +20,15 @@ public static class RequestStatus
     public const string Disputed = "disputed";
 
     /// <summary>
+    /// T-backend-024 (JEEB-42): non-terminal holding state used when a
+    /// Client cancels after pickup. The row is parked here until an admin
+    /// approves (→ <see cref="Cancelled"/>) or rejects (→ the previous
+    /// status). Treated as ACTIVE for BR-9/BR-10 purposes — the Jeeber is
+    /// still on the hook until the admin signs off.
+    /// </summary>
+    public const string CancellationRequested = "cancellation_requested";
+
+    /// <summary>
     /// The active states from BR-9: every status strictly before
     /// <see cref="Delivered"/>. <see cref="Cancelled"/> and <see cref="Expired"/>
     /// are terminal and do NOT count against the limit. <see cref="Scheduled"/>
@@ -33,7 +42,10 @@ public static class RequestStatus
         Matched,
         Accepted,
         PickedUp,
-        HeadingOff
+        HeadingOff,
+        // Cancellation pending admin sign-off: the row is not yet terminal
+        // and the Jeeber still owns it for capacity-cap purposes.
+        CancellationRequested
     };
 
     /// <summary>
@@ -48,7 +60,12 @@ public static class RequestStatus
     {
         Accepted,
         PickedUp,
-        HeadingOff
+        HeadingOff,
+        // While an admin reviews a Client-requested cancellation the
+        // delivery is still bound to the Jeeber — counting it against
+        // BR-10 prevents the Jeeber from accepting fresh work that they
+        // may have to drop again when the admin rejects.
+        CancellationRequested
     };
 
     /// <summary>
@@ -195,6 +212,42 @@ public class DeliveryRequest
     public string? DeliveryOtp { get; set; }
 
     /// <summary>
+    /// Cumulative count of incorrect OTP submissions against
+    /// POST /deliveries/{id}/verify-otp (T-backend-015). Successful
+    /// verification resets the counter implicitly by transitioning the
+    /// row out of the handover window. Reaching
+    /// <c>OtpHandoverOptions.MaxAttempts</c> locks the OTP and creates
+    /// an admin escalation entry.
+    /// </summary>
+    public int OtpAttemptCount { get; set; }
+
+    /// <summary>
+    /// Wall-clock moment the OTP became locked after
+    /// <c>OtpHandoverOptions.MaxAttempts</c> consecutive bad submissions
+    /// (T-backend-015). Null while OTP entry is still permitted. Once
+    /// stamped, every subsequent POST /verify-otp returns 423 Locked.
+    /// </summary>
+    public DateTimeOffset? OtpLockedAt { get; set; }
+
+    /// <summary>
+    /// When the Jeeber flagged the Client as unreachable at drop-off
+    /// (T-backend-015). The <c>OtpHandoverSweeper</c> escalates the
+    /// delivery to an admin once
+    /// <c>now - ClientUnreachableAt &gt;= OtpHandoverOptions.ClientUnreachableWindow</c>
+    /// (default 15 minutes).
+    /// </summary>
+    public DateTimeOffset? ClientUnreachableAt { get; set; }
+
+    /// <summary>
+    /// Id of the admin escalation row that owns this delivery's
+    /// hand-off dispute (T-backend-015). Set the first time either the
+    /// OTP locks out or the unreachable timer elapses; the field is
+    /// write-once so the sweeper cannot create duplicate escalations
+    /// when it polls.
+    /// </summary>
+    public string? OtpEscalationId { get; set; }
+
+    /// <summary>
     /// Whether the row's GPS-tracking requirement is active
     /// (T-backend-013). Flipped true when the state machine moves the
     /// row into <see cref="RequestStatus.PickedUp"/>; downstream
@@ -202,6 +255,47 @@ public class DeliveryRequest
     /// location updates.
     /// </summary>
     public bool GpsTrackingActive { get; set; }
+
+    /// <summary>
+    /// T-backend-024 (JEEB-42): who initiated the cancellation.
+    /// "client" or "jeeber". Null until a cancellation lands.
+    /// </summary>
+    public string? CancelledBy { get; set; }
+
+    /// <summary>
+    /// T-backend-024: reason supplied with the cancellation. Mandatory
+    /// for Jeeber cancellations; optional for Client cancellations.
+    /// Surfaced on the admin queue when a post-pickup Client cancel
+    /// gets escalated.
+    /// </summary>
+    public string? CancellationReason { get; set; }
+
+    /// <summary>
+    /// T-backend-024: when the cancellation was requested. For pre-pickup
+    /// Client cancels and all Jeeber cancels this equals the moment the
+    /// row went terminal; for post-pickup Client cancels it's the moment
+    /// the row entered <see cref="RequestStatus.CancellationRequested"/>.
+    /// </summary>
+    public DateTimeOffset? CancellationRequestedAt { get; set; }
+
+    /// <summary>
+    /// T-backend-024: when an admin approved a post-pickup Client cancel
+    /// and the row transitioned to <see cref="RequestStatus.Cancelled"/>.
+    /// </summary>
+    public DateTimeOffset? CancellationApprovedAt { get; set; }
+
+    /// <summary>
+    /// T-backend-024: when an admin rejected a post-pickup Client cancel
+    /// and reverted the row to <see cref="CancellationPreviousStatus"/>.
+    /// </summary>
+    public DateTimeOffset? CancellationRejectedAt { get; set; }
+
+    /// <summary>
+    /// T-backend-024: status the row held immediately before the
+    /// cancellation request. Used to revert the row on admin reject so
+    /// the delivery resumes from exactly where it left off.
+    /// </summary>
+    public string? CancellationPreviousStatus { get; set; }
 }
 
 public class CreateRequestBody
@@ -272,6 +366,33 @@ public class DeliveryRequestDto
     /// and begin streaming Jeeber location updates when this flips.
     /// </summary>
     public bool GpsTrackingActive { get; init; }
+
+    /// <summary>
+    /// OTP attempt count exposed so the mobile UI can render "2 of 3
+    /// remaining" (T-backend-015).
+    /// </summary>
+    public int OtpAttemptCount { get; init; }
+
+    /// <summary>
+    /// Non-null when OTP entry is locked out and the row has been
+    /// escalated to an admin (T-backend-015). The presence of this
+    /// value gates the UI on the "contact support" CTA.
+    /// </summary>
+    public DateTimeOffset? OtpLockedAt { get; init; }
+
+    /// <summary>
+    /// Non-null when the Jeeber flagged the Client as unreachable
+    /// (T-backend-015). Pair with <c>OtpEscalationId</c> to tell apart
+    /// "timer running" from "already escalated".
+    /// </summary>
+    public DateTimeOffset? ClientUnreachableAt { get; init; }
+
+    /// <summary>
+    /// Non-null once the row has been escalated to an admin via either
+    /// the OTP lockout path or the client-unreachable path
+    /// (T-backend-015).
+    /// </summary>
+    public string? OtpEscalationId { get; init; }
 }
 
 /// <summary>
