@@ -21,7 +21,8 @@ public sealed class WhisperOptions
     /// <summary>Total attempts including the first call (so 3 = 1 try + 2 retries).</summary>
     public int MaxAttempts { get; set; } = 3;
 
-    public TimeSpan InitialBackoff { get; set; } = TimeSpan.FromMilliseconds(500);
+    /// <summary>First backoff delay; doubles on each subsequent attempt (1s → 2s → 4s).</summary>
+    public TimeSpan InitialBackoff { get; set; } = TimeSpan.FromSeconds(1);
 
     public TimeSpan MaxBackoff { get; set; } = TimeSpan.FromSeconds(8);
 

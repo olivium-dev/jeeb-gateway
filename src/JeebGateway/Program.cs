@@ -282,6 +282,8 @@ builder.Services.AddHostedService<AutoOfflineSweeper>();
 // Resilient Whisper integration (T-backend-036).
 // Per-attempt 10s timeout enforced via linked CTS inside ResilientTranscriptionService;
 // HttpClient.Timeout is set to Infinite so the service's cancellation policy is authoritative.
+// Retry with exponential backoff (3 attempts, 1s/2s/4s), circuit breaker (5 failures),
+// secondary fallback provider, and health check integration.
 builder.Services.Configure<WhisperOptions>(builder.Configuration.GetSection(WhisperOptions.SectionName));
 builder.Services.AddHttpClient<IWhisperClient, WhisperClient>((sp, http) =>
 {
@@ -292,7 +294,10 @@ builder.Services.AddHttpClient<IWhisperClient, WhisperClient>((sp, http) =>
 builder.Services.AddSingleton<IWhisperCircuitBreaker, WhisperCircuitBreaker>();
 builder.Services.AddSingleton<IAudioStore, InMemoryAudioStore>();
 builder.Services.AddSingleton<ITranscriptionFallbackQueue, InMemoryTranscriptionFallbackQueue>();
+builder.Services.AddSingleton<IFallbackTranscriptionProvider, NoOpFallbackTranscriptionProvider>();
 builder.Services.AddScoped<ITranscriptionService, ResilientTranscriptionService>();
+builder.Services.AddHealthChecks()
+    .AddCheck<WhisperHealthCheck>("whisper", tags: new[] { "ready" });
 
 // ---------------------------------------------------------------------------
 // Middleware pipeline
