@@ -1,0 +1,64 @@
+name: DB Backup Verify
+
+# Weekly smoke test: build the backup sidecar image and run a logical restore
+# against a fresh Postgres container. This is the only thing that catches
+# silently-corrupt dumps before a real incident does.
+on:
+  schedule:
+    - cron: "23 4 * * 1"   # Mondays 04:23 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "db/backup/**"
+      - "docker-compose.backup.yml"
+      - ".github/workflows/db-backup-verify.yml"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: jeeb
+          POSTGRES_USER: jeeb
+          POSTGRES_PASSWORD: jeeb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U jeeb -d jeeb"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Seed minimal schema
+        env:
+          PGPASSWORD: jeeb
+        run: |
+          psql -h 127.0.0.1 -U jeeb -d jeeb <<'SQL'
+          CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, phone TEXT);
+          CREATE TABLE IF NOT EXISTS kyc_submissions (id SERIAL PRIMARY KEY);
+          CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY);
+          INSERT INTO users (phone) VALUES ('+966500000000');
+          INSERT INTO schema_migrations (version) VALUES ('verify-seed');
+          SQL
+
+      - name: Take a backup
+        env:
+          DATABASE_URL: postgres://jeeb:jeeb@127.0.0.1:5432/jeeb
+          BACKUP_DIR: ${{ runner.temp }}/backups
+        run: |
+          chmod +x db/backup/pg_backup.sh
+          db/backup/pg_backup.sh
+
+      - name: Verify by restoring into a throwaway container
+        env:
+          BACKUP_DIR: ${{ runner.temp }}/backups
+        run: |
+          chmod +x db/backup/verify_backup.sh db/backup/pg_restore.sh
+          db/backup/verify_backup.sh
