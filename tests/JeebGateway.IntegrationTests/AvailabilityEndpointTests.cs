@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Availability;
+using JeebGateway.Push;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -198,6 +199,65 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
     }
 
     [Fact]
+    public async Task Auto_Offline_Push_Flows_Through_PushNotificationService()
+    {
+        var factory = _fixture.FactoryWithProductionNotifier();
+        var client = factory.CreateClient();
+        var userId = $"jeeber-{Guid.NewGuid()}";
+        client.DefaultRequestHeaders.Add("X-User-Id", userId);
+        client.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        var devices = factory.Services.GetRequiredService<IDeviceTokenStore>();
+        await devices.RegisterAsync(new DeviceToken(userId, DevicePlatform.Fcm, $"tok-{userId}"), default);
+
+        await client.PatchAsJsonAsync("/jeebers/me/availability", new
+        {
+            online = true,
+            vehicleType = "car",
+            zone = "amman-downtown"
+        });
+
+        var clock = (FakeClock)factory.Services.GetRequiredService<TimeProvider>();
+        clock.Advance(TimeSpan.FromMinutes(31));
+
+        var sweeper = factory.Services.GetServices<IHostedService>().OfType<AutoOfflineSweeper>().Single();
+        await sweeper.SweepOnceAsync(default);
+
+        var fcm = factory.Services.GetServices<IPushTransport>()
+            .OfType<InMemoryPushTransport>()
+            .Single(t => t.Platform == DevicePlatform.Fcm);
+        fcm.Sent.Should().ContainSingle(s =>
+            s.Request.UserId == userId &&
+            s.Request.Trigger == NotificationTrigger.AutoOffline);
+    }
+
+    [Theory]
+    [InlineData("car", VehicleType.Car)]
+    [InlineData("motorbike", VehicleType.Motorbike)]
+    [InlineData("bicycle", VehicleType.Bicycle)]
+    [InlineData("scooter", VehicleType.Scooter)]
+    [InlineData("walk", VehicleType.Walk)]
+    public async Task Patch_Online_Broadcasts_Each_Vehicle_Type(string wire, VehicleType expected)
+    {
+        var factory = _fixture.Factory();
+        var client = factory.CreateClient();
+        var userId = $"jeeber-{Guid.NewGuid()}";
+        client.DefaultRequestHeaders.Add("X-User-Id", userId);
+        client.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        var resp = await client.PatchAsJsonAsync("/jeebers/me/availability", new
+        {
+            online = true,
+            vehicleType = wire,
+            zone = "amman-downtown"
+        });
+        resp.EnsureSuccessStatusCode();
+
+        var geo = factory.Services.GetRequiredService<IGeoIndex>();
+        (await geo.GetVehicleAsync(userId, default)).Should().Be(expected);
+    }
+
+    [Fact]
     public async Task Sweeper_Skips_Jeebers_With_Recent_Interaction()
     {
         var factory = _fixture.Factory();
@@ -240,8 +300,31 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
             {
                 builder.ConfigureServices(services =>
                 {
-                    var existing = services.Single(d => d.ServiceType == typeof(TimeProvider));
-                    services.Remove(existing);
+                    var clock = services.Single(d => d.ServiceType == typeof(TimeProvider));
+                    services.Remove(clock);
+                    services.AddSingleton<TimeProvider>(new FakeClock(new DateTimeOffset(2026, 5, 15, 12, 0, 0, TimeSpan.Zero)));
+
+                    // Swap the production push-backed notifier for the in-memory
+                    // variant so we can assert what was sent without FCM.
+                    var notifier = services.Single(d => d.ServiceType == typeof(IAutoOfflineNotifier));
+                    services.Remove(notifier);
+                    services.AddSingleton<InMemoryAutoOfflineNotifier>();
+                    services.AddSingleton<IAutoOfflineNotifier>(sp => sp.GetRequiredService<InMemoryAutoOfflineNotifier>());
+                });
+            });
+
+        /// <summary>
+        /// Variant that keeps the production <see cref="PushAutoOfflineNotifier"/>
+        /// wired so we can assert the auto-offline trigger really flows through
+        /// the shared push pipeline (preferences, transports, retry).
+        /// </summary>
+        public WebApplicationFactory<Program> FactoryWithProductionNotifier() => new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureServices(services =>
+                {
+                    var clock = services.Single(d => d.ServiceType == typeof(TimeProvider));
+                    services.Remove(clock);
                     services.AddSingleton<TimeProvider>(new FakeClock(new DateTimeOffset(2026, 5, 15, 12, 0, 0, TimeSpan.Zero)));
                 });
             });

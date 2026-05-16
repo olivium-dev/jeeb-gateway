@@ -332,8 +332,11 @@ builder.Services.Configure<ZoneOptions>(builder.Configuration.GetSection(ZoneOpt
 builder.Services.AddSingleton<IGeoIndex, InMemoryGeoIndex>();
 builder.Services.AddSingleton<InMemoryPendingOffersStore>();
 builder.Services.AddSingleton<IPendingOffersStore>(sp => sp.GetRequiredService<InMemoryPendingOffersStore>());
-builder.Services.AddSingleton<InMemoryAutoOfflineNotifier>();
-builder.Services.AddSingleton<IAutoOfflineNotifier>(sp => sp.GetRequiredService<InMemoryAutoOfflineNotifier>());
+// Auto-offline notifications flow through the shared push pipeline
+// (T-backend-022) so they obey the same transport and retry rules as
+// any other trigger; tests override this with InMemoryAutoOfflineNotifier
+// when they want to inspect what was sent without spinning up FCM.
+builder.Services.AddSingleton<IAutoOfflineNotifier, PushAutoOfflineNotifier>();
 builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();
 builder.Services.AddHostedService<AutoOfflineSweeper>();
 
