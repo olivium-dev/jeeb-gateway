@@ -2,6 +2,28 @@ using System.Collections.Concurrent;
 
 namespace JeebGateway.Tokens;
 
+/// <summary>
+/// MVP in-memory refresh-token / revocation list. The collection
+/// doubles as the revocation list: a token is "revoked" iff its
+/// <see cref="RefreshToken.RevokedAt"/> is set, and lookups go
+/// through <see cref="FindByHashAsync"/> on every refresh.
+///
+/// Production swap (see follow-up migration 0007 + the Redis line in
+/// docker-compose.yml):
+///   - <c>_byId</c> moves to the <c>refresh_tokens</c> Postgres table
+///     keyed on token_id (UUID), with token_hash UNIQUE for the lookup
+///     path.
+///   - The revocation list itself becomes a Redis SET, populated by an
+///     outbox trigger on the same DB transaction that writes the
+///     revocation row. JWT bearer middleware then checks Redis on every
+///     access-token use for the suspended-user fast path (suspension
+///     should bite faster than the 15-min access-token TTL when the
+///     access token is presented via Authorization header).
+///   - Example wiring (commented; not enabled in the MVP build):
+///       // services.AddSingleton&lt;IConnectionMultiplexer&gt;(sp =&gt;
+///       //     ConnectionMultiplexer.Connect(opts.RedisConnectionString));
+///       // services.AddSingleton&lt;IRefreshTokenStore, RedisRefreshTokenStore&gt;();
+/// </summary>
 public class InMemoryRefreshTokenStore : IRefreshTokenStore
 {
     private readonly ConcurrentDictionary<string, RefreshToken> _byId = new();
