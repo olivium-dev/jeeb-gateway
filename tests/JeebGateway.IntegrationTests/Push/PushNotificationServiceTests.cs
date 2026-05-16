@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.NotificationPreferences;
 using JeebGateway.Push;
+using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -457,6 +458,72 @@ public class PushNotificationServiceTests
         resp.StatusCode.Should().Be(HttpStatusCode.Accepted);
         var body = await resp.Content.ReadFromJsonAsync<SendPushResponse>();
         body!.Outcome.Should().Be(nameof(PushDeliveryOutcome.Delivered));
+    }
+
+    [Fact]
+    public async Task Push_Inherits_Persisted_Language_From_User_Profile()
+    {
+        // T-backend-029 AC #6: when callers don't supply a Language, the
+        // unified service stamps the request with the recipient's persisted
+        // language so transports receive a locale-tagged payload.
+        var factory = NewFactory(out _);
+        var users = factory.Services.GetRequiredService<InMemoryUsersStore>();
+        var now = DateTimeOffset.UtcNow;
+        users.Seed(new UserProfile
+        {
+            Id = "user-lang",
+            Phone = "+96550008888",
+            Name = "Nora",
+            Language = "ar",
+            Roles = new List<string> { "customer" },
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await RegisterDevice(factory, "user-lang", DevicePlatform.Fcm, "tok-lang");
+
+        var service = factory.Services.GetRequiredService<IPushNotificationService>();
+        var result = await service.SendAsync(
+            new PushNotificationRequest("user-lang", NotificationTrigger.Chat, "مرحبا", "نص"),
+            CancellationToken.None);
+
+        result.Outcome.Should().Be(PushDeliveryOutcome.Delivered);
+
+        var fcm = factory.Services.GetServices<IPushTransport>()
+            .OfType<InMemoryPushTransport>()
+            .Single(t => t.Platform == DevicePlatform.Fcm);
+        fcm.Sent.Single().Request.Language.Should().Be("ar");
+    }
+
+    [Fact]
+    public async Task Caller_Provided_Language_Takes_Precedence_Over_Profile()
+    {
+        // When a caller already rendered the payload in a specific locale,
+        // the service must not silently override it with the profile value.
+        var factory = NewFactory(out _);
+        var users = factory.Services.GetRequiredService<InMemoryUsersStore>();
+        var now = DateTimeOffset.UtcNow;
+        users.Seed(new UserProfile
+        {
+            Id = "user-lang-override",
+            Phone = "+96550008889",
+            Name = "Sara",
+            Language = "ar",
+            Roles = new List<string> { "customer" },
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await RegisterDevice(factory, "user-lang-override", DevicePlatform.Fcm, "tok-ov");
+
+        var service = factory.Services.GetRequiredService<IPushNotificationService>();
+        await service.SendAsync(
+            new PushNotificationRequest(
+                "user-lang-override", NotificationTrigger.Chat, "Hello", "Hi", Language: "en-US"),
+            CancellationToken.None);
+
+        var fcm = factory.Services.GetServices<IPushTransport>()
+            .OfType<InMemoryPushTransport>()
+            .Single(t => t.Platform == DevicePlatform.Fcm);
+        fcm.Sent.Single().Request.Language.Should().Be("en-US");
     }
 
     [Fact]

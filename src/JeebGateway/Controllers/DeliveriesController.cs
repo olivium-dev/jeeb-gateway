@@ -1,9 +1,11 @@
 using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
+using JeebGateway.Requests.OtpHandover;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
 
@@ -38,17 +40,26 @@ public class DeliveriesController : ControllerBase
     private readonly IRequestsStore _store;
     private readonly IPushNotificationService _push;
     private readonly ICancellationService _cancellations;
+    private readonly IAdminEscalationStore _escalations;
+    private readonly IOptions<OtpHandoverOptions> _otpOptions;
+    private readonly TimeProvider _clock;
     private readonly ILogger<DeliveriesController> _log;
 
     public DeliveriesController(
         IRequestsStore store,
         IPushNotificationService push,
         ICancellationService cancellations,
+        IAdminEscalationStore escalations,
+        IOptions<OtpHandoverOptions> otpOptions,
+        TimeProvider clock,
         ILogger<DeliveriesController> log)
     {
         _store = store;
         _push = push;
         _cancellations = cancellations;
+        _escalations = escalations;
+        _otpOptions = otpOptions;
+        _clock = clock;
         _log = log;
     }
 
@@ -335,6 +346,155 @@ public class DeliveriesController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// POST /deliveries/{id}/verify-otp (T-backend-015 / JEEB-33).
+    ///
+    /// Dedicated hand-off OTP verification surface, distinct from the
+    /// PATCH /status endpoint's OTP gate so the attempt-counter and
+    /// lockout policy can live on this single endpoint.
+    ///
+    /// <list type="bullet">
+    ///   <item>Correct OTP → transition to <see cref="RequestStatus.Delivered"/> and 200.</item>
+    ///   <item>Wrong OTP → 400 with the remaining attempt budget.</item>
+    ///   <item>N-th wrong OTP (default 3) → 423 Locked, escalation row created.</item>
+    ///   <item>Subsequent calls after lockout → 423 Locked (no extra escalation).</item>
+    /// </list>
+    /// </summary>
+    [HttpPost("{deliveryId}/verify-otp")]
+    [ProducesResponseType(typeof(OtpVerificationResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(OtpLockedResponse), StatusCodes.Status423Locked)]
+    public async Task<IActionResult> VerifyOtp(
+        string deliveryId,
+        [FromBody] OtpVerificationRequest? body,
+        CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+
+        if (body is null || string.IsNullOrWhiteSpace(body.OtpCode))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "otpCode is required.",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/otp-required"
+            });
+        }
+
+        var opts = _otpOptions.Value;
+        var now = _clock.GetUtcNow();
+        var result = await _store.TryVerifyOtpAsync(deliveryId, body.OtpCode, opts.MaxAttempts, now, ct);
+
+        switch (result.Outcome)
+        {
+            case OtpVerificationOutcome.NotFound:
+                return NotFound();
+
+            case OtpVerificationOutcome.NotInHandoverState:
+                return BadRequest(new ProblemDetails
+                {
+                    Title = "Delivery is not in the OTP handover state.",
+                    Detail = $"OTP verification is only allowed when status is '{RequestStatus.HeadingOff}'.",
+                    Status = StatusCodes.Status400BadRequest,
+                    Type = "https://jeeb.dev/errors/otp-not-in-handover-state"
+                });
+
+            case OtpVerificationOutcome.Mismatch:
+                return BadRequest(new ProblemDetails
+                {
+                    Title = "Supplied OTP does not match.",
+                    Detail = $"{result.AttemptsRemaining} attempt(s) remaining.",
+                    Status = StatusCodes.Status400BadRequest,
+                    Type = "https://jeeb.dev/errors/otp-mismatch"
+                });
+
+            case OtpVerificationOutcome.Locked:
+            {
+                // First time this row hits the lockout boundary — open
+                // the escalation row, then stamp the id back on the
+                // delivery so the sweeper / repeated calls don't race a
+                // duplicate.
+                if (result.JustLockedOut && result.Request is { } req)
+                {
+                    var escalation = await _escalations.CreateAsync(new AdminEscalation
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        DeliveryId = req.Id,
+                        ClientId = req.ClientId,
+                        JeeberId = req.JeeberId,
+                        Reason = EscalationReason.OtpLocked,
+                        Status = EscalationStatus.Pending,
+                        CreatedAt = now,
+                        OtpAttemptCount = req.OtpAttemptCount,
+                    }, ct);
+
+                    await _store.TrySetEscalationIdAsync(req.Id, escalation.Id, ct);
+                    _log.LogWarning(
+                        "OTP lockout for delivery {DeliveryId} after {Attempts} attempts — escalation {EscalationId} opened",
+                        req.Id, req.OtpAttemptCount, escalation.Id);
+                }
+
+                // Re-read so the response carries the escalation id that
+                // was written above (the in-memory store returns the
+                // same row, so the field is now populated).
+                var locked = result.Request!;
+                return StatusCode(StatusCodes.Status423Locked, new OtpLockedResponse
+                {
+                    EscalationId = locked.OtpEscalationId ?? string.Empty,
+                    LockedAt = locked.OtpLockedAt ?? now,
+                    Reason = EscalationReason.OtpLocked
+                });
+            }
+
+            case OtpVerificationOutcome.Verified:
+            {
+                // Status flipped to 'delivered'. Fan out the status-change
+                // push to both parties, mirroring the PATCH /status path.
+                var req = result.Request!;
+                await NotifyOtherPartyAsync(req, RequestStatus.HeadingOff, ct);
+                return Ok(new OtpVerificationResponse
+                {
+                    Delivery = ToDto(req),
+                    AttemptsRemaining = result.AttemptsRemaining,
+                    Verified = true
+                });
+            }
+
+            default:
+                // Defensive — every outcome is handled. If a new enum
+                // value lands without a controller branch, fail closed.
+                return Problem(
+                    title: "Unhandled OTP verification outcome.",
+                    statusCode: StatusCodes.Status500InternalServerError);
+        }
+    }
+
+    /// <summary>
+    /// POST /deliveries/{id}/client-unreachable (T-backend-015 step 6).
+    /// Jeeber-initiated: starts the 15-min unreachable-client timer.
+    /// The <c>OtpHandoverSweeper</c> escalates the row once the window
+    /// elapses without a successful OTP verification.
+    /// </summary>
+    [HttpPost("{deliveryId}/client-unreachable")]
+    [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> MarkClientUnreachable(string deliveryId, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+
+        var row = await _store.MarkClientUnreachableAsync(deliveryId, _clock.GetUtcNow(), ct);
+        if (row is null) return NotFound();
+
+        _log.LogInformation(
+            "Delivery {DeliveryId} flagged client-unreachable at {At} — 15-min escalation timer started",
+            row.Id, row.ClientUnreachableAt);
+
+        return Ok(ToDto(row));
+    }
+
     private static DeliveryRequestDto ToDto(DeliveryRequest r) => new()
     {
         Id = r.Id,
@@ -347,6 +507,10 @@ public class DeliveriesController : ControllerBase
         ScheduledAt = r.ScheduledAt,
         JeeberId = r.JeeberId,
         AcceptedAt = r.AcceptedAt,
-        GpsTrackingActive = r.GpsTrackingActive
+        GpsTrackingActive = r.GpsTrackingActive,
+        OtpAttemptCount = r.OtpAttemptCount,
+        OtpLockedAt = r.OtpLockedAt,
+        ClientUnreachableAt = r.ClientUnreachableAt,
+        OtpEscalationId = r.OtpEscalationId
     };
 }

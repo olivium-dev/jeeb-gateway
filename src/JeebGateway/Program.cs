@@ -12,8 +12,10 @@ using JeebGateway.ProhibitedItems.Scanner;
 using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
+using JeebGateway.Requests.OtpHandover;
 using JeebGateway.Security;
 using JeebGateway.Tokens;
+using JeebGateway.Tracking;
 using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
 using JeebGateway.Whisper;
@@ -194,6 +196,16 @@ builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
 builder.Services.AddSingleton<IJeeberRestrictionStore, InMemoryJeeberRestrictionStore>();
 builder.Services.AddSingleton<ICancellationService, CancellationService>();
 
+// OTP handover verification + admin escalation (T-backend-015 / JEEB-33).
+// Dedicated POST /deliveries/{id}/verify-otp endpoint owns the
+// 3-strike lockout and 15-min unreachable-client escalation paths.
+// In-memory escalation store for the MVP; production wiring lands a
+// Postgres-backed implementation alongside admin_actions in 0005.
+builder.Services.Configure<OtpHandoverOptions>(builder.Configuration.GetSection(OtpHandoverOptions.SectionName));
+builder.Services.AddSingleton<IAdminEscalationStore, InMemoryAdminEscalationStore>();
+builder.Services.AddSingleton<OtpHandoverSweeper>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper>());
+
 // Geo-matching engine (T-backend-008).
 // Queries online Jeebers within the tier-specific radius (PostGIS-style
 // ST_DWithin, MVP-side using Haversine), filters by vehicle-type
@@ -358,6 +370,17 @@ builder.Services.AddSingleton<IOfferRealtimeNotifier>(sp => sp.GetRequiredServic
 builder.Services.AddSingleton<IAutoOfflineNotifier, PushAutoOfflineNotifier>();
 builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();
 builder.Services.AddHostedService<AutoOfflineSweeper>();
+
+// GPS location streaming + SSE delivery tracking (T-backend-014).
+// The store is an in-memory ConcurrentDictionary keyed by Jeeber id with
+// a 5-min TTL — production swaps to Redis (SET ... EX 300) keyed on
+// jeeber:{id}:position so multiple gateway replicas share the view. The
+// SSE controller reads the store on a 5-second timer, flips the event
+// name to "last-seen" when the latest fix is older than the configured
+// stale threshold (default 2 min), and ends the stream when the delivery
+// row reaches a terminal status.
+builder.Services.Configure<TrackingOptions>(builder.Configuration.GetSection(TrackingOptions.SectionName));
+builder.Services.AddSingleton<ILocationStore, InMemoryLocationStore>();
 
 // Real-time chat (T-backend-012).
 // SignalR hub at /hubs/chat delivers each message under the 1s WS SLA

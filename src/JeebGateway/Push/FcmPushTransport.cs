@@ -42,6 +42,16 @@ public sealed class FcmPushTransport : IPushTransport
     {
         ct.ThrowIfCancellationRequested();
 
+        // T-backend-029 AC #6: surface the recipient's persisted language to
+        // the device so the client app can route to the correct in-app screen
+        // (and FCM can pick a localised notification channel where set up).
+        var dataPayload = request.Data?.ToDictionary(kv => kv.Key, kv => kv.Value)
+            ?? new Dictionary<string, string>();
+        if (!string.IsNullOrEmpty(request.Language))
+        {
+            dataPayload["language"] = request.Language;
+        }
+
         var payload = new FcmSendRequest
         {
             Message = new FcmMessage
@@ -52,7 +62,7 @@ public sealed class FcmPushTransport : IPushTransport
                     Title = request.Title,
                     Body = request.Body
                 },
-                Data = request.Data?.ToDictionary(kv => kv.Key, kv => kv.Value),
+                Data = dataPayload.Count == 0 ? null : dataPayload,
                 Android = new FcmAndroidConfig
                 {
                     Priority = "high",
