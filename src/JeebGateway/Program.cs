@@ -332,6 +332,13 @@ builder.Services.Configure<ZoneOptions>(builder.Configuration.GetSection(ZoneOpt
 builder.Services.AddSingleton<IGeoIndex, InMemoryGeoIndex>();
 builder.Services.AddSingleton<InMemoryPendingOffersStore>();
 builder.Services.AddSingleton<IPendingOffersStore>(sp => sp.GetRequiredService<InMemoryPendingOffersStore>());
+
+// Realtime "new offer" fan-out for T-backend-010. Stubbed in-memory for
+// the MVP (records dispatched events so tests can assert delivery);
+// production wiring will swap for a SignalR / realtime-service client
+// behind the same IOfferRealtimeNotifier contract.
+builder.Services.AddSingleton<InMemoryOfferRealtimeNotifier>();
+builder.Services.AddSingleton<IOfferRealtimeNotifier>(sp => sp.GetRequiredService<InMemoryOfferRealtimeNotifier>());
 builder.Services.AddSingleton<InMemoryAutoOfflineNotifier>();
 builder.Services.AddSingleton<IAutoOfflineNotifier>(sp => sp.GetRequiredService<InMemoryAutoOfflineNotifier>());
 builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();

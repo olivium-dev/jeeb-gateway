@@ -3,13 +3,16 @@ using System.Collections.Concurrent;
 namespace JeebGateway.Availability;
 
 /// <summary>
-/// MVP in-memory pending-offers ledger. Tests seed offers via
-/// <see cref="EnqueueForTest"/>; production swaps for an offer-service
-/// client behind the same <see cref="IPendingOffersStore"/> contract.
+/// MVP in-memory offer ledger. Tests seed offers via
+/// <see cref="EnqueueForTest"/> (legacy accept-flow tests) or by hitting
+/// <see cref="TrySubmitAsync"/> from the submission tests; production
+/// swaps for an offer-service client behind the same
+/// <see cref="IPendingOffersStore"/> contract.
 ///
 /// Concurrency: lookups go through the underlying ConcurrentDictionary;
-/// state-changing operations (withdraw, accept) take the write lock so
-/// the multi-row "accept this, withdraw the others" transition is atomic.
+/// state-changing operations (submit, withdraw, accept) take the write
+/// lock so the multi-row transitions ("accept this, withdraw the others"
+/// and "count live offers, then insert") are atomic.
 /// </summary>
 public class InMemoryPendingOffersStore : IPendingOffersStore
 {
@@ -23,9 +26,10 @@ public class InMemoryPendingOffersStore : IPendingOffersStore
     }
 
     /// <summary>
-    /// Test seam — registers an offer in <see cref="PendingOfferStatus.Pending"/>.
-    /// Production wiring will receive offers from the offer-service event
-    /// stream and call into the same dictionary via an internal path.
+    /// Test seam — registers an offer in <see cref="PendingOfferStatus.Pending"/>
+    /// with synthetic fee/eta values. Production wiring will receive offers
+    /// from the offer-service event stream and call into the same dictionary
+    /// via an internal path.
     /// </summary>
     public PendingOffer EnqueueForTest(string jeeberId, string requestId, string? offerId = null)
     {
@@ -35,7 +39,10 @@ public class InMemoryPendingOffersStore : IPendingOffersStore
             RequestId = requestId,
             JeeberId = jeeberId,
             Status = PendingOfferStatus.Pending,
-            CreatedAt = _clock.GetUtcNow()
+            CreatedAt = _clock.GetUtcNow(),
+            Fee = 1m,
+            EtaMinutes = 30,
+            Note = null
         };
         _offers[offer.Id] = offer;
         return offer;
@@ -102,5 +109,106 @@ public class InMemoryPendingOffersStore : IPendingOffersStore
 
             return Task.FromResult(true);
         }
+    }
+
+    public Task<PendingOffer> TrySubmitAsync(
+        string requestId,
+        string jeeberId,
+        decimal fee,
+        int etaMinutes,
+        string? note,
+        int maxPerRequest,
+        DateTimeOffset at,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            // Scan once and capture both pieces of state we need: the live
+            // offer count for the request (cap check) and any existing live
+            // offer from this Jeeber (one-per-Jeeber check). Doing it inside
+            // the write lock means a concurrent submit cannot squeeze in
+            // between the read and the insert.
+            var liveCount = 0;
+            PendingOffer? existingForJeeber = null;
+            foreach (var offer in _offers.Values)
+            {
+                if (!string.Equals(offer.RequestId, requestId, StringComparison.Ordinal)) continue;
+                if (offer.Status != PendingOfferStatus.Pending) continue;
+                liveCount++;
+                if (string.Equals(offer.JeeberId, jeeberId, StringComparison.Ordinal))
+                {
+                    existingForJeeber = offer;
+                }
+            }
+
+            if (existingForJeeber is not null)
+            {
+                throw new DuplicateOfferException(requestId, jeeberId, existingForJeeber.Id);
+            }
+
+            if (liveCount >= maxPerRequest)
+            {
+                throw new TooManyOffersForRequestException(requestId, liveCount, maxPerRequest);
+            }
+
+            var created = new PendingOffer
+            {
+                Id = Guid.NewGuid().ToString(),
+                RequestId = requestId,
+                JeeberId = jeeberId,
+                Status = PendingOfferStatus.Pending,
+                CreatedAt = at,
+                Fee = fee,
+                EtaMinutes = etaMinutes,
+                Note = note
+            };
+            _offers[created.Id] = created;
+            return Task.FromResult(created);
+        }
+    }
+
+    public Task<WithdrawOfferOutcome> TryWithdrawAsync(
+        string offerId,
+        string requestId,
+        string jeeberId,
+        DateTimeOffset at,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_offers.TryGetValue(offerId, out var offer))
+            {
+                return Task.FromResult(WithdrawOfferOutcome.NotFound);
+            }
+            // 404 — id collides with an offer on a different request. We
+            // surface this as NotFound rather than as a generic mismatch so
+            // the controller stays free of guesses about the caller's intent.
+            if (!string.Equals(offer.RequestId, requestId, StringComparison.Ordinal))
+            {
+                return Task.FromResult(WithdrawOfferOutcome.NotFound);
+            }
+            if (!string.Equals(offer.JeeberId, jeeberId, StringComparison.Ordinal))
+            {
+                return Task.FromResult(WithdrawOfferOutcome.NotOwned);
+            }
+            if (offer.Status != PendingOfferStatus.Pending)
+            {
+                return Task.FromResult(WithdrawOfferOutcome.NotPending);
+            }
+
+            offer.Status = PendingOfferStatus.Withdrawn;
+            offer.UpdatedAt = at;
+            return Task.FromResult(WithdrawOfferOutcome.Withdrawn);
+        }
+    }
+
+    public Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(
+        string requestId, CancellationToken ct)
+    {
+        var snapshot = _offers.Values
+            .Where(o => string.Equals(o.RequestId, requestId, StringComparison.Ordinal))
+            .OrderByDescending(o => o.CreatedAt)
+            .ToArray();
+        return Task.FromResult<IReadOnlyList<PendingOffer>>(snapshot);
     }
 }
