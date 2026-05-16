@@ -51,6 +51,15 @@ public interface IUsersStore
     Task<UserProfile?> SwitchRoleAsync(string userId, string newRole, CancellationToken ct);
 
     /// <summary>
+    /// T-backend-005. Adds <paramref name="role"/> to the user's roles
+    /// list. No-op when the user already holds the role. Returns the
+    /// updated profile or null when the user does not exist. Used by
+    /// the admin KYC approve flow to unlock the Jeeber role (AC #2 —
+    /// within 5 seconds of approval).
+    /// </summary>
+    Task<UserProfile?> GrantRoleAsync(string userId, string role, CancellationToken ct);
+
+    /// <summary>
     /// Hard-delete every piece of PII for <paramref name="userId"/>:
     ///   * name → empty
     ///   * phone → empty
