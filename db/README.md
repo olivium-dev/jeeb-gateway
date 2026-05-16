@@ -7,8 +7,10 @@ the Jeeb BFF aggregation layer.
 
 ```
 db/
-  migrations/         # numbered, idempotent SQL migrations
-  apply.sh            # apply all pending migrations to $DATABASE_URL
+  migrations/         # numbered, idempotent SQL migrations (incl. reference data)
+  seeds/              # dev/CI-only seed scripts — never run in production
+  apply.sh            # apply all pending migrations; pass --with-seed to also run seeds
+  seed.sh             # apply dev/test seed scripts (refuses on production hostnames)
 ```
 
 ## Migrations are idempotent
@@ -29,13 +31,43 @@ script without divergence.
 ```bash
 # local dev (docker-compose brings up postgres on :5432)
 export DATABASE_URL="postgres://jeeb:jeeb@localhost:5432/jeeb"
-./db/apply.sh
+./db/apply.sh                 # schema + reference data only
+./db/apply.sh --with-seed     # also load P1-P5 test accounts
 ```
 
 `apply.sh` walks `db/migrations/*.sql` in lexicographic order and pipes each
 file into `psql`. Files already recorded in `schema_migrations` are still
 re-applied — they're no-ops thanks to the idempotency rules above — so the
 script never has to track state itself.
+
+## Reference data vs test data
+
+| Source                          | Contains                                | Prod-safe |
+|---------------------------------|-----------------------------------------|-----------|
+| `migrations/0011_init_seed_reference_data.sql` | 5 delivery tiers, initial prohibited-items catalog | ✅ |
+| `seeds/test_accounts.sql`       | P1–P5 persona users + demo KYC/addresses | ❌ dev/CI only |
+
+`seed.sh` (and `apply.sh --with-seed`) refuses to run when `DATABASE_URL`
+points at a host whose name contains `prod`, `production`, or `live`. Set
+`FORCE_SEED=1` to override.
+
+### Seed contents
+
+* **Delivery tiers** (`delivery_tiers`) — five rows keyed by `code`:
+  `flash` (30 min / 3 km / 15%), `express` (60 min / 7 km / 15%),
+  `standard` (180 min / 15 km / 12%), `on_the_way` (no SLA / 25 km / 10%),
+  `eco` (1440 min / 25 km / 10%). Commission rates encode BR-2.
+* **Prohibited items** (`prohibited_items`) — 15 starter rows across the
+  five categories called out in FR-17.1 (weapons, drugs, alcohol,
+  prescription medication, hazardous materials), plus a small `other`
+  bucket for live animals, cash, and human remains. `alcohol` rows are
+  inserted with `active = FALSE` and admins enable per-market.
+* **Personas** (`users` + `kyc_submissions` + `saved_addresses`) — five
+  fixed-UUID accounts so tests can reference them by literal value:
+  P1 Layla, P2 Hajj Antoine (Arabic), P3 Rami (dual-role), P4 Khaled
+  (Jeeber power user, approved KYC), P5 Ops Admin. Phone numbers use the
+  `+961 70 0000XX` range that no Lebanese carrier issues to real
+  subscribers.
 
 ## Schema overview
 

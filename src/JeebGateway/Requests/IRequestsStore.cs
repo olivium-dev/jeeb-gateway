@@ -1,0 +1,228 @@
+namespace JeebGateway.Requests;
+
+/// <summary>
+/// Storage abstraction for delivery requests. The default in-memory
+/// implementation is intended for early-MVP local runs and integration
+/// tests; production wiring will hit Postgres directly using the schema
+/// in db/migrations/0004.
+///
+/// The contract is intentionally minimal — just enough to enforce the
+/// BR-9 concurrency cap (max 3 active per Client) on creation. The
+/// downstream delivery-service owns the full state machine.
+/// </summary>
+public interface IRequestsStore
+{
+    /// <summary>
+    /// Returns the number of requests for <paramref name="clientId"/>
+    /// whose status is in <see cref="RequestStatus.ActiveStates"/>
+    /// (anything before <c>delivered</c>). Used by the BR-9 cap.
+    /// </summary>
+    Task<int> CountActiveForClientAsync(string clientId, CancellationToken ct);
+
+    /// <summary>
+    /// Persists a new request in the <c>pending</c> state. Callers MUST
+    /// have already enforced the BR-9 cap via
+    /// <see cref="CountActiveForClientAsync"/>.
+    /// </summary>
+    Task<DeliveryRequest> CreateAsync(CreateRequestInput input, CancellationToken ct);
+
+    /// <summary>
+    /// Atomic "count active + insert" — enforces the BR-9 concurrency cap
+    /// inside the store so the check and the write cannot race. Throws
+    /// <see cref="TooManyActiveRequestsException"/> when the client is at
+    /// or above <paramref name="limit"/>.
+    /// </summary>
+    Task<DeliveryRequest> TryCreateWithLimitAsync(
+        CreateRequestInput input,
+        int limit,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Test/admin helper: forcibly set a request's status. Used by the
+    /// integration tests to flip a request out of an active state so
+    /// the BR-9 cap behavior at the 3-active boundary can be exercised.
+    ///
+    /// Returns false (and leaves the row untouched) when the request is
+    /// already in a terminal state — terminal rows are immutable so the
+    /// expiry guarantee from T-backend-028 ("expired requests cannot
+    /// receive new offers") cannot be undone by a stray transition.
+    /// </summary>
+    Task<bool> SetStatusAsync(string requestId, string status, CancellationToken ct);
+
+    /// <summary>
+    /// Returns every request whose creation timestamp is at or before
+    /// <paramref name="cutoff"/> and whose status is still in the
+    /// pre-acceptance set (<c>pending</c>, <c>matched</c>). The
+    /// <see cref="RequestExpirySweeper"/> uses this to find both the
+    /// 10-min nudge candidates and the 30-min expiry candidates in a
+    /// single scan.
+    /// </summary>
+    Task<IReadOnlyList<DeliveryRequest>> ListPendingCreatedAtOrBeforeAsync(
+        DateTimeOffset cutoff,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Records that the no-offer prompt was sent for <paramref name="requestId"/>
+    /// at <paramref name="at"/>. Returns true on first call, false on every
+    /// subsequent call — the sweeper relies on this idempotence to avoid
+    /// duplicate pushes.
+    /// </summary>
+    Task<bool> MarkNudgedAsync(string requestId, DateTimeOffset at, CancellationToken ct);
+
+    /// <summary>
+    /// Atomically moves <paramref name="requestId"/> to <c>expired</c>
+    /// when its current status is still pre-acceptance. Returns true when
+    /// the transition occurred. Returns false when the request has
+    /// already advanced to <c>accepted</c> (or beyond) or is already
+    /// terminal — in either case the sweeper must NOT send the
+    /// expired-notification.
+    /// </summary>
+    Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct);
+
+    /// <summary>
+    /// Replaces <c>ClientId</c> on every (non-active) request belonging
+    /// to <paramref name="userId"/> with the deterministic pseudonym
+    /// <paramref name="anonymizedHash"/>. Used by the account-deletion
+    /// flow (T-backend-035) — order records are retained, but the
+    /// foreign key to the user becomes a one-way hash.
+    ///
+    /// Returns the number of rows rewritten. Active requests are NOT
+    /// rewritten; callers must ensure no active deliveries remain
+    /// before invoking (the deletion store enforces this).
+    /// </summary>
+    Task<int> AnonymizeForClientAsync(string userId, string anonymizedHash, CancellationToken ct);
+
+    /// <summary>
+    /// Returns every request still in <see cref="RequestStatus.Scheduled"/>
+    /// whose <c>ScheduledAt</c> falls at or before <paramref name="cutoff"/>.
+    /// The <c>ScheduledDeliveryActivator</c> uses this to find rows whose
+    /// matching window has opened (cutoff = now + MatchingBuffer).
+    /// </summary>
+    Task<IReadOnlyList<DeliveryRequest>> ListScheduledDueAsync(
+        DateTimeOffset cutoff,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Atomically transitions <paramref name="requestId"/> from
+    /// <see cref="RequestStatus.Scheduled"/> to <see cref="RequestStatus.Pending"/>
+    /// and stamps <c>ActivatedAt</c>. Returns true exactly once per request.
+    /// Returns false when the request has already been activated, cancelled
+    /// before its window, or otherwise advanced out of <c>scheduled</c> — in
+    /// every false case the activator must NOT fire the reminder so the
+    /// Client doesn't receive a duplicate push if the activator runs at a
+    /// high cadence.
+    /// </summary>
+    Task<bool> TryActivateScheduledAsync(string requestId, DateTimeOffset at, CancellationToken ct);
+
+    /// <summary>
+    /// Single-row lookup used by the cancellation endpoint. Returns null
+    /// when the id is unknown.
+    /// </summary>
+    Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct);
+
+    /// <summary>
+    /// BR-10 (T-backend-039): counts the requests where
+    /// <see cref="DeliveryRequest.JeeberId"/> equals <paramref name="jeeberId"/>
+    /// and the status is in <see cref="RequestStatus.JeeberActiveStates"/>
+    /// (accepted / picked_up / heading_off). Used by the offer-accept
+    /// endpoint and surfaced on the Jeeber profile for ops triage.
+    /// </summary>
+    Task<int> CountActiveForJeeberAsync(string jeeberId, CancellationToken ct);
+
+    /// <summary>
+    /// BR-10 atomic accept: under the store's write lock, validates the
+    /// request is still in <see cref="RequestStatus.PreAcceptanceStates"/>
+    /// and the Jeeber has fewer than <paramref name="limit"/> active
+    /// deliveries, then transitions the row to
+    /// <see cref="RequestStatus.Accepted"/> while stamping
+    /// <see cref="DeliveryRequest.JeeberId"/> and
+    /// <see cref="DeliveryRequest.AcceptedAt"/>.
+    ///
+    /// Throws <see cref="TooManyActiveDeliveriesException"/> when the
+    /// Jeeber is already at or above the cap. Returns null when the
+    /// request is unknown. Returns the updated request otherwise.
+    /// Throws <see cref="RequestNotAcceptableException"/> when the
+    /// request is no longer in a pre-acceptance state (already accepted
+    /// by someone else, cancelled, expired, …) — the caller maps this
+    /// to a 409 distinct from the BR-10 cap.
+    /// </summary>
+    Task<DeliveryRequest?> TryAcceptByJeeberAsync(
+        string requestId,
+        string jeeberId,
+        int limit,
+        DateTimeOffset at,
+        CancellationToken ct);
+}
+
+public class CreateRequestInput
+{
+    public required string ClientId { get; init; }
+    public required string Description { get; init; }
+    public string? PickupAddress { get; init; }
+    public string? DropoffAddress { get; init; }
+
+    /// <summary>
+    /// Future delivery moment for T-backend-046. Null = immediate delivery
+    /// (status starts as <see cref="RequestStatus.Pending"/>). When set, the
+    /// store initialises the row with status <see cref="RequestStatus.Scheduled"/>;
+    /// the <c>ScheduledDeliveryActivator</c> flips it to <c>pending</c> at
+    /// <c>ScheduledAt - MatchingBuffer</c>.
+    /// </summary>
+    public DateTimeOffset? ScheduledAt { get; init; }
+}
+
+/// <summary>
+/// Thrown by the controller (and surfaced as ProblemDetails) when the
+/// client has already reached the BR-9 concurrency cap. The
+/// <see cref="ActiveCount"/> field is included in the response detail
+/// so dashboards / mobile clients can show the exact value.
+/// </summary>
+public class TooManyActiveRequestsException : Exception
+{
+    public int ActiveCount { get; }
+    public int Limit { get; }
+
+    public TooManyActiveRequestsException(int activeCount, int limit)
+        : base($"Client already has {activeCount} active requests (limit {limit}).")
+    {
+        ActiveCount = activeCount;
+        Limit = limit;
+    }
+}
+
+/// <summary>
+/// BR-10 (T-backend-039): the offer-accept endpoint surfaces this as
+/// ProblemDetails with HTTP 409. <see cref="ActiveCount"/> mirrors the
+/// shape of <see cref="TooManyActiveRequestsException"/> so the mobile
+/// app can render the exact value in the error banner.
+/// </summary>
+public class TooManyActiveDeliveriesException : Exception
+{
+    public int ActiveCount { get; }
+    public int Limit { get; }
+
+    public TooManyActiveDeliveriesException(int activeCount, int limit)
+        : base($"Jeeber already has {activeCount} active deliveries (limit {limit}).")
+    {
+        ActiveCount = activeCount;
+        Limit = limit;
+    }
+}
+
+/// <summary>
+/// Thrown by <see cref="IRequestsStore.TryAcceptByJeeberAsync"/> when the
+/// request has moved out of the pre-acceptance set before the accept
+/// landed (race with another Jeeber, with the expiry sweeper, or with
+/// the Client's cancel). Distinct from <see cref="TooManyActiveDeliveriesException"/>
+/// so the controller can return a different ProblemDetails type.
+/// </summary>
+public class RequestNotAcceptableException : Exception
+{
+    public string CurrentStatus { get; }
+
+    public RequestNotAcceptableException(string currentStatus)
+        : base($"Request is not in a pre-acceptance state (current={currentStatus}).")
+    {
+        CurrentStatus = currentStatus;
+    }
+}

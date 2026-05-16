@@ -24,9 +24,77 @@ jobs:
       - name: Build
         run: dotnet build src/JeebGateway/JeebGateway.csproj -c Release --no-restore
 
-      # Uncomment when test project is added:
-      # - name: Test
-      #   run: dotnet test --no-build -c Release --verbosity normal
+      - name: Restore tests
+        run: dotnet restore tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj
+
+      - name: Test
+        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal
 
       - name: Publish
         run: dotnet publish src/JeebGateway/JeebGateway.csproj -c Release -o publish --no-build
+
+  migrations:
+    name: Database migrations (idempotency + seed)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4-alpine
+        env:
+          POSTGRES_DB: jeeb
+          POSTGRES_USER: jeeb
+          POSTGRES_PASSWORD: jeeb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jeeb -d jeeb"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://jeeb:jeeb@localhost:5432/jeeb
+      PGPASSWORD: jeeb
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Apply migrations (first pass — from empty DB)
+        run: ./db/apply.sh
+
+      - name: Apply migrations (second pass — must be a no-op)
+        run: ./db/apply.sh
+
+      - name: Apply seed scripts
+        run: ./db/seed.sh
+
+      - name: Apply seed scripts again (must be a no-op)
+        run: ./db/seed.sh
+
+      - name: Verify acceptance criteria
+        run: |
+          set -euo pipefail
+          q() { psql "$DATABASE_URL" -At -c "$1"; }
+
+          tiers=$(q "SELECT COUNT(*) FROM delivery_tiers;")
+          test "$tiers" = "5" || { echo "expected 5 delivery_tiers, got $tiers"; exit 1; }
+
+          flash_radius=$(q "SELECT radius_metres FROM delivery_tiers WHERE code = 'flash';")
+          test "$flash_radius" = "3000" || { echo "flash radius wrong: $flash_radius"; exit 1; }
+
+          eco_sla=$(q "SELECT sla_minutes FROM delivery_tiers WHERE code = 'eco';")
+          test "$eco_sla" = "1440" || { echo "eco SLA wrong: $eco_sla"; exit 1; }
+
+          on_the_way_sla=$(q "SELECT sla_minutes IS NULL FROM delivery_tiers WHERE code = 'on_the_way';")
+          test "$on_the_way_sla" = "t" || { echo "on_the_way must have NULL SLA, got: $on_the_way_sla"; exit 1; }
+
+          prohibited=$(q "SELECT COUNT(*) FROM prohibited_items;")
+          test "$prohibited" -ge "10" || { echo "expected >=10 prohibited_items, got $prohibited"; exit 1; }
+
+          personas=$(q "SELECT COUNT(*) FROM users WHERE phone LIKE '+9617000000%';")
+          test "$personas" = "5" || { echo "expected 5 persona users, got $personas"; exit 1; }
+
+          echo "All acceptance criteria verified."

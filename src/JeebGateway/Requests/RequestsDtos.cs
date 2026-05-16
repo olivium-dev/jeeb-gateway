@@ -1,0 +1,170 @@
+namespace JeebGateway.Requests;
+
+/// <summary>
+/// Status of a delivery request. Mirrors the <c>delivery_request_status</c>
+/// enum in db/migrations/0004 — order matters: anything before <c>delivered</c>
+/// is "active" and counts against the per-Client concurrency cap (BR-9).
+/// </summary>
+public static class RequestStatus
+{
+    public const string Scheduled = "scheduled";
+    public const string Pending = "pending";
+    public const string Matched = "matched";
+    public const string Accepted = "accepted";
+    public const string PickedUp = "picked_up";
+    public const string HeadingOff = "heading_off";
+    public const string Delivered = "delivered";
+    public const string Rated = "rated";
+    public const string Cancelled = "cancelled";
+    public const string Expired = "expired";
+    public const string Disputed = "disputed";
+
+    /// <summary>
+    /// The active states from BR-9: every status strictly before
+    /// <see cref="Delivered"/>. <see cref="Cancelled"/> and <see cref="Expired"/>
+    /// are terminal and do NOT count against the limit. <see cref="Scheduled"/>
+    /// is included so a Client cannot trivially bypass the cap by stacking
+    /// future-dated requests (T-backend-046).
+    /// </summary>
+    public static readonly IReadOnlySet<string> ActiveStates = new HashSet<string>(StringComparer.Ordinal)
+    {
+        Scheduled,
+        Pending,
+        Matched,
+        Accepted,
+        PickedUp,
+        HeadingOff
+    };
+
+    /// <summary>
+    /// BR-10 active states from the Jeeber's perspective: every status the
+    /// Jeeber is on the hook for once an offer has been accepted. Pre-accept
+    /// states (<c>scheduled</c>, <c>pending</c>, <c>matched</c>) are not in
+    /// this set because no Jeeber is bound to the request yet — the BR-10
+    /// cap only kicks in at acceptance time and only counts deliveries the
+    /// Jeeber is actively running.
+    /// </summary>
+    public static readonly IReadOnlySet<string> JeeberActiveStates = new HashSet<string>(StringComparer.Ordinal)
+    {
+        Accepted,
+        PickedUp,
+        HeadingOff
+    };
+
+    /// <summary>
+    /// Statuses where the Client has not yet accepted any offer
+    /// (T-backend-028 expiry-window scope). Strictly the two "auction
+    /// open" states — <c>matched</c> means candidate Jeebers were
+    /// notified but no offer has been accepted.
+    /// </summary>
+    public static readonly IReadOnlySet<string> PreAcceptanceStates = new HashSet<string>(StringComparer.Ordinal)
+    {
+        Pending,
+        Matched
+    };
+
+    /// <summary>
+    /// Terminal statuses — once a request lands here it MUST NOT
+    /// transition further. Mirrors the (terminal) markers in the
+    /// 0004 migration's enum comments.
+    /// </summary>
+    public static readonly IReadOnlySet<string> TerminalStates = new HashSet<string>(StringComparer.Ordinal)
+    {
+        Delivered,
+        Rated,
+        Cancelled,
+        Expired,
+        Disputed
+    };
+
+    public static bool IsActive(string status) => ActiveStates.Contains(status);
+    public static bool IsPreAcceptance(string status) => PreAcceptanceStates.Contains(status);
+    public static bool IsTerminal(string status) => TerminalStates.Contains(status);
+    public static bool IsJeeberActive(string status) => JeeberActiveStates.Contains(status);
+}
+
+public class DeliveryRequest
+{
+    public required string Id { get; init; }
+    public required string ClientId { get; init; }
+    public required string Status { get; set; }
+    public required string Description { get; init; }
+    public string? PickupAddress { get; init; }
+    public string? DropoffAddress { get; init; }
+    public required DateTimeOffset CreatedAt { get; init; }
+
+    /// <summary>
+    /// When the Client wants the delivery to happen (T-backend-046, Phase 2).
+    /// Null for an immediate delivery — matching kicks off at creation. When
+    /// set, the request enters <see cref="RequestStatus.Scheduled"/> and the
+    /// <c>ScheduledDeliveryActivator</c> flips it to <see cref="RequestStatus.Pending"/>
+    /// at <c>ScheduledAt - MatchingBuffer</c> (default 30 min before).
+    /// </summary>
+    public DateTimeOffset? ScheduledAt { get; init; }
+
+    /// <summary>
+    /// When the scheduled-delivery activator transitioned the request out of
+    /// <see cref="RequestStatus.Scheduled"/> and fired the matching window
+    /// reminder. Idempotence guard for the activator — set once, never reset.
+    /// </summary>
+    public DateTimeOffset? ActivatedAt { get; set; }
+
+    /// <summary>
+    /// When the no-offer "try expanding tier" prompt was sent for this
+    /// request (T-backend-028). The expiry sweeper sets this once and
+    /// then refuses to re-fire so the Client doesn't receive a duplicate
+    /// push if the sweeper runs at a high cadence.
+    /// </summary>
+    public DateTimeOffset? NudgedAt { get; set; }
+
+    /// <summary>
+    /// When the request was terminally expired by the sweeper. Null until
+    /// the 30-min window elapses without an accepted offer.
+    /// </summary>
+    public DateTimeOffset? ExpiredAt { get; set; }
+
+    /// <summary>
+    /// The Jeeber currently fulfilling this request (BR-10, T-backend-039).
+    /// Null until an offer has been accepted. Once set, the request counts
+    /// against the Jeeber's <see cref="JeeberActiveStates"/> cap until the
+    /// status leaves that set (delivered / rated / cancelled / expired /
+    /// disputed).
+    /// </summary>
+    public string? JeeberId { get; set; }
+
+    /// <summary>
+    /// When the offer was accepted and <see cref="JeeberId"/> was bound to
+    /// the request. Set in the same atomic transition as the
+    /// <c>matched/pending → accepted</c> flip.
+    /// </summary>
+    public DateTimeOffset? AcceptedAt { get; set; }
+}
+
+public class CreateRequestBody
+{
+    public string? Description { get; set; }
+    public string? PickupAddress { get; set; }
+    public string? DropoffAddress { get; set; }
+
+    /// <summary>
+    /// Optional. When set, the delivery is scheduled for the given moment;
+    /// matching only starts at <c>ScheduledAt - MatchingBuffer</c>. Must be
+    /// in the future. Absent / null means an immediate delivery (existing
+    /// behavior — status starts as <c>pending</c>).
+    /// </summary>
+    public DateTimeOffset? ScheduledAt { get; set; }
+}
+
+public class DeliveryRequestDto
+{
+    public required string Id { get; init; }
+    public required string ClientId { get; init; }
+    public required string Status { get; init; }
+    public required string Description { get; init; }
+    public string? PickupAddress { get; init; }
+    public string? DropoffAddress { get; init; }
+    public required DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset? ScheduledAt { get; init; }
+    public string? JeeberId { get; init; }
+    public DateTimeOffset? AcceptedAt { get; init; }
+}

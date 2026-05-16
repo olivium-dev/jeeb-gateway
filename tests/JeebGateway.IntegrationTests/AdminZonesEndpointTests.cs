@@ -1,0 +1,277 @@
+using System.Net;
+using System.Net.Http.Json;
+using FluentAssertions;
+using JeebGateway.Availability;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Xunit;
+
+namespace JeebGateway.IntegrationTests;
+
+public class AdminZonesEndpointTests : IClassFixture<AdminZonesEndpointTests.Fixture>
+{
+    private readonly Fixture _fixture;
+
+    public AdminZonesEndpointTests(Fixture fixture)
+    {
+        _fixture = fixture;
+    }
+
+    [Fact]
+    public async Task Get_Without_Identity_Returns_401()
+    {
+        var factory = _fixture.Factory();
+        var client = factory.CreateClient();
+
+        var resp = await client.GetAsync("/admin/zones/online-jeebers");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Get_Without_Admin_Role_Returns_403()
+    {
+        var factory = _fixture.Factory();
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", "ops-1");
+
+        var resp = await client.GetAsync("/admin/zones/online-jeebers");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+    }
+
+    [Fact]
+    public async Task Get_Groups_Online_Jeebers_By_Configured_Boundary_With_Vehicle_Type()
+    {
+        var factory = _fixture.Factory();
+        await GoOnline(factory, "jeeber-downtown-a", "motorbike", "amman-downtown", lon: 35.935, lat: 31.955);
+        await GoOnline(factory, "jeeber-downtown-b", "car",       "amman-downtown", lon: 35.940, lat: 31.960);
+        await GoOnline(factory, "jeeber-abdoun-a",   "bicycle",   "amman-abdoun",   lon: 35.880, lat: 31.945);
+        // Offline Jeeber must not surface on the ops map even though it has a location.
+        await GoOnline(factory, "jeeber-going-offline", "scooter", "amman-shmeisani", lon: 35.905, lat: 31.975);
+        await GoOffline(factory, "jeeber-going-offline");
+
+        var admin = AdminClient(factory);
+        var resp = await admin.GetAsync("/admin/zones/online-jeebers");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<AdminZoneViewResponse>();
+        body.Should().NotBeNull();
+        body!.TotalOnline.Should().Be(3);
+        body.RefreshIntervalSeconds.Should().Be(30);
+
+        var downtown = body.Zones.Single(z => z.Key == "amman-downtown");
+        downtown.Count.Should().Be(2);
+        downtown.CountByVehicleType.Should().BeEquivalentTo(new Dictionary<string, int>
+        {
+            ["motorbike"] = 1,
+            ["car"] = 1
+        });
+        downtown.Jeebers.Select(j => j.UserId).Should().BeEquivalentTo(new[]
+        {
+            "jeeber-downtown-a",
+            "jeeber-downtown-b"
+        });
+        downtown.Bounds.Should().NotBeNull();
+        downtown.Bounds!.MinLatitude.Should().Be(31.94);
+        downtown.Jeebers.Should().OnlyContain(j => j.Latitude.HasValue && j.Longitude.HasValue);
+
+        var abdoun = body.Zones.Single(z => z.Key == "amman-abdoun");
+        abdoun.Count.Should().Be(1);
+        abdoun.Jeebers.Single().VehicleType.Should().Be("bicycle");
+
+        var shmeisani = body.Zones.Single(z => z.Key == "amman-shmeisani");
+        shmeisani.Count.Should().Be(0);
+        shmeisani.Jeebers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Get_Buckets_Jeebers_Outside_Configured_Zones_As_Unzoned()
+    {
+        var factory = _fixture.Factory();
+        await GoOnline(factory, "jeeber-zarqa", "car", "zarqa", lon: 36.1, lat: 32.07);
+        await GoOnlineWithoutLocation(factory, "jeeber-no-loc", "walk", "unknown");
+
+        var admin = AdminClient(factory);
+        var resp = await admin.GetAsync("/admin/zones/online-jeebers");
+
+        var body = await resp.Content.ReadFromJsonAsync<AdminZoneViewResponse>();
+        var unzoned = body!.Zones.Single(z => z.Key == ZoneOptions.UnzonedKey);
+        unzoned.Count.Should().Be(2);
+        unzoned.Bounds.Should().BeNull();
+        unzoned.Jeebers.Select(j => j.UserId).Should().BeEquivalentTo(new[]
+        {
+            "jeeber-zarqa",
+            "jeeber-no-loc"
+        });
+    }
+
+    [Fact]
+    public async Task Get_Sets_Cache_Control_Header_To_Configured_Refresh_Interval()
+    {
+        var factory = _fixture.Factory();
+        var admin = AdminClient(factory);
+        var resp = await admin.GetAsync("/admin/zones/online-jeebers");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        resp.Headers.CacheControl.Should().NotBeNull();
+        resp.Headers.CacheControl!.MaxAge.Should().Be(TimeSpan.FromSeconds(30));
+        resp.Headers.CacheControl.Public.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Get_Honours_Configurable_Boundaries_Override()
+    {
+        var factory = _fixture.FactoryWithBoundaries(new[]
+        {
+            new ZoneBoundary
+            {
+                Key = "irbid-centre",
+                Name = "Irbid",
+                MinLatitude = 32.50,
+                MaxLatitude = 32.60,
+                MinLongitude = 35.80,
+                MaxLongitude = 35.90
+            }
+        });
+
+        await GoOnline(factory, "jeeber-irbid", "car", "irbid-centre", lon: 35.85, lat: 32.55);
+        await GoOnline(factory, "jeeber-amman", "car", "amman-downtown", lon: 35.94, lat: 31.95);
+
+        var admin = AdminClient(factory);
+        var resp = await admin.GetAsync("/admin/zones/online-jeebers");
+
+        var body = await resp.Content.ReadFromJsonAsync<AdminZoneViewResponse>();
+        body!.Zones.Should().HaveCount(2);
+        body.Zones.Select(z => z.Key).Should().BeEquivalentTo(new[]
+        {
+            "irbid-centre",
+            ZoneOptions.UnzonedKey
+        });
+        body.Zones.Single(z => z.Key == "irbid-centre").Jeebers.Single().UserId.Should().Be("jeeber-irbid");
+        body.Zones.Single(z => z.Key == ZoneOptions.UnzonedKey).Jeebers.Single().UserId.Should().Be("jeeber-amman");
+    }
+
+    // -----------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------
+
+    private static HttpClient AdminClient(WebApplicationFactory<Program> factory)
+    {
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", "ops-admin");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "admin");
+        return client;
+    }
+
+    private static HttpClient JeeberClient(WebApplicationFactory<Program> factory, string userId)
+    {
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", userId);
+        client.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+        return client;
+    }
+
+    private static async Task GoOnline(
+        WebApplicationFactory<Program> factory,
+        string userId,
+        string vehicleType,
+        string zone,
+        double lon,
+        double lat)
+    {
+        var client = JeeberClient(factory, userId);
+        var resp = await client.PatchAsJsonAsync("/jeebers/me/availability", new
+        {
+            online = true,
+            vehicleType,
+            zone,
+            longitude = lon,
+            latitude = lat
+        });
+        resp.EnsureSuccessStatusCode();
+    }
+
+    private static async Task GoOnlineWithoutLocation(
+        WebApplicationFactory<Program> factory,
+        string userId,
+        string vehicleType,
+        string zone)
+    {
+        var client = JeeberClient(factory, userId);
+        var resp = await client.PatchAsJsonAsync("/jeebers/me/availability", new
+        {
+            online = true,
+            vehicleType,
+            zone
+        });
+        resp.EnsureSuccessStatusCode();
+    }
+
+    private static async Task GoOffline(WebApplicationFactory<Program> factory, string userId)
+    {
+        var client = JeeberClient(factory, userId);
+        var resp = await client.PatchAsJsonAsync("/jeebers/me/availability", new { online = false });
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public sealed class Fixture
+    {
+        public WebApplicationFactory<Program> Factory() => new WebApplicationFactory<Program>();
+
+        public WebApplicationFactory<Program> FactoryWithBoundaries(IEnumerable<ZoneBoundary> boundaries)
+        {
+            var snapshot = boundaries.ToList();
+            return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            {
+                // PostConfigure replaces whatever the appsettings binder
+                // produced. This is the simplest way to swap the default
+                // Amman boundaries for a deterministic test set without
+                // wrestling with array-merge semantics in IConfiguration.
+                builder.ConfigureServices(services =>
+                {
+                    services.PostConfigure<ZoneOptions>(opts =>
+                    {
+                        opts.Boundaries = snapshot;
+                    });
+                });
+            });
+        }
+    }
+
+    private sealed class AdminZoneViewResponse
+    {
+        public List<AdminZoneGroup> Zones { get; set; } = new();
+        public int TotalOnline { get; set; }
+        public DateTimeOffset GeneratedAt { get; set; }
+        public int RefreshIntervalSeconds { get; set; }
+    }
+
+    private sealed class AdminZoneGroup
+    {
+        public string Key { get; set; } = "";
+        public string? Name { get; set; }
+        public ZoneBounds? Bounds { get; set; }
+        public int Count { get; set; }
+        public Dictionary<string, int> CountByVehicleType { get; set; } = new();
+        public List<AdminJeeberMarker> Jeebers { get; set; } = new();
+    }
+
+    private sealed class ZoneBounds
+    {
+        public double MinLatitude { get; set; }
+        public double MaxLatitude { get; set; }
+        public double MinLongitude { get; set; }
+        public double MaxLongitude { get; set; }
+    }
+
+    private sealed class AdminJeeberMarker
+    {
+        public string UserId { get; set; } = "";
+        public string VehicleType { get; set; } = "";
+        public double? Latitude { get; set; }
+        public double? Longitude { get; set; }
+        public DateTimeOffset? LastSeenAt { get; set; }
+    }
+}
