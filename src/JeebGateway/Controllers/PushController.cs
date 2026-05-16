@@ -17,11 +17,13 @@ public class PushController : ControllerBase
 {
     private readonly IPushNotificationService _push;
     private readonly IDeviceTokenStore _devices;
+    private readonly IPushDeliveryTracker _tracker;
 
-    public PushController(IPushNotificationService push, IDeviceTokenStore devices)
+    public PushController(IPushNotificationService push, IDeviceTokenStore devices, IPushDeliveryTracker tracker)
     {
         _push = push;
         _devices = devices;
+        _tracker = tracker;
     }
 
     [HttpPost("send")]
@@ -99,6 +101,46 @@ public class PushController : ControllerBase
         if (!TryGetUserId(out var userId, out var problem)) return problem;
         await _devices.UnregisterAsync(userId, token, ct);
         return NoContent();
+    }
+
+    [HttpGet("deliveries")]
+    [ProducesResponseType(typeof(IReadOnlyList<DeliveryTrackingResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> GetDeliveries([FromQuery] int limit = 50, CancellationToken ct = default)
+    {
+        if (!TryGetUserId(out var userId, out var problem)) return problem;
+
+        var results = await _tracker.GetForUserAsync(userId, ct);
+        var response = results
+            .Take(limit)
+            .Select(r => new DeliveryTrackingResponse
+            {
+                UserId = r.UserId,
+                Trigger = r.Trigger.ToString(),
+                Outcome = r.Outcome.ToString(),
+                AttemptsMade = r.AttemptsMade,
+                Reason = r.Reason
+            })
+            .ToArray();
+
+        return Ok(response);
+    }
+
+    [HttpGet("deliveries/recent")]
+    [ProducesResponseType(typeof(IReadOnlyList<DeliveryTrackingResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetRecentDeliveries([FromQuery] int limit = 100, CancellationToken ct = default)
+    {
+        var results = await _tracker.GetRecentAsync(limit, ct);
+        var response = results.Select(r => new DeliveryTrackingResponse
+        {
+            UserId = r.UserId,
+            Trigger = r.Trigger.ToString(),
+            Outcome = r.Outcome.ToString(),
+            AttemptsMade = r.AttemptsMade,
+            Reason = r.Reason
+        }).ToArray();
+
+        return Ok(response);
     }
 
     private bool TryGetUserId(out string userId, out IActionResult problem)

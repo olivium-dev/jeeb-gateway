@@ -31,6 +31,7 @@ public class InMemoryNotificationPreferencesStore : INotificationPreferencesStor
         if (patch.Chat is { } chat) prefs.Chat = chat;
         if (patch.StatusChanges is { } status) prefs.StatusChanges = status;
         if (patch.RatingReminders is { } rating) prefs.RatingReminders = rating;
+        if (patch.Promotions is { } promotions) prefs.Promotions = promotions;
         prefs.UpdatedAt = DateTimeOffset.UtcNow;
         return prefs;
     }
@@ -42,6 +43,7 @@ public class InMemoryNotificationPreferencesStore : INotificationPreferencesStor
         Chat = prefs.Chat,
         StatusChanges = prefs.StatusChanges,
         RatingReminders = prefs.RatingReminders,
+        Promotions = prefs.Promotions,
         UpdatedAt = prefs.UpdatedAt
     };
 }

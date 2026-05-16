@@ -22,6 +22,7 @@ public static class PushTriggerCategoryMap
         NotificationTrigger.StatusChange => NotificationCategory.StatusChanges,
         NotificationTrigger.Chat => NotificationCategory.Chat,
         NotificationTrigger.RatingReminder => NotificationCategory.RatingReminders,
+        NotificationTrigger.Promotion => NotificationCategory.Promotions,
         // KYC is a regulatory/identity event — always delivered, like OTP.
         NotificationTrigger.KycUpdate => null,
         _ => throw new ArgumentOutOfRangeException(nameof(trigger), trigger, "Unknown trigger")
@@ -37,6 +38,7 @@ public static class PushTriggerCategoryMap
             NotificationCategory.Chat => prefs.Chat,
             NotificationCategory.StatusChanges => prefs.StatusChanges,
             NotificationCategory.RatingReminders => prefs.RatingReminders,
+            NotificationCategory.Promotions => prefs.Promotions,
             _ => true
         };
     }

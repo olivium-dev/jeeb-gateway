@@ -15,6 +15,7 @@ public static class NotificationPreferencesDefaults
         Chat = true,
         StatusChanges = true,
         RatingReminders = true,
+        Promotions = true,
         UpdatedAt = DateTimeOffset.UtcNow
     };
 }

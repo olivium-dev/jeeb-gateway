@@ -7,5 +7,6 @@ public class UserNotificationPreferences
     public bool Chat { get; set; }
     public bool StatusChanges { get; set; }
     public bool RatingReminders { get; set; }
+    public bool Promotions { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }

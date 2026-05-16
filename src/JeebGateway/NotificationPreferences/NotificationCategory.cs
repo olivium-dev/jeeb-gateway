@@ -10,5 +10,6 @@ public enum NotificationCategory
     Offers,
     Chat,
     StatusChanges,
-    RatingReminders
+    RatingReminders,
+    Promotions
 }

@@ -20,4 +20,17 @@ public sealed class PushOptions
 
     /// <summary>Per-transport HTTP timeout. Tight to keep the 5s SLA.</summary>
     public TimeSpan TransportTimeout { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>Google Cloud project ID for FCM HTTP v1 API.</summary>
+    public string FcmProjectId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// OAuth2 bearer token for FCM HTTP v1. In production, rotate via
+    /// Google Application Default Credentials; for the MVP a long-lived
+    /// service account token is acceptable.
+    /// </summary>
+    public string FcmBearerToken { get; set; } = string.Empty;
+
+    /// <summary>Whether to use the real FCM transport or the in-memory test double.</summary>
+    public bool UseFcmTransport { get; set; }
 }
