@@ -9,6 +9,7 @@ namespace JeebGateway.Controllers;
 /// current role, preventing them from acting as both Client and Jeeber on
 /// the same delivery.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("users")]
 public class RoleSwitchController : ControllerBase

@@ -14,6 +14,7 @@ namespace JeebGateway.Controllers;
 /// id — only the unguessable token does. That way leaking the export
 /// requires leaking the token, not just compromising the session.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("users/me/data-export")]
 public class DataExportController : ControllerBase

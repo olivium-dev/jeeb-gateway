@@ -2,6 +2,7 @@ using System.Text;
 using JeebGateway.Admin;
 using JeebGateway.Availability;
 using JeebGateway.Chat;
+using JeebGateway.Extensions;
 using JeebGateway.Kyc;
 using JeebGateway.Matching;
 using JeebGateway.Middleware;
@@ -22,6 +23,7 @@ using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.IdentityModel.Tokens;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -97,8 +99,28 @@ builder.Services.AddSwaggerGen(options =>
     });
 });
 
-// Health checks
-builder.Services.AddHealthChecks();
+// Health checks — the live probe ("self") returns 200 if the process is up;
+// downstream-service probes are wired below via AddDownstreamHealthChecks and
+// only run under the readiness predicate.
+builder.Services.AddHealthChecks()
+    .AddCheck("self", () => HealthCheckResult.Healthy("process alive"), tags: new[] { "live" });
+
+// ---------------------------------------------------------------------------
+// BFF aggregation skeleton (T-migrate-gateway-shell)
+//
+// AddDownstreamClients registers a named HttpClient + Polly resilience
+// pipeline (retry + circuit breaker + per-attempt timeout) per upstream
+// service. Generated NSwag typed clients (Services/Generated/*Client.cs) hang
+// off these named registrations once each per-controller migration ticket
+// lands. See Extensions/ServiceClientExtensions.cs and
+// scripts/regenerate-clients.sh.
+//
+// AddDownstreamHealthChecks registers a /health URL-group probe per upstream
+// (tagged "ready" + "downstream", failureStatus: Degraded). Unset BaseUrls
+// silently skip — local dev does not have to spin up every backend.
+// ---------------------------------------------------------------------------
+builder.Services.AddDownstreamClients(builder.Configuration);
+builder.Services.AddDownstreamHealthChecks(builder.Configuration);
 
 // OpenTelemetry
 var serviceName = "jeeb-gateway";
@@ -157,9 +179,28 @@ builder.Services.AddOpenTelemetry()
 // MeterProvider's subscription alive for the life of the process.
 builder.Services.AddSingleton<RequestLatencyMetrics>();
 
-// Typed HttpClient registrations for downstream services will go here.
-// Example:
-// builder.Services.AddHttpClient<ISomeServiceClient, SomeServiceClient>();
+// ===========================================================================
+// LEGACY IN-MEMORY SERVICE REGISTRATIONS — DO NOT EXTEND
+//
+// Everything below this banner is the MVP/in-memory implementation backing
+// the controllers under Controllers/, every one of which is now marked
+// [Obsolete]. These registrations stay intact because per-controller
+// migration tickets will replace each store with a call into the
+// NSwag-generated client registered above via AddDownstreamClients.
+//
+// When you migrate a controller:
+//   1. Run scripts/regenerate-clients.sh to refresh the typed client for the
+//      relevant upstream service.
+//   2. Register the typed client on top of the named HttpClient registered
+//      in Extensions/ServiceClientExtensions.cs (the named registration
+//      already carries the resilience pipeline).
+//   3. Replace the controller's dependency on the in-memory store with the
+//      generated client (wrapped if you need an adapter contract).
+//   4. Remove the matching AddSingleton<I*Store, InMemory*Store>() line below.
+//   5. Remove the [Obsolete] annotation from the controller in the same PR.
+//
+// Track per-controller migrations against GATEWAY-REMEDIATION-PLAN.md.
+// ===========================================================================
 
 // Notification preferences (T-backend-031).
 // In-memory implementation for MVP; swap for an NSwag-generated notification-service

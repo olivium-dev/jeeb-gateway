@@ -14,6 +14,7 @@ namespace JeebGateway.Controllers;
 /// paginated GET, PATCH per row, every decision lands in
 /// <see cref="IAdminAuditLog"/>.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("admin/cancellations")]
 [RequireRole(Roles.Admin)]

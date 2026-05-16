@@ -1,0 +1,1464 @@
+{
+    "schemes": [
+        "http",
+        "https"
+    ],
+    "swagger": "2.0",
+    "info": {
+        "description": "A configurable delivery microservice for parcel shipment lifecycle management with webhook notifications and intelligent quote ranking.",
+        "title": "Delivery Service API",
+        "contact": {
+            "name": "Delivery Service API Support",
+            "email": "support@delivery-service.com"
+        },
+        "license": {
+            "name": "MIT",
+            "url": "https://opensource.org/licenses/MIT"
+        },
+        "version": "1.0.0"
+    },
+    "host": "localhost:8080",
+    "basePath": "/",
+    "paths": {
+        "/api/v1/admin/outbox": {
+            "get": {
+                "description": "Get statistics about webhook delivery status",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Get outbox statistics",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/subscribers": {
+            "get": {
+                "description": "Get list of all webhook subscribers (admin)",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "List all subscribers",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/SubscribersListResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/bootstrap": {
+            "post": {
+                "description": "Activate a preconfigured pack with workflows and rules",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "bootstrap"
+                ],
+                "summary": "Bootstrap configuration pack",
+                "parameters": [
+                    {
+                        "description": "Bootstrap request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/quotes": {
+            "post": {
+                "description": "Get ranked shipping quotes for parcel delivery",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "quotes"
+                ],
+                "summary": "Get shipping quotes",
+                "parameters": [
+                    {
+                        "description": "Quote request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/QuoteRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/QuoteResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/rules": {
+            "get": {
+                "description": "Get list of rule sets",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "rules"
+                ],
+                "summary": "List rule sets",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Create a new rule set for quote scoring",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "rules"
+                ],
+                "summary": "Create rule set",
+                "parameters": [
+                    {
+                        "description": "Rule set creation request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/shipments": {
+            "get": {
+                "description": "Get list of shipments with optional filters",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "shipments"
+                ],
+                "summary": "List shipments",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Filter by order ID",
+                        "name": "orderId",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by current stage",
+                        "name": "stage",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Limit number of results",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/ShipmentsListResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Create a new parcel shipment",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "shipments"
+                ],
+                "summary": "Create shipment",
+                "parameters": [
+                    {
+                        "description": "Shipment creation request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/CreateShipmentRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/ShipmentResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/shipments/{id}": {
+            "get": {
+                "description": "Get detailed information about a specific shipment",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "shipments"
+                ],
+                "summary": "Get shipment details",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Shipment ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Shipment"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/shipments/{id}/advance": {
+            "post": {
+                "description": "Advance a shipment to the next stage in the workflow",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "shipments"
+                ],
+                "summary": "Advance shipment stage",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Shipment ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Stage advance request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/AdvanceShipmentRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/TransitionResult"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/webhooks": {
+            "get": {
+                "description": "Get list of webhook subscriptions",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "webhooks"
+                ],
+                "summary": "List webhook subscriptions",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/SubscribersListResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Subscribe to webhook events for shipment updates",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "webhooks"
+                ],
+                "summary": "Create webhook subscription",
+                "parameters": [
+                    {
+                        "description": "Webhook subscription request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/CreateWebhookRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/WebhookResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/webhooks/{id}/replay": {
+            "post": {
+                "description": "Replay webhook events for a subscriber since a specific time",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "webhooks"
+                ],
+                "summary": "Replay webhooks",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Subscriber ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/workflows": {
+            "get": {
+                "description": "Get list of available workflows",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "workflows"
+                ],
+                "summary": "List workflows",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/WorkflowsListResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Create a new workflow definition",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "workflows"
+                ],
+                "summary": "Create workflow",
+                "parameters": [
+                    {
+                        "description": "Workflow creation request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/CreateWorkflowRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/WorkflowResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/workflows/{id}": {
+            "get": {
+                "description": "Get detailed information about a specific workflow",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "workflows"
+                ],
+                "summary": "Get workflow details",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workflow ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/WorkflowResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/health": {
+            "get": {
+                "description": "Check if the delivery service is healthy and running",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "health"
+                ],
+                "summary": "Health check",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/HealthResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "AdvanceShipmentRequest": {
+            "type": "object",
+            "required": [
+                "event",
+                "reason"
+            ],
+            "properties": {
+                "event": {
+                    "type": "string",
+                    "example": "out_for_delivery"
+                },
+                "payload": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "reason": {
+                    "type": "string",
+                    "example": "Package out for delivery"
+                }
+            }
+        },
+        "CarrierSelection": {
+            "type": "object",
+            "required": [
+                "carrier",
+                "service"
+            ],
+            "properties": {
+                "carrier": {
+                    "type": "string",
+                    "example": "PostNL"
+                },
+                "service": {
+                    "type": "string",
+                    "example": "standard"
+                }
+            }
+        },
+        "CreateShipmentRequest": {
+            "type": "object",
+            "required": [
+                "address",
+                "orderId",
+                "selection",
+                "workflow"
+            ],
+            "properties": {
+                "address": {
+                    "$ref": "#/definitions/ShippingAddress"
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "orderId": {
+                    "type": "string",
+                    "example": "order_12345"
+                },
+                "selection": {
+                    "$ref": "#/definitions/CarrierSelection"
+                },
+                "tenantId": {
+                    "type": "string"
+                },
+                "workflow": {
+                    "$ref": "#/definitions/WorkflowSelection"
+                }
+            }
+        },
+        "CreateWebhookRequest": {
+            "type": "object",
+            "required": [
+                "topics",
+                "url"
+            ],
+            "properties": {
+                "headers": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "example": {
+                        "X-Source": "delivery-service"
+                    }
+                },
+                "retryPolicy": {
+                    "$ref": "#/definitions/RetryPolicy"
+                },
+                "secret": {
+                    "type": "string",
+                    "example": "webhook-secret-key"
+                },
+                "topics": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "shipment.stage.changed",
+                        "shipment.sla.breached"
+                    ]
+                },
+                "url": {
+                    "type": "string",
+                    "example": "https://api.example.com/webhooks"
+                }
+            }
+        },
+        "CreateWorkflowRequest": {
+            "type": "object",
+            "required": [
+                "name",
+                "stages",
+                "version"
+            ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "example": "express_delivery"
+                },
+                "policies": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/Policy"
+                    }
+                },
+                "stages": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "$ref": "#/definitions/WorkflowStage"
+                    }
+                },
+                "version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "example": 1
+                }
+            }
+        },
+        "Customer": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "example": "cust_456"
+                },
+                "segment": {
+                    "type": "string",
+                    "example": "PREMIUM"
+                },
+                "tier": {
+                    "type": "string",
+                    "example": "GOLD"
+                }
+            }
+        },
+        "Destination": {
+            "type": "object",
+            "required": [
+                "city",
+                "country",
+                "postalCode"
+            ],
+            "properties": {
+                "city": {
+                    "type": "string",
+                    "example": "Amsterdam"
+                },
+                "country": {
+                    "type": "string",
+                    "example": "NL"
+                },
+                "postalCode": {
+                    "type": "string",
+                    "example": "1000AA"
+                },
+                "region": {
+                    "type": "string",
+                    "example": "Noord-Holland"
+                }
+            }
+        },
+        "ErrorResponse": {
+            "type": "object",
+            "properties": {
+                "details": {
+                    "type": "string",
+                    "example": "OrderID is required"
+                },
+                "error": {
+                    "type": "string",
+                    "example": "Validation failed"
+                },
+                "status": {
+                    "type": "integer",
+                    "example": 400
+                }
+            }
+        },
+        "HealthResponse": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "example": "healthy"
+                },
+                "time": {
+                    "type": "string",
+                    "example": "2025-09-27T10:00:00Z"
+                }
+            }
+        },
+        "Item": {
+            "type": "object",
+            "required": [
+                "qty",
+                "sku",
+                "volumeDm3",
+                "weightKg"
+            ],
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "example": "books"
+                },
+                "qty": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "example": 2
+                },
+                "sku": {
+                    "type": "string",
+                    "example": "ITEM001"
+                },
+                "value": {
+                    "type": "number",
+                    "example": 29.99
+                },
+                "volumeDm3": {
+                    "type": "number",
+                    "minimum": 0,
+                    "example": 0.1
+                },
+                "weightKg": {
+                    "type": "number",
+                    "minimum": 0,
+                    "example": 0.5
+                }
+            }
+        },
+        "Policy": {
+            "type": "object",
+            "properties": {
+                "end": {
+                    "type": "string",
+                    "example": "20:00"
+                },
+                "start": {
+                    "type": "string",
+                    "example": "08:00"
+                },
+                "tz": {
+                    "type": "string",
+                    "example": "Europe/Amsterdam"
+                }
+            }
+        },
+        "QuoteRequest": {
+            "type": "object",
+            "required": [
+                "cartId",
+                "dest",
+                "items"
+            ],
+            "properties": {
+                "cartId": {
+                    "type": "string",
+                    "example": "cart_123"
+                },
+                "customer": {
+                    "$ref": "#/definitions/Customer"
+                },
+                "dest": {
+                    "$ref": "#/definitions/Destination"
+                },
+                "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "$ref": "#/definitions/Item"
+                    }
+                },
+                "preferences": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
+        },
+        "QuoteResponse": {
+            "type": "object",
+            "properties": {
+                "options": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/ScoredOption"
+                    }
+                }
+            }
+        },
+        "RetryPolicy": {
+            "type": "object",
+            "properties": {
+                "maxAttempts": {
+                    "type": "integer",
+                    "example": 5
+                },
+                "schedule": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "PT1M",
+                        "PT5M",
+                        "PT15M",
+                        "PT1H"
+                    ]
+                }
+            }
+        },
+        "RuleExplanation": {
+            "type": "object",
+            "properties": {
+                "contribution": {
+                    "type": "number",
+                    "example": 0.4
+                },
+                "description": {
+                    "type": "string",
+                    "example": "Rule 'prefer_local_courier' matched (+0.40)"
+                },
+                "matched": {
+                    "type": "boolean",
+                    "example": true
+                },
+                "ruleId": {
+                    "type": "string",
+                    "example": "prefer_local_courier"
+                }
+            }
+        },
+        "SLATimer": {
+            "type": "object",
+            "properties": {
+                "dueAt": {
+                    "type": "string",
+                    "example": "2025-09-28T14:30:00Z"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "timer_456"
+                },
+                "stage": {
+                    "type": "string",
+                    "example": "IN_TRANSIT"
+                },
+                "status": {
+                    "type": "string",
+                    "example": "active"
+                }
+            }
+        },
+        "ScoredOption": {
+            "type": "object",
+            "properties": {
+                "carrier": {
+                    "type": "string",
+                    "example": "PostNL"
+                },
+                "eta": {
+                    "type": "string",
+                    "example": "2025-09-28T16:00:00Z"
+                },
+                "explain": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/RuleExplanation"
+                    }
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "price": {
+                    "type": "number",
+                    "example": 5.5
+                },
+                "score": {
+                    "type": "number",
+                    "example": 0.85
+                },
+                "service": {
+                    "type": "string",
+                    "example": "standard"
+                }
+            }
+        },
+        "ShipmentDetail": {
+            "type": "object",
+            "properties": {
+                "carrierName": {
+                    "type": "string",
+                    "example": "PostNL"
+                },
+                "carrierTrackingId": {
+                    "type": "string",
+                    "example": "3SPOST123456"
+                },
+                "createdAt": {
+                    "type": "string",
+                    "example": "2025-09-27T10:30:00Z"
+                },
+                "currentStage": {
+                    "type": "string",
+                    "example": "IN_TRANSIT"
+                },
+                "history": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/ShipmentHistory"
+                    }
+                },
+                "id": {
+                    "type": "string",
+                    "example": "shp_xyz789"
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "orderId": {
+                    "type": "string",
+                    "example": "order_12345"
+                },
+                "slaTimers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/SLATimer"
+                    }
+                },
+                "stageEnteredAt": {
+                    "type": "string",
+                    "example": "2025-09-27T14:30:00Z"
+                },
+                "tenantId": {
+                    "type": "string",
+                    "example": "acme-corp"
+                },
+                "updatedAt": {
+                    "type": "string",
+                    "example": "2025-09-27T14:30:00Z"
+                },
+                "workflowId": {
+                    "type": "string",
+                    "example": "default_eu"
+                },
+                "workflowVersion": {
+                    "type": "integer",
+                    "example": 1
+                }
+            }
+        },
+        "ShipmentHistory": {
+            "type": "object",
+            "properties": {
+                "actor": {
+                    "type": "string",
+                    "example": "carrier:postnl"
+                },
+                "at": {
+                    "type": "string",
+                    "example": "2025-09-27T14:30:00Z"
+                },
+                "fromStage": {
+                    "type": "string",
+                    "example": "CREATED"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "hist_123"
+                },
+                "payload": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "reason": {
+                    "type": "string",
+                    "example": "carrier webhook: PostNL"
+                },
+                "toStage": {
+                    "type": "string",
+                    "example": "IN_TRANSIT"
+                }
+            }
+        },
+        "ShipmentResponse": {
+            "type": "object",
+            "properties": {
+                "carrierName": {
+                    "type": "string",
+                    "example": "PostNL"
+                },
+                "createdAt": {
+                    "type": "string",
+                    "example": "2025-09-27T10:30:00Z"
+                },
+                "currentStage": {
+                    "type": "string",
+                    "example": "CREATED"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "shp_xyz789"
+                },
+                "orderId": {
+                    "type": "string",
+                    "example": "order_12345"
+                }
+            }
+        },
+        "ShipmentsListResponse": {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "example": 10
+                },
+                "shipments": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/ShipmentDetail"
+                    }
+                }
+            }
+        },
+        "ShippingAddress": {
+            "type": "object",
+            "required": [
+                "city",
+                "country",
+                "name",
+                "postalCode",
+                "street"
+            ],
+            "properties": {
+                "city": {
+                    "type": "string",
+                    "example": "Amsterdam"
+                },
+                "country": {
+                    "type": "string",
+                    "example": "NL"
+                },
+                "email": {
+                    "type": "string",
+                    "example": "john@example.com"
+                },
+                "name": {
+                    "type": "string",
+                    "example": "John Doe"
+                },
+                "phone": {
+                    "type": "string",
+                    "example": "+31612345678"
+                },
+                "postalCode": {
+                    "type": "string",
+                    "example": "1000AA"
+                },
+                "street": {
+                    "type": "string",
+                    "example": "Damrak 1"
+                }
+            }
+        },
+        "SubscribersListResponse": {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "example": 3
+                },
+                "subscribers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/WebhookResponse"
+                    }
+                }
+            }
+        },
+        "TransitionResult": {
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "notifyCustomer"
+                    ]
+                },
+                "fromStage": {
+                    "type": "string",
+                    "example": "IN_TRANSIT"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "nextTimeout": {
+                    "type": "string",
+                    "example": "2025-09-27T22:30:00Z"
+                },
+                "success": {
+                    "type": "boolean",
+                    "example": true
+                },
+                "toStage": {
+                    "type": "string",
+                    "example": "OUT_FOR_DELIVERY"
+                }
+            }
+        },
+        "WebhookResponse": {
+            "type": "object",
+            "properties": {
+                "createdAt": {
+                    "type": "string",
+                    "example": "2025-09-27T10:00:00Z"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "sub_abc123"
+                },
+                "status": {
+                    "type": "string",
+                    "example": "active"
+                },
+                "topics": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "shipment.stage.changed",
+                        "shipment.sla.breached"
+                    ]
+                },
+                "url": {
+                    "type": "string",
+                    "example": "https://api.example.com/webhooks"
+                }
+            }
+        },
+        "WorkflowResponse": {
+            "type": "object",
+            "properties": {
+                "createdAt": {
+                    "type": "string",
+                    "example": "2025-09-27T10:00:00Z"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "wf_abc123"
+                },
+                "isActive": {
+                    "type": "boolean",
+                    "example": true
+                },
+                "name": {
+                    "type": "string",
+                    "example": "express_delivery"
+                },
+                "version": {
+                    "type": "integer",
+                    "example": 1
+                }
+            }
+        },
+        "WorkflowSelection": {
+            "type": "object",
+            "required": [
+                "name",
+                "version"
+            ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "example": "default_eu"
+                },
+                "version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "example": 1
+                }
+            }
+        },
+        "WorkflowStage": {
+            "type": "object",
+            "required": [
+                "id"
+            ],
+            "properties": {
+                "allowedTransitions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "IN_TRANSIT",
+                        "EXCEPTION"
+                    ]
+                },
+                "enterActions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "reserveSlot",
+                        "generateLabel"
+                    ]
+                },
+                "exitActions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "guards": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "businessHours"
+                    ]
+                },
+                "id": {
+                    "type": "string",
+                    "example": "CREATED"
+                },
+                "onTimeout": {
+                    "type": "string",
+                    "example": "CANCELLED"
+                },
+                "terminal": {
+                    "type": "boolean",
+                    "example": false
+                },
+                "timeout": {
+                    "type": "string",
+                    "example": "PT2H"
+                }
+            }
+        },
+        "WorkflowsListResponse": {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "example": 5
+                },
+                "workflows": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/WorkflowResponse"
+                    }
+                }
+            }
+        },
+        "models.Shipment": {
+            "type": "object",
+            "properties": {
+                "carrierName": {
+                    "type": "string"
+                },
+                "carrierTrackingId": {
+                    "type": "string"
+                },
+                "createdAt": {
+                    "type": "string"
+                },
+                "currentStage": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "orderId": {
+                    "type": "string"
+                },
+                "stageEnteredAt": {
+                    "type": "string"
+                },
+                "tenantId": {
+                    "type": "string"
+                },
+                "updatedAt": {
+                    "type": "string"
+                },
+                "workflowId": {
+                    "type": "string"
+                },
+                "workflowVersion": {
+                    "type": "integer"
+                }
+            }
+        }
+    }
+}

@@ -10,6 +10,7 @@ namespace JeebGateway.Controllers;
 /// are seeded on startup; admins may edit the catalog via /admin/tiers and
 /// changes are picked up on the next request.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("tiers")]
 public class TiersController : ControllerBase

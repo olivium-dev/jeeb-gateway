@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
 
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("users/me")]
 public class UsersController : ControllerBase

@@ -14,6 +14,7 @@ namespace JeebGateway.Controllers;
 /// The version is the max updated_at across the active set, so reactivating or
 /// editing an item bumps it and the user must acknowledge again.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("prohibited-items")]
 public class ProhibitedItemsController : ControllerBase

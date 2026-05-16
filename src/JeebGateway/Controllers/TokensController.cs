@@ -13,6 +13,7 @@ namespace JeebGateway.Controllers;
 /// Refresh:  POST /auth/tokens/refresh  — single-use; rotates and returns a new pair.
 /// Revoke:   POST /auth/tokens/revoke   — logout for one device.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("auth/tokens")]
 [EnableRateLimiting(RateLimitingExtensions.AuthTokenBucketPolicy)]

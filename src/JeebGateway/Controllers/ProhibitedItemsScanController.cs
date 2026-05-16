@@ -12,6 +12,7 @@ namespace JeebGateway.Controllers;
 /// uphold them. The endpoint NEVER auto-blocks the underlying request; that
 /// decision lives in the human-in-the-loop admin queue.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("prohibited-items")]
 public class ProhibitedItemsScanController : ControllerBase

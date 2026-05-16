@@ -27,6 +27,7 @@ namespace JeebGateway.Controllers;
 /// or empty means "any vehicle type". Unknown strings in the array
 /// reject the request with 400.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("matching")]
 public sealed class MatchingController : ControllerBase

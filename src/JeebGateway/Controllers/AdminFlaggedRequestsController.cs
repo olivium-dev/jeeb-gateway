@@ -10,6 +10,7 @@ namespace JeebGateway.Controllers;
 /// flagged record here. Upstream services consume the upheld decision via a
 /// follow-up wiring task once the moderation outcomes feed is in place.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("admin/prohibited-items/flagged")]
 [RequireRole(Roles.Admin)]

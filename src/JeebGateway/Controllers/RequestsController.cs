@@ -18,6 +18,7 @@ namespace JeebGateway.Controllers;
 /// disputed) do not count against the cap. <c>scheduled</c> is included
 /// so Clients cannot bypass the cap by stacking future-dated requests.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("requests")]
 public class RequestsController : ControllerBase

@@ -11,6 +11,7 @@ namespace JeebGateway.Controllers;
 /// ops-map client polls this endpoint every 30 seconds; the cache
 /// directive advertises that cadence to intermediaries.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("admin/zones")]
 [RequireRole(Roles.Admin)]

@@ -1,0 +1,11 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "geolocation-service (placeholder)",
+    "version": "0.0.0",
+    "description": "PLACEHOLDER: regenerate against a running instance using scripts/regenerate-clients.sh. This file is committed only so the BFF skeleton builds and contracts/ has an inventory entry for geolocation-service."
+  },
+  "paths": {},
+  "components": {},
+  "x-status": "PLACEHOLDER: fetch via scripts/regenerate-clients.sh against a running instance"
+}
