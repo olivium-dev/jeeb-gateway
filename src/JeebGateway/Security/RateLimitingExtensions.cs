@@ -8,23 +8,25 @@ using Microsoft.Extensions.Options;
 namespace JeebGateway.Security;
 
 /// <summary>
-/// Wires the gateway's two-tier rate-limit policy (T-backend-032):
-///   - per-user partition  (JWT sub or X-User-Id header) — 100 req / min
-///   - per-IP   partition  (RemoteIpAddress, falls back to X-Forwarded-For
-///                          left-most when behind the BFF edge) — 1000 req / min
+/// Wires the gateway's multi-tier rate-limit policy (T-backend-032):
 ///
-/// The two limiters are chained via <see cref="PartitionedRateLimiter.CreateChained{TResource}"/>.
-/// A single request consumes one permit in each partition; if either is
-/// exhausted the request rejects with 429 + Retry-After.
+///   Global chained limiters (applied to all requests):
+///   - per-user partition  (JWT sub or X-User-Id header) — sliding window, 100 req / min
+///   - per-IP   partition  (RemoteIpAddress / X-Forwarded-For) — sliding window, 1000 req / min
 ///
-/// Auth routes (<c>/auth/tokens/*</c>) bypass the user partition (no identity
-/// before tokens issue) but stay subject to the per-IP cap, which is the
-/// correct knob against OTP / refresh-token brute force.
+///   Named policies (applied via [EnableRateLimiting] on controller / endpoint groups):
+///   - "auth_token_bucket" — token bucket for auth routes (brute-force protection)
+///   - "sensitive_fixed"   — fixed window for sensitive endpoints (login, OTP)
+///
+/// A single request consumes one permit in each applicable partition; if any
+/// is exhausted the request rejects with 429 + Retry-After.
 /// </summary>
 public static class RateLimitingExtensions
 {
     public const string UserPartition = "user";
     public const string IpPartition = "ip";
+    public const string AuthTokenBucketPolicy = "auth_token_bucket";
+    public const string SensitiveFixedPolicy = "sensitive_fixed";
 
     public static IServiceCollection AddJeebRateLimiting(this IServiceCollection services)
     {
@@ -34,8 +36,6 @@ public static class RateLimitingExtensions
 
             options.OnRejected = async (ctx, ct) =>
             {
-                // Surface the limiter's own retry-after when present; the 60s
-                // ceiling matches the 1-minute window — clients should not poll faster.
                 TimeSpan retry = TimeSpan.FromSeconds(60);
                 if (ctx.Lease.TryGetMetadata(MetadataName.RetryAfter, out var ra))
                 {
@@ -50,9 +50,58 @@ public static class RateLimitingExtensions
                     ct);
             };
 
+            // Global: chained sliding-window limiters for user + IP.
             options.GlobalLimiter = PartitionedRateLimiter.CreateChained(
                 BuildUserLimiter(services),
                 BuildIpLimiter(services));
+
+            // Named policy: token bucket for auth routes (login / refresh).
+            // Allows burst traffic up to the bucket limit, then drip-feeds permits.
+            options.AddPolicy(AuthTokenBucketPolicy, httpContext =>
+            {
+                var opts = httpContext.RequestServices
+                    .GetRequiredService<IOptionsMonitor<SecurityOptions>>()
+                    .CurrentValue.RateLimit;
+
+                if (!opts.Enabled)
+                    return RateLimitPartition.GetNoLimiter("disabled");
+
+                var ip = ResolveClientIp(httpContext) ?? "unknown";
+                return RateLimitPartition.GetTokenBucketLimiter(
+                    partitionKey: $"auth_tb:{ip}",
+                    factory: _ => new TokenBucketRateLimiterOptions
+                    {
+                        TokenLimit = opts.AuthTokenBucketLimit,
+                        TokensPerPeriod = opts.AuthTokensPerPeriod,
+                        ReplenishmentPeriod = TimeSpan.FromSeconds(opts.AuthReplenishmentSeconds),
+                        QueueLimit = 0,
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                        AutoReplenishment = true
+                    });
+            });
+
+            // Named policy: fixed window for sensitive endpoints (OTP, password reset).
+            options.AddPolicy(SensitiveFixedPolicy, httpContext =>
+            {
+                var opts = httpContext.RequestServices
+                    .GetRequiredService<IOptionsMonitor<SecurityOptions>>()
+                    .CurrentValue.RateLimit;
+
+                if (!opts.Enabled)
+                    return RateLimitPartition.GetNoLimiter("disabled");
+
+                var ip = ResolveClientIp(httpContext) ?? "unknown";
+                return RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: $"sensitive_fw:{ip}",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = opts.SensitiveEndpointPermitsPerWindow,
+                        Window = TimeSpan.FromSeconds(opts.SensitiveEndpointWindowSeconds),
+                        QueueLimit = 0,
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                        AutoReplenishment = true
+                    });
+            });
         });
 
         return services;
@@ -74,7 +123,6 @@ public static class RateLimitingExtensions
             var userId = ResolveUserId(httpContext);
             if (string.IsNullOrWhiteSpace(userId))
             {
-                // Anonymous traffic is constrained only by the IP partition.
                 return RateLimitPartition.GetNoLimiter("anon");
             }
 
@@ -121,7 +169,7 @@ public static class RateLimitingExtensions
         });
     }
 
-    private static string? ResolveUserId(HttpContext ctx)
+    internal static string? ResolveUserId(HttpContext ctx)
     {
         var sub = ctx.User?.FindFirstValue(ClaimTypes.NameIdentifier)
                   ?? ctx.User?.FindFirstValue("sub");
@@ -135,10 +183,8 @@ public static class RateLimitingExtensions
         return null;
     }
 
-    private static string? ResolveClientIp(HttpContext ctx)
+    internal static string? ResolveClientIp(HttpContext ctx)
     {
-        // Behind an edge proxy the gateway sees the proxy's IP on
-        // Connection.RemoteIpAddress; rely on X-Forwarded-For when present.
         if (ctx.Request.Headers.TryGetValue("X-Forwarded-For", out var fwd)
             && !string.IsNullOrWhiteSpace(fwd))
         {
