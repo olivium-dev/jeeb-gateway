@@ -210,21 +210,16 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProc
 // a partial unique index on (client_id) WHERE status in active-set.
 builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
 
+// Tier-existence probe consumed by RequestsController to enforce
+// T-backend-007's "validate tier exists" criterion. Distinct interface
+// from JeebGateway.Tiers.ITiersStore (the admin/catalog surface).
+builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.InMemoryTiersStore>();
+
 // Delivery cancellation pipeline (T-backend-024 / JEEB-42).
-// POST /deliveries/{id}/cancel routes by caller-role and current status:
-// pre-pickup Client cancels go terminal immediately, post-pickup Client
-// cancels park on cancellation_requested for admin review, Jeeber cancels
-// must include a reason and trip a 24hr restriction at 3+/7d. The
-// restriction store is consulted by the matching layer so a blocked
-// Jeeber stops receiving offers for the window.
 builder.Services.AddSingleton<IJeeberRestrictionStore, InMemoryJeeberRestrictionStore>();
 builder.Services.AddSingleton<ICancellationService, CancellationService>();
 
 // OTP handover verification + admin escalation (T-backend-015 / JEEB-33).
-// Dedicated POST /deliveries/{id}/verify-otp endpoint owns the
-// 3-strike lockout and 15-min unreachable-client escalation paths.
-// In-memory escalation store for the MVP; production wiring lands a
-// Postgres-backed implementation alongside admin_actions in 0005.
 builder.Services.Configure<OtpHandoverOptions>(builder.Configuration.GetSection(OtpHandoverOptions.SectionName));
 builder.Services.AddSingleton<IAdminEscalationStore, InMemoryAdminEscalationStore>();
 builder.Services.AddSingleton<OtpHandoverSweeper>();

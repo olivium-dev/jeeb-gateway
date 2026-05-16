@@ -199,6 +199,42 @@ public class AdminUsersController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// Returns the admin action audit log for a single user (T-backend-030
+    /// acceptance criterion #4). One row per recorded mutation, newest
+    /// first, mirroring the on-disk order in <c>admin_actions</c>. Returns
+    /// 404 when the user does not exist so an empty <c>Items</c> array
+    /// unambiguously means "user has never been the subject of an admin
+    /// action" rather than "wrong id".
+    /// </summary>
+    [HttpGet("{id}/actions")]
+    [ProducesResponseType(typeof(AdminUserActionsResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListActions(string id, CancellationToken ct)
+    {
+        var user = await _store.GetByIdAsync(id, ct);
+        if (user is null) return NotFound();
+
+        var entries = await _auditLog.ListForEntityAsync(EntityType, id, ct);
+
+        return Ok(new AdminUserActionsResponse
+        {
+            UserId = id,
+            Items = entries.Select(e => new AdminUserActionItem
+            {
+                Id = e.Id,
+                AdminUserId = e.AdminUserId,
+                Action = e.Action,
+                CreatedAt = e.CreatedAt,
+                BeforeState = e.BeforeState,
+                AfterState = e.AfterState,
+                RequestId = e.RequestId
+            }).ToList()
+        });
+    }
+
     private static IReadOnlyDictionary<string, object?> SuspensionSnapshot(UserProfile p) =>
         new Dictionary<string, object?>
         {

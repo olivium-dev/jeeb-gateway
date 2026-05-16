@@ -129,6 +129,28 @@ public class UnsuspendUserResponse
 }
 
 /// <summary>
+/// GET /admin/users/{id}/actions response. One row per recorded admin
+/// mutation against the target user. T-backend-030 acceptance criterion
+/// #4 — admin actions are timestamped and attributed.
+/// </summary>
+public class AdminUserActionItem
+{
+    public required string Id { get; init; }
+    public required string AdminUserId { get; init; }
+    public required string Action { get; init; }
+    public required DateTimeOffset CreatedAt { get; init; }
+    public IReadOnlyDictionary<string, object?>? BeforeState { get; init; }
+    public IReadOnlyDictionary<string, object?>? AfterState { get; init; }
+    public string? RequestId { get; init; }
+}
+
+public class AdminUserActionsResponse
+{
+    public required string UserId { get; init; }
+    public required IReadOnlyList<AdminUserActionItem> Items { get; init; }
+}
+
+/// <summary>
 /// DELETE /users/me / GET /users/me/deletion response. Status drives the
 /// mobile UI between "your data will be deleted on …" and
 /// "we're waiting for your delivery to complete first". <c>ScheduledPurgeAt</c>
