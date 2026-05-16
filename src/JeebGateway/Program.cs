@@ -11,6 +11,7 @@ using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.ProhibitedItems.Scanner;
 using JeebGateway.Push;
 using JeebGateway.Requests;
+using JeebGateway.Requests.Cancellation;
 using JeebGateway.Security;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
@@ -182,6 +183,16 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProc
 // schema in db/migrations/0004 with a SERIALIZABLE-isolation create or
 // a partial unique index on (client_id) WHERE status in active-set.
 builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
+
+// Delivery cancellation pipeline (T-backend-024 / JEEB-42).
+// POST /deliveries/{id}/cancel routes by caller-role and current status:
+// pre-pickup Client cancels go terminal immediately, post-pickup Client
+// cancels park on cancellation_requested for admin review, Jeeber cancels
+// must include a reason and trip a 24hr restriction at 3+/7d. The
+// restriction store is consulted by the matching layer so a blocked
+// Jeeber stops receiving offers for the window.
+builder.Services.AddSingleton<IJeeberRestrictionStore, InMemoryJeeberRestrictionStore>();
+builder.Services.AddSingleton<ICancellationService, CancellationService>();
 
 // Geo-matching engine (T-backend-008).
 // Queries online Jeebers within the tier-specific radius (PostGIS-style

@@ -1,5 +1,6 @@
 using JeebGateway.Push;
 using JeebGateway.Requests;
+using JeebGateway.Requests.Cancellation;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -36,15 +37,18 @@ public class DeliveriesController : ControllerBase
 {
     private readonly IRequestsStore _store;
     private readonly IPushNotificationService _push;
+    private readonly ICancellationService _cancellations;
     private readonly ILogger<DeliveriesController> _log;
 
     public DeliveriesController(
         IRequestsStore store,
         IPushNotificationService push,
+        ICancellationService cancellations,
         ILogger<DeliveriesController> log)
     {
         _store = store;
         _push = push;
+        _cancellations = cancellations;
         _log = log;
     }
 
@@ -117,6 +121,158 @@ public class DeliveriesController : ControllerBase
                 return Problem(
                     title: "Unhandled transition outcome.",
                     statusCode: StatusCodes.Status500InternalServerError);
+        }
+    }
+
+    /// <summary>
+    /// T-backend-024 (JEEB-42): cancellation endpoint.
+    ///
+    /// Routing depends on caller role and current status:
+    /// <list type="bullet">
+    ///   <item>Client, status before <c>picked_up</c> → row goes terminal
+    ///     to <c>cancelled</c> immediately. No penalty.</item>
+    ///   <item>Client, status <c>picked_up</c> or <c>heading_off</c> →
+    ///     row parks on <c>cancellation_requested</c>; the admin queue
+    ///     is the only path forward (approve / reject).</item>
+    ///   <item>Jeeber, status <c>accepted</c> onwards → reason field
+    ///     mandatory; on commit the service consults the rolling-7d
+    ///     cancellation count for that Jeeber and applies a 24-hour
+    ///     no-new-offers restriction when the count hits 3+.</item>
+    /// </list>
+    ///
+    /// Counterparty push fires on every committed cancel so the other
+    /// party finds out without polling.
+    /// </summary>
+    [HttpPost("{deliveryId}/cancel")]
+    [ProducesResponseType(typeof(CancelDeliveryResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> Cancel(
+        string deliveryId,
+        [FromBody] CancelDeliveryBody? body,
+        CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
+
+        var callerIsClient = UserIdentity.HasRole(HttpContext, Roles.Client);
+        var callerIsJeeber = UserIdentity.HasRole(HttpContext, Roles.Jeeber);
+
+        if (!callerIsClient && !callerIsJeeber)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
+            {
+                Title = "Cancel requires the customer or driver role.",
+                Status = StatusCodes.Status403Forbidden,
+                Type = "https://jeeb.dev/errors/forbidden-role"
+            });
+        }
+
+        var result = await _cancellations.CancelAsync(
+            deliveryId, callerId, callerIsClient, callerIsJeeber, body?.Reason, ct);
+
+        switch (result.Outcome)
+        {
+            case CancellationOutcome.NotFound:
+                return NotFound();
+
+            case CancellationOutcome.NotAuthorized:
+                return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
+                {
+                    Title = "You are not a party to this delivery.",
+                    Status = StatusCodes.Status403Forbidden,
+                    Type = "https://jeeb.dev/errors/not-a-party"
+                });
+
+            case CancellationOutcome.ReasonRequired:
+                return BadRequest(new ProblemDetails
+                {
+                    Title = "Reason is required when a driver cancels a delivery.",
+                    Status = StatusCodes.Status400BadRequest,
+                    Type = "https://jeeb.dev/errors/cancellation-reason-required"
+                });
+
+            case CancellationOutcome.NotCancellable:
+                return Conflict(new ProblemDetails
+                {
+                    Title = "Delivery cannot be cancelled in its current state.",
+                    Detail = $"current status: {result.Request?.Status}",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/not-cancellable"
+                });
+
+            case CancellationOutcome.CancelledImmediately:
+            case CancellationOutcome.CancelledByJeeber:
+            case CancellationOutcome.PendingAdminApproval:
+                await NotifyCancellationCounterpartyAsync(result.Request!, result.PreviousStatus!, result.Outcome, ct);
+                return Ok(new CancelDeliveryResponse
+                {
+                    DeliveryId = result.Request!.Id,
+                    Status = result.Request.Status,
+                    PreviousStatus = result.PreviousStatus!,
+                    Reason = result.Reason,
+                    PendingApproval = result.Outcome == CancellationOutcome.PendingAdminApproval,
+                    JeeberRestricted = result.JeeberRestrictionTriggered,
+                    RestrictionExpiresAt = result.RestrictionExpiresAt,
+                    JeeberCancellationsLast7Days = result.JeeberCancellationsLast7Days
+                });
+
+            default:
+                return Problem(
+                    title: "Unhandled cancellation outcome.",
+                    statusCode: StatusCodes.Status500InternalServerError);
+        }
+    }
+
+    private async Task NotifyCancellationCounterpartyAsync(
+        DeliveryRequest req,
+        string previousStatus,
+        CancellationOutcome outcome,
+        CancellationToken ct)
+    {
+        var recipients = new List<string> { req.ClientId };
+        if (!string.IsNullOrEmpty(req.JeeberId))
+        {
+            recipients.Add(req.JeeberId);
+        }
+
+        var data = new Dictionary<string, string>
+        {
+            ["deliveryId"] = req.Id,
+            ["previousStatus"] = previousStatus,
+            ["status"] = req.Status,
+            ["cancelledBy"] = req.CancelledBy ?? string.Empty,
+            ["pendingApproval"] = (outcome == CancellationOutcome.PendingAdminApproval) ? "true" : "false"
+        };
+
+        var title = outcome == CancellationOutcome.PendingAdminApproval
+            ? "Cancellation requested"
+            : "Delivery cancelled";
+        var bodyText = outcome == CancellationOutcome.PendingAdminApproval
+            ? "The client requested a cancellation. An admin will review."
+            : $"Delivery cancelled from {previousStatus}.";
+
+        foreach (var userId in recipients)
+        {
+            try
+            {
+                var request = new PushNotificationRequest(
+                    UserId: userId,
+                    Trigger: NotificationTrigger.StatusChange,
+                    Title: title,
+                    Body: bodyText,
+                    Data: data,
+                    IdempotencyKey: $"{req.Id}:{req.Status}:cancel:{userId}");
+                await _push.SendAsync(request, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "Cancellation push failed for delivery {DeliveryId} user {UserId}",
+                    req.Id, userId);
+            }
         }
     }
 

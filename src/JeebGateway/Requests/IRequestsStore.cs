@@ -176,7 +176,78 @@ public interface IRequestsStore
         string toStatus,
         string? otp,
         CancellationToken ct);
+
+    /// <summary>
+    /// T-backend-024 (JEEB-42): atomic cancellation. Under the store's
+    /// write lock, validates that the row is in <paramref name="allowedFromStates"/>
+    /// and then either lands it directly on <paramref name="targetStatus"/>
+    /// (immediate cancel) or parks it on <see cref="RequestStatus.CancellationRequested"/>
+    /// (admin-approval queue). Stamps the cancellation audit fields in the
+    /// same critical section so a racing accept / status PATCH cannot land
+    /// between the guard read and the write.
+    ///
+    /// Returns null when the id is unknown. Returns the cancellation
+    /// result otherwise; <see cref="CancellationStoreOutcome.NotCancellable"/>
+    /// when the row is no longer in an allowed state.
+    /// </summary>
+    Task<CancellationStoreResult?> TryCancelAsync(
+        string requestId,
+        IReadOnlySet<string> allowedFromStates,
+        string targetStatus,
+        string cancelledBy,
+        string? reason,
+        DateTimeOffset at,
+        CancellationToken ct);
+
+    /// <summary>
+    /// T-backend-024 admin decision. Approves or rejects a row currently
+    /// in <see cref="RequestStatus.CancellationRequested"/>:
+    /// <list type="bullet">
+    ///   <item>approve → row transitions to <see cref="RequestStatus.Cancelled"/>.</item>
+    ///   <item>reject  → row reverts to <see cref="DeliveryRequest.CancellationPreviousStatus"/>.</item>
+    /// </list>
+    /// Returns null when the id is unknown or the row is not in
+    /// <see cref="RequestStatus.CancellationRequested"/>.
+    /// </summary>
+    Task<CancellationStoreResult?> TryDecideCancellationAsync(
+        string requestId,
+        bool approve,
+        DateTimeOffset at,
+        CancellationToken ct);
+
+    /// <summary>
+    /// T-backend-024: paginated list of rows currently parked in
+    /// <see cref="RequestStatus.CancellationRequested"/>, oldest first.
+    /// </summary>
+    Task<(IReadOnlyList<DeliveryRequest> Items, int Total)> ListPendingCancellationsAsync(
+        int page, int pageSize, CancellationToken ct);
+
+    /// <summary>
+    /// T-backend-024: returns every row a particular Jeeber cancelled,
+    /// regardless of when. The cancellation service uses this to compute
+    /// the rolling-7d count and the lifetime cancellation rate.
+    /// </summary>
+    Task<IReadOnlyList<DeliveryRequest>> ListJeeberCancelledAsync(
+        string jeeberId, CancellationToken ct);
 }
+
+/// <summary>
+/// Outcome of <see cref="IRequestsStore.TryCancelAsync"/> /
+/// <see cref="IRequestsStore.TryDecideCancellationAsync"/>.
+/// </summary>
+public enum CancellationStoreOutcome
+{
+    Committed,
+    NotCancellable,
+}
+
+/// <summary>
+/// Result bundle returned from store-level cancellation operations.
+/// </summary>
+public sealed record CancellationStoreResult(
+    CancellationStoreOutcome Outcome,
+    DeliveryRequest Request,
+    string PreviousStatus);
 
 public class CreateRequestInput
 {

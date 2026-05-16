@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using JeebGateway.Availability;
 using JeebGateway.Push;
+using JeebGateway.Requests.Cancellation;
 using JeebGateway.Tiers;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -33,6 +34,8 @@ public sealed class MatchingService : IMatchingService
     private readonly ITiersStore _tiers;
     private readonly IJeeberRatingProvider _ratings;
     private readonly IPushNotificationService _push;
+    private readonly IJeeberRestrictionStore _restrictions;
+    private readonly TimeProvider _clock;
     private readonly MatchingOptions _options;
     private readonly ILogger<MatchingService> _log;
 
@@ -41,6 +44,8 @@ public sealed class MatchingService : IMatchingService
         ITiersStore tiers,
         IJeeberRatingProvider ratings,
         IPushNotificationService push,
+        IJeeberRestrictionStore restrictions,
+        TimeProvider clock,
         IOptions<MatchingOptions> options,
         ILogger<MatchingService> log)
     {
@@ -48,6 +53,8 @@ public sealed class MatchingService : IMatchingService
         _tiers = tiers;
         _ratings = ratings;
         _push = push;
+        _restrictions = restrictions;
+        _clock = clock;
         _options = options.Value;
         _log = log;
     }
@@ -68,6 +75,7 @@ public sealed class MatchingService : IMatchingService
         var allowAny = input.AllowedVehicleTypes.Count == 0;
         var radiusKm = tier.RadiusKm;
         var withinRadius = new List<(JeeberAvailability Row, double DistanceKm)>(capacity: Math.Min(online.Count, 256));
+        var now = _clock.GetUtcNow();
 
         foreach (var row in online)
         {
@@ -76,6 +84,13 @@ public sealed class MatchingService : IMatchingService
                 continue;
             }
             if (row.Latitude is null || row.Longitude is null)
+            {
+                continue;
+            }
+            // T-backend-024 (JEEB-42): a Jeeber inside an active 24-hour
+            // restriction window is excluded from new offers — the
+            // cancellation policy has no teeth otherwise.
+            if (await _restrictions.IsRestrictedAsync(row.UserId, now, ct))
             {
                 continue;
             }

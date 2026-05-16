@@ -20,6 +20,15 @@ public static class RequestStatus
     public const string Disputed = "disputed";
 
     /// <summary>
+    /// T-backend-024 (JEEB-42): non-terminal holding state used when a
+    /// Client cancels after pickup. The row is parked here until an admin
+    /// approves (→ <see cref="Cancelled"/>) or rejects (→ the previous
+    /// status). Treated as ACTIVE for BR-9/BR-10 purposes — the Jeeber is
+    /// still on the hook until the admin signs off.
+    /// </summary>
+    public const string CancellationRequested = "cancellation_requested";
+
+    /// <summary>
     /// The active states from BR-9: every status strictly before
     /// <see cref="Delivered"/>. <see cref="Cancelled"/> and <see cref="Expired"/>
     /// are terminal and do NOT count against the limit. <see cref="Scheduled"/>
@@ -33,7 +42,10 @@ public static class RequestStatus
         Matched,
         Accepted,
         PickedUp,
-        HeadingOff
+        HeadingOff,
+        // Cancellation pending admin sign-off: the row is not yet terminal
+        // and the Jeeber still owns it for capacity-cap purposes.
+        CancellationRequested
     };
 
     /// <summary>
@@ -48,7 +60,12 @@ public static class RequestStatus
     {
         Accepted,
         PickedUp,
-        HeadingOff
+        HeadingOff,
+        // While an admin reviews a Client-requested cancellation the
+        // delivery is still bound to the Jeeber — counting it against
+        // BR-10 prevents the Jeeber from accepting fresh work that they
+        // may have to drop again when the admin rejects.
+        CancellationRequested
     };
 
     /// <summary>
@@ -202,6 +219,47 @@ public class DeliveryRequest
     /// location updates.
     /// </summary>
     public bool GpsTrackingActive { get; set; }
+
+    /// <summary>
+    /// T-backend-024 (JEEB-42): who initiated the cancellation.
+    /// "client" or "jeeber". Null until a cancellation lands.
+    /// </summary>
+    public string? CancelledBy { get; set; }
+
+    /// <summary>
+    /// T-backend-024: reason supplied with the cancellation. Mandatory
+    /// for Jeeber cancellations; optional for Client cancellations.
+    /// Surfaced on the admin queue when a post-pickup Client cancel
+    /// gets escalated.
+    /// </summary>
+    public string? CancellationReason { get; set; }
+
+    /// <summary>
+    /// T-backend-024: when the cancellation was requested. For pre-pickup
+    /// Client cancels and all Jeeber cancels this equals the moment the
+    /// row went terminal; for post-pickup Client cancels it's the moment
+    /// the row entered <see cref="RequestStatus.CancellationRequested"/>.
+    /// </summary>
+    public DateTimeOffset? CancellationRequestedAt { get; set; }
+
+    /// <summary>
+    /// T-backend-024: when an admin approved a post-pickup Client cancel
+    /// and the row transitioned to <see cref="RequestStatus.Cancelled"/>.
+    /// </summary>
+    public DateTimeOffset? CancellationApprovedAt { get; set; }
+
+    /// <summary>
+    /// T-backend-024: when an admin rejected a post-pickup Client cancel
+    /// and reverted the row to <see cref="CancellationPreviousStatus"/>.
+    /// </summary>
+    public DateTimeOffset? CancellationRejectedAt { get; set; }
+
+    /// <summary>
+    /// T-backend-024: status the row held immediately before the
+    /// cancellation request. Used to revert the row on admin reject so
+    /// the delivery resumes from exactly where it left off.
+    /// </summary>
+    public string? CancellationPreviousStatus { get; set; }
 }
 
 public class CreateRequestBody
