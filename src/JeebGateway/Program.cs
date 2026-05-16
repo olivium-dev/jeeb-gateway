@@ -184,6 +184,13 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProc
 // a partial unique index on (client_id) WHERE status in active-set.
 builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
 
+// Tier-existence probe consumed by RequestsController to enforce
+// T-backend-007's "validate tier exists" criterion. Distinct interface
+// from JeebGateway.Tiers.ITiersStore (the admin/catalog surface) — the
+// requests-side variant only needs an Exists check, kept minimal so the
+// hot path of request creation does not pull in the full catalog DTOs.
+builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.InMemoryTiersStore>();
+
 // Geo-matching engine (T-backend-008).
 // Queries online Jeebers within the tier-specific radius (PostGIS-style
 // ST_DWithin, MVP-side using Haversine), filters by vehicle-type

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Admin;
+using JeebGateway.Requests;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -177,6 +178,88 @@ public class UserSuspensionEndpointTests : IClassFixture<WebApplicationFactory<P
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 
+    [Fact]
+    public async Task Suspended_Jeeber_Cannot_Submit_Offer_403()
+    {
+        // Seed a Jeeber, suspend them, then confirm POST
+        // /requests/{id}/offers is blocked with the suspension reason.
+        // Covers AC #1 for the Jeeber side.
+        SeedUser("susp-jeeber");
+        var admin = AdminClient("admin-suspend-jeeber");
+        var suspendResp = await admin.PatchAsJsonAsync(
+            "/admin/users/susp-jeeber/suspend",
+            new { reason = "offer abuse" });
+        suspendResp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // Stage an existing pending request that a Jeeber could legally bid on.
+        var clientId = $"client-{Guid.NewGuid()}";
+        using var scope = _factory.Services.CreateScope();
+        var requests = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
+        var pending = await requests.CreateAsync(new CreateRequestInput
+        {
+            ClientId = clientId,
+            Description = "Pick up a package"
+        }, default);
+
+        var jeeber = JeeberClient("susp-jeeber");
+        var resp = await jeeber.PostAsJsonAsync(
+            $"/requests/{pending.Id}/offers",
+            new { fee = 5m, etaMinutes = 20 });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Title.Should().Be("Account is suspended.");
+        problem.Detail.Should().Be("offer abuse");
+    }
+
+    [Fact]
+    public async Task Get_Admin_Actions_Returns_Audit_Log_For_User()
+    {
+        // AC #4: GET /admin/users/{id}/actions returns the audit log
+        // populated by every prior admin mutation on the user.
+        SeedUser("susp-actions-1");
+        var admin = AdminClient("admin-actions-1");
+
+        await admin.PatchAsJsonAsync("/admin/users/susp-actions-1/suspend", new { reason = "test" });
+        await admin.PatchAsync("/admin/users/susp-actions-1/unsuspend", content: null);
+
+        var resp = await admin.GetAsync("/admin/users/susp-actions-1/actions");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<AdminUserActionsResponse>();
+
+        body!.UserId.Should().Be("susp-actions-1");
+        body.Items.Should().HaveCountGreaterOrEqualTo(2);
+        body.Items.Select(i => i.Action).Should().Contain(new[] { "suspend_user", "unsuspend_user" });
+        body.Items.Should().AllSatisfy(i =>
+        {
+            i.AdminUserId.Should().Be("admin-actions-1");
+            i.CreatedAt.Should().BeAfter(DateTimeOffset.UtcNow.AddMinutes(-1));
+        });
+        // Newest-first ordering.
+        body.Items.Should().BeInDescendingOrder(i => i.CreatedAt);
+    }
+
+    [Fact]
+    public async Task Get_Admin_Actions_Unknown_User_Returns_404()
+    {
+        var admin = AdminClient("admin-actions-404");
+
+        var resp = await admin.GetAsync("/admin/users/does-not-exist/actions");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task Get_Admin_Actions_Without_Admin_Role_Returns_403()
+    {
+        SeedUser("susp-actions-no-admin");
+        var notAdmin = ClientFor("susp-actions-not-admin");
+
+        var resp = await notAdmin.GetAsync("/admin/users/susp-actions-no-admin/actions");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+    }
+
     // -----------------------------------------------------------------
     // Helpers (mirrors UsersEndpointTests).
     // -----------------------------------------------------------------
@@ -211,6 +294,17 @@ public class UserSuspensionEndpointTests : IClassFixture<WebApplicationFactory<P
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", userId);
         client.DefaultRequestHeaders.Add("X-User-Roles", "admin");
+        return client;
+    }
+
+    private HttpClient JeeberClient(string userId)
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", userId);
+        // Matches the role label used by RequestOffersEndpointTests; the
+        // RequireRole(Jeeber) filter passes on the canonical string and the
+        // suspension filter is what we're actually exercising.
+        client.DefaultRequestHeaders.Add("X-User-Roles", "driver");
         return client;
     }
 }
