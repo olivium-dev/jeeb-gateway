@@ -195,6 +195,42 @@ public class DeliveryRequest
     public string? DeliveryOtp { get; set; }
 
     /// <summary>
+    /// Cumulative count of incorrect OTP submissions against
+    /// POST /deliveries/{id}/verify-otp (T-backend-015). Successful
+    /// verification resets the counter implicitly by transitioning the
+    /// row out of the handover window. Reaching
+    /// <c>OtpHandoverOptions.MaxAttempts</c> locks the OTP and creates
+    /// an admin escalation entry.
+    /// </summary>
+    public int OtpAttemptCount { get; set; }
+
+    /// <summary>
+    /// Wall-clock moment the OTP became locked after
+    /// <c>OtpHandoverOptions.MaxAttempts</c> consecutive bad submissions
+    /// (T-backend-015). Null while OTP entry is still permitted. Once
+    /// stamped, every subsequent POST /verify-otp returns 423 Locked.
+    /// </summary>
+    public DateTimeOffset? OtpLockedAt { get; set; }
+
+    /// <summary>
+    /// When the Jeeber flagged the Client as unreachable at drop-off
+    /// (T-backend-015). The <c>OtpHandoverSweeper</c> escalates the
+    /// delivery to an admin once
+    /// <c>now - ClientUnreachableAt &gt;= OtpHandoverOptions.ClientUnreachableWindow</c>
+    /// (default 15 minutes).
+    /// </summary>
+    public DateTimeOffset? ClientUnreachableAt { get; set; }
+
+    /// <summary>
+    /// Id of the admin escalation row that owns this delivery's
+    /// hand-off dispute (T-backend-015). Set the first time either the
+    /// OTP locks out or the unreachable timer elapses; the field is
+    /// write-once so the sweeper cannot create duplicate escalations
+    /// when it polls.
+    /// </summary>
+    public string? OtpEscalationId { get; set; }
+
+    /// <summary>
     /// Whether the row's GPS-tracking requirement is active
     /// (T-backend-013). Flipped true when the state machine moves the
     /// row into <see cref="RequestStatus.PickedUp"/>; downstream
@@ -272,6 +308,33 @@ public class DeliveryRequestDto
     /// and begin streaming Jeeber location updates when this flips.
     /// </summary>
     public bool GpsTrackingActive { get; init; }
+
+    /// <summary>
+    /// OTP attempt count exposed so the mobile UI can render "2 of 3
+    /// remaining" (T-backend-015).
+    /// </summary>
+    public int OtpAttemptCount { get; init; }
+
+    /// <summary>
+    /// Non-null when OTP entry is locked out and the row has been
+    /// escalated to an admin (T-backend-015). The presence of this
+    /// value gates the UI on the "contact support" CTA.
+    /// </summary>
+    public DateTimeOffset? OtpLockedAt { get; init; }
+
+    /// <summary>
+    /// Non-null when the Jeeber flagged the Client as unreachable
+    /// (T-backend-015). Pair with <c>OtpEscalationId</c> to tell apart
+    /// "timer running" from "already escalated".
+    /// </summary>
+    public DateTimeOffset? ClientUnreachableAt { get; init; }
+
+    /// <summary>
+    /// Non-null once the row has been escalated to an admin via either
+    /// the OTP lockout path or the client-unreachable path
+    /// (T-backend-015).
+    /// </summary>
+    public string? OtpEscalationId { get; init; }
 }
 
 /// <summary>

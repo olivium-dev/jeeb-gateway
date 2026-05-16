@@ -1,3 +1,5 @@
+using JeebGateway.Requests.OtpHandover;
+
 namespace JeebGateway.Requests;
 
 /// <summary>
@@ -175,6 +177,75 @@ public interface IRequestsStore
         string requestId,
         string toStatus,
         string? otp,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Hand-off OTP verification (T-backend-015 / JEEB-33). Under the
+    /// store's write lock the row's OTP attempt counter is incremented
+    /// (on mismatch) or the row is flipped to <see cref="RequestStatus.Delivered"/>
+    /// (on match). The <paramref name="maxAttempts"/> ceiling is passed
+    /// in by the controller so the policy stays in
+    /// <see cref="OtpHandoverOptions"/>.
+    ///
+    /// <list type="bullet">
+    ///   <item>Returns <see cref="OtpVerificationOutcome.NotFound"/> when
+    ///     <paramref name="requestId"/> is unknown.</item>
+    ///   <item>Returns <see cref="OtpVerificationOutcome.NotInHandoverState"/>
+    ///     when the row is not in <see cref="RequestStatus.HeadingOff"/> —
+    ///     the OTP is only verifiable at the documented handover step.</item>
+    ///   <item>Returns <see cref="OtpVerificationOutcome.Locked"/> when the
+    ///     row was already locked OR when this call is the one that hit
+    ///     <paramref name="maxAttempts"/>. The
+    ///     <c>OtpVerificationResult.JustLockedOut</c> flag distinguishes
+    ///     the two so the controller creates the escalation exactly once.</item>
+    ///   <item>Returns <see cref="OtpVerificationOutcome.Mismatch"/> with
+    ///     the remaining attempt budget on a normal wrong-OTP attempt.</item>
+    ///   <item>Returns <see cref="OtpVerificationOutcome.Verified"/> with
+    ///     the updated row on success — status is now
+    ///     <see cref="RequestStatus.Delivered"/>.</item>
+    /// </list>
+    /// </summary>
+    Task<OtpVerificationResult> TryVerifyOtpAsync(
+        string requestId,
+        string otpCode,
+        int maxAttempts,
+        DateTimeOffset at,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Records that the Jeeber flagged the Client as unreachable at
+    /// drop-off (T-backend-015 step 6). Idempotent — calling twice
+    /// preserves the original timestamp so the 15-min sweeper window
+    /// starts from the first flag, not the most recent one. Returns
+    /// the updated row, or null when the id is unknown / the row is in
+    /// a terminal state.
+    /// </summary>
+    Task<DeliveryRequest?> MarkClientUnreachableAsync(
+        string requestId,
+        DateTimeOffset at,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Returns every still-active delivery whose
+    /// <see cref="DeliveryRequest.ClientUnreachableAt"/> is at or before
+    /// <paramref name="cutoff"/> and that has not yet been escalated.
+    /// The <c>OtpHandoverSweeper</c> uses this to find rows past the
+    /// 15-min unreachable window.
+    /// </summary>
+    Task<IReadOnlyList<DeliveryRequest>> ListUnreachableAtOrBeforeAsync(
+        DateTimeOffset cutoff,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Atomically writes <paramref name="escalationId"/> onto
+    /// <see cref="DeliveryRequest.OtpEscalationId"/> when the row has
+    /// not already been escalated. Returns true on first set, false
+    /// when the row was already escalated — the false case lets the
+    /// sweeper skip without creating a duplicate escalation row.
+    /// </summary>
+    Task<bool> TrySetEscalationIdAsync(
+        string requestId,
+        string escalationId,
         CancellationToken ct);
 }
 

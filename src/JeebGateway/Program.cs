@@ -11,6 +11,7 @@ using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.ProhibitedItems.Scanner;
 using JeebGateway.Push;
 using JeebGateway.Requests;
+using JeebGateway.Requests.OtpHandover;
 using JeebGateway.Security;
 using JeebGateway.Tokens;
 using JeebGateway.Tracking;
@@ -183,6 +184,16 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProc
 // schema in db/migrations/0004 with a SERIALIZABLE-isolation create or
 // a partial unique index on (client_id) WHERE status in active-set.
 builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
+
+// OTP handover verification + admin escalation (T-backend-015 / JEEB-33).
+// Dedicated POST /deliveries/{id}/verify-otp endpoint owns the
+// 3-strike lockout and 15-min unreachable-client escalation paths.
+// In-memory escalation store for the MVP; production wiring lands a
+// Postgres-backed implementation alongside admin_actions in 0005.
+builder.Services.Configure<OtpHandoverOptions>(builder.Configuration.GetSection(OtpHandoverOptions.SectionName));
+builder.Services.AddSingleton<IAdminEscalationStore, InMemoryAdminEscalationStore>();
+builder.Services.AddSingleton<OtpHandoverSweeper>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper>());
 
 // Geo-matching engine (T-backend-008).
 // Queries online Jeebers within the tier-specific radius (PostGIS-style
