@@ -180,6 +180,14 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProc
 // a partial unique index on (client_id) WHERE status in active-set.
 builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
 
+// Delivery tier catalog (T-backend-009).
+// In-memory store seeded with the five default tiers (Urgent, Same-Day,
+// Scheduled, Economy, On-the-Way); admins can CRUD via /admin/tiers and
+// changes take effect on the next request because each List/Get returns
+// a deep-cloned snapshot. Production wiring will hit Postgres via a
+// follow-up migration colocated with delivery_requests.
+builder.Services.AddSingleton<JeebGateway.Tiers.ITiersStore, JeebGateway.Tiers.InMemoryTiersStore>();
+
 // Request expiry + no-offer nudge (T-backend-028).
 // 10-min "try expanding tier" prompt and 30-min terminal expiry. The
 // in-memory notifier records calls so integration tests can assert
