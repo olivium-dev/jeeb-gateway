@@ -411,10 +411,9 @@ public class UsersController : ControllerBase
         IsSuspended = p.IsSuspended,
         SuspensionReason = p.SuspensionReason,
         SuspendedAt = p.SuspendedAt,
-        // BR-10 / T-backend-039: a user is "new" until at least one
-        // delivery has been rated. The mobile app renders a "New" badge
-        // in place of a numeric rating in this state.
-        IsNew = p.RatingCount == 0
+        IsNew = p.RatingCount == 0,
+        ActiveRole = p.ActiveRole,
+        RoleSwitchedAt = p.RoleSwitchedAt
     };
 
     private static SavedAddressResponse ToResponse(SavedAddress a) => new()

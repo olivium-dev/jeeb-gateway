@@ -28,6 +28,16 @@ public class UserProfileResponse
     /// they could still have a hidden 0 rating".
     /// </summary>
     public required bool IsNew { get; init; }
+
+    /// <summary>
+    /// T-backend-041. The currently active role for this dual-role account.
+    /// Mobile app uses this to render the correct UI hat and enforce
+    /// role-specific navigation.
+    /// </summary>
+    public required string ActiveRole { get; init; }
+
+    /// <summary>When the active role was last switched (T-backend-041).</summary>
+    public DateTimeOffset? RoleSwitchedAt { get; init; }
 }
 
 public class SavedAddressResponse
@@ -131,4 +141,28 @@ public class AccountDeletionResponse
     public required DateTimeOffset RequestedAt { get; init; }
     public DateTimeOffset? ScheduledPurgeAt { get; init; }
     public DateTimeOffset? CompletedAt { get; init; }
+}
+
+/// <summary>
+/// POST /users/{id}/switch-role body. The target role must be one the user
+/// already holds (e.g. <see cref="Roles.Client"/> or <see cref="Roles.Jeeber"/>).
+/// T-backend-041.
+/// </summary>
+public class SwitchRoleRequest
+{
+    public string? TargetRole { get; set; }
+}
+
+/// <summary>
+/// POST /users/{id}/switch-role response. Confirms the role transition and
+/// surfaces the new active role so the mobile app can immediately update
+/// the UI hat without a separate GET /users/me round-trip.
+/// </summary>
+public class SwitchRoleResponse
+{
+    public required string UserId { get; init; }
+    public required string PreviousRole { get; init; }
+    public required string ActiveRole { get; init; }
+    public required DateTimeOffset SwitchedAt { get; init; }
+    public required IReadOnlyList<string> Roles { get; init; }
 }

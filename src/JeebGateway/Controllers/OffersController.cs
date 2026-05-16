@@ -34,15 +34,18 @@ public class OffersController : ControllerBase
 
     private readonly IPendingOffersStore _offers;
     private readonly IRequestsStore _requests;
+    private readonly IDualRoleService _dualRole;
     private readonly TimeProvider _clock;
 
     public OffersController(
         IPendingOffersStore offers,
         IRequestsStore requests,
+        IDualRoleService dualRole,
         TimeProvider clock)
     {
         _offers = offers;
         _requests = requests;
+        _dualRole = dualRole;
         _clock = clock;
     }
 
@@ -82,6 +85,20 @@ public class OffersController : ControllerBase
                 Title = $"Offer is no longer pending (current={offer.Status}).",
                 Status = StatusCodes.Status409Conflict,
                 Type = "https://jeeb.dev/errors/offer-not-pending"
+            });
+        }
+
+        // BR-1 (T-backend-041): a user cannot act as both Client and Jeeber
+        // on the same delivery. This check runs before the heavy atomic
+        // accept so we fail fast without holding the store write lock.
+        if (await _dualRole.WouldViolateSameDeliveryRuleAsync(jeeberId, offer.RequestId, ct))
+        {
+            return Conflict(new ProblemDetails
+            {
+                Title = "Cannot accept your own delivery request (BR-1).",
+                Detail = "A user cannot act as both Client and Jeeber on the same delivery.",
+                Status = StatusCodes.Status409Conflict,
+                Type = "https://jeeb.dev/errors/same-delivery-role-violation"
             });
         }
 

@@ -163,6 +163,22 @@ public class InMemoryUsersStore : IUsersStore
         }
     }
 
+    public Task<UserProfile?> SwitchRoleAsync(string userId, string newRole, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_users.TryGetValue(userId, out var existing))
+            {
+                return Task.FromResult<UserProfile?>(null);
+            }
+
+            existing.ActiveRole = newRole;
+            existing.RoleSwitchedAt = DateTimeOffset.UtcNow;
+            existing.UpdatedAt = DateTimeOffset.UtcNow;
+            return Task.FromResult<UserProfile?>(Clone(existing));
+        }
+    }
+
     public Task<UserProfile?> UnsuspendAsync(string userId, string adminId, CancellationToken ct)
     {
         lock (_writeLock)
@@ -211,7 +227,9 @@ public class InMemoryUsersStore : IUsersStore
                 IsSuspended = existing.IsSuspended,
                 SuspensionReason = existing.SuspensionReason,
                 SuspendedAt = existing.SuspendedAt,
-                SuspendedBy = existing.SuspendedBy
+                SuspendedBy = existing.SuspendedBy,
+                ActiveRole = existing.ActiveRole,
+                RoleSwitchedAt = existing.RoleSwitchedAt
             };
             _users[userId] = purged;
 
@@ -302,7 +320,9 @@ public class InMemoryUsersStore : IUsersStore
         IsSuspended = p.IsSuspended,
         SuspensionReason = p.SuspensionReason,
         SuspendedAt = p.SuspendedAt,
-        SuspendedBy = p.SuspendedBy
+        SuspendedBy = p.SuspendedBy,
+        ActiveRole = p.ActiveRole,
+        RoleSwitchedAt = p.RoleSwitchedAt
     };
 
     private static SavedAddress Clone(SavedAddress a) => new()
