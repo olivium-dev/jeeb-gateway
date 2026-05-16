@@ -42,6 +42,15 @@ public interface IUsersStore
     Task<UserProfile?> UnsuspendAsync(string userId, string adminId, CancellationToken ct);
 
     /// <summary>
+    /// T-backend-041. Switches <paramref name="userId"/>'s active role.
+    /// Returns the updated profile, or null when the user does not exist.
+    /// Callers MUST have already validated BR-1 (no active deliveries in
+    /// the current role) before invoking — the store does not enforce
+    /// business rules.
+    /// </summary>
+    Task<UserProfile?> SwitchRoleAsync(string userId, string newRole, CancellationToken ct);
+
+    /// <summary>
     /// Hard-delete every piece of PII for <paramref name="userId"/>:
     ///   * name → empty
     ///   * phone → empty

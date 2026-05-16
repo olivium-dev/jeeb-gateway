@@ -16,4 +16,10 @@ public class UsersStoreRolesAdapter : IUsersStoreAdapter
         var profile = await _store.GetByIdAsync(userId, ct);
         return profile?.Roles ?? new List<string>();
     }
+
+    public async Task<string> GetActiveRoleAsync(string userId, CancellationToken ct)
+    {
+        var profile = await _store.GetByIdAsync(userId, ct);
+        return profile?.ActiveRole ?? Roles.Client;
+    }
 }
