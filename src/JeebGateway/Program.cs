@@ -13,6 +13,7 @@ using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Security;
 using JeebGateway.Tokens;
+using JeebGateway.Tracking;
 using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
 using JeebGateway.Whisper;
@@ -347,6 +348,17 @@ builder.Services.AddSingleton<IOfferRealtimeNotifier>(sp => sp.GetRequiredServic
 builder.Services.AddSingleton<IAutoOfflineNotifier, PushAutoOfflineNotifier>();
 builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();
 builder.Services.AddHostedService<AutoOfflineSweeper>();
+
+// GPS location streaming + SSE delivery tracking (T-backend-014).
+// The store is an in-memory ConcurrentDictionary keyed by Jeeber id with
+// a 5-min TTL — production swaps to Redis (SET ... EX 300) keyed on
+// jeeber:{id}:position so multiple gateway replicas share the view. The
+// SSE controller reads the store on a 5-second timer, flips the event
+// name to "last-seen" when the latest fix is older than the configured
+// stale threshold (default 2 min), and ends the stream when the delivery
+// row reaches a terminal status.
+builder.Services.Configure<TrackingOptions>(builder.Configuration.GetSection(TrackingOptions.SectionName));
+builder.Services.AddSingleton<ILocationStore, InMemoryLocationStore>();
 
 // Real-time chat (T-backend-012).
 // SignalR hub at /hubs/chat delivers each message under the 1s WS SLA
