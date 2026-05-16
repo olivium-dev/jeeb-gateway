@@ -64,7 +64,6 @@ public class ResilientTranscriptionServiceTests
 
         var task = service.TranscribeAsync(SampleAudio, CancellationToken.None);
 
-        // The fake delays cooperatively via TimeProvider; advance time to release each backoff window.
         await Task.Yield();
         deps.Time.Advance(TimeSpan.FromMilliseconds(100)); // after attempt 1
         await Task.Yield();
@@ -75,6 +74,22 @@ public class ResilientTranscriptionServiceTests
 
         result.Outcome.Should().Be(TranscriptionOutcome.QueuedForRetry);
         calls.Should().Be(3);
+    }
+
+    [Fact]
+    public void Backoff_Follows_1s_2s_4s_Pattern_With_Default_Options()
+    {
+        var (service, _) = NewService(
+            new FakeWhisper(_ => Throw(new WhisperUnavailableException("boom"))),
+            opts =>
+            {
+                opts.InitialBackoff = TimeSpan.FromSeconds(1);
+                opts.MaxBackoff = TimeSpan.FromSeconds(8);
+            });
+
+        service.BackoffFor(1).Should().Be(TimeSpan.FromSeconds(1));
+        service.BackoffFor(2).Should().Be(TimeSpan.FromSeconds(2));
+        service.BackoffFor(3).Should().Be(TimeSpan.FromSeconds(4));
     }
 
     [Fact]
@@ -135,7 +150,6 @@ public class ResilientTranscriptionServiceTests
             opts.CircuitBreakerFailureThreshold = 5;
         });
 
-        // Trip the breaker by recording 5 consecutive failures directly.
         for (var i = 0; i < 5; i++) deps.Breaker.RecordFailure();
         deps.Breaker.State.Should().Be(CircuitState.Open);
 
@@ -160,13 +174,111 @@ public class ResilientTranscriptionServiceTests
             opts.CircuitBreakerFailureThreshold = 5;
         });
 
-        // First call: 3 failures.
         await service.TranscribeAsync(SampleAudio, CancellationToken.None);
         deps.Breaker.State.Should().Be(CircuitState.Closed);
 
-        // Second call: 2 more failures = 5 total -> open.
         await service.TranscribeAsync(SampleAudio, CancellationToken.None);
         deps.Breaker.State.Should().Be(CircuitState.Open);
+    }
+
+    [Fact]
+    public async Task Fallback_Provider_Is_Invoked_When_Primary_Exhausts_Retries()
+    {
+        var whisper = new FakeWhisper(_ => Throw(new WhisperUnavailableException("boom")));
+        var fallback = new FakeFallbackProvider(
+            available: true,
+            result: new WhisperTranscription("fallback text", "ar"));
+
+        var (service, deps) = NewService(whisper, opts =>
+        {
+            opts.MaxAttempts = 1;
+            opts.InitialBackoff = TimeSpan.Zero;
+        }, fallback);
+
+        var result = await service.TranscribeAsync(SampleAudio, CancellationToken.None);
+
+        result.Outcome.Should().Be(TranscriptionOutcome.Transcribed);
+        result.Transcription!.Text.Should().Be("fallback text");
+        fallback.CallCount.Should().Be(1);
+        deps.Queue.Snapshot().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Fallback_Provider_Is_Invoked_When_Circuit_Open()
+    {
+        var whisper = new FakeWhisper(_ => Throw(new WhisperUnavailableException("boom")));
+        var fallback = new FakeFallbackProvider(
+            available: true,
+            result: new WhisperTranscription("secondary", "ar"));
+
+        var (service, deps) = NewService(whisper, opts =>
+        {
+            opts.MaxAttempts = 1;
+            opts.InitialBackoff = TimeSpan.Zero;
+            opts.CircuitBreakerFailureThreshold = 5;
+        }, fallback);
+
+        for (var i = 0; i < 5; i++) deps.Breaker.RecordFailure();
+
+        var result = await service.TranscribeAsync(SampleAudio, CancellationToken.None);
+
+        result.Outcome.Should().Be(TranscriptionOutcome.Transcribed);
+        result.Transcription!.Text.Should().Be("secondary");
+    }
+
+    [Fact]
+    public async Task Queues_When_Fallback_Provider_Fails()
+    {
+        var whisper = new FakeWhisper(_ => Throw(new WhisperUnavailableException("boom")));
+        var fallback = new FakeFallbackProvider(available: true, throwOnCall: true);
+
+        var (service, deps) = NewService(whisper, opts =>
+        {
+            opts.MaxAttempts = 1;
+            opts.InitialBackoff = TimeSpan.Zero;
+        }, fallback);
+
+        var result = await service.TranscribeAsync(SampleAudio, CancellationToken.None);
+
+        result.Outcome.Should().Be(TranscriptionOutcome.QueuedForRetry);
+        deps.Queue.Snapshot().Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task Queues_When_Fallback_Provider_Returns_Null()
+    {
+        var whisper = new FakeWhisper(_ => Throw(new WhisperUnavailableException("boom")));
+        var fallback = new FakeFallbackProvider(available: true, result: null);
+
+        var (service, deps) = NewService(whisper, opts =>
+        {
+            opts.MaxAttempts = 1;
+            opts.InitialBackoff = TimeSpan.Zero;
+        }, fallback);
+
+        var result = await service.TranscribeAsync(SampleAudio, CancellationToken.None);
+
+        result.Outcome.Should().Be(TranscriptionOutcome.QueuedForRetry);
+        deps.Queue.Snapshot().Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task Queues_When_Fallback_Provider_Not_Available()
+    {
+        var whisper = new FakeWhisper(_ => Throw(new WhisperUnavailableException("boom")));
+        var fallback = new FakeFallbackProvider(available: false);
+
+        var (service, deps) = NewService(whisper, opts =>
+        {
+            opts.MaxAttempts = 1;
+            opts.InitialBackoff = TimeSpan.Zero;
+        }, fallback);
+
+        var result = await service.TranscribeAsync(SampleAudio, CancellationToken.None);
+
+        result.Outcome.Should().Be(TranscriptionOutcome.QueuedForRetry);
+        fallback.CallCount.Should().Be(0);
+        deps.Queue.Snapshot().Should().HaveCount(1);
     }
 
     private sealed record Deps(
@@ -177,7 +289,8 @@ public class ResilientTranscriptionServiceTests
 
     private static (ResilientTranscriptionService Service, Deps Deps) NewService(
         IWhisperClient whisper,
-        Action<WhisperOptions>? configure = null)
+        Action<WhisperOptions>? configure = null,
+        IFallbackTranscriptionProvider? fallbackProvider = null)
     {
         var options = new WhisperOptions
         {
@@ -196,7 +309,9 @@ public class ResilientTranscriptionServiceTests
         var store = new InMemoryAudioStore();
         var queue = new InMemoryTranscriptionFallbackQueue();
         var service = new ResilientTranscriptionService(
-            whisper, breaker, store, queue, opts,
+            whisper, breaker,
+            fallbackProvider ?? new NoOpFallbackTranscriptionProvider(),
+            store, queue, opts,
             NullLogger<ResilientTranscriptionService>.Instance,
             time);
         return (service, new Deps(breaker, store, queue, time));
@@ -210,5 +325,29 @@ public class ResilientTranscriptionServiceTests
         private readonly Func<CancellationToken, Task<WhisperTranscription>> _impl;
         public FakeWhisper(Func<CancellationToken, Task<WhisperTranscription>> impl) => _impl = impl;
         public Task<WhisperTranscription> TranscribeAsync(WhisperAudio audio, CancellationToken ct) => _impl(ct);
+    }
+
+    private sealed class FakeFallbackProvider : IFallbackTranscriptionProvider
+    {
+        private readonly WhisperTranscription? _result;
+        private readonly bool _throwOnCall;
+
+        public FakeFallbackProvider(bool available, WhisperTranscription? result = null, bool throwOnCall = false)
+        {
+            IsAvailable = available;
+            _result = result;
+            _throwOnCall = throwOnCall;
+        }
+
+        public bool IsAvailable { get; }
+        public int CallCount { get; private set; }
+
+        public Task<WhisperTranscription?> TranscribeAsync(WhisperAudio audio, CancellationToken ct)
+        {
+            CallCount++;
+            if (_throwOnCall)
+                throw new InvalidOperationException("fallback provider exploded");
+            return Task.FromResult(_result);
+        }
     }
 }

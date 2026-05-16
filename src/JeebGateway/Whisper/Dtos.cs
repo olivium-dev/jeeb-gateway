@@ -34,3 +34,9 @@ public sealed record TranscribeResponse(
     string? Transcription,
     string? Language,
     string? Reason);
+
+public sealed record WhisperStatusResponse(
+    string CircuitState,
+    bool FallbackAvailable,
+    int PendingQueueDepth,
+    bool Healthy);

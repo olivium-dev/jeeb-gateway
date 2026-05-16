@@ -8,10 +8,20 @@ namespace JeebGateway.Controllers;
 public class TranscriptionController : ControllerBase
 {
     private readonly ITranscriptionService _service;
+    private readonly IWhisperCircuitBreaker _breaker;
+    private readonly IFallbackTranscriptionProvider _fallbackProvider;
+    private readonly ITranscriptionFallbackQueue _queue;
 
-    public TranscriptionController(ITranscriptionService service)
+    public TranscriptionController(
+        ITranscriptionService service,
+        IWhisperCircuitBreaker breaker,
+        IFallbackTranscriptionProvider fallbackProvider,
+        ITranscriptionFallbackQueue queue)
     {
         _service = service;
+        _breaker = breaker;
+        _fallbackProvider = fallbackProvider;
+        _queue = queue;
     }
 
     [HttpPost]
@@ -62,5 +72,20 @@ public class TranscriptionController : ControllerBase
             Transcription: null,
             Language: null,
             Reason: result.Reason));
+    }
+
+    /// <summary>Lightweight status probe for the Whisper transcription subsystem.</summary>
+    [HttpGet("status")]
+    [ProducesResponseType(typeof(WhisperStatusResponse), StatusCodes.Status200OK)]
+    public IActionResult GetStatus()
+    {
+        var state = _breaker.State;
+        var queueDepth = _queue.Snapshot().Count;
+
+        return Ok(new WhisperStatusResponse(
+            CircuitState: state.ToString(),
+            FallbackAvailable: _fallbackProvider.IsAvailable,
+            PendingQueueDepth: queueDepth,
+            Healthy: state != CircuitState.Open));
     }
 }

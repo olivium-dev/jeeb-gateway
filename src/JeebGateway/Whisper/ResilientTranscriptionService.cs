@@ -6,14 +6,16 @@ namespace JeebGateway.Whisper;
 /// <summary>
 /// Implements T-backend-036 resilience policy:
 ///   1. Per-attempt 10s timeout via linked CTS.
-///   2. Retry with exponential backoff up to <see cref="WhisperOptions.MaxAttempts"/>.
+///   2. Retry with exponential backoff up to <see cref="WhisperOptions.MaxAttempts"/> (3 attempts, 1s/2s/4s delays).
 ///   3. Circuit breaker trips after 5 consecutive failures (<see cref="IWhisperCircuitBreaker"/>).
-///   4. On exhausted retries OR open breaker: save audio + enqueue for async retry.
+///   4. On exhausted retries OR open breaker: try secondary fallback provider.
+///   5. If fallback provider unavailable/fails: save audio + enqueue for async retry.
 /// </summary>
 public sealed class ResilientTranscriptionService : ITranscriptionService
 {
     private readonly IWhisperClient _whisper;
     private readonly IWhisperCircuitBreaker _breaker;
+    private readonly IFallbackTranscriptionProvider _fallbackProvider;
     private readonly IAudioStore _store;
     private readonly ITranscriptionFallbackQueue _queue;
     private readonly WhisperOptions _options;
@@ -23,6 +25,7 @@ public sealed class ResilientTranscriptionService : ITranscriptionService
     public ResilientTranscriptionService(
         IWhisperClient whisper,
         IWhisperCircuitBreaker breaker,
+        IFallbackTranscriptionProvider fallbackProvider,
         IAudioStore store,
         ITranscriptionFallbackQueue queue,
         IOptions<WhisperOptions> options,
@@ -31,6 +34,7 @@ public sealed class ResilientTranscriptionService : ITranscriptionService
     {
         _whisper = whisper;
         _breaker = breaker;
+        _fallbackProvider = fallbackProvider;
         _store = store;
         _queue = queue;
         _options = options.Value;
@@ -42,7 +46,7 @@ public sealed class ResilientTranscriptionService : ITranscriptionService
     {
         if (!_breaker.AllowRequest())
         {
-            _log.LogWarning("whisper circuit open; falling back to audio-only mode");
+            _log.LogWarning("whisper circuit open; attempting fallback provider");
             return await FallbackAsync(audio, "circuit_open", ct);
         }
 
@@ -66,7 +70,7 @@ public sealed class ResilientTranscriptionService : ITranscriptionService
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                throw; // caller cancellation — surface immediately
+                throw;
             }
             catch (OperationCanceledException ex)
             {
@@ -97,9 +101,8 @@ public sealed class ResilientTranscriptionService : ITranscriptionService
         return await FallbackAsync(audio, lastError?.Message ?? "exhausted_retries", ct);
     }
 
-    private TimeSpan BackoffFor(int attempt)
+    internal TimeSpan BackoffFor(int attempt)
     {
-        // attempt is 1-based; first backoff = InitialBackoff, then doubles up to MaxBackoff.
         var multiplier = Math.Pow(2, attempt - 1);
         var raw = TimeSpan.FromMilliseconds(_options.InitialBackoff.TotalMilliseconds * multiplier);
         return raw > _options.MaxBackoff ? _options.MaxBackoff : raw;
@@ -107,6 +110,27 @@ public sealed class ResilientTranscriptionService : ITranscriptionService
 
     private async Task<TranscriptionResult> FallbackAsync(WhisperAudio audio, string reason, CancellationToken ct)
     {
+        if (_fallbackProvider.IsAvailable)
+        {
+            try
+            {
+                _log.LogInformation("primary whisper failed ({Reason}); trying fallback provider", reason);
+                var fallbackResult = await _fallbackProvider.TranscribeAsync(audio, ct);
+                if (fallbackResult is not null)
+                {
+                    return new TranscriptionResult(
+                        AudioId: Guid.NewGuid().ToString("n"),
+                        Outcome: TranscriptionOutcome.Transcribed,
+                        Transcription: fallbackResult,
+                        Reason: null);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _log.LogWarning(ex, "fallback transcription provider failed; queueing for async retry");
+            }
+        }
+
         var audioId = await _store.SaveAsync(audio, ct);
         await _queue.EnqueueAsync(new QueuedTranscription(audioId, reason, _time.GetUtcNow()), ct);
         return new TranscriptionResult(
