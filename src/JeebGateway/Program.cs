@@ -15,6 +15,7 @@ using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
 using JeebGateway.Requests.OtpHandover;
 using JeebGateway.Security;
+using JeebGateway.Services;
 using JeebGateway.Tokens;
 using JeebGateway.Tracking;
 using JeebGateway.Users;
@@ -121,6 +122,13 @@ builder.Services.AddHealthChecks()
 // ---------------------------------------------------------------------------
 builder.Services.AddDownstreamClients(builder.Configuration);
 builder.Services.AddDownstreamHealthChecks(builder.Configuration);
+
+// T-migrate-gateway-proxies (PR-A): per-service kill switches. Each
+// controller migrated in this PR checks the matching flag and falls
+// back to the in-memory store when false. PR-B flips defaults to true
+// and removes the in-memory stores.
+builder.Services.Configure<UpstreamFeatureFlags>(
+    builder.Configuration.GetSection(UpstreamFeatureFlags.SectionName));
 
 // OpenTelemetry
 var serviceName = "jeeb-gateway";

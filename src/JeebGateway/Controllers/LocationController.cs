@@ -1,5 +1,7 @@
 using System.Text.Json;
 using JeebGateway.Requests;
+using JeebGateway.Services;
+using JeebGateway.Services.Clients;
 using JeebGateway.Tracking;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -38,24 +40,30 @@ public class LocationController : ControllerBase
     private readonly IRequestsStore _requests;
     private readonly IOptionsMonitor<TrackingOptions> _options;
     private readonly TimeProvider _clock;
+    private readonly IGeolocationServiceClient _upstream;
+    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
 
     public LocationController(
         ILocationStore store,
         IRequestsStore requests,
         IOptionsMonitor<TrackingOptions> options,
-        TimeProvider clock)
+        TimeProvider clock,
+        IGeolocationServiceClient upstream,
+        IOptionsMonitor<UpstreamFeatureFlags> flags)
     {
         _store = store;
         _requests = requests;
         _options = options;
         _clock = clock;
+        _upstream = upstream;
+        _flags = flags;
     }
 
     [HttpPost("location/update")]
     [ProducesResponseType(typeof(LocationUpdateResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public IActionResult Update([FromBody] LocationUpdateRequest? body)
+    public async Task<IActionResult> Update([FromBody] LocationUpdateRequest? body, CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var jeeberId, out var unauthorized)) return unauthorized;
 
@@ -78,6 +86,12 @@ public class LocationController : ControllerBase
                 Status = StatusCodes.Status400BadRequest,
                 Type = "https://jeeb.dev/errors/batch-too-large"
             });
+        }
+
+        if (_flags.CurrentValue.Geolocation)
+        {
+            var upstream = await _upstream.UpdateLocationAsync(jeeberId, body, ct);
+            return Ok(upstream);
         }
 
         var result = _store.Record(jeeberId, body.Points);

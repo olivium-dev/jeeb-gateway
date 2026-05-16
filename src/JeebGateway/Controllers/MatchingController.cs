@@ -1,8 +1,11 @@
 using JeebGateway.Availability;
 using JeebGateway.Matching;
 using JeebGateway.Requests;
+using JeebGateway.Services;
+using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
 
@@ -34,11 +37,19 @@ public sealed class MatchingController : ControllerBase
 {
     private readonly IMatchingService _matching;
     private readonly IRequestsStore _requests;
+    private readonly IMatchingServiceClient _upstream;
+    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
 
-    public MatchingController(IMatchingService matching, IRequestsStore requests)
+    public MatchingController(
+        IMatchingService matching,
+        IRequestsStore requests,
+        IMatchingServiceClient upstream,
+        IOptionsMonitor<UpstreamFeatureFlags> flags)
     {
         _matching = matching;
         _requests = requests;
+        _upstream = upstream;
+        _flags = flags;
     }
 
     [HttpPost("run")]
@@ -59,6 +70,15 @@ public sealed class MatchingController : ControllerBase
                 Title = "Request body is required.",
                 Status = StatusCodes.Status400BadRequest
             });
+        }
+
+        // T-migrate-gateway-proxies (PR-A): proxy to upstream matching-service
+        // when the flag is on. Input validation and the dry-run branch live
+        // upstream, so we forward the body verbatim and surface the response.
+        if (_flags.CurrentValue.Matching)
+        {
+            var upstreamResponse = await _upstream.RunMatchingAsync(body, ct);
+            return Ok(upstreamResponse);
         }
 
         // Resolve allowed vehicle types — empty / null means "any". Unknown
