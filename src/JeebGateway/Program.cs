@@ -2,6 +2,7 @@ using System.Text;
 using JeebGateway.Admin;
 using JeebGateway.Availability;
 using JeebGateway.Kyc;
+using JeebGateway.Matching;
 using JeebGateway.Middleware;
 using JeebGateway.NotificationPreferences;
 using JeebGateway.ProhibitedItems;
@@ -179,6 +180,20 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProc
 // schema in db/migrations/0004 with a SERIALIZABLE-isolation create or
 // a partial unique index on (client_id) WHERE status in active-set.
 builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
+
+// Geo-matching engine (T-backend-008).
+// Queries online Jeebers within the tier-specific radius (PostGIS-style
+// ST_DWithin, MVP-side using Haversine), filters by vehicle-type
+// compatibility, orders by proximity-then-rating, and fans out a
+// "new offer" push to the matched set under a single 2-second deadline.
+// Production wiring swaps:
+//   - InMemoryJeeberRatingProvider → ratings-service NSwag client.
+//   - The candidate scan moves to a PostGIS ST_DWithin query against
+//     the GEOGRAPHY(Point, 4326) column on jeeber_availability.
+builder.Services.Configure<MatchingOptions>(builder.Configuration.GetSection(MatchingOptions.SectionName));
+builder.Services.AddSingleton<InMemoryJeeberRatingProvider>();
+builder.Services.AddSingleton<IJeeberRatingProvider>(sp => sp.GetRequiredService<InMemoryJeeberRatingProvider>());
+builder.Services.AddSingleton<IMatchingService, MatchingService>();
 
 // Delivery tier catalog (T-backend-009).
 // In-memory store seeded with the five default tiers (Urgent, Same-Day,
