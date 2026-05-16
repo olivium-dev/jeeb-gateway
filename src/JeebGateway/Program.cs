@@ -1,6 +1,7 @@
 using System.Text;
 using JeebGateway.Admin;
 using JeebGateway.Availability;
+using JeebGateway.Kyc;
 using JeebGateway.Middleware;
 using JeebGateway.NotificationPreferences;
 using JeebGateway.ProhibitedItems;
@@ -179,11 +180,13 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProc
 // a partial unique index on (client_id) WHERE status in active-set.
 builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
 
-// Delivery-tier catalog (T-backend-007). Five seeded tiers mirroring
-// db/migrations/0011 — required for the "validate tier exists" check
-// on every new request. Production wiring resolves tier_code → UUID
-// against delivery_tiers via the NSwag-generated delivery-service client.
-builder.Services.AddSingleton<ITiersStore, InMemoryTiersStore>();
+// Delivery tier catalog (T-backend-009).
+// In-memory store seeded with the five default tiers (Urgent, Same-Day,
+// Scheduled, Economy, On-the-Way); admins can CRUD via /admin/tiers and
+// changes take effect on the next request because each List/Get returns
+// a deep-cloned snapshot. Production wiring will hit Postgres via a
+// follow-up migration colocated with delivery_requests.
+builder.Services.AddSingleton<JeebGateway.Tiers.ITiersStore, JeebGateway.Tiers.InMemoryTiersStore>();
 
 // Request expiry + no-offer nudge (T-backend-028).
 // 10-min "try expanding tier" prompt and 30-min terminal expiry. The
@@ -231,6 +234,20 @@ builder.Services.AddSingleton<IFlaggedRequestStore, InMemoryFlaggedRequestStore>
 // db/migrations/0005.admin_actions on the same transaction as the
 // mutation so the audit trail can never diverge from entity state.
 builder.Services.AddSingleton<IAdminAuditLog, InMemoryAdminAuditLog>();
+
+// Jeeber KYC submission pipeline (T-backend-004 / JEEB-22).
+//
+// POST /kyc/submit lands ID front/back + selfie in encrypted document
+// storage, runs the liveness check stub, and pushes a queue entry with
+// status 'pending_review' for the admin moderation pipeline. Production
+// wiring swaps the in-memory document storage for S3 with per-object
+// KMS data keys, the liveness stub for a real vendor (e.g. AWS Rekognition
+// or iProov), and the in-memory KYC store for a Postgres-backed
+// implementation colocated with admin_actions.
+builder.Services.AddSingleton<IKycStore, InMemoryKycStore>();
+builder.Services.AddSingleton<IKycDocumentStorage, InMemoryEncryptedDocumentStorage>();
+builder.Services.AddSingleton<IKycLivenessChecker, StubKycLivenessChecker>();
+builder.Services.AddSingleton<IKycService, KycService>();
 
 // Users / profile / saved addresses / admin search (T-backend-029).
 // In-memory store for the MVP; production wiring will proxy to auth-service

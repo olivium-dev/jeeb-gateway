@@ -184,6 +184,24 @@ public class DeliveryRequest
     /// <c>matched/pending → accepted</c> flip.
     /// </summary>
     public DateTimeOffset? AcceptedAt { get; set; }
+
+    /// <summary>
+    /// One-time code the Client presents to the Jeeber at hand-off
+    /// (T-backend-013). Issued by the store when the row enters
+    /// <see cref="RequestStatus.Accepted"/> and consumed on the
+    /// <c>heading_off → delivered</c> transition — the patch endpoint
+    /// rejects with 400 when the supplied OTP does not match.
+    /// </summary>
+    public string? DeliveryOtp { get; set; }
+
+    /// <summary>
+    /// Whether the row's GPS-tracking requirement is active
+    /// (T-backend-013). Flipped true when the state machine moves the
+    /// row into <see cref="RequestStatus.PickedUp"/>; downstream
+    /// telemetry uses this as the gate to start ingesting Jeeber
+    /// location updates.
+    /// </summary>
+    public bool GpsTrackingActive { get; set; }
 }
 
 public class CreateRequestBody
@@ -247,4 +265,28 @@ public class DeliveryRequestDto
     public DateTimeOffset? ScheduledAt { get; init; }
     public string? JeeberId { get; init; }
     public DateTimeOffset? AcceptedAt { get; init; }
+
+    /// <summary>
+    /// True once the row has transitioned through <see cref="RequestStatus.PickedUp"/>
+    /// (T-backend-013). Mobile clients show the live-tracking indicator
+    /// and begin streaming Jeeber location updates when this flips.
+    /// </summary>
+    public bool GpsTrackingActive { get; init; }
+}
+
+/// <summary>
+/// PATCH /deliveries/{id}/status body (T-backend-013). Clients hand in the
+/// target status and, for the <c>heading_off → delivered</c> transition,
+/// the OTP previously issued at accept time.
+/// </summary>
+public class PatchStatusBody
+{
+    public string? Status { get; set; }
+
+    /// <summary>
+    /// Required only when transitioning to <see cref="RequestStatus.Delivered"/>.
+    /// Compared against the row's <see cref="DeliveryRequest.DeliveryOtp"/>;
+    /// a missing or mismatched value rejects with 400.
+    /// </summary>
+    public string? Otp { get; set; }
 }

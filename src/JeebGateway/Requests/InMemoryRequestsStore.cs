@@ -236,9 +236,89 @@ public class InMemoryRequestsStore : IRequestsStore
             existing.Status = RequestStatus.Accepted;
             existing.JeeberId = jeeberId;
             existing.AcceptedAt = at;
+            // T-backend-013: issue the hand-off OTP at accept time so the
+            // heading_off → delivered transition can verify it without an
+            // extra round-trip. Production swap binds to a hashed column.
+            if (string.IsNullOrEmpty(existing.DeliveryOtp))
+            {
+                existing.DeliveryOtp = GenerateOtp();
+            }
             return Task.FromResult<DeliveryRequest?>(existing);
         }
     }
+
+    /// <summary>
+    /// T-backend-013 state-machine transition. The whole guard — status
+    /// read, machine validation, OTP check, GPS flip — runs under the
+    /// write lock so two PATCH calls racing at the same step cannot both
+    /// commit.
+    /// </summary>
+    public Task<DeliveryTransitionResult> TryTransitionAsync(
+        string requestId,
+        string toStatus,
+        string? otp,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_requests.TryGetValue(requestId, out var existing))
+            {
+                return Task.FromResult(new DeliveryTransitionResult(
+                    DeliveryTransitionOutcome.NotFound, null, null, null));
+            }
+
+            var from = existing.Status;
+            var validation = DeliveryStateMachine.ValidateTransition(from, toStatus);
+            if (!validation.IsValid)
+            {
+                return Task.FromResult(new DeliveryTransitionResult(
+                    DeliveryTransitionOutcome.InvalidTransition,
+                    existing,
+                    from,
+                    validation.Reason));
+            }
+
+            if (DeliveryStateMachine.RequiresOtp(from, toStatus))
+            {
+                if (string.IsNullOrWhiteSpace(otp))
+                {
+                    return Task.FromResult(new DeliveryTransitionResult(
+                        DeliveryTransitionOutcome.OtpRequired,
+                        existing,
+                        from,
+                        "OTP is required to mark the delivery as delivered."));
+                }
+                if (!string.Equals(otp, existing.DeliveryOtp, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(new DeliveryTransitionResult(
+                        DeliveryTransitionOutcome.OtpMismatch,
+                        existing,
+                        from,
+                        "Supplied OTP does not match."));
+                }
+            }
+
+            existing.Status = toStatus;
+
+            if (DeliveryStateMachine.ActivatesGpsTracking(from, toStatus))
+            {
+                existing.GpsTrackingActive = true;
+            }
+
+            return Task.FromResult(new DeliveryTransitionResult(
+                DeliveryTransitionOutcome.Committed,
+                existing,
+                from,
+                null));
+        }
+    }
+
+    /// <summary>
+    /// Six-digit numeric hand-off OTP (T-backend-013). MVP uses
+    /// <see cref="Random.Shared"/>; production swaps to a cryptographically
+    /// random generator hashed at the column.
+    /// </summary>
+    private static string GenerateOtp() => Random.Shared.Next(0, 1_000_000).ToString("D6");
 
     /// <summary>
     /// Test/export helper — returns every request currently owned by
