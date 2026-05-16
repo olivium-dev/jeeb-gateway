@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using JeebGateway.NotificationPreferences;
+using JeebGateway.Users;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -28,6 +29,7 @@ public sealed class PushNotificationService : IPushNotificationService
     private readonly IReadOnlyDictionary<DevicePlatform, IPushTransport> _transports;
     private readonly IPushRetryQueue _retryQueue;
     private readonly IPushDeliveryTracker _tracker;
+    private readonly IUsersStore _users;
     private readonly PushOptions _options;
     private readonly TimeProvider _clock;
     private readonly ILogger<PushNotificationService> _log;
@@ -38,6 +40,7 @@ public sealed class PushNotificationService : IPushNotificationService
         IEnumerable<IPushTransport> transports,
         IPushRetryQueue retryQueue,
         IPushDeliveryTracker tracker,
+        IUsersStore users,
         IOptions<PushOptions> options,
         TimeProvider clock,
         ILogger<PushNotificationService> log)
@@ -47,6 +50,7 @@ public sealed class PushNotificationService : IPushNotificationService
         _transports = transports.ToDictionary(t => t.Platform);
         _retryQueue = retryQueue;
         _tracker = tracker;
+        _users = users;
         _options = options.Value;
         _clock = clock;
         _log = log;
@@ -54,9 +58,28 @@ public sealed class PushNotificationService : IPushNotificationService
 
     public async Task<PushDeliveryResult> SendAsync(PushNotificationRequest request, CancellationToken ct)
     {
-        var result = await SendInternalAsync(request, attempt: 1, ct);
+        var enriched = await ResolveLanguageAsync(request, ct);
+        var result = await SendInternalAsync(enriched, attempt: 1, ct);
         await _tracker.RecordAsync(result, ct);
         return result;
+    }
+
+    /// <summary>
+    /// T-backend-029 AC #6. When the caller didn't pre-localise the payload,
+    /// stamp the request with the recipient's persisted language so transports
+    /// (and any downstream renderer) can carry the correct locale through to
+    /// the device. A missing user row falls back to the request as-is — push
+    /// is best-effort; we don't want a profile-lookup miss to suppress a KYC
+    /// or OTP delivery.
+    /// </summary>
+    private async Task<PushNotificationRequest> ResolveLanguageAsync(PushNotificationRequest request, CancellationToken ct)
+    {
+        if (!string.IsNullOrEmpty(request.Language)) return request;
+
+        var profile = await _users.GetByIdAsync(request.UserId, ct);
+        if (profile is null || string.IsNullOrEmpty(profile.Language)) return request;
+
+        return request with { Language = profile.Language };
     }
 
     /// <summary>
@@ -66,7 +89,8 @@ public sealed class PushNotificationService : IPushNotificationService
     /// </summary>
     internal async Task<PushDeliveryResult> SendForRetryAsync(PushNotificationRequest request, CancellationToken ct)
     {
-        var result = await SendInternalAsync(request, attempt: 2, ct);
+        var enriched = await ResolveLanguageAsync(request, ct);
+        var result = await SendInternalAsync(enriched, attempt: 2, ct);
         await _tracker.RecordAsync(result, ct);
         return result;
     }

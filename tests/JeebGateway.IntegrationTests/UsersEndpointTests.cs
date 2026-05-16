@@ -340,6 +340,22 @@ public class UsersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
+    public async Task PatchMe_Persists_Language_So_Notifications_Can_Consume_It()
+    {
+        // T-backend-029 AC #6: the language chosen via PATCH /users/me must be
+        // observable to the notification pipeline (InMemoryUsersStore is the
+        // same instance the PushNotificationService reads from).
+        var client = ClientFor("user-lang-persist");
+
+        var resp = await client.PatchAsJsonAsync("/users/me", new { language = "ar" });
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var store = _factory.Services.GetRequiredService<InMemoryUsersStore>();
+        var profile = await store.GetByIdAsync("user-lang-persist", default);
+        profile!.Language.Should().Be("ar");
+    }
+
+    [Fact]
     public async Task AdminSearch_Rejects_Invalid_Page_Size()
     {
         var client = AdminClient("user-admin-4");
