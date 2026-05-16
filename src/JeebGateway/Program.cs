@@ -1,6 +1,7 @@
 using System.Text;
 using JeebGateway.Admin;
 using JeebGateway.Availability;
+using JeebGateway.Kyc;
 using JeebGateway.Middleware;
 using JeebGateway.NotificationPreferences;
 using JeebGateway.ProhibitedItems;
@@ -225,6 +226,20 @@ builder.Services.AddSingleton<IFlaggedRequestStore, InMemoryFlaggedRequestStore>
 // db/migrations/0005.admin_actions on the same transaction as the
 // mutation so the audit trail can never diverge from entity state.
 builder.Services.AddSingleton<IAdminAuditLog, InMemoryAdminAuditLog>();
+
+// Jeeber KYC submission pipeline (T-backend-004 / JEEB-22).
+//
+// POST /kyc/submit lands ID front/back + selfie in encrypted document
+// storage, runs the liveness check stub, and pushes a queue entry with
+// status 'pending_review' for the admin moderation pipeline. Production
+// wiring swaps the in-memory document storage for S3 with per-object
+// KMS data keys, the liveness stub for a real vendor (e.g. AWS Rekognition
+// or iProov), and the in-memory KYC store for a Postgres-backed
+// implementation colocated with admin_actions.
+builder.Services.AddSingleton<IKycStore, InMemoryKycStore>();
+builder.Services.AddSingleton<IKycDocumentStorage, InMemoryEncryptedDocumentStorage>();
+builder.Services.AddSingleton<IKycLivenessChecker, StubKycLivenessChecker>();
+builder.Services.AddSingleton<IKycService, KycService>();
 
 // Users / profile / saved addresses / admin search (T-backend-029).
 // In-memory store for the MVP; production wiring will proxy to auth-service
