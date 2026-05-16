@@ -152,6 +152,30 @@ public interface IRequestsStore
         int limit,
         DateTimeOffset at,
         CancellationToken ct);
+
+    /// <summary>
+    /// Atomically advances <paramref name="requestId"/> through one step of
+    /// the <see cref="DeliveryStateMachine"/> (T-backend-013). The state
+    /// guard, OTP check, and side-effects all run under the store's write
+    /// lock so a racing PATCH cannot observe a stale status and double-fire.
+    ///
+    /// Side-effects committed inside the same critical section:
+    /// <list type="bullet">
+    ///   <item>Transitioning into <see cref="RequestStatus.PickedUp"/> flips
+    ///     <see cref="DeliveryRequest.GpsTrackingActive"/> to true.</item>
+    ///   <item>Transitioning into <see cref="RequestStatus.Delivered"/>
+    ///     requires <paramref name="otp"/> to match
+    ///     <see cref="DeliveryRequest.DeliveryOtp"/>; a missing or
+    ///     mismatched value returns
+    ///     <see cref="DeliveryTransitionOutcome.OtpRequired"/> /
+    ///     <see cref="DeliveryTransitionOutcome.OtpMismatch"/>.</item>
+    /// </list>
+    /// </summary>
+    Task<DeliveryTransitionResult> TryTransitionAsync(
+        string requestId,
+        string toStatus,
+        string? otp,
+        CancellationToken ct);
 }
 
 public class CreateRequestInput
