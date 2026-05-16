@@ -1,6 +1,7 @@
 using System.Text;
 using JeebGateway.Admin;
 using JeebGateway.Availability;
+using JeebGateway.Chat;
 using JeebGateway.Kyc;
 using JeebGateway.Matching;
 using JeebGateway.Middleware;
@@ -81,6 +82,7 @@ builder.Services.AddCors(options =>
 builder.Services.AddJeebRateLimiting();
 
 builder.Services.AddControllers();
+builder.Services.AddSignalR();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -337,6 +339,18 @@ builder.Services.AddSingleton<IAutoOfflineNotifier>(sp => sp.GetRequiredService<
 builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();
 builder.Services.AddHostedService<AutoOfflineSweeper>();
 
+// Real-time chat (T-backend-012).
+// SignalR hub at /hubs/chat delivers each message under the 1s WS SLA
+// to the conversation group; backgrounded recipients (no live hub
+// connection or client-reported background state) fall back to the
+// T-backend-022 push pipeline. In-memory stores for the MVP — the
+// production swap moves persistence to Postgres and presence to Redis,
+// proxied through an NSwag-generated chat-service client per the BFF
+// aggregation policy.
+builder.Services.AddSingleton<IChatMessageStore, InMemoryChatMessageStore>();
+builder.Services.AddSingleton<IChatPresenceTracker, InMemoryChatPresenceTracker>();
+builder.Services.AddSingleton<IChatDispatcher, ChatDispatcher>();
+
 // Resilient Whisper integration (T-backend-036).
 // Per-attempt 10s timeout enforced via linked CTS inside ResilientTranscriptionService;
 // HttpClient.Timeout is set to Infinite so the service's cancellation policy is authoritative.
@@ -394,6 +408,9 @@ app.UseMiddleware<ActiveRoleMiddleware>();
 app.UseRateLimiter();
 
 app.MapControllers();
+
+// Real-time chat WebSocket surface (T-backend-012).
+app.MapHub<ChatHub>("/hubs/chat");
 
 // Health endpoints — separate liveness and readiness probes.
 app.MapHealthChecks("/health/live", new HealthCheckOptions
