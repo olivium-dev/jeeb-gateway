@@ -1,6 +1,8 @@
+using JeebGateway.Security;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace JeebGateway.Controllers;
 
@@ -13,6 +15,7 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("auth/tokens")]
+[EnableRateLimiting(RateLimitingExtensions.AuthTokenBucketPolicy)]
 public class TokensController : ControllerBase
 {
     private readonly ITokenService _tokens;
