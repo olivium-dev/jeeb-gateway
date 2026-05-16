@@ -10,6 +10,7 @@ namespace JeebGateway.Controllers;
 /// snapshots on every read so an in-flight request can never observe a
 /// half-updated tier.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("admin/tiers")]
 [RequireRole(Roles.Admin)]

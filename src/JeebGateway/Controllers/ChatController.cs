@@ -16,6 +16,7 @@ namespace JeebGateway.Controllers;
 /// History reads land here only — we do not stream history over the hub
 /// to avoid double-replay on reconnect.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("chat")]
 public class ChatController : ControllerBase

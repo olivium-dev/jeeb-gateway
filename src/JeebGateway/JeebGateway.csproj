@@ -6,10 +6,24 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>JeebGateway</RootNamespace>
     <AssemblyName>JeebGateway</AssemblyName>
+    <!--
+      CS0618 — legacy controllers under Controllers/ are intentionally marked
+      [Obsolete] to flag them for the BFF migration follow-ups. Suppress the
+      warning at the project level so the IDE still shows the strikethrough
+      but the build stays green. Tracked in GATEWAY-REMEDIATION-PLAN.md.
+    -->
+    <NoWarn>$(NoWarn);CS0618</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="JeebGateway.IntegrationTests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pinned OpenAPI specs in src/JeebGateway/contracts/ are part of the build artifact. -->
+    <None Include="contracts\**\*.json" CopyToOutputDirectory="Never" />
+    <!-- regenerate-clients.sh is reference material; not copied. -->
+    <None Include="scripts\**\*.sh" CopyToOutputDirectory="Never" />
   </ItemGroup>
 
   <ItemGroup>
@@ -23,6 +37,15 @@
     <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="8.0.11" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.1.2" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.11" />
+    <!--
+      BFF resilience pipeline (Polly v8 via the official Microsoft.Extensions.* wrapper).
+      Provides .AddResilienceHandler() used by Extensions/ServiceClientExtensions.cs.
+    -->
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="8.10.0" />
+    <!--
+      URL-group health checks for downstream services in Extensions/HealthCheckExtensions.cs.
+    -->
+    <PackageReference Include="AspNetCore.HealthChecks.Uris" Version="8.0.1" />
   </ItemGroup>
 
 </Project>

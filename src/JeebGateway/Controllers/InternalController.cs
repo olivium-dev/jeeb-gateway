@@ -6,6 +6,7 @@ namespace JeebGateway.Controllers;
 /// Internal endpoints protected by API key authentication (T-backend-032).
 /// Used by downstream services for health probing and diagnostics.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("internal")]
 public class InternalController : ControllerBase

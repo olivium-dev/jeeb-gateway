@@ -33,6 +33,7 @@ namespace JeebGateway.Controllers;
 /// state, supplying an unknown status string — is rejected with 400 by
 /// the <see cref="DeliveryStateMachine"/>.
 /// </summary>
+[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("deliveries")]
 public class DeliveriesController : ControllerBase
