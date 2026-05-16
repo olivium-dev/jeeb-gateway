@@ -32,16 +32,30 @@ public class RequestsController : ControllerBase
     internal const string LimitExceededMessage =
         "Maximum 3 active requests. Complete or cancel an existing request.";
 
+    /// <summary>T-backend-007: MVP cap on attached photos per request.</summary>
+    public const int MaxPhotos = 10;
+
+    /// <summary>
+    /// audio_url / photos[] entries must look like absolute URLs. Mirrors
+    /// the DB CHECK <c>delivery_requests_audio_url_format</c> in 0004 —
+    /// gateway-side validation here so a bad URL never reaches the store.
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex UrlShape =
+        new(@"^(https?|s3)://[^\s]+$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
     private readonly IRequestsStore _store;
+    private readonly ITiersStore _tiers;
     private readonly TimeProvider _clock;
     private readonly ScheduledDeliveryOptions _scheduledOptions;
 
     public RequestsController(
         IRequestsStore store,
+        ITiersStore tiers,
         TimeProvider clock,
         IOptions<ScheduledDeliveryOptions> scheduledOptions)
     {
         _store = store;
+        _tiers = tiers;
         _clock = clock;
         _scheduledOptions = scheduledOptions.Value;
     }
@@ -92,10 +106,94 @@ public class RequestsController : ControllerBase
             // window is already open.
         }
 
+        // T-backend-007: structured pickup/dropoff are required. Free-text
+        // PickupAddress / DropoffAddress remain optional human-readable
+        // labels — the matching engine joins on the GEOGRAPHY columns.
+        if (body.PickupLocation is null || body.DropoffLocation is null)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "pickupLocation and dropoffLocation are required.",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/location-required"
+            });
+        }
+        if (!body.PickupLocation.IsValid() || !body.DropoffLocation.IsValid())
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "pickupLocation / dropoffLocation must be valid WGS84 coordinates.",
+                Detail = "lat must be in [-90, 90]; lng must be in [-180, 180]; NaN is not allowed.",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/location-invalid"
+            });
+        }
+
+        // T-backend-007 acceptance criterion: validate tier exists.
+        if (string.IsNullOrWhiteSpace(body.TierId))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "tierId is required.",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/tier-required"
+            });
+        }
+        if (!await _tiers.ExistsAsync(body.TierId, ct))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "tierId does not match any active delivery tier.",
+                Detail = $"tierId={body.TierId}",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/tier-not-found"
+            });
+        }
+
+        if (!string.IsNullOrEmpty(body.AudioUrl) && !UrlShape.IsMatch(body.AudioUrl))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "audioUrl must be an absolute http(s):// or s3:// URL.",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/audio-url-invalid"
+            });
+        }
+
+        var photos = body.Photos ?? new List<string>();
+        if (photos.Count > MaxPhotos)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = $"Too many photos attached (max {MaxPhotos}).",
+                Detail = $"received={photos.Count}",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/photos-too-many"
+            });
+        }
+        foreach (var photo in photos)
+        {
+            if (string.IsNullOrWhiteSpace(photo) || !UrlShape.IsMatch(photo))
+            {
+                return BadRequest(new ProblemDetails
+                {
+                    Title = "Every photos[] entry must be an absolute http(s):// or s3:// URL.",
+                    Status = StatusCodes.Status400BadRequest,
+                    Type = "https://jeeb.dev/errors/photo-url-invalid"
+                });
+            }
+        }
+
         var input = new CreateRequestInput
         {
             ClientId = clientId,
             Description = body.Description.Trim(),
+            Transcription = string.IsNullOrWhiteSpace(body.Transcription) ? null : body.Transcription.Trim(),
+            AudioUrl = body.AudioUrl,
+            Photos = photos.ToArray(),
+            TierId = body.TierId,
+            PickupLocation = body.PickupLocation,
+            DropoffLocation = body.DropoffLocation,
             PickupAddress = body.PickupAddress,
             DropoffAddress = body.DropoffAddress,
             ScheduledAt = body.ScheduledAt
@@ -187,9 +285,17 @@ public class RequestsController : ControllerBase
         ClientId = r.ClientId,
         Status = r.Status,
         Description = r.Description,
+        Transcription = r.Transcription,
+        AudioUrl = r.AudioUrl,
+        Photos = r.Photos,
+        TierId = r.TierId,
+        PickupLocation = r.PickupLocation,
+        DropoffLocation = r.DropoffLocation,
         PickupAddress = r.PickupAddress,
         DropoffAddress = r.DropoffAddress,
         CreatedAt = r.CreatedAt,
-        ScheduledAt = r.ScheduledAt
+        ScheduledAt = r.ScheduledAt,
+        JeeberId = r.JeeberId,
+        AcceptedAt = r.AcceptedAt
     };
 }

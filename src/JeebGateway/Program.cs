@@ -179,6 +179,12 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProc
 // a partial unique index on (client_id) WHERE status in active-set.
 builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
 
+// Delivery-tier catalog (T-backend-007). Five seeded tiers mirroring
+// db/migrations/0011 — required for the "validate tier exists" check
+// on every new request. Production wiring resolves tier_code → UUID
+// against delivery_tiers via the NSwag-generated delivery-service client.
+builder.Services.AddSingleton<ITiersStore, InMemoryTiersStore>();
+
 // Request expiry + no-offer nudge (T-backend-028).
 // 10-min "try expanding tier" prompt and 30-min terminal expiry. The
 // in-memory notifier records calls so integration tests can assert

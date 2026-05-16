@@ -158,6 +158,12 @@ public class CreateRequestInput
 {
     public required string ClientId { get; init; }
     public required string Description { get; init; }
+    public string? Transcription { get; init; }
+    public string? AudioUrl { get; init; }
+    public IReadOnlyList<string> Photos { get; init; } = Array.Empty<string>();
+    public string? TierId { get; init; }
+    public GeoPoint? PickupLocation { get; init; }
+    public GeoPoint? DropoffLocation { get; init; }
     public string? PickupAddress { get; init; }
     public string? DropoffAddress { get; init; }
 

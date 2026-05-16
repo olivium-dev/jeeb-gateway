@@ -127,8 +127,15 @@ public class UserSuspensionEndpointTests : IClassFixture<WebApplicationFactory<P
         body!.IsSuspended.Should().BeFalse();
         body.UnsuspendedBy.Should().Be("admin-suspend-5");
 
-        // Same user can now create a request.
-        var afterUnsuspend = await asUser.PostAsJsonAsync("/requests", new { description = "now allowed" });
+        // Same user can now create a request. T-backend-007 added tier +
+        // structured locations as required fields on the create body.
+        var afterUnsuspend = await asUser.PostAsJsonAsync("/requests", new
+        {
+            description = "now allowed",
+            tierId = "flash",
+            pickupLocation = new { lat = 24.7, lng = 46.7 },
+            dropoffLocation = new { lat = 24.6, lng = 46.7 }
+        });
         afterUnsuspend.StatusCode.Should().Be(HttpStatusCode.Created);
 
         // GET /users/me no longer reports suspension.

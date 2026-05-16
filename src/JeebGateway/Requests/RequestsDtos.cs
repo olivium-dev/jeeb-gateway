@@ -83,12 +83,58 @@ public static class RequestStatus
     public static bool IsJeeberActive(string status) => JeeberActiveStates.Contains(status);
 }
 
+/// <summary>
+/// WGS84 lon/lat pair. Mirrors the GEOGRAPHY(Point, 4326) columns in
+/// db/migrations/0004 — radius math at the matching layer is in metres.
+/// </summary>
+public class GeoPoint
+{
+    public required double Lat { get; init; }
+    public required double Lng { get; init; }
+
+    public bool IsValid() =>
+        Lat is >= -90 and <= 90 && Lng is >= -180 and <= 180
+        && !double.IsNaN(Lat) && !double.IsNaN(Lng);
+}
+
 public class DeliveryRequest
 {
     public required string Id { get; init; }
     public required string ClientId { get; init; }
     public required string Status { get; set; }
     public required string Description { get; init; }
+
+    /// <summary>
+    /// Raw speech-to-text output preserved alongside the user-edited
+    /// <see cref="Description"/> so admins can audit how the final text
+    /// diverged from what was dictated (FR-3.4).
+    /// </summary>
+    public string? Transcription { get; init; }
+
+    /// <summary>
+    /// Object-storage URL of the original voice recording. NULL when the
+    /// Client typed the description rather than recording it.
+    /// </summary>
+    public string? AudioUrl { get; init; }
+
+    /// <summary>
+    /// Optional photos attached at creation (parcel snapshots, label
+    /// shots). Each entry is an object-storage URL; the gateway validates
+    /// the protocol shape only — content moderation runs in the
+    /// prohibited-items scanner pipeline.
+    /// </summary>
+    public IReadOnlyList<string> Photos { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Selected tier code (flash / express / standard / on_the_way / eco).
+    /// Validated against the active tier catalog at creation. Maps to
+    /// <c>delivery_tiers.code</c> in the DB; production wiring resolves
+    /// code → UUID before persisting.
+    /// </summary>
+    public string? TierId { get; init; }
+
+    public GeoPoint? PickupLocation { get; init; }
+    public GeoPoint? DropoffLocation { get; init; }
     public string? PickupAddress { get; init; }
     public string? DropoffAddress { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
@@ -143,6 +189,34 @@ public class DeliveryRequest
 public class CreateRequestBody
 {
     public string? Description { get; set; }
+
+    /// <summary>
+    /// Raw STT output preserved for audit. The Client edits this on the
+    /// confirmation screen — the edited text lands in <see cref="Description"/>.
+    /// </summary>
+    public string? Transcription { get; set; }
+
+    /// <summary>
+    /// Object-storage URL of the original voice recording. MUST start with
+    /// https://, http://, or s3:// — mirrors the DB CHECK constraint.
+    /// </summary>
+    public string? AudioUrl { get; set; }
+
+    /// <summary>
+    /// Photos attached to the request. Each entry must be an absolute URL
+    /// (https / http / s3). MVP cap: 10 photos per request.
+    /// </summary>
+    public List<string>? Photos { get; set; }
+
+    /// <summary>
+    /// Selected tier code (e.g. "flash", "express"). Required at creation
+    /// per T-backend-007 — the single-screen tier picker means we always
+    /// know the tier when the request lands.
+    /// </summary>
+    public string? TierId { get; set; }
+
+    public GeoPoint? PickupLocation { get; set; }
+    public GeoPoint? DropoffLocation { get; set; }
     public string? PickupAddress { get; set; }
     public string? DropoffAddress { get; set; }
 
@@ -161,6 +235,12 @@ public class DeliveryRequestDto
     public required string ClientId { get; init; }
     public required string Status { get; init; }
     public required string Description { get; init; }
+    public string? Transcription { get; init; }
+    public string? AudioUrl { get; init; }
+    public IReadOnlyList<string> Photos { get; init; } = Array.Empty<string>();
+    public string? TierId { get; init; }
+    public GeoPoint? PickupLocation { get; init; }
+    public GeoPoint? DropoffLocation { get; init; }
     public string? PickupAddress { get; init; }
     public string? DropoffAddress { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
