@@ -332,10 +332,16 @@ builder.Services.Configure<ZoneOptions>(builder.Configuration.GetSection(ZoneOpt
 builder.Services.AddSingleton<IGeoIndex, InMemoryGeoIndex>();
 builder.Services.AddSingleton<InMemoryPendingOffersStore>();
 builder.Services.AddSingleton<IPendingOffersStore>(sp => sp.GetRequiredService<InMemoryPendingOffersStore>());
+// Realtime "new offer" fan-out for T-backend-010. Stubbed in-memory for
+// the MVP (records dispatched events so tests can assert delivery);
+// production wiring will swap for a SignalR / realtime-service client
+// behind the same IOfferRealtimeNotifier contract.
+builder.Services.AddSingleton<InMemoryOfferRealtimeNotifier>();
+builder.Services.AddSingleton<IOfferRealtimeNotifier>(sp => sp.GetRequiredService<InMemoryOfferRealtimeNotifier>());
+
 // Auto-offline notifications flow through the shared push pipeline
-// (T-backend-022) so they obey the same transport and retry rules as
-// any other trigger; tests override this with InMemoryAutoOfflineNotifier
-// when they want to inspect what was sent without spinning up FCM.
+// (T-backend-022, T-backend-023) so they obey the same transport and retry
+// rules as any other trigger.
 builder.Services.AddSingleton<IAutoOfflineNotifier, PushAutoOfflineNotifier>();
 builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();
 builder.Services.AddHostedService<AutoOfflineSweeper>();
