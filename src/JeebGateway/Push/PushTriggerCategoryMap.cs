@@ -25,6 +25,9 @@ public static class PushTriggerCategoryMap
         NotificationTrigger.Promotion => NotificationCategory.Promotions,
         // KYC is a regulatory/identity event — always delivered, like OTP.
         NotificationTrigger.KycUpdate => null,
+        // Auto-offline tells the Jeeber why their offer feed went silent;
+        // muting it would leave them confused about lost earnings.
+        NotificationTrigger.AutoOffline => null,
         _ => throw new ArgumentOutOfRangeException(nameof(trigger), trigger, "Unknown trigger")
     };
 

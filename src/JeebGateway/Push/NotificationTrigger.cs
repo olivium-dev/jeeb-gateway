@@ -14,5 +14,6 @@ public enum NotificationTrigger
     Chat,
     KycUpdate,
     RatingReminder,
-    Promotion
+    Promotion,
+    AutoOffline
 }
