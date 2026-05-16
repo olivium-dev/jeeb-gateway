@@ -34,11 +34,7 @@ public class ScheduledDeliveryTests
         var client = ClientFor(factory, "sched-create-client");
 
         var scheduledAt = clock.GetUtcNow() + TimeSpan.FromHours(2);
-        var resp = await client.PostAsJsonAsync("/requests", new
-        {
-            description = "Pick up groceries at 2pm",
-            scheduledAt
-        });
+        var resp = await client.PostAsJsonAsync("/requests", ValidBody("Pick up groceries at 2pm", scheduledAt));
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
         var dto = await resp.Content.ReadFromJsonAsync<RequestDto>();
@@ -52,7 +48,7 @@ public class ScheduledDeliveryTests
         var factory = NewFactory(out _);
         var client = ClientFor(factory, "sched-immediate-client");
 
-        var resp = await client.PostAsJsonAsync("/requests", new { description = "now" });
+        var resp = await client.PostAsJsonAsync("/requests", ValidBody("now"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
         var dto = await resp.Content.ReadFromJsonAsync<RequestDto>();
@@ -66,20 +62,14 @@ public class ScheduledDeliveryTests
         var factory = NewFactory(out var clock);
         var client = ClientFor(factory, "sched-past-client");
 
-        var pastResp = await client.PostAsJsonAsync("/requests", new
-        {
-            description = "back in time",
-            scheduledAt = clock.GetUtcNow() - TimeSpan.FromMinutes(1)
-        });
+        var pastResp = await client.PostAsJsonAsync("/requests",
+            ValidBody("back in time", clock.GetUtcNow() - TimeSpan.FromMinutes(1)));
         pastResp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         var problem = await pastResp.Content.ReadFromJsonAsync<ProblemDetails>();
         problem!.Title.Should().Contain("future");
 
-        var nowResp = await client.PostAsJsonAsync("/requests", new
-        {
-            description = "right now",
-            scheduledAt = clock.GetUtcNow()
-        });
+        var nowResp = await client.PostAsJsonAsync("/requests",
+            ValidBody("right now", clock.GetUtcNow()));
         nowResp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 
@@ -164,21 +154,15 @@ public class ScheduledDeliveryTests
             ids.Add(await CreateScheduled(client, $"sched {i}", scheduledAt));
         }
 
-        var blocked = await client.PostAsJsonAsync("/requests", new
-        {
-            description = "blocked-by-cap",
-            scheduledAt
-        });
+        var blocked = await client.PostAsJsonAsync("/requests",
+            ValidBody("blocked-by-cap", scheduledAt));
         blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
 
         var cancel = await client.DeleteAsync($"/requests/{ids[0]}");
         cancel.StatusCode.Should().Be(HttpStatusCode.NoContent);
 
-        var freshOk = await client.PostAsJsonAsync("/requests", new
-        {
-            description = "after-cancel",
-            scheduledAt
-        });
+        var freshOk = await client.PostAsJsonAsync("/requests",
+            ValidBody("after-cancel", scheduledAt));
         freshOk.StatusCode.Should().Be(HttpStatusCode.Created);
 
         // Activator must NOT subsequently activate a cancelled scheduled row.
@@ -226,20 +210,14 @@ public class ScheduledDeliveryTests
 
         for (var i = 0; i < 3; i++)
         {
-            (await client.PostAsJsonAsync("/requests", new
-            {
-                description = $"sched {i}",
-                scheduledAt
-            })).StatusCode.Should().Be(HttpStatusCode.Created);
+            (await client.PostAsJsonAsync("/requests",
+                ValidBody($"sched {i}", scheduledAt))).StatusCode.Should().Be(HttpStatusCode.Created);
         }
 
         // Fourth scheduled MUST hit the BR-9 cap exactly like an immediate
         // request would — scheduled is in the ActiveStates set.
-        var blocked = await client.PostAsJsonAsync("/requests", new
-        {
-            description = "fourth scheduled",
-            scheduledAt
-        });
+        var blocked = await client.PostAsJsonAsync("/requests",
+            ValidBody("fourth scheduled", scheduledAt));
         blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
 
         var problem = await blocked.Content.ReadFromJsonAsync<ProblemDetails>();
@@ -279,11 +257,27 @@ public class ScheduledDeliveryTests
         string description,
         DateTimeOffset scheduledAt)
     {
-        var resp = await client.PostAsJsonAsync("/requests", new { description, scheduledAt });
+        var resp = await client.PostAsJsonAsync("/requests", ValidBody(description, scheduledAt));
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
         var dto = await resp.Content.ReadFromJsonAsync<RequestDto>();
         return dto!.Id;
     }
+
+    /// <summary>
+    /// Builds a request body that satisfies the T-backend-007 validators
+    /// (tier + structured pickup/dropoff). Tests in this file care about
+    /// the scheduled-delivery contract; they're not exercising the new
+    /// field-level validators, so a single canned valid pickup/dropoff
+    /// pair is sufficient.
+    /// </summary>
+    private static object ValidBody(string description, DateTimeOffset? scheduledAt = null) => new
+    {
+        description,
+        tierId = "flash",
+        pickupLocation = new { lat = 24.7136, lng = 46.6753 },
+        dropoffLocation = new { lat = 24.6309, lng = 46.7194 },
+        scheduledAt
+    };
 
     private static Task ActivateOnce(WebApplicationFactory<Program> factory)
     {

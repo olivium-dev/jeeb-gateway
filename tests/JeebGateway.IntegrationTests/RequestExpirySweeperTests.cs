@@ -81,7 +81,13 @@ public class RequestExpirySweeperTests
         // The expiry frees a BR-9 active slot — a fresh request must
         // therefore be acceptable even if the Client previously sat at
         // the cap. (Sanity-check that expired truly is terminal.)
-        var followUp = await client.PostAsJsonAsync("/requests", new { description = "re-request" });
+        var followUp = await client.PostAsJsonAsync("/requests", new
+        {
+            description = "re-request",
+            tierId = "flash",
+            pickupLocation = new { lat = 24.7, lng = 46.7 },
+            dropoffLocation = new { lat = 24.6, lng = 46.7 }
+        });
         followUp.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
@@ -178,7 +184,16 @@ public class RequestExpirySweeperTests
 
     private static async Task<string> CreateRequest(HttpClient client, string description)
     {
-        var resp = await client.PostAsJsonAsync("/requests", new { description });
+        // T-backend-007 added tier + locations as required fields. The
+        // sweeper tests don't care about those values — a single canned
+        // pickup/dropoff pair is enough to land a row in the store.
+        var resp = await client.PostAsJsonAsync("/requests", new
+        {
+            description,
+            tierId = "flash",
+            pickupLocation = new { lat = 24.7136, lng = 46.6753 },
+            dropoffLocation = new { lat = 24.6309, lng = 46.7194 }
+        });
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
         var dto = await resp.Content.ReadFromJsonAsync<RequestDto>();
         return dto!.Id;

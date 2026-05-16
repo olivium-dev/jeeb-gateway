@@ -52,7 +52,10 @@ public class DualRoleIdentityTests : IClassFixture<WebApplicationFactory<Program
         // Client endpoint: create a delivery request.
         var clientResp = await client.PostAsJsonAsync("/requests", new
         {
-            description = "Same person, wearing the Client hat."
+            description = "Same person, wearing the Client hat.",
+            tierId = "flash",
+            pickupLocation = new { lat = 24.7, lng = 46.7 },
+            dropoffLocation = new { lat = 24.6, lng = 46.7 }
         });
         clientResp.StatusCode.Should().Be(HttpStatusCode.Created);
 

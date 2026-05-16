@@ -10,13 +10,20 @@ using Xunit;
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// BR-9 (T-backend-049): a Client may have at most 3 active (non-delivered)
-/// delivery requests. Request creation must return 409 once the cap is hit.
+/// BR-9 (T-backend-049 + T-backend-007): a Client may have at most 3
+/// active (non-delivered) delivery requests. Request creation must return
+/// 409 once the cap is hit.
 ///
-/// These tests share a single WebApplicationFactory and therefore a single
-/// in-memory store across cases. Each test scopes itself by using a unique
-/// <c>X-User-Id</c> so the per-client active counts don't bleed between
-/// tests.
+/// T-backend-007 added tier + structured location fields as required on
+/// the create body — the <see cref="ValidPayload"/> helper builds the
+/// minimum valid payload so each test stays focused on the BR-9 contract
+/// rather than the new field-level validators (covered separately in
+/// <see cref="DeliveryRequestCreationTests"/>).
+///
+/// These tests share a single WebApplicationFactory and therefore a
+/// single in-memory store across cases. Each test scopes itself by using
+/// a unique <c>X-User-Id</c> so the per-client active counts don't bleed
+/// between tests.
 /// </summary>
 public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 {
@@ -32,12 +39,10 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
     {
         var client = ClientFor("br9-happy-path");
 
-        var resp = await client.PostAsJsonAsync("/requests", new
-        {
-            description = "Pick up groceries from Carrefour",
-            pickupAddress = "Carrefour Mall of Arabia",
-            dropoffAddress = "Riyadh, Diplomatic Quarter"
-        });
+        var resp = await client.PostAsJsonAsync("/requests", ValidPayload(
+            description: "Pick up groceries from Carrefour",
+            pickupAddress: "Carrefour Mall of Arabia",
+            dropoffAddress: "Riyadh, Diplomatic Quarter"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
         var body = await resp.Content.ReadFromJsonAsync<RequestDto>();
@@ -52,10 +57,7 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
     {
         var anon = _factory.CreateClient();
 
-        var resp = await anon.PostAsJsonAsync("/requests", new
-        {
-            description = "anonymous"
-        });
+        var resp = await anon.PostAsJsonAsync("/requests", ValidPayload("anonymous"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
@@ -65,10 +67,7 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
     {
         var client = ClientFor("br9-blank-desc");
 
-        var resp = await client.PostAsJsonAsync("/requests", new
-        {
-            description = "   "
-        });
+        var resp = await client.PostAsJsonAsync("/requests", ValidPayload(description: "   "));
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
@@ -80,11 +79,11 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
 
         for (var i = 0; i < 3; i++)
         {
-            var ok = await client.PostAsJsonAsync("/requests", new { description = $"req {i}" });
+            var ok = await client.PostAsJsonAsync("/requests", ValidPayload($"req {i}"));
             ok.StatusCode.Should().Be(HttpStatusCode.Created, $"creation {i} should succeed under the cap");
         }
 
-        var blocked = await client.PostAsJsonAsync("/requests", new { description = "fourth" });
+        var blocked = await client.PostAsJsonAsync("/requests", ValidPayload("fourth"));
         blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
 
         var problem = await blocked.Content.ReadFromJsonAsync<ProblemDetails>();
@@ -100,15 +99,15 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
 
         for (var i = 0; i < 3; i++)
         {
-            (await alice.PostAsJsonAsync("/requests", new { description = $"alice {i}" }))
+            (await alice.PostAsJsonAsync("/requests", ValidPayload($"alice {i}")))
                 .StatusCode.Should().Be(HttpStatusCode.Created);
         }
 
         // Alice is now at the cap; Bob is unaffected.
-        var bobResp = await bob.PostAsJsonAsync("/requests", new { description = "bob 1" });
+        var bobResp = await bob.PostAsJsonAsync("/requests", ValidPayload("bob 1"));
         bobResp.StatusCode.Should().Be(HttpStatusCode.Created);
 
-        var aliceBlocked = await alice.PostAsJsonAsync("/requests", new { description = "alice 4" });
+        var aliceBlocked = await alice.PostAsJsonAsync("/requests", ValidPayload("alice 4"));
         aliceBlocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
     }
 
@@ -120,7 +119,7 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
         var created = new List<string>();
         for (var i = 0; i < 3; i++)
         {
-            var ok = await client.PostAsJsonAsync("/requests", new { description = $"req {i}" });
+            var ok = await client.PostAsJsonAsync("/requests", ValidPayload($"req {i}"));
             ok.StatusCode.Should().Be(HttpStatusCode.Created);
             var dto = await ok.Content.ReadFromJsonAsync<RequestDto>();
             created.Add(dto!.Id);
@@ -130,7 +129,7 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
         // free a slot — only states strictly before 'delivered' count.
         await MoveToStatus(created[0], "delivered");
 
-        var fourth = await client.PostAsJsonAsync("/requests", new { description = "now allowed" });
+        var fourth = await client.PostAsJsonAsync("/requests", ValidPayload("now allowed"));
         fourth.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
@@ -142,7 +141,7 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
         var created = new List<string>();
         for (var i = 0; i < 3; i++)
         {
-            var ok = await client.PostAsJsonAsync("/requests", new { description = $"req {i}" });
+            var ok = await client.PostAsJsonAsync("/requests", ValidPayload($"req {i}"));
             ok.StatusCode.Should().Be(HttpStatusCode.Created);
             var dto = await ok.Content.ReadFromJsonAsync<RequestDto>();
             created.Add(dto!.Id);
@@ -150,7 +149,7 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
 
         await MoveToStatus(created[1], "cancelled");
 
-        var replacement = await client.PostAsJsonAsync("/requests", new { description = "replacement" });
+        var replacement = await client.PostAsJsonAsync("/requests", ValidPayload("replacement"));
         replacement.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
@@ -167,7 +166,7 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
         var created = new List<string>();
         for (var i = 0; i < 3; i++)
         {
-            var ok = await client.PostAsJsonAsync("/requests", new { description = $"req {i}" });
+            var ok = await client.PostAsJsonAsync("/requests", ValidPayload($"req {i}"));
             ok.StatusCode.Should().Be(HttpStatusCode.Created);
             var dto = await ok.Content.ReadFromJsonAsync<RequestDto>();
             created.Add(dto!.Id);
@@ -177,7 +176,7 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
         // still apply because that state is strictly before 'delivered'.
         await MoveToStatus(created[0], activeStatus);
 
-        var blocked = await client.PostAsJsonAsync("/requests", new { description = "should be blocked" });
+        var blocked = await client.PostAsJsonAsync("/requests", ValidPayload("should be blocked"));
         blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
     }
 
@@ -192,6 +191,25 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
         client.DefaultRequestHeaders.Add("X-User-Roles", "customer");
         return client;
     }
+
+    /// <summary>
+    /// Minimum body that satisfies T-backend-007 validation — tier +
+    /// pickup/dropoff coordinates. Tests targeting BR-9 don't care about
+    /// the values, only that they're present and valid so the request
+    /// reaches the store layer.
+    /// </summary>
+    private static object ValidPayload(
+        string description,
+        string? pickupAddress = null,
+        string? dropoffAddress = null) => new
+    {
+        description,
+        tierId = "flash",
+        pickupLocation = new { lat = 24.7136, lng = 46.6753 },
+        dropoffLocation = new { lat = 24.6309, lng = 46.7194 },
+        pickupAddress,
+        dropoffAddress
+    };
 
     private async Task MoveToStatus(string requestId, string status)
     {
