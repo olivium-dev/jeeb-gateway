@@ -179,6 +179,24 @@ public class InMemoryUsersStore : IUsersStore
         }
     }
 
+    public Task<UserProfile?> GrantRoleAsync(string userId, string role, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_users.TryGetValue(userId, out var existing))
+            {
+                return Task.FromResult<UserProfile?>(null);
+            }
+
+            if (!existing.Roles.Any(r => string.Equals(r, role, StringComparison.OrdinalIgnoreCase)))
+            {
+                existing.Roles.Add(role);
+                existing.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+            return Task.FromResult<UserProfile?>(Clone(existing));
+        }
+    }
+
     public Task<UserProfile?> UnsuspendAsync(string userId, string adminId, CancellationToken ct)
     {
         lock (_writeLock)
