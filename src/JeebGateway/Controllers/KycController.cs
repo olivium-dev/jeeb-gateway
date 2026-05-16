@@ -162,6 +162,7 @@ public class KycController : ControllerBase
         RejectionReason = s.RejectionReason,
         VehicleType = s.VehicleType,
         VehicleRegistration = s.VehicleRegistration,
-        LivenessPassed = s.LivenessPassed
+        LivenessPassed = s.LivenessPassed,
+        ResubmitSteps = s.ResubmitSteps.ToList()
     };
 }
