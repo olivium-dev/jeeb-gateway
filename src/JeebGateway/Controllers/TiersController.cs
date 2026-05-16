@@ -1,5 +1,8 @@
+using JeebGateway.Services;
+using JeebGateway.Services.Clients;
 using JeebGateway.Tiers;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
 
@@ -16,16 +19,29 @@ namespace JeebGateway.Controllers;
 public class TiersController : ControllerBase
 {
     private readonly ITiersStore _store;
+    private readonly IDeliveryServiceClient _upstream;
+    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
 
-    public TiersController(ITiersStore store)
+    public TiersController(
+        ITiersStore store,
+        IDeliveryServiceClient upstream,
+        IOptionsMonitor<UpstreamFeatureFlags> flags)
     {
         _store = store;
+        _upstream = upstream;
+        _flags = flags;
     }
 
     [HttpGet]
     [ProducesResponseType(typeof(DeliveryTiersListResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> List(CancellationToken ct)
     {
+        if (_flags.CurrentValue.Delivery)
+        {
+            var upstreamTiers = await _upstream.ListTiersAsync(ct);
+            return Ok(new DeliveryTiersListResponse { Items = upstreamTiers });
+        }
+
         var tiers = await _store.ListAsync(ct);
         return Ok(new DeliveryTiersListResponse
         {

@@ -1,6 +1,9 @@
 using JeebGateway.Kyc;
+using JeebGateway.Services;
+using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
 
@@ -31,10 +34,17 @@ public class KycController : ControllerBase
     };
 
     private readonly IKycService _service;
+    private readonly IAuthServiceClient _upstream;
+    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
 
-    public KycController(IKycService service)
+    public KycController(
+        IKycService service,
+        IAuthServiceClient upstream,
+        IOptionsMonitor<UpstreamFeatureFlags> flags)
     {
         _service = service;
+        _upstream = upstream;
+        _flags = flags;
     }
 
     [HttpPost("submit")]
@@ -84,14 +94,32 @@ public class KycController : ControllerBase
             return BadRequest(selfieError);
         }
 
+        var idFrontDoc = await ToInput(idFrontInput!, ct);
+        var idBackDoc = await ToInput(idBackInput!, ct);
+        var selfieDoc = await ToInput(selfieInput!, ct);
+
+        if (_flags.CurrentValue.Auth)
+        {
+            var upstreamResponse = await _upstream.SubmitKycAsync(new KycSubmitUpstreamRequest
+            {
+                UserId = userId,
+                VehicleType = vehicleType!.Trim(),
+                VehicleRegistration = vehicleRegistration!.Trim(),
+                IdFront = new KycFile { FileName = idFrontDoc.FileName, ContentType = idFrontDoc.ContentType, Bytes = idFrontDoc.Bytes },
+                IdBack = new KycFile { FileName = idBackDoc.FileName, ContentType = idBackDoc.ContentType, Bytes = idBackDoc.Bytes },
+                Selfie = new KycFile { FileName = selfieDoc.FileName, ContentType = selfieDoc.ContentType, Bytes = selfieDoc.Bytes }
+            }, ct);
+            return StatusCode(StatusCodes.Status202Accepted, upstreamResponse);
+        }
+
         var input = new KycSubmissionInput
         {
             UserId = userId,
             VehicleType = vehicleType!.Trim(),
             VehicleRegistration = vehicleRegistration!.Trim(),
-            IdFront = await ToInput(idFrontInput!, ct),
-            IdBack = await ToInput(idBackInput!, ct),
-            Selfie = await ToInput(selfieInput!, ct)
+            IdFront = idFrontDoc,
+            IdBack = idBackDoc,
+            Selfie = selfieDoc
         };
 
         var submission = await _service.SubmitAsync(input, ct);

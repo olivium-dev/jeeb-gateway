@@ -1,3 +1,4 @@
+using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
 
@@ -78,7 +79,42 @@ public static class ServiceClientExtensions
         //             (currently IRequestsStore + InMemoryRequestsStore)
         AddNamedDownstreamClient(services, config, "delivery", "Services:Delivery:BaseUrl");
 
+        // T-migrate-gateway-proxies (PR-A): typed clients on top of the named
+        // HttpClient registrations above. Hand-coded against verified upstream
+        // routes pending NSwag-generated artifacts. Each controller checks the
+        // matching FeatureFlags:UseUpstream:* flag and falls back to the
+        // legacy in-memory implementation when false.
+        services.AddHttpClient<IAuthServiceClient, AuthServiceClient>(http =>
+            BindBaseAddress(http, config, "Services:Auth"));
+        services.AddHttpClient<IDeliveryServiceClient, DeliveryServiceClient>(http =>
+            BindBaseAddress(http, config, "Services:Delivery"));
+        services.AddHttpClient<IMatchingServiceClient, MatchingServiceClient>(http =>
+            BindBaseAddress(http, config, "Services:Matching"));
+        services.AddHttpClient<IGeolocationServiceClient, GeolocationServiceClient>(http =>
+            BindBaseAddress(http, config, "Services:Geolocation"));
+
         return services;
+    }
+
+    /// <summary>
+    /// Accepts either a bare URL at <c>{section}</c> (e.g. "Services:Auth")
+    /// or a nested <c>{section}:BaseUrl</c> key. The bare URL form is the
+    /// shape used by the PR-A appsettings additions; the nested form is the
+    /// pre-existing one used by named clients above. Both produce the same
+    /// trailing-slash-corrected BaseAddress.
+    /// </summary>
+    private static void BindBaseAddress(HttpClient http, IConfiguration config, string section)
+    {
+        var direct = config[section];
+        var nested = config[$"{section}:BaseUrl"];
+        var baseUrl = !string.IsNullOrWhiteSpace(direct) ? direct : nested;
+        if (!string.IsNullOrWhiteSpace(baseUrl))
+        {
+            // Trailing slash is required so relative paths like "api/jeeb/..."
+            // resolve under the configured prefix rather than replacing it.
+            http.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+        }
+        http.Timeout = TimeSpan.FromSeconds(30);
     }
 
     /// <summary>
