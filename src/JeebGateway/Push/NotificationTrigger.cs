@@ -15,5 +15,8 @@ public enum NotificationTrigger
     KycUpdate,
     RatingReminder,
     Promotion,
-    AutoOffline
+    AutoOffline,
+    RatingRevealed,
+    LowRatingFlag,
+    DisputeUpdate
 }

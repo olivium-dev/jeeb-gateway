@@ -24,6 +24,8 @@ using JeebGateway.Tokens;
 using JeebGateway.Tracking;
 using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
+using JeebGateway.Calls;
+using JeebGateway.Wallet;
 using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -524,6 +526,46 @@ builder.Services.AddSingleton<ILocationStore, InMemoryLocationStore>();
 builder.Services.AddSingleton<IChatMessageStore, InMemoryChatMessageStore>();
 builder.Services.AddSingleton<IChatPresenceTracker, InMemoryChatPresenceTracker>();
 builder.Services.AddSingleton<IChatDispatcher, ChatDispatcher>();
+
+// Wave 2-3 backend services.
+// T-backend-017: Weekly settlement batch processing.
+builder.Services.Configure<JeebGateway.Financials.WeeklySettlementOptions>(
+    builder.Configuration.GetSection(JeebGateway.Financials.WeeklySettlementOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore, JeebGateway.Financials.InMemorySettlementBatchStore>();
+builder.Services.AddHostedService<JeebGateway.Financials.WeeklySettlementBatch>();
+
+// T-backend-018: Earnings aggregation API.
+builder.Services.AddSingleton<JeebGateway.Financials.IEarningsAggregationService, JeebGateway.Financials.EarningsAggregationService>();
+
+// T-backend-019: Earnings PDF statement generation.
+builder.Services.AddSingleton<JeebGateway.Financials.IEarningsPdfGenerator, JeebGateway.Financials.SimpleEarningsPdfGenerator>();
+
+// T-backend-033: Admin finance dashboard API.
+builder.Services.AddSingleton<JeebGateway.Financials.IAdminFinanceDashboardService, JeebGateway.Financials.AdminFinanceDashboardService>();
+
+// T-backend-021: 7-day rating reveal cron job.
+builder.Services.Configure<JeebGateway.Ratings.RatingRevealOptions>(
+    builder.Configuration.GetSection(JeebGateway.Ratings.RatingRevealOptions.SectionName));
+builder.Services.AddHostedService<JeebGateway.Ratings.RatingRevealJob>();
+
+// T-backend-040: Low-rating auto-flag and admin notification.
+builder.Services.Configure<JeebGateway.Ratings.LowRatingFlagOptions>(
+    builder.Configuration.GetSection(JeebGateway.Ratings.LowRatingFlagOptions.SectionName));
+builder.Services.AddHostedService<JeebGateway.Ratings.LowRatingAutoFlag>();
+
+// T-backend-037: Chat data retention and cleanup job.
+builder.Services.Configure<JeebGateway.Chat.ChatRetentionOptions>(
+    builder.Configuration.GetSection(JeebGateway.Chat.ChatRetentionOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Chat.IChatRetentionStore, JeebGateway.Chat.InMemoryChatRetentionStore>();
+builder.Services.AddHostedService<JeebGateway.Chat.ChatRetentionSweeper>();
+
+// T-backend-044: Masked phone calls via Twilio proxy (Phase 2).
+builder.Services.Configure<JeebGateway.Calls.MaskedCallOptions>(
+    builder.Configuration.GetSection(JeebGateway.Calls.MaskedCallOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Calls.IMaskedCallService, JeebGateway.Calls.MaskedCallService>();
+
+// T-backend-045: In-app wallet and top-up (Phase 2).
+builder.Services.AddSingleton<JeebGateway.Wallet.IInAppWalletService, JeebGateway.Wallet.InAppWalletService>();
 
 // Resilient Whisper integration (T-backend-036).
 // Per-attempt 10s timeout enforced via linked CTS inside ResilientTranscriptionService;
