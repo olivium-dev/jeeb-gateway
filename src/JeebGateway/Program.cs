@@ -9,6 +9,7 @@ using JeebGateway.Matching;
 using JeebGateway.Middleware;
 using JeebGateway.NotificationPreferences;
 using JeebGateway.ProhibitedItems;
+using JeebGateway.Ratings;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.ProhibitedItems.Scanner;
 using JeebGateway.Push;
@@ -298,6 +299,17 @@ builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requ
 // Delivery cancellation pipeline (T-backend-024 / JEEB-42).
 builder.Services.AddSingleton<IJeeberRestrictionStore, InMemoryJeeberRestrictionStore>();
 builder.Services.AddSingleton<ICancellationService, CancellationService>();
+
+// Mutual-blind ratings (T-backend-020 / JEEB-38).
+//
+// Reveal logic is pure (BlindRevealPolicy): both parties' ratings stay
+// blind until both sides submit OR the 7-day window closes (after which
+// the row is locked as no-rating, with whatever exists already visible).
+// The canonical rating row is captured by score-taking-service via the
+// typed IScoreServiceClient registered in ServiceClientExtensions.
+builder.Services.Configure<RatingOptions>(builder.Configuration.GetSection(RatingOptions.SectionName));
+builder.Services.AddSingleton<IRatingStore, InMemoryRatingStore>();
+builder.Services.AddSingleton<IRatingService, RatingService>();
 
 // OTP handover verification + admin escalation (T-backend-015 / JEEB-33).
 builder.Services.Configure<OtpHandoverOptions>(builder.Configuration.GetSection(OtpHandoverOptions.SectionName));

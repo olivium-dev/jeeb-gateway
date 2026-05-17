@@ -79,6 +79,11 @@ public static class ServiceClientExtensions
         //             (currently IRequestsStore + InMemoryRequestsStore)
         AddNamedDownstreamClient(services, config, "delivery", "Services:Delivery:BaseUrl");
 
+        // T-backend-020 (JEEB-38): score-taking-service captures the canonical
+        // per-party rating once the gateway's mutual-blind state machine
+        // accepts it. Reveal logic remains in JeebGateway.Ratings.
+        AddNamedDownstreamClient(services, config, "score-taking", "Services:ScoreTaking:BaseUrl");
+
         // T-migrate-gateway-proxies (PR-A): typed clients on top of the named
         // HttpClient registrations above. Hand-coded against verified upstream
         // routes pending NSwag-generated artifacts. Each controller checks the
@@ -92,6 +97,13 @@ public static class ServiceClientExtensions
             BindBaseAddress(http, config, "Services:Matching"));
         services.AddHttpClient<IGeolocationServiceClient, GeolocationServiceClient>(http =>
             BindBaseAddress(http, config, "Services:Geolocation"));
+
+        // T-backend-020 (JEEB-38): typed client over score-taking-service.
+        // The named "score-taking" registration above carries BaseAddress +
+        // the standard resilience pipeline; this typed registration hangs
+        // off it via the BFF aggregation pattern.
+        services.AddHttpClient<IScoreServiceClient, ScoreServiceClient>(http =>
+            BindBaseAddress(http, config, "Services:ScoreTaking"));
 
         return services;
     }
