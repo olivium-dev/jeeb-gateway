@@ -2,6 +2,7 @@ using System.Text;
 using JeebGateway.Admin;
 using JeebGateway.Availability;
 using JeebGateway.Chat;
+using JeebGateway.Disputes;
 using JeebGateway.Extensions;
 using JeebGateway.Financials;
 using JeebGateway.Kyc;
@@ -385,6 +386,25 @@ builder.Services.AddSingleton<IFlaggedRequestStore, InMemoryFlaggedRequestStore>
 // db/migrations/0005.admin_actions on the same transaction as the
 // mutation so the audit trail can never diverge from entity state.
 builder.Services.AddSingleton<IAdminAuditLog, InMemoryAdminAuditLog>();
+
+// Dispute reporting pipeline (T-backend-025 / JEEB-43).
+//
+// POST /deliveries/{id}/dispute files a dispute (one open at a time per
+// delivery). GET /disputes lists the caller's filed disputes; GET /disputes/{id}
+// returns a single dispute (filer-or-admin visibility). PUT /admin/disputes/{id}/resolve
+// transitions the case through filed → under_review → resolved | dismissed
+// and pushes the outcome to the filer.
+//
+// Photos are referenced by URL (already-uploaded via upload-service), the
+// same pattern parcel photos use on DeliveryRequest.Photos. Push fan-out
+// rides the unified IPushNotificationService pipeline.
+//
+// Production swap: InMemoryDisputeStore → Postgres-backed store colocated
+// with admin moderation tables; the photo-URL set acquires upload-service
+// signed-URL validation; resolution-text rendering moves to dynamic-template
+// via the BFF NSwag client.
+builder.Services.AddSingleton<IDisputeStore, InMemoryDisputeStore>();
+builder.Services.AddSingleton<IDisputeService, DisputeService>();
 
 // Jeeber KYC submission pipeline (T-backend-004 / JEEB-22).
 //
