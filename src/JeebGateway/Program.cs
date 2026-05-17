@@ -3,6 +3,7 @@ using JeebGateway.Admin;
 using JeebGateway.Availability;
 using JeebGateway.Chat;
 using JeebGateway.Extensions;
+using JeebGateway.Financials;
 using JeebGateway.Kyc;
 using JeebGateway.Matching;
 using JeebGateway.Middleware;
@@ -11,6 +12,7 @@ using JeebGateway.ProhibitedItems;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.ProhibitedItems.Scanner;
 using JeebGateway.Push;
+using JeebGateway.Services.Clients;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
 using JeebGateway.Requests.OtpHandover;
@@ -209,6 +211,35 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 //
 // Track per-controller migrations against GATEWAY-REMEDIATION-PLAN.md.
 // ===========================================================================
+
+// Cash settlement + receipt API (T-backend-016 / JEEB-34).
+//
+// SettlementService re-computes the Jeeb fee (commission % per tier +
+// 2% insurance, min 1000 LBP) from the row's tier and posts a single
+// ledger entry to wallet-service via WalletServiceClient. The in-memory
+// fallback for IWalletServiceClient lets MVP / integration tests run
+// without a downstream wallet instance — the HTTP-backed client takes
+// over when Services:Wallet:BaseUrl is configured. The settlement store
+// stays in-memory pending the T-backend-bff-wallet migration to the
+// generated wallet-service client.
+builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
+builder.Services.AddSingleton<InMemoryWalletServiceClient>();
+var walletBaseUrl = builder.Configuration["Services:Wallet:BaseUrl"]
+    ?? builder.Configuration["Services:Wallet"];
+if (!string.IsNullOrWhiteSpace(walletBaseUrl))
+{
+    builder.Services.AddHttpClient<IWalletServiceClient, WalletServiceClient>(http =>
+    {
+        http.BaseAddress = new Uri(walletBaseUrl!.TrimEnd('/') + "/");
+        http.Timeout = TimeSpan.FromSeconds(30);
+    });
+}
+else
+{
+    builder.Services.AddSingleton<IWalletServiceClient>(sp =>
+        sp.GetRequiredService<InMemoryWalletServiceClient>());
+}
+builder.Services.AddSingleton<ISettlementService, SettlementService>();
 
 // Notification preferences (T-backend-031).
 // In-memory implementation for MVP; swap for an NSwag-generated notification-service
