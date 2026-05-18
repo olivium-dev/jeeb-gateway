@@ -1,0 +1,181 @@
+# SPDX-License-Identifier: Proprietary
+# JEB-467 / T-BE-001 — OpenAPI fragment for Schemathesis fuzzing.
+#
+# Scope: the two OTP endpoints exposed by jeeb-gateway. This is a FRAGMENT,
+# not the full gateway spec — it intentionally omits /v1/auth/refresh because
+# fuzzing it would consume refresh-token state across runs and pollute
+# Pact contract tests. Rate-limited endpoints are NOT excluded here at the
+# spec level; they are excluded at runner level (see schemathesis-runner.sh).
+#
+# When the auth-service repo is checked out, replace this fragment with the
+# generated NSwag swagger.json from the gateway. Until then this fragment
+# is the canonical fuzz target.
+openapi: 3.0.3
+info:
+  title: jeeb-gateway · OTP endpoints
+  version: "1.0.0"
+  description: |
+    Backend OTP sign-in (T-BE-001). Locked per audit comment #14764:
+      - ttlSeconds = 300 (5 min, read from downstream ExpiresAt)
+      - 3-attempt downstream cap with Resend recovery (no time window)
+      - Phone normalized to E.164 (region=LB) before any processing
+      - PII: only bcrypt(phone, 12) ever leaves the gateway in logs/spans
+      - Frozen ProblemDetails type set:
+          invalid_otp, too_many_attempts, invalid_country, rate_limited, invalid_phone
+servers:
+  - url: http://localhost:8080
+    description: schemathesis target — wired up by schemathesis-runner.sh
+paths:
+  /v1/auth/otp/request:
+    post:
+      operationId: requestOtp
+      summary: Request an OTP for a Lebanese phone number
+      tags: [otp]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OtpRequestRequest"
+      responses:
+        "200":
+          description: OTP request accepted; SMS in flight via one-time-password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OtpRequestResponse"
+        "202":
+          description: OTP request queued (async-queued variant)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OtpRequestResponse"
+        "400":
+          description: Bad input (invalid_phone / invalid_country)
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "429":
+          description: Rate-limited (rate_limited)
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: RFC6585 §4
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+  /v1/auth/otp/verify:
+    post:
+      operationId: verifyOtp
+      summary: Verify an OTP code and issue JWT pair
+      tags: [otp]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OtpVerifyRequest"
+      responses:
+        "200":
+          description: OTP verified; JWT pair issued (HS512; access 1h / refresh 30d)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OtpVerifyResponse"
+        "401":
+          description: Invalid OTP (invalid_otp) OR refresh-token replay
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "429":
+          description: Downstream 3-attempt cap reached (too_many_attempts)
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+components:
+  schemas:
+    OtpRequestRequest:
+      type: object
+      required: [phone]
+      properties:
+        phone:
+          type: string
+          description: Phone in any common Lebanese format; gateway normalizes to E.164 (region=LB).
+          minLength: 4
+          maxLength: 32
+          example: "+96179123456"
+    OtpRequestResponse:
+      type: object
+      required: [ttlSeconds]
+      properties:
+        ttlSeconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          description: TTL in seconds. AC1 locks this at 300.
+          example: 300
+    OtpVerifyRequest:
+      type: object
+      required: [phone, code]
+      properties:
+        phone:
+          type: string
+          minLength: 4
+          maxLength: 32
+        code:
+          type: string
+          pattern: "^[0-9]{6}$"
+          example: "123456"
+    OtpVerifyResponse:
+      type: object
+      required: [accessToken, refreshToken, user]
+      properties:
+        accessToken:
+          type: string
+          description: JWT, HS512, exp = 1h
+        refreshToken:
+          type: string
+          description: JWT, HS512, exp = 30d, family-rotated
+        user:
+          $ref: "#/components/schemas/User"
+    User:
+      type: object
+      required: [userId, activeRole, availableRoles]
+      properties:
+        userId:
+          type: string
+          format: uuid
+        activeRole:
+          type: string
+          enum: [customer, rider]
+        availableRoles:
+          type: array
+          items:
+            type: string
+            enum: [customer, rider]
+    ProblemDetails:
+      type: object
+      description: RFC 7807. Audit-frozen `type` set.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          enum:
+            - "urn:jeeb:otp:invalid_otp"
+            - "urn:jeeb:otp:too_many_attempts"
+            - "urn:jeeb:otp:invalid_country"
+            - "urn:jeeb:otp:rate_limited"
+            - "urn:jeeb:otp:invalid_phone"
+        title:
+          type: string
+        status:
+          type: integer
+          enum: [400, 401, 429]
+        detail:
+          type: string
+        instance:
+          type: string

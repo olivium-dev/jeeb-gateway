@@ -46,6 +46,17 @@
       URL-group health checks for downstream services in Extensions/HealthCheckExtensions.cs.
     -->
     <PackageReference Include="AspNetCore.HealthChecks.Uris" Version="8.0.1" />
+
+    <!--
+      T-BE-001 / JEB-471 — OTP sign-in path.
+      libphonenumber-csharp normalises +961 / 00961 / 0079... → canonical E.164
+      and surfaces the RegionCode used by AC-PhoneNorm to reject non-LB phones.
+      Phone hashing uses HMAC-SHA256 from System.Security.Cryptography with a
+      server-side pepper (JeebJwt:PhonePepper). PR #32 review B1 — the prior
+      bcrypt-on-phone implementation generated a random salt per call so the
+      phone.hash tag could not correlate; HMAC-SHA256 restores determinism.
+    -->
+    <PackageReference Include="libphonenumber-csharp" Version="8.13.51" />
   </ItemGroup>
 
 </Project>

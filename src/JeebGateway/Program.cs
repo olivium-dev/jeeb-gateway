@@ -1,5 +1,6 @@
 using System.Text;
 using JeebGateway.Admin;
+using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Availability;
 using JeebGateway.Chat;
 using JeebGateway.Disputes;
@@ -29,6 +30,7 @@ using JeebGateway.Wallet;
 using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.IdentityModel.Tokens;
@@ -41,6 +43,53 @@ var builder = WebApplication.CreateBuilder(args);
 // ---------------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Forwarded headers (PR #32 review B2).
+//
+// jeeb-gateway sits behind a load balancer / reverse proxy that terminates
+// TLS and forwards the original client address via X-Forwarded-For. Without
+// UseForwardedHeaders, HttpContext.Connection.RemoteIpAddress is the LB's
+// internal address, which collapses the per-IP rate limit
+// (AC-GatewayRateLimit) to a single bucket shared across every client.
+//
+// Trusted-proxy allowlist comes from ForwardedHeaders:KnownProxies in
+// configuration (env / sealed secret). Empty list intentionally leaves the
+// default "loopback only" trust so misconfigured deploys do not silently
+// trust attacker-supplied X-Forwarded-For.
+// ---------------------------------------------------------------------------
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders =
+        ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    // Drop the default "exactly one hop" restriction — production traffic
+    // routes through cloudflared + Swarm ingress (≥ 2 hops). The KnownProxies
+    // / KnownNetworks allowlist below is the actual trust boundary.
+    options.ForwardLimit = null;
+
+    var knownProxies = builder.Configuration
+        .GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? Array.Empty<string>();
+    foreach (var proxy in knownProxies)
+    {
+        if (System.Net.IPAddress.TryParse(proxy, out var ip))
+        {
+            options.KnownProxies.Add(ip);
+        }
+    }
+
+    var knownNetworks = builder.Configuration
+        .GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>() ?? Array.Empty<string>();
+    foreach (var cidr in knownNetworks)
+    {
+        var parts = cidr.Split('/', 2);
+        if (parts.Length == 2
+            && System.Net.IPAddress.TryParse(parts[0], out var net)
+            && int.TryParse(parts[1], out var prefix))
+        {
+            options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(net, prefix));
+        }
+    }
+});
 
 // ---------------------------------------------------------------------------
 // Edge security (T-backend-032): CORS, rate limiting, JWT bearer, headers.
@@ -147,6 +196,9 @@ builder.Services.AddOpenTelemetry()
         tracing
             .AddAspNetCoreInstrumentation()
             .AddHttpClientInstrumentation()
+            // T-BE-001 / JEB-471 — OTP sign-in spans
+            // (auth.otp.request / auth.otp.verify / auth.refresh).
+            .AddSource(OtpSignInActivitySource.Name)
             .AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
     })
     .WithMetrics(metrics =>
@@ -476,6 +528,30 @@ builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
 builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 
+// ===========================================================================
+// T-BE-001 / JEB-471 — OTP sign-in via olivium-dev/one-time-password
+// (Twilio) + olivium-dev/user-management (sibling T-BE-001a).
+//
+// Registers:
+//   - JeebJwtOptions / GatewayRateLimitOptions / UserManagementApiOptions /
+//     ServiceOtpApiOptions  (Options pattern + ValidateOnStart)
+//   - IPhoneNormalizer (libphonenumber-csharp, region=LB)
+//   - IPhoneHasher (HMAC-SHA256 with JeebJwt:PhonePepper; PR #32 review B1)
+//   - IOtpRequestRateLimiter (sliding-minute 10/IP + 3/phone)
+//   - IRefreshTokenFamilyStore (in-memory; production swap → Postgres)
+//   - IJeebJwtIssuer (HS512, access 1h, refresh 30d, family rotation)
+//   - IUserManagementPhoneIdentityClient (fail-closed shim until T-BE-001a)
+//
+// AuthOtpController routes:
+//   POST /v1/auth/otp/request
+//   POST /v1/auth/otp/verify
+//   POST /v1/auth/refresh
+//
+// Frozen ProblemDetails type set (AC-ProblemTypeSet):
+//   invalid_otp, too_many_attempts, invalid_country, rate_limited, invalid_phone
+// ===========================================================================
+builder.Services.AddJeebOtpSignIn(builder.Configuration, builder.Environment);
+
 // Jeeber availability toggle + auto-offline sweeper (T-backend-023).
 // In-memory implementations stand in for the durable Postgres row, the
 // Redis geo index, and the offer-service withdrawal hook described in
@@ -592,6 +668,38 @@ builder.Services.AddHealthChecks()
 // ---------------------------------------------------------------------------
 
 var app = builder.Build();
+
+// PR #32 review B2 — must run FIRST so every downstream middleware (rate
+// limiter, OTP per-IP partition, auth-correlation logs) sees the real client
+// IP from X-Forwarded-For instead of the LB's internal address.
+app.UseForwardedHeaders();
+
+// PR #32 review B2 — single-process rate limiter warning.
+//
+// The OTP-request rate limiter (IOtpRequestRateLimiter) is registered as a
+// per-process ConcurrentDictionary in OtpSignInServiceCollectionExtensions.
+// With N replicas the per-phone cap effectively becomes 3 × N / minute and
+// the per-IP cap 10 × N / minute — both bypassable. Production MUST swap
+// the limiter to a Redis-backed implementation (ZADD ts; ZREMRANGEBYSCORE 0
+// (now-60s); ZCARD), gated by the GatewayRateLimit:RedisConnectionString
+// config key.
+//
+// TODO(JEB-37 follow-up): Postgres- / Redis-backed IOtpRequestRateLimiter.
+// Tracked in qa/t-be-001/ac-mapping.md AC-GatewayRateLimit.
+{
+    var rateLimitRedis = app.Configuration["GatewayRateLimit:RedisConnectionString"];
+    if (!app.Environment.IsDevelopment()
+        && !app.Environment.EnvironmentName.Equals("Testing", StringComparison.OrdinalIgnoreCase)
+        && string.IsNullOrWhiteSpace(rateLimitRedis))
+    {
+        app.Logger.LogWarning(
+            "OTP rate limiter is in-memory but environment is '{Env}' (non-Development). " +
+            "With multiple replicas the per-phone / per-IP caps scale with replica count and are bypassable. " +
+            "Set GatewayRateLimit:RedisConnectionString to enable the Redis-backed limiter " +
+            "(PR #32 review B2 / AC-GatewayRateLimit).",
+            app.Environment.EnvironmentName);
+    }
+}
 
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseMiddleware<RequestValidationMiddleware>();
