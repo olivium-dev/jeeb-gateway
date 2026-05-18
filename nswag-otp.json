@@ -1,0 +1,23 @@
+{
+  "runtime": "Net90",
+  "documentGenerator": {
+    "fromDocument": {
+      "url": "src/JeebGateway/contracts/one-time-password.openapi.json",
+      "output": null
+    }
+  },
+  "codeGenerators": {
+    "openApiToCSharpClient": {
+      "namespace": "JeebGateway.Services.Clients",
+      "className": "ServiceOTPClient",
+      "generateClientInterfaces": true,
+      "injectHttpClient": true,
+      "useHttpClientCreationMethod": false,
+      "jsonLibrary": "SystemTextJson",
+      "generateDtoTypes": true,
+      "generateOptionalPropertiesAsNullable": true,
+      "generateNullableReferenceTypes": true,
+      "output": "src/JeebGateway/Services/Clients/ServiceOTPClient.cs"
+    }
+  }
+}
