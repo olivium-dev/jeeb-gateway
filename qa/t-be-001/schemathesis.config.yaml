@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Proprietary
+# JEB-467 / T-BE-001 — Schemathesis runtime config.
+# See schemathesis-runner.sh for the full execution command.
+#
+# Hypothesis settings tuned for CI: 200 examples is the sweet spot between
+# coverage (well above the default 100) and CI time (~3-5 min per endpoint
+# against a real instance). The 2000 ms deadline matches AC7's p99 budget of
+# 800 ms with 2.5× headroom for Docker-on-CI overhead.
+hypothesis:
+  max_examples: 200
+  deadline: 2000   # ms — per AC7 (p99 ≤ 800ms, ×2.5 CI overhead)
+  derandomize: false
+  print_blob: true
+  verbosity: normal
+
+checks:
+  - not_a_server_error            # any 5xx is a bug
+  - status_code_conformance       # response status code must be in the spec
+  - content_type_conformance      # response Content-Type must match spec
+  - response_schema_conformance   # response body must validate against schema
+  - response_headers_conformance  # response headers must match spec (Retry-After on 429)
+
+# Endpoint-specific overrides.
+# /v1/auth/otp/request is rate-limited at 10/IP/min — Schemathesis with
+# max_examples=200 will trip the limiter from example ~11 onward. We tell
+# the runner to treat 429s on /otp/request as a valid response, NOT a bug.
+# /v1/auth/otp/verify is NOT rate-limited (per audit, downstream 3-attempt cap
+# is per-OTP, not per-rate-window) so we keep strict checks there.
+operations:
+  - method: POST
+    path: /v1/auth/otp/request
+    # 429 is a documented response in the spec — Schemathesis already accepts
+    # this via status_code_conformance. Explicit comment for the reviewer.
+    additional_checks: []
+
+# Stateful testing: disabled. The OTP flow is inherently 2-step (request →
+# verify) and Schemathesis stateful mode would invent invalid transitions
+# that we already cover deterministically in xUnit
+# (see CrossStoryMobileContractTests.MobileFlow_FullSequence_BackendContractHolds).
+stateful: false

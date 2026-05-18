@@ -1,5 +1,6 @@
 using System.Text;
 using JeebGateway.Admin;
+using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Availability;
 using JeebGateway.Chat;
 using JeebGateway.Disputes;
@@ -147,6 +148,9 @@ builder.Services.AddOpenTelemetry()
         tracing
             .AddAspNetCoreInstrumentation()
             .AddHttpClientInstrumentation()
+            // T-BE-001 / JEB-471 — OTP sign-in spans
+            // (auth.otp.request / auth.otp.verify / auth.refresh).
+            .AddSource(OtpSignInActivitySource.Name)
             .AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
     })
     .WithMetrics(metrics =>
@@ -475,6 +479,30 @@ builder.Services.TryAddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
 builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
+
+// ===========================================================================
+// T-BE-001 / JEB-471 — OTP sign-in via olivium-dev/one-time-password
+// (Twilio) + olivium-dev/user-management (sibling T-BE-001a).
+//
+// Registers:
+//   - JeebJwtOptions / GatewayRateLimitOptions / UserManagementApiOptions /
+//     ServiceOtpApiOptions  (Options pattern + ValidateOnStart)
+//   - IPhoneNormalizer (libphonenumber-csharp, region=LB)
+//   - IPhoneHasher (BCrypt workFactor=12)
+//   - IOtpRequestRateLimiter (sliding-minute 10/IP + 3/phone)
+//   - IRefreshTokenFamilyStore (in-memory; production swap → Postgres)
+//   - IJeebJwtIssuer (HS512, access 1h, refresh 30d, family rotation)
+//   - IUserManagementPhoneIdentityClient (fail-closed shim until T-BE-001a)
+//
+// AuthOtpController routes:
+//   POST /v1/auth/otp/request
+//   POST /v1/auth/otp/verify
+//   POST /v1/auth/refresh
+//
+// Frozen ProblemDetails type set (AC-ProblemTypeSet):
+//   invalid_otp, too_many_attempts, invalid_country, rate_limited, invalid_phone
+// ===========================================================================
+builder.Services.AddJeebOtpSignIn(builder.Configuration);
 
 // Jeeber availability toggle + auto-offline sweeper (T-backend-023).
 // In-memory implementations stand in for the durable Postgres row, the

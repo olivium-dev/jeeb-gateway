@@ -46,6 +46,17 @@
       URL-group health checks for downstream services in Extensions/HealthCheckExtensions.cs.
     -->
     <PackageReference Include="AspNetCore.HealthChecks.Uris" Version="8.0.1" />
+
+    <!--
+      T-BE-001 / JEB-471 — OTP sign-in path.
+      libphonenumber-csharp normalises +961 / 00961 / 0079... → canonical E.164
+      and surfaces the RegionCode used by AC-PhoneNorm to reject non-LB phones.
+      BCrypt.Net-Next produces the workFactor=12 phone hash that is the ONLY
+      observable form of the phone in logs and OTel span attributes
+      (AC-PhonePIIHash).
+    -->
+    <PackageReference Include="libphonenumber-csharp" Version="8.13.51" />
+    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
   </ItemGroup>
 
 </Project>
