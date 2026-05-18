@@ -38,3 +38,36 @@ public class OtpLockedResponse
     public required DateTimeOffset LockedAt { get; init; }
     public required string Reason { get; init; }
 }
+
+/// <summary>
+/// Response from GET /v1/deliveries/{id}/otp (T-BE-019 / JEB-55).
+/// Confirms that a 4-digit OTP has been triggered via the external
+/// one-time-password service with ApplicationId delivery_handover_{deliveryId}.
+/// </summary>
+public class OtpTriggerResponse
+{
+    public required string DeliveryId { get; init; }
+    public required bool Triggered { get; init; }
+    public required string Message { get; init; }
+}
+
+/// <summary>
+/// Request body for POST /v1/deliveries/{id}/otp/verify (T-BE-019 / JEB-55).
+/// Contains the 4-digit code to verify against the external one-time-password service.
+/// </summary>
+public class OtpHandoverVerificationRequest
+{
+    public required string Code { get; init; }
+}
+
+/// <summary>
+/// Response from POST /v1/deliveries/{id}/otp/verify on successful verification
+/// (T-BE-019 / JEB-55). Confirms the delivery has transitioned to 'done' status.
+/// </summary>
+public class OtpHandoverVerificationResponse
+{
+    public required string DeliveryId { get; init; }
+    public required bool Verified { get; init; }
+    public required string Status { get; init; }
+    public required string Message { get; init; }
+}

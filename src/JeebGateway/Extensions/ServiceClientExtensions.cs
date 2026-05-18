@@ -84,6 +84,10 @@ public static class ServiceClientExtensions
         // accepts it. Reveal logic remains in JeebGateway.Ratings.
         AddNamedDownstreamClient(services, config, "score-taking", "Services:ScoreTaking:BaseUrl");
 
+        // T-BE-019 (JEB-55): one-time-password service for delivery handover OTP
+        // ApplicationId pattern: delivery_handover_{deliveryId}
+        AddNamedDownstreamClient(services, config, "otp", "Services:ServiceOTP:BaseUrl");
+
         // T-migrate-gateway-proxies (PR-A): typed clients on top of the named
         // HttpClient registrations above. Hand-coded against verified upstream
         // routes pending NSwag-generated artifacts. Each controller checks the
@@ -104,6 +108,11 @@ public static class ServiceClientExtensions
         // off it via the BFF aggregation pattern.
         services.AddHttpClient<IScoreServiceClient, ScoreServiceClient>(http =>
             BindBaseAddress(http, config, "Services:ScoreTaking"));
+
+        // T-BE-019 (JEB-55): typed client over one-time-password service.
+        // Used for 4-digit handover OTPs with ApplicationId delivery_handover_{deliveryId}
+        services.AddHttpClient<IServiceOTPClient, ServiceOTPClient>(http =>
+            BindBaseAddress(http, config, "Services:ServiceOTP"));
 
         return services;
     }

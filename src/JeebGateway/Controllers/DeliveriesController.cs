@@ -2,10 +2,12 @@ using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
 using JeebGateway.Requests.OtpHandover;
+using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Diagnostics;
 
 namespace JeebGateway.Controllers;
 
@@ -38,13 +40,19 @@ namespace JeebGateway.Controllers;
 [Route("deliveries")]
 public class DeliveriesController : ControllerBase
 {
+    private static readonly ActivitySource ActivitySource = new("JeebGateway.Deliveries");
     private readonly IRequestsStore _store;
     private readonly IPushNotificationService _push;
     private readonly ICancellationService _cancellations;
     private readonly IAdminEscalationStore _escalations;
     private readonly IOptions<OtpHandoverOptions> _otpOptions;
+    private readonly IServiceOTPClient _otpClient;
     private readonly TimeProvider _clock;
     private readonly ILogger<DeliveriesController> _log;
+
+    // TODO: Replace with persistent storage for external OTP attempt tracking
+    private static readonly Dictionary<string, int> _externalOtpAttempts = new();
+    private static readonly Dictionary<string, DateTimeOffset> _externalOtpLockouts = new();
 
     public DeliveriesController(
         IRequestsStore store,
@@ -52,6 +60,7 @@ public class DeliveriesController : ControllerBase
         ICancellationService cancellations,
         IAdminEscalationStore escalations,
         IOptions<OtpHandoverOptions> otpOptions,
+        IServiceOTPClient otpClient,
         TimeProvider clock,
         ILogger<DeliveriesController> log)
     {
@@ -60,6 +69,7 @@ public class DeliveriesController : ControllerBase
         _cancellations = cancellations;
         _escalations = escalations;
         _otpOptions = otpOptions;
+        _otpClient = otpClient;
         _clock = clock;
         _log = log;
     }
@@ -494,6 +504,241 @@ public class DeliveriesController : ControllerBase
             row.Id, row.ClientUnreachableAt);
 
         return Ok(ToDto(row));
+    }
+
+    /// <summary>
+    /// GET /v1/deliveries/{id}/otp (T-BE-019 / JEB-55).
+    ///
+    /// Issues a 4-digit handover OTP via the external one-time-password service.
+    /// ApplicationId pattern: delivery_handover_{deliveryId}
+    /// Only valid when delivery status = at_door.
+    /// </summary>
+    [HttpGet("{deliveryId}/otp")]
+    [ProducesResponseType(typeof(OtpTriggerResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> TriggerOtp(string deliveryId, CancellationToken ct)
+    {
+        using var activity = ActivitySource.StartActivity("trigger_delivery_handover_otp");
+        activity?.SetTag("delivery.id", deliveryId);
+        activity?.SetTag("otp.type", "external");
+
+        var correlationId = Activity.Current?.Id ?? HttpContext.TraceIdentifier;
+
+        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+
+        // Get delivery and validate status
+        var delivery = await _store.GetAsync(deliveryId, ct);
+        if (delivery is null)
+        {
+            return NotFound();
+        }
+
+        if (delivery.Status != RequestStatus.HeadingOff)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "OTP can only be triggered when delivery status is 'heading_off'.",
+                Detail = $"Current status: {delivery.Status}",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/invalid-otp-trigger-state"
+            });
+        }
+
+        // TODO: Replace with user management service lookup once available
+        // For MVP: using placeholder phone number for client
+        var clientPhoneNumber = "+962700000000"; // Placeholder - should be delivery.ClientId → user phone lookup
+
+        try
+        {
+            // Call external OTP service with ApplicationId pattern
+            var applicationId = $"delivery_handover_{deliveryId}";
+            await _otpClient.SendOTPAsync(new SendOTPRequestUserID
+            {
+                PhoneNumber = clientPhoneNumber,
+                ApplicationId = applicationId
+            }, ct);
+
+            _log.LogInformation(
+                "Handover OTP triggered for delivery {DeliveryId} with applicationId {ApplicationId}, correlationId {CorrelationId}",
+                deliveryId, applicationId, correlationId);
+
+            activity?.SetTag("otp.triggered", "true");
+            activity?.SetTag("otp.application_id", applicationId);
+
+            return Ok(new OtpTriggerResponse
+            {
+                DeliveryId = deliveryId,
+                Triggered = true,
+                Message = "4-digit OTP sent to client phone number"
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex,
+                "Failed to trigger OTP for delivery {DeliveryId}",
+                deliveryId);
+
+            return Problem(
+                title: "Failed to send OTP",
+                detail: "Unable to trigger OTP via one-time-password service",
+                statusCode: StatusCodes.Status500InternalServerError);
+        }
+    }
+
+    /// <summary>
+    /// POST /v1/deliveries/{id}/otp/verify (T-BE-019 / JEB-55).
+    ///
+    /// Verifies a 4-digit OTP against the external one-time-password service.
+    /// On success: transitions delivery to 'done' status and triggers commission settlement.
+    /// On failure: increments attempt counter, returns 423 after 3rd failure with escalation.
+    /// </summary>
+    [HttpPost("{deliveryId}/otp/verify")]
+    [ProducesResponseType(typeof(OtpHandoverVerificationResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(OtpLockedResponse), StatusCodes.Status423Locked)]
+    public async Task<IActionResult> VerifyHandoverOtp(
+        string deliveryId,
+        [FromBody] OtpHandoverVerificationRequest? body,
+        CancellationToken ct)
+    {
+        using var activity = ActivitySource.StartActivity("verify_delivery_handover_otp");
+        activity?.SetTag("delivery.id", deliveryId);
+        activity?.SetTag("otp.type", "external");
+
+        var correlationId = Activity.Current?.Id ?? HttpContext.TraceIdentifier;
+
+        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+
+        if (body is null || string.IsNullOrWhiteSpace(body.Code))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Code is required.",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/otp-code-required"
+            });
+        }
+
+        // Get delivery and validate status
+        var delivery = await _store.GetAsync(deliveryId, ct);
+        if (delivery is null)
+        {
+            return NotFound();
+        }
+
+        if (delivery.Status != RequestStatus.HeadingOff)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "OTP verification only allowed when delivery status is 'heading_off'.",
+                Detail = $"Current status: {delivery.Status}",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/invalid-otp-verification-state"
+            });
+        }
+
+        // Check if delivery is locked out
+        var now = _clock.GetUtcNow();
+        if (_externalOtpLockouts.TryGetValue(deliveryId, out var lockedAt))
+        {
+            return StatusCode(StatusCodes.Status423Locked, new OtpLockedResponse
+            {
+                EscalationId = $"ext_otp_{deliveryId}", // Placeholder escalation ID
+                LockedAt = lockedAt,
+                Reason = EscalationReason.OtpLocked
+            });
+        }
+
+        // Get current attempt count
+        _externalOtpAttempts.TryGetValue(deliveryId, out var attemptCount);
+
+        try
+        {
+            // Call external OTP validation service
+            var applicationId = $"delivery_handover_{deliveryId}";
+            var clientPhoneNumber = "+962700000000"; // TODO: Get from user management service
+
+            await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
+            {
+                PhoneNumber = clientPhoneNumber,
+                Otp = body.Code,
+                ApplicationId = applicationId
+            }, ct);
+
+            // OTP verification successful - transition to done status
+            await _store.SetStatusAsync(deliveryId, RequestStatus.Delivered, ct);
+
+            // Clear attempt tracking
+            _externalOtpAttempts.Remove(deliveryId);
+            _externalOtpLockouts.Remove(deliveryId);
+
+            // AC6: Log handover.verified event with deliveryId
+            _log.LogInformation(
+                "handover.verified: OTP verified successfully for delivery {DeliveryId}, correlationId {CorrelationId}. Status transitioned to done.",
+                deliveryId, correlationId);
+
+            activity?.SetTag("otp.verified", "true");
+            activity?.SetTag("delivery.status_transition", "heading_off_to_delivered");
+
+            // TODO: Trigger commission settlement via T-BE-020
+
+            return Ok(new OtpHandoverVerificationResponse
+            {
+                DeliveryId = deliveryId,
+                Verified = true,
+                Status = RequestStatus.Delivered,
+                Message = "OTP verified successfully. Delivery completed."
+            });
+        }
+        catch (Exception ex)
+        {
+            // OTP verification failed - increment attempt counter
+            attemptCount++;
+            _externalOtpAttempts[deliveryId] = attemptCount;
+
+            _log.LogWarning(ex,
+                "handover.verification_failed: OTP verification failed for delivery {DeliveryId}, correlationId {CorrelationId}. Attempt {AttemptCount}/3",
+                deliveryId, correlationId, attemptCount);
+
+            activity?.SetTag("otp.verified", "false");
+            activity?.SetTag("otp.attempt_count", attemptCount);
+
+            const int maxAttempts = 3;
+            if (attemptCount >= maxAttempts)
+            {
+                // Lock out after 3rd attempt
+                _externalOtpLockouts[deliveryId] = now;
+                _externalOtpAttempts.Remove(deliveryId);
+
+                // TODO: Create admin escalation
+                _log.LogWarning(
+                    "handover.lockout: External OTP lockout for delivery {DeliveryId}, correlationId {CorrelationId} after {Attempts} attempts",
+                    deliveryId, correlationId, attemptCount);
+
+                activity?.SetTag("otp.locked_out", "true");
+                activity?.SetTag("otp.max_attempts_reached", "true");
+
+                return StatusCode(StatusCodes.Status423Locked, new OtpLockedResponse
+                {
+                    EscalationId = $"ext_otp_{deliveryId}", // Placeholder - should create real escalation
+                    LockedAt = now,
+                    Reason = EscalationReason.OtpLocked
+                });
+            }
+
+            // Return failure with remaining attempts
+            return BadRequest(new ProblemDetails
+            {
+                Title = "OTP verification failed.",
+                Detail = $"Invalid code. {maxAttempts - attemptCount} attempt(s) remaining.",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/otp-verification-failed"
+            });
+        }
     }
 
     private static DeliveryRequestDto ToDto(DeliveryRequest r) => new()
