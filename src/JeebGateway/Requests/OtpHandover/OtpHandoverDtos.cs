@@ -54,10 +54,15 @@ public class OtpTriggerResponse
 /// <summary>
 /// Request body for POST /v1/deliveries/{id}/otp/verify (T-BE-019 / JEB-55).
 /// Contains the 4-digit code to verify against the external one-time-password service.
+///
+/// <c>Code</c> is intentionally nullable so the controller owns the
+/// "missing code" error shape (otp-code-required) instead of letting model
+/// binding produce an RFC 9110-flavored 400. PR review B9 demands a
+/// stable ProblemDetails type for QA assertions.
 /// </summary>
 public class OtpHandoverVerificationRequest
 {
-    public required string Code { get; init; }
+    public string? Code { get; init; }
 }
 
 /// <summary>

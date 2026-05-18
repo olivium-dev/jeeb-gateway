@@ -110,9 +110,22 @@ public static class ServiceClientExtensions
             BindBaseAddress(http, config, "Services:ScoreTaking"));
 
         // T-BE-019 (JEB-55): typed client over one-time-password service.
-        // Used for 4-digit handover OTPs with ApplicationId delivery_handover_{deliveryId}
-        services.AddHttpClient<IServiceOTPClient, ServiceOTPClient>(http =>
-            BindBaseAddress(http, config, "Services:ServiceOTP"));
+        // Used for 4-digit handover OTPs with ApplicationId delivery_handover_{deliveryId}.
+        // NSwag-generated client takes (string baseUrl, HttpClient http) — we resolve
+        // baseUrl via factory and let HttpClient be the configured/named pipeline. The
+        // resilience pipeline and timeout are still applied through the named "otp"
+        // registration above so callers inherit retry/circuit-breaker behavior.
+        services.AddHttpClient<IServiceOTPClient, ServiceOTPClient>((sp, http) =>
+            {
+                BindBaseAddress(http, config, "Services:ServiceOTP");
+            })
+            .AddTypedClient<IServiceOTPClient>((http, sp) =>
+            {
+                var baseUrl = config["Services:ServiceOTP:BaseUrl"]
+                    ?? config["Services:ServiceOTP"]
+                    ?? "http://localhost:5005";
+                return new ServiceOTPClient(baseUrl, http);
+            });
 
         return services;
     }
