@@ -19,13 +19,13 @@
     <!--
       JEB-471 / T-BE-001 — additional packages for the OTP sign-in
       QA-PRE test suite ported from updated-requirements/qa-scaffolding/JEB-467/.
-      libphonenumber + bcrypt mirror the production deps so the AC-PhoneNorm
-      and AC-PhonePIIHash theories assert on the same library behaviour.
+      libphonenumber mirrors the production dep so AC-PhoneNorm theories
+      assert on the same library behaviour. Phone-hash determinism is checked
+      directly against HmacShaPhoneHasher (PR #32 review B1).
     -->
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="8.10.0" />
     <PackageReference Include="OpenTelemetry" Version="1.9.0" />
     <PackageReference Include="libphonenumber-csharp" Version="8.13.51" />
-    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.1.2" />
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
   </ItemGroup>

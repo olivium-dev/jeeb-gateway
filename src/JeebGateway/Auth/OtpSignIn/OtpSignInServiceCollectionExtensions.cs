@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Auth.OtpSignIn;
@@ -9,17 +10,42 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// </summary>
 public static class OtpSignInServiceCollectionExtensions
 {
+    /// <summary>
+    /// PR #32 review B3 — refuses any SigningKey starting with this prefix
+    /// when the host environment is NOT Development. The dev key shipped in
+    /// <c>appsettings.Development.json</c> satisfies <c>[MinLength(64)]</c>
+    /// but must never be the active key in QA / staging / production.
+    /// </summary>
+    public const string DevOnlySigningKeyPrefix = "dev-only-";
+
     public static IServiceCollection AddJeebOtpSignIn(
         this IServiceCollection services,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        IHostEnvironment hostEnvironment)
     {
         // Options + startup validation. AC5: SigningKey MUST come from env;
-        // we reject < 32 bytes at startup so misconfigured deploys never
-        // get past readiness.
+        // data-annotation MinLength(64) is the baseline; ValidateOnStart fires
+        // the dev-only guard below before the host accepts traffic.
         services
             .AddOptions<JeebJwtOptions>()
             .Bind(configuration.GetSection(JeebJwtOptions.SectionName))
             .ValidateDataAnnotations()
+            // PR #32 review B3 — fail-on-startup if a dev-shaped signing key
+            // or pepper is active outside Development. Catches the
+            // appsettings.Development.json values being accidentally inherited.
+            .Validate(
+                opts => hostEnvironment.IsDevelopment()
+                        || !opts.SigningKey.StartsWith(DevOnlySigningKeyPrefix, StringComparison.Ordinal),
+                $"JeebJwt:SigningKey must not start with '{DevOnlySigningKeyPrefix}' outside the " +
+                "Development environment. Load the production key from env / sealed secret. " +
+                "(PR #32 review B3.)")
+            .Validate(
+                opts => hostEnvironment.IsDevelopment()
+                        || !opts.PhonePepper.StartsWith(DevOnlySigningKeyPrefix, StringComparison.Ordinal),
+                $"JeebJwt:PhonePepper must not start with '{DevOnlySigningKeyPrefix}' outside the " +
+                "Development environment. Load the production pepper from env / sealed secret. " +
+                "(PR #32 review B1+B3 symmetry — a known pepper lets an attacker pre-compute the " +
+                "phone-hash for the entire +961xxxxxxxx keyspace.)")
             .ValidateOnStart();
 
         services
@@ -41,7 +67,10 @@ public static class OtpSignInServiceCollectionExtensions
 
         // Phone primitives — singletons (stateless).
         services.TryAddSingleton<IPhoneNormalizer, LibPhoneNumberPhoneNormalizer>();
-        services.TryAddSingleton<IPhoneHasher,     BcryptPhoneHasher>();
+        // PR #32 review B1: replaced BcryptPhoneHasher (random salt → no
+        // correlation) with HMAC-SHA256(pepper, phone) for deterministic
+        // hashes. Pepper is bound from JeebJwt:PhonePepper (env-only).
+        services.TryAddSingleton<IPhoneHasher,     HmacShaPhoneHasher>();
 
         // Rate limiter — singleton, partitioned state per phone/IP.
         services.TryAddSingleton<IOtpRequestRateLimiter, SlidingMinuteOtpRequestRateLimiter>();

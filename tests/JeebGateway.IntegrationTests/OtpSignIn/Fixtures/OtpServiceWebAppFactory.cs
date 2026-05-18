@@ -80,6 +80,10 @@ public sealed class OtpServiceWebAppFactory : WebApplicationFactory<Program>
                 ["JeebJwt:Audience"]        = "jeeb-mobile",
                 ["JeebJwt:AccessTtlSeconds"]  = "3600",
                 ["JeebJwt:RefreshTtlSeconds"] = "2592000",
+                // PR #32 review B1 — HMAC-SHA256 phone-hash pepper. Production
+                // loads this from env / sealed secret; tests pin a fixed value
+                // so hashes are deterministic across runs.
+                ["JeebJwt:PhonePepper"]     = "test-phone-pepper-must-be-at-least-thirty-two-bytes-for-HMAC-SHA256",
 
                 // GatewayRateLimit — audit #14764.
                 ["GatewayRateLimit:PerPhonePerMin"] = "3",

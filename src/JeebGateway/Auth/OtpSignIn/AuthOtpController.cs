@@ -19,8 +19,10 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// <c>JeebGateway.csproj</c> NoWarn block).
 ///
 /// Phone PII discipline (AC-PhonePIIHash):
-///   - The raw phone is normalised, then BCrypt-hashed; only the hash
-///     appears in logs, span tags, and metrics labels.
+///   - The raw phone is normalised, then HMAC-SHA256-hashed with a server
+///     pepper (PR #32 review B1 — bcrypt was non-deterministic and broke
+///     correlation); only the hash appears in logs, span tags, and metrics
+///     labels.
 ///   - Even on failure paths (invalid_phone, invalid_country), the response
 ///     body NEVER echoes the raw phone — only a generic message.
 /// </summary>
@@ -118,11 +120,11 @@ public sealed class AuthOtpController : ControllerBase
             _log.LogError(ex,
                 "auth.otp.request downstream send failed phoneHash={PhoneHash}", phoneHash);
             span?.SetStatus(ActivityStatusCode.Error);
-            span?.SetTag(OtpSignInActivitySource.TagOtpOutcome, "downstream_error");
+            span?.SetTag(OtpSignInActivitySource.TagOtpOutcome, "service_unavailable");
             return BuildProblem(
                 status: StatusCodes.Status502BadGateway,
-                type:   OtpProblemTypes.BaseUri + "/downstream",
-                title:  "Downstream service unavailable",
+                type:   OtpProblemTypes.ServiceUnavailable,
+                title:  "Service temporarily unavailable",
                 detail: "Could not request an OTP at this time. Try again shortly.");
         }
 
@@ -189,11 +191,11 @@ public sealed class AuthOtpController : ControllerBase
             _log.LogError(ex,
                 "auth.otp.verify downstream validate failed phoneHash={PhoneHash}", phoneHash);
             span?.SetStatus(ActivityStatusCode.Error);
-            span?.SetTag(OtpSignInActivitySource.TagOtpOutcome, "downstream_error");
+            span?.SetTag(OtpSignInActivitySource.TagOtpOutcome, "service_unavailable");
             return BuildProblem(
                 status: StatusCodes.Status502BadGateway,
-                type:   OtpProblemTypes.BaseUri + "/downstream",
-                title:  "Downstream service unavailable",
+                type:   OtpProblemTypes.ServiceUnavailable,
+                title:  "Service temporarily unavailable",
                 detail: "Could not validate the OTP at this time.");
         }
 
@@ -214,11 +216,11 @@ public sealed class AuthOtpController : ControllerBase
             // Dev/local without the sibling story wired in — fail closed.
             _log.LogError(ex,
                 "auth.otp.verify user-management not configured phoneHash={PhoneHash}", phoneHash);
-            span?.SetTag(OtpSignInActivitySource.TagOtpOutcome, "user_mgmt_unavailable");
+            span?.SetTag(OtpSignInActivitySource.TagOtpOutcome, "service_unavailable");
             return BuildProblem(
                 status: StatusCodes.Status503ServiceUnavailable,
-                type:   OtpProblemTypes.BaseUri + "/user_mgmt_unavailable",
-                title:  "Identity service unavailable",
+                type:   OtpProblemTypes.ServiceUnavailable,
+                title:  "Service temporarily unavailable",
                 detail: "The user identity service is not yet configured.");
         }
         catch (Exception ex)
@@ -226,11 +228,11 @@ public sealed class AuthOtpController : ControllerBase
             _log.LogError(ex,
                 "auth.otp.verify user-management call failed phoneHash={PhoneHash}", phoneHash);
             span?.SetStatus(ActivityStatusCode.Error);
-            span?.SetTag(OtpSignInActivitySource.TagOtpOutcome, "downstream_error");
+            span?.SetTag(OtpSignInActivitySource.TagOtpOutcome, "service_unavailable");
             return BuildProblem(
                 status: StatusCodes.Status502BadGateway,
-                type:   OtpProblemTypes.BaseUri + "/downstream",
-                title:  "Downstream service unavailable",
+                type:   OtpProblemTypes.ServiceUnavailable,
+                title:  "Service temporarily unavailable",
                 detail: "Could not look up the user identity.");
         }
 
@@ -274,9 +276,11 @@ public sealed class AuthOtpController : ControllerBase
         if (string.IsNullOrWhiteSpace(body?.RefreshToken))
         {
             span?.SetTag(OtpSignInActivitySource.TagRefreshOutcome, "missing");
+            // PR #32 review S3 — distinct from invalid_otp so mobile renders
+            // the "session expired" copy, not "wrong code".
             return BuildProblem(
                 status: StatusCodes.Status401Unauthorized,
-                type:   OtpProblemTypes.InvalidOtp,
+                type:   OtpProblemTypes.InvalidRefreshToken,
                 title:  "Invalid refresh token",
                 detail: "Refresh token is missing or empty.");
         }
@@ -304,7 +308,7 @@ public sealed class AuthOtpController : ControllerBase
                     "auth.refresh family revoked due to detected reuse — caller must re-OTP");
                 return BuildProblem(
                     status: StatusCodes.Status401Unauthorized,
-                    type:   OtpProblemTypes.InvalidOtp,
+                    type:   OtpProblemTypes.InvalidRefreshToken,
                     title:  "Refresh token reuse detected",
                     detail: "The refresh-token family has been revoked. Please sign in again.");
 
@@ -312,7 +316,7 @@ public sealed class AuthOtpController : ControllerBase
                 span?.SetTag(OtpSignInActivitySource.TagRefreshOutcome, "revoked_or_invalid");
                 return BuildProblem(
                     status: StatusCodes.Status401Unauthorized,
-                    type:   OtpProblemTypes.InvalidOtp,
+                    type:   OtpProblemTypes.InvalidRefreshToken,
                     title:  "Invalid refresh token",
                     detail: "The refresh token is expired, revoked, or invalid.");
         }

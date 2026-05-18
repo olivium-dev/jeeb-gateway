@@ -5,9 +5,11 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// <summary>
 /// AC6 — dedicated OTel <see cref="ActivitySource"/> for the OTP sign-in path.
 /// Span names: <c>auth.otp.request</c>, <c>auth.otp.verify</c>, <c>auth.refresh</c>.
-/// Every span carries <c>phone.hash</c> (bcrypt) but NEVER raw E.164
-/// (AC-PhonePIIHash). The source name is registered in <see cref="JeebGateway"/>'s
-/// OTel tracer provider so tests can subscribe via <c>tracing.AddSource(...)</c>.
+/// Every span carries <c>phone.hash</c> (HMAC-SHA256 of the normalised E.164
+/// with a server pepper — deterministic, see PR #32 review B1) but NEVER raw
+/// E.164 (AC-PhonePIIHash). The source name is registered in
+/// <see cref="JeebGateway"/>'s OTel tracer provider so tests can subscribe
+/// via <c>tracing.AddSource(...)</c>.
 /// </summary>
 public static class OtpSignInActivitySource
 {

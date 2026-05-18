@@ -51,12 +51,12 @@
       T-BE-001 / JEB-471 — OTP sign-in path.
       libphonenumber-csharp normalises +961 / 00961 / 0079... → canonical E.164
       and surfaces the RegionCode used by AC-PhoneNorm to reject non-LB phones.
-      BCrypt.Net-Next produces the workFactor=12 phone hash that is the ONLY
-      observable form of the phone in logs and OTel span attributes
-      (AC-PhonePIIHash).
+      Phone hashing uses HMAC-SHA256 from System.Security.Cryptography with a
+      server-side pepper (JeebJwt:PhonePepper). PR #32 review B1 — the prior
+      bcrypt-on-phone implementation generated a random salt per call so the
+      phone.hash tag could not correlate; HMAC-SHA256 restores determinism.
     -->
     <PackageReference Include="libphonenumber-csharp" Version="8.13.51" />
-    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
   </ItemGroup>
 
 </Project>

@@ -82,10 +82,11 @@ public sealed class CrossStoryMobileContractTests : IAsyncLifetime
     [Trait("AC", "AC-ProblemTypeSet")]
     public async Task EveryReturnedType_IsInTheFrozenSet()
     {
-        var frozen = new HashSet<string>
-        {
-            "invalid_otp", "too_many_attempts", "invalid_country", "rate_limited", "invalid_phone"
-        };
+        // PR #32 review S1/S3 — frozen set extended additively:
+        //   + service_unavailable   (replaces ad-hoc /downstream and /user_mgmt_unavailable)
+        //   + invalid_refresh_token (replaces invalid_otp on the /refresh path)
+        // Mobile mapping coordinated via JEB-37 comment thread.
+        var frozen = JeebGateway.Auth.OtpSignIn.OtpProblemTypes.FrozenSet;
         var seenTypes = new HashSet<string>();
 
         await TriggerAsync("/v1/auth/otp/verify", new { phone = "+96179111111", code = "000000" }, seenTypes);
@@ -114,7 +115,7 @@ public sealed class CrossStoryMobileContractTests : IAsyncLifetime
 
         foreach (var t in seenTypes)
             frozen.Should().Contain(t,
-                because: $"AC-ProblemTypeSet: gateway must only emit types in {{invalid_otp, too_many_attempts, invalid_country, rate_limited, invalid_phone}}; saw '{t}'");
+                because: $"AC-ProblemTypeSet: gateway must only emit types in OtpProblemTypes.FrozenSet; saw '{t}'");
     }
 
     private async Task TriggerAsync(string path, object body, HashSet<string> seen)

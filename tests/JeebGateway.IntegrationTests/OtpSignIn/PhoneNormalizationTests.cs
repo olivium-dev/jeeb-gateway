@@ -3,6 +3,8 @@
 // Ported from updated-requirements/qa-scaffolding/JEB-467/.
 
 using FluentAssertions;
+using JeebGateway.Auth.OtpSignIn;
+using Microsoft.Extensions.Options;
 using PhoneNumbers;
 using Xunit;
 
@@ -12,8 +14,6 @@ namespace JeebGateway.IntegrationTests.OtpSignIn;
 [Trait("AC", "AC-PhoneNorm")]
 public sealed class PhoneNormalizationTests
 {
-    private const string FixedTestSalt = "$2a$12$abcdefghijklmnopqrstuv";
-
     // Note: dropped the scaffolding's "0079 123 456" data point — libphonenumber
     // resolves `00` as the international call prefix, so "0079" is read as
     // country-code 79 (which is unassigned) and does NOT normalise to LB.
@@ -40,17 +40,26 @@ public sealed class PhoneNormalizationTests
         util.GetRegionCodeForNumber(parsed).Should().Be("LB");
     }
 
-    [Theory(DisplayName = "AC-PhonePIIHash: every equivalent format produces the SAME bcrypt hash")]
+    [Theory(DisplayName = "AC-PhonePIIHash: every equivalent format produces the SAME HMAC-SHA256 hash (deterministic, PR #32 B1)")]
     [MemberData(nameof(EquivalentPhoneFormats))]
-    public void EquivalentFormats_AllProduceSameBcryptHash(string input)
+    public void EquivalentFormats_AllProduceSameHmacHash(string input)
     {
+        // PR #32 review B1 — replaces bcrypt (random salt → per-request random)
+        // with HMAC-SHA256(pepper, e164) which is deterministic across calls.
         var util  = PhoneNumberUtil.GetInstance();
         var e164  = util.Format(util.Parse(input, "LB"), PhoneNumberFormat.E164);
 
-        var hash      = BCrypt.Net.BCrypt.HashPassword(e164, FixedTestSalt);
-        var benchmark = BCrypt.Net.BCrypt.HashPassword("+96179123456", FixedTestSalt);
+        var options = Options.Create(new JeebJwtOptions
+        {
+            PhonePepper = "fixed-test-pepper-must-be-at-least-thirty-two-bytes-long-OK",
+        });
+        using var hasher = new HmacShaPhoneHasher(options);
+
+        var hash      = hasher.HashE164(e164);
+        var benchmark = hasher.HashE164("+96179123456");
 
         hash.Should().Be(benchmark);
+        hash.Should().StartWith("ph1:");
     }
 
     [Theory(DisplayName = "AC-PhoneNorm: non-LB numbers are rejected with RegionCode != LB")]

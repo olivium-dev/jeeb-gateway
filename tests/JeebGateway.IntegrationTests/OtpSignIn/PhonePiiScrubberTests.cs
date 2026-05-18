@@ -97,24 +97,51 @@ public sealed class PhonePiiScrubberTests : IAsyncLifetime
         }
     }
 
-    [Fact(DisplayName = "AC-PhonePIIHash: phone.hash (bcrypt $2[ab]$...) IS present in at least one log record OR span")]
-    public async Task BcryptHash_IsPresent_InAtLeastOneSinkRecord()
+    [Fact(DisplayName = "AC-PhonePIIHash: phone.hash (HMAC ph1: prefix) IS present in at least one log record OR span")]
+    public async Task PhoneHash_IsPresent_InAtLeastOneSinkRecord()
     {
+        // PR #32 review B1 — assert the HMAC-SHA256 deterministic hash is in
+        // place of the prior bcrypt $2[ab]$ marker.
         await _client.PostAsJsonAsync("/v1/auth/otp/request", new { phone = Phone });
         var code = _factory.OtpClient.PeekCode(Phone)!;
         await _client.PostAsJsonAsync("/v1/auth/otp/verify", new { phone = Phone, code });
 
-        bool LooksLikeBcrypt(string? s) =>
-            !string.IsNullOrEmpty(s) && (s.Contains("$2a$") || s.Contains("$2b$") || s.Contains("$2y$"));
+        bool LooksLikePhoneHash(string? s) =>
+            !string.IsNullOrEmpty(s) && s.Contains("ph1:");
 
         var logHasHash = _factory.LogCapture.Records.Any(rec =>
-            LooksLikeBcrypt(rec.Message) ||
-            rec.State.Any(kv => LooksLikeBcrypt(kv.Value?.ToString())));
+            LooksLikePhoneHash(rec.Message) ||
+            rec.State.Any(kv => LooksLikePhoneHash(kv.Value?.ToString())));
 
         var spanHasHash = _factory.SpanExporter.Spans.Any(span =>
-            span.Tags.Any(t => LooksLikeBcrypt(t.Value)));
+            span.Tags.Any(t => LooksLikePhoneHash(t.Value)));
 
         (logHasHash || spanHasHash).Should().BeTrue();
+    }
+
+    [Fact(DisplayName = "AC-PhonePIIHash B1: phone.hash is DETERMINISTIC — same phone → same hash across requests")]
+    public async Task PhoneHash_IsDeterministic_AcrossRequests()
+    {
+        // PR #32 review B1 — bcrypt's random salt made phone.hash a per-request
+        // random, breaking correlation. HMAC-SHA256(pepper, phone) is the fix.
+        await _client.PostAsJsonAsync("/v1/auth/otp/request", new { phone = Phone });
+        _factory.Clock.Advance(TimeSpan.FromSeconds(1));
+        await _client.PostAsJsonAsync("/v1/auth/otp/request", new { phone = Phone });
+
+        var spanHashes = _factory.SpanExporter.Spans
+            .SelectMany(s => s.Tags)
+            .Where(t => string.Equals(t.Key, "phone.hash", StringComparison.Ordinal))
+            .Select(t => t.Value?.ToString())
+            .Where(v => !string.IsNullOrEmpty(v))
+            .Distinct()
+            .ToList();
+
+        spanHashes.Should().HaveCount(1,
+            because: "B1: two requests from the SAME phone must produce the SAME phone.hash — " +
+                     "otherwise correlation across requests is impossible.");
+        spanHashes.Single().Should().StartWith("ph1:",
+            because: "the org-pinned HMAC-SHA256 hash format prefixes 'ph1:' so log scanners can " +
+                     "identify the field even if the column name is missing.");
     }
 
     [Fact(DisplayName = "AC-PhonePIIHash: ProblemDetails 4xx body never echoes the raw phone")]

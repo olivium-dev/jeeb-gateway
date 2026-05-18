@@ -30,6 +30,22 @@ public sealed class JeebJwtOptions
     [Required]
     public string Audience { get; set; } = "jeeb-mobile";
 
+    /// <summary>
+    /// HMAC-SHA256 pepper used by <see cref="HmacShaPhoneHasher"/> to produce
+    /// the deterministic <c>phone.hash</c> tag / JWT claim. Loaded with the
+    /// same env-only discipline as <see cref="SigningKey"/> — never from
+    /// <c>appsettings.json</c>. MUST be ≥ 32 bytes (HMAC-SHA256 block-size
+    /// floor so the pepper is at least as long as the hash output).
+    ///
+    /// PR #32 review B1: the prior bcrypt-on-phone implementation produced a
+    /// fresh random salt per call, so <c>phone.hash</c> could not correlate
+    /// across requests. Replacing with HMAC-SHA256(pepper, phone) restores
+    /// the correlation property that AC-PhonePIIHash assumes.
+    /// </summary>
+    [Required]
+    [MinLength(32)]
+    public string PhonePepper { get; set; } = string.Empty;
+
     /// <summary>Access token TTL. Locked at 1 hour (3600s) by AC5b.</summary>
     [Range(60, 86_400)]
     public int AccessTtlSeconds { get; set; } = 3600;
