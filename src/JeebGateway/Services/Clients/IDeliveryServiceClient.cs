@@ -17,6 +17,16 @@ public interface IDeliveryServiceClient
 
     Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct);
 
+    /// <summary>
+    /// T-BE-019 (JEB-55): canonical status transition. Delegates the
+    /// status flip to the source-of-truth delivery-service so handover-OTP
+    /// success can mark the delivery as 'done' there (commission settlement
+    /// in T-BE-020 keys off the upstream record). The gateway must NEVER
+    /// write status directly to its local store on the OTP-verified path —
+    /// that splits the canonical write between two systems.
+    /// </summary>
+    Task<DeliveryRequestUpstream> StatusTransitionAsync(string deliveryId, string status, CancellationToken ct);
+
     Task<DeliveryCancelResult> CancelDeliveryAsync(string deliveryId, DeliveryCancelUpstreamRequest body, CancellationToken ct);
 
     Task<JeeberAvailabilityUpstream> SetAvailabilityAsync(JeeberAvailabilityUpstreamRequest body, string jeeberId, CancellationToken ct);
@@ -60,6 +70,11 @@ public sealed class DeliveryRequestUpstream
     public int OtpAttemptCount { get; init; }
     public DateTimeOffset? OtpLockedAt { get; init; }
     public string? OtpEscalationId { get; init; }
+
+    /// <summary>
+    /// T-BE-019 (JEB-55): E.164 phone for the 4-digit handover OTP.
+    /// </summary>
+    public string? RecipientPhone { get; init; }
     public DateTimeOffset? ExpiresAt { get; init; }
     public string? CancelledBy { get; init; }
     public string? CancellationReason { get; init; }
