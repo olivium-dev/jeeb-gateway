@@ -18,6 +18,7 @@ using JeebGateway.Push;
 using JeebGateway.Services.Clients;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
+using JeebGateway.Requests.Cancellation.V2;
 using JeebGateway.Requests.OtpHandover;
 using JeebGateway.Security;
 using JeebGateway.Services;
@@ -355,6 +356,25 @@ builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requ
 // Delivery cancellation pipeline (T-backend-024 / JEEB-42).
 builder.Services.AddSingleton<IJeeberRestrictionStore, InMemoryJeeberRestrictionStore>();
 builder.Services.AddSingleton<ICancellationService, CancellationService>();
+
+// T-BE-030 / JEB-66 — v1 cancellation policy (client soft/hard limits,
+// jeeber strikes, unified_payment_gateway fee posting, jeeber-role
+// suspension on threshold). Additive — the legacy DeliveriesController
+// path stays intact (AC5). Production wiring swaps the in-memory
+// IUnifiedPaymentGatewayCancellationClient with an HTTP adapter over the
+// NSwag-generated ServiceUnifiedPaymentGatewayClient (config key
+// ServiceUnifiedPaymentGatewayApi:BaseUrl), and IJeeberRoleSuspensionClient
+// with an adapter over the user-management role-suspension endpoint.
+builder.Services.Configure<CancellationPolicyOptions>(
+    builder.Configuration.GetSection(CancellationPolicyOptions.SectionName));
+builder.Services.AddSingleton<ICancellationLogStore, InMemoryCancellationLogStore>();
+builder.Services.AddSingleton<InMemoryUnifiedPaymentGatewayCancellationClient>();
+builder.Services.AddSingleton<IUnifiedPaymentGatewayCancellationClient>(
+    sp => sp.GetRequiredService<InMemoryUnifiedPaymentGatewayCancellationClient>());
+builder.Services.AddSingleton<InMemoryJeeberRoleSuspensionClient>();
+builder.Services.AddSingleton<IJeeberRoleSuspensionClient>(
+    sp => sp.GetRequiredService<InMemoryJeeberRoleSuspensionClient>());
+builder.Services.AddSingleton<ICancellationPolicyService, CancellationPolicyService>();
 
 // Mutual-blind ratings (T-backend-020 / JEEB-38).
 //
