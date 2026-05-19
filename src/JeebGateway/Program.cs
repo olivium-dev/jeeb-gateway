@@ -647,6 +647,20 @@ builder.Services.Configure<JeebGateway.Ratings.RatingRevealOptions>(
     builder.Configuration.GetSection(JeebGateway.Ratings.RatingRevealOptions.SectionName));
 builder.Services.AddHostedService<JeebGateway.Ratings.RatingRevealJob>();
 
+// T-BE-025 / JEB-61: daily mutual-blind auto-reveal cron.
+//
+// At 03:00 Asia/Beirut every day, the job scans IRatingStore for rows
+// past delivered_at + 7d that are not already auto-revealed and where at
+// most one side submitted. Each eligible row is atomically stamped
+// (idempotency contract — AC2 "no double reveal"), the missing side(s)
+// receive the rating_auto_revealed push, and the run logs revealedCount
+// (AC3). The reveal NEVER auto-fills a synthetic score.
+builder.Services.Configure<JeebGateway.Ratings.MutualBlindAutoRevealOptions>(
+    builder.Configuration.GetSection(JeebGateway.Ratings.MutualBlindAutoRevealOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Ratings.MutualBlindAutoRevealJob>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Ratings.MutualBlindAutoRevealJob>());
+
 // T-backend-040: Low-rating auto-flag and admin notification.
 builder.Services.Configure<JeebGateway.Ratings.LowRatingFlagOptions>(
     builder.Configuration.GetSection(JeebGateway.Ratings.LowRatingFlagOptions.SectionName));

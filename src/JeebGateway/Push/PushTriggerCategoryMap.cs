@@ -22,12 +22,24 @@ public static class PushTriggerCategoryMap
         NotificationTrigger.StatusChange => NotificationCategory.StatusChanges,
         NotificationTrigger.Chat => NotificationCategory.Chat,
         NotificationTrigger.RatingReminder => NotificationCategory.RatingReminders,
+        // T-BE-025 / JEB-61 — bucket the auto-reveal ping under
+        // RatingReminders so a user who muted rating reminders is not
+        // pinged about an auto-reveal either. The reveal happens regardless;
+        // only the push is suppressed.
+        NotificationTrigger.RatingAutoRevealed => NotificationCategory.RatingReminders,
+        // T-backend-021 / JEEB-39 — mutual-consent reveal (both sides
+        // submitted) is also a rating-reminder follow-up.
+        NotificationTrigger.RatingRevealed => NotificationCategory.RatingReminders,
         NotificationTrigger.Promotion => NotificationCategory.Promotions,
         // KYC is a regulatory/identity event — always delivered, like OTP.
         NotificationTrigger.KycUpdate => null,
         // Auto-offline tells the Jeeber why their offer feed went silent;
         // muting it would leave them confused about lost earnings.
         NotificationTrigger.AutoOffline => null,
+        // Admin-facing operational pings — always delivered.
+        NotificationTrigger.LowRatingFlag => null,
+        // Disputes are a regulatory/safety channel — always delivered.
+        NotificationTrigger.DisputeUpdate => null,
         _ => throw new ArgumentOutOfRangeException(nameof(trigger), trigger, "Unknown trigger")
     };
 

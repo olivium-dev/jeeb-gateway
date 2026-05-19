@@ -3,6 +3,15 @@ namespace JeebGateway.Ratings;
 /// <summary>
 /// Per-delivery rating state. Holds both sides' ratings plus the delivered-at
 /// stamp used as the anchor for the 7-day rating window.
+///
+/// <para><see cref="AutoRevealedAt"/> is stamped by the T-BE-025 / JEB-61 cron
+/// the first time a delivery transitions out of <c>pending_*</c> after the
+/// blind window has elapsed without both sides submitting. The stamp acts as
+/// the idempotency key: a second cron pass over the same row finds
+/// <see cref="AutoRevealedAt"/> already set and skips the flip and the
+/// notification. Once stamped, both parties (whichever sides actually
+/// submitted) become visible — the missing side's <see cref="RatingEntry"/>
+/// stays null so no synthetic score is ever invented.</para>
 /// </summary>
 public sealed class RatingPair
 {
@@ -12,6 +21,7 @@ public sealed class RatingPair
     public required DateTimeOffset DeliveredAt { get; init; }
     public RatingEntry? ClientRating { get; set; }
     public RatingEntry? JeeberRating { get; set; }
+    public DateTimeOffset? AutoRevealedAt { get; set; }
 }
 
 /// <summary>
@@ -55,5 +65,30 @@ public interface IRatingStore
         string deliveryId,
         bool callerIsClient,
         RatingEntry entry,
+        CancellationToken ct);
+
+    /// <summary>
+    /// T-BE-025 / JEB-61 — enumerates rating pairs eligible for auto-reveal,
+    /// i.e. rows that are not already auto-revealed, that have not yet had
+    /// both sides submit, AND whose blind window
+    /// (<see cref="RatingPair.DeliveredAt"/> + 7 days) closed at or before
+    /// <paramref name="asOf"/>. Returns a stable snapshot so the cron can
+    /// iterate without observing concurrent submissions.
+    /// </summary>
+    Task<IReadOnlyList<RatingPair>> ListPendingAutoRevealAsync(
+        DateTimeOffset asOf,
+        TimeSpan ratingWindow,
+        CancellationToken ct);
+
+    /// <summary>
+    /// T-BE-025 / JEB-61 — atomically stamps <see cref="RatingPair.AutoRevealedAt"/>
+    /// if it is still null. Returns <c>true</c> on first stamp; subsequent
+    /// calls (including from a second cron pass) return <c>false</c> without
+    /// mutating state. This is the idempotency contract that protects AC2
+    /// ("no double reveal").
+    /// </summary>
+    Task<bool> TryMarkAutoRevealedAsync(
+        string deliveryId,
+        DateTimeOffset at,
         CancellationToken ct);
 }

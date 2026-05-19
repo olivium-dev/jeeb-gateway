@@ -34,6 +34,23 @@ public static class BlindRevealPolicy
     public static readonly TimeSpan DefaultRatingWindow = TimeSpan.FromDays(7);
 
     /// <summary>
+    /// Back-compat overload that forwards <c>autoRevealedAt: null</c>.
+    /// Callers that don't track the T-BE-025 cron stamp (legacy controllers,
+    /// JEB-38 tests) keep their existing semantics.
+    /// </summary>
+    public static BlindRevealView ProjectFor(
+        DateTimeOffset now,
+        DateTimeOffset deliveredAt,
+        bool callerIsClient,
+        RatingEntry? clientRating,
+        RatingEntry? jeeberRating,
+        TimeSpan ratingWindow)
+        => ProjectFor(
+            now, deliveredAt, callerIsClient,
+            clientRating, jeeberRating, ratingWindow,
+            autoRevealedAt: null);
+
+    /// <summary>
     /// Computes the view a single party should see, given which side they are.
     /// </summary>
     /// <param name="now">Wall-clock reference for window evaluation.</param>
@@ -42,13 +59,19 @@ public static class BlindRevealPolicy
     /// <param name="clientRating">Client-side rating, or null when not yet submitted.</param>
     /// <param name="jeeberRating">Jeeber-side rating, or null when not yet submitted.</param>
     /// <param name="ratingWindow">How long ratings may be submitted after delivery.</param>
+    /// <param name="autoRevealedAt">Non-null when the T-BE-025 cron has flipped
+    /// the row to <see cref="BlindRevealOutcome.AutoRevealed"/>. The cron does
+    /// NOT auto-fill missing scores, so the missing side stays null in the
+    /// payload (per the JEB-61 system design line "do NOT auto-fill any
+    /// score").</param>
     public static BlindRevealView ProjectFor(
         DateTimeOffset now,
         DateTimeOffset deliveredAt,
         bool callerIsClient,
         RatingEntry? clientRating,
         RatingEntry? jeeberRating,
-        TimeSpan ratingWindow)
+        TimeSpan ratingWindow,
+        DateTimeOffset? autoRevealedAt)
     {
         var windowClosesAt = deliveredAt + ratingWindow;
         var windowExpired = now > windowClosesAt;
@@ -58,6 +81,8 @@ public static class BlindRevealPolicy
         var theirs = callerIsClient ? jeeberRating : clientRating;
 
         // Both submitted — always revealed, even if past the window.
+        // This branch wins over auto-reveal: a row that genuinely got both
+        // ratings is not "auto-revealed", it's revealed-by-mutual-consent.
         if (bothSubmitted)
         {
             return new BlindRevealView(
@@ -68,8 +93,25 @@ public static class BlindRevealPolicy
                 WindowExpired: windowExpired);
         }
 
-        // Window closed without both sides submitting — locked.
-        // Whatever ratings exist are revealed; the missing side stays null.
+        // T-BE-025 / JEB-61 — the cron stamped this row past the 7-day
+        // window because at least one side never submitted. Whatever ratings
+        // exist are now visible to both parties; the missing side is null
+        // (no synthetic stars). This bucket is reported on the wire as
+        // <c>auto_revealed</c> rather than <c>locked_no_rating</c> so the
+        // mobile app and notification template can distinguish the two cases.
+        if (autoRevealedAt is not null)
+        {
+            return new BlindRevealView(
+                Outcome: BlindRevealOutcome.AutoRevealed,
+                MyRating: mine,
+                TheirRating: theirs,
+                WindowClosesAt: windowClosesAt,
+                WindowExpired: true);
+        }
+
+        // Window closed without both sides submitting and no auto-reveal
+        // stamp yet — locked. Whatever ratings exist are revealed; the
+        // missing side stays null.
         if (windowExpired)
         {
             return new BlindRevealView(
@@ -119,6 +161,13 @@ public enum BlindRevealOutcome
     /// <summary>Window closed without both sides submitting. Row is locked;
     /// no further submissions allowed.</summary>
     LockedNoRating,
+
+    /// <summary>T-BE-025 / JEB-61 — cron flipped the row 7 days after
+    /// delivery because at least one side never submitted. Whatever ratings
+    /// exist are visible; the missing side stays null. Distinct from
+    /// <see cref="LockedNoRating"/> so the wire payload and the
+    /// <c>rating_auto_revealed</c> notification template can be selected.</summary>
+    AutoRevealed,
 }
 
 /// <summary>One party's rating capture. Stars in [1,5], optional comment.</summary>

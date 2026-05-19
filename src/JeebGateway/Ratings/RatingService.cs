@@ -99,7 +99,8 @@ public sealed class RatingService : IRatingService
         {
             var lockedView = BlindRevealPolicy.ProjectFor(
                 now, pair.DeliveredAt, callerIsClient,
-                pair.ClientRating, pair.JeeberRating, _options.RatingWindow);
+                pair.ClientRating, pair.JeeberRating, _options.RatingWindow,
+                pair.AutoRevealedAt);
             return new RatingSubmissionResult(
                 RatingSubmissionOutcome.WindowClosed, lockedView, callerIsClient,
                 $"rating window closed at {pair.DeliveredAt + _options.RatingWindow:O}.");
@@ -112,7 +113,8 @@ public sealed class RatingService : IRatingService
         {
             var view = BlindRevealPolicy.ProjectFor(
                 now, pair.DeliveredAt, callerIsClient,
-                pair.ClientRating, pair.JeeberRating, _options.RatingWindow);
+                pair.ClientRating, pair.JeeberRating, _options.RatingWindow,
+                pair.AutoRevealedAt);
             return new RatingSubmissionResult(
                 RatingSubmissionOutcome.AlreadyRated, view, callerIsClient,
                 "caller has already submitted a rating for this delivery.");
@@ -153,7 +155,8 @@ public sealed class RatingService : IRatingService
 
         var resultView = BlindRevealPolicy.ProjectFor(
             now, updated.DeliveredAt, callerIsClient,
-            updated.ClientRating, updated.JeeberRating, _options.RatingWindow);
+            updated.ClientRating, updated.JeeberRating, _options.RatingWindow,
+            updated.AutoRevealedAt);
 
         return new RatingSubmissionResult(
             RatingSubmissionOutcome.Submitted, resultView, callerIsClient, null);
@@ -194,7 +197,8 @@ public sealed class RatingService : IRatingService
 
         var view = BlindRevealPolicy.ProjectFor(
             now, pair.DeliveredAt, callerIsClient,
-            pair.ClientRating, pair.JeeberRating, _options.RatingWindow);
+            pair.ClientRating, pair.JeeberRating, _options.RatingWindow,
+            pair.AutoRevealedAt);
 
         return new RatingQueryResult(RatingQueryOutcome.Ok, view, callerIsClient);
     }

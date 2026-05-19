@@ -180,4 +180,81 @@ public class BlindRevealPolicyTests
         view.Outcome.Should().Be(BlindRevealOutcome.PendingMine);
         view.WindowExpired.Should().BeFalse();
     }
+
+    // -----------------------------------------------------------------
+    // T-BE-025 / JEB-61 — auto_revealed outcome
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public void AutoReveal_Stamp_Promotes_LockedNoRating_To_AutoRevealed_With_Existing_Side_Visible()
+    {
+        // Sami (jeeber) rated within the window; Client never did.
+        // After the JEB-61 cron stamps AutoRevealedAt, both sides see
+        // state=auto_revealed; client's stars stay null per the spec
+        // ("do NOT auto-fill any score").
+        var jeeber = JeeberEntry(stars: 4);
+        var stamp = DeliveredAt + Window + TimeSpan.FromHours(2);
+        var view = BlindRevealPolicy.ProjectFor(
+            now: stamp,
+            deliveredAt: DeliveredAt,
+            callerIsClient: true, // client querying
+            clientRating: null,
+            jeeberRating: jeeber,
+            ratingWindow: Window,
+            autoRevealedAt: stamp);
+
+        view.Outcome.Should().Be(BlindRevealOutcome.AutoRevealed);
+        view.MyRating.Should().BeNull("client never submitted — no synthetic stars");
+        view.TheirRating.Should().Be(jeeber);
+        view.WindowExpired.Should().BeTrue();
+    }
+
+    [Fact]
+    public void AutoReveal_With_Neither_Side_Submitted_Yields_AutoRevealed_With_Both_Null()
+    {
+        var stamp = DeliveredAt + Window + TimeSpan.FromMinutes(30);
+        var view = BlindRevealPolicy.ProjectFor(
+            now: stamp,
+            deliveredAt: DeliveredAt,
+            callerIsClient: true,
+            clientRating: null,
+            jeeberRating: null,
+            ratingWindow: Window,
+            autoRevealedAt: stamp);
+
+        view.Outcome.Should().Be(BlindRevealOutcome.AutoRevealed);
+        view.MyRating.Should().BeNull();
+        view.TheirRating.Should().BeNull();
+        view.WindowExpired.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Mutual_Reveal_Wins_Over_Auto_Reveal_Stamp()
+    {
+        // Defensive: if for any reason BOTH ratings exist AND AutoRevealedAt
+        // is non-null (shouldn't happen because the cron skips
+        // both-submitted rows), the mutual-consent outcome wins so the
+        // wire payload remains "revealed", not "auto_revealed".
+        var client = ClientEntry();
+        var jeeber = JeeberEntry();
+        var stamp = DeliveredAt + Window + TimeSpan.FromHours(2);
+
+        var view = BlindRevealPolicy.ProjectFor(
+            now: stamp,
+            deliveredAt: DeliveredAt,
+            callerIsClient: true,
+            clientRating: client,
+            jeeberRating: jeeber,
+            ratingWindow: Window,
+            autoRevealedAt: stamp);
+
+        view.Outcome.Should().Be(BlindRevealOutcome.Revealed);
+    }
+
+    [Fact]
+    public void RatingStateCodes_For_AutoRevealed_Maps_To_Auto_Revealed_String()
+    {
+        RatingStateCodes.For(BlindRevealOutcome.AutoRevealed)
+            .Should().Be("auto_revealed");
+    }
 }
