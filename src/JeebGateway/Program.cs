@@ -15,6 +15,7 @@ using JeebGateway.Ratings;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.ProhibitedItems.Scanner;
 using JeebGateway.Push;
+using JeebGateway.Services.Bff;
 using JeebGateway.Services.Clients;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
@@ -162,19 +163,28 @@ builder.Services.AddHealthChecks()
     .AddCheck("self", () => HealthCheckResult.Healthy("process alive"), tags: new[] { "live" });
 
 // ---------------------------------------------------------------------------
-// BFF aggregation skeleton (T-migrate-gateway-shell)
+// BFF aggregation (JEB-67 / T-BE-031) + skeleton (T-migrate-gateway-shell)
 //
-// AddDownstreamClients registers a named HttpClient + Polly resilience
+// AddBffAggregation wires the cross-cutting BFF concerns:
+//   - ServiceAuthOptions    (X-Service-Auth HMAC, AC3)
+//   - DownstreamServicesOptions + BffStartupValidator (AC1 — fail boot when
+//     required downstream BaseUrls are missing in non-Dev/Testing envs)
+//   - IHttpContextAccessor for BearerForwardingHandler (AC3 — JWT forward)
+//
+// AddDownstreamClients registers a named HttpClient + DelegatingHandlers
+// (BearerForwardingHandler + ServiceAuthSigningHandler) + Polly resilience
 // pipeline (retry + circuit breaker + per-attempt timeout) per upstream
-// service. Generated NSwag typed clients (Services/Generated/*Client.cs) hang
-// off these named registrations once each per-controller migration ticket
-// lands. See Extensions/ServiceClientExtensions.cs and
+// service. Generated NSwag typed clients (Services/Generated/*Client.cs)
+// hang off these named registrations once each per-controller migration
+// ticket lands. See Extensions/ServiceClientExtensions.cs and
 // scripts/regenerate-clients.sh.
 //
-// AddDownstreamHealthChecks registers a /health URL-group probe per upstream
-// (tagged "ready" + "downstream", failureStatus: Degraded). Unset BaseUrls
+// AddDownstreamHealthChecks registers a /health/ready URL-group probe per
+// upstream (tagged "ready" + "downstream", failureStatus: Unhealthy so the
+// aggregated /health endpoint returns HTTP 503 per AC2). Unset BaseUrls
 // silently skip — local dev does not have to spin up every backend.
 // ---------------------------------------------------------------------------
+builder.Services.AddBffAggregation(builder.Configuration);
 builder.Services.AddDownstreamClients(builder.Configuration);
 builder.Services.AddDownstreamHealthChecks(builder.Configuration);
 
@@ -713,8 +723,34 @@ app.UseMiddleware<RequestValidationMiddleware>();
 app.UseMiddleware<SecurityHeadersMiddleware>();
 app.UseMiddleware<ApiKeyAuthenticationMiddleware>();
 
-if (app.Environment.IsDevelopment())
+// JEB-67 / T-BE-031 AC7 — Swagger UI is on in Development without auth,
+// gated behind the "admin" role in Staging (so internal QA can browse the
+// surface) and entirely disabled in Production. The staging gate is
+// enforced by middleware that rejects any /swagger request that doesn't
+// carry an authenticated principal with the "admin" role.
+if (app.Environment.IsDevelopment()
+    || string.Equals(app.Environment.EnvironmentName, "Testing", StringComparison.OrdinalIgnoreCase))
 {
+    app.UseSwagger();
+    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Jeeb Gateway v1"));
+}
+else if (string.Equals(app.Environment.EnvironmentName, "Staging", StringComparison.OrdinalIgnoreCase))
+{
+    app.UseWhen(
+        ctx => ctx.Request.Path.StartsWithSegments("/swagger", StringComparison.OrdinalIgnoreCase),
+        branch =>
+        {
+            branch.Use(async (ctx, next) =>
+            {
+                var user = ctx.User;
+                if (user?.Identity?.IsAuthenticated != true || !user.IsInRole("admin"))
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+                    return;
+                }
+                await next();
+            });
+        });
     app.UseSwagger();
     app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Jeeb Gateway v1"));
 }
@@ -754,14 +790,30 @@ app.MapPrometheusScrapingEndpoint("/metrics");
 // Real-time chat WebSocket surface (T-backend-012).
 app.MapHub<ChatHub>("/hubs/chat");
 
-// Health endpoints — separate liveness and readiness probes.
+// Health endpoints — three distinct surfaces.
+//
+//   /health/live   liveness only ("self" check). K8s liveness probe — restarts
+//                  the pod when the process can no longer respond.
+//   /health/ready  readiness only (all "ready"-tagged checks, including the
+//                  downstream URL-group probes). K8s readiness probe — pulls
+//                  the pod out of Service load balancing on degradation.
+//   /health        JEB-67 / T-BE-031 AC2 — aggregated dashboard surface.
+//                  Returns 200 when every check is Healthy, 503 with a JSON
+//                  body naming every failing service when any check fails.
+//                  Used by external monitoring + the jeeb-admin dashboard.
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
     Predicate = _ => false // liveness: always 200 if process is up
 });
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
 {
-    Predicate = check => check.Tags.Contains("ready")
+    Predicate = check => check.Tags.Contains("ready"),
+    ResponseWriter = AggregateHealthResponseWriter.WriteAsync,
+});
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    Predicate = _ => true,
+    ResponseWriter = AggregateHealthResponseWriter.WriteAsync,
 });
 
 app.Run();

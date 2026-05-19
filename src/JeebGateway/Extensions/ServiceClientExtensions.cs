@@ -1,3 +1,4 @@
+using JeebGateway.Services.Bff;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
@@ -32,6 +33,16 @@ public static class ServiceClientExtensions
         this IServiceCollection services,
         IConfiguration config)
     {
+        // JEB-67 / T-BE-031 — DelegatingHandlers attached to every named
+        // downstream client below. BearerForwardingHandler propagates the
+        // inbound mobile JWT (AC3 — bearer forwarded); ServiceAuthSigningHandler
+        // attaches the X-Service-Auth HMAC (AC3 — ServiceAuth signed). Both
+        // are transient because DelegatingHandler is captured per request by
+        // HttpClientFactory.
+        services.AddHttpContextAccessor();
+        services.AddTransient<BearerForwardingHandler>();
+        services.AddTransient<ServiceAuthSigningHandler>();
+
         // TODO(T-backend-bff-auth): auth-service — wire NSwag-generated AuthServiceClient
         //   contract: src/JeebGateway/contracts/auth-service.openapi.json
         //   migrates: AuthController, TokensController (currently in-memory)
@@ -178,6 +189,13 @@ public static class ServiceClientExtensions
             // hard upper bound for a single dispatched request.
             http.Timeout = TimeSpan.FromSeconds(30);
         });
+
+        // JEB-67 / T-BE-031 AC3 — every named downstream call carries the
+        // inbound mobile JWT bearer + an HMAC-signed X-Service-Auth header.
+        // Order matters: the auth headers must be added BEFORE the resilience
+        // pipeline so retried attempts also carry them.
+        builder.AddHttpMessageHandler<BearerForwardingHandler>();
+        builder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
 
         builder.AddResilienceHandler("standard", ConfigureStandardResilience);
 
