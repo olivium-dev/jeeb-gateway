@@ -28,6 +28,14 @@ public static class PushTriggerCategoryMap
         // Auto-offline tells the Jeeber why their offer feed went silent;
         // muting it would leave them confused about lost earnings.
         NotificationTrigger.AutoOffline => null,
+        // Rating reveal (T-backend-021) — same category as the daily
+        // reminder so users who muted that channel are not pinged again.
+        NotificationTrigger.RatingRevealed => NotificationCategory.RatingReminders,
+        // Admin / moderation triggers (T-backend-040 / T-BE-028) — always
+        // delivered. Low-rating flags and dispute updates are operational
+        // events the participant needs to see regardless of preferences.
+        NotificationTrigger.LowRatingFlag => null,
+        NotificationTrigger.DisputeUpdate => null,
         _ => throw new ArgumentOutOfRangeException(nameof(trigger), trigger, "Unknown trigger")
     };
 
