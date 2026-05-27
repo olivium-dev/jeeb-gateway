@@ -105,9 +105,8 @@ jobs:
 
   push-image:
     name: Build & Push Docker Image
-    needs: [build, migrations]
+    needs: [build]
     runs-on: ubuntu-latest
-    # Only push image on actual push to main, not on PRs
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     permissions:
