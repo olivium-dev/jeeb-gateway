@@ -171,3 +171,12 @@ jobs:
           echo "Image:    ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.run_id }}"
           echo "Latest:   ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           echo ""
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: push-image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/deploy-staging.yml
+    with:
+      image_tag: ${{ needs.push-image.outputs.image_tag }}
+    secrets: inherit

@@ -21,22 +21,11 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy to Staging
-    runs-on: ubuntu-22.04
-    environment:
-      name: staging
-      url: ${{ vars.STAGING_URL }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Deploy via reusable workflow
-        uses: olivium-dev/jeeb-infrastructure/.github/workflows/swarm-deploy.yml@main
-        with:
-          service_name: jeeb-gateway
-          image_tag: ${{ inputs.image_tag }}
-          environment: staging
-          published_port: "10000"
-          target_port: "8080"
-        secrets: inherit
+    uses: olivium-dev/jeeb-infrastructure/.github/workflows/swarm-deploy.yml@main
+    with:
+      service_name: jeeb-gateway
+      image_tag: ${{ inputs.image_tag || 'latest' }}
+      environment: staging
+      published_port: "10000"
+      target_port: "8080"
+    secrets: inherit
