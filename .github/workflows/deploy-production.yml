@@ -1,0 +1,57 @@
+name: Deploy to Production
+
+# Production deploys are MANUAL ONLY (workflow_dispatch). There is no `on: push`
+# trigger. The GitHub `production` environment protects this workflow with
+# required reviewers and a deployment branch policy (set in repo settings).
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (must already be pushed to GHCR, e.g. run_id or v1.2.3)"
+        required: true
+        type: string
+      confirm_production:
+        description: "Type 'PRODUCTION' to confirm"
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Confirm production intent
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify confirmation
+        run: |
+          if [ "${{ inputs.confirm_production }}" != "PRODUCTION" ]; then
+            echo "ERROR: confirm_production must be the exact string 'PRODUCTION'."
+            echo "       This guard exists so production cannot be deployed by mis-click."
+            exit 1
+          fi
+          echo "Production deploy confirmed for tag ${{ inputs.image_tag }}"
+
+  deploy:
+    name: Deploy to Production
+    needs: guard
+    runs-on: ubuntu-22.04
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy via reusable workflow
+        uses: olivium-dev/jeeb-infrastructure/.github/workflows/swarm-deploy.yml@main
+        with:
+          service_name: jeeb-gateway
+          image_tag: ${{ inputs.image_tag }}
+          environment: production
+          published_port: "10000"
+          target_port: "8080"
+        secrets: inherit
