@@ -373,6 +373,13 @@ builder.Services.AddSingleton<IAdminEscalationStore, InMemoryAdminEscalationStor
 builder.Services.AddSingleton<OtpHandoverSweeper>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper>());
 
+// T-BE-019 (JEB-55): shared cache for the external-OTP attempt counter
+// and lockout flag. MVP wires AddDistributedMemoryCache() (single-process);
+// production swaps to AddStackExchangeRedisCache() against the cluster's
+// Redis so attempts cannot be circumvented by hitting different gateway
+// replicas. The same IDistributedCache abstraction works for both.
+builder.Services.AddDistributedMemoryCache();
+
 // Geo-matching engine (T-backend-008).
 // Queries online Jeebers within the tier-specific radius (PostGIS-style
 // ST_DWithin, MVP-side using Haversine), filters by vehicle-type
@@ -553,6 +560,7 @@ builder.Services.AddSingleton<ITokenService, TokenService>();
 // ===========================================================================
 builder.Services.AddJeebOtpSignIn(builder.Configuration, builder.Environment);
 
+<<<<<<< HEAD
 // ===========================================================================
 // T-BE-003 / JEB-39 — role-switch endpoint POST /v1/users/me/role/switch
 //
@@ -575,6 +583,8 @@ builder.Services.AddSingleton<InMemoryUserManagementRoleSwitchClient>();
 builder.Services.AddSingleton<IUserManagementRoleSwitchClient>(sp =>
     sp.GetRequiredService<InMemoryUserManagementRoleSwitchClient>());
 
+=======
+>>>>>>> origin/main
 // Jeeber availability toggle + auto-offline sweeper (T-backend-023).
 // In-memory implementations stand in for the durable Postgres row, the
 // Redis geo index, and the offer-service withdrawal hook described in

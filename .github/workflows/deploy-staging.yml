@@ -1,0 +1,31 @@
+name: Deploy to Staging
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (defaults to latest)"
+        required: false
+        type: string
+        default: "latest"
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: olivium-dev/jeeb-infrastructure/.github/workflows/swarm-deploy.yml@main
+    with:
+      service_name: jeeb-gateway
+      image_tag: ${{ inputs.image_tag || 'latest' }}
+      environment: staging
+      published_port: "10000"
+      target_port: "8080"
+    secrets: inherit

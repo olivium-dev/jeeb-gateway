@@ -52,6 +52,20 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         return await DeserializeAsync<DeliveryOtpVerifyResult>(response, ct);
     }
 
+    public async Task<DeliveryRequestUpstream> StatusTransitionAsync(string deliveryId, string status, CancellationToken ct)
+    {
+        // T-BE-019 (JEB-55): upstream's PATCH /jeeb/deliveries/{id}/status is
+        // the canonical state-machine writer. The gateway hands off the
+        // transition so commission settlement (T-BE-020) keys off the
+        // source-of-truth record rather than the gateway's read-cache.
+        using var response = await _http.PatchAsync(
+            $"jeeb/deliveries/{Uri.EscapeDataString(deliveryId)}/status",
+            JsonContent.Create(new { status }, options: JsonOptions),
+            ct);
+        response.EnsureSuccessStatusCode();
+        return await DeserializeAsync<DeliveryRequestUpstream>(response, ct);
+    }
+
     public async Task<DeliveryCancelResult> CancelDeliveryAsync(string deliveryId, DeliveryCancelUpstreamRequest body, CancellationToken ct)
     {
         using var response = await _http.PostAsJsonAsync(

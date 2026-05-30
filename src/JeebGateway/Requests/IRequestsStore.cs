@@ -334,6 +334,13 @@ public class CreateRequestInput
     public string? DropoffAddress { get; init; }
 
     /// <summary>
+    /// T-BE-019 (JEB-55): E.164 phone number to deliver the 4-digit
+    /// handover OTP to. Optional at creation; the OTP trigger endpoint
+    /// rejects with 400 when this is missing.
+    /// </summary>
+    public string? RecipientPhone { get; init; }
+
+    /// <summary>
     /// Future delivery moment for T-backend-046. Null = immediate delivery
     /// (status starts as <see cref="RequestStatus.Pending"/>). When set, the
     /// store initialises the row with status <see cref="RequestStatus.Scheduled"/>;

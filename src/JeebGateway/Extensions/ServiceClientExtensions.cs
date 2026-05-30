@@ -84,6 +84,10 @@ public static class ServiceClientExtensions
         // accepts it. Reveal logic remains in JeebGateway.Ratings.
         AddNamedDownstreamClient(services, config, "score-taking", "Services:ScoreTaking:BaseUrl");
 
+        // T-BE-019 (JEB-55): one-time-password service for delivery handover OTP
+        // ApplicationId pattern: delivery_handover_{deliveryId}
+        AddNamedDownstreamClient(services, config, "otp", "Services:ServiceOTP:BaseUrl");
+
         // T-migrate-gateway-proxies (PR-A): typed clients on top of the named
         // HttpClient registrations above. Hand-coded against verified upstream
         // routes pending NSwag-generated artifacts. Each controller checks the
@@ -104,6 +108,24 @@ public static class ServiceClientExtensions
         // off it via the BFF aggregation pattern.
         services.AddHttpClient<IScoreServiceClient, ScoreServiceClient>(http =>
             BindBaseAddress(http, config, "Services:ScoreTaking"));
+
+        // T-BE-019 (JEB-55): typed client over one-time-password service.
+        // Used for 4-digit handover OTPs with ApplicationId delivery_handover_{deliveryId}.
+        // NSwag-generated client takes (string baseUrl, HttpClient http) — we resolve
+        // baseUrl via factory and let HttpClient be the configured/named pipeline. The
+        // resilience pipeline and timeout are still applied through the named "otp"
+        // registration above so callers inherit retry/circuit-breaker behavior.
+        services.AddHttpClient<IServiceOTPClient, ServiceOTPClient>((sp, http) =>
+            {
+                BindBaseAddress(http, config, "Services:ServiceOTP");
+            })
+            .AddTypedClient<IServiceOTPClient>((http, sp) =>
+            {
+                var baseUrl = config["Services:ServiceOTP:BaseUrl"]
+                    ?? config["Services:ServiceOTP"]
+                    ?? "http://localhost:5005";
+                return new ServiceOTPClient(baseUrl, http);
+            });
 
         return services;
     }

@@ -49,7 +49,10 @@ jobs:
 
       - name: Verify health check endpoint exists in image
         run: |
-          docker run -d --name gw-smoke -p 18080:8080 jeeb-gateway:ci-${{ github.sha }}
+          docker run -d --name gw-smoke -p 18080:8080 \
+            -e JeebJwt__SigningKey="ci-smoke-signing-key-not-for-prod-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+            -e JeebJwt__PhonePepper="ci-smoke-phone-pepper-not-for-prod-aaaaaaa" \
+            jeeb-gateway:ci-${{ github.sha }}
           sleep 5
           curl -sf http://localhost:18080/health/live || (docker logs gw-smoke && exit 1)
           docker stop gw-smoke

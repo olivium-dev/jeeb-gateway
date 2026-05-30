@@ -13,6 +13,15 @@ public static class RequestStatus
     public const string Accepted = "accepted";
     public const string PickedUp = "picked_up";
     public const string HeadingOff = "heading_off";
+
+    /// <summary>
+    /// T-BE-019 (JEB-55): the Jeeber has arrived at the drop-off and is
+    /// physically at the recipient's door. The 4-digit external handover
+    /// OTP can only be issued / verified while a delivery is in this state.
+    /// Treated as ACTIVE for BR-9/BR-10 — the row is still in flight.
+    /// </summary>
+    public const string AtDoor = "at_door";
+
     public const string Delivered = "delivered";
     public const string Rated = "rated";
     public const string Cancelled = "cancelled";
@@ -43,6 +52,7 @@ public static class RequestStatus
         Accepted,
         PickedUp,
         HeadingOff,
+        AtDoor,
         // Cancellation pending admin sign-off: the row is not yet terminal
         // and the Jeeber still owns it for capacity-cap purposes.
         CancellationRequested
@@ -61,6 +71,7 @@ public static class RequestStatus
         Accepted,
         PickedUp,
         HeadingOff,
+        AtDoor,
         // While an admin reviews a Client-requested cancellation the
         // delivery is still bound to the Jeeber — counting it against
         // BR-10 prevents the Jeeber from accepting fresh work that they
@@ -154,6 +165,17 @@ public class DeliveryRequest
     public GeoPoint? DropoffLocation { get; init; }
     public string? PickupAddress { get; init; }
     public string? DropoffAddress { get; init; }
+
+    /// <summary>
+    /// T-BE-019 (JEB-55): E.164 phone number that receives the 4-digit
+    /// handover OTP via the external one-time-password service. Distinct
+    /// from <c>ClientId</c> because the recipient at drop-off may be a
+    /// different person than the requester (e.g. a gift). Null until set
+    /// by the request-creation flow; the OTP trigger endpoint returns 400
+    /// when missing so a hardcoded placeholder phone is never used.
+    /// </summary>
+    public string? RecipientPhone { get; set; }
+
     public required DateTimeOffset CreatedAt { get; init; }
 
     /// <summary>
