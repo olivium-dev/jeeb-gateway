@@ -16,3 +16,6 @@ Thumbs.db
 
 ## Test results
 **/TestResults/
+
+## Generated audit/build output
+dist/

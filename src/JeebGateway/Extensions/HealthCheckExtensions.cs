@@ -3,23 +3,28 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 namespace JeebGateway.Extensions;
 
 /// <summary>
-/// Registers downstream-service liveness probes on the gateway's
-/// <c>/health/ready</c> endpoint. Every check tags itself <c>"ready"</c> AND
-/// <c>"downstream"</c> so it shows up under the readiness predicate and can be
-/// filtered to "just upstream services" for dashboards.
+/// Registers downstream-service liveness probes used by the gateway's
+/// <c>/health</c>, <c>/health/ready</c>, and <c>/health/live</c> endpoints.
+/// Every check tags itself <c>"ready"</c> AND <c>"downstream"</c> so it
+/// shows up under the readiness predicate and can be filtered to "just
+/// upstream services" for dashboards.
 ///
-/// Failures are reported as <see cref="HealthStatus.Degraded"/>, never
-/// <see cref="HealthStatus.Unhealthy"/>. Rationale: the gateway can still serve
-/// the endpoints that don't depend on the flaky upstream — Kubernetes should
-/// not pull the pod out of the Service load balancer on a single backend hiccup.
-/// Pages and alerts should fire on <c>Degraded</c>, not on liveness failure.
+/// JEB-67 / T-BE-031 AC2 — downstream failures are reported as
+/// <see cref="HealthStatus.Unhealthy"/> so the aggregated <c>/health</c>
+/// surface returns HTTP 503 (the default mapping in <c>MapHealthChecks</c>)
+/// with the failing service named. Kubernetes liveness uses the separate
+/// <c>/health/live</c> endpoint which only checks the <c>"live"</c> tag,
+/// so a flaky upstream cannot cause a pod restart loop.
 /// </summary>
 public static class HealthCheckExtensions
 {
     /// <summary>
     /// Adds a URL-group health check per upstream service. Each check uses the
     /// same BaseUrl key as <see cref="ServiceClientExtensions.AddDownstreamClients"/>
-    /// and probes <c>{BaseUrl}/health</c>.
+    /// and probes <c>{BaseUrl}/health/ready</c> (the org-standard readyz path
+    /// — see dotnet-healthchecks-readiness-liveness skill). Falls back to
+    /// <c>{BaseUrl}/health</c> if the configured BaseUrl already ends in a
+    /// health path segment.
     /// </summary>
     public static IServiceCollection AddDownstreamHealthChecks(
         this IServiceCollection services,
@@ -52,18 +57,18 @@ public static class HealthCheckExtensions
         // for dev environments that don't spin up every upstream). An unset
         // URL means "we are not aggregating this service in this environment"
         // — registering a check pointing at an empty Uri would always fail and
-        // wrongly mark the gateway Degraded.
+        // wrongly mark the gateway Unhealthy.
         if (string.IsNullOrWhiteSpace(baseUrl))
         {
             return;
         }
 
-        var healthEndpoint = new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), "health");
+        var readyEndpoint = new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), "health/ready");
 
         checks.AddUrlGroup(
-            uri: healthEndpoint,
+            uri: readyEndpoint,
             name: name,
-            failureStatus: HealthStatus.Degraded,
+            failureStatus: HealthStatus.Unhealthy,
             tags: new[] { "ready", "downstream" },
             timeout: TimeSpan.FromSeconds(3));
     }
