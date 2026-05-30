@@ -560,7 +560,6 @@ builder.Services.AddSingleton<ITokenService, TokenService>();
 // ===========================================================================
 builder.Services.AddJeebOtpSignIn(builder.Configuration, builder.Environment);
 
-<<<<<<< HEAD
 // ===========================================================================
 // T-BE-003 / JEB-39 — role-switch endpoint POST /v1/users/me/role/switch
 //
@@ -583,8 +582,6 @@ builder.Services.AddSingleton<InMemoryUserManagementRoleSwitchClient>();
 builder.Services.AddSingleton<IUserManagementRoleSwitchClient>(sp =>
     sp.GetRequiredService<InMemoryUserManagementRoleSwitchClient>());
 
-=======
->>>>>>> origin/main
 // Jeeber availability toggle + auto-offline sweeper (T-backend-023).
 // In-memory implementations stand in for the durable Postgres row, the
 // Redis geo index, and the offer-service withdrawal hook described in
