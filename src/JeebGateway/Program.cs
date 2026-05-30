@@ -4,6 +4,7 @@ using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Availability;
 using JeebGateway.Chat;
 using JeebGateway.Disputes;
+using JeebGateway.Disputes.V2;
 using JeebGateway.Extensions;
 using JeebGateway.Financials;
 using JeebGateway.Kyc;
@@ -209,6 +210,8 @@ builder.Services.AddOpenTelemetry()
             // T-BE-001 / JEB-471 — OTP sign-in spans
             // (auth.otp.request / auth.otp.verify / auth.refresh).
             .AddSource(OtpSignInActivitySource.Name)
+            // T-BE-028 / JEB-64 — dispute case open / resolve spans.
+            .AddSource(DisputeCaseTelemetry.ActivitySourceName)
             .AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
     })
     .WithMetrics(metrics =>
@@ -218,6 +221,8 @@ builder.Services.AddOpenTelemetry()
             .AddHttpClientInstrumentation()
             // T-backend-050 — Jeeb-owned per-endpoint latency meter.
             .AddMeter(RequestLatencyMetrics.MeterName)
+            // T-BE-028 / JEB-64 — dispute case counters & histograms.
+            .AddMeter(DisputeCaseTelemetry.MeterName)
             // Explicit buckets keep the 400ms p95 SLO on a bucket boundary so
             // histogram_quantile() does not round across a wide bucket (T-backend-050).
             .AddView(
@@ -476,6 +481,44 @@ builder.Services.AddSingleton<IAdminAuditLog, InMemoryAdminAuditLog>();
 // via the BFF NSwag client.
 builder.Services.AddSingleton<IDisputeStore, InMemoryDisputeStore>();
 builder.Services.AddSingleton<IDisputeService, DisputeService>();
+
+// ---------------------------------------------------------------------------
+// T-BE-028 / JEB-64: dispute case state machine + chat/GPS evidence
+// orchestration. Additive over T-backend-025; adds the new v1 surface:
+//   POST /v1/deliveries/{id}/escalate
+//   POST /admin/v1/disputes/{id}/resolve
+//
+// Refund path proxies to olivium-dev/unified_payment_gateway (locked-in
+// payments policy). InMemoryPaymentRefundClient stands in for tests /
+// local dev; HttpPaymentRefundClient takes over when
+// Services:UnifiedPayment:BaseUrl is configured.
+//
+// Evidence orchestrator captures chat transcript + GPS polyline at
+// escalate time with per-call timeouts so the AC6 1s open budget holds
+// even under upstream degradation (PO blocker #3).
+// ---------------------------------------------------------------------------
+builder.Services.Configure<DisputeEvidenceOptions>(
+    builder.Configuration.GetSection(DisputeEvidenceOptions.SectionName));
+builder.Services.AddSingleton<IDisputeCaseStore, InMemoryDisputeCaseStore>();
+builder.Services.AddSingleton<IDisputeEvidenceOrchestrator, DisputeEvidenceOrchestrator>();
+builder.Services.AddSingleton<IDisputeCaseService, DisputeCaseService>();
+
+builder.Services.AddSingleton<InMemoryPaymentRefundClient>();
+var paymentBaseUrl = builder.Configuration["Services:UnifiedPayment:BaseUrl"]
+    ?? builder.Configuration["Services:UnifiedPayment"];
+if (!string.IsNullOrWhiteSpace(paymentBaseUrl))
+{
+    builder.Services.AddHttpClient<IPaymentRefundClient, HttpPaymentRefundClient>(http =>
+    {
+        http.BaseAddress = new Uri(paymentBaseUrl!.TrimEnd('/') + "/");
+        http.Timeout = TimeSpan.FromSeconds(5);
+    });
+}
+else
+{
+    builder.Services.AddSingleton<IPaymentRefundClient>(sp =>
+        sp.GetRequiredService<InMemoryPaymentRefundClient>());
+}
 
 // Jeeber KYC submission pipeline (T-backend-004 / JEEB-22).
 //
