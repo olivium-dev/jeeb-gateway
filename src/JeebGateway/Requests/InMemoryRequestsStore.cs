@@ -702,6 +702,7 @@ public class InMemoryRequestsStore : IRequestsStore
         DropoffLocation = input.DropoffLocation,
         PickupAddress = input.PickupAddress,
         DropoffAddress = input.DropoffAddress,
+        RecipientPhone = input.RecipientPhone,
         CreatedAt = _clock.GetUtcNow(),
         ScheduledAt = input.ScheduledAt
     };
