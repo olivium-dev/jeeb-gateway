@@ -27,6 +27,7 @@ using JeebGateway.Tokens;
 using JeebGateway.Tracking;
 using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
+using JeebGateway.Users.RoleSwitch;
 using JeebGateway.Calls;
 using JeebGateway.Wallet;
 using JeebGateway.Whisper;
@@ -611,6 +612,28 @@ builder.Services.AddSingleton<ITokenService, TokenService>();
 //   invalid_otp, too_many_attempts, invalid_country, rate_limited, invalid_phone
 // ===========================================================================
 builder.Services.AddJeebOtpSignIn(builder.Configuration, builder.Environment);
+
+// ===========================================================================
+// T-BE-003 / JEB-39 — role-switch endpoint POST /v1/users/me/role/switch
+//
+// Registers IUserManagementRoleSwitchClient with the in-memory MVP shim
+// (InMemoryUserManagementRoleSwitchClient). The MVP shim is keyed by Guid
+// userId and tracks (available_roles, active_role, active_role_changed_at)
+// in process; integration tests seed users via the concrete singleton.
+//
+// Production wiring (TODO T-backend-bff-user — see ServiceClientExtensions)
+// swaps this registration with an HTTP adapter over the NSwag-generated
+// UserManagementClient calling
+//   PATCH /api/User/{id}/active-role  (added by T-BE-002, JEB-38)
+// behind the standard Polly resilience pipeline.
+//
+// UsersRoleController consumes this client plus IJeebJwtIssuer (registered
+// by AddJeebOtpSignIn above) to mint a fresh HS512 token pair carrying the
+// new active_role claim on every successful switch.
+// ===========================================================================
+builder.Services.AddSingleton<InMemoryUserManagementRoleSwitchClient>();
+builder.Services.AddSingleton<IUserManagementRoleSwitchClient>(sp =>
+    sp.GetRequiredService<InMemoryUserManagementRoleSwitchClient>());
 
 // Jeeber availability toggle + auto-offline sweeper (T-backend-023).
 // In-memory implementations stand in for the durable Postgres row, the
