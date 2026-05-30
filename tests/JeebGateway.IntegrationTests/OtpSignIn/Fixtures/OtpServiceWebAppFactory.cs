@@ -139,7 +139,7 @@ public sealed class OtpServiceWebAppFactory : WebApplicationFactory<Program>
         OtpClient.Reset();
         UserMgmtClient.Reset();
         LogCapture.Records.Clear();
-        SpanExporter.Spans.Clear();
+        SpanExporter.Clear();
 
         var target = BaseEpoch.AddDays(System.Threading.Interlocked.Increment(ref _resetCount));
         var current = Clock.GetUtcNow();
@@ -229,13 +229,37 @@ public sealed class CapturingLoggerProvider : ILoggerProvider
 /// </summary>
 public sealed class InMemorySpanExporter : BaseExporter<Activity>
 {
-    public List<Activity> Spans { get; } = new();
+    private readonly List<Activity> _spans = new();
+    private readonly object _gate = new();
+
+    /// <summary>
+    /// Thread-safe snapshot of every exported span. Returns a copy so callers
+    /// can enumerate without racing the OTel export thread: production
+    /// Program.cs wires AspNetCore + HttpClient instrumentation onto the same
+    /// TracerProvider, so server/client spans are exported on request-handling
+    /// threads concurrently with the test thread reading this collection.
+    /// Enumerating the live list directly threw "Collection was modified;
+    /// enumeration operation may not execute".
+    /// </summary>
+    public IReadOnlyList<Activity> Spans
+    {
+        get { lock (_gate) { return new List<Activity>(_spans); } }
+    }
+
+    /// <summary>Clears captured spans between tests (see ResetState).</summary>
+    public void Clear()
+    {
+        lock (_gate) { _spans.Clear(); }
+    }
 
     public override ExportResult Export(in Batch<Activity> batch)
     {
-        foreach (var activity in batch)
+        lock (_gate)
         {
-            Spans.Add(activity);
+            foreach (var activity in batch)
+            {
+                _spans.Add(activity);
+            }
         }
         return ExportResult.Success;
     }
