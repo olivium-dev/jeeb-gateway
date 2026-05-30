@@ -12,15 +12,20 @@
 -- Refs:      FR-3.* (request creation), FR-4.* (matching), 0004 base.
 -- =====================================================================
 
-BEGIN;
-
 -- ---------------------------------------------------------------------
 -- Enum: extend delivery_request_status with 'scheduled'
 --
--- Idempotent — re-applying the migration must succeed even if the value
--- already exists. ADD VALUE IF NOT EXISTS is Postgres 9.6+.
+-- Postgres forbids USING a newly-ADDed enum value in the SAME transaction
+-- that added it ("unsafe use of new value"). The CHECK constraint and the
+-- partial index below both reference 'scheduled', so the ADD VALUE must be
+-- committed first. It therefore runs in autocommit (NO surrounding BEGIN);
+-- the column/constraint/index then run in their own transaction below.
+-- Idempotent — ADD VALUE IF NOT EXISTS is a no-op if the value exists, so
+-- the non-atomic split is safe to re-run.
 -- ---------------------------------------------------------------------
 ALTER TYPE delivery_request_status ADD VALUE IF NOT EXISTS 'scheduled' BEFORE 'pending';
+
+BEGIN;
 
 -- ---------------------------------------------------------------------
 -- Column: delivery_requests.scheduled_at
