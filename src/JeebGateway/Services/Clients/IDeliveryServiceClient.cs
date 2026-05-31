@@ -141,21 +141,45 @@ public sealed class DeliveryOtpVerifyResult
 /// <summary>
 /// T-BE-019 (JEB-55): 200 body of <c>POST /api/v1/deliveries/{id}/otp/issue</c>
 /// — <c>{ delivery_id, issued:true }</c>.
+///
+/// delivery-service (Go) emits <b>snake_case</b>; the shared
+/// <c>JsonSerializerDefaults.Web</c> options in <see cref="DeliveryServiceClient"/>
+/// map PascalCase → camelCase, which would fail to bind <c>delivery_id</c> onto
+/// the <c>required</c> <see cref="DeliveryId"/> and throw a JsonException on the
+/// SUCCESS path. The explicit <see cref="System.Text.Json.Serialization.JsonPropertyName"/>
+/// attributes scope the snake_case mapping to exactly this DTO without changing
+/// the global naming policy (which other client methods depend on).
 /// </summary>
 public sealed class DeliveryHandoverIssueResult
 {
+    [System.Text.Json.Serialization.JsonPropertyName("delivery_id")]
     public required string DeliveryId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("issued")]
     public bool Issued { get; init; }
 }
 
 /// <summary>
 /// T-BE-019 (JEB-55): 200 body of <c>POST /api/v1/deliveries/{id}/otp/verify</c>
 /// — <c>{ delivery_id, verified:true, status:"Done" }</c>.
+///
+/// delivery-service (Go) emits <b>snake_case</b>. As with
+/// <see cref="DeliveryHandoverIssueResult"/>, the explicit
+/// <see cref="System.Text.Json.Serialization.JsonPropertyName"/> attributes bind
+/// <c>delivery_id</c>/<c>verified</c>/<c>status</c> under the shared web-default
+/// options without mutating the global naming policy. Without them STJ throws on
+/// the SUCCESS path — after delivery-service has already committed
+/// AtDoor→Done + settlement — surfacing as an unhandled 500.
 /// </summary>
 public sealed class DeliveryHandoverVerifyResult
 {
+    [System.Text.Json.Serialization.JsonPropertyName("delivery_id")]
     public required string DeliveryId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("verified")]
     public bool Verified { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("status")]
     public string? Status { get; init; }
 }
 
@@ -177,17 +201,27 @@ public sealed class DeliveryHandoverException : Exception
     public int? AttemptsRemaining { get; }
     public string? EscalationId { get; }
 
+    /// <summary>
+    /// T-BE-019 (JEB-55): the upstream <c>locked_at</c> stamp from a 423 body
+    /// (RFC3339). The controller echoes this instead of synthesizing a gateway
+    /// clock value so the lock instant matches the source-of-truth record.
+    /// Null when the upstream omits it.
+    /// </summary>
+    public DateTimeOffset? LockedAt { get; }
+
     public DeliveryHandoverException(
         int statusCode,
         string? reason,
         int? attemptsRemaining = null,
-        string? escalationId = null)
+        string? escalationId = null,
+        DateTimeOffset? lockedAt = null)
         : base($"delivery-service handover returned {statusCode} ({reason ?? "no reason"}).")
     {
         StatusCode = statusCode;
         Reason = reason;
         AttemptsRemaining = attemptsRemaining;
         EscalationId = escalationId;
+        LockedAt = lockedAt;
     }
 }
 

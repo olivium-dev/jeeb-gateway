@@ -146,7 +146,8 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
             (int)response.StatusCode,
             problem?.Reason,
             problem?.AttemptsRemaining,
-            problem?.EscalationId);
+            problem?.EscalationId,
+            problem?.LockedAt);
     }
 
     public async Task<DeliveryCancelResult> CancelDeliveryAsync(string deliveryId, DeliveryCancelUpstreamRequest body, CancellationToken ct)
@@ -216,5 +217,8 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
     private sealed record HandoverProblemBody(
         [property: System.Text.Json.Serialization.JsonPropertyName("reason")] string? Reason,
         [property: System.Text.Json.Serialization.JsonPropertyName("attempts_remaining")] int? AttemptsRemaining,
-        [property: System.Text.Json.Serialization.JsonPropertyName("escalation_id")] string? EscalationId);
+        [property: System.Text.Json.Serialization.JsonPropertyName("escalation_id")] string? EscalationId,
+        // delivery-service stamps locked_at (RFC3339) on the 423 body; the
+        // controller echoes it rather than synthesizing a gateway clock value.
+        [property: System.Text.Json.Serialization.JsonPropertyName("locked_at")] DateTimeOffset? LockedAt);
 }

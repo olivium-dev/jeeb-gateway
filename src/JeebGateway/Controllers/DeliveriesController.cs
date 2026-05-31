@@ -1148,6 +1148,24 @@ public class DeliveriesController : ControllerBase
         {
             return MapHandoverException(dhx, deliveryId, correlationId, activity);
         }
+        catch (System.Text.Json.JsonException jx)
+        {
+            // Belt-and-suspenders: delivery-service returned 200 but the body
+            // failed to deserialize (e.g. a contract drift). CRITICAL: a 200
+            // means the durable AtDoor→Done transition + settlement ALREADY
+            // committed upstream — we must NOT let this surface as a bare 500.
+            // Map it to a 502 ProblemDetails and log loudly so the on-call can
+            // reconcile (the delivery is very likely already Done).
+            _log.LogError(
+                jx,
+                "handover.verify_deserialization_failed deliveryId={DeliveryId} correlationId={CorrelationId} — delivery-service returned 200 but the body did not bind; the AtDoor->Done transition + settlement may have ALREADY committed upstream. Reconcile manually.",
+                deliveryId, correlationId);
+            activity?.SetTag("otp.verify_deserialization_failed", "true");
+            return Problem(
+                title:      "OTP verification response could not be read",
+                detail:     "delivery-service accepted the handover but its response could not be parsed. The delivery may already be completed; do not retry without reconciling.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
         catch (HttpRequestException hreq)
         {
             _log.LogError(
@@ -1244,7 +1262,10 @@ public class DeliveriesController : ControllerBase
                 return StatusCode(StatusCodes.Status423Locked, new OtpLockedResponse
                 {
                     EscalationId = dhx.EscalationId ?? string.Empty,
-                    LockedAt     = _clock.GetUtcNow(),
+                    // Echo the upstream locked_at stamp (the source-of-truth lock
+                    // instant) rather than synthesizing the gateway clock; fall
+                    // back to the clock only when delivery-service omits it.
+                    LockedAt     = dhx.LockedAt ?? _clock.GetUtcNow(),
                     Reason       = EscalationReason.OtpLocked
                 });
             }
