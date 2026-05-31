@@ -64,49 +64,23 @@ public sealed class WalletServiceClient : IWalletServiceClient
 
         return await response.Content.ReadFromJsonAsync<SystemWalletResponse>(JsonOptions, ct);
     }
-}
-
-/// <summary>
-/// MVP fallback used until wallet-service is reachable in every Jeeb
-/// environment (no BaseUrl configured). Records the request in memory so
-/// settlement still completes end-to-end and integration tests can assert
-/// the ledger payload without a downstream dependency.
-///
-/// Registered as the default <see cref="IWalletServiceClient"/> binding;
-/// the HTTP-backed <see cref="WalletServiceClient"/> takes over once
-/// <c>Services:Wallet:BaseUrl</c> is set.
-/// </summary>
-public sealed class InMemoryWalletServiceClient : IWalletServiceClient
-{
-    private readonly List<LedgerEntryRequest> _entries = new();
-    private readonly object _lock = new();
-
-    public IReadOnlyList<LedgerEntryRequest> Entries
-    {
-        get
-        {
-            lock (_lock) return _entries.ToArray();
-        }
-    }
-
-    public Task<LedgerEntryResponse> PostLedgerEntryAsync(LedgerEntryRequest request, CancellationToken ct)
-    {
-        lock (_lock)
-        {
-            _entries.Add(request);
-        }
-
-        return Task.FromResult(new LedgerEntryResponse
-        {
-            LedgerEntryId = $"ledger-{request.IdempotencyKey}",
-            PostedAt = DateTimeOffset.UtcNow,
-        });
-    }
 
     /// <inheritdoc/>
-    /// Returns null — the in-memory fallback has no jeeb-wallet Postgres
-    /// to read from. Callers that require a real system-wallet balance must
-    /// configure <c>Services:Wallet:BaseUrl</c> to route to wallet-service.
-    public Task<SystemWalletResponse?> GetSystemWalletAsync(CancellationToken ct)
-        => Task.FromResult<SystemWalletResponse?>(null);
+    public async Task<SystemWalletResponse?> GetHolderWalletsAsync(string holderId, CancellationToken ct)
+    {
+        // wallet-service route: GET /Wallet/holder/{holderId}/wallets.
+        // When the holder is unknown the upstream returns 200 with an empty
+        // object ({}) rather than 404, so an absent WalletHolder means
+        // "no wallet provisioned" — we surface that as null.
+        using var response = await _http.GetAsync(
+            $"Wallet/holder/{Uri.EscapeDataString(holderId)}/wallets", ct);
+
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            return null;
+
+        response.EnsureSuccessStatusCode();
+
+        var payload = await response.Content.ReadFromJsonAsync<SystemWalletResponse>(JsonOptions, ct);
+        return payload?.WalletHolder is null ? null : payload;
+    }
 }
