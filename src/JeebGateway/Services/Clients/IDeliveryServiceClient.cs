@@ -37,6 +37,42 @@ public interface IDeliveryServiceClient
     /// </summary>
     Task<DeliveryRequestUpstream> StatusTransitionAsync(string deliveryId, string status, CancellationToken ct);
 
+    /// <summary>
+    /// T-BE-019 (JEB-55): the durable AtDoor-gate half of the handover OTP.
+    /// Calls the frozen delivery-service contract
+    /// <c>POST /api/v1/deliveries/{id}/otp/issue</c>. delivery-service owns
+    /// the at_door gate: the gateway must call this BEFORE asking
+    /// one-time-password to dispatch the SMS, so a courier who is not
+    /// physically at the door never triggers an OTP. The raw code never
+    /// leaves the gateway↔one-time-password hop (AC5) — only an optional
+    /// <paramref name="codeHash"/> for support is forwarded.
+    /// </summary>
+    /// <returns><see cref="DeliveryHandoverIssueResult"/> on 200.</returns>
+    /// <exception cref="DeliveryHandoverException">
+    /// Thrown for 409 <c>not_at_door</c> and 404 so the controller maps the
+    /// upstream status straight through as RFC 7807.
+    /// </exception>
+    Task<DeliveryHandoverIssueResult> IssueHandoverOtpAsync(string deliveryId, string? codeHash, CancellationToken ct);
+
+    /// <summary>
+    /// T-BE-019 (JEB-55): the durable attempt-counter / 423-lock / settlement
+    /// half of the handover OTP. Calls the frozen delivery-service contract
+    /// <c>POST /api/v1/deliveries/{id}/otp/verify</c> with ONLY a success
+    /// boolean (the gateway already validated the raw code against
+    /// one-time-password; AC5 — the code never reaches delivery-service).
+    /// delivery-service runs the AtDoor→Done transition + single-tx
+    /// settlement on success and owns the durable, multi-replica-safe
+    /// attempt counter and lock.
+    /// </summary>
+    /// <returns><see cref="DeliveryHandoverVerifyResult"/> on 200 (verified).</returns>
+    /// <exception cref="DeliveryHandoverException">
+    /// Thrown for 401 <c>invalid_code</c> (with <c>attempts_remaining</c>),
+    /// 423 <c>locked</c> (with <c>escalation_id</c>), 409 <c>not_at_door</c>,
+    /// and 404 so the controller maps the upstream status straight through
+    /// as RFC 7807.
+    /// </exception>
+    Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(string deliveryId, bool success, CancellationToken ct);
+
     Task<DeliveryCancelResult> CancelDeliveryAsync(string deliveryId, DeliveryCancelUpstreamRequest body, CancellationToken ct);
 
     Task<JeeberAvailabilityUpstream> SetAvailabilityAsync(JeeberAvailabilityUpstreamRequest body, string jeeberId, CancellationToken ct);
@@ -100,6 +136,93 @@ public sealed class DeliveryOtpVerifyResult
     public string? Reason { get; init; }
     public string? EscalationId { get; init; }
     public DateTimeOffset? LockedAt { get; init; }
+}
+
+/// <summary>
+/// T-BE-019 (JEB-55): 200 body of <c>POST /api/v1/deliveries/{id}/otp/issue</c>
+/// — <c>{ delivery_id, issued:true }</c>.
+///
+/// delivery-service (Go) emits <b>snake_case</b>; the shared
+/// <c>JsonSerializerDefaults.Web</c> options in <see cref="DeliveryServiceClient"/>
+/// map PascalCase → camelCase, which would fail to bind <c>delivery_id</c> onto
+/// the <c>required</c> <see cref="DeliveryId"/> and throw a JsonException on the
+/// SUCCESS path. The explicit <see cref="System.Text.Json.Serialization.JsonPropertyName"/>
+/// attributes scope the snake_case mapping to exactly this DTO without changing
+/// the global naming policy (which other client methods depend on).
+/// </summary>
+public sealed class DeliveryHandoverIssueResult
+{
+    [System.Text.Json.Serialization.JsonPropertyName("delivery_id")]
+    public required string DeliveryId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("issued")]
+    public bool Issued { get; init; }
+}
+
+/// <summary>
+/// T-BE-019 (JEB-55): 200 body of <c>POST /api/v1/deliveries/{id}/otp/verify</c>
+/// — <c>{ delivery_id, verified:true, status:"Done" }</c>.
+///
+/// delivery-service (Go) emits <b>snake_case</b>. As with
+/// <see cref="DeliveryHandoverIssueResult"/>, the explicit
+/// <see cref="System.Text.Json.Serialization.JsonPropertyName"/> attributes bind
+/// <c>delivery_id</c>/<c>verified</c>/<c>status</c> under the shared web-default
+/// options without mutating the global naming policy. Without them STJ throws on
+/// the SUCCESS path — after delivery-service has already committed
+/// AtDoor→Done + settlement — surfacing as an unhandled 500.
+/// </summary>
+public sealed class DeliveryHandoverVerifyResult
+{
+    [System.Text.Json.Serialization.JsonPropertyName("delivery_id")]
+    public required string DeliveryId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("verified")]
+    public bool Verified { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("status")]
+    public string? Status { get; init; }
+}
+
+/// <summary>
+/// T-BE-019 (JEB-55): a non-200 outcome from the frozen delivery-service
+/// handover-OTP endpoints. The gateway is a thin BFF on this path — it does
+/// NOT re-interpret the durable gate; it surfaces the upstream
+/// <see cref="StatusCode"/> + <see cref="Reason"/> back to the caller as
+/// RFC 7807 ProblemDetails.
+///
+/// Carries the contract's typed extension fields so the controller can echo
+/// them: <see cref="AttemptsRemaining"/> for 401 <c>invalid_code</c> and
+/// <see cref="EscalationId"/> for 423 <c>locked</c>.
+/// </summary>
+public sealed class DeliveryHandoverException : Exception
+{
+    public int StatusCode { get; }
+    public string? Reason { get; }
+    public int? AttemptsRemaining { get; }
+    public string? EscalationId { get; }
+
+    /// <summary>
+    /// T-BE-019 (JEB-55): the upstream <c>locked_at</c> stamp from a 423 body
+    /// (RFC3339). The controller echoes this instead of synthesizing a gateway
+    /// clock value so the lock instant matches the source-of-truth record.
+    /// Null when the upstream omits it.
+    /// </summary>
+    public DateTimeOffset? LockedAt { get; }
+
+    public DeliveryHandoverException(
+        int statusCode,
+        string? reason,
+        int? attemptsRemaining = null,
+        string? escalationId = null,
+        DateTimeOffset? lockedAt = null)
+        : base($"delivery-service handover returned {statusCode} ({reason ?? "no reason"}).")
+    {
+        StatusCode = statusCode;
+        Reason = reason;
+        AttemptsRemaining = attemptsRemaining;
+        EscalationId = escalationId;
+        LockedAt = lockedAt;
+    }
 }
 
 public sealed class DeliveryCancelUpstreamRequest

@@ -314,10 +314,18 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
     private WebApplicationFactory<Program> ExternalOtpFactory(
         FakeServiceOtpClient otpClient,
         FakeDeliveryServiceClient deliveryClient,
-        CapturingLoggerProvider logCapture)
+        CapturingLoggerProvider logCapture,
+        bool deliveryUpstream = false)
     {
         return _factory.WithWebHostBuilder(builder =>
         {
+            // T-BE-019 kill-switch: when on, the controller composes the
+            // downstream delivery-service path; when off (default), the legacy
+            // in-memory handover stays. Default false keeps existing tests green.
+            builder.UseSetting(
+                "FeatureFlags:UseUpstream:Delivery",
+                deliveryUpstream ? "true" : "false");
+
             builder.ConfigureServices(services =>
             {
                 // Replace the NSwag-generated OTP client with a fake we control
@@ -613,6 +621,187 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
+    // -------- T-BE-019 downstream compose path (FeatureFlags:UseUpstream:Delivery on) --
+    //
+    // Flag-on rewires the durable gate (at_door gate, attempt counter, 423-lock,
+    // AtDoor→Done + settlement) to delivery-service. The gateway keeps ONLY the
+    // SMS round-trip (issue) and the code-validation hop (verify), then forwards
+    // a success boolean. The raw code never reaches delivery-service (AC5).
+
+    [Fact]
+    public async Task IssueOtp_FlagOn_GatesViaDeliveryServiceThenSendsSms()
+    {
+        // AC1 happy path: delivery-service /otp/issue is called FIRST (the
+        // at_door gate), THEN one-time-password sends the SMS.
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962799123456");
+        var http = AuthClient(factory, seed.JeeberId);
+
+        var resp = await http.GetAsync($"/deliveries/{seed.Id}/otp");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // Gate hit exactly once, with no code_hash (the code does not exist yet).
+        delivery.IssueCalls.Should().ContainSingle();
+        delivery.IssueCalls[0].DeliveryId.Should().Be(seed.Id);
+        delivery.IssueCalls[0].CodeHash.Should().BeNull();
+
+        // SMS dispatched to the row phone with the canonical applicationId.
+        otp.SendOtpCalls.Should().ContainSingle();
+        otp.SendOtpCalls[0].PhoneNumber.Should().Be("+962799123456");
+        otp.SendOtpCalls[0].ApplicationId.Should().Be($"delivery_handover_{seed.Id}");
+    }
+
+    [Fact]
+    public async Task IssueOtp_FlagOn_NotAtDoor_Propagates409_AndSkipsSms()
+    {
+        // delivery-service owns the gate now: 409 not_at_door short-circuits
+        // BEFORE any SMS goes out.
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient
+        {
+            IssueThrows = new DeliveryHandoverException(
+                409, reason: "not_at_door")
+        };
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        // Seed at AtDoor locally so the local guard would have passed — proving
+        // the gate is now the upstream's, not the gateway's.
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962799000111");
+        var http = AuthClient(factory, seed.JeeberId);
+
+        var resp = await http.GetAsync($"/deliveries/{seed.Id}/otp");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/not-at-door");
+
+        // No SMS round-trip happened — the gate rejected first.
+        otp.SendOtpCalls.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task VerifyOtp_FlagOn_CorrectCode_ForwardsSuccessTrue_Returns200_Done()
+    {
+        // AC2: gateway validates the code against one-time-password (success),
+        // forwards { success:true } to delivery-service, gets 200 + status Done.
+        // AC5/B5: the code never reaches delivery-service and never hits a log.
+        var otp        = new FakeServiceOtpClient { ValidateOutcome = FakeServiceOtpClient.OtpResult.Correct };
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700555666");
+        var http = AuthClient(factory, seed.JeeberId);
+
+        var resp = await http.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "1234" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<OtpVerificationResponseDto>();
+        body!.Verified.Should().BeTrue();
+        body.Status.Should().Be("Done");
+
+        // delivery-service got the success boolean — never the raw code.
+        delivery.VerifyCalls.Should().ContainSingle();
+        delivery.VerifyCalls[0].DeliveryId.Should().Be(seed.Id);
+        delivery.VerifyCalls[0].Success.Should().BeTrue();
+
+        // AC6: handover.verified emitted with the delivery id.
+        logCapture.Records.Should().Contain(r =>
+            r.Message.Contains("handover.verified") && r.Message.Contains(seed.Id));
+
+        // AC5: the code never appears in any log line.
+        logCapture.Records.Should().NotContain(r => r.Message.Contains("1234"));
+    }
+
+    [Fact]
+    public async Task VerifyOtp_FlagOn_WrongCode_ForwardsSuccessFalse_Maps401()
+    {
+        // Wrong code → one-time-password rejects → gateway forwards
+        // { success:false } → delivery-service returns 401 invalid_code with
+        // attempts_remaining, mapped straight through (AC3).
+        var otp        = new FakeServiceOtpClient { ValidateOutcome = FakeServiceOtpClient.OtpResult.Wrong };
+        var delivery   = new FakeDeliveryServiceClient
+        {
+            VerifyThrows = new DeliveryHandoverException(
+                401, reason: "invalid_code", attemptsRemaining: 2)
+        };
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700777888");
+        var http = AuthClient(factory, seed.JeeberId);
+
+        var resp = await http.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "9999" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/otp-verification-failed");
+        problem.Extensions.Should().ContainKey("attemptsRemaining");
+
+        // delivery-service was asked to verify with success=false.
+        delivery.VerifyCalls.Should().ContainSingle();
+        delivery.VerifyCalls[0].Success.Should().BeFalse();
+
+        // AC5: wrong code never logged.
+        logCapture.Records.Should().NotContain(r => r.Message.Contains("9999"));
+    }
+
+    [Fact]
+    public async Task VerifyOtp_FlagOn_Locked_Maps423WithEscalationId()
+    {
+        // delivery-service owns the durable counter; on the locking attempt it
+        // returns 423 locked + escalation_id, mapped straight through (AC4).
+        var otp        = new FakeServiceOtpClient { ValidateOutcome = FakeServiceOtpClient.OtpResult.Wrong };
+        var delivery   = new FakeDeliveryServiceClient
+        {
+            VerifyThrows = new DeliveryHandoverException(
+                423, reason: "locked", escalationId: "esc-abc-123")
+        };
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700999000");
+        var http = AuthClient(factory, seed.JeeberId);
+
+        var resp = await http.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "1111" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Locked);
+        var locked = await resp.Content.ReadFromJsonAsync<OtpLockedResponseDto>();
+        locked!.EscalationId.Should().Be("esc-abc-123");
+
+        logCapture.Records.Should().NotContain(r => r.Message.Contains("1111"));
+    }
+
+    [Fact]
+    public async Task VerifyOtp_FlagOn_NotAtDoor_Maps409()
+    {
+        // delivery-service is authoritative on the at_door gate at verify time
+        // too: 409 not_at_door forwarded straight through.
+        var otp        = new FakeServiceOtpClient { ValidateOutcome = FakeServiceOtpClient.OtpResult.Correct };
+        var delivery   = new FakeDeliveryServiceClient
+        {
+            VerifyThrows = new DeliveryHandoverException(
+                409, reason: "not_at_door")
+        };
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700222333");
+        var http = AuthClient(factory, seed.JeeberId);
+
+        var resp = await http.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "1234" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/not-at-door");
+    }
+
     // ----------------------- helpers -----------------------------------------
 
     private HttpClient AuthClient(string userId) => AuthClient(_factory, userId);
@@ -768,6 +957,39 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
     private sealed class FakeDeliveryServiceClient : IDeliveryServiceClient
     {
         public List<(string DeliveryId, string Status)> StatusTransitionCalls { get; } = new();
+
+        // ---- T-BE-019 downstream compose path (flag-on) capture/config ----
+        public List<(string DeliveryId, string? CodeHash)> IssueCalls { get; } = new();
+        public List<(string DeliveryId, bool Success)> VerifyCalls { get; } = new();
+
+        /// <summary>When set, IssueHandoverOtpAsync throws this instead of 200.</summary>
+        public DeliveryHandoverException? IssueThrows { get; set; }
+
+        /// <summary>When set, VerifyHandoverOtpAsync throws this instead of 200.</summary>
+        public DeliveryHandoverException? VerifyThrows { get; set; }
+
+        public Task<DeliveryHandoverIssueResult> IssueHandoverOtpAsync(string deliveryId, string? codeHash, CancellationToken ct)
+        {
+            IssueCalls.Add((deliveryId, codeHash));
+            if (IssueThrows is not null) throw IssueThrows;
+            return Task.FromResult(new DeliveryHandoverIssueResult
+            {
+                DeliveryId = deliveryId,
+                Issued     = true
+            });
+        }
+
+        public Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(string deliveryId, bool success, CancellationToken ct)
+        {
+            VerifyCalls.Add((deliveryId, success));
+            if (VerifyThrows is not null) throw VerifyThrows;
+            return Task.FromResult(new DeliveryHandoverVerifyResult
+            {
+                DeliveryId = deliveryId,
+                Verified   = true,
+                Status     = "Done"
+            });
+        }
 
         public Task<DeliveryRequestUpstream> StatusTransitionAsync(string deliveryId, string status, CancellationToken ct)
         {

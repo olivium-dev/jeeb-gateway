@@ -99,6 +99,57 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         return await DeserializeAsync<DeliveryRequestUpstream>(response, ct);
     }
 
+    public async Task<DeliveryHandoverIssueResult> IssueHandoverOtpAsync(string deliveryId, string? codeHash, CancellationToken ct)
+    {
+        // Frozen contract: POST /api/v1/deliveries/{id}/otp/issue
+        //   200 -> { delivery_id, issued:true }
+        //   409 -> { reason:"not_at_door" } | 404
+        // body carries only an OPTIONAL code_hash for support — never the raw
+        // code (AC5). When null we still send a (null) field; STJ omits it
+        // under web defaults only if we drop it, so we send an explicit object.
+        using var response = await _http.PostAsJsonAsync(
+            $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}/otp/issue",
+            new HandoverIssueRequest(codeHash),
+            JsonOptions,
+            ct);
+
+        if (response.IsSuccessStatusCode)
+        {
+            return await DeserializeAsync<DeliveryHandoverIssueResult>(response, ct);
+        }
+
+        var reason = await TryReadReasonAsync(response, ct);
+        throw new DeliveryHandoverException((int)response.StatusCode, reason);
+    }
+
+    public async Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(string deliveryId, bool success, CancellationToken ct)
+    {
+        // Frozen contract: POST /api/v1/deliveries/{id}/otp/verify
+        //   body { success:bool }  (NO raw code — AC5)
+        //   200 -> { delivery_id, verified:true, status:"Done" }
+        //   401 -> { reason:"invalid_code", attempts_remaining }
+        //   423 -> { reason:"locked", escalation_id }
+        //   409 -> { reason:"not_at_door" } | 404
+        using var response = await _http.PostAsJsonAsync(
+            $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}/otp/verify",
+            new HandoverVerifyRequest(success),
+            JsonOptions,
+            ct);
+
+        if (response.IsSuccessStatusCode)
+        {
+            return await DeserializeAsync<DeliveryHandoverVerifyResult>(response, ct);
+        }
+
+        var problem = await TryReadHandoverProblemAsync(response, ct);
+        throw new DeliveryHandoverException(
+            (int)response.StatusCode,
+            problem?.Reason,
+            problem?.AttemptsRemaining,
+            problem?.EscalationId,
+            problem?.LockedAt);
+    }
+
     public async Task<DeliveryCancelResult> CancelDeliveryAsync(string deliveryId, DeliveryCancelUpstreamRequest body, CancellationToken ct)
     {
         using var response = await _http.PostAsJsonAsync(
@@ -132,4 +183,42 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         }
         return payload;
     }
+
+    /// <summary>
+    /// Reads the <c>reason</c> field off a non-200 handover response, tolerating
+    /// a missing/non-JSON body (a proxy 5xx page) — returns null in that case.
+    /// </summary>
+    private static async Task<string?> TryReadReasonAsync(HttpResponseMessage response, CancellationToken ct)
+        => (await TryReadHandoverProblemAsync(response, ct))?.Reason;
+
+    private static async Task<HandoverProblemBody?> TryReadHandoverProblemAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        if (response.Content.Headers.ContentLength is 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await response.Content.ReadFromJsonAsync<HandoverProblemBody>(JsonOptions, ct);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private sealed record HandoverIssueRequest(
+        [property: System.Text.Json.Serialization.JsonPropertyName("code_hash")] string? CodeHash);
+
+    private sealed record HandoverVerifyRequest(
+        [property: System.Text.Json.Serialization.JsonPropertyName("success")] bool Success);
+
+    private sealed record HandoverProblemBody(
+        [property: System.Text.Json.Serialization.JsonPropertyName("reason")] string? Reason,
+        [property: System.Text.Json.Serialization.JsonPropertyName("attempts_remaining")] int? AttemptsRemaining,
+        [property: System.Text.Json.Serialization.JsonPropertyName("escalation_id")] string? EscalationId,
+        // delivery-service stamps locked_at (RFC3339) on the 423 body; the
+        // controller echoes it rather than synthesizing a gateway clock value.
+        [property: System.Text.Json.Serialization.JsonPropertyName("locked_at")] DateTimeOffset? LockedAt);
 }
