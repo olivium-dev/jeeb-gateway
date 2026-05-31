@@ -9,16 +9,18 @@ namespace JeebGateway.Controllers;
 /// <summary>
 /// REST shim over the chat surface (T-backend-012 / T-backend-bff-chat).
 ///
-/// Send and History now proxy the REAL chat-api (Firestore-backed,
-/// <c>Services:Chat:BaseUrl</c>) via <see cref="IChatServiceClient"/>.
-/// MarkRead remains on the in-memory <see cref="IChatDispatcher"/> (no
-/// chat-api surface for read receipts today; SignalR hub fans out receipts
-/// to connected clients regardless).
+/// Send and History are aggregated HERE in the gateway BFF via
+/// <see cref="IChatServiceClient"/>, which calls only the GENERIC chat-service
+/// member/channel/session/message primitives (Firestore-backed,
+/// <c>Services:Chat:BaseUrl</c>). No product-specific chat route exists on the
+/// shared chat-service; the Jeeb 1:1 conversation mapping is gateway-owned.
+/// MarkRead remains on the in-memory <see cref="IChatDispatcher"/> (the generic
+/// chat-service has no read-receipt surface today; the SignalR hub fans out
+/// receipts to connected clients regardless).
 ///
-/// <c>X-User-Id</c> is derived from the bearer token's <c>sub</c> /
-/// <c>ClaimTypes.NameIdentifier</c> claim and forwarded to the upstream
-/// service as a trusted BFF header — the chat-api trusts gateway-injected
-/// identity rather than its own JWT validation for this surface.
+/// The sender identity is derived from the bearer token's <c>sub</c> /
+/// <c>ClaimTypes.NameIdentifier</c> claim (see <see cref="TryGetUserId"/>) and
+/// passed to the BFF client, which resolves it to a generic chat member.
 /// </summary>
 [ApiController]
 [Route("chat")]
@@ -35,8 +37,9 @@ public class ChatController : ControllerBase
     }
 
     /// <summary>
-    /// Send a message via REST. Proxies <c>POST /api/jeeb/chat/messages</c>
-    /// on the real chat-api; sender identity is taken from the bearer token.
+    /// Send a message via REST. The BFF client ensures the deterministic 1:1
+    /// channel for the sorted user pair exists on the generic chat-service, then
+    /// posts the message. Sender identity is taken from the bearer token.
     /// </summary>
     [HttpPost("messages")]
     [ProducesResponseType(typeof(ChatMessageDto), StatusCodes.Status201Created)]
@@ -86,9 +89,9 @@ public class ChatController : ControllerBase
     }
 
     /// <summary>
-    /// Fetch chat history with another user. Proxies
-    /// <c>GET /api/jeeb/chat/conversations/{otherUserId}/messages?limit=N</c>
-    /// on the real chat-api.
+    /// Fetch chat history with another user. The BFF client resolves the
+    /// deterministic channel for the pair and reads its messages from the
+    /// generic chat-service (channel summary / message GET).
     /// </summary>
     [HttpGet("conversations/{otherUserId}/messages")]
     [ProducesResponseType(typeof(ChatMessageDto[]), StatusCodes.Status200OK)]
