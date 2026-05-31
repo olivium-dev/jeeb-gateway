@@ -15,4 +15,5 @@ public sealed class UpstreamFeatureFlags
     public bool Delivery { get; set; }
     public bool Matching { get; set; }
     public bool Geolocation { get; set; }
+    public bool Push { get; set; }
 }

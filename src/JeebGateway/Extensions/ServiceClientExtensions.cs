@@ -138,6 +138,18 @@ public static class ServiceClientExtensions
                 return new ServiceOTPClient(baseUrl, http);
             });
 
+        // T-backend-022 (push DB wiring): typed client over the
+        // push-notification FastAPI service. The device-register write path
+        // (PUT /api/v1/register) upserts into the push_notification Postgres
+        // table — the "any call that writes to the push DB". PushController
+        // consumes this when FeatureFlags:UseUpstream:Push is set, replacing
+        // InMemoryDeviceTokenStore for that path. BindBaseAddress applies the
+        // configured Services:PushNotification host with a trailing slash; the
+        // auth/resilience handlers ride the named "push-notification"
+        // registration above per the BFF aggregation pattern.
+        services.AddHttpClient<IPushNotificationClient, PushNotificationClient>(http =>
+            BindBaseAddress(http, config, "Services:PushNotification"));
+
         return services;
     }
 
