@@ -1,3 +1,4 @@
+using System.Threading;
 using JeebGateway.Services.Bff;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Http.Resilience;
@@ -160,8 +161,42 @@ public static class ServiceClientExtensions
         var redisConnectionString = config["Redis:ConnectionString"];
         if (!string.IsNullOrWhiteSpace(redisConnectionString))
         {
-            services.AddSingleton<IConnectionMultiplexer>(_ =>
-                ConnectionMultiplexer.Connect(redisConnectionString!));
+            // PR #45 — the multiplexer MUST NOT block or throw at host boot.
+            //
+            // Previously this was `ConnectionMultiplexer.Connect(connStr)` with
+            // StackExchange.Redis' default AbortOnConnectFail=true. When the
+            // configured Redis (appsettings.Production.json = 192.168.2.50:6379)
+            // is unreachable — e.g. in CI's network namespace, or during a Redis
+            // outage in prod — Connect() blocks for the full connect timeout and
+            // then throws. Because a hosted service (DataExportProcessor) resolves
+            // a chat client during Host.StartAsync, that eager Connect ran on the
+            // startup path: Kestrel never reached "Now listening", the container
+            // smoke test's `curl /health/live` after 5s failed, and in prod a
+            // transient Redis blip would crash-loop the whole gateway (reviewer
+            // P2: a Redis outage should degrade chat id-mapping, not hard-fail the
+            // BFF).
+            //
+            // Fix: parse ConfigurationOptions from the connection string and force
+            //   * AbortOnConnectFail=false — Connect() returns immediately even
+            //     when Redis is down; the multiplexer retries in the background and
+            //     recovers without a restart.
+            //   * ConnectTimeout=2000ms, ConnectRetry=1 — bounded, fast boot.
+            // and wrap the multiplexer in a Lazy<> so the (now non-blocking)
+            // Connect is deferred to first actual use, never to DI resolution.
+            // RedisChatTopologyMap reads IConnectionMultiplexer.GetDatabase() per
+            // op, so an as-yet-unconnected multiplexer degrades gracefully (ops
+            // throw RedisConnectionException per-call and recover) instead of
+            // taking the host down.
+            var redisOptions = ConfigurationOptions.Parse(redisConnectionString!);
+            redisOptions.AbortOnConnectFail = false;
+            redisOptions.ConnectTimeout = 2000;
+            redisOptions.ConnectRetry = 1;
+
+            var lazyMultiplexer = new Lazy<IConnectionMultiplexer>(
+                () => ConnectionMultiplexer.Connect(redisOptions),
+                LazyThreadSafetyMode.ExecutionAndPublication);
+
+            services.AddSingleton<IConnectionMultiplexer>(_ => lazyMultiplexer.Value);
             services.AddSingleton<IChatTopologyMap, RedisChatTopologyMap>();
         }
         else
