@@ -94,3 +94,37 @@ public sealed class MatchedJeeber
     public required double DistanceKm { get; init; }
     public required double Rating { get; init; }
 }
+
+// ---------------------------------------------------------------------------
+// DTOs for the real matching-service FastAPI endpoints
+// (GET /api/v1/matches/{user_id} — app/api/endpoints/matches.py)
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// Response shape returned by the matching-service's
+/// <c>GET /api/v1/matches/{user_id}</c> endpoint.
+/// <para>
+/// Fields mirror the Python <c>MatchesResponse</c> Pydantic model.
+/// </para>
+/// </summary>
+public sealed class MatchingServiceMatchesResponse
+{
+    /// <summary>Paginated list of matched user IDs.</summary>
+    public List<string> Matches { get; init; } = [];
+
+    /// <summary>Total number of matches before pagination.</summary>
+    public int Total { get; init; }
+}
+
+/// <summary>
+/// Gateway response shape for <c>GET /matching/users/{userId}</c>.
+/// Wraps the upstream payload and adds the resolved user id for traceability.
+/// </summary>
+public sealed class MatchingUsersResponse
+{
+    public required string UserId { get; init; }
+    public required List<string> Matches { get; init; }
+    public required int Total { get; init; }
+    public required int Skip { get; init; }
+    public required int Limit { get; init; }
+}

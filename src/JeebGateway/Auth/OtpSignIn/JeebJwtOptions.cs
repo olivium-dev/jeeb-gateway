@@ -93,4 +93,15 @@ public sealed class ServiceOtpApiOptions
 
     [Required]
     public string BaseUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The <c>ApplicationId</c> (a GUID) the one-time-password service uses to
+    /// scope OTP records. The login sign-in flow uses a single fixed value so
+    /// every <c>api/OTP/send</c> + <c>api/OTP/validate</c> pair addresses the
+    /// same partition. Loaded from <c>ServiceOTPApi:ApplicationId</c>; defaults
+    /// to a stable "jeeb-login" namespace GUID so local dev works without extra
+    /// config while remaining overridable per environment.
+    /// </summary>
+    [Required]
+    public string ApplicationId { get; set; } = "00000000-0000-0000-0000-00000000010b";
 }

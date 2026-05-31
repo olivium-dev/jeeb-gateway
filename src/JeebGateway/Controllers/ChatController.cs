@@ -1,36 +1,44 @@
 using System.Security.Claims;
 using JeebGateway.Chat;
+using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
 
 /// <summary>
-/// REST shim over the chat dispatcher (T-backend-012). Two reasons it
-/// lives alongside the SignalR hub:
-///   1. Tests and operator scripts can drive the chat flow without a
-///      SignalR client.
-///   2. Browsers behind aggressive proxies that strip WS upgrade still
-///      need a fallback for sending and marking read; the hub remains
-///      the canonical real-time surface.
+/// REST shim over the chat surface (T-backend-012 / T-backend-bff-chat).
 ///
-/// History reads land here only — we do not stream history over the hub
-/// to avoid double-replay on reconnect.
+/// Send and History are aggregated HERE in the gateway BFF via
+/// <see cref="IChatServiceClient"/>, which calls only the GENERIC chat-service
+/// member/channel/session/message primitives (Firestore-backed,
+/// <c>Services:Chat:BaseUrl</c>). No product-specific chat route exists on the
+/// shared chat-service; the Jeeb 1:1 conversation mapping is gateway-owned.
+/// MarkRead remains on the in-memory <see cref="IChatDispatcher"/> (the generic
+/// chat-service has no read-receipt surface today; the SignalR hub fans out
+/// receipts to connected clients regardless).
+///
+/// The sender identity is derived from the bearer token's <c>sub</c> /
+/// <c>ClaimTypes.NameIdentifier</c> claim (see <see cref="TryGetUserId"/>) and
+/// passed to the BFF client, which resolves it to a generic chat member.
 /// </summary>
-[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("chat")]
 public class ChatController : ControllerBase
 {
-    private readonly IChatMessageStore _store;
+    private readonly IChatServiceClient _chatServiceClient;
     private readonly IChatDispatcher _dispatcher;
 
-    public ChatController(IChatMessageStore store, IChatDispatcher dispatcher)
+    public ChatController(IChatServiceClient chatServiceClient, IChatDispatcher dispatcher)
     {
-        _store = store;
+        _chatServiceClient = chatServiceClient;
         _dispatcher = dispatcher;
     }
 
-    /// <summary>Send a message via REST (mirrors ChatHub.SendMessage).</summary>
+    /// <summary>
+    /// Send a message via REST. The BFF client ensures the deterministic 1:1
+    /// channel for the sorted user pair exists on the generic chat-service, then
+    /// posts the message. Sender identity is taken from the bearer token.
+    /// </summary>
     [HttpPost("messages")]
     [ProducesResponseType(typeof(ChatMessageDto), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -47,13 +55,31 @@ public class ChatController : ControllerBase
             });
         }
 
+        if (string.IsNullOrWhiteSpace(body.RecipientId))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "RecipientId is required.",
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
+
         try
         {
-            var message = await _dispatcher.SendAsync(userId, body, ct);
-            return StatusCode(StatusCodes.Status201Created, ChatMessageDto.From(message));
+            // Forward the FULL request (type + type-specific payload), not just the
+            // text body, so the BFF facade can validate the combination and echo the
+            // correct discriminator. Dropping everything but Text — as an earlier
+            // revision did — silently degrades every non-text message to a textless
+            // Text row and skips per-type validation.
+            var dto = await _chatServiceClient.SendMessageAsync(userId, body, ct);
+            return StatusCode(StatusCodes.Status201Created, dto);
         }
         catch (ChatValidationException ex)
         {
+            // Per-type payload validation (self-message, missing/invalid media URL,
+            // out-of-range coordinates, empty text, user-authored System) surfaces
+            // as RFC 7807 Problem+JSON 400, mirroring the SignalR hub's HubException
+            // mapping so REST and WS clients see the same rejection semantics.
             return BadRequest(new ProblemDetails
             {
                 Title = ex.Message,
@@ -63,9 +89,10 @@ public class ChatController : ControllerBase
     }
 
     /// <summary>
-    /// Mark a message as read by the calling user. Mirrors ChatHub.MarkRead;
-    /// the dispatcher fans out the receipt to the conversation group so
-    /// connected senders see it regardless of which surface marked it.
+    /// Mark a message as read by the calling user. Remains on the
+    /// in-memory <see cref="IChatDispatcher"/> — the chat-api does not
+    /// yet expose a read-receipt surface. The dispatcher fans out the
+    /// receipt via SignalR so connected senders see it.
     /// </summary>
     [HttpPost("messages/{messageId}/read")]
     [ProducesResponseType(typeof(ChatMessageDto), StatusCodes.Status200OK)]
@@ -80,9 +107,9 @@ public class ChatController : ControllerBase
     }
 
     /// <summary>
-    /// Fetch chat history with another user. The conversation id is
-    /// derived server-side from the (caller, otherUserId) pair so clients
-    /// cannot read foreign conversations by guessing ids.
+    /// Fetch chat history with another user. The BFF client resolves the
+    /// deterministic channel for the pair and reads its messages from the
+    /// generic chat-service (channel summary / message GET).
     /// </summary>
     [HttpGet("conversations/{otherUserId}/messages")]
     [ProducesResponseType(typeof(ChatMessageDto[]), StatusCodes.Status200OK)]
@@ -102,9 +129,9 @@ public class ChatController : ControllerBase
             });
         }
 
-        var conversationId = ConversationKey.For(userId, otherUserId);
-        var messages = await _store.GetByConversationAsync(conversationId, limit, ct);
-        return Ok(messages.Select(ChatMessageDto.From).ToArray());
+        var effectiveLimit = limit > 0 ? limit : 50;
+        var messages = await _chatServiceClient.GetConversationAsync(userId, otherUserId, effectiveLimit, ct);
+        return Ok(messages.ToArray());
     }
 
     private bool TryGetUserId(out string userId, out IActionResult problem)

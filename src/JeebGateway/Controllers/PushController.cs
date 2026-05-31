@@ -1,6 +1,9 @@
 using System.Security.Claims;
 using JeebGateway.Push;
+using JeebGateway.Services;
+using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
 
@@ -19,12 +22,21 @@ public class PushController : ControllerBase
     private readonly IPushNotificationService _push;
     private readonly IDeviceTokenStore _devices;
     private readonly IPushDeliveryTracker _tracker;
+    private readonly IPushNotificationClient _upstream;
+    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
 
-    public PushController(IPushNotificationService push, IDeviceTokenStore devices, IPushDeliveryTracker tracker)
+    public PushController(
+        IPushNotificationService push,
+        IDeviceTokenStore devices,
+        IPushDeliveryTracker tracker,
+        IPushNotificationClient upstream,
+        IOptionsMonitor<UpstreamFeatureFlags> flags)
     {
         _push = push;
         _devices = devices;
         _tracker = tracker;
+        _upstream = upstream;
+        _flags = flags;
     }
 
     [HttpPost("send")]
@@ -90,6 +102,25 @@ public class PushController : ControllerBase
                 statusCode: StatusCodes.Status400BadRequest);
         }
 
+        if (_flags.CurrentValue.Push)
+        {
+            // Real push-notification service (FastAPI, Postgres push_notification
+            // table). PUT /api/v1/register upserts on the (device_id, user_id)
+            // primary key. The gateway's public contract only carries
+            // platform + token, so we derive a stable device_id from the
+            // (platform, token) pair — repeated registers of the same channel
+            // collapse onto one row, preserving the in-memory store's
+            // idempotency semantics. active_role is unknown at the BFF layer
+            // (optional, backward-compatible upstream field) and left null.
+            await _upstream.RegisterDeviceAsync(new RegisterDeviceUpstreamRequest
+            {
+                UserId = userId,
+                FcmToken = body.Token,
+                DeviceId = DeriveDeviceId(platform, body.Token)
+            }, ct);
+            return NoContent();
+        }
+
         await _devices.RegisterAsync(new DeviceToken(userId, platform, body.Token), ct);
         return NoContent();
     }
@@ -142,6 +173,20 @@ public class PushController : ControllerBase
         }).ToArray();
 
         return Ok(response);
+    }
+
+    /// <summary>
+    /// Derives a stable device id from the (platform, token) pair so repeated
+    /// registrations of the same push channel upsert the same
+    /// (device_id, user_id) row upstream. SHA-256 keeps it deterministic and
+    /// avoids leaking the raw FCM/APNs token into a secondary identifier.
+    /// </summary>
+    private static string DeriveDeviceId(DevicePlatform platform, string token)
+    {
+        var material = $"{platform}:{token}";
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(material));
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     private bool TryGetUserId(out string userId, out IActionResult problem)

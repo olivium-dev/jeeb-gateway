@@ -26,4 +26,22 @@ public sealed class MatchingServiceClient : IMatchingServiceClient
         }
         return payload;
     }
+
+    /// <inheritdoc />
+    public async Task<MatchingServiceMatchesResponse> GetMatchesAsync(
+        string userId, int skip, int limit, CancellationToken ct)
+    {
+        // Real matching-service endpoint: GET /api/v1/matches/{user_id}?skip=&limit=
+        // Defined in matching/app/api/endpoints/matches.py router prefix="/matches"
+        // mounted at /api/v1 in main.py.
+        var relPath = $"api/v1/matches/{Uri.EscapeDataString(userId)}?skip={skip}&limit={limit}";
+        using var response = await _http.GetAsync(relPath, ct);
+        response.EnsureSuccessStatusCode();
+        var payload = await response.Content.ReadFromJsonAsync<MatchingServiceMatchesResponse>(JsonOptions, ct);
+        if (payload is null)
+        {
+            throw new HttpRequestException("matching-service returned an empty body for GetMatches.");
+        }
+        return payload;
+    }
 }

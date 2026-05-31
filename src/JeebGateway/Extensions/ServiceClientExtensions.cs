@@ -48,9 +48,11 @@ public static class ServiceClientExtensions
         //   migrates: AuthController, TokensController (currently in-memory)
         AddNamedDownstreamClient(services, config, "auth", "Services:Auth:BaseUrl");
 
-        // TODO(T-backend-bff-chat): chat-service — wire NSwag-generated ChatServiceClient
-        //   contract: src/JeebGateway/contracts/chat-service.openapi.json
-        //   migrates: ChatController (currently SignalR + InMemoryChatMessageStore)
+        // chat-service — GENERIC member/channel/session/message API. The Jeeb
+        //   1:1 conversation aggregation lives in ChatServiceClient (BFF), which
+        //   calls only the generic routes below. No product-specific chat surface
+        //   exists on the shared chat-service.
+        //   migrates: ChatController (REST send/history) + SignalR fan-out.
         AddNamedDownstreamClient(services, config, "chat", "Services:Chat:BaseUrl");
 
         // TODO(T-backend-bff-user): user-management — wire NSwag-generated UserManagementClient
@@ -113,6 +115,36 @@ public static class ServiceClientExtensions
         services.AddHttpClient<IGeolocationServiceClient, GeolocationServiceClient>(http =>
             BindBaseAddress(http, config, "Services:Geolocation"));
 
+        // Chat BFF facade over the GENERIC chat-service (Firestore-backed, C#/.NET 8,
+        // Services:Chat:BaseUrl). ChatServiceClient performs the Jeeb 1:1 aggregation
+        // entirely in the gateway, calling only the generic primitives:
+        //   POST /api/members
+        //   POST /api/channels
+        //   POST /api/channels/{channelId}/members   (returns a session id)
+        //   POST /api/channels/{channelId}/messages  (requires a valid session)
+        //   GET  /api/channels/{channelId}/messages/{messageId}
+        //   GET  /api/channels/{channelId}/summary
+        // It never calls any product-specific chat route. The named "chat" registration
+        // above carries the resilience pipeline; BindBaseAddress resolves
+        // Services:Chat[:BaseUrl] so the typed client inherits the same address.
+        //
+        // IChatTopologyMap is a singleton: it caches userId->memberId and
+        // sortedPairKey->(channelId, sessions) so a conversation resolves to the
+        // same generic channel/sessions across requests (the generic API has no
+        // lookup-by-external-id).
+        services.AddSingleton<IChatTopologyMap, InMemoryChatTopologyMap>();
+        services.AddHttpClient<IChatServiceClient, ChatServiceClient>(http =>
+            BindBaseAddress(http, config, "Services:Chat"));
+
+        // T-migrate-gateway-proxies — typed client over the real notification-service
+        // (FastAPI, Mongo jeeb_notifications). Hand-coded against verified routes on
+        // notification-service/main.py (GET /notifications) pending an NSwag spec.
+        // The named "notification" registration above carries the resilience pipeline;
+        // BindBaseAddress resolves Services:Notification[:BaseUrl] so the typed client
+        // inherits the same upstream address. Gated by FeatureFlags:UseUpstream:Notification.
+        services.AddHttpClient<INotificationServiceClient, NotificationServiceClient>(http =>
+            BindBaseAddress(http, config, "Services:Notification"));
+
         // T-backend-020 (JEEB-38): typed client over score-taking-service.
         // The named "score-taking" registration above carries BaseAddress +
         // the standard resilience pipeline; this typed registration hangs
@@ -137,6 +169,18 @@ public static class ServiceClientExtensions
                     ?? "http://localhost:5005";
                 return new ServiceOTPClient(baseUrl, http);
             });
+
+        // T-backend-022 (push DB wiring): typed client over the
+        // push-notification FastAPI service. The device-register write path
+        // (PUT /api/v1/register) upserts into the push_notification Postgres
+        // table — the "any call that writes to the push DB". PushController
+        // consumes this when FeatureFlags:UseUpstream:Push is set, replacing
+        // InMemoryDeviceTokenStore for that path. BindBaseAddress applies the
+        // configured Services:PushNotification host with a trailing slash; the
+        // auth/resilience handlers ride the named "push-notification"
+        // registration above per the BFF aggregation pattern.
+        services.AddHttpClient<IPushNotificationClient, PushNotificationClient>(http =>
+            BindBaseAddress(http, config, "Services:PushNotification"));
 
         return services;
     }
