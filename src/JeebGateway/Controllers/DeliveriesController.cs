@@ -2,6 +2,7 @@ using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
 using JeebGateway.Requests.OtpHandover;
+using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Authorization;
@@ -53,6 +54,7 @@ public class DeliveriesController : ControllerBase
     private readonly IServiceOTPClient _otpClient;
     private readonly IDeliveryServiceClient _deliveryClient;
     private readonly IDistributedCache _cache;
+    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly TimeProvider _clock;
     private readonly ILogger<DeliveriesController> _log;
 
@@ -75,6 +77,7 @@ public class DeliveriesController : ControllerBase
         IServiceOTPClient otpClient,
         IDeliveryServiceClient deliveryClient,
         IDistributedCache cache,
+        IOptionsMonitor<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         ILogger<DeliveriesController> log)
     {
@@ -86,6 +89,7 @@ public class DeliveriesController : ControllerBase
         _otpClient = otpClient;
         _deliveryClient = deliveryClient;
         _cache = cache;
+        _flags = flags;
         _clock = clock;
         _log = log;
     }
@@ -592,6 +596,18 @@ public class DeliveriesController : ControllerBase
             return NotFound();
         }
 
+        // ---- T-BE-019 downstream compose path (FeatureFlags:UseUpstream:Delivery) ----
+        // When the kill-switch is on, delivery-service owns the durable
+        // at_door gate. The gateway calls /otp/issue FIRST so the gate is
+        // enforced server-side and is multi-replica safe, THEN performs the
+        // SMS round-trip via one-time-password. The raw code never leaves the
+        // gateway↔one-time-password hop (AC5). The in-memory path below stays
+        // intact as the documented rollback lever.
+        if (_flags.CurrentValue.Delivery)
+        {
+            return await TriggerOtpViaDeliveryServiceAsync(deliveryId, delivery, correlationId, activity, ct);
+        }
+
         // PR review B1 (JEB-628): AC1 requires status `at_door` (the
         // handover step), not `heading_off` (the en-route step). Issuing
         // an OTP before the courier has arrived is the wrong UX.
@@ -726,6 +742,18 @@ public class DeliveriesController : ControllerBase
         if (delivery is null)
         {
             return NotFound();
+        }
+
+        // ---- T-BE-019 downstream compose path (FeatureFlags:UseUpstream:Delivery) ----
+        // When the kill-switch is on, the gateway owns ONLY the code-validation
+        // hop against one-time-password; the durable attempt counter, 423-lock,
+        // at_door gate, AtDoor→Done transition and single-tx settlement all live
+        // in delivery-service. The gateway forwards a success boolean and maps
+        // delivery-service's 200/401/423/409/404 straight through as RFC 7807.
+        // The raw code never leaves the gateway↔one-time-password hop (AC5).
+        if (_flags.CurrentValue.Delivery)
+        {
+            return await VerifyOtpViaDeliveryServiceAsync(deliveryId, delivery, body.Code!, correlationId, activity, ct);
         }
 
         // PR review B1: handover OTP applies at the `at_door` step.
@@ -943,6 +971,294 @@ public class DeliveriesController : ControllerBase
             StatusCode  = StatusCodes.Status401Unauthorized,
             ContentTypes = { "application/problem+json" }
         };
+    }
+
+    // ---- T-BE-019 downstream compose helpers (FeatureFlags:UseUpstream:Delivery) ----
+
+    /// <summary>
+    /// Issue path, flag-on: delivery-service owns the durable at_door gate.
+    /// Order is binding — call <c>/otp/issue</c> FIRST so the gate is enforced
+    /// server-side, THEN dispatch the SMS via one-time-password. A 409
+    /// <c>not_at_door</c> from delivery-service short-circuits before any SMS is
+    /// sent and is propagated as RFC 7807.
+    /// </summary>
+    private async Task<IActionResult> TriggerOtpViaDeliveryServiceAsync(
+        string deliveryId,
+        DeliveryRequest delivery,
+        string correlationId,
+        Activity? activity,
+        CancellationToken ct)
+    {
+        // Gateway still owns the SMS round-trip, so it still needs the
+        // recipient phone. The local store row carries it (the gateway is the
+        // V2-name adapter); reject rather than ship to a placeholder (AC1/B6).
+        if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
+        {
+            _log.LogWarning(
+                "OTP trigger rejected (upstream path): recipient phone missing for delivery {DeliveryId}, correlationId {CorrelationId}",
+                deliveryId, correlationId);
+            return BadRequest(new ProblemDetails
+            {
+                Title  = "Recipient phone is missing on the delivery row.",
+                Detail = "An OTP cannot be dispatched without a recipient phone number.",
+                Status = StatusCodes.Status400BadRequest,
+                Type   = "https://jeeb.dev/errors/recipient-phone-missing"
+            });
+        }
+
+        // 1) Durable at_door gate in delivery-service. The raw code never
+        //    leaves the gateway, so we forward no code_hash here (the code does
+        //    not exist yet — one-time-password mints it on send).
+        try
+        {
+            await _deliveryClient.IssueHandoverOtpAsync(deliveryId, codeHash: null, ct);
+        }
+        catch (DeliveryHandoverException dhx)
+        {
+            return MapHandoverException(dhx, deliveryId, correlationId, activity);
+        }
+        catch (HttpRequestException hreq)
+        {
+            _log.LogError(
+                "Handover OTP issue gate (upstream) network failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
+                deliveryId, hreq.GetType().Name, correlationId);
+            return Problem(
+                title:      "Failed to send OTP",
+                detail:     "Unable to reach delivery-service to gate the OTP issue.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        // 2) SMS round-trip — gateway↔one-time-password hop. Reuse the same
+        //    one-time-password client + applicationId convention as the legacy
+        //    path so the SMS template is identical.
+        var applicationId = $"delivery_handover_{deliveryId}";
+        try
+        {
+            await _otpClient.SendOTPAsync(new SendOTPRequestUserID
+            {
+                PhoneNumber   = delivery.RecipientPhone,
+                ApplicationId = applicationId
+            }, ct);
+        }
+        catch (ApiException apiEx)
+        {
+            // Never log apiEx.Message — it embeds the upstream body (B5/AC5).
+            _log.LogWarning(
+                "Handover OTP issue (upstream path) one-time-password failure for delivery {DeliveryId}: upstream status {UpstreamStatus}, correlationId {CorrelationId}",
+                deliveryId, apiEx.StatusCode, correlationId);
+            return Problem(
+                title:      "Failed to send OTP",
+                detail:     "Unable to trigger OTP via the one-time-password service.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        _log.LogInformation(
+            "Handover OTP issued (upstream path) for delivery {DeliveryId} with applicationId {ApplicationId}, correlationId {CorrelationId}",
+            deliveryId, applicationId, correlationId);
+
+        activity?.SetTag("otp.triggered", "true");
+        activity?.SetTag("otp.path", "upstream");
+        activity?.SetTag("otp.application_id", applicationId);
+
+        return Ok(new OtpTriggerResponse
+        {
+            DeliveryId = deliveryId,
+            Triggered  = true,
+            Message    = "4-digit OTP sent to the delivery recipient."
+        });
+    }
+
+    /// <summary>
+    /// Verify path, flag-on: gateway validates the raw code against
+    /// one-time-password (success boolean), then hands the durable
+    /// attempt-counter / 423-lock / AtDoor→Done / settlement to
+    /// delivery-service via <c>/otp/verify {success}</c>. delivery-service's
+    /// 200/401/423/409/404 are mapped straight through as RFC 7807. The raw
+    /// code never reaches delivery-service (AC5).
+    /// </summary>
+    private async Task<IActionResult> VerifyOtpViaDeliveryServiceAsync(
+        string deliveryId,
+        DeliveryRequest delivery,
+        string code,
+        string correlationId,
+        Activity? activity,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
+        {
+            _log.LogWarning(
+                "OTP verify rejected (upstream path): recipient phone missing for delivery {DeliveryId}, correlationId {CorrelationId}",
+                deliveryId, correlationId);
+            return BadRequest(new ProblemDetails
+            {
+                Title  = "Recipient phone is missing on the delivery row.",
+                Status = StatusCodes.Status400BadRequest,
+                Type   = "https://jeeb.dev/errors/recipient-phone-missing"
+            });
+        }
+
+        var applicationId = $"delivery_handover_{deliveryId}";
+
+        // 1) Code-validation hop. one-time-password returns 2xx for a correct
+        //    code; the NSwag client throws ApiException for a wrong/expired
+        //    code. We collapse that to a success boolean — the raw code is
+        //    discarded here and NEVER forwarded to delivery-service (AC5).
+        bool success;
+        try
+        {
+            await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
+            {
+                PhoneNumber   = delivery.RecipientPhone,
+                Otp           = code,
+                ApplicationId = applicationId
+            }, ct);
+            success = true;
+        }
+        catch (ApiException)
+        {
+            // Wrong/expired code. Do NOT log apiEx/Message (B5/AC5).
+            success = false;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(
+                "Handover OTP verify (upstream path) pre-validate failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
+                deliveryId, ex.GetType().Name, correlationId);
+            return Problem(
+                title:      "OTP verification failed",
+                detail:     "Unable to reach the one-time-password service.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        activity?.SetTag("otp.path", "upstream");
+        activity?.SetTag("otp.code_valid", success ? "true" : "false");
+
+        // 2) Durable gate in delivery-service: it owns the attempt counter,
+        //    the 423-lock, the AtDoor→Done transition and single-tx settlement.
+        DeliveryHandoverVerifyResult result;
+        try
+        {
+            result = await _deliveryClient.VerifyHandoverOtpAsync(deliveryId, success, ct);
+        }
+        catch (DeliveryHandoverException dhx)
+        {
+            return MapHandoverException(dhx, deliveryId, correlationId, activity);
+        }
+        catch (HttpRequestException hreq)
+        {
+            _log.LogError(
+                "Handover OTP verify (upstream path) delivery-service network failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
+                deliveryId, hreq.GetType().Name, correlationId);
+            return Problem(
+                title:      "OTP verification failed",
+                detail:     "Unable to reach delivery-service to complete the handover.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        // 200: delivery-service confirmed verified + transitioned to Done.
+        // AC6: emit handover.verified with the delivery id — never the code.
+        _log.LogInformation(
+            "handover.verified deliveryId={DeliveryId} correlationId={CorrelationId} status={Status}",
+            deliveryId, correlationId, result.Status ?? RequestStatus.Delivered);
+
+        activity?.SetTag("otp.verified", "true");
+
+        return Ok(new OtpHandoverVerificationResponse
+        {
+            DeliveryId = result.DeliveryId,
+            Verified   = true,
+            Status     = result.Status ?? RequestStatus.Delivered,
+            Message    = "OTP verified successfully. Delivery completed."
+        });
+    }
+
+    /// <summary>
+    /// Maps a <see cref="DeliveryHandoverException"/> (a non-200 from the frozen
+    /// delivery-service handover contract) onto the gateway's RFC 7807 surface,
+    /// echoing the contract's typed extension fields. The gateway does not
+    /// re-interpret the upstream status; it forwards it.
+    /// </summary>
+    private IActionResult MapHandoverException(
+        DeliveryHandoverException dhx,
+        string deliveryId,
+        string correlationId,
+        Activity? activity)
+    {
+        activity?.SetTag("otp.upstream_status", dhx.StatusCode);
+        activity?.SetTag("otp.upstream_reason", dhx.Reason);
+
+        switch (dhx.StatusCode)
+        {
+            case StatusCodes.Status404NotFound:
+                return NotFound();
+
+            case StatusCodes.Status409Conflict:
+                // not_at_door — the durable gate rejected the issue/verify.
+                return Conflict(new ProblemDetails
+                {
+                    Title  = "Delivery is not at the door.",
+                    Detail = "The handover OTP is only available once the courier has arrived.",
+                    Status = StatusCodes.Status409Conflict,
+                    Type   = "https://jeeb.dev/errors/not-at-door"
+                });
+
+            case StatusCodes.Status401Unauthorized:
+            {
+                // invalid_code (+ attempts_remaining). Wrong code is 401 (AC3).
+                _log.LogWarning(
+                    "handover.verification_failed deliveryId={DeliveryId} correlationId={CorrelationId} attemptsRemaining={AttemptsRemaining}",
+                    deliveryId, correlationId, dhx.AttemptsRemaining);
+                var problem = new ProblemDetails
+                {
+                    Title  = "OTP verification failed.",
+                    Detail = dhx.AttemptsRemaining is { } rem
+                        ? $"Invalid code. {rem} attempt(s) remaining."
+                        : "Invalid code.",
+                    Status = StatusCodes.Status401Unauthorized,
+                    Type   = "https://jeeb.dev/errors/otp-verification-failed"
+                };
+                if (dhx.AttemptsRemaining is { } remaining)
+                {
+                    problem.Extensions["attemptsRemaining"] = remaining;
+                }
+                return new ObjectResult(problem)
+                {
+                    StatusCode   = StatusCodes.Status401Unauthorized,
+                    ContentTypes = { "application/problem+json" }
+                };
+            }
+
+            case StatusCodes.Status423Locked:
+            {
+                // locked (+ escalation_id). delivery-service auto-opened the
+                // FailedNeedsEscalation row; surface its id for the deep-link.
+                _log.LogWarning(
+                    "handover.lockout deliveryId={DeliveryId} correlationId={CorrelationId} escalationId={EscalationId}",
+                    deliveryId, correlationId, dhx.EscalationId);
+                activity?.SetTag("otp.locked_out", "true");
+                activity?.SetTag("otp.escalation_id", dhx.EscalationId);
+                return StatusCode(StatusCodes.Status423Locked, new OtpLockedResponse
+                {
+                    EscalationId = dhx.EscalationId ?? string.Empty,
+                    LockedAt     = _clock.GetUtcNow(),
+                    Reason       = EscalationReason.OtpLocked
+                });
+            }
+
+            default:
+                // Any other upstream status (incl. 5xx) is a downstream fault.
+                _log.LogError(
+                    "Handover OTP (upstream path) unexpected delivery-service status {UpstreamStatus} for delivery {DeliveryId}, correlationId {CorrelationId}",
+                    dhx.StatusCode, deliveryId, correlationId);
+                return Problem(
+                    title:      "Handover OTP failed",
+                    detail:     "delivery-service returned an unexpected status.",
+                    statusCode: StatusCodes.Status502BadGateway);
+        }
     }
 
     // ---- IDistributedCache helpers for the OTP attempt counter --------------
