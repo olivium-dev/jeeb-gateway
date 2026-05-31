@@ -24,4 +24,13 @@ public sealed class UpstreamFeatureFlags
     /// preference fixtures green.
     /// </summary>
     public bool Notification { get; set; }
+
+    /// <summary>
+    /// When true, device-register / push paths proxy the real
+    /// push-notification service via
+    /// <see cref="JeebGateway.Services.Clients.IPushNotificationClient"/>
+    /// instead of the in-memory transport. Default false keeps existing
+    /// push fixtures green.
+    /// </summary>
+    public bool Push { get; set; }
 }
