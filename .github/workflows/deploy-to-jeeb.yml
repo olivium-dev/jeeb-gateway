@@ -38,6 +38,8 @@ on:
       notification_base_url:       { description: 'Notification service base URL',     required: true, default: 'http://192.168.2.50:10026' }
       push_notification_base_url:  { description: 'Push-notification service base URL',required: true, default: 'http://192.168.2.50:10040' }
       otp_base_url:                { description: 'OTP service base URL',             required: true, default: 'http://192.168.2.50:10037' }
+      matching_base_url:           { description: 'Matching service base URL (native host)', required: true, default: 'http://192.168.2.50:10025' }
+      delivery_base_url:           { description: 'Delivery service base URL (native host)', required: true, default: 'http://192.168.2.50:10051' }
 
 permissions:
   contents: read
@@ -107,14 +109,12 @@ jobs:
           set -euo pipefail
           SVC='${{ inputs.service_name }}'; INT='${{ inputs.internal_port }}'; EXT='${{ inputs.external_port }}'
           docker pull '$TAG'
-          docker network create --driver overlay --attachable jeeb-net 2>/dev/null || true
           if docker service ls --format '{{.Name}}' | grep -wq "\$SVC"; then
             docker service update --image '$TAG' --with-registry-auth \
               --update-order start-first --update-failure-action rollback \
               --rollback-order start-first --update-monitor 20s "\$SVC"
           else
             docker service create --name "\$SVC" --replicas 1 \
-              --network jeeb-net \
               --publish published=\$EXT,target=\$INT,mode=host \
               --with-registry-auth \
               --env ASPNETCORE_ENVIRONMENT='Production' \
@@ -128,6 +128,9 @@ jobs:
               --env Services__Wallet__BaseUrl='${{ inputs.wallet_base_url }}' \
               --env Services__Notification__BaseUrl='${{ inputs.notification_base_url }}' \
               --env Services__PushNotification__BaseUrl='${{ inputs.push_notification_base_url }}' \
+              --env UserManagementApi__BaseUrl='${{ inputs.user_management_base_url }}' \
+              --env Services__Matching__BaseUrl='${{ inputs.matching_base_url }}' \
+              --env Services__Delivery__BaseUrl='${{ inputs.delivery_base_url }}' \
               --env ServiceOTPApi__BaseUrl='${{ inputs.otp_base_url }}' \
               --reserve-memory 256M \
               '$TAG'
