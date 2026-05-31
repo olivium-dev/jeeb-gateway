@@ -113,6 +113,15 @@ public static class ServiceClientExtensions
         services.AddHttpClient<IGeolocationServiceClient, GeolocationServiceClient>(http =>
             BindBaseAddress(http, config, "Services:Geolocation"));
 
+        // T-migrate-gateway-proxies — typed client over the real notification-service
+        // (FastAPI, Mongo jeeb_notifications). Hand-coded against verified routes on
+        // notification-service/main.py (GET /notifications) pending an NSwag spec.
+        // The named "notification" registration above carries the resilience pipeline;
+        // BindBaseAddress resolves Services:Notification[:BaseUrl] so the typed client
+        // inherits the same upstream address. Gated by FeatureFlags:UseUpstream:Notification.
+        services.AddHttpClient<INotificationServiceClient, NotificationServiceClient>(http =>
+            BindBaseAddress(http, config, "Services:Notification"));
+
         // T-backend-020 (JEEB-38): typed client over score-taking-service.
         // The named "score-taking" registration above carries BaseAddress +
         // the standard resilience pipeline; this typed registration hangs
