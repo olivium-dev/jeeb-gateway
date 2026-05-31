@@ -1,7 +1,6 @@
 using System.Security.Claims;
 using JeebGateway.Chat;
 using JeebGateway.Services.Clients;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
@@ -24,7 +23,6 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("chat")]
-[Authorize]
 public class ChatController : ControllerBase
 {
     private readonly IChatServiceClient _chatServiceClient;
@@ -66,8 +64,28 @@ public class ChatController : ControllerBase
             });
         }
 
-        var dto = await _chatServiceClient.SendMessageAsync(userId, body.RecipientId, body.Text, ct);
-        return StatusCode(StatusCodes.Status201Created, dto);
+        try
+        {
+            // Forward the FULL request (type + type-specific payload), not just the
+            // text body, so the BFF facade can validate the combination and echo the
+            // correct discriminator. Dropping everything but Text — as an earlier
+            // revision did — silently degrades every non-text message to a textless
+            // Text row and skips per-type validation.
+            var dto = await _chatServiceClient.SendMessageAsync(userId, body, ct);
+            return StatusCode(StatusCodes.Status201Created, dto);
+        }
+        catch (ChatValidationException ex)
+        {
+            // Per-type payload validation (self-message, missing/invalid media URL,
+            // out-of-range coordinates, empty text, user-authored System) surfaces
+            // as RFC 7807 Problem+JSON 400, mirroring the SignalR hub's HubException
+            // mapping so REST and WS clients see the same rejection semantics.
+            return BadRequest(new ProblemDetails
+            {
+                Title = ex.Message,
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
     }
 
     /// <summary>

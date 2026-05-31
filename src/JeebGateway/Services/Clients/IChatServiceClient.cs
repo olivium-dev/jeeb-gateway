@@ -45,6 +45,24 @@ public interface IChatServiceClient
         CancellationToken ct);
 
     /// <summary>
+    /// Sends a full <see cref="SendMessageRequest"/> from <paramref name="senderId"/>.
+    /// Carries the message <see cref="ChatMessageType"/> and its type-specific
+    /// payload (media URL, coordinates, offer id) so the BFF facade can validate
+    /// the combination and persist/echo the correct discriminator — the text-only
+    /// <see cref="SendMessageAsync(string,string,string?,CancellationToken)"/>
+    /// overload loses everything but the text body.
+    ///
+    /// Additive (non-breaking): the production
+    /// <see cref="ChatServiceClient"/> implements this by projecting onto the
+    /// generic text-only upstream send, preserving existing behaviour; richer
+    /// in-memory doubles (tests) can honour every field.
+    /// </summary>
+    Task<ChatMessageDto> SendMessageAsync(
+        string senderId,
+        SendMessageRequest request,
+        CancellationToken ct);
+
+    /// <summary>
     /// Fetches the <paramref name="limit"/> most-recent messages in the
     /// conversation between <paramref name="userId"/> and
     /// <paramref name="otherUserId"/>. Resolves the deterministic channel for the

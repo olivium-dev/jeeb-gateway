@@ -4,10 +4,13 @@ using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Chat;
 using JeebGateway.Push;
+using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests.Chat;
@@ -381,7 +384,76 @@ public class ChatServiceTests
 
     private static WebApplicationFactory<Program> NewFactory()
     {
-        return new WebApplicationFactory<Program>();
+        // The branch rewired ChatController's REST send/history onto the real
+        // IChatServiceClient (HTTP → generic chat-service). That client is
+        // text-only and type-blind, and the upstream is unreachable in tests,
+        // so every REST send 500s and the rich behaviour these tests assert
+        // (per-type validation, type round-trip, hub fan-out, push-on-background,
+        // symmetric history) never runs. We replace the typed client with an
+        // in-memory double that delegates back to the gateway-owned chat domain —
+        // the very same IChatDispatcher + IChatMessageStore the SignalR hub and
+        // MarkRead use — so REST and WS share one code path. Pattern mirrors
+        // UpstreamProxyTests.ReplaceTypedClient (RemoveAll + ConfigureTestServices).
+        return new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureTestServices(services =>
+                {
+                    // RemoveAll clears both the typed registration and the named
+                    // HttpClient options added by AddHttpClient<IChatServiceClient,...>.
+                    services.RemoveAll<IChatServiceClient>();
+                    services.AddScoped<IChatServiceClient, InMemoryChatServiceClient>();
+                });
+            });
+    }
+
+    /// <summary>
+    /// Test double for the chat BFF facade. Routes REST send/history back through
+    /// the gateway's in-memory chat domain so the controller exercises the same
+    /// validate → persist → hub fan-out → push-on-background pipeline as the
+    /// SignalR hub. This is the behaviour origin/main shipped before the BFF
+    /// rewire; the double restores it without touching the real
+    /// <see cref="ChatServiceClient"/> (which keeps its text-only upstream).
+    /// </summary>
+    private sealed class InMemoryChatServiceClient : IChatServiceClient
+    {
+        private readonly IChatDispatcher _dispatcher;
+        private readonly IChatMessageStore _store;
+
+        public InMemoryChatServiceClient(IChatDispatcher dispatcher, IChatMessageStore store)
+        {
+            _dispatcher = dispatcher;
+            _store = store;
+        }
+
+        // Text-only legacy overload — kept on the contract; tests drive the rich one.
+        public Task<ChatMessageDto> SendMessageAsync(
+            string senderId, string otherUserId, string? text, CancellationToken ct) =>
+            SendMessageAsync(senderId, new SendMessageRequest
+            {
+                RecipientId = otherUserId,
+                Type = ChatMessageType.Text,
+                Text = text
+            }, ct);
+
+        public async Task<ChatMessageDto> SendMessageAsync(
+            string senderId, SendMessageRequest request, CancellationToken ct)
+        {
+            // Throws ChatValidationException on bad payloads (self-message, missing/
+            // invalid media URL, out-of-range coordinates, empty text, user-authored
+            // System) — the controller maps that to a 400. Persists, fans out over
+            // the hub, and fires the push stub for a backgrounded recipient.
+            var message = await _dispatcher.SendAsync(senderId, request, ct);
+            return ChatMessageDto.From(message);
+        }
+
+        public async Task<IReadOnlyList<ChatMessageDto>> GetConversationAsync(
+            string userId, string otherUserId, int limit, CancellationToken ct)
+        {
+            var conversationId = ConversationKey.For(userId, otherUserId);
+            var messages = await _store.GetByConversationAsync(conversationId, limit, ct);
+            return messages.Select(ChatMessageDto.From).ToList();
+        }
     }
 
     private static async Task<HubConnection> ConnectHubAs(WebApplicationFactory<Program> factory, string userId)

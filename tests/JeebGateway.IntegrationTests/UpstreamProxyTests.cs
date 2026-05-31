@@ -83,7 +83,7 @@ public class UpstreamProxyTests
         body!.Items.Should().HaveCount(1);
         body.Items[0].Id.Should().Be("upstream-only");
 
-        captured.Single().RequestUri!.AbsolutePath.Should().Be("/jeeb/tiers");
+        captured.Single().RequestUri!.AbsolutePath.Should().Be("/api/v1/tiers");
     }
 
     // -----------------------------------------------------------------

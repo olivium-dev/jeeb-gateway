@@ -101,6 +101,22 @@ public sealed class ChatServiceClient : IChatServiceClient
     }
 
     /// <inheritdoc/>
+    public Task<ChatMessageDto> SendMessageAsync(
+        string senderId,
+        SendMessageRequest request,
+        CancellationToken ct)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+        // The generic chat-service understands only a text body + opaque payload;
+        // it has no concept of message type, media URLs, coordinates or offer
+        // cards. Project the rich request onto the text-only upstream send so the
+        // production path keeps its current behaviour. (The gateway-owned rich
+        // chat domain — type validation, presence, push — is exercised in-memory
+        // via IChatDispatcher; this BFF facade only bridges the generic upstream.)
+        return SendMessageAsync(senderId, request.RecipientId ?? string.Empty, request.Text, ct);
+    }
+
+    /// <inheritdoc/>
     public async Task<IReadOnlyList<ChatMessageDto>> GetConversationAsync(
         string userId,
         string otherUserId,
