@@ -113,6 +113,15 @@ public static class ServiceClientExtensions
         services.AddHttpClient<IGeolocationServiceClient, GeolocationServiceClient>(http =>
             BindBaseAddress(http, config, "Services:Geolocation"));
 
+        // T-backend-bff-chat — typed client over the real chat-api (Firestore-backed,
+        // C#/.NET 8, Services:Chat:BaseUrl = http://192.168.2.50:10028).
+        // Routes: POST /api/jeeb/chat/messages, GET /api/jeeb/chat/conversations/{userId}/messages
+        // The named "chat" registration above carries the resilience pipeline;
+        // BindBaseAddress resolves Services:Chat[:BaseUrl] so the typed client
+        // inherits the same upstream address.
+        services.AddHttpClient<IChatServiceClient, ChatServiceClient>(http =>
+            BindBaseAddress(http, config, "Services:Chat"));
+
         // T-migrate-gateway-proxies — typed client over the real notification-service
         // (FastAPI, Mongo jeeb_notifications). Hand-coded against verified routes on
         // notification-service/main.py (GET /notifications) pending an NSwag spec.

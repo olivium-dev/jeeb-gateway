@@ -1,36 +1,43 @@
 using System.Security.Claims;
 using JeebGateway.Chat;
+using JeebGateway.Services.Clients;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
 
 /// <summary>
-/// REST shim over the chat dispatcher (T-backend-012). Two reasons it
-/// lives alongside the SignalR hub:
-///   1. Tests and operator scripts can drive the chat flow without a
-///      SignalR client.
-///   2. Browsers behind aggressive proxies that strip WS upgrade still
-///      need a fallback for sending and marking read; the hub remains
-///      the canonical real-time surface.
+/// REST shim over the chat surface (T-backend-012 / T-backend-bff-chat).
 ///
-/// History reads land here only — we do not stream history over the hub
-/// to avoid double-replay on reconnect.
+/// Send and History now proxy the REAL chat-api (Firestore-backed,
+/// <c>Services:Chat:BaseUrl</c>) via <see cref="IChatServiceClient"/>.
+/// MarkRead remains on the in-memory <see cref="IChatDispatcher"/> (no
+/// chat-api surface for read receipts today; SignalR hub fans out receipts
+/// to connected clients regardless).
+///
+/// <c>X-User-Id</c> is derived from the bearer token's <c>sub</c> /
+/// <c>ClaimTypes.NameIdentifier</c> claim and forwarded to the upstream
+/// service as a trusted BFF header — the chat-api trusts gateway-injected
+/// identity rather than its own JWT validation for this surface.
 /// </summary>
-[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("chat")]
+[Authorize]
 public class ChatController : ControllerBase
 {
-    private readonly IChatMessageStore _store;
+    private readonly IChatServiceClient _chatServiceClient;
     private readonly IChatDispatcher _dispatcher;
 
-    public ChatController(IChatMessageStore store, IChatDispatcher dispatcher)
+    public ChatController(IChatServiceClient chatServiceClient, IChatDispatcher dispatcher)
     {
-        _store = store;
+        _chatServiceClient = chatServiceClient;
         _dispatcher = dispatcher;
     }
 
-    /// <summary>Send a message via REST (mirrors ChatHub.SendMessage).</summary>
+    /// <summary>
+    /// Send a message via REST. Proxies <c>POST /api/jeeb/chat/messages</c>
+    /// on the real chat-api; sender identity is taken from the bearer token.
+    /// </summary>
     [HttpPost("messages")]
     [ProducesResponseType(typeof(ChatMessageDto), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -47,25 +54,24 @@ public class ChatController : ControllerBase
             });
         }
 
-        try
-        {
-            var message = await _dispatcher.SendAsync(userId, body, ct);
-            return StatusCode(StatusCodes.Status201Created, ChatMessageDto.From(message));
-        }
-        catch (ChatValidationException ex)
+        if (string.IsNullOrWhiteSpace(body.RecipientId))
         {
             return BadRequest(new ProblemDetails
             {
-                Title = ex.Message,
+                Title = "RecipientId is required.",
                 Status = StatusCodes.Status400BadRequest
             });
         }
+
+        var dto = await _chatServiceClient.SendMessageAsync(userId, body.RecipientId, body.Text, ct);
+        return StatusCode(StatusCodes.Status201Created, dto);
     }
 
     /// <summary>
-    /// Mark a message as read by the calling user. Mirrors ChatHub.MarkRead;
-    /// the dispatcher fans out the receipt to the conversation group so
-    /// connected senders see it regardless of which surface marked it.
+    /// Mark a message as read by the calling user. Remains on the
+    /// in-memory <see cref="IChatDispatcher"/> — the chat-api does not
+    /// yet expose a read-receipt surface. The dispatcher fans out the
+    /// receipt via SignalR so connected senders see it.
     /// </summary>
     [HttpPost("messages/{messageId}/read")]
     [ProducesResponseType(typeof(ChatMessageDto), StatusCodes.Status200OK)]
@@ -80,9 +86,9 @@ public class ChatController : ControllerBase
     }
 
     /// <summary>
-    /// Fetch chat history with another user. The conversation id is
-    /// derived server-side from the (caller, otherUserId) pair so clients
-    /// cannot read foreign conversations by guessing ids.
+    /// Fetch chat history with another user. Proxies
+    /// <c>GET /api/jeeb/chat/conversations/{otherUserId}/messages?limit=N</c>
+    /// on the real chat-api.
     /// </summary>
     [HttpGet("conversations/{otherUserId}/messages")]
     [ProducesResponseType(typeof(ChatMessageDto[]), StatusCodes.Status200OK)]
@@ -102,9 +108,9 @@ public class ChatController : ControllerBase
             });
         }
 
-        var conversationId = ConversationKey.For(userId, otherUserId);
-        var messages = await _store.GetByConversationAsync(conversationId, limit, ct);
-        return Ok(messages.Select(ChatMessageDto.From).ToArray());
+        var effectiveLimit = limit > 0 ? limit : 50;
+        var messages = await _chatServiceClient.GetConversationAsync(userId, otherUserId, effectiveLimit, ct);
+        return Ok(messages.ToArray());
     }
 
     private bool TryGetUserId(out string userId, out IActionResult problem)
