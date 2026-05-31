@@ -2,6 +2,7 @@ using JeebGateway.Services.Bff;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
+using StackExchange.Redis;
 
 namespace JeebGateway.Extensions;
 
@@ -147,7 +148,26 @@ public static class ServiceClientExtensions
         // sortedPairKey->(channelId, sessions) so a conversation resolves to the
         // same generic channel/sessions across requests (the generic API has no
         // lookup-by-external-id).
-        services.AddSingleton<IChatTopologyMap, InMemoryChatTopologyMap>();
+        //
+        // Impl is chosen by config presence, mirroring the wallet pattern:
+        //   - Redis:ConnectionString set (appsettings.Production.json =
+        //     192.168.2.50:6379) -> RedisChatTopologyMap. The in-memory map was
+        //     lost on restart and not multi-replica safe (two replicas would split
+        //     a conversation across two generic channels); Redis makes it durable
+        //     + shared across replicas.
+        //   - absent (dev/test) -> InMemoryChatTopologyMap, so the suite and local
+        //     runs need no Redis.
+        var redisConnectionString = config["Redis:ConnectionString"];
+        if (!string.IsNullOrWhiteSpace(redisConnectionString))
+        {
+            services.AddSingleton<IConnectionMultiplexer>(_ =>
+                ConnectionMultiplexer.Connect(redisConnectionString!));
+            services.AddSingleton<IChatTopologyMap, RedisChatTopologyMap>();
+        }
+        else
+        {
+            services.AddSingleton<IChatTopologyMap, InMemoryChatTopologyMap>();
+        }
         AttachStandardPipeline(
             services.AddHttpClient<IChatServiceClient, ChatServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Chat")));

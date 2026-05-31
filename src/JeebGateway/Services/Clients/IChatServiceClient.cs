@@ -66,12 +66,81 @@ public interface IChatServiceClient
     /// Fetches the <paramref name="limit"/> most-recent messages in the
     /// conversation between <paramref name="userId"/> and
     /// <paramref name="otherUserId"/>. Resolves the deterministic channel for the
-    /// pair and reads its messages from the generic chat-service. Returns an empty
-    /// list when no channel/history exists yet.
+    /// pair and pages the generic chat-service list-messages endpoint
+    /// (<c>GET /api/channels/{channelId}/messages</c>, newest-first cursor
+    /// pagination) until <paramref name="limit"/> messages are gathered or the
+    /// channel is exhausted. Returned oldest-first so callers can render a
+    /// chronological transcript directly. Returns an empty list when no
+    /// channel/history exists yet.
     /// </summary>
     Task<IReadOnlyList<ChatMessageDto>> GetConversationAsync(
         string userId,
         string otherUserId,
         int limit,
         CancellationToken ct);
+
+    /// <summary>
+    /// Reads one newest-first page of messages for a resolved generic
+    /// <paramref name="channelId"/> via the GENERIC chat-service endpoint
+    /// <c>GET /api/channels/{channelId}/messages?limit={limit}&amp;before={beforeMessageId?}</c>.
+    /// This is the raw cursor primitive the new generic list-messages endpoint
+    /// exposes; <see cref="GetConversationAsync"/> and the dispute transcript
+    /// helper compose it. <paramref name="beforeMessageId"/> is the
+    /// <c>nextPageToken</c> from a prior page (null for the first page).
+    /// Returns an empty page (no items, null token) when the channel has no
+    /// messages or does not exist.
+    /// </summary>
+    Task<ChannelMessagePage> GetChannelMessagesAsync(
+        string channelId,
+        int limit,
+        string? beforeMessageId,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Captures up to <paramref name="limit"/> messages of the conversation
+    /// between <paramref name="userId"/> and <paramref name="otherUserId"/> for
+    /// dispute evidence, oldest-first. Identical resolution to
+    /// <see cref="GetConversationAsync"/>; named distinctly so the dispute
+    /// orchestrator's intent (transcript capture) is explicit at the call site.
+    /// </summary>
+    Task<IReadOnlyList<ChatMessageDto>> GetConversationTranscriptAsync(
+        string userId,
+        string otherUserId,
+        int limit,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Marks <paramref name="messageId"/> read by <paramref name="readerId"/> in
+    /// the conversation between <paramref name="readerId"/> and
+    /// <paramref name="otherUserId"/>, via the generic chat-service
+    /// <c>POST /api/channels/{channelId}/messages/{messageId}/seen</c> surface.
+    /// Returns the resolved <see cref="ChatMessageDto"/> with <c>ReadAt</c> set,
+    /// or null when the channel/message cannot be resolved (idempotent no-op,
+    /// never an error) so a duplicate mark-read does not surface a 500.
+    /// </summary>
+    Task<ChatMessageDto?> MarkMessageSeenAsync(
+        string readerId,
+        string otherUserId,
+        string messageId,
+        CancellationToken ct);
+}
+
+/// <summary>
+/// One newest-first page of a channel's messages as returned by the GENERIC
+/// chat-service list endpoint. <see cref="NextPageToken"/> carries the cursor
+/// (a message id) to pass as <c>before</c> for the next (older) page; null when
+/// there are no older messages.
+/// </summary>
+public sealed class ChannelMessagePage
+{
+    public required IReadOnlyList<ChatMessageDto> Items { get; init; }
+    public string? NextPageToken { get; init; }
+    public int TotalCount { get; init; }
+
+    public static ChannelMessagePage Empty { get; } = new()
+    {
+        Items = Array.Empty<ChatMessageDto>(),
+        NextPageToken = null,
+        TotalCount = 0
+    };
 }

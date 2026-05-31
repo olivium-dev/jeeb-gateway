@@ -5,7 +5,9 @@ using FluentAssertions;
 using JeebGateway.Requests;
 using JeebGateway.Users.DataExport;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -97,7 +99,7 @@ public class DataExportEndpointTests
     [Fact]
     public async Task Processor_Renders_Payload_With_All_Four_Sections()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = NewFactoryWithChatHistoryDouble();
         var userId = "exp-payload";
 
         // Seed a profile, an order, ratings, and chat history so the
@@ -260,9 +262,27 @@ public class DataExportEndpointTests
         });
     }
 
+    /// <summary>
+    /// Factory variant that swaps the production client-backed chat-history provider
+    /// (returns empty until chat-service exposes list-channels-for-member) for a
+    /// seedable double, so the export-pipeline test can assert chat history is
+    /// packaged when the provider yields it.
+    /// </summary>
+    private static WebApplicationFactory<Program> NewFactoryWithChatHistoryDouble() =>
+        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IDataExportChatHistoryProvider>();
+                services.AddSingleton<SeedableDataExportChatHistoryProvider>();
+                services.AddScoped<IDataExportChatHistoryProvider>(
+                    sp => sp.GetRequiredService<SeedableDataExportChatHistoryProvider>());
+            });
+        });
+
     private static void SeedChatMessage(WebApplicationFactory<Program> factory, string userId)
     {
-        var chats = factory.Services.GetRequiredService<InMemoryDataExportChatHistoryProvider>();
+        var chats = factory.Services.GetRequiredService<SeedableDataExportChatHistoryProvider>();
         chats.Seed(userId, new ChatMessageSnapshot
         {
             ConversationId = "conv-1",
