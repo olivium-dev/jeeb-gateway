@@ -1,0 +1,150 @@
+# Deploy to Jeeb — zero-downtime Docker Swarm deploy over the Cloudflare tunnel.
+#
+# Follows the olivium per-service deploy-to-<server>.yml pattern (workflow_dispatch
+# + cloudflared SSH + ghcr image + docker service), hardened per the locked deploy
+# policy (olivium-deployment/README.md):
+#   * zero-downtime: docker service UPDATE (start-first, rollback-on-failure);
+#     CREATE only when the service is absent  -- NEVER `service rm` + `service create`
+#   * key-only SSH from a secret (fail-closed; no password in YAML, unlike legacy)
+#   * registry creds via GitHub secrets, never inlined (no demo-password literals)
+#   * HTTP health gate after deploy, with auto-rollback to the previous image
+#
+# This service is the Jeeb gateway: a JWT BFF. It has NO database (no DB creds,
+# no connection string) — it aggregates downstream services via the
+# Services__*__BaseUrl config injected on first create.
+#
+# Required secrets (set org-selected to the Jeeb repos, or per-repo):
+#   JEEB_SSH_PRIVATE_KEY    -- deploy private key authorized on the Jeeb swarm host
+#   JEEB_JWT_SIGNING_KEY    -- gateway JWT signing key (injected as env on first create)
+#   JEEB_JWT_PHONE_PEPPER   -- gateway phone-pepper secret (injected on first create)
+
+name: Deploy to Jeeb
+
+on:
+  workflow_dispatch:
+    inputs:
+      registry:        { description: 'Container registry',              required: true, default: 'ghcr.io' }
+      service_name:    { description: 'Swarm service name',              required: true, default: 'jeeb-gateway' }
+      internal_port:   { description: 'Container port',                  required: true, default: '8080' }
+      external_port:   { description: 'Published host port (Jeeb swarm)',required: true, default: '10000' }
+      health_path:     { description: 'HTTP health path',                required: true, default: '/api/health' }
+      server_hostname: { description: 'Cloudflare tunnel hostname',      required: true, default: 'jeeb-ssh.fds-1.com' }
+      server_user:     { description: 'SSH user',                        required: true, default: 'ec2-user' }
+      jwt_issuer:                  { description: 'JWT issuer',                       required: true, default: 'https://jeeb.fds-1.com' }
+      jwt_audience:                { description: 'JWT audience',                     required: true, default: 'jeeb-mobile' }
+      chat_base_url:               { description: 'Chat service base URL',            required: true, default: 'http://192.168.2.50:10028' }
+      user_management_base_url:    { description: 'User-management service base URL',  required: true, default: 'http://192.168.2.50:10001' }
+      wallet_base_url:             { description: 'Wallet service base URL',          required: true, default: 'http://192.168.2.50:10014' }
+      notification_base_url:       { description: 'Notification service base URL',     required: true, default: 'http://192.168.2.50:10026' }
+      push_notification_base_url:  { description: 'Push-notification service base URL',required: true, default: 'http://192.168.2.50:10040' }
+      otp_base_url:                { description: 'OTP service base URL',             required: true, default: 'http://192.168.2.50:10037' }
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: deploy-jeeb-jeeb-gateway
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-22.04
+    env:
+      IMAGE: ${{ inputs.registry }}/olivium-dev/jeeb-gateway
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR (password via stdin)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ inputs.registry }} -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push image (git-SHA tag)
+        id: build
+        run: |
+          TAG="${IMAGE}:sha-${GITHUB_SHA::12}"
+          docker build -t "$TAG" -t "${IMAGE}:latest" .
+          docker push "$TAG"
+          docker push "${IMAGE}:latest"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Install cloudflared + write deploy key
+        run: |
+          set -euo pipefail
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb || sudo apt-get install -f -y
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          KEY_MATERIAL="${{ secrets.JEEB_SSH_PRIVATE_KEY }}"
+          if printf '%s' "$KEY_MATERIAL" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$KEY_MATERIAL" > ~/.ssh/id_ed25519
+          else
+            printf '%s' "$KEY_MATERIAL" | base64 -d > ~/.ssh/id_ed25519
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+          cat > ~/.ssh/config <<EOF
+          Host jeeb
+            HostName ${{ inputs.server_hostname }}
+            User ${{ inputs.server_user }}
+            IdentityFile ~/.ssh/id_ed25519
+            ProxyCommand cloudflared access ssh --hostname %h
+            StrictHostKeyChecking accept-new
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Remote GHCR login (token via stdin pipe)
+        run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ inputs.registry }} -u ${{ github.actor }} --password-stdin"
+
+      - name: Capture current image as rollback target
+        id: prev
+        run: |
+          PREV=$(ssh jeeb "docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' '${{ inputs.service_name }}' 2>/dev/null" || echo none)
+          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
+
+      - name: Zero-downtime deploy (update if exists, else create)
+        run: |
+          TAG="${{ steps.build.outputs.tag }}"
+          ssh jeeb bash -se <<EOF
+          set -euo pipefail
+          SVC='${{ inputs.service_name }}'; INT='${{ inputs.internal_port }}'; EXT='${{ inputs.external_port }}'
+          docker pull '$TAG'
+          docker network create --driver overlay --attachable jeeb-net 2>/dev/null || true
+          if docker service ls --format '{{.Name}}' | grep -wq "\$SVC"; then
+            docker service update --image '$TAG' --with-registry-auth \
+              --update-order start-first --update-failure-action rollback \
+              --rollback-order start-first --update-monitor 20s "\$SVC"
+          else
+            docker service create --name "\$SVC" --replicas 1 \
+              --network jeeb-net \
+              --publish published=\$EXT,target=\$INT,mode=host \
+              --with-registry-auth \
+              --env ASPNETCORE_ENVIRONMENT='Production' \
+              --env DOTNET_EnableWriteXorExecute='0' \
+              --env JeebJwt__SigningKey='${{ secrets.JEEB_JWT_SIGNING_KEY }}' \
+              --env JeebJwt__PhonePepper='${{ secrets.JEEB_JWT_PHONE_PEPPER }}' \
+              --env JeebJwt__Issuer='${{ inputs.jwt_issuer }}' \
+              --env JeebJwt__Audience='${{ inputs.jwt_audience }}' \
+              --env Services__Chat__BaseUrl='${{ inputs.chat_base_url }}' \
+              --env Services__UserManagement__BaseUrl='${{ inputs.user_management_base_url }}' \
+              --env Services__Wallet__BaseUrl='${{ inputs.wallet_base_url }}' \
+              --env Services__Notification__BaseUrl='${{ inputs.notification_base_url }}' \
+              --env Services__PushNotification__BaseUrl='${{ inputs.push_notification_base_url }}' \
+              --env ServiceOTPApi__BaseUrl='${{ inputs.otp_base_url }}' \
+              --reserve-memory 256M \
+              '$TAG'
+          fi
+          EOF
+
+      - name: Health gate (poll; rollback on failure)
+        run: |
+          ok=false
+          for i in $(seq 1 30); do
+            if ssh jeeb "curl -fsS -m 5 http://\$(hostname -I | awk '{print \$1}'):${{ inputs.external_port }}${{ inputs.health_path }} >/dev/null 2>&1"; then ok=true; break; fi
+            echo "health attempt $i ..."; sleep 4
+          done
+          ssh jeeb "docker service ps --no-trunc '${{ inputs.service_name }}' | head -6" || true
+          if [ "$ok" != true ]; then
+            echo "Health gate RED — rolling back"
+            ssh jeeb "docker service rollback '${{ inputs.service_name }}'" || true
+            exit 1
+          fi
+          echo "Health OK on :${{ inputs.external_port }}${{ inputs.health_path }}"
