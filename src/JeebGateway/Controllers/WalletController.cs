@@ -1,5 +1,7 @@
+using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using JeebGateway.Wallet;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
@@ -9,8 +11,13 @@ namespace JeebGateway.Controllers;
 public sealed class WalletController : ControllerBase
 {
     private readonly IInAppWalletService _wallet;
+    private readonly IWalletServiceClient _walletClient;
 
-    public WalletController(IInAppWalletService wallet) => _wallet = wallet;
+    public WalletController(IInAppWalletService wallet, IWalletServiceClient walletClient)
+    {
+        _wallet = wallet;
+        _walletClient = walletClient;
+    }
 
     [HttpGet("balance")]
     public async Task<IActionResult> GetBalance(CancellationToken ct)
@@ -46,5 +53,25 @@ public sealed class WalletController : ControllerBase
 
         var txns = await _wallet.GetTransactionsAsync(userId, page, pageSize, ct);
         return Ok(txns);
+    }
+
+    /// <summary>
+    /// Returns the system wallet holder and all its wallets as recorded in
+    /// the jeeb-wallet Postgres database via wallet-service
+    /// <c>GET /system-wallet</c>. Requires an authenticated caller.
+    ///
+    /// When <c>Services:Wallet:BaseUrl</c> is not configured the in-memory
+    /// fallback returns 404 so callers know no real data is available.
+    /// </summary>
+    [HttpGet("system")]
+    [Authorize]
+    [ProducesResponseType(typeof(SystemWalletResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetSystemWallet(CancellationToken ct)
+    {
+        var result = await _walletClient.GetSystemWalletAsync(ct);
+        return result is null
+            ? NotFound(new { message = "System wallet not found or wallet-service unavailable." })
+            : Ok(result);
     }
 }
