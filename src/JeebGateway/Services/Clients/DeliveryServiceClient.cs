@@ -21,10 +21,43 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
 
     public async Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct)
     {
-        using var response = await _http.GetAsync("jeeb/tiers", ct);
+        using var response = await _http.GetAsync("api/v1/tiers", ct);
         response.EnsureSuccessStatusCode();
         // Upstream returns a raw JSON array — not wrapped in an envelope.
         return await DeserializeAsync<IReadOnlyList<DeliveryTierDto>>(response, ct);
+    }
+
+    /// <inheritdoc />
+    public async Task<ShipmentsListDto> ListShipmentsAsync(
+        string? orderId,
+        string? stage,
+        int? limit,
+        CancellationToken ct)
+    {
+        // Build query string from optional filters — only append params that
+        // are provided so the delivery-service default behaviour applies when
+        // a filter is absent.
+        var qs = new System.Text.StringBuilder("api/v1/shipments");
+        var sep = '?';
+
+        if (!string.IsNullOrWhiteSpace(orderId))
+        {
+            qs.Append(sep).Append("orderId=").Append(Uri.EscapeDataString(orderId));
+            sep = '&';
+        }
+        if (!string.IsNullOrWhiteSpace(stage))
+        {
+            qs.Append(sep).Append("stage=").Append(Uri.EscapeDataString(stage));
+            sep = '&';
+        }
+        if (limit is > 0)
+        {
+            qs.Append(sep).Append("limit=").Append(limit.Value);
+        }
+
+        using var response = await _http.GetAsync(qs.ToString(), ct);
+        response.EnsureSuccessStatusCode();
+        return await DeserializeAsync<ShipmentsListDto>(response, ct);
     }
 
     public async Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct)

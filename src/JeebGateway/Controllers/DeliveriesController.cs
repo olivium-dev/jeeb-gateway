@@ -4,6 +4,7 @@ using JeebGateway.Requests.Cancellation;
 using JeebGateway.Requests.OtpHandover;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Logging;
@@ -87,6 +88,45 @@ public class DeliveriesController : ControllerBase
         _cache = cache;
         _clock = clock;
         _log = log;
+    }
+
+    /// <summary>
+    /// GET /deliveries — proxies to the REAL delivery-service DB via
+    /// <c>GET /api/v1/shipments</c>. This is the one gateway endpoint that
+    /// proves an end-to-end gateway → delivery-service → Postgres round-trip.
+    ///
+    /// All query parameters are forwarded verbatim to the upstream.
+    /// </summary>
+    [HttpGet]
+    [Authorize]
+    [ProducesResponseType(typeof(ShipmentsListDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
+    public async Task<IActionResult> ListShipments(
+        [FromQuery] string? orderId,
+        [FromQuery] string? stage,
+        [FromQuery] int? limit,
+        CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+
+        try
+        {
+            var result = await _deliveryClient.ListShipmentsAsync(orderId, stage, limit, ct);
+            return Ok(result);
+        }
+        catch (HttpRequestException hre)
+        {
+            _log.LogError(
+                hre,
+                "GET /deliveries upstream call failed: {Message}",
+                hre.Message);
+            return Problem(
+                title: "Delivery service unavailable.",
+                detail: "Unable to fetch shipments from delivery-service.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
     }
 
     [HttpPatch("{deliveryId}/status")]
