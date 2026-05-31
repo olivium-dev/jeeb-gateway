@@ -62,6 +62,10 @@ public class NotificationsController : ControllerBase
         {
             // Flag off: do not call an unconfigured downstream. Return an empty
             // page so callers get a well-formed envelope during phased rollout.
+            // KILL SWITCH — retained intentionally: flipping
+            // FeatureFlags:UseUpstream:Notification back to false instantly
+            // reverts the feed to this empty-page response without a redeploy.
+            // Do NOT delete this branch.
             return Ok(new NotificationListResponse
             {
                 Page = page,

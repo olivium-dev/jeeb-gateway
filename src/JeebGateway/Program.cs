@@ -288,29 +288,27 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 //
 // SettlementService re-computes the Jeeb fee (commission % per tier +
 // 2% insurance, min 1000 LBP) from the row's tier and posts a single
-// ledger entry to wallet-service via WalletServiceClient. The in-memory
-// fallback for IWalletServiceClient lets MVP / integration tests run
-// without a downstream wallet instance — the HTTP-backed client takes
-// over when Services:Wallet:BaseUrl is configured. The settlement store
-// stays in-memory pending the T-backend-bff-wallet migration to the
-// generated wallet-service client.
+// ledger entry to wallet-service via the real WalletServiceClient. The
+// in-memory record-of-truth fallback has been removed (Batch 1 thin-wire):
+// the gateway is a pure BFF, so the wallet ledger / balances always route
+// to the owning wallet-service. BaseAddress is bound lazily from
+// Services:Wallet[:BaseUrl] (real host set in appsettings.Production.json);
+// when unconfigured the client fails closed on first use rather than
+// silently serving local state. The typed client carries its own
+// bearer-forwarding + X-Service-Auth + resilience pipeline (the named
+// "wallet" client's chain is NOT inherited by a typed registration).
 builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
-builder.Services.AddSingleton<InMemoryWalletServiceClient>();
-var walletBaseUrl = builder.Configuration["Services:Wallet:BaseUrl"]
-    ?? builder.Configuration["Services:Wallet"];
-if (!string.IsNullOrWhiteSpace(walletBaseUrl))
-{
+JeebGateway.Extensions.ServiceClientExtensions.AttachWalletPipeline(
     builder.Services.AddHttpClient<IWalletServiceClient, WalletServiceClient>(http =>
     {
-        http.BaseAddress = new Uri(walletBaseUrl!.TrimEnd('/') + "/");
+        var walletBaseUrl = builder.Configuration["Services:Wallet:BaseUrl"]
+            ?? builder.Configuration["Services:Wallet"];
+        if (!string.IsNullOrWhiteSpace(walletBaseUrl))
+        {
+            http.BaseAddress = new Uri(walletBaseUrl!.TrimEnd('/') + "/");
+        }
         http.Timeout = TimeSpan.FromSeconds(30);
-    });
-}
-else
-{
-    builder.Services.AddSingleton<IWalletServiceClient>(sp =>
-        sp.GetRequiredService<InMemoryWalletServiceClient>());
-}
+    }));
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
 
 // Notification preferences (T-backend-031).
@@ -333,6 +331,13 @@ builder.Services.AddSingleton<INotificationPreferencesStore, InMemoryNotificatio
 // in-memory device-token store becomes a Postgres-backed implementation
 // alongside the per-user row in 0006.
 builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOptions.SectionName));
+// Batch 1 thin-wire: the REGISTER path now routes to the real push-notification
+// service when FeatureFlags:UseUpstream:Push is true (PushController →
+// IPushNotificationClient → PUT /api/v1/register). InMemoryDeviceTokenStore is
+// deliberately KEPT because the SEND path (PushNotificationService fan-out) still
+// reads device tokens from it — that is a separate C-domain (push transport /
+// retry / SLA) with no upstream owner yet. Do not delete this store until the
+// push-transport service lands; deleting it now would break the send pipeline.
 builder.Services.AddSingleton<IDeviceTokenStore, InMemoryDeviceTokenStore>();
 builder.Services.AddSingleton<IPushRetryQueue, InMemoryPushRetryQueue>();
 builder.Services.AddSingleton<InMemoryPushDeliveryTracker>();

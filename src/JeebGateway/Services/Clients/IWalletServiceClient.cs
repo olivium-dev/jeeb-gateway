@@ -23,6 +23,16 @@ public interface IWalletServiceClient
     /// jeeb-wallet database (e.g., before the seed migration has run).
     /// </summary>
     Task<SystemWalletResponse?> GetSystemWalletAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Reads a single wallet holder and its wallets from wallet-service via
+    /// <c>GET /Wallet/holder/{holderId}/wallets</c>. The mobile <paramref name="holderId"/>
+    /// is the user's identity GUID (the olivium wallet-holder convention — the
+    /// same identity used to seed the holder row). Returns null when the holder
+    /// has no wallets yet (the upstream returns an empty object), so callers can
+    /// distinguish "no wallet provisioned" from a zero balance.
+    /// </summary>
+    Task<SystemWalletResponse?> GetHolderWalletsAsync(string holderId, CancellationToken ct);
 }
 
 // ---------------------------------------------------------------------------
