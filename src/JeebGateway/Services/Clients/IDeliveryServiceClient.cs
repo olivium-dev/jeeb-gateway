@@ -11,6 +11,16 @@ public interface IDeliveryServiceClient
 {
     Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct);
 
+    /// <summary>
+    /// Reads shipments from the delivery-service DB via
+    /// <c>GET /api/v1/shipments</c>. All parameters are optional.
+    /// </summary>
+    Task<ShipmentsListDto> ListShipmentsAsync(
+        string? orderId,
+        string? stage,
+        int? limit,
+        CancellationToken ct);
+
     Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct);
 
     Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct);
@@ -124,5 +134,36 @@ public sealed class JeeberAvailabilityUpstream
     public double? Lat { get; init; }
     public double? Lng { get; init; }
     public DateTimeOffset? LastSeenAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+}
+
+/// <summary>
+/// Maps the delivery-service <c>GET /api/v1/shipments</c> response envelope.
+/// Matches the Go struct <c>ShipmentsListResponse</c> in
+/// <c>delivery-service/internal/api/models.go</c>.
+/// </summary>
+public sealed class ShipmentsListDto
+{
+    public IReadOnlyList<ShipmentDetailDto> Shipments { get; init; } = Array.Empty<ShipmentDetailDto>();
+    public int Count { get; init; }
+}
+
+/// <summary>
+/// Maps a single element from the <c>shipments</c> array returned by
+/// delivery-service. Only the fields the gateway exposes downstream are
+/// represented here; unmapped fields are silently dropped by STJ.
+/// </summary>
+public sealed class ShipmentDetailDto
+{
+    public required string Id { get; init; }
+    public string? TenantId { get; init; }
+    public string? OrderId { get; init; }
+    public string? WorkflowId { get; init; }
+    public int WorkflowVersion { get; init; }
+    public required string CurrentStage { get; init; }
+    public DateTimeOffset StageEnteredAt { get; init; }
+    public string? CarrierName { get; init; }
+    public string? CarrierTrackingId { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
 }

@@ -47,6 +47,23 @@ public sealed class WalletServiceClient : IWalletServiceClient
         }
         return payload;
     }
+
+    /// <inheritdoc/>
+    public async Task<SystemWalletResponse?> GetSystemWalletAsync(CancellationToken ct)
+    {
+        // wallet-service route: GET /system-wallet (absolute path — not under a
+        // controller prefix, defined directly on the action with [HttpGet("/system-wallet")]).
+        using var response = await _http.GetAsync("system-wallet", ct);
+
+        // 404 means the system wallet holder hasn't been seeded yet — not a
+        // fatal error at the gateway layer; callers receive null and decide.
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            return null;
+
+        response.EnsureSuccessStatusCode();
+
+        return await response.Content.ReadFromJsonAsync<SystemWalletResponse>(JsonOptions, ct);
+    }
 }
 
 /// <summary>
@@ -85,4 +102,11 @@ public sealed class InMemoryWalletServiceClient : IWalletServiceClient
             PostedAt = DateTimeOffset.UtcNow,
         });
     }
+
+    /// <inheritdoc/>
+    /// Returns null — the in-memory fallback has no jeeb-wallet Postgres
+    /// to read from. Callers that require a real system-wallet balance must
+    /// configure <c>Services:Wallet:BaseUrl</c> to route to wallet-service.
+    public Task<SystemWalletResponse?> GetSystemWalletAsync(CancellationToken ct)
+        => Task.FromResult<SystemWalletResponse?>(null);
 }

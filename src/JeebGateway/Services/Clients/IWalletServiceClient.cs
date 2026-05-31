@@ -15,6 +15,50 @@ namespace JeebGateway.Services.Clients;
 public interface IWalletServiceClient
 {
     Task<LedgerEntryResponse> PostLedgerEntryAsync(LedgerEntryRequest request, CancellationToken ct);
+
+    /// <summary>
+    /// Reads the system wallet holder and all its associated wallets from
+    /// wallet-service Postgres via <c>GET /system-wallet</c>.
+    /// Returns null when the system wallet holder does not yet exist in the
+    /// jeeb-wallet database (e.g., before the seed migration has run).
+    /// </summary>
+    Task<SystemWalletResponse?> GetSystemWalletAsync(CancellationToken ct);
+}
+
+// ---------------------------------------------------------------------------
+// DTOs for GET /system-wallet
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// Gateway-side projection of wallet-service's <c>AddWalletHolderResponse</c>.
+/// Field names match the wire JSON produced by wallet-service
+/// (<c>WalletHolder</c> + <c>Wallets</c>).
+/// </summary>
+public sealed class SystemWalletResponse
+{
+    public SystemWalletHolder? WalletHolder { get; init; }
+    public IReadOnlyList<SystemWallet> Wallets { get; init; } = [];
+}
+
+public sealed class SystemWalletHolder
+{
+    public Guid HolderId { get; init; }
+    public string HolderName { get; init; } = string.Empty;
+    public string HolderType { get; init; } = string.Empty;
+    public bool IsActive { get; init; }
+    public DateTime CreatedAt { get; init; }
+}
+
+public sealed class SystemWallet
+{
+    public Guid WalletId { get; init; }
+    public Guid HolderId { get; init; }
+    public int CurrencyID { get; init; }
+    public decimal Amount { get; init; }
+    public string Type { get; init; } = string.Empty;
+    public string? Note { get; init; }
+    public bool IsActive { get; init; }
+    public DateTime CreatedAt { get; init; }
 }
 
 /// <summary>
