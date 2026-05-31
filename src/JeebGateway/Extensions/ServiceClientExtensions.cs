@@ -14,10 +14,19 @@ namespace JeebGateway.Extensions;
 ///
 /// The named clients registered here ("auth", "chat", ...) are the integration
 /// points consumed by NSwag-generated typed clients (see
-/// <see cref="Services/Generated"/>). When you add a typed client, register it
-/// with <c>services.AddHttpClient&lt;IFooClient, FooClient&gt;("foo")</c> AFTER
-/// calling <see cref="AddDownstreamClients"/> so the typed registration inherits
-/// the named client's BaseAddress and resilience pipeline.
+/// <see cref="Services/Generated"/>).
+///
+/// IMPORTANT: a typed <c>AddHttpClient&lt;IFooClient, FooClient&gt;</c>
+/// registration does NOT inherit a separately-registered NAMED client's handler
+/// chain — <see cref="IHttpClientFactory"/> keys handler chains by client name,
+/// and a typed registration uses the type name as its key. Each typed client
+/// therefore gets its OWN handler chain and must have the bearer-forwarding,
+/// X-Service-Auth signing, and resilience handlers attached explicitly. The
+/// <see cref="AttachStandardPipeline"/> helper does exactly that, so every
+/// post-auth typed client below carries the same cross-cutting behaviour as the
+/// named clients. (Pre-auth OTP sign-in clients are registered separately in
+/// <c>Auth/OtpSignIn/OtpSignInServiceCollectionExtensions.cs</c> and must NOT
+/// carry bearer/ServiceAuth headers — they run before a caller token exists.)
 ///
 /// This is the BFF gateway aggregation pattern; see
 /// <c>olivium-domain-atlas</c> entries for rahmah-gateway, salehly-gateway,
@@ -101,19 +110,25 @@ public static class ServiceClientExtensions
         // ApplicationId pattern: delivery_handover_{deliveryId}
         AddNamedDownstreamClient(services, config, "otp", "Services:ServiceOTP:BaseUrl");
 
-        // T-migrate-gateway-proxies (PR-A): typed clients on top of the named
-        // HttpClient registrations above. Hand-coded against verified upstream
-        // routes pending NSwag-generated artifacts. Each controller checks the
-        // matching FeatureFlags:UseUpstream:* flag and falls back to the
-        // legacy in-memory implementation when false.
-        services.AddHttpClient<IAuthServiceClient, AuthServiceClient>(http =>
-            BindBaseAddress(http, config, "Services:Auth"));
-        services.AddHttpClient<IDeliveryServiceClient, DeliveryServiceClient>(http =>
-            BindBaseAddress(http, config, "Services:Delivery"));
-        services.AddHttpClient<IMatchingServiceClient, MatchingServiceClient>(http =>
-            BindBaseAddress(http, config, "Services:Matching"));
-        services.AddHttpClient<IGeolocationServiceClient, GeolocationServiceClient>(http =>
-            BindBaseAddress(http, config, "Services:Geolocation"));
+        // T-migrate-gateway-proxies (PR-A): typed clients for every post-auth
+        // upstream. Each is registered with its OWN handler chain — bearer
+        // forwarding + X-Service-Auth signing + the org-standard resilience
+        // pipeline — via AttachStandardPipeline. (A typed registration does not
+        // inherit the same-named named-client's handlers; see the type doc.)
+        // Each controller checks the matching FeatureFlags:UseUpstream:* flag
+        // and falls back to the legacy in-memory implementation when false.
+        AttachStandardPipeline(
+            services.AddHttpClient<IAuthServiceClient, AuthServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Auth")));
+        AttachStandardPipeline(
+            services.AddHttpClient<IDeliveryServiceClient, DeliveryServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Delivery")));
+        AttachStandardPipeline(
+            services.AddHttpClient<IMatchingServiceClient, MatchingServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Matching")));
+        AttachStandardPipeline(
+            services.AddHttpClient<IGeolocationServiceClient, GeolocationServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Geolocation")));
 
         // Chat BFF facade over the GENERIC chat-service (Firestore-backed, C#/.NET 8,
         // Services:Chat:BaseUrl). ChatServiceClient performs the Jeeb 1:1 aggregation
@@ -133,8 +148,9 @@ public static class ServiceClientExtensions
         // same generic channel/sessions across requests (the generic API has no
         // lookup-by-external-id).
         services.AddSingleton<IChatTopologyMap, InMemoryChatTopologyMap>();
-        services.AddHttpClient<IChatServiceClient, ChatServiceClient>(http =>
-            BindBaseAddress(http, config, "Services:Chat"));
+        AttachStandardPipeline(
+            services.AddHttpClient<IChatServiceClient, ChatServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Chat")));
 
         // T-migrate-gateway-proxies — typed client over the real notification-service
         // (FastAPI, Mongo jeeb_notifications). Hand-coded against verified routes on
@@ -142,23 +158,27 @@ public static class ServiceClientExtensions
         // The named "notification" registration above carries the resilience pipeline;
         // BindBaseAddress resolves Services:Notification[:BaseUrl] so the typed client
         // inherits the same upstream address. Gated by FeatureFlags:UseUpstream:Notification.
-        services.AddHttpClient<INotificationServiceClient, NotificationServiceClient>(http =>
-            BindBaseAddress(http, config, "Services:Notification"));
+        AttachStandardPipeline(
+            services.AddHttpClient<INotificationServiceClient, NotificationServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Notification")));
 
         // T-backend-020 (JEEB-38): typed client over score-taking-service.
-        // The named "score-taking" registration above carries BaseAddress +
-        // the standard resilience pipeline; this typed registration hangs
-        // off it via the BFF aggregation pattern.
-        services.AddHttpClient<IScoreServiceClient, ScoreServiceClient>(http =>
-            BindBaseAddress(http, config, "Services:ScoreTaking"));
+        // Carries its own bearer/ServiceAuth/resilience chain via
+        // AttachStandardPipeline (BFF aggregation pattern).
+        AttachStandardPipeline(
+            services.AddHttpClient<IScoreServiceClient, ScoreServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:ScoreTaking")));
 
-        // T-BE-019 (JEB-55): typed client over one-time-password service.
-        // Used for 4-digit handover OTPs with ApplicationId delivery_handover_{deliveryId}.
-        // NSwag-generated client takes (string baseUrl, HttpClient http) — we resolve
-        // baseUrl via factory and let HttpClient be the configured/named pipeline. The
-        // resilience pipeline and timeout are still applied through the named "otp"
-        // registration above so callers inherit retry/circuit-breaker behavior.
-        services.AddHttpClient<IServiceOTPClient, ServiceOTPClient>((sp, http) =>
+        // T-BE-019 (JEB-55): typed client over one-time-password service for the
+        // delivery-HANDOVER OTP (ApplicationId delivery_handover_{deliveryId}).
+        // This is a POST-AUTH call inside the authenticated delivery flow, so it
+        // carries the same bearer/ServiceAuth/resilience chain as the other
+        // downstream clients (distinct from the PRE-AUTH sign-in OTP client in
+        // Auth/OtpSignIn, which must not). The NSwag-generated client takes
+        // (string baseUrl, HttpClient http); we resolve baseUrl via factory and
+        // let HttpClient be the pipeline-configured instance.
+        AttachStandardPipeline(
+            services.AddHttpClient<IServiceOTPClient, ServiceOTPClient>((sp, http) =>
             {
                 BindBaseAddress(http, config, "Services:ServiceOTP");
             })
@@ -168,7 +188,7 @@ public static class ServiceClientExtensions
                     ?? config["Services:ServiceOTP"]
                     ?? "http://localhost:5005";
                 return new ServiceOTPClient(baseUrl, http);
-            });
+            }));
 
         // T-backend-022 (push DB wiring): typed client over the
         // push-notification FastAPI service. The device-register write path
@@ -176,11 +196,12 @@ public static class ServiceClientExtensions
         // table — the "any call that writes to the push DB". PushController
         // consumes this when FeatureFlags:UseUpstream:Push is set, replacing
         // InMemoryDeviceTokenStore for that path. BindBaseAddress applies the
-        // configured Services:PushNotification host with a trailing slash; the
-        // auth/resilience handlers ride the named "push-notification"
-        // registration above per the BFF aggregation pattern.
-        services.AddHttpClient<IPushNotificationClient, PushNotificationClient>(http =>
-            BindBaseAddress(http, config, "Services:PushNotification"));
+        // configured Services:PushNotification host with a trailing slash;
+        // AttachStandardPipeline gives this typed client its own bearer +
+        // X-Service-Auth + resilience chain (BFF aggregation pattern).
+        AttachStandardPipeline(
+            services.AddHttpClient<IPushNotificationClient, PushNotificationClient>(http =>
+                BindBaseAddress(http, config, "Services:PushNotification")));
 
         return services;
     }
@@ -245,6 +266,44 @@ public static class ServiceClientExtensions
 
         return builder;
     }
+
+    /// <summary>
+    /// Attaches the org-standard outbound pipeline to a TYPED client builder:
+    /// <see cref="BearerForwardingHandler"/> (forwards the inbound mobile JWT) →
+    /// <see cref="ServiceAuthSigningHandler"/> (attaches the HMAC X-Service-Auth
+    /// header) → the standard resilience handler (retry / circuit-breaker /
+    /// timeout). This mirrors <see cref="AddNamedDownstreamClient"/> so a
+    /// <c>AddHttpClient&lt;IFoo, Foo&gt;</c> registration is production-safe on
+    /// its own and does not silently bypass auth/resilience just because a
+    /// like-named named client exists.
+    ///
+    /// Handler order is load-bearing: the auth headers are added BEFORE the
+    /// resilience handler so every retried attempt still carries them.
+    ///
+    /// Do NOT call this for pre-auth clients (e.g. the OTP sign-in clients in
+    /// <c>Auth/OtpSignIn</c>): they run before any caller token exists and must
+    /// not emit bearer/X-Service-Auth headers.
+    /// </summary>
+    private static IHttpClientBuilder AttachStandardPipeline(IHttpClientBuilder builder)
+    {
+        builder.AddHttpMessageHandler<BearerForwardingHandler>();
+        builder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
+        builder.AddResilienceHandler("standard", ConfigureStandardResilience);
+        return builder;
+    }
+
+    /// <summary>
+    /// Public entry point that applies the same standard pipeline as the typed
+    /// downstream clients to the wallet <see cref="IHttpClientBuilder"/>
+    /// registered in <c>Program.cs</c>. The wallet client is wired there (not in
+    /// <see cref="AddDownstreamClients"/>) because it composes with settlement
+    /// services declared in the same block; this keeps it on the identical
+    /// bearer + X-Service-Auth + resilience chain. The bearer/ServiceAuth
+    /// handlers are registered transiently by <see cref="AddDownstreamClients"/>,
+    /// which Program.cs calls first.
+    /// </summary>
+    public static IHttpClientBuilder AttachWalletPipeline(IHttpClientBuilder builder)
+        => AttachStandardPipeline(builder);
 
     /// <summary>
     /// The org-standard outbound resilience pipeline. Used by every downstream
