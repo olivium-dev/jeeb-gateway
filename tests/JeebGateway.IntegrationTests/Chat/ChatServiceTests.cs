@@ -88,10 +88,10 @@ public class ChatServiceTests
         // by writing directly through the store, which is the same path
         // those dispatchers use.
         await using var factory = NewFactory();
-        var store = factory.Services.GetRequiredService<IChatMessageStore>();
+        var chat = factory.Services.GetRequiredService<InMemoryChatServiceClientDouble>();
         var conv = ConversationKey.For("alice", "bob");
 
-        await store.AppendAsync(new ChatMessage
+        chat.Seed(new ChatMessageDto
         {
             Id = Guid.NewGuid().ToString(),
             ConversationId = conv,
@@ -100,7 +100,7 @@ public class ChatServiceTests
             Type = ChatMessageType.System,
             SentAt = DateTimeOffset.UtcNow,
             Text = "Delivery accepted"
-        }, default);
+        });
 
         var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "alice");
@@ -329,7 +329,9 @@ public class ChatServiceTests
 
         var bobRest = factory.CreateClient();
         bobRest.DefaultRequestHeaders.Add("X-User-Id", "bob");
-        var resp = await bobRest.PostAsync($"/chat/messages/{sent.Id}/read", content: null);
+        // Read receipts are conversation-scoped: bob marks alice's message read in
+        // the conversation with alice.
+        var resp = await bobRest.PostAsync($"/chat/conversations/alice/messages/{sent.Id}/read", content: null);
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
 
         var updated = await resp.Content.ReadFromJsonAsync<ChatMessageDto>();
@@ -350,7 +352,9 @@ public class ChatServiceTests
         aliceRest.DefaultRequestHeaders.Add("X-User-Id", "alice");
 
         var created = await SendViaRest(aliceRest, "bob", ChatMessageType.Text, text: "hi");
-        var resp = await aliceRest.PostAsync($"/chat/messages/{created!.Id}/read", content: null);
+        // alice authored the message, so she is not its recipient — marking it read
+        // is a no-op 404 (the double rejects non-recipient mark-seen).
+        var resp = await aliceRest.PostAsync($"/chat/conversations/bob/messages/{created!.Id}/read", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
@@ -384,15 +388,14 @@ public class ChatServiceTests
 
     private static WebApplicationFactory<Program> NewFactory()
     {
-        // The branch rewired ChatController's REST send/history onto the real
-        // IChatServiceClient (HTTP → generic chat-service). That client is
-        // text-only and type-blind, and the upstream is unreachable in tests,
-        // so every REST send 500s and the rich behaviour these tests assert
-        // (per-type validation, type round-trip, hub fan-out, push-on-background,
-        // symmetric history) never runs. We replace the typed client with an
-        // in-memory double that delegates back to the gateway-owned chat domain —
-        // the very same IChatDispatcher + IChatMessageStore the SignalR hub and
-        // MarkRead use — so REST and WS share one code path. Pattern mirrors
+        // The branch deleted the in-memory chat record-of-truth: the gateway now
+        // persists every message to the GENERIC chat-service via the typed
+        // IChatServiceClient, which is unreachable in the suite. We swap in the
+        // shared in-memory double (the record-of-truth the suite needs) as a
+        // SINGLETON so seeded/sent state survives across the request scopes the
+        // controller + dispatcher resolve from. The gateway-owned rich domain
+        // (per-type validation, hub fan-out, push-on-background) runs in
+        // ChatDispatcher, which calls this double to persist. Pattern mirrors
         // UpstreamProxyTests.ReplaceTypedClient (RemoveAll + ConfigureTestServices).
         return new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
@@ -402,58 +405,11 @@ public class ChatServiceTests
                     // RemoveAll clears both the typed registration and the named
                     // HttpClient options added by AddHttpClient<IChatServiceClient,...>.
                     services.RemoveAll<IChatServiceClient>();
-                    services.AddScoped<IChatServiceClient, InMemoryChatServiceClient>();
+                    services.AddSingleton<InMemoryChatServiceClientDouble>();
+                    services.AddSingleton<IChatServiceClient>(
+                        sp => sp.GetRequiredService<InMemoryChatServiceClientDouble>());
                 });
             });
-    }
-
-    /// <summary>
-    /// Test double for the chat BFF facade. Routes REST send/history back through
-    /// the gateway's in-memory chat domain so the controller exercises the same
-    /// validate → persist → hub fan-out → push-on-background pipeline as the
-    /// SignalR hub. This is the behaviour origin/main shipped before the BFF
-    /// rewire; the double restores it without touching the real
-    /// <see cref="ChatServiceClient"/> (which keeps its text-only upstream).
-    /// </summary>
-    private sealed class InMemoryChatServiceClient : IChatServiceClient
-    {
-        private readonly IChatDispatcher _dispatcher;
-        private readonly IChatMessageStore _store;
-
-        public InMemoryChatServiceClient(IChatDispatcher dispatcher, IChatMessageStore store)
-        {
-            _dispatcher = dispatcher;
-            _store = store;
-        }
-
-        // Text-only legacy overload — kept on the contract; tests drive the rich one.
-        public Task<ChatMessageDto> SendMessageAsync(
-            string senderId, string otherUserId, string? text, CancellationToken ct) =>
-            SendMessageAsync(senderId, new SendMessageRequest
-            {
-                RecipientId = otherUserId,
-                Type = ChatMessageType.Text,
-                Text = text
-            }, ct);
-
-        public async Task<ChatMessageDto> SendMessageAsync(
-            string senderId, SendMessageRequest request, CancellationToken ct)
-        {
-            // Throws ChatValidationException on bad payloads (self-message, missing/
-            // invalid media URL, out-of-range coordinates, empty text, user-authored
-            // System) — the controller maps that to a 400. Persists, fans out over
-            // the hub, and fires the push stub for a backgrounded recipient.
-            var message = await _dispatcher.SendAsync(senderId, request, ct);
-            return ChatMessageDto.From(message);
-        }
-
-        public async Task<IReadOnlyList<ChatMessageDto>> GetConversationAsync(
-            string userId, string otherUserId, int limit, CancellationToken ct)
-        {
-            var conversationId = ConversationKey.For(userId, otherUserId);
-            var messages = await _store.GetByConversationAsync(conversationId, limit, ct);
-            return messages.Select(ChatMessageDto.From).ToList();
-        }
     }
 
     private static async Task<HubConnection> ConnectHubAs(WebApplicationFactory<Program> factory, string userId)

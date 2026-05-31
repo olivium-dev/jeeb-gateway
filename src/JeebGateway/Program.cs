@@ -506,8 +506,13 @@ builder.Services.AddSingleton<IDisputeService, DisputeService>();
 builder.Services.Configure<DisputeEvidenceOptions>(
     builder.Configuration.GetSection(DisputeEvidenceOptions.SectionName));
 builder.Services.AddSingleton<IDisputeCaseStore, InMemoryDisputeCaseStore>();
-builder.Services.AddSingleton<IDisputeEvidenceOrchestrator, DisputeEvidenceOrchestrator>();
-builder.Services.AddSingleton<IDisputeCaseService, DisputeCaseService>();
+// Scoped (was singleton): the evidence orchestrator now reads the chat transcript
+// through the typed IChatServiceClient (an IHttpClientFactory client), so it must
+// not be captured by a singleton. The dispute case service depends on the
+// orchestrator and is resolved per-request by DisputeCasesController, so both move
+// to scoped together. Their other deps are singletons (safe to inject into scoped).
+builder.Services.AddScoped<IDisputeEvidenceOrchestrator, DisputeEvidenceOrchestrator>();
+builder.Services.AddScoped<IDisputeCaseService, DisputeCaseService>();
 
 builder.Services.AddSingleton<InMemoryPaymentRefundClient>();
 var paymentBaseUrl = builder.Configuration["Services:UnifiedPayment:BaseUrl"]
@@ -573,11 +578,19 @@ builder.Services.Configure<DataExportOptions>(builder.Configuration.GetSection(D
 builder.Services.AddSingleton<IDataExportStore, InMemoryDataExportStore>();
 builder.Services.AddSingleton<InMemoryDataExportRatingsProvider>();
 builder.Services.AddSingleton<IDataExportRatingsProvider>(sp => sp.GetRequiredService<InMemoryDataExportRatingsProvider>());
-builder.Services.AddSingleton<InMemoryDataExportChatHistoryProvider>();
-builder.Services.AddSingleton<IDataExportChatHistoryProvider>(sp => sp.GetRequiredService<InMemoryDataExportChatHistoryProvider>());
+// Chat history for GDPR export reads through the BFF chat client (the in-memory
+// provider has been DELETED). Scoped to match the typed IChatServiceClient
+// lifetime (an IHttpClientFactory client). See provider doc for the documented
+// per-user enumeration limitation pending a generic list-channels-for-member
+// chat-service endpoint.
+builder.Services.AddScoped<IDataExportChatHistoryProvider, ChatServiceDataExportChatHistoryProvider>();
 builder.Services.AddSingleton<InMemoryDataExportNotifier>();
 builder.Services.AddSingleton<IDataExportNotifier>(sp => sp.GetRequiredService<InMemoryDataExportNotifier>());
-builder.Services.AddSingleton<IDataExportPackager, DataExportPackager>();
+// Scoped (was singleton): the packager now depends on the scoped
+// IDataExportChatHistoryProvider (client-backed). DataExportProcessor already
+// resolves the packager from a per-job scope, so scoped is correct and avoids a
+// captive dependency on the scoped chat provider.
+builder.Services.AddScoped<IDataExportPackager, DataExportPackager>();
 builder.Services.AddSingleton<DataExportProcessor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DataExportProcessor>());
 
@@ -680,16 +693,19 @@ builder.Services.Configure<TrackingOptions>(builder.Configuration.GetSection(Tra
 builder.Services.AddSingleton<ILocationStore, InMemoryLocationStore>();
 
 // Real-time chat (T-backend-012).
-// SignalR hub at /hubs/chat delivers each message under the 1s WS SLA
-// to the conversation group; backgrounded recipients (no live hub
-// connection or client-reported background state) fall back to the
-// T-backend-022 push pipeline. In-memory stores for the MVP — the
-// production swap moves persistence to Postgres and presence to Redis,
-// proxied through an NSwag-generated chat-service client per the BFF
-// aggregation policy.
-builder.Services.AddSingleton<IChatMessageStore, InMemoryChatMessageStore>();
+// SignalR hub at /hubs/chat delivers each message under the 1s WS SLA to the
+// conversation group; backgrounded recipients (no live hub connection or
+// client-reported background state) fall back to the T-backend-022 push pipeline.
+//
+// The in-memory message record-of-truth has been DELETED: the dispatcher now
+// persists every message to the GENERIC chat-service via IChatServiceClient (the
+// gateway is a pure BFF). Presence remains an in-memory singleton (live socket
+// state). The dispatcher is SCOPED because it depends on the typed
+// IChatServiceClient (an IHttpClientFactory client) — a singleton would capture
+// the typed client and pin its handler chain (no DNS/handler rotation, captive
+// dependency). The dispatcher is stateless, so scoped is correct.
 builder.Services.AddSingleton<IChatPresenceTracker, InMemoryChatPresenceTracker>();
-builder.Services.AddSingleton<IChatDispatcher, ChatDispatcher>();
+builder.Services.AddScoped<IChatDispatcher, ChatDispatcher>();
 
 // Wave 2-3 backend services.
 // T-backend-017: Weekly settlement batch processing.
@@ -717,11 +733,10 @@ builder.Services.Configure<JeebGateway.Ratings.LowRatingFlagOptions>(
     builder.Configuration.GetSection(JeebGateway.Ratings.LowRatingFlagOptions.SectionName));
 builder.Services.AddHostedService<JeebGateway.Ratings.LowRatingAutoFlag>();
 
-// T-backend-037: Chat data retention and cleanup job.
-builder.Services.Configure<JeebGateway.Chat.ChatRetentionOptions>(
-    builder.Configuration.GetSection(JeebGateway.Chat.ChatRetentionOptions.SectionName));
-builder.Services.AddSingleton<JeebGateway.Chat.IChatRetentionStore, JeebGateway.Chat.InMemoryChatRetentionStore>();
-builder.Services.AddHostedService<JeebGateway.Chat.ChatRetentionSweeper>();
+// T-backend-037: Chat data retention is now a chat-service concern.
+// The in-gateway retention sweeper + in-memory retention store have been DELETED:
+// the gateway holds no chat record-of-truth, so it cannot (and must not) purge
+// messages. Retention/TTL belongs to the owning chat-service.
 
 // T-backend-044: Masked phone calls via Twilio proxy (Phase 2).
 builder.Services.Configure<JeebGateway.Calls.MaskedCallOptions>(

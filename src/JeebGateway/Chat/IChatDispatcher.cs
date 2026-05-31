@@ -21,11 +21,18 @@ public interface IChatDispatcher
 
     /// <summary>
     /// Marks <paramref name="messageId"/> as read by <paramref name="readerId"/>
-    /// and pushes a "ReadReceipt" event to the original sender. Returns
-    /// null if the message does not exist or the reader is not the
-    /// recipient (idempotent no-op rather than error).
+    /// in the conversation with <paramref name="otherUserId"/>, persisting the
+    /// receipt on the generic chat-service via <see cref="Services.Clients.IChatServiceClient"/>
+    /// and pushing a "ReadReceipt" event to the conversation group. Returns null
+    /// if the message/channel cannot be resolved (idempotent no-op rather than
+    /// error).
+    ///
+    /// Read receipts are conversation-scoped: the generic upstream addresses
+    /// messages by (channelId, messageId), and the gateway resolves the channel
+    /// from the sorted (reader, other) pair — so the counterpart id is required.
     /// </summary>
     Task<ChatMessage?> MarkReadAsync(
+        string otherUserId,
         string messageId,
         string readerId,
         CancellationToken ct);

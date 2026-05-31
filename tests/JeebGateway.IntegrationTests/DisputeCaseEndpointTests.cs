@@ -9,8 +9,11 @@ using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
 using JeebGateway.Tracking;
+using JeebGateway.IntegrationTests.Chat;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 using Roles = JeebGateway.Users.Roles;
 
@@ -38,7 +41,7 @@ public class DisputeCaseEndpointTests
     [Fact]
     public async Task Escalate_Attaches_Chat_Transcript_And_Gps_Polyline()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = NewFactoryWithChatDouble();
         const string client = "c-ac1";
         const string jeeber = "j-ac1";
 
@@ -309,7 +312,7 @@ public class DisputeCaseEndpointTests
     [Fact]
     public async Task Escalate_With_100KB_Transcript_Completes_Under_One_Second()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = NewFactoryWithChatDouble();
         const string client = "c-ac6";
         const string jeeber = "j-ac6";
 
@@ -544,20 +547,38 @@ public class DisputeCaseEndpointTests
         return created.Id;
     }
 
-    private static async Task SeedChatAsync(
+    /// <summary>
+    /// Factory variant that swaps the typed (HTTP) IChatServiceClient — unreachable
+    /// in the suite — for the shared in-memory double. The dispute evidence
+    /// orchestrator reads the transcript through IChatServiceClient now that the
+    /// in-memory chat store is deleted, so transcript tests seed via the double.
+    /// </summary>
+    private static WebApplicationFactory<Program> NewFactoryWithChatDouble() =>
+        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IChatServiceClient>();
+                services.AddSingleton<InMemoryChatServiceClientDouble>();
+                services.AddSingleton<IChatServiceClient>(
+                    sp => sp.GetRequiredService<InMemoryChatServiceClientDouble>());
+            });
+        });
+
+    private static Task SeedChatAsync(
         WebApplicationFactory<Program> factory,
         string userA,
         string userB,
         IReadOnlyList<(string text, string sender)> messages)
     {
-        var chat = factory.Services.GetRequiredService<IChatMessageStore>();
+        var chat = factory.Services.GetRequiredService<InMemoryChatServiceClientDouble>();
         var conversationId = ConversationKey.For(userA, userB);
         var now = DateTimeOffset.UtcNow.AddMinutes(-messages.Count);
         var idx = 0;
         foreach (var (text, sender) in messages)
         {
             var recipient = string.Equals(sender, userA, StringComparison.Ordinal) ? userB : userA;
-            await chat.AppendAsync(new ChatMessage
+            chat.Seed(new ChatMessageDto
             {
                 Id = $"msg-{Guid.NewGuid():N}",
                 ConversationId = conversationId,
@@ -566,8 +587,9 @@ public class DisputeCaseEndpointTests
                 Type = ChatMessageType.Text,
                 SentAt = now.AddSeconds(idx++),
                 Text = text
-            }, CancellationToken.None);
+            });
         }
+        return Task.CompletedTask;
     }
 
     private static void SeedJeeberLocation(WebApplicationFactory<Program> factory, string jeeberId, double lat, double lng)

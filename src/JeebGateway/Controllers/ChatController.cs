@@ -13,9 +13,10 @@ namespace JeebGateway.Controllers;
 /// member/channel/session/message primitives (Firestore-backed,
 /// <c>Services:Chat:BaseUrl</c>). No product-specific chat route exists on the
 /// shared chat-service; the Jeeb 1:1 conversation mapping is gateway-owned.
-/// MarkRead remains on the in-memory <see cref="IChatDispatcher"/> (the generic
-/// chat-service has no read-receipt surface today; the SignalR hub fans out
-/// receipts to connected clients regardless).
+/// MarkRead is handled by <see cref="IChatDispatcher"/>, which now persists the
+/// receipt on the generic chat-service via <see cref="IChatServiceClient"/>
+/// (POST .../messages/{messageId}/seen) — the gateway holds no in-memory message
+/// store — and fans the receipt out over SignalR to connected clients.
 ///
 /// The sender identity is derived from the bearer token's <c>sub</c> /
 /// <c>ClaimTypes.NameIdentifier</c> claim (see <see cref="TryGetUserId"/>) and
@@ -66,13 +67,17 @@ public class ChatController : ControllerBase
 
         try
         {
-            // Forward the FULL request (type + type-specific payload), not just the
-            // text body, so the BFF facade can validate the combination and echo the
-            // correct discriminator. Dropping everything but Text — as an earlier
-            // revision did — silently degrades every non-text message to a textless
-            // Text row and skips per-type validation.
-            var dto = await _chatServiceClient.SendMessageAsync(userId, body, ct);
-            return StatusCode(StatusCodes.Status201Created, dto);
+            // Route through the dispatcher — NOT the BFF client directly. The
+            // dispatcher owns the four send side effects: (1) per-type payload
+            // validation (self-message, empty text, media URL, location coords,
+            // user-authored System) → ChatValidationException → 400; (2) persist
+            // via the generic chat-service through IChatServiceClient; (3) SignalR
+            // fan-out to the conversation group; (4) push fallback when the
+            // recipient is backgrounded. Calling the client directly (an earlier
+            // revision did) skips validation AND the live/push fan-out, so REST
+            // sends silently diverge from the SignalR hub path.
+            var message = await _dispatcher.SendAsync(userId, body, ct);
+            return StatusCode(StatusCodes.Status201Created, ChatMessageDto.From(message));
         }
         catch (ChatValidationException ex)
         {
@@ -89,20 +94,35 @@ public class ChatController : ControllerBase
     }
 
     /// <summary>
-    /// Mark a message as read by the calling user. Remains on the
-    /// in-memory <see cref="IChatDispatcher"/> — the chat-api does not
-    /// yet expose a read-receipt surface. The dispatcher fans out the
-    /// receipt via SignalR so connected senders see it.
+    /// Mark a message as read by the calling user in the conversation with
+    /// <paramref name="otherUserId"/>. The <see cref="IChatDispatcher"/> persists
+    /// the receipt on the generic chat-service via <see cref="IChatServiceClient"/>
+    /// (the gateway holds no in-memory message store) and fans the receipt out
+    /// via SignalR so connected senders see it. Read receipts are
+    /// conversation-scoped because the generic upstream addresses messages by
+    /// (channelId, messageId) and the gateway resolves the channel from the
+    /// sorted (reader, other) pair.
     /// </summary>
-    [HttpPost("messages/{messageId}/read")]
+    [HttpPost("conversations/{otherUserId}/messages/{messageId}/read")]
     [ProducesResponseType(typeof(ChatMessageDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> MarkRead([FromRoute] string messageId, CancellationToken ct)
+    public async Task<IActionResult> MarkRead(
+        [FromRoute] string otherUserId,
+        [FromRoute] string messageId,
+        CancellationToken ct)
     {
         if (!TryGetUserId(out var userId, out var problem)) return problem;
+        if (string.IsNullOrWhiteSpace(otherUserId))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "otherUserId is required.",
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
 
-        var updated = await _dispatcher.MarkReadAsync(messageId, userId, ct);
+        var updated = await _dispatcher.MarkReadAsync(otherUserId, messageId, userId, ct);
         return updated is null ? NotFound() : Ok(ChatMessageDto.From(updated));
     }
 

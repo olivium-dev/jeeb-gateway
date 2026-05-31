@@ -6,7 +6,7 @@ namespace JeebGateway.Chat;
 /// SignalR hub for real-time chat (T-backend-012). Endpoints:
 ///
 ///   - SendMessage(SendMessageRequest)         → echoes the persisted message and fans out "ReceiveMessage" to the conversation group
-///   - MarkRead(messageId)                     → updates the receipt and fans out "ReadReceipt" to the conversation group
+///   - MarkRead(otherUserId, messageId)        → updates the receipt and fans out "ReadReceipt" to the conversation group
 ///   - JoinConversation(otherUserId)           → adds the caller to the group keyed by ConversationKey
 ///   - LeaveConversation(otherUserId)          → removes the caller from the group (optional; auto-cleaned on disconnect)
 ///   - SetForegroundState(isForeground)        → drives the push-vs-WS routing decision in ChatDispatcher
@@ -62,12 +62,12 @@ public sealed class ChatHub : Hub
         }
     }
 
-    public async Task MarkRead(string messageId)
+    public async Task MarkRead(string otherUserId, string messageId)
     {
         var userId = ResolveUserId() ?? throw new HubException("unauthorized");
         try
         {
-            await _dispatcher.MarkReadAsync(messageId, userId, Context.ConnectionAborted);
+            await _dispatcher.MarkReadAsync(otherUserId, messageId, userId, Context.ConnectionAborted);
         }
         catch (ChatValidationException ex)
         {

@@ -21,23 +21,40 @@ namespace JeebGateway.Services.Clients;
 ///     <item>join both members to obtain per-member session ids
 ///           (<c>POST /api/channels/{channelId}/members</c>),</item>
 ///     <item>post the message with the sender's session
-///           (<c>POST /api/channels/{channelId}/messages</c>).</item>
+///           (<c>POST /api/channels/{channelId}/messages</c>),</item>
+///     <item>page history newest-first via the GENERIC list endpoint
+///           (<c>GET /api/channels/{channelId}/messages?limit&amp;before</c>).</item>
 ///   </list>
 ///
 /// Because the generic API exposes no lookup-by-external-id, the gateway keeps a
-/// process-local <see cref="IChatTopologyMap"/> (singleton) caching userId→memberId
-/// and sortedPairKey→(channelId, sessions). This is BFF state and lives entirely in
-/// the gateway; the chat-service is never asked to resolve Jeeb identities.
+/// shared <see cref="IChatTopologyMap"/> (Redis in production, in-memory in
+/// dev/test) caching userId-&gt;memberId and sortedPairKey-&gt;(channelId, sessions).
+/// This is BFF state and lives entirely in the gateway; the chat-service is never
+/// asked to resolve Jeeb identities.
 ///
-/// The named "chat" HttpClient (registered in
+/// The typed "chat" HttpClient (registered in
 /// <see cref="JeebGateway.Extensions.ServiceClientExtensions"/>) supplies the
-/// BaseAddress + the org-standard resilience pipeline (retry, circuit breaker,
-/// timeout), so this class never manages retry/timeout/breaker directly.
+/// BaseAddress + the org-standard pipeline (Bearer forwarding, X-Service-Auth
+/// signing, Polly retry / circuit breaker / timeout), so this class never manages
+/// auth or resilience directly.
 /// </summary>
 public sealed class ChatServiceClient : IChatServiceClient
 {
+    // chat-service serializes responses with Newtonsoft using DEFAULT settings
+    // (no CamelCasePropertyNamesContractResolver): properties WITHOUT an explicit
+    // [JsonProperty] keep their PascalCase CLR names on the wire, while properties
+    // WITH a [JsonProperty("camel")] use the annotated camelCase name. So the
+    // response body is a MIXED-CASE envelope:
+    //   - PagedList<T> wrapper  -> PascalCase  (NextPageToken, PageCount, TotalCount, Items)
+    //   - MessageResponse items -> camelCase   (guid, createdAt, messageId, memberId, ...)
+    // JsonSerializerDefaults.Web sets PropertyNameCaseInsensitive = true, so STJ
+    // binds either casing on read; we keep explicit [JsonPropertyName] on every
+    // wire DTO below to make the seam unambiguous and resistant to future churn.
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
+
+    // Generic list endpoint default page size (chat-service clamps to [1, 100]).
+    private const int MaxPageSize = 100;
 
     private readonly HttpClient _http;
     private readonly IChatTopologyMap _topology;
@@ -86,7 +103,7 @@ public sealed class ChatServiceClient : IChatServiceClient
         var wire = await resp.Content.ReadFromJsonAsync<WireMessageResponse>(JsonOptions, ct);
 
         return wire is not null
-            ? wire.ToDto(senderId, otherUserId, pair.ChannelId)
+            ? wire.ToDto(senderId, otherUserId, pair.ChannelId, _topology)
             // Fallback: synthesize from the request if read-back returns empty.
             : new ChatMessageDto
             {
@@ -117,7 +134,28 @@ public sealed class ChatServiceClient : IChatServiceClient
     }
 
     /// <inheritdoc/>
-    public async Task<IReadOnlyList<ChatMessageDto>> GetConversationAsync(
+    public Task<IReadOnlyList<ChatMessageDto>> GetConversationAsync(
+        string userId,
+        string otherUserId,
+        int limit,
+        CancellationToken ct) =>
+        PageConversationAsync(userId, otherUserId, limit, ct);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyList<ChatMessageDto>> GetConversationTranscriptAsync(
+        string userId,
+        string otherUserId,
+        int limit,
+        CancellationToken ct) =>
+        PageConversationAsync(userId, otherUserId, limit, ct);
+
+    /// <summary>
+    /// Resolves the deterministic channel for the pair and pages the generic
+    /// list-messages endpoint (newest-first cursor pagination) until
+    /// <paramref name="limit"/> messages are gathered or the channel is exhausted.
+    /// Returns the result OLDEST-first so callers render a chronological transcript.
+    /// </summary>
+    private async Task<IReadOnlyList<ChatMessageDto>> PageConversationAsync(
         string userId,
         string otherUserId,
         int limit,
@@ -136,33 +174,145 @@ public sealed class ChatServiceClient : IChatServiceClient
             return Array.Empty<ChatMessageDto>();
         }
 
-        // The generic chat-service exposes single-message GET and a channel
-        // summary (which carries the last message). It has no "list all messages"
-        // endpoint, so the BFF reads the channel summary and projects its last
-        // message into the history shape. This is the richest generic read
-        // available today; a future generic list endpoint would slot in here.
-        var url = $"api/channels/{Uri.EscapeDataString(channelId)}/summary?memberId={Uri.EscapeDataString(_topology.GetMemberOrDefault(userId))}";
+        if (limit <= 0) limit = 50;
+
+        // Page the GENERIC list-messages endpoint newest-first until we have
+        // `limit` messages (or run out). Each page returns a nextPageToken cursor
+        // (a message id) to pass as `before` for the next, older page.
+        var collected = new List<ChatMessageDto>(Math.Min(limit, 256));
+        string? before = null;
+        do
+        {
+            var pageSize = Math.Min(limit - collected.Count, MaxPageSize);
+            if (pageSize <= 0) break;
+
+            var page = await GetChannelMessagesAsync(channelId, pageSize, before, ct)
+                .ConfigureAwait(false);
+            if (page.Items.Count == 0) break;
+
+            collected.AddRange(page.Items);
+            before = page.NextPageToken;
+        }
+        while (!string.IsNullOrEmpty(before) && collected.Count < limit);
+
+        // Endpoint is newest-first; reverse to oldest-first for a chronological
+        // transcript. Cap defensively at `limit` (last page may overshoot).
+        if (collected.Count > limit)
+            collected.RemoveRange(limit, collected.Count - limit);
+        collected.Reverse();
+        return collected;
+    }
+
+    /// <inheritdoc/>
+    public async Task<ChannelMessagePage> GetChannelMessagesAsync(
+        string channelId,
+        int limit,
+        string? beforeMessageId,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(channelId))
+            throw new ArgumentException("channelId is required.", nameof(channelId));
+
+        // chat-service clamps limit to [1, 100]; clamp here too so we never send
+        // a degenerate page request and the cursor loop terminates predictably.
+        if (limit <= 0) limit = 25;
+        if (limit > MaxPageSize) limit = MaxPageSize;
+
+        // GET /api/channels/{channelId}/messages?limit={limit}&before={messageId?}
+        var url = $"api/channels/{Uri.EscapeDataString(channelId)}/messages?limit={limit}";
+        if (!string.IsNullOrEmpty(beforeMessageId))
+            url += $"&before={Uri.EscapeDataString(beforeMessageId)}";
+
         using var resp = await _http.GetAsync(url, ct);
         if (resp.StatusCode == HttpStatusCode.NotFound)
-        {
-            return Array.Empty<ChatMessageDto>();
-        }
+            return ChannelMessagePage.Empty;
         resp.EnsureSuccessStatusCode();
 
-        var summary = await resp.Content.ReadFromJsonAsync<WireChannelSummary>(JsonOptions, ct);
-        if (summary?.LastMessage is null)
+        var paged = await resp.Content.ReadFromJsonAsync<WirePagedList>(JsonOptions, ct);
+        if (paged?.Items is null || paged.Items.Count == 0)
+            return ChannelMessagePage.Empty;
+
+        var items = paged.Items
+            .Select(m => m.ToDto(channelId, _topology))
+            .ToList();
+
+        return new ChannelMessagePage
         {
-            return Array.Empty<ChatMessageDto>();
+            Items = items,
+            NextPageToken = string.IsNullOrEmpty(paged.NextPageToken) ? null : paged.NextPageToken,
+            TotalCount = paged.TotalCount
+        };
+    }
+
+    /// <inheritdoc/>
+    public async Task<ChatMessageDto?> MarkMessageSeenAsync(
+        string readerId,
+        string otherUserId,
+        string messageId,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(readerId)
+            || string.IsNullOrWhiteSpace(otherUserId)
+            || string.IsNullOrWhiteSpace(messageId))
+        {
+            return null;
         }
 
-        var dto = summary.LastMessage.ToDto(userId, otherUserId, channelId);
-        IReadOnlyList<ChatMessageDto> result = new[] { dto };
-        return limit > 0 ? result.Take(limit).ToList().AsReadOnly() : result;
+        var pairKey = PairKey(readerId, otherUserId);
+        if (!_topology.TryGetChannel(pairKey, out var channelId) || string.IsNullOrEmpty(channelId))
+        {
+            // No materialized channel => nothing to mark. Idempotent no-op.
+            return null;
+        }
+
+        var readerMemberId = _topology.GetMemberOrDefault(readerId);
+
+        // POST /api/channels/{channelId}/messages/{messageId}/seen { memberId }
+        var seenBody = new WireSeenRequest { MemberId = readerMemberId };
+        using var seenResp = await _http.PostAsJsonAsync(
+            $"api/channels/{Uri.EscapeDataString(channelId)}/messages/{Uri.EscapeDataString(messageId)}/seen",
+            seenBody, JsonOptions, ct);
+
+        if (seenResp.StatusCode == HttpStatusCode.NotFound)
+            return null; // unknown message => no-op rather than 500
+        seenResp.EnsureSuccessStatusCode();
+
+        // Read the canonical message back so ReadAt reflects the server state.
+        var getUrl =
+            $"api/channels/{Uri.EscapeDataString(channelId)}/messages/{Uri.EscapeDataString(messageId)}";
+        using var getResp = await _http.GetAsync(getUrl, ct);
+        if (getResp.StatusCode == HttpStatusCode.NotFound)
+            return null;
+        getResp.EnsureSuccessStatusCode();
+
+        var wire = await getResp.Content.ReadFromJsonAsync<WireMessageResponse>(JsonOptions, ct);
+        if (wire is null) return null;
+
+        var dto = wire.ToDto(readerId, otherUserId, channelId, _topology);
+        // The reader has just seen it; if the upstream did not echo a modifiedAt,
+        // synthesize a ReadAt so callers see the receipt.
+        return dto.ReadAt is not null
+            ? dto
+            : new ChatMessageDto
+            {
+                Id = dto.Id,
+                ConversationId = dto.ConversationId,
+                SenderId = dto.SenderId,
+                RecipientId = dto.RecipientId,
+                Type = dto.Type,
+                Text = dto.Text,
+                MediaUrl = dto.MediaUrl,
+                Latitude = dto.Latitude,
+                Longitude = dto.Longitude,
+                OfferId = dto.OfferId,
+                SentAt = dto.SentAt,
+                ReadAt = DateTimeOffset.UtcNow
+            };
     }
 
     // -------------------------------------------------------------------------
     // BFF orchestration — ensure the generic member/channel/session topology
-    // exists for a Jeeb user pair, memoized in the gateway-local topology map.
+    // exists for a Jeeb user pair, memoized in the gateway-shared topology map.
     // -------------------------------------------------------------------------
 
     private async Task<ConversationTopology> EnsureConversationAsync(
@@ -260,11 +410,13 @@ public sealed class ChatServiceClient : IChatServiceClient
     private static string PairKey(string x, string y)
     {
         var (a, b) = SortedPair(x, y);
-        return $"{a} {b}";
+        return $"{a} {b}";
     }
 
     // -------------------------------------------------------------------------
-    // Wire DTOs — exact shapes of the GENERIC chat-service API.
+    // Wire DTOs — exact shapes of the GENERIC chat-service API. Explicit
+    // [JsonPropertyName] on every field; see the JsonOptions note above for why
+    // the envelope is PascalCase but the message items are camelCase.
     // -------------------------------------------------------------------------
 
     private sealed class WireCreateMemberRequest
@@ -299,17 +451,29 @@ public sealed class ChatServiceClient : IChatServiceClient
         [JsonPropertyName("payload")] public string Payload { get; init; } = "";
     }
 
+    private sealed class WireSeenRequest
+    {
+        [JsonPropertyName("memberId")] public string MemberId { get; init; } = "";
+    }
+
     private sealed class WireIdentityResponse
     {
         [JsonPropertyName("id")] public string Id { get; init; } = "";
     }
 
-    private sealed class WireChannelSummary
+    /// <summary>
+    /// Envelope for <c>GET /api/channels/{channelId}/messages</c>
+    /// (<c>PagedList&lt;MessageResponse&gt;</c>). The chat-service PagedList&lt;T&gt;
+    /// has NO [JsonProperty], so Newtonsoft (default settings, no camel-case
+    /// resolver) emits PascalCase here. STJ Web defaults read it case-insensitively;
+    /// we still annotate with the actual wire casing to document the seam.
+    /// </summary>
+    private sealed class WirePagedList
     {
-        [JsonPropertyName("channelId")] public string ChannelId { get; init; } = "";
-        [JsonPropertyName("sessionId")] public string? SessionId { get; init; }
-        [JsonPropertyName("name")] public string Name { get; init; } = "";
-        [JsonPropertyName("lastMessage")] public WireMessageResponse? LastMessage { get; init; }
+        [JsonPropertyName("NextPageToken")] public string? NextPageToken { get; init; }
+        [JsonPropertyName("PageCount")] public int PageCount { get; init; }
+        [JsonPropertyName("TotalCount")] public int TotalCount { get; init; }
+        [JsonPropertyName("Items")] public List<WireMessageResponse> Items { get; init; } = new();
     }
 
     private sealed class WireMessageResponse
@@ -325,23 +489,55 @@ public sealed class ChatServiceClient : IChatServiceClient
         [JsonPropertyName("modifiedAt")] public DateTimeOffset? ModifiedAt { get; init; }
 
         /// <summary>
-        /// Projects a generic message onto the Jeeb <see cref="ChatMessageDto"/>.
-        /// The generic message stores only the authoring member, so the BFF
-        /// supplies sender/recipient from the resolved user pair: the message is
-        /// "from" whichever pair member authored it, "to" the other.
+        /// Projects a generic message onto the Jeeb <see cref="ChatMessageDto"/>,
+        /// attributing the message to its authoring Jeeb user. The generic message
+        /// stores only the authoring <see cref="MemberId"/>; the topology map's
+        /// reverse index resolves it back to a Jeeb userId. The recipient is the
+        /// OTHER known channel participant; when only the sender is resolvable the
+        /// recipient is left empty rather than guessed.
         /// </summary>
-        public ChatMessageDto ToDto(string viewerUserId, string otherUserId, string channelId)
+        public ChatMessageDto ToDto(string channelId, IChatTopologyMap topology)
         {
-            // Map authoring memberId back to a Jeeb userId when known.
-            var senderUserId = viewerUserId; // default — overridden below if discernible
-            var recipientUserId = otherUserId;
+            string sender = MemberId;
+            if (!string.IsNullOrEmpty(MemberId) && topology.TryResolveUserByMember(MemberId, out var senderUser))
+                sender = senderUser;
 
             return new ChatMessageDto
             {
                 Id = MessageId ?? Guid,
                 ConversationId = string.IsNullOrEmpty(ChannelId) ? channelId : ChannelId,
-                SenderId = senderUserId,
-                RecipientId = recipientUserId,
+                SenderId = sender,
+                RecipientId = string.Empty,
+                Type = ChatMessageType.Text,
+                Text = Text,
+                SentAt = CreatedAt == default ? DateTimeOffset.UtcNow : CreatedAt,
+                ReadAt = ModifiedAt
+            };
+        }
+
+        /// <summary>
+        /// Overload used by the single-message read-back paths (send echo,
+        /// mark-seen) where both pair members are already known, so sender and
+        /// recipient can be attributed precisely.
+        /// </summary>
+        public ChatMessageDto ToDto(string viewerUserId, string otherUserId, string channelId, IChatTopologyMap topology)
+        {
+            string sender = viewerUserId;
+            string recipient = otherUserId;
+            if (!string.IsNullOrEmpty(MemberId) && topology.TryResolveUserByMember(MemberId, out var authorUser))
+            {
+                sender = authorUser;
+                recipient = string.Equals(authorUser, viewerUserId, StringComparison.Ordinal)
+                    ? otherUserId
+                    : viewerUserId;
+            }
+
+            return new ChatMessageDto
+            {
+                Id = MessageId ?? Guid,
+                ConversationId = string.IsNullOrEmpty(ChannelId) ? channelId : ChannelId,
+                SenderId = sender,
+                RecipientId = recipient,
                 Type = ChatMessageType.Text,
                 Text = Text,
                 SentAt = CreatedAt == default ? DateTimeOffset.UtcNow : CreatedAt,
@@ -365,10 +561,11 @@ public sealed class ChatServiceClient : IChatServiceClient
 }
 
 /// <summary>
-/// Process-local BFF state mapping Jeeb identities onto the generic chat-service
-/// topology (members, channels, per-member sessions). Singleton: a 1:1
+/// Process/cluster-shared BFF state mapping Jeeb identities onto the generic
+/// chat-service topology (members, channels, per-member sessions). A 1:1
 /// conversation must resolve to the same channel and sessions across requests
-/// because the generic API cannot look these up by external id.
+/// (and, in production, across replicas) because the generic API cannot look
+/// these up by external id.
 ///
 /// Thread-safe; the *-Async factory overloads run the create-on-miss exactly
 /// once per key under a key-scoped lock so concurrent first sends do not create
@@ -381,12 +578,21 @@ public interface IChatTopologyMap
     Task<string> GetOrAddSessionAsync(string pairKey, string userId, Func<Task<string>> factory);
     bool TryGetChannel(string pairKey, out string channelId);
     string GetMemberOrDefault(string userId);
+
+    /// <summary>
+    /// Reverse lookup: resolves an authoring generic memberId back to the Jeeb
+    /// userId it was created for, or false when the member is unknown to this
+    /// gateway. Used to attribute each message in a transcript to the correct
+    /// sender (the generic message carries only the authoring memberId).
+    /// </summary>
+    bool TryResolveUserByMember(string memberId, out string userId);
 }
 
 /// <inheritdoc cref="IChatTopologyMap"/>
 public sealed class InMemoryChatTopologyMap : IChatTopologyMap
 {
     private readonly ConcurrentDictionary<string, string> _members = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _membersReverse = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _channels = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _sessions = new(StringComparer.Ordinal);
 
@@ -394,16 +600,23 @@ public sealed class InMemoryChatTopologyMap : IChatTopologyMap
     // when two requests miss the same key concurrently.
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
 
-    public Task<string> GetOrAddMemberAsync(string userId, Func<Task<string>> factory) =>
-        GetOrAddAsync(_members, $"member {userId}", userId, factory);
+    public async Task<string> GetOrAddMemberAsync(string userId, Func<Task<string>> factory)
+    {
+        var memberId = await GetOrAddAsync(_members, $"member {userId}", userId, factory)
+            .ConfigureAwait(false);
+        // Maintain the reverse index so a transcript can attribute each message
+        // to the Jeeb user that authored it. memberId<->userId is 1:1.
+        _membersReverse[memberId] = userId;
+        return memberId;
+    }
 
     public Task<string> GetOrAddChannelAsync(string pairKey, Func<Task<string>> factory) =>
-        GetOrAddAsync(_channels, $"channel {pairKey}", pairKey, factory);
+        GetOrAddAsync(_channels, $"channel {pairKey}", pairKey, factory);
 
     public Task<string> GetOrAddSessionAsync(string pairKey, string userId, Func<Task<string>> factory)
     {
-        var sessionKey = $"{pairKey} {userId}";
-        return GetOrAddAsync(_sessions, $"session {sessionKey}", sessionKey, factory);
+        var sessionKey = $"{pairKey} {userId}";
+        return GetOrAddAsync(_sessions, $"session {sessionKey}", sessionKey, factory);
     }
 
     public bool TryGetChannel(string pairKey, out string channelId) =>
@@ -411,6 +624,14 @@ public sealed class InMemoryChatTopologyMap : IChatTopologyMap
 
     public string GetMemberOrDefault(string userId) =>
         _members.TryGetValue(userId, out var id) ? id : string.Empty;
+
+    public bool TryResolveUserByMember(string memberId, out string userId)
+    {
+        if (!string.IsNullOrEmpty(memberId) && _membersReverse.TryGetValue(memberId, out userId!))
+            return true;
+        userId = string.Empty;
+        return false;
+    }
 
     private async Task<string> GetOrAddAsync(
         ConcurrentDictionary<string, string> store,

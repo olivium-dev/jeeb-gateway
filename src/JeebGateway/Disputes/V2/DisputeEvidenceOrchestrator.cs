@@ -1,6 +1,7 @@
 using System.Text.Json;
 using JeebGateway.Chat;
 using JeebGateway.Requests;
+using JeebGateway.Services.Clients;
 using JeebGateway.Tracking;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -8,16 +9,17 @@ using Microsoft.Extensions.Options;
 namespace JeebGateway.Disputes.V2;
 
 /// <summary>
-/// MVP <see cref="IDisputeEvidenceOrchestrator"/>. Pulls the chat
-/// transcript via <see cref="IChatMessageStore"/> and a stub polyline
-/// via <see cref="ILocationStore"/> + delivery pickup/dropoff. Both
-/// calls run with a strict timeout — exceeded calls degrade the
-/// evidence bundle instead of failing the escalate.
+/// <see cref="IDisputeEvidenceOrchestrator"/>. Pulls the chat transcript via the
+/// generic chat-service through <see cref="IChatServiceClient"/> and a stub
+/// polyline via <see cref="ILocationStore"/> + delivery pickup/dropoff. Both
+/// calls run with a strict timeout — exceeded calls degrade the evidence bundle
+/// instead of failing the escalate.
 ///
-/// In production the chat/geo stores are replaced with NSwag-generated
-/// HTTP clients to <c>chat-service</c> and <c>geolocation-service</c>;
-/// the orchestrator contract is the same so the controller and tests
-/// don't change.
+/// The chat transcript now reads through the BFF client
+/// (<see cref="IChatServiceClient.GetConversationTranscriptAsync"/>), which pages
+/// the generic chat-service list-messages endpoint — the gateway no longer holds
+/// an in-memory chat record-of-truth. The geo polyline remains a stub pending the
+/// geolocation-service relocation.
 /// </summary>
 public sealed class DisputeEvidenceOrchestrator : IDisputeEvidenceOrchestrator
 {
@@ -26,14 +28,14 @@ public sealed class DisputeEvidenceOrchestrator : IDisputeEvidenceOrchestrator
         WriteIndented = false
     };
 
-    private readonly IChatMessageStore _chat;
+    private readonly IChatServiceClient _chat;
     private readonly ILocationStore _location;
     private readonly IRequestsStore _deliveries;
     private readonly IOptionsMonitor<DisputeEvidenceOptions> _options;
     private readonly ILogger<DisputeEvidenceOrchestrator> _log;
 
     public DisputeEvidenceOrchestrator(
-        IChatMessageStore chat,
+        IChatServiceClient chat,
         ILocationStore location,
         IRequestsStore deliveries,
         IOptionsMonitor<DisputeEvidenceOptions> options,
@@ -94,9 +96,16 @@ public sealed class DisputeEvidenceOrchestrator : IDisputeEvidenceOrchestrator
 
         try
         {
-            var conversationId = ConversationKey.For(request.OpenedByUserId, request.CounterpartyUserId);
+            // Read the transcript through the BFF client (pages the generic
+            // chat-service list-messages endpoint, oldest-first). The gateway no
+            // longer keeps an in-memory chat store; the client resolves the
+            // deterministic channel for the (openedBy, counterparty) pair.
             var messages = await _chat
-                .GetByConversationAsync(conversationId, opts.MaxTranscriptMessages, linked.Token)
+                .GetConversationTranscriptAsync(
+                    request.OpenedByUserId,
+                    request.CounterpartyUserId,
+                    opts.MaxTranscriptMessages,
+                    linked.Token)
                 .ConfigureAwait(false);
 
             var snapshot = messages.Select(m => new
