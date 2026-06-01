@@ -278,6 +278,21 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IUserPreferencesClient, UserPreferencesClient>(http =>
                 BindBaseAddress(http, config, "Services:RemoteUserPreferences")));
 
+        // thin-BFF fan-out (3 of 4): typed client over voice-transcription-service
+        // (FastAPI, host port 10062, health /healthz, ready /readyz). NET-NEW thin
+        // client — the upstream's route POST /v1/transcribe differs materially from
+        // the OpenAI route the in-process WhisperClient calls, so this is NOT a
+        // repoint of WhisperClient. TranscriptionController consumes this when
+        // FeatureFlags:UseUpstream:Voice is true and falls back to the in-process
+        // resilient Whisper path (ITranscriptionService) when false. BindBaseAddress
+        // resolves Services:VoiceTranscription[:BaseUrl] with a trailing slash so the
+        // relative "v1/transcribe" resolves under the host; AttachStandardPipeline
+        // gives this typed client its own bearer + X-Service-Auth + resilience chain
+        // (BFF aggregation pattern).
+        AttachStandardPipeline(
+            services.AddHttpClient<IVoiceTranscriptionClient, VoiceTranscriptionClient>(http =>
+                BindBaseAddress(http, config, "Services:VoiceTranscription")));
+
         return services;
     }
 
