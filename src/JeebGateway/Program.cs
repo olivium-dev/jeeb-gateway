@@ -876,10 +876,14 @@ app.MapHub<ChatHub>("/hubs/chat");
 //   /health/ready  readiness only (all "ready"-tagged checks, including the
 //                  downstream URL-group probes). K8s readiness probe — pulls
 //                  the pod out of Service load balancing on degradation.
-//   /health        JEB-67 / T-BE-031 AC2 — aggregated dashboard surface.
-//                  Returns 200 when every check is Healthy, 503 with a JSON
-//                  body naming every failing service when any check fails.
-//                  Used by external monitoring + the jeeb-admin dashboard.
+//   /health        LIVENESS alias. MUST NOT depend on downstreams. The swarm /
+//                  external monitor hits /health as the primary liveness probe;
+//                  if it gated on downstream readiness, a single undeployed or
+//                  flapping upstream would 503 the gateway and (under a
+//                  health-gated deploy) pull it out of rotation — which is
+//                  exactly the production incident this PR fixes. Liveness is
+//                  process-only: returns 200 whenever the process can answer.
+//                  Use /health/ready for the aggregated downstream view.
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
     Predicate = _ => false // liveness: always 200 if process is up
@@ -890,6 +894,16 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
     ResponseWriter = AggregateHealthResponseWriter.WriteAsync,
 });
 app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    Predicate = _ => false, // liveness alias — never gate on downstreams
+});
+// /health/aggregate — the JEB-67 / T-BE-031 AC2 dashboard surface, moved OFF
+// the /health liveness path. Runs every check and returns 200 when all Healthy
+// or 503 with a JSON body naming each failing service. External monitoring and
+// the jeeb-admin dashboard use this for a full red/green view; the swarm and
+// external liveness probe use /health (and k8s uses /health/live), neither of
+// which may ever 503 on a downstream — that overload was the production incident.
+app.MapHealthChecks("/health/aggregate", new HealthCheckOptions
 {
     Predicate = _ => true,
     ResponseWriter = AggregateHealthResponseWriter.WriteAsync,

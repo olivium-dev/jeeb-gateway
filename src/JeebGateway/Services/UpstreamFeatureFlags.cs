@@ -33,4 +33,18 @@ public sealed class UpstreamFeatureFlags
     /// push fixtures green.
     /// </summary>
     public bool Push { get; set; }
+
+    /// <summary>
+    /// When true, the user-preferences read/write surface proxies the real
+    /// <c>remote-user-preferences</c> service (the fleet-wide preference store,
+    /// host port 10067) via
+    /// <see cref="JeebGateway.Services.Clients.IUserPreferencesClient"/>.
+    /// This path is net-new — the gateway never held a preferences store — so
+    /// the flag is a runtime kill switch (flip to false to make the endpoints
+    /// return 503 without a redeploy if the upstream is taken down), NOT a
+    /// fallback to local state. Defaulted ON in
+    /// <c>appsettings.Production.json</c> because the upstream is live; default
+    /// false here keeps unit fixtures that do not configure the upstream green.
+    /// </summary>
+    public bool RemoteUserPreferences { get; set; }
 }

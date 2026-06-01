@@ -113,6 +113,14 @@ public static class ServiceClientExtensions
         // ApplicationId pattern: delivery_handover_{deliveryId}
         AddNamedDownstreamClient(services, config, "otp", "Services:ServiceOTP:BaseUrl");
 
+        // remote-user-preferences — the fleet-wide user-preference store
+        // (internal port 10023; jeeb host port 10067). Net-new wire: the gateway
+        // never held a preferences store, so there is nothing to delete. The
+        // named registration carries BaseAddress (Services:RemoteUserPreferences:BaseUrl)
+        // + the standard resilience pipeline; the typed IUserPreferencesClient
+        // below hangs off it.
+        AddNamedDownstreamClient(services, config, "remote-user-preferences", "Services:RemoteUserPreferences:BaseUrl");
+
         // T-migrate-gateway-proxies (PR-A): typed clients for every post-auth
         // upstream. Each is registered with its OWN handler chain — bearer
         // forwarding + X-Service-Auth signing + the org-standard resilience
@@ -258,6 +266,17 @@ public static class ServiceClientExtensions
         AttachStandardPipeline(
             services.AddHttpClient<IPushNotificationClient, PushNotificationClient>(http =>
                 BindBaseAddress(http, config, "Services:PushNotification")));
+
+        // remote-user-preferences typed client. UserPreferencesController consumes
+        // this when FeatureFlags:UseUpstream:RemoteUserPreferences is on. The wire
+        // is snake_case (handled inside UserPreferencesClient); BindBaseAddress
+        // applies Services:RemoteUserPreferences[:BaseUrl] with a trailing slash so
+        // relative paths like "preferences/{user}" resolve under the host; this
+        // typed client gets its own bearer + X-Service-Auth + resilience chain via
+        // AttachStandardPipeline (BFF aggregation pattern).
+        AttachStandardPipeline(
+            services.AddHttpClient<IUserPreferencesClient, UserPreferencesClient>(http =>
+                BindBaseAddress(http, config, "Services:RemoteUserPreferences")));
 
         return services;
     }
