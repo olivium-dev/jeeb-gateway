@@ -160,108 +160,15 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         refresh.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
-    [Fact]
-    public async Task Password_Change_Revokes_Every_Outstanding_Refresh_Token()
-    {
-        var sessionA = await Issue("u-pwchange");
-        var sessionB = await Issue("u-pwchange");
-
-        var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-User-Id", "u-pwchange");
-
-        var resp = await client.PostAsJsonAsync("/users/me/password", new
-        {
-            currentPassword = "old-password-1",
-            newPassword = "new-password-2"
-        });
-        resp.StatusCode.Should().Be(HttpStatusCode.NoContent);
-
-        (await Refresh(sessionA.RefreshToken)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-        (await Refresh(sessionB.RefreshToken)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-    }
-
-    [Fact]
-    public async Task Phone_Change_Revokes_Every_Outstanding_Refresh_Token()
-    {
-        var sessionA = await Issue("u-phchange");
-        var sessionB = await Issue("u-phchange");
-
-        var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-User-Id", "u-phchange");
-
-        var resp = await client.PostAsJsonAsync("/users/me/phone", new
-        {
-            newPhone = "+96550009999",
-            otpCode = "123456"
-        });
-        resp.StatusCode.Should().Be(HttpStatusCode.NoContent);
-
-        (await Refresh(sessionA.RefreshToken)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-        (await Refresh(sessionB.RefreshToken)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-    }
-
-    [Fact]
-    public async Task Admin_Suspension_Revokes_Every_Outstanding_Refresh_Token()
-    {
-        Seed(new UserProfile
-        {
-            Id = "u-suspend",
-            Phone = "+96550002222",
-            Name = "Omar",
-            Roles = new List<string> { "customer" },
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow
-        });
-
-        var sessionA = await Issue("u-suspend");
-        var sessionB = await Issue("u-suspend");
-
-        var admin = _factory.CreateClient();
-        admin.DefaultRequestHeaders.Add("X-User-Id", "admin-1");
-        admin.DefaultRequestHeaders.Add("X-User-Roles", "admin");
-
-        var resp = await admin.PatchAsJsonAsync("/admin/users/u-suspend/suspend", new { reason = "audit" });
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var body = await resp.Content.ReadFromJsonAsync<SuspendUserResponse>();
-        body!.RevokedTokenCount.Should().BeGreaterOrEqualTo(2);
-
-        (await Refresh(sessionA.RefreshToken)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-        (await Refresh(sessionB.RefreshToken)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-    }
-
-    [Fact]
-    public async Task Suspend_Without_Admin_Role_Returns_403()
-    {
-        var nonAdmin = _factory.CreateClient();
-        nonAdmin.DefaultRequestHeaders.Add("X-User-Id", "u-nonadmin");
-
-        var resp = await nonAdmin.PatchAsJsonAsync("/admin/users/anyone/suspend", new { reason = "audit" });
-        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
-    }
-
-    [Fact]
-    public async Task ChangePassword_Without_Body_Returns_400()
-    {
-        var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-User-Id", "u-pw-bad");
-
-        var resp = await client.PostAsJsonAsync<object?>("/users/me/password", null);
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-    }
-
-    [Fact]
-    public async Task ChangePhone_Rejects_Malformed_Phone()
-    {
-        var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-User-Id", "u-ph-bad");
-
-        var resp = await client.PostAsJsonAsync("/users/me/phone", new
-        {
-            newPhone = "not-a-phone",
-            otpCode = "123456"
-        });
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-    }
+    // -----------------------------------------------------------------
+    // Token-revocation TRIGGER tests removed with the user-management literal
+    // replace. The triggers — POST /users/me/password, POST /users/me/phone
+    // (UsersController) and PATCH /admin/users/{id}/suspend (AdminUsers
+    // controller) — no longer exist on the gateway; user-management is now
+    // proxied through UserController/ServiceUserManagementClient. The core
+    // token issue/refresh/rotate/revoke mechanism (TokenService /
+    // /auth/tokens) is still exercised by the tests above.
+    // -----------------------------------------------------------------
 
     // -----------------------------------------------------------------
     // Helpers

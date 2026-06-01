@@ -1,6 +1,5 @@
 using System.Text;
 using JeebGateway.Admin;
-using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Availability;
 using JeebGateway.Chat;
 using JeebGateway.Disputes;
@@ -26,7 +25,6 @@ using JeebGateway.Tokens;
 using JeebGateway.Tracking;
 using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
-using JeebGateway.Users.RoleSwitch;
 using JeebGateway.Calls;
 using JeebGateway.Wallet;
 using JeebGateway.Whisper;
@@ -207,9 +205,6 @@ builder.Services.AddOpenTelemetry()
         tracing
             .AddAspNetCoreInstrumentation()
             .AddHttpClientInstrumentation()
-            // T-BE-001 / JEB-471 — OTP sign-in spans
-            // (auth.otp.request / auth.otp.verify / auth.refresh).
-            .AddSource(OtpSignInActivitySource.Name)
             // T-BE-028 / JEB-64 — dispute case open / resolve spans.
             .AddSource(DisputeCaseTelemetry.ActivitySourceName)
             .AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
@@ -620,50 +615,36 @@ builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 
 // ===========================================================================
-// T-BE-001 / JEB-471 — OTP sign-in via olivium-dev/one-time-password
-// (Twilio) + olivium-dev/user-management (sibling T-BE-001a).
+// User-management integration — EXACT mirror of the salehly-gateway sibling.
 //
-// Registers:
-//   - JeebJwtOptions / GatewayRateLimitOptions / UserManagementApiOptions /
-//     ServiceOtpApiOptions  (Options pattern + ValidateOnStart)
-//   - IPhoneNormalizer (libphonenumber-csharp, region=LB)
-//   - IPhoneHasher (HMAC-SHA256 with JeebJwt:PhonePepper; PR #32 review B1)
-//   - IOtpRequestRateLimiter (sliding-minute 10/IP + 3/phone)
-//   - IRefreshTokenFamilyStore (in-memory; production swap → Postgres)
-//   - IJeebJwtIssuer (HS512, access 1h, refresh 30d, family rotation)
-//   - IUserManagementPhoneIdentityClient (fail-closed shim until T-BE-001a)
+// jeeb-gateway proxies all user-management traffic through the NSwag-generated
+// ServiceUserManagementClient (Services/ServiceUserManagementClient.cs,
+// namespace JeebGateway.service.ServiceUserManagement) exactly as
+// salehly-gateway does. The client is a named IHttpClientFactory client bound
+// to UserManagementServiceApi:BaseUrl, with a scoped typed-client instance that
+// hands the named HttpClient to the generated constructor.
 //
-// AuthOtpController routes:
-//   POST /v1/auth/otp/request
-//   POST /v1/auth/otp/verify
-//   POST /v1/auth/refresh
-//
-// Frozen ProblemDetails type set (AC-ProblemTypeSet):
-//   invalid_otp, too_many_attempts, invalid_country, rate_limited, invalid_phone
+// Controllers/UserController.cs is the byte-faithful salehly UserController
+// (routes under /api/User: check, all, register, login, token-login,
+// user-id-login, logout, social, forgot, reset, profile{,/update}, device
+// register/unregister, payment auth-token issue/validate, bulk email delete).
 // ===========================================================================
-builder.Services.AddJeebOtpSignIn(builder.Configuration, builder.Environment);
+builder.Services.AddHttpClient("ServiceUserManagementClient", client =>
+{
+    var apiUrl = builder.Configuration["UserManagementServiceApi:BaseUrl"];
+    if (!string.IsNullOrEmpty(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
 
-// ===========================================================================
-// T-BE-003 / JEB-39 — role-switch endpoint POST /v1/users/me/role/switch
-//
-// Registers IUserManagementRoleSwitchClient with the in-memory MVP shim
-// (InMemoryUserManagementRoleSwitchClient). The MVP shim is keyed by Guid
-// userId and tracks (available_roles, active_role, active_role_changed_at)
-// in process; integration tests seed users via the concrete singleton.
-//
-// Production wiring (TODO T-backend-bff-user — see ServiceClientExtensions)
-// swaps this registration with an HTTP adapter over the NSwag-generated
-// UserManagementClient calling
-//   PATCH /api/User/{id}/active-role  (added by T-BE-002, JEB-38)
-// behind the standard Polly resilience pipeline.
-//
-// UsersRoleController consumes this client plus IJeebJwtIssuer (registered
-// by AddJeebOtpSignIn above) to mint a fresh HS512 token pair carrying the
-// new active_role claim on every successful switch.
-// ===========================================================================
-builder.Services.AddSingleton<InMemoryUserManagementRoleSwitchClient>();
-builder.Services.AddSingleton<IUserManagementRoleSwitchClient>(sp =>
-    sp.GetRequiredService<InMemoryUserManagementRoleSwitchClient>());
+builder.Services.AddScoped<JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceUserManagementClient");
+    var baseUrl = builder.Configuration["UserManagementServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient(baseUrl, client);
+});
 
 // Jeeber availability toggle + auto-offline sweeper (T-backend-023).
 // In-memory implementations stand in for the durable Postgres row, the
@@ -888,10 +869,6 @@ app.UseCors(corsPolicyName);
 
 app.UseAuthentication();
 app.UseAuthorization();
-
-// T-backend-041: inject the user's persisted active role into HttpContext.Items
-// and reject tokens with a stale active_role claim.
-app.UseMiddleware<ActiveRoleMiddleware>();
 
 // Rate limiter must run after authentication so the per-user partition can
 // read the JWT sub claim.
