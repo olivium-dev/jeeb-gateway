@@ -1,5 +1,8 @@
+using JeebGateway.Services;
+using JeebGateway.Services.Clients;
 using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
 
@@ -12,17 +15,26 @@ public class TranscriptionController : ControllerBase
     private readonly IWhisperCircuitBreaker _breaker;
     private readonly IFallbackTranscriptionProvider _fallbackProvider;
     private readonly ITranscriptionFallbackQueue _queue;
+    private readonly IVoiceTranscriptionClient _upstream;
+    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
+    private readonly IOptionsMonitor<WhisperOptions> _whisperOptions;
 
     public TranscriptionController(
         ITranscriptionService service,
         IWhisperCircuitBreaker breaker,
         IFallbackTranscriptionProvider fallbackProvider,
-        ITranscriptionFallbackQueue queue)
+        ITranscriptionFallbackQueue queue,
+        IVoiceTranscriptionClient upstream,
+        IOptionsMonitor<UpstreamFeatureFlags> flags,
+        IOptionsMonitor<WhisperOptions> whisperOptions)
     {
         _service = service;
         _breaker = breaker;
         _fallbackProvider = fallbackProvider;
         _queue = queue;
+        _upstream = upstream;
+        _flags = flags;
+        _whisperOptions = whisperOptions;
     }
 
     [HttpPost]
@@ -55,7 +67,36 @@ public class TranscriptionController : ControllerBase
         }
 
         var audio = new WhisperAudio(bytes, body.FileName, body.ContentType);
-        var result = await _service.TranscribeAsync(audio, ct);
+
+        // thin-BFF fan-out (3 of 4): when FeatureFlags:UseUpstream:Voice is ON,
+        // proxy voice-transcription-service via the typed client. When OFF (the
+        // default), use the in-process resilient Whisper path
+        // (ITranscriptionService) — circuit breaker, retries, fallback queue —
+        // which is preserved and NOT deleted in this PR. A transient upstream
+        // failure (WhisperUnavailableException after the resilience pipeline is
+        // exhausted) degrades to the same "queued" 202 shape rather than a 500,
+        // so the mobile contract is identical on both paths.
+        TranscriptionResult result;
+        if (_flags.CurrentValue.Voice)
+        {
+            try
+            {
+                result = await _upstream.TranscribeAsync(
+                    audio, _whisperOptions.CurrentValue.Language, ct);
+            }
+            catch (WhisperUnavailableException)
+            {
+                result = new TranscriptionResult(
+                    AudioId: Guid.NewGuid().ToString("n"),
+                    Outcome: TranscriptionOutcome.QueuedForRetry,
+                    Transcription: null,
+                    Reason: "upstream_unavailable");
+            }
+        }
+        else
+        {
+            result = await _service.TranscribeAsync(audio, ct);
+        }
 
         if (result.Outcome == TranscriptionOutcome.Transcribed)
         {
