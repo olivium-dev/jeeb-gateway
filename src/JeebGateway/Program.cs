@@ -187,7 +187,7 @@ builder.Services.AddHealthChecks()
 // ---------------------------------------------------------------------------
 builder.Services.AddBffAggregation(builder.Configuration);
 builder.Services.AddDownstreamClients(builder.Configuration);
-builder.Services.AddDownstreamHealthChecks(builder.Configuration);
+builder.Services.AddDownstreamHealthChecks(builder.Configuration, builder.Environment);
 
 // T-migrate-gateway-proxies (PR-A): per-service kill switches. Each
 // controller migrated in this PR checks the matching flag and falls
