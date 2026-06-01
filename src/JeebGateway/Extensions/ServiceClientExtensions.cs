@@ -295,6 +295,22 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IOfferServiceClient, OfferServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Offer")));
 
+        // thin-BFF wire (T-thin-bff-ban) — typed client over the real ban-service
+        // (Rust / Actix-Web, Redis-backed, host port 10065, health /health). The
+        // gateway's IJeeberRestrictionStore (the Jeeber abuse-control restriction
+        // record-of-truth, consumed by CancellationService from BOTH
+        // AdminCancellationsController and DeliveriesController) is swapped to a
+        // ban-service-backed implementation in Program.cs when
+        // FeatureFlags:UseUpstream:Ban is true; this typed client is its transport.
+        // Hand-coded (BanServiceClient) over snake_case + OpenAPI-3.1-nullable wire,
+        // mirroring the NotificationServiceClient precedent. BindBaseAddress
+        // resolves Services:Ban[:BaseUrl] with a trailing slash so api/v1/ban/...
+        // paths resolve under the host; AttachStandardPipeline gives this typed
+        // client its own bearer + X-Service-Auth + resilience chain.
+        AttachStandardPipeline(
+            services.AddHttpClient<IBanServiceClient, BanServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Ban")));
+
         return services;
     }
 
