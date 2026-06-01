@@ -174,6 +174,30 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         return await DeserializeAsync<JeeberAvailabilityUpstream>(response, ct);
     }
 
+    /// <inheritdoc />
+    public async Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct)
+    {
+        // Courier matching relocated to delivery-service (Go). Canonical route:
+        //   POST /api/v1/matching/run
+        // Request + response are snake_case (Go). The request DTO carries
+        // explicit [JsonPropertyName] so the camelCase web-default policy on the
+        // shared JsonOptions does not mis-serialize request_id / pickup_lat /
+        // allowed_vehicle_types onto the Go field names. The response DTOs do the
+        // same on the bind side (see DeliveryMatchingRunResult).
+        using var response = await _http.PostAsJsonAsync("api/v1/matching/run", body, JsonOptions, ct);
+
+        if (response.IsSuccessStatusCode)
+        {
+            return await DeserializeAsync<DeliveryMatchingRunResult>(response, ct);
+        }
+
+        // 400/404/422 — surface the upstream status + reason so the controller
+        // can map straight through to RFC 7807 ProblemDetails (the gateway is a
+        // thin BFF on this path; it does not re-run matching logic).
+        var reason = await TryReadReasonAsync(response, ct);
+        throw new DeliveryMatchingException((int)response.StatusCode, reason);
+    }
+
     private static async Task<T> DeserializeAsync<T>(HttpResponseMessage response, CancellationToken ct)
     {
         var payload = await response.Content.ReadFromJsonAsync<T>(JsonOptions, ct);

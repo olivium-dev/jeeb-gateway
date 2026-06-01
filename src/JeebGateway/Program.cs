@@ -8,7 +8,6 @@ using JeebGateway.Disputes.V2;
 using JeebGateway.Extensions;
 using JeebGateway.Financials;
 using JeebGateway.Kyc;
-using JeebGateway.Matching;
 using JeebGateway.Middleware;
 using JeebGateway.NotificationPreferences;
 using JeebGateway.ProhibitedItems;
@@ -400,19 +399,13 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper
 // replicas. The same IDistributedCache abstraction works for both.
 builder.Services.AddDistributedMemoryCache();
 
-// Geo-matching engine (T-backend-008).
-// Queries online Jeebers within the tier-specific radius (PostGIS-style
-// ST_DWithin, MVP-side using Haversine), filters by vehicle-type
-// compatibility, orders by proximity-then-rating, and fans out a
-// "new offer" push to the matched set under a single 2-second deadline.
-// Production wiring swaps:
-//   - InMemoryJeeberRatingProvider → ratings-service NSwag client.
-//   - The candidate scan moves to a PostGIS ST_DWithin query against
-//     the GEOGRAPHY(Point, 4326) column on jeeber_availability.
-builder.Services.Configure<MatchingOptions>(builder.Configuration.GetSection(MatchingOptions.SectionName));
-builder.Services.AddSingleton<InMemoryJeeberRatingProvider>();
-builder.Services.AddSingleton<IJeeberRatingProvider>(sp => sp.GetRequiredService<InMemoryJeeberRatingProvider>());
-builder.Services.AddSingleton<IMatchingService, MatchingService>();
+// Geo-matching engine (T-backend-008) — RELOCATED to delivery-service.
+// The gateway's in-memory geo-matching engine (great-circle distance scan +
+// in-memory rating provider) was deleted; courier matching now lives in
+// delivery-service (Go) behind POST /api/v1/matching/run. MatchingController
+// is a thin BFF that delegates via IDeliveryServiceClient.RunMatchingAsync
+// (registered with the standard pipeline in AddDownstreamClients).
+// See DELIVERY-SERVICE-RELOCATION-DESIGN.md §2.1 + §5.
 
 // Delivery tier catalog (T-backend-009).
 // In-memory store seeded with the five default tiers (Urgent, Same-Day,

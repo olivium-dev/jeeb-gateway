@@ -87,82 +87,12 @@ public class UpstreamProxyTests
     }
 
     // -----------------------------------------------------------------
-    // Matching (matching-service)
+    // Matching: courier /matching/run was RELOCATED to delivery-service.
+    // The gateway always delegates via IDeliveryServiceClient (no in-memory
+    // engine, no feature flag). That delegation + the snake_case wire contract
+    // are covered by MatchingEndpointTests + MatchingRunContractTests, so there
+    // is no flag-gated matching case here anymore.
     // -----------------------------------------------------------------
-
-    [Fact]
-    public async Task Matching_With_Flag_Off_Uses_InMemory_Engine()
-    {
-        // The in-memory engine returns a real response (notifiedCount may be 0
-        // when no Jeebers are seeded); the point is that the upstream stub is
-        // not contacted.
-        var stub = new StubHttpMessageHandler(_ =>
-            throw new InvalidOperationException("upstream must not be called when flag is off"));
-
-        using var factory = NewFactory(
-            flags: new() { { "FeatureFlags:UseUpstream:Matching", "false" } },
-            configureServices: services =>
-            {
-                ReplaceTypedClient<IMatchingServiceClient, MatchingServiceClient>(
-                    services, stub, "http://upstream-matching.test");
-            });
-
-        var client = ClientWith(factory, "client-1", "customer");
-        var resp = await client.PostAsJsonAsync("/matching/run", new
-        {
-            pickupLat = 31.95,
-            pickupLng = 35.92,
-            tierId = "urgent"
-        });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var body = await resp.Content.ReadFromJsonAsync<MatchingRunResponse>();
-        // In-memory dry-run path tags the request id with the "dryrun:" prefix.
-        body!.RequestId.Should().StartWith("dryrun:");
-    }
-
-    [Fact]
-    public async Task Matching_With_Flag_On_Forwards_To_Matching_Upstream()
-    {
-        var captured = new CapturedRequests();
-        var stub = new StubHttpMessageHandler(req =>
-        {
-            captured.Add(req);
-            return JsonResponse(new MatchingRunResponse
-            {
-                RequestId = "upstream-rq-1",
-                TierId = "urgent",
-                RadiusKm = 5.0,
-                NotifiedCount = 3,
-                CandidateCount = 3,
-                Candidates = Array.Empty<MatchedJeeberDto>(),
-                ElapsedMs = 42
-            });
-        });
-
-        using var factory = NewFactory(
-            flags: new() { { "FeatureFlags:UseUpstream:Matching", "true" } },
-            configureServices: services =>
-            {
-                ReplaceTypedClient<IMatchingServiceClient, MatchingServiceClient>(
-                    services, stub, "http://upstream-matching.test");
-            });
-
-        var client = ClientWith(factory, "client-1", "customer");
-        var resp = await client.PostAsJsonAsync("/matching/run", new
-        {
-            pickupLat = 31.95,
-            pickupLng = 35.92,
-            tierId = "urgent"
-        });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var body = await resp.Content.ReadFromJsonAsync<MatchingRunResponse>();
-        body!.RequestId.Should().Be("upstream-rq-1");
-        body.NotifiedCount.Should().Be(3);
-
-        captured.Single().RequestUri!.AbsolutePath.Should().Be("/api/v1/jeeb/matching/run");
-    }
 
     // -----------------------------------------------------------------
     // Location update (geolocation-service)
