@@ -109,6 +109,15 @@ public static class HealthCheckExtensions
         //   - feedback               (Services:Feedback:BaseUrl)
         //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
+        //   - realtime-comunication-service (Services:Realtime:BaseUrl) — NOT yet on
+        //       the Jeeb swarm; BaseUrl is a marked PLACEHOLDER (PORT_TBD), so the
+        //       URL is not even probe-able. It DOES serve GET /health, /health/ready,
+        //       /health/live upstream — once it is deployed and the placeholder is
+        //       replaced with the real host:port, add a Degraded URL-group probe
+        //       (healthPath "health/ready") here so a missing instance shows in the
+        //       dashboard WITHOUT 503-ing the gateway. Until then it stays
+        //       liveness-only (no probe) and the FeatureFlags:UseUpstream:Realtime
+        //       kill switch keeps the publish path dark.
 
         return services;
     }
