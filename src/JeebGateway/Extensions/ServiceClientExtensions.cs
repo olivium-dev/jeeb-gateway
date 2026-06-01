@@ -1,9 +1,7 @@
-using System.Threading;
 using JeebGateway.Services.Bff;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
-using StackExchange.Redis;
 
 namespace JeebGateway.Extensions;
 
@@ -59,12 +57,11 @@ public static class ServiceClientExtensions
         //   migrates: AuthController, TokensController (currently in-memory)
         AddNamedDownstreamClient(services, config, "auth", "Services:Auth:BaseUrl");
 
-        // chat-service — GENERIC member/channel/session/message API. The Jeeb
-        //   1:1 conversation aggregation lives in ChatServiceClient (BFF), which
-        //   calls only the generic routes below. No product-specific chat surface
-        //   exists on the shared chat-service.
-        //   migrates: ChatController (REST send/history) + SignalR fan-out.
-        AddNamedDownstreamClient(services, config, "chat", "Services:Chat:BaseUrl");
+        // chat-service — registered separately as the salehly-style named client
+        //   "ServiceChatClient" (ChatServiceApi:BaseUrl) in Program.cs, consumed by
+        //   the NSwag ServiceChatClient that ChatController passes through. It is
+        //   NOT part of this named-downstream-client set (no bearer/ServiceAuth
+        //   pipeline), matching salehly-gateway exactly.
 
         // TODO(T-backend-bff-user): user-management — wire NSwag-generated UserManagementClient
         //   contract: src/JeebGateway/contracts/user-management.openapi.json
@@ -141,80 +138,13 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IGeolocationServiceClient, GeolocationServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Geolocation")));
 
-        // Chat BFF facade over the GENERIC chat-service (Firestore-backed, C#/.NET 8,
-        // Services:Chat:BaseUrl). ChatServiceClient performs the Jeeb 1:1 aggregation
-        // entirely in the gateway, calling only the generic primitives:
-        //   POST /api/members
-        //   POST /api/channels
-        //   POST /api/channels/{channelId}/members   (returns a session id)
-        //   POST /api/channels/{channelId}/messages  (requires a valid session)
-        //   GET  /api/channels/{channelId}/messages/{messageId}
-        //   GET  /api/channels/{channelId}/summary
-        // It never calls any product-specific chat route. The named "chat" registration
-        // above carries the resilience pipeline; BindBaseAddress resolves
-        // Services:Chat[:BaseUrl] so the typed client inherits the same address.
-        //
-        // IChatTopologyMap is a singleton: it caches userId->memberId and
-        // sortedPairKey->(channelId, sessions) so a conversation resolves to the
-        // same generic channel/sessions across requests (the generic API has no
-        // lookup-by-external-id).
-        //
-        // Impl is chosen by config presence, mirroring the wallet pattern:
-        //   - Redis:ConnectionString set (appsettings.Production.json =
-        //     192.168.2.50:6379) -> RedisChatTopologyMap. The in-memory map was
-        //     lost on restart and not multi-replica safe (two replicas would split
-        //     a conversation across two generic channels); Redis makes it durable
-        //     + shared across replicas.
-        //   - absent (dev/test) -> InMemoryChatTopologyMap, so the suite and local
-        //     runs need no Redis.
-        var redisConnectionString = config["Redis:ConnectionString"];
-        if (!string.IsNullOrWhiteSpace(redisConnectionString))
-        {
-            // PR #45 — the multiplexer MUST NOT block or throw at host boot.
-            //
-            // Previously this was `ConnectionMultiplexer.Connect(connStr)` with
-            // StackExchange.Redis' default AbortOnConnectFail=true. When the
-            // configured Redis (appsettings.Production.json = 192.168.2.50:6379)
-            // is unreachable — e.g. in CI's network namespace, or during a Redis
-            // outage in prod — Connect() blocks for the full connect timeout and
-            // then throws. Because a hosted service (DataExportProcessor) resolves
-            // a chat client during Host.StartAsync, that eager Connect ran on the
-            // startup path: Kestrel never reached "Now listening", the container
-            // smoke test's `curl /health/live` after 5s failed, and in prod a
-            // transient Redis blip would crash-loop the whole gateway (reviewer
-            // P2: a Redis outage should degrade chat id-mapping, not hard-fail the
-            // BFF).
-            //
-            // Fix: parse ConfigurationOptions from the connection string and force
-            //   * AbortOnConnectFail=false — Connect() returns immediately even
-            //     when Redis is down; the multiplexer retries in the background and
-            //     recovers without a restart.
-            //   * ConnectTimeout=2000ms, ConnectRetry=1 — bounded, fast boot.
-            // and wrap the multiplexer in a Lazy<> so the (now non-blocking)
-            // Connect is deferred to first actual use, never to DI resolution.
-            // RedisChatTopologyMap reads IConnectionMultiplexer.GetDatabase() per
-            // op, so an as-yet-unconnected multiplexer degrades gracefully (ops
-            // throw RedisConnectionException per-call and recover) instead of
-            // taking the host down.
-            var redisOptions = ConfigurationOptions.Parse(redisConnectionString!);
-            redisOptions.AbortOnConnectFail = false;
-            redisOptions.ConnectTimeout = 2000;
-            redisOptions.ConnectRetry = 1;
-
-            var lazyMultiplexer = new Lazy<IConnectionMultiplexer>(
-                () => ConnectionMultiplexer.Connect(redisOptions),
-                LazyThreadSafetyMode.ExecutionAndPublication);
-
-            services.AddSingleton<IConnectionMultiplexer>(_ => lazyMultiplexer.Value);
-            services.AddSingleton<IChatTopologyMap, RedisChatTopologyMap>();
-        }
-        else
-        {
-            services.AddSingleton<IChatTopologyMap, InMemoryChatTopologyMap>();
-        }
-        AttachStandardPipeline(
-            services.AddHttpClient<IChatServiceClient, ChatServiceClient>(http =>
-                BindBaseAddress(http, config, "Services:Chat")));
+        // chat-service — REMOVED from this set. The jeeb 1:1 conversation BFF
+        // (ChatServiceClient) + Redis topology map (RedisChatTopologyMap /
+        // InMemoryChatTopologyMap / IChatTopologyMap) + IConnectionMultiplexer
+        // singleton were removed with the salehly mirror. Chat is now a stateless
+        // passthrough: the NSwag ServiceChatClient is registered in Program.cs as
+        // the named client "ServiceChatClient" (ChatServiceApi:BaseUrl) and consumed
+        // directly by ChatController, exactly as salehly-gateway wires it.
 
         // T-migrate-gateway-proxies — typed client over the real notification-service
         // (FastAPI, Mongo jeeb_notifications). Hand-coded against verified routes on

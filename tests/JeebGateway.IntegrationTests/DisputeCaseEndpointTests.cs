@@ -3,17 +3,13 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using FluentAssertions;
-using JeebGateway.Chat;
 using JeebGateway.Disputes.V2;
 using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
 using JeebGateway.Tracking;
-using JeebGateway.IntegrationTests.Chat;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 using Roles = JeebGateway.Users.Roles;
 
@@ -24,37 +20,35 @@ namespace JeebGateway.IntegrationTests;
 /// orchestration. Every AC from the Jira story is pinned to a test:
 ///
 /// <list type="bullet">
-///   <item>AC1: <see cref="Escalate_Attaches_Chat_Transcript_And_Gps_Polyline"/></item>
+///   <item>AC1: <see cref="Escalate_Attaches_Gps_Polyline_And_Empty_Chat_Transcript"/></item>
 ///   <item>AC2: <see cref="Resolve_With_Refund_Triggers_Payment_Gateway_And_Notifies_Both_Parties"/></item>
 ///   <item>AC3: <see cref="Resolve_When_Already_Resolved_Returns_409_Already_Resolved"/></item>
 ///   <item>AC4: <see cref="Resolve_As_Non_Admin_Returns_403"/> +
 ///     <see cref="ListMine_Includes_Cases_Where_User_Is_Counterparty"/></item>
 ///   <item>AC5: <see cref="Open_And_Resolve_Emit_Telemetry_Spans"/></item>
-///   <item>AC6: <see cref="Escalate_With_100KB_Transcript_Completes_Under_One_Second"/></item>
+///   <item>AC6: <see cref="Escalate_Completes_Under_One_Second"/></item>
 /// </list>
 /// </summary>
 public class DisputeCaseEndpointTests
 {
     // ----------------------------------------------------------------
-    // AC1 — escalate captures chat transcript + GPS polyline as evidence
+    // AC1 — escalate captures the GPS polyline as evidence. (Chat
+    // transcript capture was REMOVED with the gateway chat BFF client: the
+    // salehly mirror replaced jeeb's 1:1 chat aggregation with a passthrough
+    // ChatController over the generic chat-service. Transcript evidence is now
+    // empty/non-degraded until chat-service exposes a generic
+    // transcript-by-participants read the gateway can call directly.)
     // ----------------------------------------------------------------
     [Fact]
-    public async Task Escalate_Attaches_Chat_Transcript_And_Gps_Polyline()
+    public async Task Escalate_Attaches_Gps_Polyline_And_Empty_Chat_Transcript()
     {
-        using var factory = NewFactoryWithChatDouble();
+        using var factory = new WebApplicationFactory<Program>();
         const string client = "c-ac1";
         const string jeeber = "j-ac1";
 
         var deliveryId = await SeedDeliveryWithJeeberAsync(factory, client, jeeber,
             pickup: new GeoPoint { Lat = 33.8938, Lng = 35.5018 },
             dropoff: new GeoPoint { Lat = 33.8869, Lng = 35.5131 });
-
-        await SeedChatAsync(factory, client, jeeber, new[]
-        {
-            ("hello — when will you arrive?", client),
-            ("on my way, 10 min", jeeber),
-            ("parcel is damaged on the box", client)
-        });
 
         SeedJeeberLocation(factory, jeeber, lat: 33.8900, lng: 35.5100);
 
@@ -78,11 +72,11 @@ public class DisputeCaseEndpointTests
         body.Reason.Should().Be("damaged_goods");
         body.PhotoUrls.Should().ContainSingle();
 
-        // Evidence: chat transcript was captured with all three messages.
+        // Evidence: chat transcript is empty (capture removed) and the bundle
+        // is not degraded — an absent transcript is the documented expected state.
         body.Evidence.Degraded.Should().BeFalse();
-        body.Evidence.ChatTranscriptMessageCount.Should().Be(3);
-        body.Evidence.ChatTranscriptJson.Should().NotBeNullOrEmpty();
-        body.Evidence.ChatTranscriptJson!.Should().Contain("parcel is damaged");
+        body.Evidence.ChatTranscriptMessageCount.Should().Be(0);
+        body.Evidence.ChatTranscriptJson.Should().BeNullOrEmpty();
 
         // Evidence: GPS polyline contains pickup → jeeber-fix → dropoff.
         body.Evidence.GpsPolyline.Should().HaveCount(3);
@@ -307,23 +301,18 @@ public class DisputeCaseEndpointTests
     }
 
     // ----------------------------------------------------------------
-    // AC6 — open with a 100 kB transcript completes in <1s.
+    // AC6 — escalate (evidence capture) completes within the 1 second open
+    // budget. Chat transcript capture is removed, so the bundle is just the
+    // GPS polyline; the latency budget still applies to the escalate path.
     // ----------------------------------------------------------------
     [Fact]
-    public async Task Escalate_With_100KB_Transcript_Completes_Under_One_Second()
+    public async Task Escalate_Completes_Under_One_Second()
     {
-        using var factory = NewFactoryWithChatDouble();
+        using var factory = new WebApplicationFactory<Program>();
         const string client = "c-ac6";
         const string jeeber = "j-ac6";
 
         var deliveryId = await SeedDeliveryWithJeeberAsync(factory, client, jeeber);
-
-        // 100 messages × ~1100 bytes of text → ~110 kB transcript.
-        var bigBody = new string('x', 1_100);
-        var transcript = Enumerable.Range(0, 100)
-            .Select(i => (bigBody, i % 2 == 0 ? client : jeeber))
-            .ToArray();
-        await SeedChatAsync(factory, client, jeeber, transcript);
 
         var http = ClientFor(factory, client);
         var stopwatch = Stopwatch.StartNew();
@@ -335,10 +324,10 @@ public class DisputeCaseEndpointTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
         stopwatch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1),
-            "AC6 — open with a 100 kB transcript must complete within the 1 second budget");
+            "AC6 — escalate evidence capture must complete within the 1 second budget");
 
         var body = await resp.Content.ReadFromJsonAsync<DisputeCaseResponse>();
-        body!.Evidence.ChatTranscriptMessageCount.Should().Be(100);
+        body!.Evidence.ChatTranscriptMessageCount.Should().Be(0);
         body.Evidence.Degraded.Should().BeFalse();
     }
 
@@ -545,51 +534,6 @@ public class DisputeCaseEndpointTests
             lookup.JeeberId = jeeberId;
         }
         return created.Id;
-    }
-
-    /// <summary>
-    /// Factory variant that swaps the typed (HTTP) IChatServiceClient — unreachable
-    /// in the suite — for the shared in-memory double. The dispute evidence
-    /// orchestrator reads the transcript through IChatServiceClient now that the
-    /// in-memory chat store is deleted, so transcript tests seed via the double.
-    /// </summary>
-    private static WebApplicationFactory<Program> NewFactoryWithChatDouble() =>
-        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
-        {
-            builder.ConfigureTestServices(services =>
-            {
-                services.RemoveAll<IChatServiceClient>();
-                services.AddSingleton<InMemoryChatServiceClientDouble>();
-                services.AddSingleton<IChatServiceClient>(
-                    sp => sp.GetRequiredService<InMemoryChatServiceClientDouble>());
-            });
-        });
-
-    private static Task SeedChatAsync(
-        WebApplicationFactory<Program> factory,
-        string userA,
-        string userB,
-        IReadOnlyList<(string text, string sender)> messages)
-    {
-        var chat = factory.Services.GetRequiredService<InMemoryChatServiceClientDouble>();
-        var conversationId = ConversationKey.For(userA, userB);
-        var now = DateTimeOffset.UtcNow.AddMinutes(-messages.Count);
-        var idx = 0;
-        foreach (var (text, sender) in messages)
-        {
-            var recipient = string.Equals(sender, userA, StringComparison.Ordinal) ? userB : userA;
-            chat.Seed(new ChatMessageDto
-            {
-                Id = $"msg-{Guid.NewGuid():N}",
-                ConversationId = conversationId,
-                SenderId = sender,
-                RecipientId = recipient,
-                Type = ChatMessageType.Text,
-                SentAt = now.AddSeconds(idx++),
-                Text = text
-            });
-        }
-        return Task.CompletedTask;
     }
 
     private static void SeedJeeberLocation(WebApplicationFactory<Program> factory, string jeeberId, double lat, double lng)
