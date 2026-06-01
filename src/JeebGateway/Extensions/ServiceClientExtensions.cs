@@ -229,9 +229,31 @@ public static class ServiceClientExtensions
         // T-backend-020 (JEEB-38): typed client over score-taking-service.
         // Carries its own bearer/ServiceAuth/resilience chain via
         // AttachStandardPipeline (BFF aggregation pattern).
+        //
+        // NOTE: score-taking-service is STALE (no appsettings entry in any
+        // environment; not in the deployed fleet). The real ratings upstream is
+        // feedback-service (block below). This typed registration is retained
+        // only so the typed-client pipeline test keeps a registration to assert
+        // against; IRatingService no longer routes its record-of-truth here.
         AttachStandardPipeline(
             services.AddHttpClient<IScoreServiceClient, ScoreServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:ScoreTaking")));
+
+        // thin-BFF wire — feedback-service (host port 10064, liveness-only; NO
+        // /health readiness route). Self-contained block: named client (resilience
+        // pipeline) + typed IFeedbackServiceClient (own bearer/ServiceAuth/resilience
+        // chain via AttachStandardPipeline). feedback-service is the REAL canonical
+        // ratings upstream (Services:Feedback:BaseUrl = http://192.168.2.50:10064 in
+        // appsettings.Production.json); IRatingService routes its rating
+        // record-of-truth here when FeatureFlags:UseUpstream:Feedback is on, and
+        // keeps the in-memory IRatingStore as the off/fallback path. Hand-coded
+        // against feedback-service's Swashbuckle spec (/swagger/v1/swagger.json),
+        // following the NotificationServiceClient precedent. See
+        // IFeedbackServiceClient for the full score-taking-vs-feedback resolution.
+        AddNamedDownstreamClient(services, config, "feedback", "Services:Feedback:BaseUrl");
+        AttachStandardPipeline(
+            services.AddHttpClient<IFeedbackServiceClient, FeedbackServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Feedback")));
 
         // T-BE-019 (JEB-55): typed client over one-time-password service for the
         // delivery-HANDOVER OTP (ApplicationId delivery_handover_{deliveryId}).
@@ -277,6 +299,54 @@ public static class ServiceClientExtensions
         AttachStandardPipeline(
             services.AddHttpClient<IUserPreferencesClient, UserPreferencesClient>(http =>
                 BindBaseAddress(http, config, "Services:RemoteUserPreferences")));
+
+        // thin-BFF offer-service wire (FeatureFlags:UseUpstream:Offer). Typed
+        // client over the real offer-service (Elixir/Phoenix, host port 10063,
+        // liveness /health). Hand-coded — offer-service exposes NO OpenAPI doc
+        // (/swagger/v1/swagger.json and /openapi.json both 404), so there is no
+        // NSwag client to generate; OfferServiceClient is verified against the
+        // routes in offer-service/lib/offer_service_web/router.ex. The named
+        // resilience pipeline is attached the same way as every other typed
+        // client; BindBaseAddress resolves Services:Offer[:BaseUrl] with a
+        // trailing slash so relative paths like "api/v1/requests/{id}/offers"
+        // resolve under the host. NOTE: offer-service authorizes on a
+        // gateway-injected x-user-id header (its AuthenticatedUser plug), which
+        // OfferServiceClient sets per call from the acting user id; the bearer-
+        // forwarding handler is harmless here (offer-service ignores the bearer).
+        AttachStandardPipeline(
+            services.AddHttpClient<IOfferServiceClient, OfferServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Offer")));
+
+        // thin-BFF wire (T-thin-bff-ban) — typed client over the real ban-service
+        // (Rust / Actix-Web, Redis-backed, host port 10065, health /health). The
+        // gateway's IJeeberRestrictionStore (the Jeeber abuse-control restriction
+        // record-of-truth, consumed by CancellationService from BOTH
+        // AdminCancellationsController and DeliveriesController) is swapped to a
+        // ban-service-backed implementation in Program.cs when
+        // FeatureFlags:UseUpstream:Ban is true; this typed client is its transport.
+        // Hand-coded (BanServiceClient) over snake_case + OpenAPI-3.1-nullable wire,
+        // mirroring the NotificationServiceClient precedent. BindBaseAddress
+        // resolves Services:Ban[:BaseUrl] with a trailing slash so api/v1/ban/...
+        // paths resolve under the host; AttachStandardPipeline gives this typed
+        // client its own bearer + X-Service-Auth + resilience chain.
+        AttachStandardPipeline(
+            services.AddHttpClient<IBanServiceClient, BanServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Ban")));
+
+        // thin-BFF fan-out (3 of 4): typed client over voice-transcription-service
+        // (FastAPI, host port 10062, health /healthz, ready /readyz). NET-NEW thin
+        // client — the upstream's route POST /v1/transcribe differs materially from
+        // the OpenAI route the in-process WhisperClient calls, so this is NOT a
+        // repoint of WhisperClient. TranscriptionController consumes this when
+        // FeatureFlags:UseUpstream:Voice is true and falls back to the in-process
+        // resilient Whisper path (ITranscriptionService) when false. BindBaseAddress
+        // resolves Services:VoiceTranscription[:BaseUrl] with a trailing slash so the
+        // relative "v1/transcribe" resolves under the host; AttachStandardPipeline
+        // gives this typed client its own bearer + X-Service-Auth + resilience chain
+        // (BFF aggregation pattern).
+        AttachStandardPipeline(
+            services.AddHttpClient<IVoiceTranscriptionClient, VoiceTranscriptionClient>(http =>
+                BindBaseAddress(http, config, "Services:VoiceTranscription")));
 
         return services;
     }

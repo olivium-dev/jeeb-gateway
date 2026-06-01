@@ -1,4 +1,5 @@
 using JeebGateway.Requests;
+using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -7,6 +8,24 @@ namespace JeebGateway.Ratings;
 
 /// <summary>
 /// T-backend-020 / JEEB-38 — see <see cref="IRatingService"/>.
+///
+/// <para>
+/// RECORD-OF-TRUTH GATE. The canonical per-party rating is persisted upstream
+/// only when <c>FeatureFlags:UseUpstream:Feedback</c> is on, in which case it is
+/// written to the REAL <c>feedback-service</c> (host port 10064) via
+/// <see cref="IFeedbackServiceClient"/> before the gateway updates its own
+/// blind-reveal state. When the flag is off, the in-memory
+/// <see cref="IRatingStore"/> is the record-of-truth (the legacy MVP path) and
+/// no upstream call is made.
+/// </para>
+///
+/// <para>
+/// The previously-wired <see cref="IScoreServiceClient"/> targeted a STALE
+/// <c>score-taking-service</c> (no appsettings entry anywhere; not in the
+/// deployed fleet) and is no longer the record-of-truth. It is retained as a
+/// constructor dependency only for backward-compatible DI/test construction;
+/// it is never invoked.
+/// </para>
 /// </summary>
 public sealed class RatingService : IRatingService
 {
@@ -16,6 +35,8 @@ public sealed class RatingService : IRatingService
     private readonly IRequestsStore _requests;
     private readonly IRatingStore _ratings;
     private readonly IScoreServiceClient _scoreClient;
+    private readonly IFeedbackServiceClient _feedbackClient;
+    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly TimeProvider _clock;
     private readonly RatingOptions _options;
     private readonly ILogger<RatingService> _log;
@@ -24,6 +45,8 @@ public sealed class RatingService : IRatingService
         IRequestsStore requests,
         IRatingStore ratings,
         IScoreServiceClient scoreClient,
+        IFeedbackServiceClient feedbackClient,
+        IOptionsMonitor<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         IOptions<RatingOptions> options,
         ILogger<RatingService> log)
@@ -31,6 +54,8 @@ public sealed class RatingService : IRatingService
         _requests = requests;
         _ratings = ratings;
         _scoreClient = scoreClient;
+        _feedbackClient = feedbackClient;
+        _flags = flags;
         _clock = clock;
         _options = options.Value;
         _log = log;
@@ -118,29 +143,35 @@ public sealed class RatingService : IRatingService
                 "caller has already submitted a rating for this delivery.");
         }
 
-        // Persist to the canonical score-taking-service BEFORE updating the
-        // local store. If the downstream call fails we surface the error;
-        // the local store stays empty so a retry is safe.
+        // Record-of-truth gate (FeatureFlags:UseUpstream:Feedback). When ON,
+        // persist the canonical per-party rating to the REAL feedback-service
+        // BEFORE updating the local store. If the downstream call fails we
+        // surface the error; the local store stays empty so a retry is safe.
+        // When OFF, the in-memory store is the record-of-truth (legacy MVP
+        // path) and no upstream call is made.
         var rateeUserId = callerIsClient ? delivery.JeeberId! : delivery.ClientId;
-        try
+        if (_flags.CurrentValue.Feedback)
         {
-            await _scoreClient.SubmitScoreAsync(new SubmitScoreUpstreamRequest
+            try
             {
-                DeliveryId = deliveryId,
-                AuthorUserId = callerUserId,
-                RateeUserId = rateeUserId,
-                AuthorRole = callerIsClient ? "client" : "jeeber",
-                Stars = stars,
-                Comment = trimmed,
-                SubmittedAt = now,
-            }, ct);
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex,
-                "score-taking-service submission failed for delivery {DeliveryId} author {AuthorUserId}",
-                deliveryId, callerUserId);
-            throw;
+                await _feedbackClient.SubmitCommentAsync(new FeedbackSubmitRequest
+                {
+                    // The review topic is the ratee — aggregate ratings are
+                    // queried per ratee (a user's received-rating average).
+                    Tag = rateeUserId,
+                    CommenterId = callerUserId,
+                    Rating = stars,
+                    Criteria = callerIsClient ? "client" : "jeeber",
+                    Text = trimmed,
+                }, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "feedback-service submission failed for delivery {DeliveryId} author {AuthorUserId}",
+                    deliveryId, callerUserId);
+                throw;
+            }
         }
 
         var entry = new RatingEntry(
