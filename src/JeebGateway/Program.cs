@@ -186,6 +186,13 @@ builder.Services.AddHealthChecks()
 // silently skip — local dev does not have to spin up every backend.
 // ---------------------------------------------------------------------------
 builder.Services.AddBffAggregation(builder.Configuration);
+// AddDownstreamClients also registers the typed IContractSigningServiceClient
+// (contract-signing-service / immutable contract templates + per-party
+// signatures; consumed by ContractSigningController, gated by
+// FeatureFlags:UseUpstream:ContractSigning which defaults OFF — the service is
+// not yet deployed, BaseUrl is a placeholder). It serves the versioned Jeeb ToS
+// template jeeb_tos_v1 (JEB-40/JEB-41) via RegisterTemplateAsync/SignAsync. See
+// the contract-signing block in Extensions/ServiceClientExtensions.cs.
 builder.Services.AddDownstreamClients(builder.Configuration);
 builder.Services.AddDownstreamHealthChecks(builder.Configuration, builder.Environment);
 

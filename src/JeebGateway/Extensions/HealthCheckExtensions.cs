@@ -109,6 +109,13 @@ public static class HealthCheckExtensions
         //   - feedback               (Services:Feedback:BaseUrl)
         //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
+        //   - contract-signing       (Services:ContractSigning:BaseUrl) — NOT yet deployed
+        //       (placeholder PORT_TBD). Liveness-only for now: probing the
+        //       placeholder host would fail to connect and falsely 503 the
+        //       gateway. The upstream FastAPI app DOES expose GET /health, so once
+        //       it is deployed and the BaseUrl is real, add:
+        //         AddDownstreamProbe(checks, config, "contract-signing",
+        //             "Services:ContractSigning:BaseUrl", healthPath: "health");
 
         return services;
     }

@@ -348,6 +348,29 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IVoiceTranscriptionClient, VoiceTranscriptionClient>(http =>
                 BindBaseAddress(http, config, "Services:VoiceTranscription")));
 
+        // thin-BFF wire — contract-signing-service (FastAPI, api_prefix /v1;
+        // immutable contract templates + per-party signatures; olivium-shared).
+        // Serves the versioned Jeeb Terms-of-Service template jeeb_tos_v1
+        // (JEB-40/JEB-41) via POST /v1/templates (RegisterTemplateAsync) and the
+        // ToS-acceptance signature via POST /v1/contracts/{id}/signatures
+        // (SignAsync). Self-contained block mirroring the feedback wire above:
+        // named client (resilience pipeline) + typed IContractSigningServiceClient
+        // (own bearer/ServiceAuth/resilience chain via AttachStandardPipeline).
+        // NOT yet deployed to the Jeeb swarm — Services:ContractSigning:BaseUrl is a
+        // PLACEHOLDER (http://192.168.2.50:PORT_TBD/) in appsettings.Production.json
+        // and FeatureFlags:UseUpstream:ContractSigning defaults OFF everywhere, so
+        // the controller 503s until the service is live. Hand-coded (no NSwag
+        // artifact — the upstream's /openapi.json is unreachable from the build host
+        // because the service is not yet deployed) against
+        // contract-signing-service/app/routers/*.py, following the
+        // NotificationServiceClient / OfferServiceClient precedent. BindBaseAddress
+        // resolves Services:ContractSigning[:BaseUrl] with a trailing slash so the
+        // relative "v1/templates" / "v1/contracts/..." resolve under the host.
+        AddNamedDownstreamClient(services, config, "contract-signing", "Services:ContractSigning:BaseUrl");
+        AttachStandardPipeline(
+            services.AddHttpClient<IContractSigningServiceClient, ContractSigningServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:ContractSigning")));
+
         return services;
     }
 
