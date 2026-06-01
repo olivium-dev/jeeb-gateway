@@ -83,4 +83,18 @@ public sealed class UpstreamFeatureFlags
     /// existing in-process Whisper fixtures green.
     /// </summary>
     public bool Voice { get; set; }
+
+    /// <summary>
+    /// When true, form-builder paths proxy the real <c>form-builder-service</c>
+    /// (FastAPI dynamic-forms upstream; serves the versioned Jeeb KYC form schema
+    /// <c>jeeb_jeeber_v1</c>) via
+    /// <see cref="JeebGateway.Services.Clients.IFormBuilderServiceClient"/>.
+    /// This path is net-new (the gateway never held a form store), so the flag is
+    /// a runtime kill switch, NOT a fallback to local state: when off the
+    /// endpoints return 503. Defaults OFF in EVERY environment because
+    /// form-builder-service is NOT yet deployed to the Jeeb swarm — its
+    /// <c>Services:FormBuilder:BaseUrl</c> is a placeholder (<c>PORT_TBD</c>)
+    /// pending deployment. Flip on once the service is live and the BaseUrl is real.
+    /// </summary>
+    public bool FormBuilder { get; set; }
 }

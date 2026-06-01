@@ -109,6 +109,12 @@ public static class HealthCheckExtensions
         //   - feedback               (Services:Feedback:BaseUrl)
         //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
+        //   - form-builder           (Services:FormBuilder:BaseUrl) — NOT yet deployed
+        //       (placeholder PORT_TBD); FastAPI app exposes no /health route
+        //       (only /docs + /openapi.json). Liveness-only: registering a probe
+        //       would 404 (or fail to connect to the placeholder host) and falsely
+        //       503 the gateway. Add a readiness probe once the service is deployed
+        //       and a real health route exists.
 
         return services;
     }

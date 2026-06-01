@@ -348,6 +348,25 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IVoiceTranscriptionClient, VoiceTranscriptionClient>(http =>
                 BindBaseAddress(http, config, "Services:VoiceTranscription")));
 
+        // thin-BFF wire — form-builder-service (FastAPI dynamic-forms upstream;
+        // atlas pattern #15 "Dynamic forms"). Serves the versioned Jeeb KYC form
+        // schema jeeb_jeeber_v1 (JEB-40/JEB-41) via GET /templates/{name}/schema.
+        // Self-contained block mirroring the feedback wire above: named client
+        // (resilience pipeline) + typed IFormBuilderServiceClient (own bearer/
+        // ServiceAuth/resilience chain via AttachStandardPipeline). NOT yet
+        // deployed to the Jeeb swarm — Services:FormBuilder:BaseUrl is a
+        // PLACEHOLDER (http://192.168.2.50:PORT_TBD/) in appsettings.Production.json
+        // and FeatureFlags:UseUpstream:FormBuilder defaults OFF everywhere, so the
+        // controller 503s until the service is live. Hand-coded (no NSwag artifact)
+        // against form-builder-service/app/main.py, following the
+        // NotificationServiceClient / OfferServiceClient precedent. Liveness-only
+        // from the gateway's perspective: the FastAPI app exposes no /health route
+        // (only /docs + /openapi.json), so no readiness probe is registered.
+        AddNamedDownstreamClient(services, config, "form-builder", "Services:FormBuilder:BaseUrl");
+        AttachStandardPipeline(
+            services.AddHttpClient<IFormBuilderServiceClient, FormBuilderServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:FormBuilder")));
+
         return services;
     }
 

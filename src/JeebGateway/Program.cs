@@ -186,6 +186,11 @@ builder.Services.AddHealthChecks()
 // silently skip — local dev does not have to spin up every backend.
 // ---------------------------------------------------------------------------
 builder.Services.AddBffAggregation(builder.Configuration);
+// AddDownstreamClients also registers the typed IFormBuilderServiceClient
+// (form-builder-service / dynamic forms; consumed by FormBuilderController,
+// gated by FeatureFlags:UseUpstream:FormBuilder which defaults OFF — the
+// service is not yet deployed, BaseUrl is a placeholder). See the form-builder
+// block in Extensions/ServiceClientExtensions.cs.
 builder.Services.AddDownstreamClients(builder.Configuration);
 builder.Services.AddDownstreamHealthChecks(builder.Configuration, builder.Environment);
 
