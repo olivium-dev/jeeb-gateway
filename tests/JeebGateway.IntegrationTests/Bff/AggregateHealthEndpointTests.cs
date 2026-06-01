@@ -12,24 +12,30 @@ using Xunit;
 namespace JeebGateway.IntegrationTests.Bff;
 
 /// <summary>
-/// JEB-67 / T-BE-031 AC2 — aggregated /health endpoint.
+/// JEB-67 / T-BE-031 AC2 — aggregated health endpoint.
+///
+/// NOTE: the aggregated surface moved from /health to /health/aggregate. /health
+/// is now a LIVENESS alias (process-only, never gates on downstreams) to fix the
+/// production incident where a flapping downstream 503'd the only PROD gateway
+/// replica via the swarm liveness probe. The full red/green dashboard view lives
+/// at /health/aggregate; /health/ready remains the readiness surface.
 ///
 /// Asserts:
-///   * /health returns 200 with status=Healthy when every check passes
-///   * /health returns 503 when any check fails, with the failing service
-///     named in the JSON body's "failing" array AND the per-check entries
+///   * /health/aggregate returns 200 with status=Healthy when every check passes
+///   * /health/aggregate returns 503 when any check fails, with the failing
+///     service named in the JSON body's "failing" array AND the per-check entries
 ///   * /health/live stays 200 even while downstream checks are unhealthy
 ///   * /health/ready returns 503 with the failing downstream named
 /// </summary>
 public class AggregateHealthEndpointTests
 {
     [Fact]
-    public async Task Health_Is_200_When_All_Checks_Healthy()
+    public async Task HealthAggregate_Is_200_When_All_Checks_Healthy()
     {
         using var factory = NewFactory(injectFailingCheck: false);
         using var client = factory.CreateClient();
 
-        var resp = await client.GetAsync("/health");
+        var resp = await client.GetAsync("/health/aggregate");
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadAsStringAsync();
@@ -39,12 +45,25 @@ public class AggregateHealthEndpointTests
     }
 
     [Fact]
-    public async Task Health_Is_503_And_Names_Failing_Downstream()
+    public async Task Health_Liveness_Stays_200_When_Downstream_Unhealthy()
     {
+        // The incident-fix contract: /health is liveness-only and must return
+        // 200 even when an injected downstream check is Unhealthy.
         using var factory = NewFactory(injectFailingCheck: true);
         using var client = factory.CreateClient();
 
         var resp = await client.GetAsync("/health");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task HealthAggregate_Is_503_And_Names_Failing_Downstream()
+    {
+        using var factory = NewFactory(injectFailingCheck: true);
+        using var client = factory.CreateClient();
+
+        var resp = await client.GetAsync("/health/aggregate");
 
         resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
 

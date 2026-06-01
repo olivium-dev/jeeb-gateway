@@ -897,6 +897,17 @@ app.MapHealthChecks("/health", new HealthCheckOptions
 {
     Predicate = _ => false, // liveness alias — never gate on downstreams
 });
+// /health/aggregate — the JEB-67 / T-BE-031 AC2 dashboard surface, moved OFF
+// the /health liveness path. Runs every check and returns 200 when all Healthy
+// or 503 with a JSON body naming each failing service. External monitoring and
+// the jeeb-admin dashboard use this for a full red/green view; the swarm and
+// external liveness probe use /health (and k8s uses /health/live), neither of
+// which may ever 503 on a downstream — that overload was the production incident.
+app.MapHealthChecks("/health/aggregate", new HealthCheckOptions
+{
+    Predicate = _ => true,
+    ResponseWriter = AggregateHealthResponseWriter.WriteAsync,
+});
 
 app.Run();
 
