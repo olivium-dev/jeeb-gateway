@@ -106,7 +106,7 @@ public static class HealthCheckExtensions
         // treatment PR #47 gave feedback-service. Adding a probe here would 404
         // and falsely mark the gateway red.
         //   - chat-service           (Services:Chat:BaseUrl)
-        //   - feedback               (Services:Feedback:BaseUrl)
+        //   - feedback               (FeedbackServiceApi:BaseUrl) — salehly-mirrored top-level key
         //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
 

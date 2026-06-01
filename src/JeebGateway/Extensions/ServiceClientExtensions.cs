@@ -231,29 +231,21 @@ public static class ServiceClientExtensions
         // AttachStandardPipeline (BFF aggregation pattern).
         //
         // NOTE: score-taking-service is STALE (no appsettings entry in any
-        // environment; not in the deployed fleet). The real ratings upstream is
-        // feedback-service (block below). This typed registration is retained
-        // only so the typed-client pipeline test keeps a registration to assert
-        // against; IRatingService no longer routes its record-of-truth here.
+        // environment; not in the deployed fleet). This typed registration is
+        // retained only so the typed-client pipeline test keeps a registration to
+        // assert against; IRatingService no longer routes its record-of-truth here.
         AttachStandardPipeline(
             services.AddHttpClient<IScoreServiceClient, ScoreServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:ScoreTaking")));
 
-        // thin-BFF wire — feedback-service (host port 10064, liveness-only; NO
-        // /health readiness route). Self-contained block: named client (resilience
-        // pipeline) + typed IFeedbackServiceClient (own bearer/ServiceAuth/resilience
-        // chain via AttachStandardPipeline). feedback-service is the REAL canonical
-        // ratings upstream (Services:Feedback:BaseUrl = http://192.168.2.50:10064 in
-        // appsettings.Production.json); IRatingService routes its rating
-        // record-of-truth here when FeatureFlags:UseUpstream:Feedback is on, and
-        // keeps the in-memory IRatingStore as the off/fallback path. Hand-coded
-        // against feedback-service's Swashbuckle spec (/swagger/v1/swagger.json),
-        // following the NotificationServiceClient precedent. See
-        // IFeedbackServiceClient for the full score-taking-vs-feedback resolution.
-        AddNamedDownstreamClient(services, config, "feedback", "Services:Feedback:BaseUrl");
-        AttachStandardPipeline(
-            services.AddHttpClient<IFeedbackServiceClient, FeedbackServiceClient>(http =>
-                BindBaseAddress(http, config, "Services:Feedback")));
+        // feedback-service: the gateway now mirrors salehly-gateway's
+        // ServiceFeedbackClient + FeedbackController exactly (named + scoped NSwag
+        // client bound to FeedbackServiceApi:BaseUrl, registered in Program.cs).
+        // The former jeeb-specific hand-coded IFeedbackServiceClient /
+        // FeedbackServiceClient (a 3-method submit+read seam over a resilience
+        // pipeline, bound to the nested Services:Feedback key) was removed with
+        // the literal salehly replace, so there is no typed-client registration
+        // here anymore.
 
         // T-BE-019 (JEB-55): typed client over one-time-password service for the
         // delivery-HANDOVER OTP (ApplicationId delivery_handover_{deliveryId}).

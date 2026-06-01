@@ -29,6 +29,14 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.11" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
+    <!--
+      JSON library used by the salehly-mirrored NSwag-generated service clients
+      (Services/Clients/Service{Feedback,Catalog,UserManagement}Client.cs). These
+      are byte-faithful copies of salehly-gateway's NSwag artifacts, which emit
+      Newtonsoft.Json serializer settings (jeeb's own typed clients use
+      System.Text.Json). Pinned to the version NSwag 14.2.0.0 generated against.
+    -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.9.0" />

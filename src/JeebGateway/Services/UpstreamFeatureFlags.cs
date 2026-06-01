@@ -67,15 +67,6 @@ public sealed class UpstreamFeatureFlags
     public bool Ban { get; set; }
 
     /// <summary>
-    /// When true, feedback paths proxy the real feedback-service
-    /// (host port 10064, liveness-only health probe) via
-    /// <see cref="JeebGateway.Services.Clients.IFeedbackServiceClient"/>
-    /// instead of gateway-local state. Default false keeps existing in-memory
-    /// feedback fixtures green.
-    /// </summary>
-    public bool Feedback { get; set; }
-
-    /// <summary>
     /// When true, voice transcription paths proxy the real
     /// voice-transcription-service (host port 10062, health <c>/healthz</c>) via
     /// <see cref="JeebGateway.Services.Clients.IVoiceTranscriptionClient"/>
