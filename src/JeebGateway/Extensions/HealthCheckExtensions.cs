@@ -38,9 +38,26 @@ public static class HealthCheckExtensions
         AddDownstreamProbe(checks, config, "wallet-service",       "Services:Wallet:BaseUrl");
         AddDownstreamProbe(checks, config, "matching",             "Services:Matching:BaseUrl");
         AddDownstreamProbe(checks, config, "notification-service", "Services:Notification:BaseUrl");
-        AddDownstreamProbe(checks, config, "geolocation-service",  "Services:Geolocation:BaseUrl");
         AddDownstreamProbe(checks, config, "push-notification",    "Services:PushNotification:BaseUrl");
         AddDownstreamProbe(checks, config, "delivery-service",     "Services:Delivery:BaseUrl");
+
+        // The six olivium upstreams Jeeb consumes are probed at their ACTUAL
+        // health-route shapes (verified against the deployed services) rather
+        // than the org-default {BaseUrl}/health/ready, which these services do
+        // not expose. Probing the wrong path returns 404 and would falsely mark
+        // /health/ready red even when the upstream is fully healthy.
+        //   geolocation / offer / ban / unified_payment_gateway -> /health
+        //   voice-transcription                                  -> /healthz
+        //   feedback                                             -> NO health route
+        // feedback therefore gets NO readiness probe — it is liveness-only from
+        // the gateway's perspective (we cannot assert its readiness without a
+        // route). It is still reachable; we simply do not gate /health/ready on
+        // it. See dotnet-healthchecks-readiness-liveness skill.
+        AddDownstreamProbe(checks, config, "geolocation-service",       "Services:Geolocation:BaseUrl",       healthPath: "health");
+        AddDownstreamProbe(checks, config, "voice-transcription",       "Services:VoiceTranscription:BaseUrl", healthPath: "healthz");
+        AddDownstreamProbe(checks, config, "offer-service",             "Services:Offer:BaseUrl",             healthPath: "health");
+        AddDownstreamProbe(checks, config, "ban-service",               "Services:Ban:BaseUrl",               healthPath: "health");
+        AddDownstreamProbe(checks, config, "unified-payment-gateway",   "Services:UnifiedPayment:BaseUrl",    healthPath: "health");
 
         return services;
     }
@@ -49,7 +66,8 @@ public static class HealthCheckExtensions
         IHealthChecksBuilder checks,
         IConfiguration config,
         string name,
-        string baseUrlConfigKey)
+        string baseUrlConfigKey,
+        string healthPath = "health/ready")
     {
         var baseUrl = config[baseUrlConfigKey];
 
@@ -63,7 +81,7 @@ public static class HealthCheckExtensions
             return;
         }
 
-        var readyEndpoint = new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), "health/ready");
+        var readyEndpoint = new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), healthPath.TrimStart('/'));
 
         checks.AddUrlGroup(
             uri: readyEndpoint,
