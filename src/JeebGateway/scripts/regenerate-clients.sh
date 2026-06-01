@@ -52,6 +52,13 @@ SERVICES=(
   "geolocation-service|GeolocationServiceClient|JeebGateway.Services.Generated.GeolocationService|http://localhost:8085/openapi.json|GEOLOCATION_SERVICE_OPENAPI_URL"
   "push-notification|PushNotificationClient|JeebGateway.Services.Generated.PushNotification|http://localhost:8080/openapi.json|PUSH_NOTIFICATION_OPENAPI_URL"
   "delivery-service|DeliveryServiceClient|JeebGateway.Services.Generated.DeliveryService|http://localhost:8081/swagger/v1/swagger.json|DELIVERY_SERVICE_OPENAPI_URL"
+  # thin-BFF fan-out upstreams (offer / ban / feedback / voice). Default URLs use the
+  # service host port from the ticket + the conventional Swashbuckle spec path; the
+  # per-service agent owns confirming the real spec path and wiring the client/flag.
+  "offer-service|OfferServiceClient|JeebGateway.Services.Generated.OfferService|http://localhost:10063/swagger/v1/swagger.json|OFFER_SERVICE_OPENAPI_URL"          # TODO: confirm spec URL (health probe is /health on :10063)
+  "ban-service|BanServiceClient|JeebGateway.Services.Generated.BanService|http://localhost:10065/swagger/v1/swagger.json|BAN_SERVICE_OPENAPI_URL"                   # TODO: confirm spec URL (health probe is /health on :10065)
+  "feedback-service|FeedbackServiceClient|JeebGateway.Services.Generated.FeedbackService|http://localhost:10064/swagger/v1/swagger.json|FEEDBACK_SERVICE_OPENAPI_URL" # TODO: confirm spec URL (feedback-service exposes liveness-only on :10064)
+  "voice-transcription-service|VoiceTranscriptionClient|JeebGateway.Services.Generated.VoiceTranscription|http://localhost:10062/openapi.json|VOICE_TRANSCRIPTION_OPENAPI_URL" # TODO: confirm spec URL (health probe is /healthz on :10062)
 )
 
 # ---------------------------------------------------------------------------
