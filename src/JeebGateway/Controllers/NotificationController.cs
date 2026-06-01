@@ -1,0 +1,459 @@
+using System;
+using System.Collections.Generic;
+using System.Security.Claims;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
+using JeebGateway.DTOs.Notification;
+using JeebGateway.service.ServiceNotification;
+using NotificationApiException = JeebGateway.service.ServiceNotification.ApiException;
+
+namespace JeebGateway.Controllers
+{
+    /// <summary>
+    /// Controller for managing user notifications (listing and read/unread status)
+    /// </summary>
+    [ApiController]
+    [Route("api/[controller]")]
+    [Produces("application/json")]
+    public class NotificationController : ControllerBase
+    {
+        private readonly ServiceNotificationClient _serviceNotificationClient;
+        private readonly ILogger<NotificationController> _logger;
+
+        public NotificationController(
+            ServiceNotificationClient serviceNotificationClient,
+            ILogger<NotificationController> logger)
+        {
+            _serviceNotificationClient = serviceNotificationClient;
+            _logger = logger;
+        }
+
+        private ActionResult<(string userId, bool isValid)> ValidateUserAndServices()
+        {
+            var userId = User.FindFirst(ClaimTypes.Sid)?.Value;
+            if (string.IsNullOrEmpty(userId))
+            {
+                userId = User.FindFirst("sid")?.Value;
+            }
+            if (string.IsNullOrEmpty(userId))
+            {
+                userId = User.FindFirst("sub")?.Value;
+            }
+            if (string.IsNullOrEmpty(userId))
+            {
+                throw new NotificationApiException("Unauthorized: User ID not found in token", 401, "Unauthorized", new Dictionary<string, IEnumerable<string>>(), null);
+            }
+
+            if (_serviceNotificationClient == null)
+            {
+                throw new NotificationApiException("Error: ServiceNotificationClient is not initialized", 500, "Internal Server Error", new Dictionary<string, IEnumerable<string>>(), null);
+            }
+
+            return (userId, true);
+        }
+
+        /// <summary>
+        /// List notifications messages for the authenticated user
+        /// </summary>
+        /// <remarks>
+        /// Retrieves a paginated list of messages for the authenticated user with optional read status filtering.
+        /// </remarks>
+        /// <param name="page">Page number (starts from 1)</param>
+        /// <param name="pageSize">Number of items per page (max 100)</param>
+        /// <param name="readStatus">
+        /// Filter by read status: 'read' (status=read), 'unread' (status=delivered/not delivered/unread), 'all' (no filter).
+        /// </param>
+        /// <returns>Messages retrieved successfully</returns>
+        /// <response code="200">Messages retrieved successfully</response>
+        /// <response code="401">Unauthorized</response>
+        /// <response code="422">Validation error</response>
+        /// <response code="500">Internal server error</response>
+        [HttpGet("messages")]
+        [Authorize]
+        [ProducesResponseType(typeof(PagedNotificationMessagesResponseDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status422UnprocessableEntity)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<PagedNotificationMessagesResponseDto>> GetMessagesForCurrentUser(
+            [FromQuery] int? page = null,
+            [FromQuery] int? pageSize = null,
+            [FromQuery] string? readStatus = null)
+        {
+            try
+            {
+                var validationResult = ValidateUserAndServices();
+                if (validationResult.Result != null)
+                {
+                    return validationResult.Result;
+                }
+
+                var userId = validationResult.Value.userId;
+
+                var response = await _serviceNotificationClient
+                    .Get_messages_by_receiver_messages_receiver__receiver_id__getAsync(
+                        userId,
+                        page,
+                        pageSize,
+                        readStatus,
+                        notification_type: null,
+                        sender: null,
+                        created_after: null,
+                        created_before: null);
+
+                var dto = MapToPagedNotificationMessagesResponseDto(response, page, pageSize);
+                return Ok(dto);
+            }
+            catch (NotificationApiException ex)
+            {
+                _logger.LogError(ex, "Error retrieving messages for current user");
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error retrieving messages for current user");
+                throw new NotificationApiException(
+                    $"Error retrieving messages: {ex.Message}, Stack trace: {ex.StackTrace}",
+                    500,
+                    "Internal Server Error",
+                    new Dictionary<string, IEnumerable<string>>(),
+                    null);
+            }
+        }
+
+        /// <summary>
+        /// Mark a notification as read
+        /// </summary>
+        /// <param name="notificationId">Notification ID</param>
+        /// <returns>Update result</returns>
+        /// <response code="200">Notification marked as read</response>
+        /// <response code="400">Bad request</response>
+        /// <response code="404">Notification not found</response>
+        /// <response code="500">Internal server error</response>
+        [HttpPatch("notifications/{notificationId}/read")]
+        [Authorize]
+        [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<NotificationStatusResponseDto>> MarkNotificationRead([FromRoute] string notificationId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(notificationId))
+                {
+                    throw new NotificationApiException("NotificationId is required", 400, "Bad Request", new Dictionary<string, IEnumerable<string>>(), null);
+                }
+
+                await _serviceNotificationClient
+                    .Mark_notification_read_notifications__notification_id__mark_read_patchAsync(notificationId);
+
+                var dto = new NotificationStatusResponseDto
+                {
+                    Success = true,
+                    Message = "Notification marked as read."
+                };
+
+                return Ok(dto);
+            }
+            catch (NotificationApiException ex)
+            {
+                _logger.LogError(ex, "Error marking notification as read");
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error marking notification as read");
+                throw new NotificationApiException(
+                    $"Error marking notification as read: {ex.Message}, Stack trace: {ex.StackTrace}",
+                    500,
+                    "Internal Server Error",
+                    new Dictionary<string, IEnumerable<string>>(),
+                    null);
+            }
+        }
+
+        /// <summary>
+        /// Mark a notification as unread
+        /// </summary>
+        /// <param name="notificationId">Notification ID</param>
+        /// <returns>Update result</returns>
+        /// <response code="200">Notification marked as unread</response>
+        /// <response code="400">Bad request</response>
+        /// <response code="404">Notification not found</response>
+        /// <response code="500">Internal server error</response>
+        [HttpPatch("notifications/{notificationId}/unread")]
+        [Authorize]
+        [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<NotificationStatusResponseDto>> MarkNotificationUnread([FromRoute] string notificationId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(notificationId))
+                {
+                    throw new NotificationApiException("NotificationId is required", 400, "Bad Request", new Dictionary<string, IEnumerable<string>>(), null);
+                }
+
+                await _serviceNotificationClient
+                    .Mark_notification_unread_notifications__notification_id__mark_unread_patchAsync(notificationId);
+
+                var dto = new NotificationStatusResponseDto
+                {
+                    Success = true,
+                    Message = "Notification marked as unread."
+                };
+
+                return Ok(dto);
+            }
+            catch (NotificationApiException ex)
+            {
+                _logger.LogError(ex, "Error marking notification as unread");
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error marking notification as unread");
+                throw new NotificationApiException(
+                    $"Error marking notification as unread: {ex.Message}, Stack trace: {ex.StackTrace}",
+                    500,
+                    "Internal Server Error",
+                    new Dictionary<string, IEnumerable<string>>(),
+                    null);
+            }
+        }
+
+        /// <summary>
+        /// Bulk mark notifications as read
+        /// </summary>
+        /// <param name="request">Bulk mark request containing notification IDs</param>
+        /// <returns>Bulk update result</returns>
+        /// <response code="200">Notifications marked as read successfully</response>
+        /// <response code="400">Bad request</response>
+        /// <response code="500">Internal server error</response>
+        [HttpPatch("notifications/bulk/read")]
+        [Authorize]
+        [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<NotificationStatusResponseDto>> BulkMarkNotificationsRead([FromBody] BulkMarkNotificationsRequestDto request)
+        {
+            try
+            {
+                if (request == null || request.NotificationIds == null || request.NotificationIds.Count == 0)
+                {
+                    throw new NotificationApiException("Notification_ids list cannot be null or empty", 400, "Bad Request", new Dictionary<string, IEnumerable<string>>(), null);
+                }
+
+                var serviceRequest = new BulkMarkRequest
+                {
+                    Notification_ids = request.NotificationIds
+                };
+
+                await _serviceNotificationClient
+                    .Bulk_mark_notifications_read_notifications_bulk_mark_read_patchAsync(serviceRequest);
+
+                var dto = new NotificationStatusResponseDto
+                {
+                    Success = true,
+                    Message = "Notifications marked as read."
+                };
+
+                return Ok(dto);
+            }
+            catch (NotificationApiException ex)
+            {
+                _logger.LogError(ex, "Error bulk marking notifications as read");
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error bulk marking notifications as read");
+                throw new NotificationApiException(
+                    $"Error bulk marking notifications as read: {ex.Message}, Stack trace: {ex.StackTrace}",
+                    500,
+                    "Internal Server Error",
+                    new Dictionary<string, IEnumerable<string>>(),
+                    null);
+            }
+        }
+
+        /// <summary>
+        /// Bulk mark notifications as unread
+        /// </summary>
+        /// <param name="request">Bulk mark request containing notification IDs</param>
+        /// <returns>Bulk update result</returns>
+        /// <response code="200">Notifications marked as unread successfully</response>
+        /// <response code="400">Bad request</response>
+        /// <response code="500">Internal server error</response>
+        [HttpPatch("notifications/bulk/unread")]
+        [Authorize]
+        [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<NotificationStatusResponseDto>> BulkMarkNotificationsUnread([FromBody] BulkMarkNotificationsRequestDto request)
+        {
+            try
+            {
+                if (request == null || request.NotificationIds == null || request.NotificationIds.Count == 0)
+                {
+                    throw new NotificationApiException("Notification_ids list cannot be null or empty", 400, "Bad Request", new Dictionary<string, IEnumerable<string>>(), null);
+                }
+
+                var serviceRequest = new BulkMarkRequest
+                {
+                    Notification_ids = request.NotificationIds
+                };
+
+                await _serviceNotificationClient
+                    .Bulk_mark_notifications_unread_notifications_bulk_mark_unread_patchAsync(serviceRequest);
+
+                var dto = new NotificationStatusResponseDto
+                {
+                    Success = true,
+                    Message = "Notifications marked as unread."
+                };
+
+                return Ok(dto);
+            }
+            catch (NotificationApiException ex)
+            {
+                _logger.LogError(ex, "Error bulk marking notifications as unread");
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error bulk marking notifications as unread");
+                throw new NotificationApiException(
+                    $"Error bulk marking notifications as unread: {ex.Message}, Stack trace: {ex.StackTrace}",
+                    500,
+                    "Internal Server Error",
+                    new Dictionary<string, IEnumerable<string>>(),
+                    null);
+            }
+        }
+
+        /// <summary>
+        /// Health check endpoint for the notification service
+        /// </summary>
+        /// <returns>Health status</returns>
+        /// <response code="200">Service is healthy</response>
+        /// <response code="503">Service is unhealthy</response>
+        /// <response code="500">Internal server error</response>
+        [HttpGet("health")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status503ServiceUnavailable)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<object>> Health()
+        {
+            try
+            {
+                var response = await _serviceNotificationClient.Health_check_health_getAsync();
+                return Ok(response);
+            }
+            catch (NotificationApiException ex)
+            {
+                _logger.LogError(ex, "Notification service health check failed");
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error during notification service health check");
+                throw new NotificationApiException(
+                    $"Error checking notification service health: {ex.Message}, Stack trace: {ex.StackTrace}",
+                    500,
+                    "Internal Server Error",
+                    new Dictionary<string, IEnumerable<string>>(),
+                    null);
+            }
+        }
+
+        #region Mapping Methods
+
+        private PagedNotificationMessagesResponseDto MapToPagedNotificationMessagesResponseDto(
+            object serviceResponse,
+            int? page,
+            int? pageSize)
+        {
+            // The notification service returns a dynamic object; we project only commonly-used fields.
+            var dto = new PagedNotificationMessagesResponseDto
+            {
+                Page = page ?? 1,
+                PageSize = pageSize ?? 0,
+                TotalCount = 0
+            };
+
+            if (serviceResponse is not null)
+            {
+                // Try to interpret the response as a dynamic object with "items" and "total" fields.
+                // If the shape is different, we still return an empty items list with paging info.
+                try
+                {
+                    dynamic dyn = serviceResponse;
+
+                    // Total count (if available)
+                    try
+                    {
+                        dto.TotalCount = (int)(dyn.total ?? dyn.Total ?? 0);
+                    }
+                    catch
+                    {
+                        dto.TotalCount = 0;
+                    }
+
+                    // Items (if available)
+                    if (dyn.items != null)
+                    {
+                        foreach (var item in dyn.items)
+                        {
+                            var notificationDto = new NotificationMessageDto();
+
+                            try { notificationDto.NotificationId = (string)(item.notification_id ?? item.Notification_id ?? string.Empty); } catch { }
+                            try { notificationDto.Title = (string)(item.title ?? item.Title ?? string.Empty); } catch { }
+                            try { notificationDto.Subtitle = (string)(item.subtitle ?? item.Subtitle ?? string.Empty); } catch { }
+                            try { notificationDto.Description = (string)(item.description ?? item.Description ?? string.Empty); } catch { }
+                            try { notificationDto.NotificationType = (string)(item.notification_type ?? item.Notification_type ?? string.Empty); } catch { }
+                            try { notificationDto.Deactivated = (bool)(item.deactivated ?? item.Deactivated ?? false); } catch { }
+
+                            try
+                            {
+                                // Treat status == "read" (case-insensitive) as read
+                                var status = (string)(item.status ?? item.Status ?? string.Empty);
+                                notificationDto.IsRead = string.Equals(status, "read", StringComparison.OrdinalIgnoreCase);
+                            }
+                            catch
+                            {
+                                notificationDto.IsRead = false;
+                            }
+
+                            try
+                            {
+                                notificationDto.CreatedAt = (DateTimeOffset)(item.created_at ?? item.Created_at);
+                            }
+                            catch
+                            {
+                                notificationDto.CreatedAt = DateTimeOffset.MinValue;
+                            }
+
+                            dto.Items.Add(notificationDto);
+                        }
+                    }
+                }
+                catch
+                {
+                    // Swallow mapping issues and return a minimal DTO; logging already happens at controller level.
+                }
+            }
+
+            return dto;
+        }
+
+        #endregion
+    }
+}
+
+

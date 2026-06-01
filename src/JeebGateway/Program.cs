@@ -189,6 +189,41 @@ builder.Services.AddBffAggregation(builder.Configuration);
 builder.Services.AddDownstreamClients(builder.Configuration);
 builder.Services.AddDownstreamHealthChecks(builder.Configuration, builder.Environment);
 
+// Notification (ServiceNotificationClient) — salehly sibling mirror. The
+// NSwag-generated ServiceNotificationClient (Services/ServiceNotificationClient.cs,
+// namespace JeebGateway.service.ServiceNotification) is registered exactly as
+// salehly-gateway does it: a named IHttpClientFactory client
+// "ServiceNotificationClient" bound to the ServiceNotificationClient:BaseUrl
+// config key, plus a scoped typed-client instance that pulls the pooled
+// HttpClient from the factory and constructs the client with the configured base
+// URL. NotificationController consumes the typed client directly as a passthrough
+// REST shim over the generic notification-service (list-by-receiver,
+// mark-read/unread, bulk mark, health). This replaces the former jeeb-specific
+// notification read BFF (NotificationServiceClient + INotificationServiceClient +
+// NotificationsController under /users/me/notifications), which has been removed.
+//
+// NOTE on the config key: salehly registers the named client against config key
+// "ServiceNotificationClient" (Program.cs:122) but its scoped registration reads
+// "NotificationServiceApi:BaseUrl" (Program.cs:242) — a key that does not exist
+// in salehly's appsettings, so salehly's client receives a null base URL. jeeb
+// uses the CORRECT key "ServiceNotificationClient:BaseUrl" in BOTH places so the
+// client actually resolves the upstream address.
+builder.Services.AddHttpClient("ServiceNotificationClient", client =>
+{
+    var apiUrl = builder.Configuration["ServiceNotificationClient:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServiceNotification.ServiceNotificationClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceNotificationClient");
+    var baseUrl = builder.Configuration["ServiceNotificationClient:BaseUrl"];
+    return new JeebGateway.service.ServiceNotification.ServiceNotificationClient(baseUrl, client);
+});
+
 // T-migrate-gateway-proxies (PR-A): per-service kill switches. Each
 // controller migrated in this PR checks the matching flag and falls
 // back to the in-memory store when false. PR-B flips defaults to true

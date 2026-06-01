@@ -10,7 +10,7 @@ namespace JeebGateway.Services.Clients;
 /// Hand-coded against the verified routes on
 /// <c>offer-service/lib/offer_service_web/router.ex</c> (the service exposes no
 /// OpenAPI document, so there is no NSwag client to generate). Mirrors the
-/// <see cref="NotificationServiceClient"/> hand-coded precedent: an explicit
+/// <c>NotificationServiceClient</c> hand-coded precedent: an explicit
 /// snake_case naming policy plus per-field <see cref="JsonPropertyNameAttribute"/>
 /// on the wire DTOs, and 404 → typed "not found" rather than an exception.
 ///

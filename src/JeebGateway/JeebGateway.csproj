@@ -48,6 +48,16 @@
     <PackageReference Include="AspNetCore.HealthChecks.Uris" Version="8.0.1" />
 
     <!--
+      Newtonsoft.Json is the JSON library the salehly-mirrored NSwag client
+      (Services/ServiceNotificationClient.cs, namespace
+      JeebGateway.service.ServiceNotification) was generated against
+      (/jsonLibrary:Newtonsoft). The generated client uses
+      Newtonsoft.Json.JsonConvert + JsonSerializerSettings internally. Pinned to
+      the version NSwag 14.x targets.
+    -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+
+    <!--
       Redis-backed chat topology map (RedisChatTopologyMap). Holds the
       channel<->conversation id-map (userId->memberId, sortedPair->channel/sessions)
       that the gateway must resolve on every chat send/history because the GENERIC

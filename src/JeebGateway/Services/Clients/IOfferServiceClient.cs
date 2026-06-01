@@ -13,7 +13,8 @@ namespace JeebGateway.Services.Clients;
 /// <c>/api/v1/...</c> auction routes exist. The contract below was lifted
 /// directly from <c>offer-service/lib/offer_service_web/router.ex</c> and
 /// <c>controllers/offer_controller.ex</c>. Follows the
-/// <see cref="NotificationServiceClient"/> hand-coded precedent.
+/// <c>NotificationServiceClient</c> hand-coded precedent (since removed in
+/// favour of the salehly-mirrored NSwag ServiceNotificationClient).
 ///
 /// Auth seam: offer-service trusts a gateway-injected <c>x-user-id</c> header
 /// (its <c>AuthenticatedUser</c> plug), NOT the mobile JWT bearer. The acting

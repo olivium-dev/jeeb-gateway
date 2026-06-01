@@ -16,14 +16,11 @@ public sealed class UpstreamFeatureFlags
     public bool Matching { get; set; }
     public bool Geolocation { get; set; }
 
-    /// <summary>
-    /// When true, notification read paths proxy the real notification-service
-    /// (FastAPI, Mongo <c>jeeb_notifications</c>) via
-    /// <see cref="JeebGateway.Services.Clients.INotificationServiceClient"/>
-    /// instead of gateway-local state. Default false keeps existing in-memory
-    /// preference fixtures green.
-    /// </summary>
-    public bool Notification { get; set; }
+    // Notification — REMOVED. The notification read surface is now a stateless
+    // passthrough over the salehly-mirrored NSwag ServiceNotificationClient
+    // (registered in Program.cs as the named client "ServiceNotificationClient")
+    // consumed directly by NotificationController, so there is no longer a
+    // gateway-local fallback to gate. The kill-switch flag is gone with it.
 
     /// <summary>
     /// When true, device-register / push paths proxy the real

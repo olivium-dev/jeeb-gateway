@@ -82,10 +82,12 @@ public static class ServiceClientExtensions
         //   delivery-service; see IDeliveryServiceClient.RunMatchingAsync.
         AddNamedDownstreamClient(services, config, "matching", "Services:Matching:BaseUrl");
 
-        // TODO(T-backend-bff-notification): notification-service (FastAPI) — wire NotificationServiceClient
-        //   contract: src/JeebGateway/contracts/notification-service.openapi.json
-        //   migrates: NotificationPreferencesController, request-expiry notifier targets
-        AddNamedDownstreamClient(services, config, "notification", "Services:Notification:BaseUrl");
+        // notification-service — registered separately as the salehly-style named
+        //   client "ServiceNotificationClient" (ServiceNotificationClient:BaseUrl)
+        //   in Program.cs, consumed by the NSwag ServiceNotificationClient that
+        //   NotificationController passes through. It is NOT part of this
+        //   named-downstream-client set (no bearer/ServiceAuth pipeline), matching
+        //   salehly-gateway exactly.
 
         // TODO(T-backend-bff-geo): geolocation-service (FastAPI) — wire GeolocationServiceClient
         //   contract: src/JeebGateway/contracts/geolocation-service.openapi.json
@@ -216,15 +218,13 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IChatServiceClient, ChatServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Chat")));
 
-        // T-migrate-gateway-proxies — typed client over the real notification-service
-        // (FastAPI, Mongo jeeb_notifications). Hand-coded against verified routes on
-        // notification-service/main.py (GET /notifications) pending an NSwag spec.
-        // The named "notification" registration above carries the resilience pipeline;
-        // BindBaseAddress resolves Services:Notification[:BaseUrl] so the typed client
-        // inherits the same upstream address. Gated by FeatureFlags:UseUpstream:Notification.
-        AttachStandardPipeline(
-            services.AddHttpClient<INotificationServiceClient, NotificationServiceClient>(http =>
-                BindBaseAddress(http, config, "Services:Notification")));
+        // notification-service — REMOVED from this set. The jeeb-specific
+        // notification read BFF (INotificationServiceClient / NotificationServiceClient)
+        // and its NotificationsController (/users/me/notifications) were removed with
+        // the salehly mirror. Notification is now a stateless passthrough: the NSwag
+        // ServiceNotificationClient is registered in Program.cs as the named client
+        // "ServiceNotificationClient" (ServiceNotificationClient:BaseUrl) and consumed
+        // directly by NotificationController, exactly as salehly-gateway wires it.
 
         // T-backend-020 (JEEB-38): typed client over score-taking-service.
         // Carries its own bearer/ServiceAuth/resilience chain via
