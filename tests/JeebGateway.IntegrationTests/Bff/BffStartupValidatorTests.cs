@@ -29,7 +29,7 @@ public class BffStartupValidatorTests
             ["Services:Auth:BaseUrl"] = "http://auth.test",
             // Chat, UserManagement, Wallet missing
             ["Services:Matching:BaseUrl"] = "http://matching.test",
-            // Notification, Geolocation, PushNotification, Delivery missing
+            // Notification, Geolocation, Delivery missing
         });
 
         var opts = Options.Create(new DownstreamServicesOptions
@@ -48,7 +48,6 @@ public class BffStartupValidatorTests
                 "Services:Wallet:BaseUrl",
                 "Services:Notification:BaseUrl",
                 "Services:Geolocation:BaseUrl",
-                "Services:PushNotification:BaseUrl",
                 "Services:Delivery:BaseUrl",
                 "environment 'Production'");
     }
@@ -104,7 +103,6 @@ public class BffStartupValidatorTests
             ["Services:Matching:BaseUrl"] = "http://matching.test",
             ["Services:Notification:BaseUrl"] = "http://notification.test",
             ["Services:Geolocation:BaseUrl"] = "http://geo.test",
-            ["Services:PushNotification:BaseUrl"] = "http://push.test",
             ["Services:Delivery:BaseUrl"] = "http://delivery.test",
         });
 
@@ -130,7 +128,6 @@ public class BffStartupValidatorTests
             ["Services:Matching"] = "http://matching.test",
             ["Services:Notification"] = "http://notification.test",
             ["Services:Geolocation"] = "http://geo.test",
-            ["Services:PushNotification"] = "http://push.test",
             ["Services:Delivery"] = "http://delivery.test",
         });
 

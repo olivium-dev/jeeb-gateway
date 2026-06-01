@@ -29,6 +29,14 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.11" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
+    <!--
+      Newtonsoft.Json — runtime serializer for the NSwag-generated
+      ServicePushNotificationClient (Services/ServicePushNotificationClient.cs),
+      mirrored byte-faithfully from salehly-gateway. The salehly NSwag client was
+      generated with /jsonLibrary:Newtonsoft, so it serializes via
+      Newtonsoft.Json.JsonConvert (unlike jeeb's System.Text.Json NSwag clients).
+    -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.9.0" />

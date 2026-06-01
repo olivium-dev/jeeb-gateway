@@ -241,82 +241,6 @@ public class PushNotificationServiceTests
     }
 
     [Fact]
-    public async Task Send_Endpoint_Accepts_Trigger_And_Returns_Outcome()
-    {
-        // Internal HTTP surface: downstream services that emit trigger
-        // events hit this endpoint via the BFF NSwag-generated client.
-        var factory = NewFactory(out _);
-        await RegisterDevice(factory, "user-http", DevicePlatform.Fcm, "tok-fcm");
-
-        var client = factory.CreateClient();
-        var resp = await client.PostAsJsonAsync("/push/send", new
-        {
-            userId = "user-http",
-            trigger = "NewOffer",
-            title = "New offer",
-            body = "Tap to view"
-        });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Accepted);
-        var body = await resp.Content.ReadFromJsonAsync<SendPushResponse>();
-        body!.Outcome.Should().Be(nameof(PushDeliveryOutcome.Delivered));
-        body.Trigger.Should().Be("NewOffer");
-    }
-
-    [Fact]
-    public async Task Send_Endpoint_Rejects_Unknown_Trigger()
-    {
-        // Defense in depth — a typo in the downstream caller must not just
-        // silently swallow the push. Return ProblemDetails with the valid
-        // values so the caller can fix their wiring.
-        var factory = NewFactory(out _);
-        var client = factory.CreateClient();
-
-        var resp = await client.PostAsJsonAsync("/push/send", new
-        {
-            userId = "user-bad-trigger",
-            trigger = "TotallyMadeUp",
-            title = "t",
-            body = "b"
-        });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-    }
-
-    [Fact]
-    public async Task Devices_Endpoint_Registers_And_Unregisters_Tokens()
-    {
-        // Mobile lifecycle — register on app launch, unregister on logout.
-        var factory = NewFactory(out _);
-        var client = factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-User-Id", "user-device-mgmt");
-
-        var reg = await client.PostAsJsonAsync("/push/devices", new { platform = "fcm", token = "tok-x" });
-        reg.StatusCode.Should().Be(HttpStatusCode.NoContent);
-
-        var devices = factory.Services.GetRequiredService<IDeviceTokenStore>();
-        (await devices.GetForUserAsync("user-device-mgmt", default)).Should().HaveCount(1);
-
-        var unreg = await client.DeleteAsync("/push/devices/tok-x");
-        unreg.StatusCode.Should().Be(HttpStatusCode.NoContent);
-
-        (await devices.GetForUserAsync("user-device-mgmt", default)).Should().BeEmpty();
-    }
-
-    [Fact]
-    public async Task Devices_Endpoint_Requires_Identity()
-    {
-        // Identity bypass would let an attacker register a device against
-        // another user's id and steal their push stream.
-        var factory = NewFactory(out _);
-        var client = factory.CreateClient();
-
-        var resp = await client.PostAsJsonAsync("/push/devices", new { platform = "fcm", token = "tok-x" });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-    }
-
-    [Fact]
     public async Task Promotion_Push_Respects_User_Preference()
     {
         // Promotions are user-toggleable — when muted, no push is sent.
@@ -388,8 +312,11 @@ public class PushNotificationServiceTests
     }
 
     [Fact]
-    public async Task Deliveries_Endpoint_Returns_User_History()
+    public async Task Deliveries_Tracker_Returns_User_History()
     {
+        // Pipeline-level delivery history (was Deliveries_Endpoint_Returns_User_History,
+        // which hit the removed PushController GET /push/deliveries). Asserts the
+        // same behaviour directly against IPushDeliveryTracker.
         var factory = NewFactory(out _);
         await RegisterDevice(factory, "user-hist", DevicePlatform.Fcm, "tok-fcm");
 
@@ -398,30 +325,17 @@ public class PushNotificationServiceTests
             new PushNotificationRequest("user-hist", NotificationTrigger.Chat, "hi", "body"),
             CancellationToken.None);
 
-        var client = factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-User-Id", "user-hist");
-
-        var resp = await client.GetAsync("/push/deliveries");
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-
-        var deliveries = await resp.Content.ReadFromJsonAsync<DeliveryTrackingResponse[]>();
+        var tracker = factory.Services.GetRequiredService<IPushDeliveryTracker>();
+        var deliveries = await tracker.GetForUserAsync("user-hist", default);
         deliveries.Should().ContainSingle()
-            .Which.Outcome.Should().Be(nameof(PushDeliveryOutcome.Delivered));
+            .Which.Outcome.Should().Be(PushDeliveryOutcome.Delivered);
     }
 
     [Fact]
-    public async Task Deliveries_Endpoint_Requires_Identity()
+    public async Task Recent_Deliveries_Tracker_Returns_Cross_User_Results()
     {
-        var factory = NewFactory(out _);
-        var client = factory.CreateClient();
-
-        var resp = await client.GetAsync("/push/deliveries");
-        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-    }
-
-    [Fact]
-    public async Task Recent_Deliveries_Endpoint_Returns_Cross_User_Results()
-    {
+        // Pipeline-level cross-user history (was Recent_Deliveries_Endpoint_*,
+        // which hit the removed PushController GET /push/deliveries/recent).
         var factory = NewFactory(out _);
         await RegisterDevice(factory, "user-r1", DevicePlatform.Fcm, "tok-1");
         await RegisterDevice(factory, "user-r2", DevicePlatform.Fcm, "tok-2");
@@ -432,32 +346,9 @@ public class PushNotificationServiceTests
         await service.SendAsync(
             new PushNotificationRequest("user-r2", NotificationTrigger.NewOffer, "offer", "body"), default);
 
-        var client = factory.CreateClient();
-        var resp = await client.GetAsync("/push/deliveries/recent?limit=10");
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-
-        var deliveries = await resp.Content.ReadFromJsonAsync<DeliveryTrackingResponse[]>();
-        deliveries.Should().HaveCount(2);
-    }
-
-    [Fact]
-    public async Task Send_Endpoint_Accepts_Promotion_Trigger()
-    {
-        var factory = NewFactory(out _);
-        await RegisterDevice(factory, "user-promo-http", DevicePlatform.Fcm, "tok-fcm");
-
-        var client = factory.CreateClient();
-        var resp = await client.PostAsJsonAsync("/push/send", new
-        {
-            userId = "user-promo-http",
-            trigger = "Promotion",
-            title = "Flash sale",
-            body = "50% off today"
-        });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Accepted);
-        var body = await resp.Content.ReadFromJsonAsync<SendPushResponse>();
-        body!.Outcome.Should().Be(nameof(PushDeliveryOutcome.Delivered));
+        var tracker = factory.Services.GetRequiredService<IPushDeliveryTracker>();
+        var recent = await tracker.GetRecentAsync(10, default);
+        recent.Should().HaveCount(2);
     }
 
     [Fact]

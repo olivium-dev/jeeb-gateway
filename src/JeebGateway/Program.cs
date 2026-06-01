@@ -189,6 +189,36 @@ builder.Services.AddBffAggregation(builder.Configuration);
 builder.Services.AddDownstreamClients(builder.Configuration);
 builder.Services.AddDownstreamHealthChecks(builder.Configuration, builder.Environment);
 
+// PushNotification (ServicePushNotificationClient) — salehly sibling mirror.
+// The NSwag-generated ServicePushNotificationClient
+// (Services/ServicePushNotificationClient.cs, namespace
+// JeebGateway.service.ServicePushNotification) is registered exactly as
+// salehly-gateway does it (Program.cs:119 + Program.cs:214): a named
+// IHttpClientFactory client "ServicePushNotificationClient" bound to the
+// PushNotificationServiceApi:BaseUrl config key, plus a scoped typed-client
+// instance that pulls the pooled HttpClient from the factory and constructs the
+// client with the configured base URL. PushNotificationController consumes the
+// typed client directly as a passthrough REST shim over the generic
+// push-notification service (register/delete device, send-to-device/user,
+// broadcast, health). This replaces the former jeeb-specific device-register
+// passthrough (PushController + IPushNotificationClient + PushNotificationClient),
+// which has been removed.
+builder.Services.AddHttpClient("ServicePushNotificationClient", client =>
+{
+    var apiUrl = builder.Configuration["PushNotificationServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePushNotificationClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServicePushNotificationClient");
+    var baseUrl = builder.Configuration["PushNotificationServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServicePushNotification.ServicePushNotificationClient(baseUrl, client);
+});
+
 // T-migrate-gateway-proxies (PR-A): per-service kill switches. Each
 // controller migrated in this PR checks the matching flag and falls
 // back to the in-memory store when false. PR-B flips defaults to true
@@ -330,10 +360,13 @@ builder.Services.AddSingleton<INotificationPreferencesStore, InMemoryNotificatio
 // in-memory device-token store becomes a Postgres-backed implementation
 // alongside the per-user row in 0006.
 builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOptions.SectionName));
-// Batch 1 thin-wire: the REGISTER path now routes to the real push-notification
-// service when FeatureFlags:UseUpstream:Push is true (PushController →
-// IPushNotificationClient → PUT /api/v1/register). InMemoryDeviceTokenStore is
-// deliberately KEPT because the SEND path (PushNotificationService fan-out) still
+// The device-register HTTP surface is now the salehly-mirrored
+// PushNotificationController, backed by the NSwag ServicePushNotificationClient
+// (registered below as a named + scoped client). The former jeeb-specific
+// PushController + IPushNotificationClient device-register passthrough was removed
+// with the salehly mirror. InMemoryDeviceTokenStore is deliberately KEPT because
+// the SEND path (PushNotificationService fan-out, consumed by KycService,
+// ChatDispatcher, DisputeService, RatingRevealJob, PushAutoOfflineNotifier) still
 // reads device tokens from it — that is a separate C-domain (push transport /
 // retry / SLA) with no upstream owner yet. Do not delete this store until the
 // push-transport service lands; deleting it now would break the send pipeline.

@@ -25,14 +25,11 @@ public sealed class UpstreamFeatureFlags
     /// </summary>
     public bool Notification { get; set; }
 
-    /// <summary>
-    /// When true, device-register / push paths proxy the real
-    /// push-notification service via
-    /// <see cref="JeebGateway.Services.Clients.IPushNotificationClient"/>
-    /// instead of the in-memory transport. Default false keeps existing
-    /// push fixtures green.
-    /// </summary>
-    public bool Push { get; set; }
+    // Push — REMOVED. The device-register / push surface is now a stateless
+    // passthrough over the salehly-mirrored NSwag ServicePushNotificationClient
+    // (registered in Program.cs as the named client "ServicePushNotificationClient")
+    // consumed directly by PushNotificationController, so there is no longer a
+    // gateway-local fallback to gate. The kill-switch flag is gone with it.
 
     /// <summary>
     /// When true, the user-preferences read/write surface proxies the real

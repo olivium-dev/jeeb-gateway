@@ -34,6 +34,11 @@ public sealed class DownstreamServicesOptions
     /// listing every missing one (not just the first) so operators get a
     /// single round trip on the fix.
     /// </summary>
+    // NOTE: push-notification is intentionally NOT listed here. PushNotification
+    // moved to the salehly-style top-level PushNotificationServiceApi:BaseUrl key
+    // (consumed directly by the NSwag ServicePushNotificationClient in Program.cs)
+    // and is no longer a Services:* nested downstream client, so this
+    // Services:{section}:BaseUrl validator does not cover it.
     public List<string> Required { get; set; } = new()
     {
         "Auth",
@@ -43,7 +48,6 @@ public sealed class DownstreamServicesOptions
         "Matching",
         "Notification",
         "Geolocation",
-        "PushNotification",
         "Delivery",
     };
 }

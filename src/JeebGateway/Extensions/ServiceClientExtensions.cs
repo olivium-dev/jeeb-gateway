@@ -92,10 +92,12 @@ public static class ServiceClientExtensions
         //   migrates: LocationController, AdminZonesController (currently InMemoryLocationStore + InMemoryGeoIndex)
         AddNamedDownstreamClient(services, config, "geolocation", "Services:Geolocation:BaseUrl");
 
-        // TODO(T-backend-bff-push): push-notification (FastAPI) — wire PushNotificationClient
-        //   contract: src/JeebGateway/contracts/push-notification.openapi.json
-        //   migrates: PushController (currently FcmPushTransport + InMemoryPushTransport)
-        AddNamedDownstreamClient(services, config, "push-notification", "Services:PushNotification:BaseUrl");
+        // push-notification — registered separately as the salehly-style named
+        //   client "ServicePushNotificationClient" (PushNotificationServiceApi:BaseUrl)
+        //   in Program.cs, consumed by the NSwag ServicePushNotificationClient that
+        //   PushNotificationController passes through. It is NOT part of this
+        //   named-downstream-client set (no bearer/ServiceAuth pipeline), matching
+        //   salehly-gateway exactly.
 
         // TODO(T-backend-bff-delivery): delivery-service (Go) — wire DeliveryServiceClient
         //   contract: src/JeebGateway/contracts/delivery-service.openapi.json
@@ -276,18 +278,14 @@ public static class ServiceClientExtensions
                 return new ServiceOTPClient(baseUrl, http);
             }));
 
-        // T-backend-022 (push DB wiring): typed client over the
-        // push-notification FastAPI service. The device-register write path
-        // (PUT /api/v1/register) upserts into the push_notification Postgres
-        // table — the "any call that writes to the push DB". PushController
-        // consumes this when FeatureFlags:UseUpstream:Push is set, replacing
-        // InMemoryDeviceTokenStore for that path. BindBaseAddress applies the
-        // configured Services:PushNotification host with a trailing slash;
-        // AttachStandardPipeline gives this typed client its own bearer +
-        // X-Service-Auth + resilience chain (BFF aggregation pattern).
-        AttachStandardPipeline(
-            services.AddHttpClient<IPushNotificationClient, PushNotificationClient>(http =>
-                BindBaseAddress(http, config, "Services:PushNotification")));
+        // push-notification — REMOVED from this set. The jeeb-specific
+        // device-register passthrough (IPushNotificationClient / PushNotificationClient)
+        // and its PushController (POST /push/devices) were removed with the salehly
+        // mirror. The device-register / notification surface is now the salehly-mirrored
+        // PushNotificationController, backed by the NSwag ServicePushNotificationClient
+        // registered in Program.cs as the named client "ServicePushNotificationClient"
+        // (PushNotificationServiceApi:BaseUrl), consumed directly by the controller,
+        // exactly as salehly-gateway wires it.
 
         // remote-user-preferences typed client. UserPreferencesController consumes
         // this when FeatureFlags:UseUpstream:RemoteUserPreferences is on. The wire

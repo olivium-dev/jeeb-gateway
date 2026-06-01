@@ -38,7 +38,10 @@ public class TypedClientPipelineTests
         new object[] { "IScoreServiceClient" },
         new object[] { "IFeedbackServiceClient" },
         new object[] { "IServiceOTPClient" },
-        new object[] { "IPushNotificationClient" },
+        // IPushNotificationClient — REMOVED. The device-register passthrough was
+        // replaced by the salehly-mirrored NSwag ServicePushNotificationClient,
+        // registered in Program.cs as the named client "ServicePushNotificationClient"
+        // (no bearer/ServiceAuth pipeline), exactly as salehly-gateway wires it.
     };
 
     [Theory]
@@ -126,7 +129,6 @@ public class TypedClientPipelineTests
                 ["Services:ScoreTaking:BaseUrl"] = "http://score.test",
                 ["Services:Feedback:BaseUrl"] = "http://feedback.test",
                 ["Services:ServiceOTP:BaseUrl"] = "http://otp.test",
-                ["Services:PushNotification:BaseUrl"] = "http://push.test",
                 ["ServiceAuth:Caller"] = "jeeb-gateway",
                 ["ServiceAuth:SigningKey"] = "integration-test-signing-key-32-chars-or-longer",
                 ["ServiceAuth:Enabled"] = "true",
