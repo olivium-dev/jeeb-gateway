@@ -3,28 +3,43 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 namespace JeebGateway.Extensions;
 
 /// <summary>
-/// Registers downstream-service liveness probes used by the gateway's
-/// <c>/health</c>, <c>/health/ready</c>, and <c>/health/live</c> endpoints.
-/// Every check tags itself <c>"ready"</c> AND <c>"downstream"</c> so it
-/// shows up under the readiness predicate and can be filtered to "just
-/// upstream services" for dashboards.
+/// Registers downstream-service readiness probes used by the gateway's
+/// <c>/health</c> and <c>/health/ready</c> endpoints. Every check tags itself
+/// <c>"ready"</c> AND <c>"downstream"</c> so it shows up under the readiness
+/// predicate and can be filtered to "just upstream services" for dashboards.
 ///
-/// JEB-67 / T-BE-031 AC2 — downstream failures are reported as
-/// <see cref="HealthStatus.Unhealthy"/> so the aggregated <c>/health</c>
-/// surface returns HTTP 503 (the default mapping in <c>MapHealthChecks</c>)
-/// with the failing service named. Kubernetes liveness uses the separate
-/// <c>/health/live</c> endpoint which only checks the <c>"live"</c> tag,
-/// so a flaky upstream cannot cause a pod restart loop.
+/// Two design rules, both grounded in the canonical Olivium gateway pattern
+/// (a sibling gateway is effectively liveness-only — see OLIVIUM-GATEWAY-PATTERN.md):
+///
+/// 1. PROBE THE REAL HEALTH ROUTE. The olivium upstreams Jeeb consumes do NOT
+///    expose the org-default <c>/health/ready</c> readyz path — they expose
+///    <c>/health</c> (most) or <c>/healthz</c> (voice-transcription). Probing
+///    the wrong path returns 404 and would falsely mark <c>/health/ready</c> red
+///    even when the upstream is fully healthy. Each probe below is pinned to the
+///    path the deployed service actually serves (verified against the swarm).
+///
+/// 2. NEVER 503 ON A NOT-YET-DEPLOYED OR ROUTE-LESS DOWNSTREAM. Services that
+///    expose no health route at all (user-management, chat, feedback,
+///    remote-user-preferences, auth) get NO readiness probe — they are
+///    liveness-only from the gateway's perspective (we cannot assert their
+///    readiness without a route; they are still reachable and called). Services
+///    that are expected but not yet on the swarm are registered with
+///    <see cref="HealthStatus.Degraded"/> so a missing instance shows up in the
+///    dashboard WITHOUT turning <c>/health/ready</c> into a 503 (only
+///    <see cref="HealthStatus.Unhealthy"/> maps to 503; Degraded stays 200).
+///    Only the deployed, critical-path services use <c>Unhealthy</c>.
+///
+/// Kubernetes/Swarm liveness uses the separate <c>/health/live</c> endpoint
+/// (the <c>"live"</c> tag only), so a flaky upstream can never cause a restart
+/// loop.
 /// </summary>
 public static class HealthCheckExtensions
 {
     /// <summary>
-    /// Adds a URL-group health check per upstream service. Each check uses the
-    /// same BaseUrl key as <see cref="ServiceClientExtensions.AddDownstreamClients"/>
-    /// and probes <c>{BaseUrl}/health/ready</c> (the org-standard readyz path
-    /// — see dotnet-healthchecks-readiness-liveness skill). Falls back to
-    /// <c>{BaseUrl}/health</c> if the configured BaseUrl already ends in a
-    /// health path segment.
+    /// Adds a URL-group readiness probe per deployed upstream service. The BaseUrl
+    /// keys match <see cref="ServiceClientExtensions.AddDownstreamClients"/>. An
+    /// unset BaseUrl skips the probe entirely (the service is not aggregated in
+    /// this environment).
     /// </summary>
     public static IServiceCollection AddDownstreamHealthChecks(
         this IServiceCollection services,
@@ -32,32 +47,44 @@ public static class HealthCheckExtensions
     {
         var checks = services.AddHealthChecks();
 
-        AddDownstreamProbe(checks, config, "auth-service",         "Services:Auth:BaseUrl");
-        AddDownstreamProbe(checks, config, "chat-service",         "Services:Chat:BaseUrl");
-        AddDownstreamProbe(checks, config, "user-management",      "Services:UserManagement:BaseUrl");
-        AddDownstreamProbe(checks, config, "wallet-service",       "Services:Wallet:BaseUrl");
-        AddDownstreamProbe(checks, config, "matching",             "Services:Matching:BaseUrl");
-        AddDownstreamProbe(checks, config, "notification-service", "Services:Notification:BaseUrl");
-        AddDownstreamProbe(checks, config, "push-notification",    "Services:PushNotification:BaseUrl");
-        AddDownstreamProbe(checks, config, "delivery-service",     "Services:Delivery:BaseUrl");
+        // --- Deployed, critical-path services, probed at their REAL health route.
+        // All of these serve GET /health -> 200 on the swarm (verified). A real
+        // failure here is fatal to readiness (Unhealthy -> /health/ready = 503).
+        AddDownstreamProbe(checks, config, "wallet-service",          "Services:Wallet:BaseUrl",          healthPath: "health");
+        AddDownstreamProbe(checks, config, "matching",                "Services:Matching:BaseUrl",        healthPath: "health");
+        AddDownstreamProbe(checks, config, "notification-service",    "Services:Notification:BaseUrl",    healthPath: "health");
+        AddDownstreamProbe(checks, config, "push-notification",       "Services:PushNotification:BaseUrl", healthPath: "health");
+        AddDownstreamProbe(checks, config, "delivery-service",        "Services:Delivery:BaseUrl",        healthPath: "health");
+        AddDownstreamProbe(checks, config, "geolocation-service",     "Services:Geolocation:BaseUrl",     healthPath: "health");
+        AddDownstreamProbe(checks, config, "offer-service",           "Services:Offer:BaseUrl",           healthPath: "health");
+        AddDownstreamProbe(checks, config, "ban-service",             "Services:Ban:BaseUrl",             healthPath: "health");
+        AddDownstreamProbe(checks, config, "unified-payment-gateway", "Services:UnifiedPayment:BaseUrl",  healthPath: "health");
 
-        // The six olivium upstreams Jeeb consumes are probed at their ACTUAL
-        // health-route shapes (verified against the deployed services) rather
-        // than the org-default {BaseUrl}/health/ready, which these services do
-        // not expose. Probing the wrong path returns 404 and would falsely mark
-        // /health/ready red even when the upstream is fully healthy.
-        //   geolocation / offer / ban / unified_payment_gateway -> /health
-        //   voice-transcription                                  -> /healthz
-        //   feedback                                             -> NO health route
-        // feedback therefore gets NO readiness probe — it is liveness-only from
-        // the gateway's perspective (we cannot assert its readiness without a
-        // route). It is still reachable; we simply do not gate /health/ready on
-        // it. See dotnet-healthchecks-readiness-liveness skill.
-        AddDownstreamProbe(checks, config, "geolocation-service",       "Services:Geolocation:BaseUrl",       healthPath: "health");
-        AddDownstreamProbe(checks, config, "voice-transcription",       "Services:VoiceTranscription:BaseUrl", healthPath: "healthz");
-        AddDownstreamProbe(checks, config, "offer-service",             "Services:Offer:BaseUrl",             healthPath: "health");
-        AddDownstreamProbe(checks, config, "ban-service",               "Services:Ban:BaseUrl",               healthPath: "health");
-        AddDownstreamProbe(checks, config, "unified-payment-gateway",   "Services:UnifiedPayment:BaseUrl",    healthPath: "health");
+        // voice-transcription serves /healthz (not /health).
+        AddDownstreamProbe(checks, config, "voice-transcription",     "Services:VoiceTranscription:BaseUrl", healthPath: "healthz");
+
+        // user-management is the JWT identity service the whole gateway depends on
+        // (OTP verify -> user-management -> JWT mint). Unlike the other upstreams it
+        // exposes the org-canonical readiness path GET /health/ready (verified:
+        // 200 {"status":"ready","db":"ok"}) AND GET /health/live. Its BaseUrl lives
+        // at the top-level UserManagementApi:BaseUrl key (NOT under Services:), bound
+        // by UserManagementApiOptions for the OTP sign-in path. It is critical-path,
+        // so a real readiness failure here is fatal (Unhealthy -> /health/ready 503):
+        // if user-management cannot reach its DB, the gateway genuinely cannot mint
+        // tokens and should be pulled from rotation.
+        AddDownstreamProbe(checks, config, "user-management",         "UserManagementApi:BaseUrl",        healthPath: "health/ready");
+
+        // --- Liveness-only services (NO readiness probe).
+        // These expose NO health route at all (verified on the swarm: GET /health
+        // AND /health/ready both 404), so we cannot assert their readiness. They
+        // are still reachable and called; we simply do not gate /health/ready on
+        // them — exactly the sibling-gateway "liveness-only" intent, and the same
+        // treatment PR #47 gave feedback-service. Adding a probe here would 404
+        // and falsely mark the gateway red.
+        //   - chat-service           (Services:Chat:BaseUrl)
+        //   - feedback               (Services:Feedback:BaseUrl)
+        //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
+        //   - auth-service           (Services:Auth — not yet deployed)
 
         return services;
     }
@@ -67,26 +94,25 @@ public static class HealthCheckExtensions
         IConfiguration config,
         string name,
         string baseUrlConfigKey,
-        string healthPath = "health/ready")
+        string healthPath = "health/ready",
+        HealthStatus failureStatus = HealthStatus.Unhealthy)
     {
         var baseUrl = config[baseUrlConfigKey];
 
         // Skip probe registration entirely when the BaseUrl is unset (typical
         // for dev environments that don't spin up every upstream). An unset
-        // URL means "we are not aggregating this service in this environment"
-        // — registering a check pointing at an empty Uri would always fail and
-        // wrongly mark the gateway Unhealthy.
+        // URL means "we are not aggregating this service in this environment".
         if (string.IsNullOrWhiteSpace(baseUrl))
         {
             return;
         }
 
-        var readyEndpoint = new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), healthPath.TrimStart('/'));
+        var endpoint = new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), healthPath.TrimStart('/'));
 
         checks.AddUrlGroup(
-            uri: readyEndpoint,
+            uri: endpoint,
             name: name,
-            failureStatus: HealthStatus.Unhealthy,
+            failureStatus: failureStatus,
             tags: new[] { "ready", "downstream" },
             timeout: TimeSpan.FromSeconds(3));
     }
