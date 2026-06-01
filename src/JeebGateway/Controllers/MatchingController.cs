@@ -1,56 +1,61 @@
-using JeebGateway.Availability;
 using JeebGateway.Matching;
-using JeebGateway.Requests;
-using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Configuration;
 
 namespace JeebGateway.Controllers;
 
 /// <summary>
-/// Client-facing matching endpoint (T-backend-008). The Client posts
-/// the request id (or a dry-run pickup/tier pair) and the engine returns
-/// the count of Jeebers that were notified.
+/// Client-facing matching endpoint (T-backend-008). The Client posts the
+/// request id (or a dry-run pickup/tier pair); the response carries the count
+/// of Jeebers that were notified plus the ordered candidate list.
 ///
-/// Two body shapes are accepted:
+/// Courier matching has been relocated out of the gateway into delivery-service
+/// (DELIVERY-SERVICE-RELOCATION-DESIGN.md §2.1). The gateway no longer owns a
+/// matching engine — this controller is a thin BFF that forwards the request to
+/// delivery-service <c>POST /api/v1/matching/run</c> and surfaces the result.
 ///
-///  - <c>{ requestId }</c> — preferred. The controller resolves pickup
-///    and tier from the persisted row, validates ownership (the caller
-///    must own the request), and runs matching. The engine pushes a
+/// Two body shapes are accepted and validated <b>by delivery-service</b>:
+///
+///  - <c>{ requestId }</c> — preferred. delivery-service resolves pickup + tier
+///    from the persisted row, authorizes the caller, runs matching, and pushes a
 ///    "new offer" to every matched Jeeber.
 ///
-///  - <c>{ pickupLat, pickupLng, tierId }</c> — dry-run shape used by
-///    the pre-creation preview UX. No persisted row is required;
-///    matching runs against the same online-Jeeber snapshot but never
-///    sends pushes (no request id → no idempotency key to dedupe with).
+///  - <c>{ pickupLat, pickupLng, tierId }</c> — dry-run preview shape. No
+///    persisted row required; matching runs against the same online-Jeeber
+///    snapshot but never sends pushes.
 ///
-/// Either shape may carry an <c>allowedVehicleTypes</c> array; absent
-/// or empty means "any vehicle type". Unknown strings in the array
-/// reject the request with 400.
+/// Either shape may carry an <c>allowedVehicleTypes</c> array; absent or empty
+/// means "any vehicle type". Input validation (unknown vehicle type, missing
+/// pickup+tier in preview mode, unknown tier/request, non-positive radius) is
+/// owned by delivery-service, which returns 400/404/422; the controller maps
+/// those straight through as RFC 7807 ProblemDetails.
 /// </summary>
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("matching")]
 public sealed class MatchingController : ControllerBase
 {
-    private readonly IMatchingService _matching;
-    private readonly IRequestsStore _requests;
-    private readonly IMatchingServiceClient _upstream;
-    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
+    // delivery-service requires a tenant scope on /matching/run. The gateway is
+    // single-tenant today; the value is config-overridable so a future
+    // multi-tenant rollout does not need a code change. Default matches the
+    // delivery-service DB default ('default' — design §2.1 / schema §3).
+    private const string DefaultTenantId = "default";
+
+    private readonly IDeliveryServiceClient _delivery;
+    private readonly IMatchingServiceClient _matchesRead;
+    private readonly string _tenantId;
 
     public MatchingController(
-        IMatchingService matching,
-        IRequestsStore requests,
-        IMatchingServiceClient upstream,
-        IOptionsMonitor<UpstreamFeatureFlags> flags)
+        IDeliveryServiceClient delivery,
+        IMatchingServiceClient matchesRead,
+        IConfiguration config)
     {
-        _matching = matching;
-        _requests = requests;
-        _upstream = upstream;
-        _flags = flags;
+        _delivery = delivery;
+        _matchesRead = matchesRead;
+        _tenantId = config["Services:Delivery:TenantId"] ?? DefaultTenantId;
     }
 
     [HttpPost("run")]
@@ -60,10 +65,11 @@ public sealed class MatchingController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
     public async Task<IActionResult> Run([FromBody] MatchingRunRequest? body, CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var clientId, out var problem)) return problem;
+        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var problem)) return problem;
         if (body is null)
         {
             return BadRequest(new ProblemDetails
@@ -73,139 +79,53 @@ public sealed class MatchingController : ControllerBase
             });
         }
 
-        // T-migrate-gateway-proxies (PR-A): proxy to upstream matching-service
-        // when the flag is on. Input validation and the dry-run branch live
-        // upstream, so we forward the body verbatim and surface the response.
-        if (_flags.CurrentValue.Matching)
-        {
-            var upstreamResponse = await _upstream.RunMatchingAsync(body, ct);
-            return Ok(upstreamResponse);
-        }
-
-        // Resolve allowed vehicle types — empty / null means "any". Unknown
-        // strings reject early so the matching engine never sees junk.
-        var allowed = new HashSet<VehicleType>();
-        if (body.AllowedVehicleTypes is { Count: > 0 } raw)
-        {
-            foreach (var entry in raw)
-            {
-                if (!VehicleTypeExtensions.TryParseWire(entry, out var v))
-                {
-                    return BadRequest(new ProblemDetails
-                    {
-                        Title = "Unknown vehicle type in allowedVehicleTypes.",
-                        Detail = $"received='{entry}'. Allowed: car, motorbike, bicycle, scooter, walk.",
-                        Status = StatusCodes.Status400BadRequest,
-                        Type = "https://jeeb.dev/errors/vehicle-type-invalid"
-                    });
-                }
-                allowed.Add(v);
-            }
-        }
-
-        string requestId;
-        double pickupLat;
-        double pickupLng;
-        string tierId;
-
-        if (!string.IsNullOrWhiteSpace(body.RequestId))
-        {
-            var existing = await _requests.GetAsync(body.RequestId, ct);
-            if (existing is null) return NotFound();
-            if (!string.Equals(existing.ClientId, clientId, StringComparison.Ordinal))
-            {
-                return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
-                {
-                    Title = "Only the owning Client may run matching for this request.",
-                    Status = StatusCodes.Status403Forbidden
-                });
-            }
-            if (existing.PickupLocation is null || string.IsNullOrEmpty(existing.TierId))
-            {
-                return BadRequest(new ProblemDetails
-                {
-                    Title = "Request is missing pickup location or tier — cannot run matching.",
-                    Status = StatusCodes.Status400BadRequest
-                });
-            }
-
-            requestId = existing.Id;
-            pickupLat = existing.PickupLocation.Lat;
-            pickupLng = existing.PickupLocation.Lng;
-            tierId = existing.TierId;
-        }
-        else
-        {
-            if (body.PickupLat is null || body.PickupLng is null || string.IsNullOrWhiteSpace(body.TierId))
-            {
-                return BadRequest(new ProblemDetails
-                {
-                    Title = "Either requestId or (pickupLat + pickupLng + tierId) must be supplied.",
-                    Status = StatusCodes.Status400BadRequest,
-                    Type = "https://jeeb.dev/errors/matching-input"
-                });
-            }
-            // WGS84 sanity — keep the engine on real Earth coordinates.
-            if (body.PickupLat is < -90 or > 90
-                || body.PickupLng is < -180 or > 180
-                || double.IsNaN(body.PickupLat.Value) || double.IsNaN(body.PickupLng.Value))
-            {
-                return BadRequest(new ProblemDetails
-                {
-                    Title = "pickupLat / pickupLng must be valid WGS84 coordinates.",
-                    Status = StatusCodes.Status400BadRequest,
-                    Type = "https://jeeb.dev/errors/location-invalid"
-                });
-            }
-
-            // Dry-run id — never sent to the push pipeline because dry-run
-            // bodies don't carry a real request id. Used only for logging.
-            requestId = $"dryrun:{Guid.NewGuid()}";
-            pickupLat = body.PickupLat.Value;
-            pickupLng = body.PickupLng.Value;
-            tierId = body.TierId!;
-        }
-
-        MatchingOutcome outcome;
+        // Thin BFF: forward verbatim to delivery-service, which owns input
+        // validation, the dry-run branch, request-ownership authz, and the push
+        // fan-out. Map the snake_case Go result onto the gateway DTO.
+        DeliveryMatchingRunResult result;
         try
         {
-            outcome = await _matching.RunAsync(new MatchingInput
+            result = await _delivery.RunMatchingAsync(new DeliveryMatchingRunRequest
             {
-                RequestId = requestId,
-                PickupLat = pickupLat,
-                PickupLng = pickupLng,
-                TierId = tierId,
-                AllowedVehicleTypes = allowed
+                RequestId = body.RequestId,
+                PickupLat = body.PickupLat,
+                PickupLng = body.PickupLng,
+                TierId = body.TierId,
+                AllowedVehicleTypes = body.AllowedVehicleTypes,
+                TenantId = _tenantId
             }, ct);
         }
-        catch (ArgumentException ex) when (ex.Message.Contains("Unknown tier", StringComparison.Ordinal))
+        catch (DeliveryMatchingException ex)
         {
-            return BadRequest(new ProblemDetails
+            // delivery-service owns the matching contract; the gateway surfaces
+            // its 400/404/422 straight through as RFC 7807 rather than
+            // re-interpreting the failure.
+            return StatusCode(ex.StatusCode, new ProblemDetails
             {
-                Title = "tierId does not match any active delivery tier.",
-                Detail = $"tierId={tierId}",
-                Status = StatusCodes.Status400BadRequest,
-                Type = "https://jeeb.dev/errors/tier-not-found"
+                Title = "delivery-service rejected the matching request.",
+                Detail = ex.Reason,
+                Status = ex.StatusCode,
+                Type = "https://jeeb.dev/errors/matching-rejected"
             });
         }
 
         return Ok(new MatchingRunResponse
         {
-            RequestId = outcome.RequestId,
-            TierId = outcome.TierId,
-            RadiusKm = outcome.RadiusKm,
-            NotifiedCount = outcome.NotifiedCount,
-            CandidateCount = outcome.Candidates.Count,
-            Candidates = outcome.Candidates
+            RequestId = result.RequestId,
+            TierId = result.TierId,
+            RadiusKm = result.RadiusKm,
+            NotifiedCount = result.NotifiedCount,
+            CandidateCount = result.CandidateCount,
+            Candidates = result.Candidates
                 .Select(c => new MatchedJeeberDto
                 {
                     UserId = c.UserId,
-                    VehicleType = c.VehicleType.ToWire(),
+                    VehicleType = c.VehicleType,
                     DistanceKm = c.DistanceKm,
                     Rating = c.Rating
                 })
                 .ToList(),
-            ElapsedMs = outcome.ElapsedMs
+            ElapsedMs = result.ElapsedMs
         });
     }
 
@@ -256,7 +176,7 @@ public sealed class MatchingController : ControllerBase
         MatchingServiceMatchesResponse upstream;
         try
         {
-            upstream = await _upstream.GetMatchesAsync(userId, skip, limit, ct);
+            upstream = await _matchesRead.GetMatchesAsync(userId, skip, limit, ct);
         }
         catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
         {

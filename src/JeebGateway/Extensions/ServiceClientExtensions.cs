@@ -76,9 +76,10 @@ public static class ServiceClientExtensions
         //   migrates: (no existing controller — net-new wallet endpoints will consume it)
         AddNamedDownstreamClient(services, config, "wallet", "Services:Wallet:BaseUrl");
 
-        // TODO(T-backend-bff-matching): matching (FastAPI) — wire NSwag-generated MatchingServiceClient
-        //   contract: src/JeebGateway/contracts/matching.openapi.json
-        //   migrates: MatchingController (currently MatchingService + InMemory* providers)
+        // matching (FastAPI) — DB-backed read of a user's match preferences
+        //   (GET /api/v1/matches/{user_id}), consumed by MatchingController's
+        //   GetMatchingUsers. Courier matching /run was relocated to
+        //   delivery-service; see IDeliveryServiceClient.RunMatchingAsync.
         AddNamedDownstreamClient(services, config, "matching", "Services:Matching:BaseUrl");
 
         // TODO(T-backend-bff-notification): notification-service (FastAPI) — wire NotificationServiceClient

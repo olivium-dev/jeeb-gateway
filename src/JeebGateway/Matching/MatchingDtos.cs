@@ -1,5 +1,3 @@
-using JeebGateway.Availability;
-
 namespace JeebGateway.Matching;
 
 /// <summary>
@@ -54,43 +52,6 @@ public sealed class MatchedJeeberDto
 {
     public required string UserId { get; init; }
     public required string VehicleType { get; init; }
-    public required double DistanceKm { get; init; }
-    public required double Rating { get; init; }
-}
-
-/// <summary>
-/// In-process input handed to <see cref="IMatchingService"/>. Mirrors
-/// <see cref="MatchingRunRequest"/> after the controller resolves the
-/// optional <c>RequestId</c> path into pickup + tier values.
-/// </summary>
-public sealed class MatchingInput
-{
-    public required string RequestId { get; init; }
-    public required double PickupLat { get; init; }
-    public required double PickupLng { get; init; }
-    public required string TierId { get; init; }
-    public required IReadOnlySet<VehicleType> AllowedVehicleTypes { get; init; }
-}
-
-/// <summary>
-/// In-process output of <see cref="IMatchingService.RunAsync"/>. Holds
-/// the ordered candidate list plus the radius used so the controller can
-/// echo both back to the caller.
-/// </summary>
-public sealed class MatchingOutcome
-{
-    public required string RequestId { get; init; }
-    public required string TierId { get; init; }
-    public required double RadiusKm { get; init; }
-    public required int NotifiedCount { get; init; }
-    public required IReadOnlyList<MatchedJeeber> Candidates { get; init; }
-    public required long ElapsedMs { get; init; }
-}
-
-public sealed class MatchedJeeber
-{
-    public required string UserId { get; init; }
-    public required VehicleType VehicleType { get; init; }
     public required double DistanceKm { get; init; }
     public required double Rating { get; init; }
 }

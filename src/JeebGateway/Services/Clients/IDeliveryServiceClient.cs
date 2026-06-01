@@ -76,6 +76,135 @@ public interface IDeliveryServiceClient
     Task<DeliveryCancelResult> CancelDeliveryAsync(string deliveryId, DeliveryCancelUpstreamRequest body, CancellationToken ct);
 
     Task<JeeberAvailabilityUpstream> SetAvailabilityAsync(JeeberAvailabilityUpstreamRequest body, string jeeberId, CancellationToken ct);
+
+    /// <summary>
+    /// Courier matching (relocated from the gateway's in-memory Haversine engine
+    /// into delivery-service). Calls the canonical Go route
+    /// <c>POST /api/v1/matching/run</c>. delivery-service owns the radius scan,
+    /// vehicle-type filter, proximity/rating ordering, and the new-offer push
+    /// fan-out; the gateway is a thin BFF that forwards the request and surfaces
+    /// the result. Request + response are <b>snake_case</b> (Go) — the DTOs carry
+    /// explicit <see cref="System.Text.Json.Serialization.JsonPropertyName"/>
+    /// attributes so the shared web-default JsonOptions bind both directions
+    /// without changing the global naming policy other client methods depend on.
+    /// </summary>
+    /// <returns><see cref="DeliveryMatchingRunResult"/> on 200.</returns>
+    /// <exception cref="DeliveryMatchingException">
+    /// Thrown for 400 (bad input), 404 (unknown tier), and 422 (validation) so
+    /// the controller maps the upstream status straight through as RFC 7807.
+    /// </exception>
+    Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct);
+}
+
+/// <summary>
+/// Request body for delivery-service <c>POST /api/v1/matching/run</c>.
+/// delivery-service (Go) reads <b>snake_case</b>; the explicit
+/// <see cref="System.Text.Json.Serialization.JsonPropertyName"/> attributes
+/// scope the snake_case mapping to exactly this DTO so the shared
+/// <c>JsonSerializerDefaults.Web</c> options (camelCase) do not emit
+/// <c>requestId</c>/<c>pickupLat</c> where Go expects <c>request_id</c>/<c>pickup_lat</c>.
+/// </summary>
+public sealed class DeliveryMatchingRunRequest
+{
+    /// <summary>Existing delivery request id. When set, delivery-service resolves
+    /// pickup + tier from the row. Null for the dry-run preview shape.</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("request_id")]
+    public string? RequestId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup_lat")]
+    public double? PickupLat { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup_lng")]
+    public double? PickupLng { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
+    public string? TierId { get; init; }
+
+    /// <summary>Optional vehicle allowlist (wire strings: car / motorbike /
+    /// bicycle / scooter / walk). Null/empty means "any".</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("allowed_vehicle_types")]
+    public IReadOnlyList<string>? AllowedVehicleTypes { get; init; }
+
+    /// <summary>Tenant scope — required by delivery-service.</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("tenant_id")]
+    public required string TenantId { get; init; }
+}
+
+/// <summary>
+/// 200 body of delivery-service <c>POST /api/v1/matching/run</c>:
+/// <c>{ request_id, tier_id, radius_km, notified_count, candidate_count,
+/// candidates:[{ user_id, vehicle_type, distance_km, rating }], elapsed_ms }</c>.
+///
+/// delivery-service (Go) emits <b>snake_case</b>; without the explicit
+/// <see cref="System.Text.Json.Serialization.JsonPropertyName"/> attributes the
+/// shared <c>JsonSerializerDefaults.Web</c> (camelCase) options would fail to
+/// bind <c>request_id</c> onto the <c>required</c> <see cref="RequestId"/> and
+/// throw a JsonException on the SUCCESS path — surfacing as an unhandled 500
+/// after delivery-service already ran matching + fanned out the offers. The
+/// attributes scope the snake_case mapping to these DTOs without mutating the
+/// global naming policy.
+/// </summary>
+public sealed class DeliveryMatchingRunResult
+{
+    [System.Text.Json.Serialization.JsonPropertyName("request_id")]
+    public required string RequestId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
+    public required string TierId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("radius_km")]
+    public double RadiusKm { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("notified_count")]
+    public int NotifiedCount { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("candidate_count")]
+    public int CandidateCount { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("candidates")]
+    public IReadOnlyList<DeliveryMatchedCandidate> Candidates { get; init; } = Array.Empty<DeliveryMatchedCandidate>();
+
+    [System.Text.Json.Serialization.JsonPropertyName("elapsed_ms")]
+    public long ElapsedMs { get; init; }
+}
+
+/// <summary>
+/// One element of the <c>candidates</c> array in
+/// <see cref="DeliveryMatchingRunResult"/>. snake_case (Go).
+/// </summary>
+public sealed class DeliveryMatchedCandidate
+{
+    [System.Text.Json.Serialization.JsonPropertyName("user_id")]
+    public required string UserId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("vehicle_type")]
+    public required string VehicleType { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("distance_km")]
+    public double DistanceKm { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("rating")]
+    public double Rating { get; init; }
+}
+
+/// <summary>
+/// A non-200 outcome from delivery-service <c>POST /api/v1/matching/run</c>
+/// (400 bad input / 404 unknown tier / 422 validation). The gateway is a thin
+/// BFF on this path — it surfaces the upstream <see cref="StatusCode"/> +
+/// <see cref="Reason"/> back to the caller as RFC 7807 ProblemDetails rather
+/// than re-interpreting the matching contract.
+/// </summary>
+public sealed class DeliveryMatchingException : Exception
+{
+    public int StatusCode { get; }
+    public string? Reason { get; }
+
+    public DeliveryMatchingException(int statusCode, string? reason)
+        : base($"delivery-service matching returned {statusCode} ({reason ?? "no reason"}).")
+    {
+        StatusCode = statusCode;
+        Reason = reason;
+    }
 }
 
 public sealed class CreateDeliveryRequestUpstream
