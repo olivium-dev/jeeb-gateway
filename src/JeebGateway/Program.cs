@@ -189,6 +189,22 @@ builder.Services.AddBffAggregation(builder.Configuration);
 builder.Services.AddDownstreamClients(builder.Configuration);
 builder.Services.AddDownstreamHealthChecks(builder.Configuration, builder.Environment);
 
+// EXACT-SALEHLY MIRROR (RemoteUserPreferences): UserPreferencesController consumes
+// the NSwag-generated ServiceRemoteUserPreferencesClient directly, exactly as
+// salehly-gateway does (Program.cs:207-213). The client is scoped and built from
+// the "remote-user-preferences" named HttpClient (which carries the standard
+// bearer/X-Service-Auth/resilience pipeline) with its baseUrl read from salehly's
+// config key RemoteUserPreferencesServiceApi:BaseUrl (prod: http://192.168.2.50:10067/).
+// There is NO UseUpstream flag gate on this controller — salehly's controller
+// always forwards to the upstream (no 503-without-calling path).
+builder.Services.AddScoped<JeebGateway.Services.Generated.ServiceRemoteUserPreferences.ServiceRemoteUserPreferencesClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("remote-user-preferences");
+    var baseUrl = builder.Configuration["RemoteUserPreferencesServiceApi:BaseUrl"];
+    return new JeebGateway.Services.Generated.ServiceRemoteUserPreferences.ServiceRemoteUserPreferencesClient(baseUrl, client);
+});
+
 // T-migrate-gateway-proxies (PR-A): per-service kill switches. Each
 // controller migrated in this PR checks the matching flag and falls
 // back to the in-memory store when false. PR-B flips defaults to true

@@ -107,7 +107,7 @@ public static class HealthCheckExtensions
         // and falsely mark the gateway red.
         //   - chat-service           (Services:Chat:BaseUrl)
         //   - feedback               (Services:Feedback:BaseUrl)
-        //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
+        //   - remote-user-preferences (RemoteUserPreferencesServiceApi:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
 
         return services;

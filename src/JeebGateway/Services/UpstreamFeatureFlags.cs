@@ -35,16 +35,16 @@ public sealed class UpstreamFeatureFlags
     public bool Push { get; set; }
 
     /// <summary>
-    /// When true, the user-preferences read/write surface proxies the real
-    /// <c>remote-user-preferences</c> service (the fleet-wide preference store,
-    /// host port 10067) via
-    /// <see cref="JeebGateway.Services.Clients.IUserPreferencesClient"/>.
-    /// This path is net-new — the gateway never held a preferences store — so
-    /// the flag is a runtime kill switch (flip to false to make the endpoints
-    /// return 503 without a redeploy if the upstream is taken down), NOT a
-    /// fallback to local state. Defaulted ON in
-    /// <c>appsettings.Production.json</c> because the upstream is live; default
-    /// false here keeps unit fixtures that do not configure the upstream green.
+    /// INERT after the exact-salehly RemoteUserPreferences migration. The
+    /// <c>UserPreferencesController</c> is now a byte-faithful salehly mirror that
+    /// consumes the NSwag-generated
+    /// <c>ServiceRemoteUserPreferences.ServiceRemoteUserPreferencesClient</c>
+    /// directly and ALWAYS forwards to the real <c>remote-user-preferences</c>
+    /// service (host port 10067) — salehly's controller has no UseUpstream gate,
+    /// so there is no 503-without-calling kill switch on this path. The property
+    /// is retained only so existing <c>FeatureFlags:UseUpstream:RemoteUserPreferences</c>
+    /// config (appsettings + tests) binds without error; it no longer changes
+    /// behaviour.
     /// </summary>
     public bool RemoteUserPreferences { get; set; }
 

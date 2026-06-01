@@ -1,144 +1,392 @@
-using JeebGateway.Services;
-using JeebGateway.Services.Clients;
-using JeebGateway.Users;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
+using Microsoft.AspNetCore.Authorization;
+using System.Security.Claims;
+using Microsoft.Extensions.Logging;
+using JeebGateway.Services.Generated.ServiceRemoteUserPreferences;
+using RemoteUserPreferencesApiException = JeebGateway.Services.Generated.ServiceRemoteUserPreferences.ApiException;
 
-namespace JeebGateway.Controllers;
-
-/// <summary>
-/// Thin BFF surface over the real <c>remote-user-preferences</c> service
-/// (host port 10067; tables <c>user_preferences</c>, <c>data_sets</c>), reached
-/// through <see cref="IUserPreferencesClient"/>. The gateway holds NO
-/// preferences state — every read/write resolves to the upstream's datastore.
-///
-/// Scoped to the authenticated caller: the userId is taken from the JWT subject
-/// (falling back to the edge-injected <c>X-User-Id</c> header for the MVP) via
-/// <see cref="UserIdentity"/>, so a caller can only read/write their own
-/// preferences. The upstream's <c>{user_id}</c> path segment is therefore never
-/// attacker-controlled at this layer.
-///
-/// Gated by <c>FeatureFlags:UseUpstream:RemoteUserPreferences</c>. Because this
-/// path is net-new (there is no legacy in-memory store to fall back to), the
-/// flag is a runtime kill switch: when off, the endpoints return 503
-/// ProblemDetails rather than calling an unconfigured/disabled downstream.
-/// </summary>
-[ApiController]
-[Route("users/me/preferences")]
-public class UserPreferencesController : ControllerBase
+namespace JeebGateway.Controllers
 {
-    private const int MaxKeyLength = 256;
-    private const int MaxValueLength = 8192;
-
-    private readonly IUserPreferencesClient _preferences;
-    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
-
-    public UserPreferencesController(
-        IUserPreferencesClient preferences,
-        IOptionsMonitor<UpstreamFeatureFlags> flags)
+    [ApiController]
+    [Route("api/[controller]")]
+    [Authorize]
+    public class UserPreferencesController : ControllerBase
     {
-        _preferences = preferences;
-        _flags = flags;
-    }
+        private const string PrefKeyFullName = "fullName";
+        private const string PrefKeyAddress = "address";
 
-    /// <summary>
-    /// Returns every preference key/value for the authenticated user.
-    /// Real path: <c>GET /preferences/{user_id}</c> on remote-user-preferences.
-    /// </summary>
-    [HttpGet]
-    [ProducesResponseType(typeof(IReadOnlyDictionary<string, string>), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
-    public async Task<IActionResult> GetAll(CancellationToken ct = default)
-    {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
-        if (!_flags.CurrentValue.RemoteUserPreferences) return UpstreamDisabled();
+        private readonly ServiceRemoteUserPreferencesClient _preferencesClient;
 
-        var prefs = await _preferences.GetAllAsync(userId, ct);
-        return Ok(prefs);
-    }
-
-    /// <summary>
-    /// Returns a single preference value for the authenticated user, or 404 when
-    /// the key has never been set. Real path:
-    /// <c>GET /preferences/{user_id}/{pref_key}</c>.
-    /// </summary>
-    [HttpGet("{prefKey}")]
-    [ProducesResponseType(typeof(PreferenceValueResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
-    public async Task<IActionResult> Get(string prefKey, CancellationToken ct = default)
-    {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
-        if (string.IsNullOrWhiteSpace(prefKey) || prefKey.Length > MaxKeyLength) return InvalidKey();
-        if (!_flags.CurrentValue.RemoteUserPreferences) return UpstreamDisabled();
-
-        var value = await _preferences.GetAsync(userId, prefKey, ct);
-        if (value is null)
+        public UserPreferencesController(ServiceRemoteUserPreferencesClient preferencesClient)
         {
-            return Problem(
-                title: "Preference not found",
-                detail: $"Preference '{prefKey}' is not set for the current user.",
-                statusCode: StatusCodes.Status404NotFound);
+            _preferencesClient = preferencesClient;
         }
 
-        return Ok(new PreferenceValueResponse { Value = value });
-    }
-
-    /// <summary>
-    /// Creates or updates a single preference value for the authenticated user.
-    /// Real path: <c>POST /preferences/{user_id}/{pref_key}</c>.
-    /// </summary>
-    [HttpPut("{prefKey}")]
-    [ProducesResponseType(typeof(PreferenceValueResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
-    public async Task<IActionResult> Set(
-        string prefKey,
-        [FromBody] PreferenceValueResponse body,
-        CancellationToken ct = default)
-    {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
-        if (string.IsNullOrWhiteSpace(prefKey) || prefKey.Length > MaxKeyLength) return InvalidKey();
-        if (body is null || body.Value is null)
+        private string? GetUserId()
         {
-            return Problem(
-                title: "Invalid preference value",
-                detail: "Request body must be a JSON object with a non-null 'value' field.",
-                statusCode: StatusCodes.Status400BadRequest);
+            return User.FindFirst(ClaimTypes.Sid)?.Value;
         }
-        if (body.Value.Length > MaxValueLength)
+
+        #region Data Set Operations
+
+        [HttpGet("data/{data_type}")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetPaginatedItems(
+            string data_type,
+            [FromQuery] int? page,
+            [FromQuery] int? size,
+            [FromQuery] string? order)
         {
-            return Problem(
-                title: "Preference value too large",
-                detail: $"Preference value must be at most {MaxValueLength} characters.",
-                statusCode: StatusCodes.Status400BadRequest);
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                var result = await _preferencesClient.Data_GetItemsAsync(userId, data_type, page, size, order);
+                return Ok(result);
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
         }
-        if (!_flags.CurrentValue.RemoteUserPreferences) return UpstreamDisabled();
 
-        await _preferences.SetAsync(userId, prefKey, body.Value, ct);
-        return Ok(new PreferenceValueResponse { Value = body.Value });
+        [HttpPost("data/{data_type}")]
+        [ProducesResponseType(StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> AddItemsToSet(
+            string data_type,
+            [FromBody] IEnumerable<string> items)
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                await _preferencesClient.Data_AddItemsAsync(userId, data_type, items);
+                return StatusCode(201, new { Message = "Items added successfully" });
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpPut("data/{data_type}")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> ReplaceSet(
+            string data_type,
+            [FromBody] IEnumerable<string> items)
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                await _preferencesClient.Data_ReplaceSetAsync(userId, data_type, items);
+                return Ok(new { Message = "Set replaced successfully" });
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpDelete("data/{data_type}")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> DeleteFromSet(
+            string data_type,
+            [FromBody] IEnumerable<string> items)
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                await _preferencesClient.Data_DeleteFromSetAsync(userId, data_type, items);
+                return Ok(new { Message = "Items deleted successfully" });
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpGet("data/{data_type}/all")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetAllItems(string data_type)
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                var result = await _preferencesClient.Data_GetAllItemsAsync(userId, data_type);
+                return Ok(result);
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpDelete("data/{data_type}/all")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> DeleteEntireSet(string data_type)
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                await _preferencesClient.Data_DeleteSetAsync(userId, data_type);
+                return Ok(new { Message = "Set deleted successfully" });
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        #endregion
+
+        #region Personal Information
+
+        #endregion
+
+        #region Nested Preferences
+
+        [HttpGet("nested-preferences/{pref_key}")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetNestedPreference(string pref_key)
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                var result = await _preferencesClient.Data_GetNestedPreferenceAsync(userId, pref_key);
+                return Ok(result);
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpPost("nested-preferences/{pref_key}")]
+        [ProducesResponseType(StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> SetNestedPreference(
+            string pref_key,
+            [FromBody] NestedPreferenceInput preference)
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                await _preferencesClient.Data_SetNestedPreferenceAsync(userId, pref_key, preference);
+                return StatusCode(201, new { Message = "Nested preference set successfully" });
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        #endregion
+
+        #region Preferences
+
+        [HttpGet("preferences")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetAllPreferences()
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                var result = await _preferencesClient.Data_GetPreferencesAsync(userId);
+                return Ok(result);
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpPost("preferences")]
+        [ProducesResponseType(StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> SetPreference([FromBody] PreferenceInput preference)
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                await _preferencesClient.Data_SetPreferenceAsync(userId, preference);
+                return StatusCode(201, new { Message = "Preference set successfully" });
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpGet("preferences/{pref_key}")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetSinglePreference(string pref_key)
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                var result = await _preferencesClient.Data_GetSinglePreferenceAsync(userId, pref_key);
+                return Ok(result);
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpPost("preferences/{pref_key}")]
+        [ProducesResponseType(StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> SetSinglePreference(
+            string pref_key,
+            [FromBody] PreferenceValue value)
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                await _preferencesClient.Data_SetSinglePreferenceAsync(userId, pref_key, value);
+                return StatusCode(201, new { Message = "Preference set successfully" });
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpPut("preferences/{pref_key}")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> UpdatePreference(
+            string pref_key,
+            [FromBody] PreferenceValue value)
+        {
+            try
+            {
+                var userId = GetUserId();
+                if (string.IsNullOrEmpty(userId))
+                    return StatusCode(401, "Unauthorized");
+
+                await _preferencesClient.Data_UpdatePreferenceAsync(userId, pref_key, value);
+                return Ok(new { Message = "Preference updated successfully" });
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        #endregion
     }
-
-    private IActionResult UpstreamDisabled() => Problem(
-        title: "User-preferences upstream disabled",
-        detail: "FeatureFlags:UseUpstream:RemoteUserPreferences is off in this environment.",
-        statusCode: StatusCodes.Status503ServiceUnavailable);
-
-    private IActionResult InvalidKey() => Problem(
-        title: "Invalid preference key",
-        detail: $"Preference key must be non-empty and at most {MaxKeyLength} characters.",
-        statusCode: StatusCodes.Status400BadRequest);
-}
-
-/// <summary>
-/// BFF response envelope for a single preference value. Mirrors the upstream
-/// <c>PreferenceValue</c> schema (<c>{ "value": "..." }</c>) so the mobile client
-/// sees a stable shape regardless of how the upstream evolves.
-/// </summary>
-public sealed class PreferenceValueResponse
-{
-    public string Value { get; init; } = string.Empty;
 }

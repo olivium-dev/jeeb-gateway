@@ -29,6 +29,14 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.11" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
+    <!--
+      Newtonsoft.Json — required by the NSwag-generated salehly client
+      Services/Generated/ServiceRemoteUserPreferencesClient.cs (jsonLibrary:Newtonsoft).
+      salehly-gateway carries this dependency; the exact-mirror clients use it for
+      (de)serialization. Pinned to 13.0.3 to match the generator's declared
+      Newtonsoft.Json v13.0.0.0 contract.
+    -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.9.0" />
