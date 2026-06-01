@@ -278,6 +278,23 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IUserPreferencesClient, UserPreferencesClient>(http =>
                 BindBaseAddress(http, config, "Services:RemoteUserPreferences")));
 
+        // thin-BFF offer-service wire (FeatureFlags:UseUpstream:Offer). Typed
+        // client over the real offer-service (Elixir/Phoenix, host port 10063,
+        // liveness /health). Hand-coded — offer-service exposes NO OpenAPI doc
+        // (/swagger/v1/swagger.json and /openapi.json both 404), so there is no
+        // NSwag client to generate; OfferServiceClient is verified against the
+        // routes in offer-service/lib/offer_service_web/router.ex. The named
+        // resilience pipeline is attached the same way as every other typed
+        // client; BindBaseAddress resolves Services:Offer[:BaseUrl] with a
+        // trailing slash so relative paths like "api/v1/requests/{id}/offers"
+        // resolve under the host. NOTE: offer-service authorizes on a
+        // gateway-injected x-user-id header (its AuthenticatedUser plug), which
+        // OfferServiceClient sets per call from the acting user id; the bearer-
+        // forwarding handler is harmless here (offer-service ignores the bearer).
+        AttachStandardPipeline(
+            services.AddHttpClient<IOfferServiceClient, OfferServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Offer")));
+
         return services;
     }
 
