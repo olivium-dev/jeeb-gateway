@@ -28,7 +28,6 @@ using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
 using JeebGateway.Users.RoleSwitch;
 using JeebGateway.Calls;
-using JeebGateway.Wallet;
 using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -287,28 +286,52 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 //
 // SettlementService re-computes the Jeeb fee (commission % per tier +
 // 2% insurance, min 1000 LBP) from the row's tier and posts a single
-// ledger entry to wallet-service via the real WalletServiceClient. The
-// in-memory record-of-truth fallback has been removed (Batch 1 thin-wire):
-// the gateway is a pure BFF, so the wallet ledger / balances always route
-// to the owning wallet-service. BaseAddress is bound lazily from
-// Services:Wallet[:BaseUrl] (real host set in appsettings.Production.json);
-// when unconfigured the client fails closed on first use rather than
-// silently serving local state. The typed client carries its own
-// bearer-forwarding + X-Service-Auth + resilience pipeline (the named
-// "wallet" client's chain is NOT inherited by a typed registration).
+// best-effort ledger entry via ISettlementLedgerClient. The settlement row
+// is the gateway-side system of record; the ledger post is idempotent on the
+// settlement id. Cash settlement is a Jeeb product concern and keeps its own
+// slim ledger contract in the Financials module — it does NOT ride on the
+// wallet integration, which now mirrors the salehly-gateway sibling's
+// upstream wallet API byte-for-byte (WalletController + ServiceWalletClient).
 builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
-JeebGateway.Extensions.ServiceClientExtensions.AttachWalletPipeline(
-    builder.Services.AddHttpClient<IWalletServiceClient, WalletServiceClient>(http =>
-    {
-        var walletBaseUrl = builder.Configuration["Services:Wallet:BaseUrl"]
-            ?? builder.Configuration["Services:Wallet"];
-        if (!string.IsNullOrWhiteSpace(walletBaseUrl))
-        {
-            http.BaseAddress = new Uri(walletBaseUrl!.TrimEnd('/') + "/");
-        }
-        http.Timeout = TimeSpan.FromSeconds(30);
-    }));
+builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
+
+// ===========================================================================
+// Wallet integration — EXACT mirror of the salehly-gateway sibling.
+//
+// jeeb-gateway proxies all wallet traffic through the NSwag-generated
+// ServiceWalletClient (Services/ServiceWalletClient.cs, namespace
+// JeebGateway.service.ServiceWallet) exactly as salehly-gateway does. The
+// client is a named IHttpClientFactory client bound to WalletServiceApi:BaseUrl
+// via ConfigureNamedClient, with a scoped typed-client instance that hands the
+// named HttpClient to the generated constructor.
+//
+// Controllers/WalletController.cs is the byte-faithful salehly WalletController
+// (routes under /api/Wallet: system-wallet, holder/add, holder/{holderId}/Add,
+// {holderId}/{walletId}/deactivate{,/force-deactivate},
+// holder/{holderId}/deactivate{,/force-deactivate}, holder/wallets[authorized]).
+// ===========================================================================
+void ConfigureNamedClient(string name, string configKey)
+{
+    builder.Services.AddHttpClient(name, client =>
+    {
+        var apiUrl = builder.Configuration[$"{configKey}:BaseUrl"];
+        if (!string.IsNullOrEmpty(apiUrl))
+        {
+            client.BaseAddress = new Uri(apiUrl);
+        }
+    });
+}
+
+ConfigureNamedClient("ServiceWalletClient", "WalletServiceApi");
+
+builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceWalletClient");
+    var baseUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceWallet.ServiceWalletClient(baseUrl, client);
+});
 
 // Notification preferences (T-backend-031).
 // In-memory implementation for MVP; swap for an NSwag-generated notification-service
@@ -773,9 +796,6 @@ builder.Services.AddHostedService<JeebGateway.Ratings.LowRatingAutoFlag>();
 builder.Services.Configure<JeebGateway.Calls.MaskedCallOptions>(
     builder.Configuration.GetSection(JeebGateway.Calls.MaskedCallOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Calls.IMaskedCallService, JeebGateway.Calls.MaskedCallService>();
-
-// T-backend-045: In-app wallet and top-up (Phase 2).
-builder.Services.AddSingleton<JeebGateway.Wallet.IInAppWalletService, JeebGateway.Wallet.InAppWalletService>();
 
 // Resilient Whisper integration (T-backend-036).
 // Per-attempt 10s timeout enforced via linked CTS inside ResilientTranscriptionService;

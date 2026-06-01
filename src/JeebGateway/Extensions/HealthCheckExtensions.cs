@@ -74,7 +74,7 @@ public static class HealthCheckExtensions
         // --- Deployed, critical-path services, probed at their REAL health route.
         // All of these serve GET /health -> 200 on the swarm (verified). A real
         // failure here is fatal to readiness (Unhealthy -> /health/ready = 503).
-        AddDownstreamProbe(checks, config, "wallet-service",          "Services:Wallet:BaseUrl",          healthPath: "health");
+        AddDownstreamProbe(checks, config, "wallet-service",          "WalletServiceApi:BaseUrl",         healthPath: "health");
         AddDownstreamProbe(checks, config, "matching",                "Services:Matching:BaseUrl",        healthPath: "health");
         AddDownstreamProbe(checks, config, "notification-service",    "Services:Notification:BaseUrl",    healthPath: "health");
         AddDownstreamProbe(checks, config, "push-notification",       "Services:PushNotification:BaseUrl", healthPath: "health");

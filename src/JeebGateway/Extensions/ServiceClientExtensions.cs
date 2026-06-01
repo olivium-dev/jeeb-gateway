@@ -71,10 +71,10 @@ public static class ServiceClientExtensions
         //   migrates: UsersController, AdminUsersController (currently InMemoryUsersStore)
         AddNamedDownstreamClient(services, config, "user-management", "Services:UserManagement:BaseUrl");
 
-        // TODO(T-backend-bff-wallet): wallet-service — wire NSwag-generated WalletServiceClient
-        //   contract: src/JeebGateway/contracts/wallet-service.openapi.json
-        //   migrates: (no existing controller — net-new wallet endpoints will consume it)
-        AddNamedDownstreamClient(services, config, "wallet", "Services:Wallet:BaseUrl");
+        // wallet-service is wired in Program.cs as a salehly-mirrored named
+        // IHttpClientFactory client ("ServiceWalletClient" bound to
+        // WalletServiceApi:BaseUrl) + scoped ServiceWalletClient typed client,
+        // not via this generic named-downstream helper.
 
         // matching (FastAPI) — DB-backed read of a user's match preferences
         //   (GET /api/v1/matches/{user_id}), consumed by MatchingController's
@@ -436,19 +436,6 @@ public static class ServiceClientExtensions
         builder.AddResilienceHandler("standard", ConfigureStandardResilience);
         return builder;
     }
-
-    /// <summary>
-    /// Public entry point that applies the same standard pipeline as the typed
-    /// downstream clients to the wallet <see cref="IHttpClientBuilder"/>
-    /// registered in <c>Program.cs</c>. The wallet client is wired there (not in
-    /// <see cref="AddDownstreamClients"/>) because it composes with settlement
-    /// services declared in the same block; this keeps it on the identical
-    /// bearer + X-Service-Auth + resilience chain. The bearer/ServiceAuth
-    /// handlers are registered transiently by <see cref="AddDownstreamClients"/>,
-    /// which Program.cs calls first.
-    /// </summary>
-    public static IHttpClientBuilder AttachWalletPipeline(IHttpClientBuilder builder)
-        => AttachStandardPipeline(builder);
 
     /// <summary>
     /// The org-standard outbound resilience pipeline. Used by every downstream
