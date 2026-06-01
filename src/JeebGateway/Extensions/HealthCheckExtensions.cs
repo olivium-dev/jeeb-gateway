@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Hosting;
 
 namespace JeebGateway.Extensions;
 
@@ -40,11 +41,34 @@ public static class HealthCheckExtensions
     /// keys match <see cref="ServiceClientExtensions.AddDownstreamClients"/>. An
     /// unset BaseUrl skips the probe entirely (the service is not aggregated in
     /// this environment).
+    ///
+    /// In the Development and Testing environments the hard-fail downstream probes
+    /// are NOT registered: those environments carry localhost dev-default BaseUrls
+    /// (so the typed clients can bind) but do not actually spin up every backend,
+    /// so probing them would 503 <c>/health/ready</c> and <c>/health/aggregate</c>
+    /// against unreachable ports. This restores the documented contract — "local dev
+    /// does not have to spin up every backend" — that base-config dev defaults
+    /// otherwise broke. Production (and any non-Dev/Testing env) registers the
+    /// probes exactly as before.
     /// </summary>
     public static IServiceCollection AddDownstreamHealthChecks(
         this IServiceCollection services,
-        IConfiguration config)
+        IConfiguration config,
+        IHostEnvironment environment)
     {
+        // Dev/Testing: skip hard-fail downstream readiness probes. The dev-default
+        // localhost BaseUrls in base appsettings.json are not reachable here, and
+        // turning them into Unhealthy URL-group checks would falsely 503 the
+        // readiness/aggregate surfaces. The "self" (live) and any in-process
+        // checks remain registered, so the readiness predicate still has the
+        // process-liveness signal and tests that inject their own failing check
+        // (tagged "ready") continue to drive a deterministic 503.
+        if (environment.IsDevelopment()
+            || environment.EnvironmentName.Equals("Testing", StringComparison.OrdinalIgnoreCase))
+        {
+            return services;
+        }
+
         var checks = services.AddHealthChecks();
 
         // --- Deployed, critical-path services, probed at their REAL health route.
