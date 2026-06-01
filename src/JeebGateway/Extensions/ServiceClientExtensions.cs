@@ -255,6 +255,28 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IFeedbackServiceClient, FeedbackServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Feedback")));
 
+        // thin-BFF wire — cdn-service (asset/object store for signed-ToS PDFs,
+        // earnings statements, KYC/dispute evidence; 90-day retention + signed
+        // URLs). Serves JEB-527 / JEB-519 / JEB-59. Self-contained block: named
+        // client (resilience pipeline) + typed ICDNServiceClient (own
+        // bearer/ServiceAuth/resilience chain via AttachStandardPipeline).
+        //
+        // NOT YET DEPLOYED: Services:Cdn:BaseUrl in appsettings.Production.json is
+        // a PLACEHOLDER (http://192.168.2.50:PORT_TBD/) pending deployment, and
+        // FeatureFlags:UseUpstream:Cdn is DEFAULT-OFF everywhere, so the gateway
+        // never dials the unroutable host. Configuration is lazy
+        // (AddNamedDownstreamClient does not throw on a missing/placeholder
+        // BaseUrl; CdnController short-circuits to 503 while the flag is off), so
+        // this registration is safe to ship before the service exists. Hand-coded
+        // (cdn-service exposes no reachable OpenAPI doc yet), following the
+        // OfferServiceClient / BanServiceClient precedent. See ICDNServiceClient
+        // for the full deployment runbook (set BaseUrl, add readiness probe, flip
+        // the flag).
+        AddNamedDownstreamClient(services, config, "cdn", "Services:Cdn:BaseUrl");
+        AttachStandardPipeline(
+            services.AddHttpClient<ICDNServiceClient, CDNServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Cdn")));
+
         // T-BE-019 (JEB-55): typed client over one-time-password service for the
         // delivery-HANDOVER OTP (ApplicationId delivery_handover_{deliveryId}).
         // This is a POST-AUTH call inside the authenticated delivery flow, so it
