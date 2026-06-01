@@ -56,7 +56,7 @@ SERVICES=(
   # service host port from the ticket + the conventional Swashbuckle spec path; the
   # per-service agent owns confirming the real spec path and wiring the client/flag.
   "offer-service|OfferServiceClient|JeebGateway.Services.Generated.OfferService|http://localhost:10063/swagger/v1/swagger.json|OFFER_SERVICE_OPENAPI_URL"          # TODO: confirm spec URL (health probe is /health on :10063)
-  "ban-service|BanServiceClient|JeebGateway.Services.Generated.BanService|http://localhost:10065/swagger/v1/swagger.json|BAN_SERVICE_OPENAPI_URL"                   # TODO: confirm spec URL (health probe is /health on :10065)
+  "ban-service|BanServiceClient|JeebGateway.Services.Generated.BanService|http://localhost:10065/api-docs/openapi.json|BAN_SERVICE_OPENAPI_URL"                      # confirmed: Rust/utoipa OpenAPI 3.1 at /api-docs/openapi.json. NOTE: client is HAND-CODED (Services/Clients/BanServiceClient.cs) not NSwag-generated — snake_case + OAS-3.1 nullable arrays; row kept for spec drift detection.
   "feedback-service|FeedbackServiceClient|JeebGateway.Services.Generated.FeedbackService|http://localhost:10064/swagger/v1/swagger.json|FEEDBACK_SERVICE_OPENAPI_URL" # TODO: confirm spec URL (feedback-service exposes liveness-only on :10064)
   "voice-transcription-service|VoiceTranscriptionClient|JeebGateway.Services.Generated.VoiceTranscription|http://localhost:10062/openapi.json|VOICE_TRANSCRIPTION_OPENAPI_URL" # TODO: confirm spec URL (health probe is /healthz on :10062)
 )

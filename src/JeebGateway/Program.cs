@@ -372,7 +372,26 @@ builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
 builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.InMemoryTiersStore>();
 
 // Delivery cancellation pipeline (T-backend-024 / JEEB-42).
-builder.Services.AddSingleton<IJeeberRestrictionStore, InMemoryJeeberRestrictionStore>();
+//
+// thin-BFF wire (T-thin-bff-ban): the Jeeber restriction record-of-truth is
+// flag-gated. When FeatureFlags:UseUpstream:Ban is true the store proxies the
+// real ban-service (Rust, port 10065) via BanServiceJeeberRestrictionStore →
+// IBanServiceClient; when false it falls back to InMemoryJeeberRestrictionStore.
+// CancellationService — invoked from BOTH AdminCancellationsController and
+// DeliveriesController — consumes IJeeberRestrictionStore, so swapping the impl
+// here gates both call sites with no controller branching. The in-memory store
+// is deliberately KEPT as the flag-off fallback (do not delete in this PR).
+var banFlags = builder.Configuration
+    .GetSection(UpstreamFeatureFlags.SectionName)
+    .Get<UpstreamFeatureFlags>() ?? new UpstreamFeatureFlags();
+if (banFlags.Ban)
+{
+    builder.Services.AddSingleton<IJeeberRestrictionStore, BanServiceJeeberRestrictionStore>();
+}
+else
+{
+    builder.Services.AddSingleton<IJeeberRestrictionStore, InMemoryJeeberRestrictionStore>();
+}
 builder.Services.AddSingleton<ICancellationService, CancellationService>();
 
 // Mutual-blind ratings (T-backend-020 / JEEB-38).
