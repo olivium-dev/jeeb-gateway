@@ -107,7 +107,7 @@ public static class HealthCheckExtensions
         // and falsely mark the gateway red.
         //   - chat-service           (Services:Chat:BaseUrl)
         //   - feedback               (Services:Feedback:BaseUrl)
-        //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
+        //   - remote-user-preferences (RemoteUserPreferencesServiceApi:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
         //   - one-time-password      (Services:ServiceOTP:BaseUrl / ServiceOTPApi:BaseUrl — host 10037).
         //       OTPApi (olivium-dev/one-time-password) maps ONLY its controllers
