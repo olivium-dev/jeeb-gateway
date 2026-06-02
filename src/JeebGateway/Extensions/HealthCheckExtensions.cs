@@ -109,13 +109,15 @@ public static class HealthCheckExtensions
         //   - feedback               (Services:Feedback:BaseUrl)
         //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
-        //   - contract-signing       (Services:ContractSigning:BaseUrl) — NOT yet deployed
-        //       (placeholder PORT_TBD). Liveness-only for now: probing the
-        //       placeholder host would fail to connect and falsely 503 the
-        //       gateway. The upstream FastAPI app DOES expose GET /health, so once
-        //       it is deployed and the BaseUrl is real, add:
-        //         AddDownstreamProbe(checks, config, "contract-signing",
-        //             "Services:ContractSigning:BaseUrl", healthPath: "health");
+
+        // --- Degraded (non-fatal) downstream probe.
+        // contract-signing-service (FastAPI) is now deployed on the Jeeb swarm at
+        // Services:ContractSigning:BaseUrl (192.168.2.50:10071). It serves
+        // GET /health. We probe it as Degraded (not Unhealthy): a missing instance
+        // surfaces in /health/aggregate WITHOUT 503-ing /health/ready, because the
+        // FeatureFlags:UseUpstream:ContractSigning kill switch independently gates
+        // the routing path.
+        AddDownstreamProbe(checks, config, "contract-signing-service", "Services:ContractSigning:BaseUrl", healthPath: "health", failureStatus: HealthStatus.Degraded);
 
         return services;
     }
