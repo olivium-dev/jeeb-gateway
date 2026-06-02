@@ -353,15 +353,15 @@ public static class ServiceClientExtensions
         // schema jeeb_jeeber_v1 (JEB-40/JEB-41) via GET /templates/{name}/schema.
         // Self-contained block mirroring the feedback wire above: named client
         // (resilience pipeline) + typed IFormBuilderServiceClient (own bearer/
-        // ServiceAuth/resilience chain via AttachStandardPipeline). NOT yet
-        // deployed to the Jeeb swarm — Services:FormBuilder:BaseUrl is a
-        // PLACEHOLDER (http://192.168.2.50:PORT_TBD/) in appsettings.Production.json
-        // and FeatureFlags:UseUpstream:FormBuilder defaults OFF everywhere, so the
-        // controller 503s until the service is live. Hand-coded (no NSwag artifact)
-        // against form-builder-service/app/main.py, following the
-        // NotificationServiceClient / OfferServiceClient precedent. Liveness-only
-        // from the gateway's perspective: the FastAPI app exposes no /health route
-        // (only /docs + /openapi.json), so no readiness probe is registered.
+        // ServiceAuth/resilience chain via AttachStandardPipeline). Deployed on the
+        // Jeeb swarm — Services:FormBuilder:BaseUrl is http://192.168.2.50:10070/
+        // (appsettings.Production.json). FeatureFlags:UseUpstream:FormBuilder still
+        // defaults OFF, so flip it to true to route through the real upstream.
+        // Hand-coded (no NSwag artifact) against form-builder-service/app/main.py,
+        // following the NotificationServiceClient / OfferServiceClient precedent.
+        // The FastAPI app exposes no /health route (only /docs + /openapi.json), so
+        // the readiness probe is pinned to GET /openapi.json and registered Degraded
+        // (see HealthCheckExtensions) — never 503s /health/ready.
         AddNamedDownstreamClient(services, config, "form-builder", "Services:FormBuilder:BaseUrl");
         AttachStandardPipeline(
             services.AddHttpClient<IFormBuilderServiceClient, FormBuilderServiceClient>(http =>

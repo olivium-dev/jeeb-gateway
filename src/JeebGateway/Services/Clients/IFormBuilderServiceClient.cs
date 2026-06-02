@@ -9,18 +9,16 @@ namespace JeebGateway.Services.Clients;
 /// <c>Accept-Language</c> header.
 ///
 /// <para>
-/// DEPLOYMENT STATUS (read before wiring anything live). form-builder-service is
-/// NOT yet on the Jeeb swarm — there is no live <c>192.168.2.50</c> port for it,
-/// and <c>Services:FormBuilder:BaseUrl</c> in
-/// <c>appsettings.Production.json</c> is a CLEARLY-MARKED PLACEHOLDER
-/// (<c>http://192.168.2.50:PORT_TBD/</c>) pending deployment + port assignment.
-/// Consequently the upstream feature flag (<c>FeatureFlags:UseUpstream:FormBuilder</c>)
-/// defaults OFF in every environment, the gateway controller returns 503
-/// ProblemDetails when off (net-new path — there is no legacy in-memory form
-/// store to fall back to), and the readiness probe is LIVENESS-ONLY (no
-/// <c>/health</c> route exists on the FastAPI app — it exposes only <c>/docs</c>
-/// and <c>/openapi.json</c>), exactly mirroring the treatment feedback-service
-/// got. Flip the flag on and set a real BaseUrl once the service is deployed.
+/// DEPLOYMENT STATUS. form-builder-service is now deployed on the Jeeb swarm at
+/// <c>Services:FormBuilder:BaseUrl</c> = <c>http://192.168.2.50:10070/</c>
+/// (<c>appsettings.json</c> + <c>appsettings.Production.json</c>). The upstream
+/// feature flag (<c>FeatureFlags:UseUpstream:FormBuilder</c>) still defaults OFF
+/// in every environment — flip it on to route through the real upstream; while
+/// off the gateway controller returns 503 ProblemDetails (net-new path — there is
+/// no legacy in-memory form store to fall back to). The FastAPI app exposes no
+/// <c>/health</c> route (only <c>/docs</c> and <c>/openapi.json</c>), so the
+/// gateway readiness probe is pinned to GET <c>/openapi.json</c> and registered
+/// <c>Degraded</c> (never 503s <c>/health/ready</c>) — see HealthCheckExtensions.
 /// </para>
 ///
 /// <para>

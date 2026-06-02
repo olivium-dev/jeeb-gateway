@@ -109,12 +109,18 @@ public static class HealthCheckExtensions
         //   - feedback               (Services:Feedback:BaseUrl)
         //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
-        //   - form-builder           (Services:FormBuilder:BaseUrl) — NOT yet deployed
-        //       (placeholder PORT_TBD); FastAPI app exposes no /health route
-        //       (only /docs + /openapi.json). Liveness-only: registering a probe
-        //       would 404 (or fail to connect to the placeholder host) and falsely
-        //       503 the gateway. Add a readiness probe once the service is deployed
-        //       and a real health route exists.
+
+        // --- Degraded (non-fatal) downstream probe.
+        // form-builder-service is now deployed on the Jeeb swarm at
+        // Services:FormBuilder:BaseUrl (192.168.2.50:10070). It is a FastAPI app
+        // that exposes NO /health or /health/ready route — probing those would 404
+        // and falsely degrade. Its real liveness signal is GET /openapi.json (200,
+        // always served by FastAPI, no auth, no data dependency). We pin the probe
+        // to /openapi.json and mark it Degraded (not Unhealthy): a missing instance
+        // surfaces in /health/aggregate WITHOUT 503-ing /health/ready, because the
+        // FeatureFlags:UseUpstream:FormBuilder kill switch independently gates the
+        // routing path.
+        AddDownstreamProbe(checks, config, "form-builder-service", "Services:FormBuilder:BaseUrl", healthPath: "openapi.json", failureStatus: HealthStatus.Degraded);
 
         return services;
     }

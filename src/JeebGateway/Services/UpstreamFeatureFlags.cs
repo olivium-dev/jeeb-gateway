@@ -91,10 +91,10 @@ public sealed class UpstreamFeatureFlags
     /// <see cref="JeebGateway.Services.Clients.IFormBuilderServiceClient"/>.
     /// This path is net-new (the gateway never held a form store), so the flag is
     /// a runtime kill switch, NOT a fallback to local state: when off the
-    /// endpoints return 503. Defaults OFF in EVERY environment because
-    /// form-builder-service is NOT yet deployed to the Jeeb swarm — its
-    /// <c>Services:FormBuilder:BaseUrl</c> is a placeholder (<c>PORT_TBD</c>)
-    /// pending deployment. Flip on once the service is live and the BaseUrl is real.
+    /// endpoints return 503. Defaults OFF in EVERY environment; form-builder-service
+    /// is now deployed to the Jeeb swarm with
+    /// <c>Services:FormBuilder:BaseUrl</c> = <c>http://192.168.2.50:10070/</c>, so
+    /// flip this on to route through the real upstream.
     /// </summary>
     public bool FormBuilder { get; set; }
 }
