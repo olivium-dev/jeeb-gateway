@@ -31,9 +31,10 @@ public class BffStartupValidatorTests
             // Services:* key — it moved to the top-level ChatServiceApi key;
             // Wallet also moved to the top-level WalletServiceApi key)
             ["Services:Matching:BaseUrl"] = "http://matching.test",
-            // Geolocation, PushNotification, Delivery missing (Notification moved
-            // to the top-level ServiceNotificationClient key, so it is no longer
-            // a required Services:* key)
+            // Geolocation, Delivery missing. Notification moved to the top-level
+            // ServiceNotificationClient key and PushNotification moved to the
+            // top-level PushNotificationServiceApi key, so neither is a required
+            // Services:* key any more.
         });
 
         var opts = Options.Create(new DownstreamServicesOptions
@@ -49,7 +50,6 @@ public class BffStartupValidatorTests
             .Which.Message.Should().ContainAll(
                 "Services:UserManagement:BaseUrl",
                 "Services:Geolocation:BaseUrl",
-                "Services:PushNotification:BaseUrl",
                 "Services:Delivery:BaseUrl",
                 "environment 'Production'");
 
@@ -108,7 +108,6 @@ public class BffStartupValidatorTests
             ["Services:UserManagement:BaseUrl"] = "http://user-management.test",
             ["Services:Matching:BaseUrl"] = "http://matching.test",
             ["Services:Geolocation:BaseUrl"] = "http://geo.test",
-            ["Services:PushNotification:BaseUrl"] = "http://push.test",
             ["Services:Delivery:BaseUrl"] = "http://delivery.test",
         });
 
@@ -131,7 +130,6 @@ public class BffStartupValidatorTests
             ["Services:UserManagement"] = "http://user-management.test",
             ["Services:Matching"] = "http://matching.test",
             ["Services:Geolocation"] = "http://geo.test",
-            ["Services:PushNotification"] = "http://push.test",
             ["Services:Delivery"] = "http://delivery.test",
         });
 

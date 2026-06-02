@@ -32,10 +32,12 @@
     <!--
       Newtonsoft.Json — required by every NSwag-generated salehly mirror client
       (jsonLibrary:Newtonsoft): ServiceRemoteUserPreferencesClient,
-      ServiceWalletClient, ServiceChatClient, ServiceNotificationClient and the
-      other Service*Client.cs mirrors. salehly-gateway carries this dependency;
-      the exact-mirror clients use it for (de)serialization. Single reference —
-      consolidated when wallet/chat/notification exact-salehly branches were merged
+      ServiceWalletClient, ServiceChatClient, ServiceNotificationClient,
+      ServicePushNotificationClient and the other Service*Client.cs mirrors.
+      salehly-gateway carries this dependency; the exact-mirror clients use it for
+      (de)serialization via Newtonsoft.Json.JsonConvert (unlike jeeb's
+      System.Text.Json NSwag clients). Single reference — consolidated when the
+      wallet/chat/notification/pushnotification exact-salehly branches were merged
       (each had added its own duplicate; NU1504). Pinned to 13.0.3 to match the
       generator's declared Newtonsoft.Json v13.0.0.0 contract.
     -->

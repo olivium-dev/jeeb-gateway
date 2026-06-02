@@ -77,7 +77,7 @@ public static class HealthCheckExtensions
         AddDownstreamProbe(checks, config, "wallet-service",          "WalletServiceApi:BaseUrl",         healthPath: "health");
         AddDownstreamProbe(checks, config, "matching",                "Services:Matching:BaseUrl",        healthPath: "health");
         AddDownstreamProbe(checks, config, "notification-service",    "ServiceNotificationClient:BaseUrl", healthPath: "health");
-        AddDownstreamProbe(checks, config, "push-notification",       "Services:PushNotification:BaseUrl", healthPath: "health");
+        AddDownstreamProbe(checks, config, "push-notification",       "PushNotificationServiceApi:BaseUrl", healthPath: "health");
         AddDownstreamProbe(checks, config, "delivery-service",        "Services:Delivery:BaseUrl",        healthPath: "health");
         AddDownstreamProbe(checks, config, "geolocation-service",     "Services:Geolocation:BaseUrl",     healthPath: "health");
         AddDownstreamProbe(checks, config, "offer-service",           "Services:Offer:BaseUrl",           healthPath: "health");

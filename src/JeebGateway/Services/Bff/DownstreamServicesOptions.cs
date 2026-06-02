@@ -45,7 +45,11 @@ public sealed class DownstreamServicesOptions
     // NOTE: notification-service is intentionally NOT listed here. Notification
     // moved to the salehly-style top-level ServiceNotificationClient:BaseUrl key
     // (consumed directly by the NSwag ServiceNotificationClient in Program.cs) and
-    // is no longer a Services:* nested downstream client, so this
+    // is no longer a Services:* nested downstream client.
+    // NOTE: push-notification is intentionally NOT listed here. PushNotification
+    // moved to the salehly-style top-level PushNotificationServiceApi:BaseUrl key
+    // (consumed directly by the NSwag ServicePushNotificationClient in Program.cs)
+    // and is no longer a Services:* nested downstream client, so this
     // Services:{section}:BaseUrl validator does not cover it.
     public List<string> Required { get; set; } = new()
     {
@@ -53,7 +57,6 @@ public sealed class DownstreamServicesOptions
         "UserManagement",
         "Matching",
         "Geolocation",
-        "PushNotification",
         "Delivery",
     };
 }
