@@ -30,11 +30,14 @@
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.11" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
     <!--
-      Newtonsoft.Json — required by the NSwag-generated salehly client
-      Services/Generated/ServiceRemoteUserPreferencesClient.cs (jsonLibrary:Newtonsoft).
-      salehly-gateway carries this dependency; the exact-mirror clients use it for
-      (de)serialization. Pinned to 13.0.3 to match the generator's declared
-      Newtonsoft.Json v13.0.0.0 contract.
+      Newtonsoft.Json — required by every NSwag-generated salehly mirror client
+      (jsonLibrary:Newtonsoft): ServiceRemoteUserPreferencesClient,
+      ServiceWalletClient, ServiceChatClient, ServiceNotificationClient and the
+      other Service*Client.cs mirrors. salehly-gateway carries this dependency;
+      the exact-mirror clients use it for (de)serialization. Single reference —
+      consolidated when wallet/chat/notification exact-salehly branches were merged
+      (each had added its own duplicate; NU1504). Pinned to 13.0.3 to match the
+      generator's declared Newtonsoft.Json v13.0.0.0 contract.
     -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.9.0" />
@@ -43,9 +46,6 @@
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.9.0-beta.2" />
     <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="8.0.11" />
-    <!-- Required by the NSwag-generated ServiceWalletClient (salehly mirror,
-         /jsonLibrary:Newtonsoft). -->
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.1.2" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.11" />
     <!--
@@ -57,15 +57,6 @@
       URL-group health checks for downstream services in Extensions/HealthCheckExtensions.cs.
     -->
     <PackageReference Include="AspNetCore.HealthChecks.Uris" Version="8.0.1" />
-
-    <!--
-      Newtonsoft.Json is the JSON library the salehly-mirrored NSwag client
-      (Services/ServiceChatClient.cs, namespace JeebGateway.service.ServiceChat)
-      was generated against (/jsonLibrary:Newtonsoft). The generated client uses
-      Newtonsoft.Json.JsonConvert + JsonSerializerSettings internally. Pinned to
-      the version NSwag 14.2 targets.
-    -->
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
 
     <!--
       T-BE-001 / JEB-471 — OTP sign-in path.

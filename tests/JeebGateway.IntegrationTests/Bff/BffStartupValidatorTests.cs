@@ -31,7 +31,9 @@ public class BffStartupValidatorTests
             // Services:* key — it moved to the top-level ChatServiceApi key;
             // Wallet also moved to the top-level WalletServiceApi key)
             ["Services:Matching:BaseUrl"] = "http://matching.test",
-            // Notification, Geolocation, PushNotification, Delivery missing
+            // Geolocation, PushNotification, Delivery missing (Notification moved
+            // to the top-level ServiceNotificationClient key, so it is no longer
+            // a required Services:* key)
         });
 
         var opts = Options.Create(new DownstreamServicesOptions
@@ -46,7 +48,6 @@ public class BffStartupValidatorTests
         act.Should().Throw<StartupConfigurationException>()
             .Which.Message.Should().ContainAll(
                 "Services:UserManagement:BaseUrl",
-                "Services:Notification:BaseUrl",
                 "Services:Geolocation:BaseUrl",
                 "Services:PushNotification:BaseUrl",
                 "Services:Delivery:BaseUrl",
@@ -106,7 +107,6 @@ public class BffStartupValidatorTests
             ["Services:Auth:BaseUrl"] = "http://auth.test",
             ["Services:UserManagement:BaseUrl"] = "http://user-management.test",
             ["Services:Matching:BaseUrl"] = "http://matching.test",
-            ["Services:Notification:BaseUrl"] = "http://notification.test",
             ["Services:Geolocation:BaseUrl"] = "http://geo.test",
             ["Services:PushNotification:BaseUrl"] = "http://push.test",
             ["Services:Delivery:BaseUrl"] = "http://delivery.test",
@@ -130,7 +130,6 @@ public class BffStartupValidatorTests
             ["Services:Auth"] = "http://auth.test",
             ["Services:UserManagement"] = "http://user-management.test",
             ["Services:Matching"] = "http://matching.test",
-            ["Services:Notification"] = "http://notification.test",
             ["Services:Geolocation"] = "http://geo.test",
             ["Services:PushNotification"] = "http://push.test",
             ["Services:Delivery"] = "http://delivery.test",

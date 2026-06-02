@@ -7,7 +7,7 @@ namespace JeebGateway.Services.Clients;
 /// Swashbuckle spec at <c>/swagger/v1/swagger.json</c> (title "Feedback Service
 /// API", paths <c>POST/GET/DELETE /Review/comment</c>,
 /// <c>GET /Review/comment/grouped</c>, <c>GET /Review/rating</c>) following the
-/// <see cref="INotificationServiceClient"/> precedent — a typed hand-coded
+/// <c>INotificationServiceClient</c> precedent — a typed hand-coded
 /// client rather than the NSwag-generated artifact, because the rating module
 /// only needs the submit + read seam and the generated client would be heavier
 /// than the surface we consume.

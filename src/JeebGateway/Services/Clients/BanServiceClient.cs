@@ -10,7 +10,7 @@ namespace JeebGateway.Services.Clients;
 /// Hand-coded (NOT NSwag-generated) against the verified routes on ban-service
 /// (Rust / Actix-Web; <c>olivium-analysis/repos/ban-service</c>) and its live
 /// OpenAPI 3.1 spec at <c>/api-docs/openapi.json</c>. Two reasons to hand-code,
-/// matching the <see cref="NotificationServiceClient"/> precedent:
+/// matching the <c>NotificationServiceClient</c> precedent:
 ///   1. The wire is <b>snake_case</b> (<c>user_id</c>, <c>ban_statuses</c>,
 ///      <c>banned_until</c>, <c>is_currently_banned</c>, <c>current_stage</c>),
 ///      so an explicit <see cref="JsonNamingPolicy.SnakeCaseLower"/> policy plus

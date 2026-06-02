@@ -42,12 +42,16 @@ public sealed class DownstreamServicesOptions
     // NSwag ServiceChatClient in Program.cs) and is no longer a Services:* nested
     // downstream client, so this Services:{section}:BaseUrl validator does not
     // cover it.
+    // NOTE: notification-service is intentionally NOT listed here. Notification
+    // moved to the salehly-style top-level ServiceNotificationClient:BaseUrl key
+    // (consumed directly by the NSwag ServiceNotificationClient in Program.cs) and
+    // is no longer a Services:* nested downstream client, so this
+    // Services:{section}:BaseUrl validator does not cover it.
     public List<string> Required { get; set; } = new()
     {
         "Auth",
         "UserManagement",
         "Matching",
-        "Notification",
         "Geolocation",
         "PushNotification",
         "Delivery",
