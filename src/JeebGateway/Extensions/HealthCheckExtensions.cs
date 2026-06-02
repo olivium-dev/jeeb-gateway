@@ -118,6 +118,16 @@ public static class HealthCheckExtensions
         //       OTP upstream is liveness-only from the gateway's perspective —
         //       same treatment as feedback-service (PR #47).
 
+        // --- Degraded (non-fatal) downstream probe.
+        // realtime-comunication-service (olivium-dev/realtime-comunication-service,
+        // Elixir/Phoenix 'LiveComm') is now deployed on the Jeeb swarm at
+        // Services:Realtime:BaseUrl (192.168.2.50:10069). It serves GET /health.
+        // We probe it as Degraded (not Unhealthy): a missing realtime instance
+        // surfaces in /health/aggregate WITHOUT 503-ing the gateway's /health/ready,
+        // because the FeatureFlags:UseUpstream:Realtime kill switch independently
+        // gates the publish path. Serves JEB-1453/1449/1432/626/444/50/51/52.
+        AddDownstreamProbe(checks, config, "realtime-comunication-service", "Services:Realtime:BaseUrl", healthPath: "health", failureStatus: HealthStatus.Degraded);
+
         return services;
     }
 

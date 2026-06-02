@@ -348,6 +348,33 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IVoiceTranscriptionClient, VoiceTranscriptionClient>(http =>
                 BindBaseAddress(http, config, "Services:VoiceTranscription")));
 
+        // realtime-comunication-service wire (FeatureFlags:UseUpstream:Realtime).
+        // Typed client over the shared Elixir/Phoenix "LiveComm" service
+        // (olivium-dev/realtime-comunication-service). The gateway uses its HTTP
+        // ingest seam (POST /api/ingest/{topic}/{stream}, verified against
+        // realtime-comunication-service/lib/live_comm_web/router.ex +
+        // controllers/ingest_controller.ex) for SERVER-SIDE per-recipient chat
+        // fan-out; mobile clients connect the Phoenix WebSocket channel
+        // (topic:jeeb:chat, membership-validated join) directly, so the gateway
+        // does not proxy the WebSocket. Serves JEB-1453/1449/1432/626/444/50/51/52.
+        //
+        // NOT-YET-DEPLOYED: realtime-comunication-service is in the olivium fleet
+        // but NOT on the Jeeb swarm. Services:Realtime:BaseUrl is a marked
+        // PLACEHOLDER (http://192.168.2.50:PORT_TBD/) in appsettings.Production.json
+        // and FeatureFlags:UseUpstream:Realtime is OFF everywhere — RealtimeController
+        // returns 503 ProblemDetails until the service is deployed and the
+        // placeholder is replaced with the real host:port. The client is still
+        // fully wired (named resilience pipeline + own bearer + X-Service-Auth +
+        // resilience chain) so flipping the flag is the only remaining step.
+        // Hand-coded (no NSwag): the upstream exposes no OpenAPI doc; the ingest
+        // route is the single seam the gateway consumes. BindBaseAddress resolves
+        // Services:Realtime[:BaseUrl] with a trailing slash so the relative
+        // "api/ingest/{topic}/{stream}" resolves under the host.
+        AddNamedDownstreamClient(services, config, "realtime", "Services:Realtime:BaseUrl");
+        AttachStandardPipeline(
+            services.AddHttpClient<IRealtimeCommunicationClient, RealtimeCommunicationClient>(http =>
+                BindBaseAddress(http, config, "Services:Realtime")));
+
         return services;
     }
 

@@ -101,4 +101,23 @@ public sealed class UpstreamFeatureFlags
     /// the 4-digit delivery_handover OTP).
     /// </summary>
     public bool Otp { get; set; }
+
+    /// <summary>
+    /// When true, real-time chat fan-out is published to the shared
+    /// <c>realtime-comunication-service</c> (Elixir/Phoenix, HTTP ingest
+    /// <c>POST /api/ingest/{topic}/{stream}</c>) via
+    /// <see cref="JeebGateway.Services.Clients.IRealtimeCommunicationClient"/>
+    /// instead of (or in addition to) the gateway-local SignalR
+    /// <see cref="JeebGateway.Chat.ChatHub"/> fan-out. Serves JEB-1453, JEB-1449,
+    /// JEB-1432, JEB-626, JEB-444, JEB-50/51/52 (jeeb:chat Phoenix channel,
+    /// membership-validated join, per-recipient fan-out filter).
+    ///
+    /// Default false in every environment: the realtime-comunication-service is
+    /// NOT yet on the Jeeb swarm — <c>Services:Realtime:BaseUrl</c> is a marked
+    /// placeholder (PORT_TBD) in appsettings.Production.json. The flag MUST stay
+    /// false until that service is deployed and the placeholder is replaced with
+    /// the real host:port, otherwise the publish path would target an unbound
+    /// upstream and the resilience pipeline would burn retries to nowhere.
+    /// </summary>
+    public bool Realtime { get; set; }
 }
