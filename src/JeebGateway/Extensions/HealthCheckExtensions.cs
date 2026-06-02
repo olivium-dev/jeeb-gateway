@@ -109,15 +109,16 @@ public static class HealthCheckExtensions
         //   - feedback               (Services:Feedback:BaseUrl)
         //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
-        //   - realtime-comunication-service (Services:Realtime:BaseUrl) — NOT yet on
-        //       the Jeeb swarm; BaseUrl is a marked PLACEHOLDER (PORT_TBD), so the
-        //       URL is not even probe-able. It DOES serve GET /health, /health/ready,
-        //       /health/live upstream — once it is deployed and the placeholder is
-        //       replaced with the real host:port, add a Degraded URL-group probe
-        //       (healthPath "health/ready") here so a missing instance shows in the
-        //       dashboard WITHOUT 503-ing the gateway. Until then it stays
-        //       liveness-only (no probe) and the FeatureFlags:UseUpstream:Realtime
-        //       kill switch keeps the publish path dark.
+
+        // --- Degraded (non-fatal) downstream probe.
+        // realtime-comunication-service (olivium-dev/realtime-comunication-service,
+        // Elixir/Phoenix 'LiveComm') is now deployed on the Jeeb swarm at
+        // Services:Realtime:BaseUrl (192.168.2.50:10069). It serves GET /health.
+        // We probe it as Degraded (not Unhealthy): a missing realtime instance
+        // surfaces in /health/aggregate WITHOUT 503-ing the gateway's /health/ready,
+        // because the FeatureFlags:UseUpstream:Realtime kill switch independently
+        // gates the publish path. Serves JEB-1453/1449/1432/626/444/50/51/52.
+        AddDownstreamProbe(checks, config, "realtime-comunication-service", "Services:Realtime:BaseUrl", healthPath: "health", failureStatus: HealthStatus.Degraded);
 
         return services;
     }
