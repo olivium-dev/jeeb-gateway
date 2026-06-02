@@ -137,6 +137,15 @@ public static class HealthCheckExtensions
         // the routing path.
         AddDownstreamProbe(checks, config, "contract-signing-service", "Services:ContractSigning:BaseUrl", healthPath: "health", failureStatus: HealthStatus.Degraded);
 
+        // --- Degraded (non-fatal) downstream probe.
+        // cdn-service is now deployed on the Jeeb swarm at Services:Cdn:BaseUrl
+        // (192.168.2.50:10072). Unlike most upstreams it exposes the org-canonical
+        // readiness path GET /health/ready (not bare /health). We probe it as
+        // Degraded (not Unhealthy): a missing instance surfaces in /health/aggregate
+        // WITHOUT 503-ing /health/ready, because the FeatureFlags:UseUpstream:Cdn
+        // kill switch independently gates the routing path. Serves JEB-527/519/59.
+        AddDownstreamProbe(checks, config, "cdn-service", "Services:Cdn:BaseUrl", healthPath: "health/ready", failureStatus: HealthStatus.Degraded);
+
         return services;
     }
 

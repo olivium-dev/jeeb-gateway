@@ -37,6 +37,7 @@ public class TypedClientPipelineTests
         new object[] { "INotificationServiceClient" },
         new object[] { "IScoreServiceClient" },
         new object[] { "IFeedbackServiceClient" },
+        new object[] { "ICDNServiceClient" },
         new object[] { "IServiceOTPClient" },
         new object[] { "IPushNotificationClient" },
     };
@@ -125,6 +126,7 @@ public class TypedClientPipelineTests
                 ["Services:Notification:BaseUrl"] = "http://notif.test",
                 ["Services:ScoreTaking:BaseUrl"] = "http://score.test",
                 ["Services:Feedback:BaseUrl"] = "http://feedback.test",
+                ["Services:Cdn:BaseUrl"] = "http://cdn.test",
                 ["Services:ServiceOTP:BaseUrl"] = "http://otp.test",
                 ["Services:PushNotification:BaseUrl"] = "http://push.test",
                 ["ServiceAuth:Caller"] = "jeeb-gateway",
