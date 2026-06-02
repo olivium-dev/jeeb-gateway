@@ -1,77 +1,209 @@
-using JeebGateway.Services.Clients;
-using JeebGateway.Users;
-using JeebGateway.Wallet;
+using System;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
+using JeebGateway.service.ServiceWallet;
+using ServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
+using WalletApiException = JeebGateway.service.ServiceWallet.ApiException;
 
-namespace JeebGateway.Controllers;
-
-[ApiController]
-[Route("api/wallet")]
-public sealed class WalletController : ControllerBase
+namespace JeebGateway.Controllers
 {
-    private readonly IInAppWalletService _wallet;
-    private readonly IWalletServiceClient _walletClient;
-
-    public WalletController(IInAppWalletService wallet, IWalletServiceClient walletClient)
+    [ApiController]
+    [Route("api/[controller]")]
+    public class WalletController : ControllerBase
     {
-        _wallet = wallet;
-        _walletClient = walletClient;
-    }
+        private readonly ServiceWalletClient _walletClient;
 
-    [HttpGet("balance")]
-    public async Task<IActionResult> GetBalance(CancellationToken ct)
-    {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var problem))
-            return problem;
+        public WalletController(ServiceWalletClient walletClient)
+        {
+            _walletClient = walletClient;
+        }
 
-        var balance = await _wallet.GetBalanceAsync(userId, ct);
-        return Ok(balance);
-    }
+        [HttpGet("system-wallet")]
+        [ProducesResponseType(typeof(AddWalletHolderResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetSystemWallet()
+        {
+            try
+            {
+                var systemWalletHolderResponse = await _walletClient.SystemWalletAsync();
+                return Ok(systemWalletHolderResponse);
+            }
+            catch (WalletApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
 
-    [HttpPost("top-up")]
-    public async Task<IActionResult> TopUp(
-        [FromBody] TopUpRequest request,
-        CancellationToken ct)
-    {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var problem))
-            return problem;
 
-        var result = await _wallet.TopUpAsync(
-            request with { UserId = userId }, ct);
-        return result.Success ? Ok(result) : UnprocessableEntity(result);
-    }
+        [HttpPost("holder/add")]
+        [ProducesResponseType(typeof(AddWalletHolderResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> CreateWalletOwner([FromBody] CreateWalletOwnerDto request)
+        {
+            try
+            {
+                var response = await _walletClient.AddAsync(request);
+                return Ok(response);
+            }
+            catch (WalletApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
 
-    [HttpGet("transactions")]
-    public async Task<IActionResult> GetTransactions(
-        [FromQuery] int page = 1,
-        [FromQuery] int pageSize = 20,
-        CancellationToken ct = default)
-    {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var problem))
-            return problem;
+        [HttpPost("holder/{holderId}/Add")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(Wallet))]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> AddWalletToOwner(Guid holderId, [FromBody] AddWalletRequest addWalletRequest)
+        {
+            try
+            {
+                var response = await _walletClient.AddAsync(holderId, addWalletRequest);
+                return Ok(response);
+            }
+            catch (WalletApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
 
-        var txns = await _wallet.GetTransactionsAsync(userId, page, pageSize, ct);
-        return Ok(txns);
-    }
+        [HttpPost("{holderId}/{walletId}/deactivate")]
+        [ProducesResponseType(StatusCodes.Status202Accepted)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> DeactivateWallet(Guid holderId, Guid walletId)
+        {
+            try
+            {
+                await _walletClient.DeactivateAsync(holderId, walletId);
+                return Accepted();
+            }
+            catch (WalletApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
 
-    /// <summary>
-    /// Returns the system wallet holder and all its wallets as recorded in
-    /// the jeeb-wallet Postgres database via wallet-service
-    /// <c>GET /system-wallet</c>. Requires an authenticated caller.
-    ///
-    /// When <c>Services:Wallet:BaseUrl</c> is not configured the in-memory
-    /// fallback returns 404 so callers know no real data is available.
-    /// </summary>
-    [HttpGet("system")]
-    [Authorize]
-    [ProducesResponseType(typeof(SystemWalletResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> GetSystemWallet(CancellationToken ct)
-    {
-        var result = await _walletClient.GetSystemWalletAsync(ct);
-        return result is null
-            ? NotFound(new { message = "System wallet not found or wallet-service unavailable." })
-            : Ok(result);
+        [HttpPost("{holderId}/{walletId}/deactivate/force-deactivate")]
+        [ProducesResponseType(StatusCodes.Status202Accepted)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> ForceDeactivateWallet(Guid holderId, Guid walletId)
+        {
+            try
+            {
+                await _walletClient.ForceDeactivateAsync(holderId, walletId);
+                return Accepted();
+            }
+            catch (WalletApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        [HttpPost("holder/{holderId}/deactivate")]
+        [ProducesResponseType(StatusCodes.Status202Accepted)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> DeactivateWalletHolder(Guid holderId)
+        {
+            try
+            {
+                await _walletClient.Deactivate2Async(holderId);
+                return Accepted();
+            }
+            catch (WalletApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        [HttpPost("holder/{holderId}/deactivate/force-deactivate")]
+        [ProducesResponseType(StatusCodes.Status202Accepted)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> ForceDeactivateWalletHolder(Guid holderId)
+        {
+            try
+            {
+                await _walletClient.ForceDeactivate2Async(holderId);
+                return Accepted();
+            }
+            catch (WalletApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        [HttpGet("holder/wallets")]
+        [Authorize]
+        [ProducesResponseType(typeof(GetHolderWallets), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetHolderWallets()
+        {
+            try
+            {
+                var userId = GetUserIdFromToken();
+                if (string.IsNullOrEmpty(userId))
+                {
+                    throw new Exception("User ID not found in token");
+                }
+
+                var wallets = await _walletClient.WalletsAsync(Guid.Parse(userId));
+                return Ok(wallets);
+            }
+            catch (WalletApiException ex)
+            {
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        private string GetUserIdFromToken()
+        {
+            var userId = User.FindFirst(ClaimTypes.Sid)?.Value;
+            if (string.IsNullOrEmpty(userId))
+            {
+                userId = User.FindFirst("sid")?.Value;
+            }
+            if (string.IsNullOrEmpty(userId))
+            {
+                userId = User.FindFirst("sub")?.Value;
+            }
+            if (string.IsNullOrEmpty(userId))
+            {
+                throw new UnauthorizedAccessException("User ID not found in token");
+            }
+            return userId;
+        }
     }
 }

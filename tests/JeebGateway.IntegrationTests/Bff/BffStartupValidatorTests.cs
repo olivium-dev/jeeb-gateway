@@ -27,7 +27,7 @@ public class BffStartupValidatorTests
         var config = BuildConfig(new Dictionary<string, string?>
         {
             ["Services:Auth:BaseUrl"] = "http://auth.test",
-            // Chat, UserManagement, Wallet missing
+            // Chat, UserManagement missing
             ["Services:Matching:BaseUrl"] = "http://matching.test",
             // Notification, Geolocation, PushNotification, Delivery missing
         });
@@ -45,7 +45,6 @@ public class BffStartupValidatorTests
             .Which.Message.Should().ContainAll(
                 "Services:Chat:BaseUrl",
                 "Services:UserManagement:BaseUrl",
-                "Services:Wallet:BaseUrl",
                 "Services:Notification:BaseUrl",
                 "Services:Geolocation:BaseUrl",
                 "Services:PushNotification:BaseUrl",
@@ -100,7 +99,6 @@ public class BffStartupValidatorTests
             ["Services:Auth:BaseUrl"] = "http://auth.test",
             ["Services:Chat:BaseUrl"] = "http://chat.test",
             ["Services:UserManagement:BaseUrl"] = "http://user-management.test",
-            ["Services:Wallet:BaseUrl"] = "http://wallet.test",
             ["Services:Matching:BaseUrl"] = "http://matching.test",
             ["Services:Notification:BaseUrl"] = "http://notification.test",
             ["Services:Geolocation:BaseUrl"] = "http://geo.test",
@@ -126,7 +124,6 @@ public class BffStartupValidatorTests
             ["Services:Auth"] = "http://auth.test",
             ["Services:Chat"] = "http://chat.test",
             ["Services:UserManagement"] = "http://user-management.test",
-            ["Services:Wallet"] = "http://wallet.test",
             ["Services:Matching"] = "http://matching.test",
             ["Services:Notification"] = "http://notification.test",
             ["Services:Geolocation"] = "http://geo.test",

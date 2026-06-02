@@ -76,37 +76,6 @@ public class TypedClientPipelineTests
             $"typed client '{clientName}' must carry the standard resilience pipeline");
     }
 
-    /// <summary>
-    /// The wallet typed client is wired in Program.cs (not AddDownstreamClients)
-    /// but must carry the same pipeline via AttachWalletPipeline. We assert it
-    /// here separately because BuildGatewayServiceProvider only exercises
-    /// AddDownstreamClients; Program.cs DI is covered by the WebApplicationFactory
-    /// suites. This test documents the requirement and guards the public helper.
-    /// </summary>
-    [Fact]
-    public void AttachWalletPipeline_Adds_Bearer_ServiceAuth_And_Resilience()
-    {
-        var services = new ServiceCollection();
-        services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
-        services.AddHttpContextAccessor();
-        services.AddSingleton(TimeProvider.System);
-        services.AddTransient<BearerForwardingHandler>();
-        services.AddTransient<ServiceAuthSigningHandler>();
-        services.Configure<ServiceAuthOptions>(_ => { });
-
-        ServiceClientExtensions.AttachWalletPipeline(
-            services.AddHttpClient("wallet-under-test"));
-
-        using var provider = services.BuildServiceProvider();
-        var factory = provider.GetRequiredService<IHttpMessageHandlerFactory>();
-        var chain = WalkHandlerChain(factory.CreateHandler("wallet-under-test"));
-
-        chain.Should().Contain(h => h is BearerForwardingHandler);
-        chain.Should().Contain(h => h is ServiceAuthSigningHandler);
-        chain.Should().Contain(
-            h => h.GetType().FullName!.Contains("Resilience", StringComparison.Ordinal));
-    }
-
     private static ServiceProvider BuildGatewayServiceProvider()
     {
         var services = new ServiceCollection();

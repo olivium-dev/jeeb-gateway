@@ -34,12 +34,14 @@ public sealed class DownstreamServicesOptions
     /// listing every missing one (not just the first) so operators get a
     /// single round trip on the fix.
     /// </summary>
+    // wallet-service is intentionally absent: it is wired in Program.cs as a
+    // salehly-mirrored named client bound to the top-level WalletServiceApi:BaseUrl
+    // key (not a Services:{Section} downstream), so it is not validated here.
     public List<string> Required { get; set; } = new()
     {
         "Auth",
         "Chat",
         "UserManagement",
-        "Wallet",
         "Matching",
         "Notification",
         "Geolocation",
