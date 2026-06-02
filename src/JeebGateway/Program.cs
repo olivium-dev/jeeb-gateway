@@ -193,6 +193,11 @@ builder.Services.AddBffAggregation(builder.Configuration);
 // not yet deployed, BaseUrl is a placeholder). It serves the versioned Jeeb ToS
 // template jeeb_tos_v1 (JEB-40/JEB-41) via RegisterTemplateAsync/SignAsync. See
 // the contract-signing block in Extensions/ServiceClientExtensions.cs.
+// AddDownstreamClients also registers the typed IFormBuilderServiceClient
+// (form-builder-service / dynamic forms; consumed by FormBuilderController,
+// gated by FeatureFlags:UseUpstream:FormBuilder which defaults OFF — the
+// service is not yet deployed, BaseUrl is a placeholder). See the form-builder
+// block in Extensions/ServiceClientExtensions.cs.
 builder.Services.AddDownstreamClients(builder.Configuration);
 builder.Services.AddDownstreamHealthChecks(builder.Configuration, builder.Environment);
 

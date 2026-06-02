@@ -146,6 +146,18 @@ public static class HealthCheckExtensions
         // kill switch independently gates the routing path. Serves JEB-527/519/59.
         AddDownstreamProbe(checks, config, "cdn-service", "Services:Cdn:BaseUrl", healthPath: "health/ready", failureStatus: HealthStatus.Degraded);
 
+        // --- Degraded (non-fatal) downstream probe.
+        // form-builder-service is now deployed on the Jeeb swarm at
+        // Services:FormBuilder:BaseUrl (192.168.2.50:10070). It is a FastAPI app
+        // that exposes NO /health or /health/ready route — probing those would 404
+        // and falsely degrade. Its real liveness signal is GET /openapi.json (200,
+        // always served by FastAPI, no auth, no data dependency). We pin the probe
+        // to /openapi.json and mark it Degraded (not Unhealthy): a missing instance
+        // surfaces in /health/aggregate WITHOUT 503-ing /health/ready, because the
+        // FeatureFlags:UseUpstream:FormBuilder kill switch independently gates the
+        // routing path.
+        AddDownstreamProbe(checks, config, "form-builder-service", "Services:FormBuilder:BaseUrl", healthPath: "openapi.json", failureStatus: HealthStatus.Degraded);
+
         return services;
     }
 

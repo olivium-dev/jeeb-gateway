@@ -40,6 +40,7 @@ public class TypedClientPipelineTests
         new object[] { "ICDNServiceClient" },
         new object[] { "IServiceOTPClient" },
         new object[] { "IPushNotificationClient" },
+        new object[] { "IFormBuilderServiceClient" },
     };
 
     [Theory]
@@ -129,6 +130,7 @@ public class TypedClientPipelineTests
                 ["Services:Cdn:BaseUrl"] = "http://cdn.test",
                 ["Services:ServiceOTP:BaseUrl"] = "http://otp.test",
                 ["Services:PushNotification:BaseUrl"] = "http://push.test",
+                ["Services:FormBuilder:BaseUrl"] = "http://form-builder.test",
                 ["ServiceAuth:Caller"] = "jeeb-gateway",
                 ["ServiceAuth:SigningKey"] = "integration-test-signing-key-32-chars-or-longer",
                 ["ServiceAuth:Enabled"] = "true",
