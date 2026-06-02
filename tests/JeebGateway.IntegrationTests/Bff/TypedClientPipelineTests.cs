@@ -13,7 +13,7 @@ namespace JeebGateway.IntegrationTests.Bff;
 /// NAMED client of the same logical name — <see cref="IHttpClientFactory"/>
 /// keys handler chains by client name, and a typed client is keyed by its
 /// interface type name. Before the Batch 1 fix the typed downstream clients
-/// (Notification, Push, Wallet, Delivery, Geolocation, Chat, …) were registered
+/// (Push, Wallet, Delivery, Geolocation, …) were registered
 /// with a BARE handler chain, so they silently bypassed bearer forwarding,
 /// X-Service-Auth signing, and the Polly resilience pipeline.
 ///
@@ -33,12 +33,18 @@ public class TypedClientPipelineTests
         new object[] { "IDeliveryServiceClient" },
         new object[] { "IMatchingServiceClient" },
         new object[] { "IGeolocationServiceClient" },
-        new object[] { "IChatServiceClient" },
-        new object[] { "INotificationServiceClient" },
         new object[] { "IScoreServiceClient" },
-        new object[] { "IFeedbackServiceClient" },
+        // IFeedbackServiceClient — REMOVED. The hand-coded feedback BFF was
+        // replaced by the salehly-mirrored NSwag ServiceFeedbackClient, registered
+        // in Program.cs as the named client "ServiceFeedbackClient" (no
+        // bearer/ServiceAuth pipeline), exactly as salehly-gateway wires it.
+        new object[] { "ICDNServiceClient" },
         new object[] { "IServiceOTPClient" },
-        new object[] { "IPushNotificationClient" },
+        // IPushNotificationClient — REMOVED. The device-register passthrough was
+        // replaced by the salehly-mirrored NSwag ServicePushNotificationClient,
+        // registered in Program.cs as the named client "ServicePushNotificationClient"
+        // (no bearer/ServiceAuth pipeline), exactly as salehly-gateway wires it.
+        new object[] { "IFormBuilderServiceClient" },
     };
 
     [Theory]
@@ -74,37 +80,6 @@ public class TypedClientPipelineTests
             $"typed client '{clientName}' must carry the standard resilience pipeline");
     }
 
-    /// <summary>
-    /// The wallet typed client is wired in Program.cs (not AddDownstreamClients)
-    /// but must carry the same pipeline via AttachWalletPipeline. We assert it
-    /// here separately because BuildGatewayServiceProvider only exercises
-    /// AddDownstreamClients; Program.cs DI is covered by the WebApplicationFactory
-    /// suites. This test documents the requirement and guards the public helper.
-    /// </summary>
-    [Fact]
-    public void AttachWalletPipeline_Adds_Bearer_ServiceAuth_And_Resilience()
-    {
-        var services = new ServiceCollection();
-        services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
-        services.AddHttpContextAccessor();
-        services.AddSingleton(TimeProvider.System);
-        services.AddTransient<BearerForwardingHandler>();
-        services.AddTransient<ServiceAuthSigningHandler>();
-        services.Configure<ServiceAuthOptions>(_ => { });
-
-        ServiceClientExtensions.AttachWalletPipeline(
-            services.AddHttpClient("wallet-under-test"));
-
-        using var provider = services.BuildServiceProvider();
-        var factory = provider.GetRequiredService<IHttpMessageHandlerFactory>();
-        var chain = WalkHandlerChain(factory.CreateHandler("wallet-under-test"));
-
-        chain.Should().Contain(h => h is BearerForwardingHandler);
-        chain.Should().Contain(h => h is ServiceAuthSigningHandler);
-        chain.Should().Contain(
-            h => h.GetType().FullName!.Contains("Resilience", StringComparison.Ordinal));
-    }
-
     private static ServiceProvider BuildGatewayServiceProvider()
     {
         var services = new ServiceCollection();
@@ -121,12 +96,10 @@ public class TypedClientPipelineTests
                 ["Services:Delivery"] = "http://delivery.test",
                 ["Services:Matching"] = "http://matching.test",
                 ["Services:Geolocation"] = "http://geo.test",
-                ["Services:Chat:BaseUrl"] = "http://chat.test",
-                ["Services:Notification:BaseUrl"] = "http://notif.test",
                 ["Services:ScoreTaking:BaseUrl"] = "http://score.test",
-                ["Services:Feedback:BaseUrl"] = "http://feedback.test",
+                ["Services:Cdn:BaseUrl"] = "http://cdn.test",
                 ["Services:ServiceOTP:BaseUrl"] = "http://otp.test",
-                ["Services:PushNotification:BaseUrl"] = "http://push.test",
+                ["Services:FormBuilder:BaseUrl"] = "http://form-builder.test",
                 ["ServiceAuth:Caller"] = "jeeb-gateway",
                 ["ServiceAuth:SigningKey"] = "integration-test-signing-key-32-chars-or-longer",
                 ["ServiceAuth:Enabled"] = "true",

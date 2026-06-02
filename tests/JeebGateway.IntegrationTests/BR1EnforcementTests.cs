@@ -188,90 +188,16 @@ public class BR1EnforcementTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     // -----------------------------------------------------------------
-    // 3. POST /users/{id}/switch-role — endpoint tests
+    // 3. (Removed) POST /users/{id}/switch-role endpoint tests.
+    //
+    // The HTTP role-switch surface (RoleSwitchController / UsersRoleController /
+    // UsersController) was removed when jeeb-gateway's user-management
+    // integration was replaced with the exact salehly-gateway mirror
+    // (ServiceUserManagementClient + UserController under /api/User). The
+    // shared IDualRoleService validation it enforced is still covered by the
+    // unit-level tests in sections 1 & 2 above and the offer-accept BR-1 test
+    // in section 4 below.
     // -----------------------------------------------------------------
-
-    [Fact]
-    public async Task SwitchRole_Returns_200_On_Valid_Switch()
-    {
-        var userId = $"api-switch-ok-{Guid.NewGuid()}";
-        SeedDualRoleUser(userId);
-
-        var client = CreateAuthenticatedClient(userId, Roles.Client, Roles.Jeeber);
-        var resp = await client.PostAsJsonAsync($"/users/{userId}/switch-role", new { targetRole = Roles.Jeeber });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var body = await resp.Content.ReadFromJsonAsync<SwitchRoleResponse>();
-        body!.UserId.Should().Be(userId);
-        body.PreviousRole.Should().Be(Roles.Client);
-        body.ActiveRole.Should().Be(Roles.Jeeber);
-    }
-
-    [Fact]
-    public async Task SwitchRole_Returns_409_When_Active_Deliveries_Exist()
-    {
-        var userId = $"api-switch-409-{Guid.NewGuid()}";
-        SeedDualRoleUser(userId);
-
-        var store = _factory.Services.GetRequiredService<IRequestsStore>();
-        await store.CreateAsync(new CreateRequestInput
-        {
-            ClientId = userId,
-            Description = "Blocking delivery"
-        }, CancellationToken.None);
-
-        var client = CreateAuthenticatedClient(userId, Roles.Client, Roles.Jeeber);
-        var resp = await client.PostAsJsonAsync($"/users/{userId}/switch-role", new { targetRole = Roles.Jeeber });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
-    }
-
-    [Fact]
-    public async Task SwitchRole_Returns_400_When_No_TargetRole()
-    {
-        var userId = $"api-switch-400-{Guid.NewGuid()}";
-        SeedDualRoleUser(userId);
-
-        var client = CreateAuthenticatedClient(userId, Roles.Client, Roles.Jeeber);
-        var resp = await client.PostAsJsonAsync<object?>($"/users/{userId}/switch-role", null);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-    }
-
-    [Fact]
-    public async Task SwitchRole_Returns_400_For_Invalid_Role()
-    {
-        var userId = $"api-switch-bad-role-{Guid.NewGuid()}";
-        SeedDualRoleUser(userId);
-
-        var client = CreateAuthenticatedClient(userId, Roles.Client, Roles.Jeeber);
-        var resp = await client.PostAsJsonAsync($"/users/{userId}/switch-role", new { targetRole = "superadmin" });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-    }
-
-    [Fact]
-    public async Task SwitchRole_Returns_401_When_Unauthenticated()
-    {
-        var client = _factory.CreateClient();
-        var resp = await client.PostAsJsonAsync("/users/any-id/switch-role", new { targetRole = Roles.Jeeber });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-    }
-
-    [Fact]
-    public async Task SwitchRole_Returns_403_When_Switching_Another_User()
-    {
-        var callerId = $"caller-{Guid.NewGuid()}";
-        var targetId = $"target-{Guid.NewGuid()}";
-        SeedDualRoleUser(callerId);
-        SeedDualRoleUser(targetId);
-
-        var client = CreateAuthenticatedClient(callerId, Roles.Client, Roles.Jeeber);
-        var resp = await client.PostAsJsonAsync($"/users/{targetId}/switch-role", new { targetRole = Roles.Jeeber });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
-    }
 
     // -----------------------------------------------------------------
     // 4. Offer-accept BR-1: Jeeber cannot accept own request
@@ -302,23 +228,12 @@ public class BR1EnforcementTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     // -----------------------------------------------------------------
-    // 5. UserProfileResponse includes ActiveRole
+    // 5. (Removed) GET /users/me ActiveRole field test — the /users/me
+    //    profile surface lived in the removed UsersController. The
+    //    salehly-mirror UserController exposes GET /api/User/profile instead,
+    //    proxied to user-management; ActiveRole is no longer a gateway-owned
+    //    projection.
     // -----------------------------------------------------------------
-
-    [Fact]
-    public async Task GetMe_Returns_ActiveRole_Field()
-    {
-        var userId = $"profile-role-{Guid.NewGuid()}";
-        SeedDualRoleUser(userId);
-
-        var client = CreateAuthenticatedClient(userId, Roles.Client, Roles.Jeeber);
-        var resp = await client.GetAsync("/users/me");
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var body = await resp.Content.ReadAsStringAsync();
-        body.Should().Contain("activeRole");
-        body.Should().Contain("customer");
-    }
 
     // -----------------------------------------------------------------
     // Helpers

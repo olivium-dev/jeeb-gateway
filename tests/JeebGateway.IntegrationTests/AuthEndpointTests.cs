@@ -133,55 +133,15 @@ public class AuthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 
-    [Fact]
-    public async Task Suspension_Revokes_All_Sessions_Including_Newly_Rotated_Ones()
-    {
-        Seed(new UserProfile
-        {
-            Id = "u-auth-suspend",
-            Phone = "+96550003333",
-            Name = "Lara",
-            Roles = new List<string> { "customer" },
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow
-        });
-
-        var session = await Issue("u-auth-suspend");
-
-        // Rotate once so we can prove the new (post-rotation) token is also
-        // killed by suspension — not just the original one.
-        var rotated = await _factory.CreateClient()
-            .PostAsJsonAsync("/auth/refresh", new { refreshToken = session.RefreshToken });
-        rotated.EnsureSuccessStatusCode();
-        var after = await rotated.Content.ReadFromJsonAsync<TokenPairResponse>();
-
-        var admin = _factory.CreateClient();
-        admin.DefaultRequestHeaders.Add("X-User-Id", "admin-auth");
-        admin.DefaultRequestHeaders.Add("X-User-Roles", "admin");
-
-        var suspend = await admin.PatchAsJsonAsync(
-            "/admin/users/u-auth-suspend/suspend", new { reason = "auth-test" });
-        suspend.StatusCode.Should().Be(HttpStatusCode.OK);
-
-        (await Refresh(after!.RefreshToken)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-    }
-
-    [Fact]
-    public async Task Password_Change_Kills_Sessions_That_Refresh_Through_The_Auth_Endpoint()
-    {
-        var session = await Issue("u-auth-pw");
-
-        var caller = _factory.CreateClient();
-        caller.DefaultRequestHeaders.Add("X-User-Id", "u-auth-pw");
-        var pw = await caller.PostAsJsonAsync("/users/me/password", new
-        {
-            currentPassword = "old-password-1",
-            newPassword = "new-password-2"
-        });
-        pw.StatusCode.Should().Be(HttpStatusCode.NoContent);
-
-        (await Refresh(session.RefreshToken)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-    }
+    // -----------------------------------------------------------------
+    // Org-wide revocation TRIGGER tests removed with the user-management
+    // literal replace. The triggers — PATCH /admin/users/{id}/suspend
+    // (AdminUsersController) and POST /users/me/password (UsersController) —
+    // no longer exist; user-management is proxied via
+    // UserController/ServiceUserManagementClient. Single-session revocation
+    // through /auth/logout and rotation through /auth/refresh remain covered
+    // by the tests above.
+    // -----------------------------------------------------------------
 
     // -----------------------------------------------------------------
     // Helpers
@@ -197,10 +157,4 @@ public class AuthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 
     private Task<HttpResponseMessage> Refresh(string refreshToken) =>
         _factory.CreateClient().PostAsJsonAsync("/auth/refresh", new { refreshToken });
-
-    private void Seed(UserProfile profile)
-    {
-        var store = _factory.Services.GetRequiredService<InMemoryUsersStore>();
-        store.Seed(profile);
-    }
 }

@@ -1,8 +1,6 @@
 using System.Text;
 using JeebGateway.Admin;
-using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Availability;
-using JeebGateway.Chat;
 using JeebGateway.Disputes;
 using JeebGateway.Disputes.V2;
 using JeebGateway.Extensions;
@@ -26,9 +24,7 @@ using JeebGateway.Tokens;
 using JeebGateway.Tracking;
 using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
-using JeebGateway.Users.RoleSwitch;
 using JeebGateway.Calls;
-using JeebGateway.Wallet;
 using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -145,7 +141,6 @@ builder.Services.AddCors(options =>
 builder.Services.AddJeebRateLimiting();
 
 builder.Services.AddControllers();
-builder.Services.AddSignalR();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -186,8 +181,202 @@ builder.Services.AddHealthChecks()
 // silently skip — local dev does not have to spin up every backend.
 // ---------------------------------------------------------------------------
 builder.Services.AddBffAggregation(builder.Configuration);
+// AddDownstreamClients also registers the typed IContractSigningServiceClient
+// (contract-signing-service / immutable contract templates + per-party
+// signatures; consumed by ContractSigningController, gated by
+// FeatureFlags:UseUpstream:ContractSigning which defaults OFF — the service is
+// not yet deployed, BaseUrl is a placeholder). It serves the versioned Jeeb ToS
+// template jeeb_tos_v1 (JEB-40/JEB-41) via RegisterTemplateAsync/SignAsync. See
+// the contract-signing block in Extensions/ServiceClientExtensions.cs.
+// AddDownstreamClients also registers the typed IFormBuilderServiceClient
+// (form-builder-service / dynamic forms; consumed by FormBuilderController,
+// gated by FeatureFlags:UseUpstream:FormBuilder which defaults OFF — the
+// service is not yet deployed, BaseUrl is a placeholder). See the form-builder
+// block in Extensions/ServiceClientExtensions.cs.
 builder.Services.AddDownstreamClients(builder.Configuration);
 builder.Services.AddDownstreamHealthChecks(builder.Configuration, builder.Environment);
+
+// EXACT-SALEHLY MIRROR (RemoteUserPreferences): UserPreferencesController consumes
+// the NSwag-generated ServiceRemoteUserPreferencesClient directly, exactly as
+// salehly-gateway does (Program.cs:207-213). The client is scoped and built from
+// the "remote-user-preferences" named HttpClient (which carries the standard
+// bearer/X-Service-Auth/resilience pipeline) with its baseUrl read from salehly's
+// config key RemoteUserPreferencesServiceApi:BaseUrl (prod: http://192.168.2.50:10067/).
+// There is NO UseUpstream flag gate on this controller — salehly's controller
+// always forwards to the upstream (no 503-without-calling path).
+builder.Services.AddScoped<JeebGateway.Services.Generated.ServiceRemoteUserPreferences.ServiceRemoteUserPreferencesClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("remote-user-preferences");
+    var baseUrl = builder.Configuration["RemoteUserPreferencesServiceApi:BaseUrl"];
+    return new JeebGateway.Services.Generated.ServiceRemoteUserPreferences.ServiceRemoteUserPreferencesClient(baseUrl, client);
+});
+
+// Chat (ChatServiceApi) — salehly sibling mirror. The NSwag-generated
+// ServiceChatClient (Services/ServiceChatClient.cs, namespace
+// JeebGateway.service.ServiceChat) is registered exactly as salehly-gateway does
+// it: a named IHttpClientFactory client "ServiceChatClient" bound to
+// ChatServiceApi:BaseUrl, plus a scoped typed-client instance that pulls the
+// pooled HttpClient from the factory and constructs the client with the
+// configured base URL. ChatController consumes the typed client directly as a
+// passthrough REST shim over the generic chat-service (channels, messages,
+// members, sessions). This replaces the former jeeb-specific 1:1 conversation
+// BFF (ChatServiceClient + Redis topology map + SignalR ChatHub/ChatDispatcher),
+// which has been removed.
+builder.Services.AddHttpClient("ServiceChatClient", client =>
+{
+    var apiUrl = builder.Configuration["ChatServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServiceChat.ServiceChatClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceChatClient");
+    var baseUrl = builder.Configuration["ChatServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceChat.ServiceChatClient(baseUrl, client);
+});
+
+// Notification (ServiceNotificationClient) — salehly sibling mirror. The
+// NSwag-generated ServiceNotificationClient (Services/ServiceNotificationClient.cs,
+// namespace JeebGateway.service.ServiceNotification) is registered exactly as
+// salehly-gateway does it: a named IHttpClientFactory client
+// "ServiceNotificationClient" bound to the ServiceNotificationClient:BaseUrl
+// config key, plus a scoped typed-client instance that pulls the pooled
+// HttpClient from the factory and constructs the client with the configured base
+// URL. NotificationController consumes the typed client directly as a passthrough
+// REST shim over the generic notification-service (list-by-receiver,
+// mark-read/unread, bulk mark, health). This replaces the former jeeb-specific
+// notification read BFF (NotificationServiceClient + INotificationServiceClient +
+// NotificationsController under /users/me/notifications), which has been removed.
+//
+// NOTE on the config key: salehly registers the named client against config key
+// "ServiceNotificationClient" (Program.cs:122) but its scoped registration reads
+// "NotificationServiceApi:BaseUrl" (Program.cs:242) — a key that does not exist
+// in salehly's appsettings, so salehly's client receives a null base URL. jeeb
+// uses the CORRECT key "ServiceNotificationClient:BaseUrl" in BOTH places so the
+// client actually resolves the upstream address.
+builder.Services.AddHttpClient("ServiceNotificationClient", client =>
+{
+    var apiUrl = builder.Configuration["ServiceNotificationClient:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServiceNotification.ServiceNotificationClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceNotificationClient");
+    var baseUrl = builder.Configuration["ServiceNotificationClient:BaseUrl"];
+    return new JeebGateway.service.ServiceNotification.ServiceNotificationClient(baseUrl, client);
+});
+
+// PushNotification (ServicePushNotificationClient) — salehly sibling mirror.
+// The NSwag-generated ServicePushNotificationClient
+// (Services/ServicePushNotificationClient.cs, namespace
+// JeebGateway.service.ServicePushNotification) is registered exactly as
+// salehly-gateway does it (Program.cs:119 + Program.cs:214): a named
+// IHttpClientFactory client "ServicePushNotificationClient" bound to the
+// PushNotificationServiceApi:BaseUrl config key, plus a scoped typed-client
+// instance that pulls the pooled HttpClient from the factory and constructs the
+// client with the configured base URL. PushNotificationController consumes the
+// typed client directly as a passthrough REST shim over the generic
+// push-notification service (register/delete device, send-to-device/user,
+// broadcast, health). This replaces the former jeeb-specific device-register
+// passthrough (PushController + IPushNotificationClient + PushNotificationClient),
+// which has been removed.
+builder.Services.AddHttpClient("ServicePushNotificationClient", client =>
+{
+    var apiUrl = builder.Configuration["PushNotificationServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePushNotificationClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServicePushNotificationClient");
+    var baseUrl = builder.Configuration["PushNotificationServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServicePushNotification.ServicePushNotificationClient(baseUrl, client);
+});
+
+// Feedback (ServiceFeedbackClient) — salehly sibling mirror.
+// The NSwag-generated ServiceFeedbackClient
+// (Services/Clients/ServiceFeedbackClient.cs, namespace
+// JeebGateway.service.ServiceFeedback) is registered exactly as salehly-gateway
+// does it (Program.cs:112 ConfigureNamedClient + Program.cs:159 scoped factory):
+// a named IHttpClientFactory client "ServiceFeedbackClient" bound to the
+// FeedbackServiceApi:BaseUrl config key, plus a scoped typed-client instance
+// that pulls the pooled HttpClient from the factory and constructs the client
+// with the configured base URL. FeedbackController consumes the typed client
+// directly (comment CRUD, grouped, rating) as a passthrough REST shim over the
+// feedback-service. This replaces the former jeeb-specific hand-coded
+// IFeedbackServiceClient / FeedbackServiceClient (3-method submit+read seam),
+// which has been removed.
+//
+// The technician-review endpoint additionally orchestrates catalog-service and
+// user-management-service, so their NSwag clients are registered the same way
+// (named + scoped, bound to CatalogServiceApi / UserManagementServiceApi),
+// matching salehly Program.cs:115/113 + 183/167. These two are byte-faithful
+// salehly NSwag artifacts consumed ONLY by TechnicianReviewService — no other
+// jeeb code depends on them; the jeeb auth/role-switch surfaces keep their own
+// hand-coded user-management clients.
+builder.Services.AddHttpClient("ServiceFeedbackClient", client =>
+{
+    var apiUrl = builder.Configuration["FeedbackServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServiceFeedback.ServiceFeedbackClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceFeedbackClient");
+    var baseUrl = builder.Configuration["FeedbackServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceFeedback.ServiceFeedbackClient(baseUrl, client);
+});
+
+builder.Services.AddHttpClient("ServiceCatalogClient", client =>
+{
+    var apiUrl = builder.Configuration["CatalogServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServiceCatalog.ServiceCatalogClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceCatalogClient");
+    var baseUrl = builder.Configuration["CatalogServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceCatalog.ServiceCatalogClient(baseUrl, client);
+});
+
+builder.Services.AddHttpClient("ServiceUserManagementClient", client =>
+{
+    var apiUrl = builder.Configuration["UserManagementServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceUserManagementClient");
+    var baseUrl = builder.Configuration["UserManagementServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient(baseUrl, client);
+});
+
+// Technician-review orchestrator (feedback + catalog + user-management),
+// matching salehly Program.cs:254. Scoped because it depends on the scoped
+// NSwag clients above.
+builder.Services.AddScoped<JeebGateway.Services.ITechnicianReviewService, JeebGateway.Services.TechnicianReviewService>();
 
 // T-migrate-gateway-proxies (PR-A): per-service kill switches. Each
 // controller migrated in this PR checks the matching flag and falls
@@ -207,9 +396,6 @@ builder.Services.AddOpenTelemetry()
         tracing
             .AddAspNetCoreInstrumentation()
             .AddHttpClientInstrumentation()
-            // T-BE-001 / JEB-471 — OTP sign-in spans
-            // (auth.otp.request / auth.otp.verify / auth.refresh).
-            .AddSource(OtpSignInActivitySource.Name)
             // T-BE-028 / JEB-64 — dispute case open / resolve spans.
             .AddSource(DisputeCaseTelemetry.ActivitySourceName)
             .AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
@@ -287,28 +473,52 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 //
 // SettlementService re-computes the Jeeb fee (commission % per tier +
 // 2% insurance, min 1000 LBP) from the row's tier and posts a single
-// ledger entry to wallet-service via the real WalletServiceClient. The
-// in-memory record-of-truth fallback has been removed (Batch 1 thin-wire):
-// the gateway is a pure BFF, so the wallet ledger / balances always route
-// to the owning wallet-service. BaseAddress is bound lazily from
-// Services:Wallet[:BaseUrl] (real host set in appsettings.Production.json);
-// when unconfigured the client fails closed on first use rather than
-// silently serving local state. The typed client carries its own
-// bearer-forwarding + X-Service-Auth + resilience pipeline (the named
-// "wallet" client's chain is NOT inherited by a typed registration).
+// best-effort ledger entry via ISettlementLedgerClient. The settlement row
+// is the gateway-side system of record; the ledger post is idempotent on the
+// settlement id. Cash settlement is a Jeeb product concern and keeps its own
+// slim ledger contract in the Financials module — it does NOT ride on the
+// wallet integration, which now mirrors the salehly-gateway sibling's
+// upstream wallet API byte-for-byte (WalletController + ServiceWalletClient).
 builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
-JeebGateway.Extensions.ServiceClientExtensions.AttachWalletPipeline(
-    builder.Services.AddHttpClient<IWalletServiceClient, WalletServiceClient>(http =>
-    {
-        var walletBaseUrl = builder.Configuration["Services:Wallet:BaseUrl"]
-            ?? builder.Configuration["Services:Wallet"];
-        if (!string.IsNullOrWhiteSpace(walletBaseUrl))
-        {
-            http.BaseAddress = new Uri(walletBaseUrl!.TrimEnd('/') + "/");
-        }
-        http.Timeout = TimeSpan.FromSeconds(30);
-    }));
+builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
+
+// ===========================================================================
+// Wallet integration — EXACT mirror of the salehly-gateway sibling.
+//
+// jeeb-gateway proxies all wallet traffic through the NSwag-generated
+// ServiceWalletClient (Services/ServiceWalletClient.cs, namespace
+// JeebGateway.service.ServiceWallet) exactly as salehly-gateway does. The
+// client is a named IHttpClientFactory client bound to WalletServiceApi:BaseUrl
+// via ConfigureNamedClient, with a scoped typed-client instance that hands the
+// named HttpClient to the generated constructor.
+//
+// Controllers/WalletController.cs is the byte-faithful salehly WalletController
+// (routes under /api/Wallet: system-wallet, holder/add, holder/{holderId}/Add,
+// {holderId}/{walletId}/deactivate{,/force-deactivate},
+// holder/{holderId}/deactivate{,/force-deactivate}, holder/wallets[authorized]).
+// ===========================================================================
+void ConfigureNamedClient(string name, string configKey)
+{
+    builder.Services.AddHttpClient(name, client =>
+    {
+        var apiUrl = builder.Configuration[$"{configKey}:BaseUrl"];
+        if (!string.IsNullOrEmpty(apiUrl))
+        {
+            client.BaseAddress = new Uri(apiUrl);
+        }
+    });
+}
+
+ConfigureNamedClient("ServiceWalletClient", "WalletServiceApi");
+
+builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceWalletClient");
+    var baseUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceWallet.ServiceWalletClient(baseUrl, client);
+});
 
 // Notification preferences (T-backend-031).
 // In-memory implementation for MVP; swap for an NSwag-generated notification-service
@@ -330,10 +540,13 @@ builder.Services.AddSingleton<INotificationPreferencesStore, InMemoryNotificatio
 // in-memory device-token store becomes a Postgres-backed implementation
 // alongside the per-user row in 0006.
 builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOptions.SectionName));
-// Batch 1 thin-wire: the REGISTER path now routes to the real push-notification
-// service when FeatureFlags:UseUpstream:Push is true (PushController →
-// IPushNotificationClient → PUT /api/v1/register). InMemoryDeviceTokenStore is
-// deliberately KEPT because the SEND path (PushNotificationService fan-out) still
+// The device-register HTTP surface is now the salehly-mirrored
+// PushNotificationController, backed by the NSwag ServicePushNotificationClient
+// (registered below as a named + scoped client). The former jeeb-specific
+// PushController + IPushNotificationClient device-register passthrough was removed
+// with the salehly mirror. InMemoryDeviceTokenStore is deliberately KEPT because
+// the SEND path (PushNotificationService fan-out, consumed by KycService,
+// ChatDispatcher, DisputeService, RatingRevealJob, PushAutoOfflineNotifier) still
 // reads device tokens from it — that is a separate C-domain (push transport /
 // retry / SLA) with no upstream owner yet. Do not delete this store until the
 // push-transport service lands; deleting it now would break the send pipeline.
@@ -518,11 +731,12 @@ builder.Services.AddSingleton<IDisputeService, DisputeService>();
 builder.Services.Configure<DisputeEvidenceOptions>(
     builder.Configuration.GetSection(DisputeEvidenceOptions.SectionName));
 builder.Services.AddSingleton<IDisputeCaseStore, InMemoryDisputeCaseStore>();
-// Scoped (was singleton): the evidence orchestrator now reads the chat transcript
-// through the typed IChatServiceClient (an IHttpClientFactory client), so it must
-// not be captured by a singleton. The dispute case service depends on the
-// orchestrator and is resolved per-request by DisputeCasesController, so both move
-// to scoped together. Their other deps are singletons (safe to inject into scoped).
+// Scoped: the dispute case service depends on the evidence orchestrator and is
+// resolved per-request by DisputeCasesController, so both are scoped together.
+// The orchestrator's deps (ILocationStore, IRequestsStore) are singletons (safe
+// to inject into a scoped service). Chat-transcript capture was removed with the
+// gateway chat BFF client (salehly mirror), so the orchestrator no longer holds a
+// typed chat HttpClient.
 builder.Services.AddScoped<IDisputeEvidenceOrchestrator, DisputeEvidenceOrchestrator>();
 builder.Services.AddScoped<IDisputeCaseService, DisputeCaseService>();
 
@@ -590,11 +804,10 @@ builder.Services.Configure<DataExportOptions>(builder.Configuration.GetSection(D
 builder.Services.AddSingleton<IDataExportStore, InMemoryDataExportStore>();
 builder.Services.AddSingleton<InMemoryDataExportRatingsProvider>();
 builder.Services.AddSingleton<IDataExportRatingsProvider>(sp => sp.GetRequiredService<InMemoryDataExportRatingsProvider>());
-// Chat history for GDPR export reads through the BFF chat client (the in-memory
-// provider has been DELETED). Scoped to match the typed IChatServiceClient
-// lifetime (an IHttpClientFactory client). See provider doc for the documented
-// per-user enumeration limitation pending a generic list-channels-for-member
-// chat-service endpoint.
+// Chat history for GDPR export. The gateway no longer carries a chat BFF client
+// (removed with the salehly mirror), so this provider returns an empty transcript
+// and logs the documented per-user enumeration limitation pending a generic
+// list-channels-for-member chat-service endpoint.
 builder.Services.AddScoped<IDataExportChatHistoryProvider, ChatServiceDataExportChatHistoryProvider>();
 builder.Services.AddSingleton<InMemoryDataExportNotifier>();
 builder.Services.AddSingleton<IDataExportNotifier>(sp => sp.GetRequiredService<InMemoryDataExportNotifier>());
@@ -620,50 +833,36 @@ builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 
 // ===========================================================================
-// T-BE-001 / JEB-471 — OTP sign-in via olivium-dev/one-time-password
-// (Twilio) + olivium-dev/user-management (sibling T-BE-001a).
+// User-management integration — EXACT mirror of the salehly-gateway sibling.
 //
-// Registers:
-//   - JeebJwtOptions / GatewayRateLimitOptions / UserManagementApiOptions /
-//     ServiceOtpApiOptions  (Options pattern + ValidateOnStart)
-//   - IPhoneNormalizer (libphonenumber-csharp, region=LB)
-//   - IPhoneHasher (HMAC-SHA256 with JeebJwt:PhonePepper; PR #32 review B1)
-//   - IOtpRequestRateLimiter (sliding-minute 10/IP + 3/phone)
-//   - IRefreshTokenFamilyStore (in-memory; production swap → Postgres)
-//   - IJeebJwtIssuer (HS512, access 1h, refresh 30d, family rotation)
-//   - IUserManagementPhoneIdentityClient (fail-closed shim until T-BE-001a)
+// jeeb-gateway proxies all user-management traffic through the NSwag-generated
+// ServiceUserManagementClient (Services/ServiceUserManagementClient.cs,
+// namespace JeebGateway.service.ServiceUserManagement) exactly as
+// salehly-gateway does. The client is a named IHttpClientFactory client bound
+// to UserManagementServiceApi:BaseUrl, with a scoped typed-client instance that
+// hands the named HttpClient to the generated constructor.
 //
-// AuthOtpController routes:
-//   POST /v1/auth/otp/request
-//   POST /v1/auth/otp/verify
-//   POST /v1/auth/refresh
-//
-// Frozen ProblemDetails type set (AC-ProblemTypeSet):
-//   invalid_otp, too_many_attempts, invalid_country, rate_limited, invalid_phone
+// Controllers/UserController.cs is the byte-faithful salehly UserController
+// (routes under /api/User: check, all, register, login, token-login,
+// user-id-login, logout, social, forgot, reset, profile{,/update}, device
+// register/unregister, payment auth-token issue/validate, bulk email delete).
 // ===========================================================================
-builder.Services.AddJeebOtpSignIn(builder.Configuration, builder.Environment);
+builder.Services.AddHttpClient("ServiceUserManagementClient", client =>
+{
+    var apiUrl = builder.Configuration["UserManagementServiceApi:BaseUrl"];
+    if (!string.IsNullOrEmpty(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
 
-// ===========================================================================
-// T-BE-003 / JEB-39 — role-switch endpoint POST /v1/users/me/role/switch
-//
-// Registers IUserManagementRoleSwitchClient with the in-memory MVP shim
-// (InMemoryUserManagementRoleSwitchClient). The MVP shim is keyed by Guid
-// userId and tracks (available_roles, active_role, active_role_changed_at)
-// in process; integration tests seed users via the concrete singleton.
-//
-// Production wiring (TODO T-backend-bff-user — see ServiceClientExtensions)
-// swaps this registration with an HTTP adapter over the NSwag-generated
-// UserManagementClient calling
-//   PATCH /api/User/{id}/active-role  (added by T-BE-002, JEB-38)
-// behind the standard Polly resilience pipeline.
-//
-// UsersRoleController consumes this client plus IJeebJwtIssuer (registered
-// by AddJeebOtpSignIn above) to mint a fresh HS512 token pair carrying the
-// new active_role claim on every successful switch.
-// ===========================================================================
-builder.Services.AddSingleton<InMemoryUserManagementRoleSwitchClient>();
-builder.Services.AddSingleton<IUserManagementRoleSwitchClient>(sp =>
-    sp.GetRequiredService<InMemoryUserManagementRoleSwitchClient>());
+builder.Services.AddScoped<JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceUserManagementClient");
+    var baseUrl = builder.Configuration["UserManagementServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient(baseUrl, client);
+});
 
 // Jeeber availability toggle + auto-offline sweeper (T-backend-023).
 // In-memory implementations stand in for the durable Postgres row, the
@@ -723,20 +922,13 @@ builder.Services.AddHostedService<AutoOfflineSweeper>();
 builder.Services.Configure<TrackingOptions>(builder.Configuration.GetSection(TrackingOptions.SectionName));
 builder.Services.AddSingleton<ILocationStore, InMemoryLocationStore>();
 
-// Real-time chat (T-backend-012).
-// SignalR hub at /hubs/chat delivers each message under the 1s WS SLA to the
-// conversation group; backgrounded recipients (no live hub connection or
-// client-reported background state) fall back to the T-backend-022 push pipeline.
-//
-// The in-memory message record-of-truth has been DELETED: the dispatcher now
-// persists every message to the GENERIC chat-service via IChatServiceClient (the
-// gateway is a pure BFF). Presence remains an in-memory singleton (live socket
-// state). The dispatcher is SCOPED because it depends on the typed
-// IChatServiceClient (an IHttpClientFactory client) — a singleton would capture
-// the typed client and pin its handler chain (no DNS/handler rotation, captive
-// dependency). The dispatcher is stateless, so scoped is correct.
-builder.Services.AddSingleton<IChatPresenceTracker, InMemoryChatPresenceTracker>();
-builder.Services.AddScoped<IChatDispatcher, ChatDispatcher>();
+// Real-time chat (T-backend-012) — REMOVED.
+// The jeeb-specific SignalR hub (/hubs/chat), ChatDispatcher, and in-memory
+// presence tracker have been removed in favour of the salehly sibling mirror:
+// ChatController is now a stateless passthrough REST shim over the generic
+// chat-service via the NSwag ServiceChatClient (registered above). Real-time
+// fan-out is a chat-service / realtime-communication-service concern, not a
+// gateway one.
 
 // Wave 2-3 backend services.
 // T-backend-017: Weekly settlement batch processing.
@@ -773,9 +965,6 @@ builder.Services.AddHostedService<JeebGateway.Ratings.LowRatingAutoFlag>();
 builder.Services.Configure<JeebGateway.Calls.MaskedCallOptions>(
     builder.Configuration.GetSection(JeebGateway.Calls.MaskedCallOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Calls.IMaskedCallService, JeebGateway.Calls.MaskedCallService>();
-
-// T-backend-045: In-app wallet and top-up (Phase 2).
-builder.Services.AddSingleton<JeebGateway.Wallet.IInAppWalletService, JeebGateway.Wallet.InAppWalletService>();
 
 // Resilient Whisper integration (T-backend-036).
 // Per-attempt 10s timeout enforced via linked CTS inside ResilientTranscriptionService;
@@ -889,10 +1078,6 @@ app.UseCors(corsPolicyName);
 app.UseAuthentication();
 app.UseAuthorization();
 
-// T-backend-041: inject the user's persisted active role into HttpContext.Items
-// and reject tokens with a stale active_role claim.
-app.UseMiddleware<ActiveRoleMiddleware>();
-
 // Rate limiter must run after authentication so the per-user partition can
 // read the JWT sub claim.
 app.UseRateLimiter();
@@ -903,9 +1088,6 @@ app.MapControllers();
 // snapshot for the configured MeterProvider (ASP.NET Core HTTP server,
 // HttpClient, and the Jeeb-owned RequestLatencyMetrics histogram).
 app.MapPrometheusScrapingEndpoint("/metrics");
-
-// Real-time chat WebSocket surface (T-backend-012).
-app.MapHub<ChatHub>("/hubs/chat");
 
 // Health endpoints — three distinct surfaces.
 //

@@ -29,6 +29,21 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.11" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
+    <!--
+      Newtonsoft.Json — required by every NSwag-generated salehly mirror client
+      (jsonLibrary:Newtonsoft): ServiceRemoteUserPreferencesClient,
+      ServiceWalletClient, ServiceChatClient, ServiceNotificationClient,
+      ServicePushNotificationClient, and the feedback-track mirrors
+      Service{Feedback,Catalog,UserManagement}Client, plus the other
+      Service*Client.cs mirrors. salehly-gateway carries this dependency; the
+      exact-mirror clients use it for (de)serialization via
+      Newtonsoft.Json.JsonConvert (unlike jeeb's System.Text.Json NSwag clients).
+      Single reference — consolidated when the wallet/chat/notification/
+      pushnotification/feedback exact-salehly branches were merged (each had added
+      its own duplicate; NU1504). Pinned to 13.0.3 to match the generator's
+      declared Newtonsoft.Json v13.0.0.0 contract.
+    -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.9.0" />
@@ -48,26 +63,18 @@
     <PackageReference Include="AspNetCore.HealthChecks.Uris" Version="8.0.1" />
 
     <!--
-      Redis-backed chat topology map (RedisChatTopologyMap). Holds the
-      channel<->conversation id-map (userId->memberId, sortedPair->channel/sessions)
-      that the gateway must resolve on every chat send/history because the GENERIC
-      chat-service exposes no lookup-by-external-id. In-memory was lost on restart
-      and not multi-replica safe; Redis (native 192.168.2.50:6379, real value only
-      in appsettings.Production.json) makes it durable + shared. The InMemory
-      fallback is selected when Redis:ConnectionString is absent (dev/test).
+      StackExchange.Redis — backs the shared-cache paths that survive the
+      exact-salehly migrations: the distributed external-OTP attempt counter and
+      the IConnectionMultiplexer wired in Extensions/ServiceClientExtensions.cs,
+      plus the refresh-token store (Tokens/InMemoryRefreshTokenStore.cs) Redis
+      fallback. (The former RedisChatTopologyMap consumer was removed by the
+      chat-exact migration; the OTP sign-in / libphonenumber phone-normalisation
+      consumer was removed by the um-exact migration — but Redis itself is still
+      required.) Real connection string only in appsettings.Production.json; the
+      InMemory fallback is selected when Redis:ConnectionString is absent
+      (dev/test).
     -->
     <PackageReference Include="StackExchange.Redis" Version="2.8.16" />
-
-    <!--
-      T-BE-001 / JEB-471 — OTP sign-in path.
-      libphonenumber-csharp normalises +961 / 00961 / 0079... → canonical E.164
-      and surfaces the RegionCode used by AC-PhoneNorm to reject non-LB phones.
-      Phone hashing uses HMAC-SHA256 from System.Security.Cryptography with a
-      server-side pepper (JeebJwt:PhonePepper). PR #32 review B1 — the prior
-      bcrypt-on-phone implementation generated a random salt per call so the
-      phone.hash tag could not correlate; HMAC-SHA256 restores determinism.
-    -->
-    <PackageReference Include="libphonenumber-csharp" Version="8.13.51" />
   </ItemGroup>
 
 </Project>

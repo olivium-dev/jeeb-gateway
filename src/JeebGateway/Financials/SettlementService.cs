@@ -1,5 +1,4 @@
 using JeebGateway.Requests;
-using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Logging;
 
 namespace JeebGateway.Financials;
@@ -17,14 +16,14 @@ public sealed class SettlementService : ISettlementService
 
     private readonly ISettlementStore _store;
     private readonly IRequestsStore _requests;
-    private readonly IWalletServiceClient _wallet;
+    private readonly ISettlementLedgerClient _wallet;
     private readonly TimeProvider _clock;
     private readonly ILogger<SettlementService> _log;
 
     public SettlementService(
         ISettlementStore store,
         IRequestsStore requests,
-        IWalletServiceClient wallet,
+        ISettlementLedgerClient wallet,
         TimeProvider clock,
         ILogger<SettlementService> log)
     {

@@ -1,9 +1,7 @@
-using System.Threading;
 using JeebGateway.Services.Bff;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
-using StackExchange.Redis;
 
 namespace JeebGateway.Extensions;
 
@@ -59,22 +57,21 @@ public static class ServiceClientExtensions
         //   migrates: AuthController, TokensController (currently in-memory)
         AddNamedDownstreamClient(services, config, "auth", "Services:Auth:BaseUrl");
 
-        // chat-service — GENERIC member/channel/session/message API. The Jeeb
-        //   1:1 conversation aggregation lives in ChatServiceClient (BFF), which
-        //   calls only the generic routes below. No product-specific chat surface
-        //   exists on the shared chat-service.
-        //   migrates: ChatController (REST send/history) + SignalR fan-out.
-        AddNamedDownstreamClient(services, config, "chat", "Services:Chat:BaseUrl");
+        // chat-service — registered separately as the salehly-style named client
+        //   "ServiceChatClient" (ChatServiceApi:BaseUrl) in Program.cs, consumed by
+        //   the NSwag ServiceChatClient that ChatController passes through. It is
+        //   NOT part of this named-downstream-client set (no bearer/ServiceAuth
+        //   pipeline), matching salehly-gateway exactly.
 
         // TODO(T-backend-bff-user): user-management — wire NSwag-generated UserManagementClient
         //   contract: src/JeebGateway/contracts/user-management.openapi.json
         //   migrates: UsersController, AdminUsersController (currently InMemoryUsersStore)
         AddNamedDownstreamClient(services, config, "user-management", "Services:UserManagement:BaseUrl");
 
-        // TODO(T-backend-bff-wallet): wallet-service — wire NSwag-generated WalletServiceClient
-        //   contract: src/JeebGateway/contracts/wallet-service.openapi.json
-        //   migrates: (no existing controller — net-new wallet endpoints will consume it)
-        AddNamedDownstreamClient(services, config, "wallet", "Services:Wallet:BaseUrl");
+        // wallet-service is wired in Program.cs as a salehly-mirrored named
+        // IHttpClientFactory client ("ServiceWalletClient" bound to
+        // WalletServiceApi:BaseUrl) + scoped ServiceWalletClient typed client,
+        // not via this generic named-downstream helper.
 
         // matching (FastAPI) — DB-backed read of a user's match preferences
         //   (GET /api/v1/matches/{user_id}), consumed by MatchingController's
@@ -82,20 +79,24 @@ public static class ServiceClientExtensions
         //   delivery-service; see IDeliveryServiceClient.RunMatchingAsync.
         AddNamedDownstreamClient(services, config, "matching", "Services:Matching:BaseUrl");
 
-        // TODO(T-backend-bff-notification): notification-service (FastAPI) — wire NotificationServiceClient
-        //   contract: src/JeebGateway/contracts/notification-service.openapi.json
-        //   migrates: NotificationPreferencesController, request-expiry notifier targets
-        AddNamedDownstreamClient(services, config, "notification", "Services:Notification:BaseUrl");
+        // notification-service — registered separately as the salehly-style named
+        //   client "ServiceNotificationClient" (ServiceNotificationClient:BaseUrl)
+        //   in Program.cs, consumed by the NSwag ServiceNotificationClient that
+        //   NotificationController passes through. It is NOT part of this
+        //   named-downstream-client set (no bearer/ServiceAuth pipeline), matching
+        //   salehly-gateway exactly.
 
         // TODO(T-backend-bff-geo): geolocation-service (FastAPI) — wire GeolocationServiceClient
         //   contract: src/JeebGateway/contracts/geolocation-service.openapi.json
         //   migrates: LocationController, AdminZonesController (currently InMemoryLocationStore + InMemoryGeoIndex)
         AddNamedDownstreamClient(services, config, "geolocation", "Services:Geolocation:BaseUrl");
 
-        // TODO(T-backend-bff-push): push-notification (FastAPI) — wire PushNotificationClient
-        //   contract: src/JeebGateway/contracts/push-notification.openapi.json
-        //   migrates: PushController (currently FcmPushTransport + InMemoryPushTransport)
-        AddNamedDownstreamClient(services, config, "push-notification", "Services:PushNotification:BaseUrl");
+        // push-notification — registered separately as the salehly-style named
+        //   client "ServicePushNotificationClient" (PushNotificationServiceApi:BaseUrl)
+        //   in Program.cs, consumed by the NSwag ServicePushNotificationClient that
+        //   PushNotificationController passes through. It is NOT part of this
+        //   named-downstream-client set (no bearer/ServiceAuth pipeline), matching
+        //   salehly-gateway exactly.
 
         // TODO(T-backend-bff-delivery): delivery-service (Go) — wire DeliveryServiceClient
         //   contract: src/JeebGateway/contracts/delivery-service.openapi.json
@@ -114,12 +115,14 @@ public static class ServiceClientExtensions
         AddNamedDownstreamClient(services, config, "otp", "Services:ServiceOTP:BaseUrl");
 
         // remote-user-preferences — the fleet-wide user-preference store
-        // (internal port 10023; jeeb host port 10067). Net-new wire: the gateway
-        // never held a preferences store, so there is nothing to delete. The
-        // named registration carries BaseAddress (Services:RemoteUserPreferences:BaseUrl)
-        // + the standard resilience pipeline; the typed IUserPreferencesClient
-        // below hangs off it.
-        AddNamedDownstreamClient(services, config, "remote-user-preferences", "Services:RemoteUserPreferences:BaseUrl");
+        // (internal port 10023; jeeb host port 10067). EXACT-SALEHLY MIRROR: the
+        // typed BFF client (IUserPreferencesClient) was removed in favour of the
+        // NSwag-generated salehly client ServiceRemoteUserPreferencesClient, which
+        // is registered as a SCOPED named client in Program.cs against the
+        // RemoteUserPreferencesServiceApi:BaseUrl config key (salehly's key). This
+        // named registration carries BaseAddress + the standard resilience
+        // pipeline so that scoped client inherits the org-standard outbound chain.
+        AddNamedDownstreamClient(services, config, "remote-user-preferences", "RemoteUserPreferencesServiceApi:BaseUrl");
 
         // T-migrate-gateway-proxies (PR-A): typed clients for every post-auth
         // upstream. Each is registered with its OWN handler chain — bearer
@@ -141,119 +144,64 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IGeolocationServiceClient, GeolocationServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Geolocation")));
 
-        // Chat BFF facade over the GENERIC chat-service (Firestore-backed, C#/.NET 8,
-        // Services:Chat:BaseUrl). ChatServiceClient performs the Jeeb 1:1 aggregation
-        // entirely in the gateway, calling only the generic primitives:
-        //   POST /api/members
-        //   POST /api/channels
-        //   POST /api/channels/{channelId}/members   (returns a session id)
-        //   POST /api/channels/{channelId}/messages  (requires a valid session)
-        //   GET  /api/channels/{channelId}/messages/{messageId}
-        //   GET  /api/channels/{channelId}/summary
-        // It never calls any product-specific chat route. The named "chat" registration
-        // above carries the resilience pipeline; BindBaseAddress resolves
-        // Services:Chat[:BaseUrl] so the typed client inherits the same address.
-        //
-        // IChatTopologyMap is a singleton: it caches userId->memberId and
-        // sortedPairKey->(channelId, sessions) so a conversation resolves to the
-        // same generic channel/sessions across requests (the generic API has no
-        // lookup-by-external-id).
-        //
-        // Impl is chosen by config presence, mirroring the wallet pattern:
-        //   - Redis:ConnectionString set (appsettings.Production.json =
-        //     192.168.2.50:6379) -> RedisChatTopologyMap. The in-memory map was
-        //     lost on restart and not multi-replica safe (two replicas would split
-        //     a conversation across two generic channels); Redis makes it durable
-        //     + shared across replicas.
-        //   - absent (dev/test) -> InMemoryChatTopologyMap, so the suite and local
-        //     runs need no Redis.
-        var redisConnectionString = config["Redis:ConnectionString"];
-        if (!string.IsNullOrWhiteSpace(redisConnectionString))
-        {
-            // PR #45 — the multiplexer MUST NOT block or throw at host boot.
-            //
-            // Previously this was `ConnectionMultiplexer.Connect(connStr)` with
-            // StackExchange.Redis' default AbortOnConnectFail=true. When the
-            // configured Redis (appsettings.Production.json = 192.168.2.50:6379)
-            // is unreachable — e.g. in CI's network namespace, or during a Redis
-            // outage in prod — Connect() blocks for the full connect timeout and
-            // then throws. Because a hosted service (DataExportProcessor) resolves
-            // a chat client during Host.StartAsync, that eager Connect ran on the
-            // startup path: Kestrel never reached "Now listening", the container
-            // smoke test's `curl /health/live` after 5s failed, and in prod a
-            // transient Redis blip would crash-loop the whole gateway (reviewer
-            // P2: a Redis outage should degrade chat id-mapping, not hard-fail the
-            // BFF).
-            //
-            // Fix: parse ConfigurationOptions from the connection string and force
-            //   * AbortOnConnectFail=false — Connect() returns immediately even
-            //     when Redis is down; the multiplexer retries in the background and
-            //     recovers without a restart.
-            //   * ConnectTimeout=2000ms, ConnectRetry=1 — bounded, fast boot.
-            // and wrap the multiplexer in a Lazy<> so the (now non-blocking)
-            // Connect is deferred to first actual use, never to DI resolution.
-            // RedisChatTopologyMap reads IConnectionMultiplexer.GetDatabase() per
-            // op, so an as-yet-unconnected multiplexer degrades gracefully (ops
-            // throw RedisConnectionException per-call and recover) instead of
-            // taking the host down.
-            var redisOptions = ConfigurationOptions.Parse(redisConnectionString!);
-            redisOptions.AbortOnConnectFail = false;
-            redisOptions.ConnectTimeout = 2000;
-            redisOptions.ConnectRetry = 1;
+        // chat-service — REMOVED from this set. The jeeb 1:1 conversation BFF
+        // (ChatServiceClient) + Redis topology map (RedisChatTopologyMap /
+        // InMemoryChatTopologyMap / IChatTopologyMap) + IConnectionMultiplexer
+        // singleton were removed with the salehly mirror. Chat is now a stateless
+        // passthrough: the NSwag ServiceChatClient is registered in Program.cs as
+        // the named client "ServiceChatClient" (ChatServiceApi:BaseUrl) and consumed
+        // directly by ChatController, exactly as salehly-gateway wires it.
 
-            var lazyMultiplexer = new Lazy<IConnectionMultiplexer>(
-                () => ConnectionMultiplexer.Connect(redisOptions),
-                LazyThreadSafetyMode.ExecutionAndPublication);
-
-            services.AddSingleton<IConnectionMultiplexer>(_ => lazyMultiplexer.Value);
-            services.AddSingleton<IChatTopologyMap, RedisChatTopologyMap>();
-        }
-        else
-        {
-            services.AddSingleton<IChatTopologyMap, InMemoryChatTopologyMap>();
-        }
-        AttachStandardPipeline(
-            services.AddHttpClient<IChatServiceClient, ChatServiceClient>(http =>
-                BindBaseAddress(http, config, "Services:Chat")));
-
-        // T-migrate-gateway-proxies — typed client over the real notification-service
-        // (FastAPI, Mongo jeeb_notifications). Hand-coded against verified routes on
-        // notification-service/main.py (GET /notifications) pending an NSwag spec.
-        // The named "notification" registration above carries the resilience pipeline;
-        // BindBaseAddress resolves Services:Notification[:BaseUrl] so the typed client
-        // inherits the same upstream address. Gated by FeatureFlags:UseUpstream:Notification.
-        AttachStandardPipeline(
-            services.AddHttpClient<INotificationServiceClient, NotificationServiceClient>(http =>
-                BindBaseAddress(http, config, "Services:Notification")));
+        // notification-service — REMOVED from this set. The jeeb-specific
+        // notification read BFF (INotificationServiceClient / NotificationServiceClient)
+        // and its NotificationsController (/users/me/notifications) were removed with
+        // the salehly mirror. Notification is now a stateless passthrough: the NSwag
+        // ServiceNotificationClient is registered in Program.cs as the named client
+        // "ServiceNotificationClient" (ServiceNotificationClient:BaseUrl) and consumed
+        // directly by NotificationController, exactly as salehly-gateway wires it.
 
         // T-backend-020 (JEEB-38): typed client over score-taking-service.
         // Carries its own bearer/ServiceAuth/resilience chain via
         // AttachStandardPipeline (BFF aggregation pattern).
         //
         // NOTE: score-taking-service is STALE (no appsettings entry in any
-        // environment; not in the deployed fleet). The real ratings upstream is
-        // feedback-service (block below). This typed registration is retained
-        // only so the typed-client pipeline test keeps a registration to assert
-        // against; IRatingService no longer routes its record-of-truth here.
+        // environment; not in the deployed fleet). This typed registration is
+        // retained only so the typed-client pipeline test keeps a registration to
+        // assert against; IRatingService no longer routes its record-of-truth here.
         AttachStandardPipeline(
             services.AddHttpClient<IScoreServiceClient, ScoreServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:ScoreTaking")));
 
-        // thin-BFF wire — feedback-service (host port 10064, liveness-only; NO
-        // /health readiness route). Self-contained block: named client (resilience
-        // pipeline) + typed IFeedbackServiceClient (own bearer/ServiceAuth/resilience
-        // chain via AttachStandardPipeline). feedback-service is the REAL canonical
-        // ratings upstream (Services:Feedback:BaseUrl = http://192.168.2.50:10064 in
-        // appsettings.Production.json); IRatingService routes its rating
-        // record-of-truth here when FeatureFlags:UseUpstream:Feedback is on, and
-        // keeps the in-memory IRatingStore as the off/fallback path. Hand-coded
-        // against feedback-service's Swashbuckle spec (/swagger/v1/swagger.json),
-        // following the NotificationServiceClient precedent. See
-        // IFeedbackServiceClient for the full score-taking-vs-feedback resolution.
-        AddNamedDownstreamClient(services, config, "feedback", "Services:Feedback:BaseUrl");
+        // feedback-service: the gateway now mirrors salehly-gateway's
+        // ServiceFeedbackClient + FeedbackController exactly (named + scoped NSwag
+        // client bound to FeedbackServiceApi:BaseUrl, registered in Program.cs).
+        // The former jeeb-specific hand-coded IFeedbackServiceClient /
+        // FeedbackServiceClient (a 3-method submit+read seam over a resilience
+        // pipeline, bound to the nested Services:Feedback key) was removed with
+        // the literal salehly replace, so there is no typed-client registration
+        // here anymore.
+
+        // thin-BFF wire — cdn-service (asset/object store for signed-ToS PDFs,
+        // earnings statements, KYC/dispute evidence; 90-day retention + signed
+        // URLs). Serves JEB-527 / JEB-519 / JEB-59. Self-contained block: named
+        // client (resilience pipeline) + typed ICDNServiceClient (own
+        // bearer/ServiceAuth/resilience chain via AttachStandardPipeline).
+        //
+        // NOT YET DEPLOYED: Services:Cdn:BaseUrl in appsettings.Production.json is
+        // a PLACEHOLDER (http://192.168.2.50:PORT_TBD/) pending deployment, and
+        // FeatureFlags:UseUpstream:Cdn is DEFAULT-OFF everywhere, so the gateway
+        // never dials the unroutable host. Configuration is lazy
+        // (AddNamedDownstreamClient does not throw on a missing/placeholder
+        // BaseUrl; CdnController short-circuits to 503 while the flag is off), so
+        // this registration is safe to ship before the service exists. Hand-coded
+        // (cdn-service exposes no reachable OpenAPI doc yet), following the
+        // OfferServiceClient / BanServiceClient precedent. See ICDNServiceClient
+        // for the full deployment runbook (set BaseUrl, add readiness probe, flip
+        // the flag).
+        AddNamedDownstreamClient(services, config, "cdn", "Services:Cdn:BaseUrl");
         AttachStandardPipeline(
-            services.AddHttpClient<IFeedbackServiceClient, FeedbackServiceClient>(http =>
-                BindBaseAddress(http, config, "Services:Feedback")));
+            services.AddHttpClient<ICDNServiceClient, CDNServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Cdn")));
 
         // T-BE-019 (JEB-55): typed client over one-time-password service for the
         // delivery-HANDOVER OTP (ApplicationId delivery_handover_{deliveryId}).
@@ -276,29 +224,21 @@ public static class ServiceClientExtensions
                 return new ServiceOTPClient(baseUrl, http);
             }));
 
-        // T-backend-022 (push DB wiring): typed client over the
-        // push-notification FastAPI service. The device-register write path
-        // (PUT /api/v1/register) upserts into the push_notification Postgres
-        // table — the "any call that writes to the push DB". PushController
-        // consumes this when FeatureFlags:UseUpstream:Push is set, replacing
-        // InMemoryDeviceTokenStore for that path. BindBaseAddress applies the
-        // configured Services:PushNotification host with a trailing slash;
-        // AttachStandardPipeline gives this typed client its own bearer +
-        // X-Service-Auth + resilience chain (BFF aggregation pattern).
-        AttachStandardPipeline(
-            services.AddHttpClient<IPushNotificationClient, PushNotificationClient>(http =>
-                BindBaseAddress(http, config, "Services:PushNotification")));
+        // push-notification — REMOVED from this set. The jeeb-specific
+        // device-register passthrough (IPushNotificationClient / PushNotificationClient)
+        // and its PushController (POST /push/devices) were removed with the salehly
+        // mirror. The device-register / notification surface is now the salehly-mirrored
+        // PushNotificationController, backed by the NSwag ServicePushNotificationClient
+        // registered in Program.cs as the named client "ServicePushNotificationClient"
+        // (PushNotificationServiceApi:BaseUrl), consumed directly by the controller,
+        // exactly as salehly-gateway wires it.
 
-        // remote-user-preferences typed client. UserPreferencesController consumes
-        // this when FeatureFlags:UseUpstream:RemoteUserPreferences is on. The wire
-        // is snake_case (handled inside UserPreferencesClient); BindBaseAddress
-        // applies Services:RemoteUserPreferences[:BaseUrl] with a trailing slash so
-        // relative paths like "preferences/{user}" resolve under the host; this
-        // typed client gets its own bearer + X-Service-Auth + resilience chain via
-        // AttachStandardPipeline (BFF aggregation pattern).
-        AttachStandardPipeline(
-            services.AddHttpClient<IUserPreferencesClient, UserPreferencesClient>(http =>
-                BindBaseAddress(http, config, "Services:RemoteUserPreferences")));
+        // remote-user-preferences: the salehly-mirror scoped client
+        // (ServiceRemoteUserPreferencesClient) is registered in Program.cs against
+        // the "remote-user-preferences" named HttpClient above. No typed
+        // IUserPreferencesClient registration here — the exact-salehly migration
+        // removed that BFF seam; UserPreferencesController consumes the generated
+        // client directly.
 
         // thin-BFF offer-service wire (FeatureFlags:UseUpstream:Offer). Typed
         // client over the real offer-service (Elixir/Phoenix, host port 10063,
@@ -347,6 +287,75 @@ public static class ServiceClientExtensions
         AttachStandardPipeline(
             services.AddHttpClient<IVoiceTranscriptionClient, VoiceTranscriptionClient>(http =>
                 BindBaseAddress(http, config, "Services:VoiceTranscription")));
+
+        // realtime-comunication-service wire (FeatureFlags:UseUpstream:Realtime).
+        // Typed client over the shared Elixir/Phoenix "LiveComm" service
+        // (olivium-dev/realtime-comunication-service). The gateway uses its HTTP
+        // ingest seam (POST /api/ingest/{topic}/{stream}, verified against
+        // realtime-comunication-service/lib/live_comm_web/router.ex +
+        // controllers/ingest_controller.ex) for SERVER-SIDE per-recipient chat
+        // fan-out; mobile clients connect the Phoenix WebSocket channel
+        // (topic:jeeb:chat, membership-validated join) directly, so the gateway
+        // does not proxy the WebSocket. Serves JEB-1453/1449/1432/626/444/50/51/52.
+        //
+        // NOT-YET-DEPLOYED: realtime-comunication-service is in the olivium fleet
+        // but NOT on the Jeeb swarm. Services:Realtime:BaseUrl is a marked
+        // PLACEHOLDER (http://192.168.2.50:PORT_TBD/) in appsettings.Production.json
+        // and FeatureFlags:UseUpstream:Realtime is OFF everywhere — RealtimeController
+        // returns 503 ProblemDetails until the service is deployed and the
+        // placeholder is replaced with the real host:port. The client is still
+        // fully wired (named resilience pipeline + own bearer + X-Service-Auth +
+        // resilience chain) so flipping the flag is the only remaining step.
+        // Hand-coded (no NSwag): the upstream exposes no OpenAPI doc; the ingest
+        // route is the single seam the gateway consumes. BindBaseAddress resolves
+        // Services:Realtime[:BaseUrl] with a trailing slash so the relative
+        // "api/ingest/{topic}/{stream}" resolves under the host.
+        AddNamedDownstreamClient(services, config, "realtime", "Services:Realtime:BaseUrl");
+        AttachStandardPipeline(
+            services.AddHttpClient<IRealtimeCommunicationClient, RealtimeCommunicationClient>(http =>
+                BindBaseAddress(http, config, "Services:Realtime")));
+
+        // thin-BFF wire — contract-signing-service (FastAPI, api_prefix /v1;
+        // immutable contract templates + per-party signatures; olivium-shared).
+        // Serves the versioned Jeeb Terms-of-Service template jeeb_tos_v1
+        // (JEB-40/JEB-41) via POST /v1/templates (RegisterTemplateAsync) and the
+        // ToS-acceptance signature via POST /v1/contracts/{id}/signatures
+        // (SignAsync). Self-contained block mirroring the feedback wire above:
+        // named client (resilience pipeline) + typed IContractSigningServiceClient
+        // (own bearer/ServiceAuth/resilience chain via AttachStandardPipeline).
+        // NOT yet deployed to the Jeeb swarm — Services:ContractSigning:BaseUrl is a
+        // PLACEHOLDER (http://192.168.2.50:PORT_TBD/) in appsettings.Production.json
+        // and FeatureFlags:UseUpstream:ContractSigning defaults OFF everywhere, so
+        // the controller 503s until the service is live. Hand-coded (no NSwag
+        // artifact — the upstream's /openapi.json is unreachable from the build host
+        // because the service is not yet deployed) against
+        // contract-signing-service/app/routers/*.py, following the
+        // NotificationServiceClient / OfferServiceClient precedent. BindBaseAddress
+        // resolves Services:ContractSigning[:BaseUrl] with a trailing slash so the
+        // relative "v1/templates" / "v1/contracts/..." resolve under the host.
+        AddNamedDownstreamClient(services, config, "contract-signing", "Services:ContractSigning:BaseUrl");
+        AttachStandardPipeline(
+            services.AddHttpClient<IContractSigningServiceClient, ContractSigningServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:ContractSigning")));
+
+        // thin-BFF wire — form-builder-service (FastAPI dynamic-forms upstream;
+        // atlas pattern #15 "Dynamic forms"). Serves the versioned Jeeb KYC form
+        // schema jeeb_jeeber_v1 (JEB-40/JEB-41) via GET /templates/{name}/schema.
+        // Self-contained block mirroring the feedback wire above: named client
+        // (resilience pipeline) + typed IFormBuilderServiceClient (own bearer/
+        // ServiceAuth/resilience chain via AttachStandardPipeline). Deployed on the
+        // Jeeb swarm — Services:FormBuilder:BaseUrl is http://192.168.2.50:10070/
+        // (appsettings.Production.json). FeatureFlags:UseUpstream:FormBuilder still
+        // defaults OFF, so flip it to true to route through the real upstream.
+        // Hand-coded (no NSwag artifact) against form-builder-service/app/main.py,
+        // following the NotificationServiceClient / OfferServiceClient precedent.
+        // The FastAPI app exposes no /health route (only /docs + /openapi.json), so
+        // the readiness probe is pinned to GET /openapi.json and registered Degraded
+        // (see HealthCheckExtensions) — never 503s /health/ready.
+        AddNamedDownstreamClient(services, config, "form-builder", "Services:FormBuilder:BaseUrl");
+        AttachStandardPipeline(
+            services.AddHttpClient<IFormBuilderServiceClient, FormBuilderServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:FormBuilder")));
 
         return services;
     }
@@ -436,19 +445,6 @@ public static class ServiceClientExtensions
         builder.AddResilienceHandler("standard", ConfigureStandardResilience);
         return builder;
     }
-
-    /// <summary>
-    /// Public entry point that applies the same standard pipeline as the typed
-    /// downstream clients to the wallet <see cref="IHttpClientBuilder"/>
-    /// registered in <c>Program.cs</c>. The wallet client is wired there (not in
-    /// <see cref="AddDownstreamClients"/>) because it composes with settlement
-    /// services declared in the same block; this keeps it on the identical
-    /// bearer + X-Service-Auth + resilience chain. The bearer/ServiceAuth
-    /// handlers are registered transiently by <see cref="AddDownstreamClients"/>,
-    /// which Program.cs calls first.
-    /// </summary>
-    public static IHttpClientBuilder AttachWalletPipeline(IHttpClientBuilder builder)
-        => AttachStandardPipeline(builder);
 
     /// <summary>
     /// The org-standard outbound resilience pipeline. Used by every downstream

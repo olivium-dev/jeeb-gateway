@@ -27,9 +27,14 @@ public class BffStartupValidatorTests
         var config = BuildConfig(new Dictionary<string, string?>
         {
             ["Services:Auth:BaseUrl"] = "http://auth.test",
-            // Chat, UserManagement, Wallet missing
+            // UserManagement missing (Chat is no longer a required
+            // Services:* key — it moved to the top-level ChatServiceApi key;
+            // Wallet also moved to the top-level WalletServiceApi key)
             ["Services:Matching:BaseUrl"] = "http://matching.test",
-            // Notification, Geolocation, PushNotification, Delivery missing
+            // Geolocation, Delivery missing. Notification moved to the top-level
+            // ServiceNotificationClient key and PushNotification moved to the
+            // top-level PushNotificationServiceApi key, so neither is a required
+            // Services:* key any more.
         });
 
         var opts = Options.Create(new DownstreamServicesOptions
@@ -43,14 +48,16 @@ public class BffStartupValidatorTests
 
         act.Should().Throw<StartupConfigurationException>()
             .Which.Message.Should().ContainAll(
-                "Services:Chat:BaseUrl",
                 "Services:UserManagement:BaseUrl",
-                "Services:Wallet:BaseUrl",
-                "Services:Notification:BaseUrl",
                 "Services:Geolocation:BaseUrl",
-                "Services:PushNotification:BaseUrl",
                 "Services:Delivery:BaseUrl",
                 "environment 'Production'");
+
+        // Chat is intentionally NOT a required Services:* key anymore (salehly
+        // mirror moved it to the top-level ChatServiceApi key), so even with the
+        // Services:Chat URL absent the validator must not name it.
+        act.Should().Throw<StartupConfigurationException>()
+            .Which.Message.Should().NotContain("Services:Chat");
     }
 
     [Fact]
@@ -98,13 +105,9 @@ public class BffStartupValidatorTests
         var config = BuildConfig(new Dictionary<string, string?>
         {
             ["Services:Auth:BaseUrl"] = "http://auth.test",
-            ["Services:Chat:BaseUrl"] = "http://chat.test",
             ["Services:UserManagement:BaseUrl"] = "http://user-management.test",
-            ["Services:Wallet:BaseUrl"] = "http://wallet.test",
             ["Services:Matching:BaseUrl"] = "http://matching.test",
-            ["Services:Notification:BaseUrl"] = "http://notification.test",
             ["Services:Geolocation:BaseUrl"] = "http://geo.test",
-            ["Services:PushNotification:BaseUrl"] = "http://push.test",
             ["Services:Delivery:BaseUrl"] = "http://delivery.test",
         });
 
@@ -124,13 +127,9 @@ public class BffStartupValidatorTests
         var config = BuildConfig(new Dictionary<string, string?>
         {
             ["Services:Auth"] = "http://auth.test",
-            ["Services:Chat"] = "http://chat.test",
             ["Services:UserManagement"] = "http://user-management.test",
-            ["Services:Wallet"] = "http://wallet.test",
             ["Services:Matching"] = "http://matching.test",
-            ["Services:Notification"] = "http://notification.test",
             ["Services:Geolocation"] = "http://geo.test",
-            ["Services:PushNotification"] = "http://push.test",
             ["Services:Delivery"] = "http://delivery.test",
         });
 

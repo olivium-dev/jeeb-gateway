@@ -74,10 +74,10 @@ public static class HealthCheckExtensions
         // --- Deployed, critical-path services, probed at their REAL health route.
         // All of these serve GET /health -> 200 on the swarm (verified). A real
         // failure here is fatal to readiness (Unhealthy -> /health/ready = 503).
-        AddDownstreamProbe(checks, config, "wallet-service",          "Services:Wallet:BaseUrl",          healthPath: "health");
+        AddDownstreamProbe(checks, config, "wallet-service",          "WalletServiceApi:BaseUrl",         healthPath: "health");
         AddDownstreamProbe(checks, config, "matching",                "Services:Matching:BaseUrl",        healthPath: "health");
-        AddDownstreamProbe(checks, config, "notification-service",    "Services:Notification:BaseUrl",    healthPath: "health");
-        AddDownstreamProbe(checks, config, "push-notification",       "Services:PushNotification:BaseUrl", healthPath: "health");
+        AddDownstreamProbe(checks, config, "notification-service",    "ServiceNotificationClient:BaseUrl", healthPath: "health");
+        AddDownstreamProbe(checks, config, "push-notification",       "PushNotificationServiceApi:BaseUrl", healthPath: "health");
         AddDownstreamProbe(checks, config, "delivery-service",        "Services:Delivery:BaseUrl",        healthPath: "health");
         AddDownstreamProbe(checks, config, "geolocation-service",     "Services:Geolocation:BaseUrl",     healthPath: "health");
         AddDownstreamProbe(checks, config, "offer-service",           "Services:Offer:BaseUrl",           healthPath: "health");
@@ -87,16 +87,17 @@ public static class HealthCheckExtensions
         // voice-transcription serves /healthz (not /health).
         AddDownstreamProbe(checks, config, "voice-transcription",     "Services:VoiceTranscription:BaseUrl", healthPath: "healthz");
 
-        // user-management is the JWT identity service the whole gateway depends on
-        // (OTP verify -> user-management -> JWT mint). Unlike the other upstreams it
-        // exposes the org-canonical readiness path GET /health/ready (verified:
-        // 200 {"status":"ready","db":"ok"}) AND GET /health/live. Its BaseUrl lives
-        // at the top-level UserManagementApi:BaseUrl key (NOT under Services:), bound
-        // by UserManagementApiOptions for the OTP sign-in path. It is critical-path,
-        // so a real readiness failure here is fatal (Unhealthy -> /health/ready 503):
-        // if user-management cannot reach its DB, the gateway genuinely cannot mint
-        // tokens and should be pulled from rotation.
-        AddDownstreamProbe(checks, config, "user-management",         "UserManagementApi:BaseUrl",        healthPath: "health/ready");
+        // user-management is the identity service the gateway proxies to via the
+        // NSwag-generated ServiceUserManagementClient (UserController). Unlike the
+        // other upstreams it exposes the org-canonical readiness path
+        // GET /health/ready (verified: 200 {"status":"ready","db":"ok"}) AND
+        // GET /health/live. Its BaseUrl lives at the top-level
+        // UserManagementServiceApi:BaseUrl key (NOT under Services:), matching the
+        // salehly-gateway sibling convention. It is critical-path, so a real
+        // readiness failure here is fatal (Unhealthy -> /health/ready 503): if
+        // user-management cannot reach its DB, the gateway genuinely cannot serve
+        // identity traffic and should be pulled from rotation.
+        AddDownstreamProbe(checks, config, "user-management",         "UserManagementServiceApi:BaseUrl", healthPath: "health/ready");
 
         // --- Liveness-only services (NO readiness probe).
         // These expose NO health route at all (verified on the swarm: GET /health
@@ -105,10 +106,58 @@ public static class HealthCheckExtensions
         // them — exactly the sibling-gateway "liveness-only" intent, and the same
         // treatment PR #47 gave feedback-service. Adding a probe here would 404
         // and falsely mark the gateway red.
-        //   - chat-service           (Services:Chat:BaseUrl)
-        //   - feedback               (Services:Feedback:BaseUrl)
-        //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
+        //   - chat-service           (ChatServiceApi:BaseUrl) — salehly-mirrored top-level key
+        //   - feedback               (FeedbackServiceApi:BaseUrl) — salehly-mirrored top-level key
+        //   - remote-user-preferences (RemoteUserPreferencesServiceApi:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
+        //   - one-time-password      (Services:ServiceOTP:BaseUrl / ServiceOTPApi:BaseUrl — host 10037).
+        //       OTPApi (olivium-dev/one-time-password) maps ONLY its controllers
+        //       (api/OTP/send, api/OTP/validate, api/OTP/check) — it serves NO
+        //       /health, /health/ready, or /healthz route (verified against
+        //       OTPApi/Program.cs: UseRouting + MapControllers, no MapHealthChecks).
+        //       A URL-group probe would 404 and falsely 503 /health/ready, so the
+        //       OTP upstream is liveness-only from the gateway's perspective —
+        //       same treatment as feedback-service (PR #47).
+
+        // --- Degraded (non-fatal) downstream probe.
+        // realtime-comunication-service (olivium-dev/realtime-comunication-service,
+        // Elixir/Phoenix 'LiveComm') is now deployed on the Jeeb swarm at
+        // Services:Realtime:BaseUrl (192.168.2.50:10069). It serves GET /health.
+        // We probe it as Degraded (not Unhealthy): a missing realtime instance
+        // surfaces in /health/aggregate WITHOUT 503-ing the gateway's /health/ready,
+        // because the FeatureFlags:UseUpstream:Realtime kill switch independently
+        // gates the publish path. Serves JEB-1453/1449/1432/626/444/50/51/52.
+        AddDownstreamProbe(checks, config, "realtime-comunication-service", "Services:Realtime:BaseUrl", healthPath: "health", failureStatus: HealthStatus.Degraded);
+
+        // --- Degraded (non-fatal) downstream probe.
+        // contract-signing-service (FastAPI) is now deployed on the Jeeb swarm at
+        // Services:ContractSigning:BaseUrl (192.168.2.50:10071). It serves
+        // GET /health. We probe it as Degraded (not Unhealthy): a missing instance
+        // surfaces in /health/aggregate WITHOUT 503-ing /health/ready, because the
+        // FeatureFlags:UseUpstream:ContractSigning kill switch independently gates
+        // the routing path.
+        AddDownstreamProbe(checks, config, "contract-signing-service", "Services:ContractSigning:BaseUrl", healthPath: "health", failureStatus: HealthStatus.Degraded);
+
+        // --- Degraded (non-fatal) downstream probe.
+        // cdn-service is now deployed on the Jeeb swarm at Services:Cdn:BaseUrl
+        // (192.168.2.50:10072). Unlike most upstreams it exposes the org-canonical
+        // readiness path GET /health/ready (not bare /health). We probe it as
+        // Degraded (not Unhealthy): a missing instance surfaces in /health/aggregate
+        // WITHOUT 503-ing /health/ready, because the FeatureFlags:UseUpstream:Cdn
+        // kill switch independently gates the routing path. Serves JEB-527/519/59.
+        AddDownstreamProbe(checks, config, "cdn-service", "Services:Cdn:BaseUrl", healthPath: "health/ready", failureStatus: HealthStatus.Degraded);
+
+        // --- Degraded (non-fatal) downstream probe.
+        // form-builder-service is now deployed on the Jeeb swarm at
+        // Services:FormBuilder:BaseUrl (192.168.2.50:10070). It is a FastAPI app
+        // that exposes NO /health or /health/ready route — probing those would 404
+        // and falsely degrade. Its real liveness signal is GET /openapi.json (200,
+        // always served by FastAPI, no auth, no data dependency). We pin the probe
+        // to /openapi.json and mark it Degraded (not Unhealthy): a missing instance
+        // surfaces in /health/aggregate WITHOUT 503-ing /health/ready, because the
+        // FeatureFlags:UseUpstream:FormBuilder kill switch independently gates the
+        // routing path.
+        AddDownstreamProbe(checks, config, "form-builder-service", "Services:FormBuilder:BaseUrl", healthPath: "openapi.json", failureStatus: HealthStatus.Degraded);
 
         return services;
     }
