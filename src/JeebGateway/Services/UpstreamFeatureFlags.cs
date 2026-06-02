@@ -83,4 +83,22 @@ public sealed class UpstreamFeatureFlags
     /// existing in-process Whisper fixtures green.
     /// </summary>
     public bool Voice { get; set; }
+
+    /// <summary>
+    /// When true, the thin generic OTP surface (<see cref="JeebGateway.Controllers.OtpController"/>)
+    /// proxies the real one-time-password service (OTPApi; live swarm overlay,
+    /// host port 10037) via
+    /// <see cref="JeebGateway.Services.Clients.IServiceOTPClient"/> — the same
+    /// NSwag-generated client the delivery-handover OTP path already consumes.
+    /// Default false so the gateway returns 503 (not a localhost-fallback call)
+    /// when the upstream is not configured in an environment, and so existing
+    /// fixtures that do not stand up the OTP upstream stay green. Defaulted ON
+    /// in <c>appsettings.Production.json</c> because the upstream is live.
+    ///
+    /// Serves JEB-1471, JEB-1467, JEB-1459, JEB-1455, JEB-1441, JEB-1437,
+    /// JEB-1433, JEB-1430, JEB-626, JEB-625, JEB-471, JEB-158, JEB-159, JEB-55,
+    /// JEB-49, JEB-37, JEB-38, JEB-39 (OTP send/validate for phone sign-in and
+    /// the 4-digit delivery_handover OTP).
+    /// </summary>
+    public bool Otp { get; set; }
 }

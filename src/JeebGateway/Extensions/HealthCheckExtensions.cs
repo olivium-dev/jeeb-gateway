@@ -109,6 +109,14 @@ public static class HealthCheckExtensions
         //   - feedback               (Services:Feedback:BaseUrl)
         //   - remote-user-preferences (Services:RemoteUserPreferences:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
+        //   - one-time-password      (Services:ServiceOTP:BaseUrl / ServiceOTPApi:BaseUrl — host 10037).
+        //       OTPApi (olivium-dev/one-time-password) maps ONLY its controllers
+        //       (api/OTP/send, api/OTP/validate, api/OTP/check) — it serves NO
+        //       /health, /health/ready, or /healthz route (verified against
+        //       OTPApi/Program.cs: UseRouting + MapControllers, no MapHealthChecks).
+        //       A URL-group probe would 404 and falsely 503 /health/ready, so the
+        //       OTP upstream is liveness-only from the gateway's perspective —
+        //       same treatment as feedback-service (PR #47).
 
         return services;
     }
