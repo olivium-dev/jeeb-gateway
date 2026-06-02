@@ -120,4 +120,19 @@ public sealed class UpstreamFeatureFlags
     /// upstream and the resilience pipeline would burn retries to nowhere.
     /// </summary>
     public bool Realtime { get; set; }
+
+    /// <summary>
+    /// When true, contract-signing paths proxy the real
+    /// <c>contract-signing-service</c> (FastAPI, immutable contract templates +
+    /// per-party signatures; serves the versioned Jeeb Terms-of-Service template
+    /// <c>jeeb_tos_v1</c>) via
+    /// <see cref="JeebGateway.Services.Clients.IContractSigningServiceClient"/>.
+    /// This path is net-new (the gateway never held a contract store), so the flag
+    /// is a runtime kill switch, NOT a fallback to local state: when off the
+    /// endpoints return 503. Defaults OFF in EVERY environment because
+    /// contract-signing-service is NOT yet deployed to the Jeeb swarm — its
+    /// <c>Services:ContractSigning:BaseUrl</c> is a placeholder (<c>PORT_TBD</c>)
+    /// pending deployment. Flip on once the service is live and the BaseUrl is real.
+    /// </summary>
+    public bool ContractSigning { get; set; }
 }

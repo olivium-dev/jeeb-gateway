@@ -128,6 +128,15 @@ public static class HealthCheckExtensions
         // gates the publish path. Serves JEB-1453/1449/1432/626/444/50/51/52.
         AddDownstreamProbe(checks, config, "realtime-comunication-service", "Services:Realtime:BaseUrl", healthPath: "health", failureStatus: HealthStatus.Degraded);
 
+        // --- Degraded (non-fatal) downstream probe.
+        // contract-signing-service (FastAPI) is now deployed on the Jeeb swarm at
+        // Services:ContractSigning:BaseUrl (192.168.2.50:10071). It serves
+        // GET /health. We probe it as Degraded (not Unhealthy): a missing instance
+        // surfaces in /health/aggregate WITHOUT 503-ing /health/ready, because the
+        // FeatureFlags:UseUpstream:ContractSigning kill switch independently gates
+        // the routing path.
+        AddDownstreamProbe(checks, config, "contract-signing-service", "Services:ContractSigning:BaseUrl", healthPath: "health", failureStatus: HealthStatus.Degraded);
+
         return services;
     }
 
