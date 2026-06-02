@@ -111,7 +111,7 @@ jobs:
           docker pull '$TAG'
           if docker service ls --format '{{.Name}}' | grep -wq "\$SVC"; then
             docker service update --image '$TAG' --with-registry-auth \
-              --update-order start-first --update-failure-action rollback \
+              --update-order stop-first --update-failure-action rollback \
               --rollback-order start-first --update-monitor 20s "\$SVC"
           else
             docker service create --name "\$SVC" --replicas 1 \
