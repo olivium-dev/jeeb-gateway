@@ -63,15 +63,18 @@
     <PackageReference Include="AspNetCore.HealthChecks.Uris" Version="8.0.1" />
 
     <!--
-      T-BE-001 / JEB-471 — OTP sign-in path.
-      libphonenumber-csharp normalises +961 / 00961 / 0079... → canonical E.164
-      and surfaces the RegionCode used by AC-PhoneNorm to reject non-LB phones.
-      Phone hashing uses HMAC-SHA256 from System.Security.Cryptography with a
-      server-side pepper (JeebJwt:PhonePepper). PR #32 review B1 — the prior
-      bcrypt-on-phone implementation generated a random salt per call so the
-      phone.hash tag could not correlate; HMAC-SHA256 restores determinism.
+      StackExchange.Redis — backs the shared-cache paths that survive the
+      exact-salehly migrations: the distributed external-OTP attempt counter and
+      the IConnectionMultiplexer wired in Extensions/ServiceClientExtensions.cs,
+      plus the refresh-token store (Tokens/InMemoryRefreshTokenStore.cs) Redis
+      fallback. (The former RedisChatTopologyMap consumer was removed by the
+      chat-exact migration; the OTP sign-in / libphonenumber phone-normalisation
+      consumer was removed by the um-exact migration — but Redis itself is still
+      required.) Real connection string only in appsettings.Production.json; the
+      InMemory fallback is selected when Redis:ConnectionString is absent
+      (dev/test).
     -->
-    <PackageReference Include="libphonenumber-csharp" Version="8.13.51" />
+    <PackageReference Include="StackExchange.Redis" Version="2.8.16" />
   </ItemGroup>
 
 </Project>

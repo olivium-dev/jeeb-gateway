@@ -87,16 +87,17 @@ public static class HealthCheckExtensions
         // voice-transcription serves /healthz (not /health).
         AddDownstreamProbe(checks, config, "voice-transcription",     "Services:VoiceTranscription:BaseUrl", healthPath: "healthz");
 
-        // user-management is the JWT identity service the whole gateway depends on
-        // (OTP verify -> user-management -> JWT mint). Unlike the other upstreams it
-        // exposes the org-canonical readiness path GET /health/ready (verified:
-        // 200 {"status":"ready","db":"ok"}) AND GET /health/live. Its BaseUrl lives
-        // at the top-level UserManagementApi:BaseUrl key (NOT under Services:), bound
-        // by UserManagementApiOptions for the OTP sign-in path. It is critical-path,
-        // so a real readiness failure here is fatal (Unhealthy -> /health/ready 503):
-        // if user-management cannot reach its DB, the gateway genuinely cannot mint
-        // tokens and should be pulled from rotation.
-        AddDownstreamProbe(checks, config, "user-management",         "UserManagementApi:BaseUrl",        healthPath: "health/ready");
+        // user-management is the identity service the gateway proxies to via the
+        // NSwag-generated ServiceUserManagementClient (UserController). Unlike the
+        // other upstreams it exposes the org-canonical readiness path
+        // GET /health/ready (verified: 200 {"status":"ready","db":"ok"}) AND
+        // GET /health/live. Its BaseUrl lives at the top-level
+        // UserManagementServiceApi:BaseUrl key (NOT under Services:), matching the
+        // salehly-gateway sibling convention. It is critical-path, so a real
+        // readiness failure here is fatal (Unhealthy -> /health/ready 503): if
+        // user-management cannot reach its DB, the gateway genuinely cannot serve
+        // identity traffic and should be pulled from rotation.
+        AddDownstreamProbe(checks, config, "user-management",         "UserManagementServiceApi:BaseUrl", healthPath: "health/ready");
 
         // --- Liveness-only services (NO readiness probe).
         // These expose NO health route at all (verified on the swarm: GET /health

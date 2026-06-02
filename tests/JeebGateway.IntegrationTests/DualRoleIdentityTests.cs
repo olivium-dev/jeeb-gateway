@@ -140,7 +140,8 @@ public class DualRoleIdentityTests : IClassFixture<WebApplicationFactory<Program
     [InlineData("GET",  "/admin/zones/online-jeebers")]
     [InlineData("GET",  "/admin/prohibited-items")]
     [InlineData("GET",  "/admin/prohibited-items/flagged")]
-    [InlineData("GET",  "/admin/users/search?name=anything")]
+    // /admin/users/search removed with AdminUsersController (user-management
+    // is now proxied via UserController/ServiceUserManagementClient).
     public async Task Admin_Endpoints_Return_403_For_Non_Admin(string method, string path)
     {
         var client = _factory.CreateClient();
