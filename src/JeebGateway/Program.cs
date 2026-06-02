@@ -306,6 +306,80 @@ builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePu
     return new JeebGateway.service.ServicePushNotification.ServicePushNotificationClient(baseUrl, client);
 });
 
+// Feedback (ServiceFeedbackClient) — salehly sibling mirror.
+// The NSwag-generated ServiceFeedbackClient
+// (Services/Clients/ServiceFeedbackClient.cs, namespace
+// JeebGateway.service.ServiceFeedback) is registered exactly as salehly-gateway
+// does it (Program.cs:112 ConfigureNamedClient + Program.cs:159 scoped factory):
+// a named IHttpClientFactory client "ServiceFeedbackClient" bound to the
+// FeedbackServiceApi:BaseUrl config key, plus a scoped typed-client instance
+// that pulls the pooled HttpClient from the factory and constructs the client
+// with the configured base URL. FeedbackController consumes the typed client
+// directly (comment CRUD, grouped, rating) as a passthrough REST shim over the
+// feedback-service. This replaces the former jeeb-specific hand-coded
+// IFeedbackServiceClient / FeedbackServiceClient (3-method submit+read seam),
+// which has been removed.
+//
+// The technician-review endpoint additionally orchestrates catalog-service and
+// user-management-service, so their NSwag clients are registered the same way
+// (named + scoped, bound to CatalogServiceApi / UserManagementServiceApi),
+// matching salehly Program.cs:115/113 + 183/167. These two are byte-faithful
+// salehly NSwag artifacts consumed ONLY by TechnicianReviewService — no other
+// jeeb code depends on them; the jeeb auth/role-switch surfaces keep their own
+// hand-coded user-management clients.
+builder.Services.AddHttpClient("ServiceFeedbackClient", client =>
+{
+    var apiUrl = builder.Configuration["FeedbackServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServiceFeedback.ServiceFeedbackClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceFeedbackClient");
+    var baseUrl = builder.Configuration["FeedbackServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceFeedback.ServiceFeedbackClient(baseUrl, client);
+});
+
+builder.Services.AddHttpClient("ServiceCatalogClient", client =>
+{
+    var apiUrl = builder.Configuration["CatalogServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServiceCatalog.ServiceCatalogClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceCatalogClient");
+    var baseUrl = builder.Configuration["CatalogServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceCatalog.ServiceCatalogClient(baseUrl, client);
+});
+
+builder.Services.AddHttpClient("ServiceUserManagementClient", client =>
+{
+    var apiUrl = builder.Configuration["UserManagementServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceUserManagementClient");
+    var baseUrl = builder.Configuration["UserManagementServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient(baseUrl, client);
+});
+
+// Technician-review orchestrator (feedback + catalog + user-management),
+// matching salehly Program.cs:254. Scoped because it depends on the scoped
+// NSwag clients above.
+builder.Services.AddScoped<JeebGateway.Services.ITechnicianReviewService, JeebGateway.Services.TechnicianReviewService>();
+
 // T-migrate-gateway-proxies (PR-A): per-service kill switches. Each
 // controller migrated in this PR checks the matching flag and falls
 // back to the in-memory store when false. PR-B flips defaults to true

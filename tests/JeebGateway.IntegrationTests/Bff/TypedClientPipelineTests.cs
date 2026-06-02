@@ -34,7 +34,10 @@ public class TypedClientPipelineTests
         new object[] { "IMatchingServiceClient" },
         new object[] { "IGeolocationServiceClient" },
         new object[] { "IScoreServiceClient" },
-        new object[] { "IFeedbackServiceClient" },
+        // IFeedbackServiceClient — REMOVED. The hand-coded feedback BFF was
+        // replaced by the salehly-mirrored NSwag ServiceFeedbackClient, registered
+        // in Program.cs as the named client "ServiceFeedbackClient" (no
+        // bearer/ServiceAuth pipeline), exactly as salehly-gateway wires it.
         new object[] { "ICDNServiceClient" },
         new object[] { "IServiceOTPClient" },
         // IPushNotificationClient — REMOVED. The device-register passthrough was
@@ -94,7 +97,6 @@ public class TypedClientPipelineTests
                 ["Services:Matching"] = "http://matching.test",
                 ["Services:Geolocation"] = "http://geo.test",
                 ["Services:ScoreTaking:BaseUrl"] = "http://score.test",
-                ["Services:Feedback:BaseUrl"] = "http://feedback.test",
                 ["Services:Cdn:BaseUrl"] = "http://cdn.test",
                 ["Services:ServiceOTP:BaseUrl"] = "http://otp.test",
                 ["Services:FormBuilder:BaseUrl"] = "http://form-builder.test",

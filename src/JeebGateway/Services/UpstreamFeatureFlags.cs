@@ -61,15 +61,6 @@ public sealed class UpstreamFeatureFlags
     public bool Ban { get; set; }
 
     /// <summary>
-    /// When true, feedback paths proxy the real feedback-service
-    /// (host port 10064, liveness-only health probe) via
-    /// <see cref="JeebGateway.Services.Clients.IFeedbackServiceClient"/>
-    /// instead of gateway-local state. Default false keeps existing in-memory
-    /// feedback fixtures green.
-    /// </summary>
-    public bool Feedback { get; set; }
-
-    /// <summary>
     /// When true, asset persist/read paths proxy the real <c>cdn-service</c>
     /// (durable object store for signed-ToS PDFs, earnings statements, evidence;
     /// 90-day retention + signed URLs) via
@@ -85,6 +76,14 @@ public sealed class UpstreamFeatureFlags
     /// BaseUrl + add a readiness probe) once cdn-service ships.
     /// </summary>
     public bool Cdn { get; set; }
+
+    // Feedback no longer has a kill-switch flag. The exact-salehly feedback
+    // migration replaced the gated jeeb feedback BFF (IFeedbackServiceClient +
+    // FeatureFlags:UseUpstream:Feedback) with the ungated salehly mirror
+    // ServiceFeedbackClient, which FeedbackController/RatingService consume
+    // directly and always forward to the real feedback-service — there is no
+    // 503-without-calling path, matching salehly. Any residual
+    // FeatureFlags:UseUpstream:Feedback config key binds to nothing and is ignored.
 
     /// <summary>
     /// When true, voice transcription paths proxy the real
