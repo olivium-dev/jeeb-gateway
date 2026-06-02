@@ -37,10 +37,14 @@ public sealed class DownstreamServicesOptions
     // wallet-service is intentionally absent: it is wired in Program.cs as a
     // salehly-mirrored named client bound to the top-level WalletServiceApi:BaseUrl
     // key (not a Services:{Section} downstream), so it is not validated here.
+    // NOTE: chat-service is intentionally NOT listed here. Chat moved to the
+    // salehly-style top-level ChatServiceApi:BaseUrl key (consumed directly by the
+    // NSwag ServiceChatClient in Program.cs) and is no longer a Services:* nested
+    // downstream client, so this Services:{section}:BaseUrl validator does not
+    // cover it.
     public List<string> Required { get; set; } = new()
     {
         "Auth",
-        "Chat",
         "UserManagement",
         "Matching",
         "Notification",

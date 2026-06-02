@@ -1,7 +1,4 @@
-using System.Text.Json;
-using JeebGateway.Chat;
 using JeebGateway.Requests;
-using JeebGateway.Services.Clients;
 using JeebGateway.Tracking;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -9,39 +6,31 @@ using Microsoft.Extensions.Options;
 namespace JeebGateway.Disputes.V2;
 
 /// <summary>
-/// <see cref="IDisputeEvidenceOrchestrator"/>. Pulls the chat transcript via the
-/// generic chat-service through <see cref="IChatServiceClient"/> and a stub
-/// polyline via <see cref="ILocationStore"/> + delivery pickup/dropoff. Both
-/// calls run with a strict timeout — exceeded calls degrade the evidence bundle
-/// instead of failing the escalate.
+/// <see cref="IDisputeEvidenceOrchestrator"/>. Captures a stub GPS polyline via
+/// <see cref="ILocationStore"/> + delivery pickup/dropoff. The call runs with a
+/// strict timeout — an exceeded call degrades the evidence bundle instead of
+/// failing the escalate.
 ///
-/// The chat transcript now reads through the BFF client
-/// (<see cref="IChatServiceClient.GetConversationTranscriptAsync"/>), which pages
-/// the generic chat-service list-messages endpoint — the gateway no longer holds
-/// an in-memory chat record-of-truth. The geo polyline remains a stub pending the
-/// geolocation-service relocation.
+/// CHAT TRANSCRIPT REMOVED: the gateway no longer carries a chat BFF client (the
+/// salehly mirror replaced jeeb's 1:1 conversation BFF with a passthrough
+/// ChatController over the generic chat-service). Chat-transcript evidence capture
+/// is therefore left empty here; it will be re-wired when chat-service exposes a
+/// generic transcript-by-participants read the gateway can call directly. The geo
+/// polyline remains a stub pending the geolocation-service relocation.
 /// </summary>
 public sealed class DisputeEvidenceOrchestrator : IDisputeEvidenceOrchestrator
 {
-    private static readonly JsonSerializerOptions TranscriptJsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        WriteIndented = false
-    };
-
-    private readonly IChatServiceClient _chat;
     private readonly ILocationStore _location;
     private readonly IRequestsStore _deliveries;
     private readonly IOptionsMonitor<DisputeEvidenceOptions> _options;
     private readonly ILogger<DisputeEvidenceOrchestrator> _log;
 
     public DisputeEvidenceOrchestrator(
-        IChatServiceClient chat,
         ILocationStore location,
         IRequestsStore deliveries,
         IOptionsMonitor<DisputeEvidenceOptions> options,
         ILogger<DisputeEvidenceOrchestrator> log)
     {
-        _chat = chat;
         _location = location;
         _deliveries = deliveries;
         _options = options;
@@ -53,14 +42,11 @@ public sealed class DisputeEvidenceOrchestrator : IDisputeEvidenceOrchestrator
         ArgumentNullException.ThrowIfNull(request);
         var opts = _options.CurrentValue;
 
-        // Fire both calls in parallel — neither depends on the other and
-        // the AC6 1-second open budget assumes they overlap.
-        var chatTask = CaptureChatAsync(request, opts, ct);
-        var gpsTask = CaptureGpsAsync(request, opts, ct);
-        await Task.WhenAll(chatTask, gpsTask).ConfigureAwait(false);
-
-        var chat = chatTask.Result;
-        var gps = gpsTask.Result;
+        // Chat transcript capture is removed (no gateway chat BFF client); GPS
+        // polyline remains. Keep the chat tuple shape so the evidence bundle and
+        // its degraded-reason aggregation stay stable.
+        var chat = CaptureChat();
+        var gps = await CaptureGpsAsync(request, opts, ct).ConfigureAwait(false);
 
         var degraded = chat.Degraded || gps.Degraded;
         var reason = (chat.Degraded, gps.Degraded) switch
@@ -81,62 +67,13 @@ public sealed class DisputeEvidenceOrchestrator : IDisputeEvidenceOrchestrator
         };
     }
 
-    private async Task<(string? Json, int MessageCount, bool Degraded, string? Reason)> CaptureChatAsync(
-        DisputeEvidenceRequest request,
-        DisputeEvidenceOptions opts,
-        CancellationToken ct)
+    private static (string? Json, int MessageCount, bool Degraded, string? Reason) CaptureChat()
     {
-        if (string.IsNullOrEmpty(request.CounterpartyUserId))
-        {
-            return (null, 0, false, null);
-        }
-
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        linked.CancelAfter(opts.ChatFetchTimeout);
-
-        try
-        {
-            // Read the transcript through the BFF client (pages the generic
-            // chat-service list-messages endpoint, oldest-first). The gateway no
-            // longer keeps an in-memory chat store; the client resolves the
-            // deterministic channel for the (openedBy, counterparty) pair.
-            var messages = await _chat
-                .GetConversationTranscriptAsync(
-                    request.OpenedByUserId,
-                    request.CounterpartyUserId,
-                    opts.MaxTranscriptMessages,
-                    linked.Token)
-                .ConfigureAwait(false);
-
-            var snapshot = messages.Select(m => new
-            {
-                id = m.Id,
-                conversation_id = m.ConversationId,
-                sender_id = m.SenderId,
-                recipient_id = m.RecipientId,
-                type = m.Type.ToString(),
-                sent_at = m.SentAt,
-                text = m.Text,
-                media_url = m.MediaUrl,
-                latitude = m.Latitude,
-                longitude = m.Longitude,
-                offer_id = m.OfferId,
-                read_at = m.ReadAt
-            }).ToList();
-
-            var json = JsonSerializer.Serialize(snapshot, TranscriptJsonOptions);
-            return (json, messages.Count, false, null);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            _log.LogWarning("dispute evidence: chat transcript fetch timed out after {Timeout}", opts.ChatFetchTimeout);
-            return (null, 0, true, "timeout");
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "dispute evidence: chat transcript fetch failed");
-            return (null, 0, true, ex.GetType().Name);
-        }
+        // Chat transcript capture is removed with the gateway chat BFF client. The
+        // evidence bundle reports no transcript (empty, not degraded) until
+        // chat-service exposes a generic transcript-by-participants read the
+        // gateway can call directly.
+        return (null, 0, false, null);
     }
 
     private async Task<(IReadOnlyList<double[]> Polyline, bool Degraded, string? Reason)> CaptureGpsAsync(

@@ -13,7 +13,7 @@ namespace JeebGateway.IntegrationTests.Bff;
 /// NAMED client of the same logical name — <see cref="IHttpClientFactory"/>
 /// keys handler chains by client name, and a typed client is keyed by its
 /// interface type name. Before the Batch 1 fix the typed downstream clients
-/// (Notification, Push, Wallet, Delivery, Geolocation, Chat, …) were registered
+/// (Notification, Push, Wallet, Delivery, Geolocation, …) were registered
 /// with a BARE handler chain, so they silently bypassed bearer forwarding,
 /// X-Service-Auth signing, and the Polly resilience pipeline.
 ///
@@ -33,7 +33,6 @@ public class TypedClientPipelineTests
         new object[] { "IDeliveryServiceClient" },
         new object[] { "IMatchingServiceClient" },
         new object[] { "IGeolocationServiceClient" },
-        new object[] { "IChatServiceClient" },
         new object[] { "INotificationServiceClient" },
         new object[] { "IScoreServiceClient" },
         new object[] { "IFeedbackServiceClient" },
@@ -92,7 +91,6 @@ public class TypedClientPipelineTests
                 ["Services:Delivery"] = "http://delivery.test",
                 ["Services:Matching"] = "http://matching.test",
                 ["Services:Geolocation"] = "http://geo.test",
-                ["Services:Chat:BaseUrl"] = "http://chat.test",
                 ["Services:Notification:BaseUrl"] = "http://notif.test",
                 ["Services:ScoreTaking:BaseUrl"] = "http://score.test",
                 ["Services:Feedback:BaseUrl"] = "http://feedback.test",

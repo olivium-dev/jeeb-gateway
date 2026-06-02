@@ -59,15 +59,13 @@
     <PackageReference Include="AspNetCore.HealthChecks.Uris" Version="8.0.1" />
 
     <!--
-      Redis-backed chat topology map (RedisChatTopologyMap). Holds the
-      channel<->conversation id-map (userId->memberId, sortedPair->channel/sessions)
-      that the gateway must resolve on every chat send/history because the GENERIC
-      chat-service exposes no lookup-by-external-id. In-memory was lost on restart
-      and not multi-replica safe; Redis (native 192.168.2.50:6379, real value only
-      in appsettings.Production.json) makes it durable + shared. The InMemory
-      fallback is selected when Redis:ConnectionString is absent (dev/test).
+      Newtonsoft.Json is the JSON library the salehly-mirrored NSwag client
+      (Services/ServiceChatClient.cs, namespace JeebGateway.service.ServiceChat)
+      was generated against (/jsonLibrary:Newtonsoft). The generated client uses
+      Newtonsoft.Json.JsonConvert + JsonSerializerSettings internally. Pinned to
+      the version NSwag 14.2 targets.
     -->
-    <PackageReference Include="StackExchange.Redis" Version="2.8.16" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
 
     <!--
       T-BE-001 / JEB-471 — OTP sign-in path.

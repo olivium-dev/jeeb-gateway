@@ -2,7 +2,6 @@ using System.Text;
 using JeebGateway.Admin;
 using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Availability;
-using JeebGateway.Chat;
 using JeebGateway.Disputes;
 using JeebGateway.Disputes.V2;
 using JeebGateway.Extensions;
@@ -144,7 +143,6 @@ builder.Services.AddCors(options =>
 builder.Services.AddJeebRateLimiting();
 
 builder.Services.AddControllers();
-builder.Services.AddSignalR();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -214,6 +212,33 @@ builder.Services.AddScoped<JeebGateway.Services.Generated.ServiceRemoteUserPrefe
     var client = factory.CreateClient("remote-user-preferences");
     var baseUrl = builder.Configuration["RemoteUserPreferencesServiceApi:BaseUrl"];
     return new JeebGateway.Services.Generated.ServiceRemoteUserPreferences.ServiceRemoteUserPreferencesClient(baseUrl, client);
+});
+
+// Chat (ChatServiceApi) — salehly sibling mirror. The NSwag-generated
+// ServiceChatClient (Services/ServiceChatClient.cs, namespace
+// JeebGateway.service.ServiceChat) is registered exactly as salehly-gateway does
+// it: a named IHttpClientFactory client "ServiceChatClient" bound to
+// ChatServiceApi:BaseUrl, plus a scoped typed-client instance that pulls the
+// pooled HttpClient from the factory and constructs the client with the
+// configured base URL. ChatController consumes the typed client directly as a
+// passthrough REST shim over the generic chat-service (channels, messages,
+// members, sessions). This replaces the former jeeb-specific 1:1 conversation
+// BFF (ChatServiceClient + Redis topology map + SignalR ChatHub/ChatDispatcher),
+// which has been removed.
+builder.Services.AddHttpClient("ServiceChatClient", client =>
+{
+    var apiUrl = builder.Configuration["ChatServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+builder.Services.AddScoped<JeebGateway.service.ServiceChat.ServiceChatClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("ServiceChatClient");
+    var baseUrl = builder.Configuration["ChatServiceApi:BaseUrl"];
+    return new JeebGateway.service.ServiceChat.ServiceChatClient(baseUrl, client);
 });
 
 // T-migrate-gateway-proxies (PR-A): per-service kill switches. Each
@@ -569,11 +594,12 @@ builder.Services.AddSingleton<IDisputeService, DisputeService>();
 builder.Services.Configure<DisputeEvidenceOptions>(
     builder.Configuration.GetSection(DisputeEvidenceOptions.SectionName));
 builder.Services.AddSingleton<IDisputeCaseStore, InMemoryDisputeCaseStore>();
-// Scoped (was singleton): the evidence orchestrator now reads the chat transcript
-// through the typed IChatServiceClient (an IHttpClientFactory client), so it must
-// not be captured by a singleton. The dispute case service depends on the
-// orchestrator and is resolved per-request by DisputeCasesController, so both move
-// to scoped together. Their other deps are singletons (safe to inject into scoped).
+// Scoped: the dispute case service depends on the evidence orchestrator and is
+// resolved per-request by DisputeCasesController, so both are scoped together.
+// The orchestrator's deps (ILocationStore, IRequestsStore) are singletons (safe
+// to inject into a scoped service). Chat-transcript capture was removed with the
+// gateway chat BFF client (salehly mirror), so the orchestrator no longer holds a
+// typed chat HttpClient.
 builder.Services.AddScoped<IDisputeEvidenceOrchestrator, DisputeEvidenceOrchestrator>();
 builder.Services.AddScoped<IDisputeCaseService, DisputeCaseService>();
 
@@ -641,11 +667,10 @@ builder.Services.Configure<DataExportOptions>(builder.Configuration.GetSection(D
 builder.Services.AddSingleton<IDataExportStore, InMemoryDataExportStore>();
 builder.Services.AddSingleton<InMemoryDataExportRatingsProvider>();
 builder.Services.AddSingleton<IDataExportRatingsProvider>(sp => sp.GetRequiredService<InMemoryDataExportRatingsProvider>());
-// Chat history for GDPR export reads through the BFF chat client (the in-memory
-// provider has been DELETED). Scoped to match the typed IChatServiceClient
-// lifetime (an IHttpClientFactory client). See provider doc for the documented
-// per-user enumeration limitation pending a generic list-channels-for-member
-// chat-service endpoint.
+// Chat history for GDPR export. The gateway no longer carries a chat BFF client
+// (removed with the salehly mirror), so this provider returns an empty transcript
+// and logs the documented per-user enumeration limitation pending a generic
+// list-channels-for-member chat-service endpoint.
 builder.Services.AddScoped<IDataExportChatHistoryProvider, ChatServiceDataExportChatHistoryProvider>();
 builder.Services.AddSingleton<InMemoryDataExportNotifier>();
 builder.Services.AddSingleton<IDataExportNotifier>(sp => sp.GetRequiredService<InMemoryDataExportNotifier>());
@@ -774,20 +799,13 @@ builder.Services.AddHostedService<AutoOfflineSweeper>();
 builder.Services.Configure<TrackingOptions>(builder.Configuration.GetSection(TrackingOptions.SectionName));
 builder.Services.AddSingleton<ILocationStore, InMemoryLocationStore>();
 
-// Real-time chat (T-backend-012).
-// SignalR hub at /hubs/chat delivers each message under the 1s WS SLA to the
-// conversation group; backgrounded recipients (no live hub connection or
-// client-reported background state) fall back to the T-backend-022 push pipeline.
-//
-// The in-memory message record-of-truth has been DELETED: the dispatcher now
-// persists every message to the GENERIC chat-service via IChatServiceClient (the
-// gateway is a pure BFF). Presence remains an in-memory singleton (live socket
-// state). The dispatcher is SCOPED because it depends on the typed
-// IChatServiceClient (an IHttpClientFactory client) — a singleton would capture
-// the typed client and pin its handler chain (no DNS/handler rotation, captive
-// dependency). The dispatcher is stateless, so scoped is correct.
-builder.Services.AddSingleton<IChatPresenceTracker, InMemoryChatPresenceTracker>();
-builder.Services.AddScoped<IChatDispatcher, ChatDispatcher>();
+// Real-time chat (T-backend-012) — REMOVED.
+// The jeeb-specific SignalR hub (/hubs/chat), ChatDispatcher, and in-memory
+// presence tracker have been removed in favour of the salehly sibling mirror:
+// ChatController is now a stateless passthrough REST shim over the generic
+// chat-service via the NSwag ServiceChatClient (registered above). Real-time
+// fan-out is a chat-service / realtime-communication-service concern, not a
+// gateway one.
 
 // Wave 2-3 backend services.
 // T-backend-017: Weekly settlement batch processing.
@@ -951,9 +969,6 @@ app.MapControllers();
 // snapshot for the configured MeterProvider (ASP.NET Core HTTP server,
 // HttpClient, and the Jeeb-owned RequestLatencyMetrics histogram).
 app.MapPrometheusScrapingEndpoint("/metrics");
-
-// Real-time chat WebSocket surface (T-backend-012).
-app.MapHub<ChatHub>("/hubs/chat");
 
 // Health endpoints — three distinct surfaces.
 //

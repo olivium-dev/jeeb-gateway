@@ -1,14 +1,14 @@
 namespace JeebGateway.Disputes.V2;
 
 /// <summary>
-/// Captures the evidence bundle (chat transcript snapshot + GPS polyline)
+/// Captures the evidence bundle (GPS polyline; chat transcript removed)
 /// that <see cref="IDisputeCaseService"/> attaches to every case at
 /// escalate time (T-BE-028 / JEB-64 AC1).
 ///
 /// Production wiring proxies to:
-///   - <c>olivium-dev/chat-service</c> for the transcript, read through the BFF
-///     <see cref="Services.Clients.IChatServiceClient"/> (paging the generic
-///     list-messages endpoint) — the gateway no longer holds a chat store.
+///   - <c>olivium-dev/chat-service</c> for the transcript — REMOVED with the
+///     gateway chat BFF client (salehly mirror). Transcript capture is left empty
+///     until chat-service exposes a generic transcript-by-participants read.
 ///   - <c>olivium-dev/geolocation-service</c> for the route polyline (the
 ///     gateway's in-process <c>ILocationStore</c> stands in for the MVP).
 ///

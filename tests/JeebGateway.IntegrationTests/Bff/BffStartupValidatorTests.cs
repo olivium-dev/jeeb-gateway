@@ -27,7 +27,9 @@ public class BffStartupValidatorTests
         var config = BuildConfig(new Dictionary<string, string?>
         {
             ["Services:Auth:BaseUrl"] = "http://auth.test",
-            // Chat, UserManagement missing
+            // UserManagement missing (Chat is no longer a required
+            // Services:* key — it moved to the top-level ChatServiceApi key;
+            // Wallet also moved to the top-level WalletServiceApi key)
             ["Services:Matching:BaseUrl"] = "http://matching.test",
             // Notification, Geolocation, PushNotification, Delivery missing
         });
@@ -43,13 +45,18 @@ public class BffStartupValidatorTests
 
         act.Should().Throw<StartupConfigurationException>()
             .Which.Message.Should().ContainAll(
-                "Services:Chat:BaseUrl",
                 "Services:UserManagement:BaseUrl",
                 "Services:Notification:BaseUrl",
                 "Services:Geolocation:BaseUrl",
                 "Services:PushNotification:BaseUrl",
                 "Services:Delivery:BaseUrl",
                 "environment 'Production'");
+
+        // Chat is intentionally NOT a required Services:* key anymore (salehly
+        // mirror moved it to the top-level ChatServiceApi key), so even with the
+        // Services:Chat URL absent the validator must not name it.
+        act.Should().Throw<StartupConfigurationException>()
+            .Which.Message.Should().NotContain("Services:Chat");
     }
 
     [Fact]
@@ -97,7 +104,6 @@ public class BffStartupValidatorTests
         var config = BuildConfig(new Dictionary<string, string?>
         {
             ["Services:Auth:BaseUrl"] = "http://auth.test",
-            ["Services:Chat:BaseUrl"] = "http://chat.test",
             ["Services:UserManagement:BaseUrl"] = "http://user-management.test",
             ["Services:Matching:BaseUrl"] = "http://matching.test",
             ["Services:Notification:BaseUrl"] = "http://notification.test",
@@ -122,7 +128,6 @@ public class BffStartupValidatorTests
         var config = BuildConfig(new Dictionary<string, string?>
         {
             ["Services:Auth"] = "http://auth.test",
-            ["Services:Chat"] = "http://chat.test",
             ["Services:UserManagement"] = "http://user-management.test",
             ["Services:Matching"] = "http://matching.test",
             ["Services:Notification"] = "http://notification.test",

@@ -105,7 +105,7 @@ public static class HealthCheckExtensions
         // them — exactly the sibling-gateway "liveness-only" intent, and the same
         // treatment PR #47 gave feedback-service. Adding a probe here would 404
         // and falsely mark the gateway red.
-        //   - chat-service           (Services:Chat:BaseUrl)
+        //   - chat-service           (ChatServiceApi:BaseUrl)
         //   - feedback               (Services:Feedback:BaseUrl)
         //   - remote-user-preferences (RemoteUserPreferencesServiceApi:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)
