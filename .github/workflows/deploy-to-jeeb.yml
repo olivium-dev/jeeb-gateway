@@ -3,8 +3,12 @@
 # Follows the olivium per-service deploy-to-<server>.yml pattern (workflow_dispatch
 # + cloudflared SSH + ghcr image + docker service), hardened per the locked deploy
 # policy (olivium-deployment/README.md):
-#   * zero-downtime: docker service UPDATE (start-first, rollback-on-failure);
+#   * zero-downtime: docker service UPDATE (rollback-on-failure);
 #     CREATE only when the service is absent  -- NEVER `service rm` + `service create`
+#   * update/rollback order = stop-first: the published port uses mode=host on a
+#     single-node swarm, so start-first deadlocks ("host-mode port already in use
+#     on 1 node") because the old task still holds the host port. stop-first frees
+#     the port first (brief blip), which is correct for host-mode single node.
 #   * key-only SSH from a secret (fail-closed; no password in YAML, unlike legacy)
 #   * registry creds via GitHub secrets, never inlined (no demo-password literals)
 #   * HTTP health gate after deploy, with auto-rollback to the previous image
@@ -111,8 +115,8 @@ jobs:
           docker pull '$TAG'
           if docker service ls --format '{{.Name}}' | grep -wq "\$SVC"; then
             docker service update --image '$TAG' --with-registry-auth \
-              --update-order start-first --update-failure-action rollback \
-              --rollback-order start-first --update-monitor 20s "\$SVC"
+              --update-order stop-first --update-failure-action rollback \
+              --rollback-order stop-first --update-monitor 20s "\$SVC"
           else
             docker service create --name "\$SVC" --replicas 1 \
               --publish published=\$EXT,target=\$INT,mode=host \
