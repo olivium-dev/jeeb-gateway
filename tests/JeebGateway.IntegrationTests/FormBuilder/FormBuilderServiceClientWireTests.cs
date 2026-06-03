@@ -84,6 +84,81 @@ public sealed class FormBuilderServiceClientWireTests
     }
 
     [Fact]
+    public async Task SubmitFormAsync_Posts_Body_To_Forms_Path_And_Returns_SubmissionId()
+    {
+        // POST /forms/{template_name} — the PostgreSQL WRITE path (insert a row,
+        // return the generated submission_id). The body is the template's
+        // configuration-driven component value map, passed through verbatim.
+        const string responseBody = """
+        { "message": "jeeb_jeeber_v1 submitted successfully",
+          "submission_id": "f3f2dc0a-8831-4e95-ab4c-e72b3ac47df2",
+          "data": { "kyc-vehicle-plate-number": "JEEB-123" } }
+        """;
+        string? capturedPath = null;
+        string? capturedBody = null;
+        var handler = new CapturingHandler((req, _) =>
+        {
+            req.Method.Should().Be(HttpMethod.Post);
+            capturedPath = req.RequestUri!.AbsolutePath;
+            capturedBody = req.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            return Respond(responseBody);
+        });
+
+        var client = new FormBuilderServiceClient(NewHttp(handler));
+
+        using var bodyDoc = JsonDocument.Parse(
+            """{ "kyc-vehicle-plate-number": { "value": "JEEB-123" } }""");
+        var result = await client.SubmitFormAsync(
+            "jeeb_jeeber_v1", bodyDoc.RootElement, CancellationToken.None);
+
+        capturedPath.Should().Be("/forms/jeeb_jeeber_v1");
+        capturedBody.Should().Contain("kyc-vehicle-plate-number");
+        result.GetProperty("submission_id").GetString()
+            .Should().Be("f3f2dc0a-8831-4e95-ab4c-e72b3ac47df2");
+    }
+
+    [Fact]
+    public async Task GetFormSubmissionAsync_Reads_Back_By_Id_From_Forms_Path()
+    {
+        // GET /forms/{template_name}/{form_id} — the PostgreSQL READ-BACK path.
+        const string responseBody = """
+        { "message": "Retrieved jeeb_jeeber_v1 form",
+          "submission_id": "f3f2dc0a-8831-4e95-ab4c-e72b3ac47df2",
+          "data": { "kyc-vehicle-plate-number": { "value": "JEEB-123" } } }
+        """;
+        var handler = new CapturingHandler((req, _) =>
+        {
+            req.Method.Should().Be(HttpMethod.Get);
+            req.RequestUri!.AbsolutePath
+                .Should().Be("/forms/jeeb_jeeber_v1/f3f2dc0a-8831-4e95-ab4c-e72b3ac47df2");
+            return Respond(responseBody);
+        });
+
+        var client = new FormBuilderServiceClient(NewHttp(handler));
+
+        var result = await client.GetFormSubmissionAsync(
+            "jeeb_jeeber_v1", "f3f2dc0a-8831-4e95-ab4c-e72b3ac47df2", CancellationToken.None);
+
+        result.GetProperty("submission_id").GetString()
+            .Should().Be("f3f2dc0a-8831-4e95-ab4c-e72b3ac47df2");
+        result.GetProperty("data").GetProperty("kyc-vehicle-plate-number")
+            .GetProperty("value").GetString().Should().Be("JEEB-123");
+    }
+
+    [Fact]
+    public async Task SubmitFormAsync_NonSuccess_Throws_HttpRequestException()
+    {
+        var handler = new CapturingHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.InternalServerError));
+        var client = new FormBuilderServiceClient(NewHttp(handler));
+
+        using var bodyDoc = JsonDocument.Parse("""{ "x": { "value": "y" } }""");
+        var act = () => client.SubmitFormAsync("jeeb_jeeber_v1", bodyDoc.RootElement, CancellationToken.None);
+
+        await act.Should().ThrowAsync<HttpRequestException>();
+    }
+
+    [Fact]
     public async Task NonSuccess_Throws_HttpRequestException()
     {
         var handler = new CapturingHandler((_, _) =>

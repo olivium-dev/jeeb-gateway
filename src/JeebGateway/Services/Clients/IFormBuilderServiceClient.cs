@@ -86,6 +86,37 @@ public interface IFormBuilderServiceClient
     /// Lists the supported localization language codes via <c>GET /languages</c>.
     /// </summary>
     Task<IReadOnlyList<string>> ListLanguagesAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Submits a form against a registered template via
+    /// <c>POST /forms/{templateName}</c> — the upstream's PostgreSQL <b>write</b>
+    /// path: it inserts a row (<c>submission_id</c> + JSON <c>data</c>) into the
+    /// dynamically-created per-template table in <c>jeeb_form_builder</c> and
+    /// returns the generated <c>submission_id</c>. The request/response bodies are
+    /// configuration-driven (the template's component value map), so they are
+    /// carried verbatim as <see cref="System.Text.Json.JsonElement"/>.
+    ///
+    /// This + <see cref="GetFormSubmissionAsync"/> are the only DB-touching HTTP
+    /// routes form-builder-service exposes (every <c>/templates*</c> and
+    /// <c>/components*</c> read is config-file-backed, not PG-backed), so the
+    /// write-then-read-back is how a real DB round-trip is proven through the gateway.
+    /// </summary>
+    Task<System.Text.Json.JsonElement> SubmitFormAsync(
+        string templateName,
+        System.Text.Json.JsonElement body,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Reads back a previously-submitted form by id via
+    /// <c>GET /forms/{templateName}/{formId}</c> — the upstream's PostgreSQL
+    /// <b>read</b> path (<c>SELECT data WHERE submission_id = :formId</c> on the
+    /// per-template table). Returns the upstream envelope verbatim as
+    /// <see cref="System.Text.Json.JsonElement"/>.
+    /// </summary>
+    Task<System.Text.Json.JsonElement> GetFormSubmissionAsync(
+        string templateName,
+        string formId,
+        CancellationToken ct);
 }
 
 /// <summary>

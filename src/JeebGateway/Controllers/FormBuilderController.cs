@@ -1,3 +1,4 @@
+using System.Text.Json;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc;
@@ -92,6 +93,68 @@ public class FormBuilderController : ControllerBase
 
         var schema = await _formBuilder.SchemaAsync(templateName, AcceptLanguage(), ct);
         return Ok(schema);
+    }
+
+    /// <summary>
+    /// Submits a form against a registered template (the upstream's PostgreSQL
+    /// <b>write</b> path). Real path: <c>POST /forms/{templateName}</c> — inserts a
+    /// row into the per-template table in <c>jeeb_form_builder</c> and returns the
+    /// generated <c>submission_id</c>.
+    ///
+    /// This is the DB-backed seam (every <c>/templates*</c> read is config-file
+    /// backed); together with <see cref="GetFormSubmission"/> it proves a real
+    /// PostgreSQL round-trip through the gateway. The body is the template's
+    /// configuration-driven component value map, carried verbatim.
+    /// </summary>
+    [HttpPost("forms/{templateName}")]
+    [ProducesResponseType(typeof(JsonElement), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> SubmitForm(
+        string templateName,
+        [FromBody] JsonElement body,
+        CancellationToken ct = default)
+    {
+        if (!IsValidTemplateName(templateName)) return InvalidTemplateName();
+        if (body.ValueKind != JsonValueKind.Object)
+        {
+            return Problem(
+                title: "Invalid form submission",
+                detail: "The request body must be a JSON object of the template's component values.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+        if (!_flags.CurrentValue.FormBuilder) return UpstreamDisabled();
+
+        var result = await _formBuilder.SubmitFormAsync(templateName, body, ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Reads back a previously-submitted form by id (the upstream's PostgreSQL
+    /// <b>read</b> path). Real path: <c>GET /forms/{templateName}/{formId}</c> —
+    /// <c>SELECT data WHERE submission_id = :formId</c> on the per-template table.
+    /// </summary>
+    [HttpGet("forms/{templateName}/{formId}")]
+    [ProducesResponseType(typeof(JsonElement), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> GetFormSubmission(
+        string templateName,
+        string formId,
+        CancellationToken ct = default)
+    {
+        if (!IsValidTemplateName(templateName)) return InvalidTemplateName();
+        if (string.IsNullOrWhiteSpace(formId) || formId.Length > MaxTemplateNameLength)
+        {
+            return Problem(
+                title: "Invalid form id",
+                detail: $"The form id must be non-empty and at most {MaxTemplateNameLength} characters.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+        if (!_flags.CurrentValue.FormBuilder) return UpstreamDisabled();
+
+        var result = await _formBuilder.GetFormSubmissionAsync(templateName, formId, ct);
+        return Ok(result);
     }
 
     /// <summary>

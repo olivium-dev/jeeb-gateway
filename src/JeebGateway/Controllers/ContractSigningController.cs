@@ -1,3 +1,4 @@
+using System.Text.Json;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc;
@@ -82,6 +83,29 @@ public class ContractSigningController : ControllerBase
 
         var template = await _contractSigning.RegisterTemplateAsync(request, ct);
         return Ok(template);
+    }
+
+    /// <summary>
+    /// Lists registered contract templates. Real path: <c>GET /v1/templates</c> —
+    /// the upstream's PostgreSQL-backed catalog read (paginated
+    /// <c>{ "items": [...], "total", "limit", "offset" }</c> from
+    /// <c>contract_templates</c>). This is the provable DB read through the gateway.
+    ///
+    /// Routed as the literal <c>templates/list</c> so it is matched ahead of the
+    /// parameterized <c>templates/{templateId}</c> route (the upstream itself has no
+    /// <c>/v1/templates/list</c> route — "list" would otherwise resolve to the
+    /// by-id route and 404 — so the client deliberately calls the bare
+    /// <c>/v1/templates</c> collection path).
+    /// </summary>
+    [HttpGet("templates/list")]
+    [ProducesResponseType(typeof(JsonElement), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> ListTemplates(CancellationToken ct = default)
+    {
+        if (!_flags.CurrentValue.ContractSigning) return UpstreamDisabled();
+
+        var templates = await _contractSigning.ListTemplatesAsync(ct);
+        return Ok(templates);
     }
 
     /// <summary>
