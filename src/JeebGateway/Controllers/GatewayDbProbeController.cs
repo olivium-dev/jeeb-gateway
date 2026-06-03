@@ -135,7 +135,9 @@ public sealed class GatewayDbProbeController : ControllerBase
     // ── compliment-service (PG read) ───────────────────────────────────────
     /// <summary>
     /// GET /api/compliments/list?userId=.. — proxies compliment-service
-    /// (<c>GET /list</c>, host port 10036) [PG read], forwarding the user filter.
+    /// (<c>GET /api/v1/compliments/list</c>, host port 10036) [PG read]. The
+    /// upstream filters by <c>partner_id_1</c>/<c>partner_id_2</c>; the gateway
+    /// forwards the supplied user id as <c>partner_id_1</c>.
     /// </summary>
     [HttpGet("api/compliments/list")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -143,10 +145,10 @@ public sealed class GatewayDbProbeController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public Task<IActionResult> GetComplimentsList([FromQuery] string? userId, CancellationToken ct)
     {
-        var q = BuildQuery(("userId", userId), ("user_id", userId));
+        var q = BuildQuery(("partner_id_1", userId));
         return ProxyGetAsync(
             "db-probe-compliment", "Services:Compliment:BaseUrl",
-            $"list{q}", ct);
+            $"api/v1/compliments/list{q}", ct);
     }
 
     // ── ban-service (Redis read) ───────────────────────────────────────────
