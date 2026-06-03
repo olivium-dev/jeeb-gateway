@@ -27,7 +27,19 @@ namespace JeebGateway.Controllers
 
         private string? GetUserId()
         {
-            return User.FindFirst(ClaimTypes.Sid)?.Value;
+            // The gateway mints access tokens with the user id in the JWT `sub`
+            // claim (TokenService.BuildAccessToken) and runs with
+            // MapInboundClaims = false + NameClaimType = "sub" (Program.cs), so the
+            // user id is NOT surfaced as ClaimTypes.Sid. Reading only Sid here
+            // returned null and 401'd every authenticated /api/UserPreferences/*
+            // call against a minted token. Fall back through the claim aliases a
+            // gateway-minted or upstream token may carry — matching the resolution
+            // order NotificationController already uses — so a valid token
+            // authorizes the existing DB-backed preference routes.
+            return User.FindFirst(ClaimTypes.Sid)?.Value
+                ?? User.FindFirst("sub")?.Value
+                ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? User.FindFirst("sid")?.Value;
         }
 
         #region Data Set Operations
