@@ -97,6 +97,34 @@ public sealed class FormBuilderServiceClient : IFormBuilderServiceClient
         return payload?.SupportedLanguages ?? new List<string>();
     }
 
+    public async Task<JsonElement> SubmitFormAsync(
+        string templateName,
+        JsonElement body,
+        CancellationToken ct)
+    {
+        // POST /forms/{template_name} — PostgreSQL insert; returns { submission_id, ... }.
+        var path = $"forms/{Uri.EscapeDataString(templateName)}";
+        using var response = await _http.PostAsJsonAsync(path, body, JsonOptions, ct);
+        response.EnsureSuccessStatusCode();
+
+        var document = await response.Content.ReadFromJsonAsync<JsonElement>(JsonOptions, ct);
+        return document.Clone();
+    }
+
+    public async Task<JsonElement> GetFormSubmissionAsync(
+        string templateName,
+        string formId,
+        CancellationToken ct)
+    {
+        // GET /forms/{template_name}/{form_id} — PostgreSQL read-back of the inserted row.
+        var path = $"forms/{Uri.EscapeDataString(templateName)}/{Uri.EscapeDataString(formId)}";
+        using var response = await _http.GetAsync(path, ct);
+        response.EnsureSuccessStatusCode();
+
+        var document = await response.Content.ReadFromJsonAsync<JsonElement>(JsonOptions, ct);
+        return document.Clone();
+    }
+
     /// <summary>
     /// Builds a GET with the upstream's <c>Accept-Language</c> localization header.
     /// Falls back to "en" (the upstream default) when unset/blank.

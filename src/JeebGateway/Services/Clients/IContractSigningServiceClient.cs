@@ -76,6 +76,16 @@ public interface IContractSigningServiceClient
         CancellationToken ct);
 
     /// <summary>
+    /// Lists registered contract templates via <c>GET /v1/templates</c> — the
+    /// upstream's PostgreSQL-backed catalog read (a paginated
+    /// <c>{ "items": [...], "total", "limit", "offset" }</c> envelope from
+    /// <c>contract_templates</c>). Carried through verbatim as
+    /// <see cref="System.Text.Json.JsonElement"/> so the gateway never couples to
+    /// the (configuration-driven) template payload shape.
+    /// </summary>
+    Task<System.Text.Json.JsonElement> ListTemplatesAsync(CancellationToken ct);
+
+    /// <summary>
     /// Reads a single template by id via <c>GET /v1/templates/{templateId}</c>.
     /// </summary>
     Task<ContractTemplate> GetTemplateAsync(

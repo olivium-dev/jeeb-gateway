@@ -50,6 +50,20 @@ public sealed class ContractSigningServiceClient : IContractSigningServiceClient
         return ToTemplate(document);
     }
 
+    public async Task<JsonElement> ListTemplatesAsync(CancellationToken ct)
+    {
+        // GET /v1/templates — the PostgreSQL-backed template catalog (paginated
+        // { "items": [...], "total", "limit", "offset" } envelope). NOTE: this is
+        // the COLLECTION route, distinct from GET /v1/templates/{template_id};
+        // the upstream resolves "/v1/templates/list" to the {id} route (id="list"
+        // -> 404), so the list MUST hit the bare "/v1/templates" path.
+        using var response = await _http.GetAsync("v1/templates", ct);
+        response.EnsureSuccessStatusCode();
+
+        var document = await response.Content.ReadFromJsonAsync<JsonElement>(JsonOptions, ct);
+        return document.Clone();
+    }
+
     public async Task<ContractTemplate> GetTemplateAsync(string templateId, CancellationToken ct)
     {
         // GET /v1/templates/{template_id}

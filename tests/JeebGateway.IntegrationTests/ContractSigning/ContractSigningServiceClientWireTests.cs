@@ -164,6 +164,46 @@ public sealed class ContractSigningServiceClientWireTests
     }
 
     [Fact]
+    public async Task ListTemplatesAsync_Hits_Bare_Collection_Path_Not_List_Suffix()
+    {
+        // GET /v1/templates — the PostgreSQL-backed catalog read. CRITICAL: it must
+        // hit the BARE collection path. The upstream resolves /v1/templates/list to
+        // the by-id route (id="list" -> 404), which is the exact 500/404 the gateway
+        // route is fixing — so this asserts the client never appends "/list".
+        const string responseBody = """
+        { "items": [ { "template_id": "tpl_123", "name": "jeeb_tos_v1", "status": "ACTIVE" } ],
+          "total": 1, "limit": 50, "offset": 0 }
+        """;
+        var handler = new CapturingHandler((req, _) =>
+        {
+            req.Method.Should().Be(HttpMethod.Get);
+            req.RequestUri!.AbsolutePath.Should().Be("/v1/templates");
+            req.RequestUri!.AbsolutePath.Should().NotContain("/list");
+            return Task.FromResult(Respond(responseBody, HttpStatusCode.OK));
+        });
+
+        var client = new ContractSigningServiceClient(NewHttp(handler));
+
+        var doc = await client.ListTemplatesAsync(CancellationToken.None);
+
+        doc.GetProperty("total").GetInt32().Should().Be(1);
+        doc.GetProperty("items")[0].GetProperty("template_id").GetString().Should().Be("tpl_123");
+        doc.GetProperty("items")[0].GetProperty("name").GetString().Should().Be("jeeb_tos_v1");
+    }
+
+    [Fact]
+    public async Task ListTemplatesAsync_NonSuccess_Throws_HttpRequestException()
+    {
+        var handler = new CapturingHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+        var client = new ContractSigningServiceClient(NewHttp(handler));
+
+        var act = () => client.ListTemplatesAsync(CancellationToken.None);
+
+        await act.Should().ThrowAsync<HttpRequestException>();
+    }
+
+    [Fact]
     public async Task NonSuccess_Throws_HttpRequestException()
     {
         var handler = new CapturingHandler((_, _) =>
