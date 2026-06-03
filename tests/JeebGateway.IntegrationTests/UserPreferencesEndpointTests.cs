@@ -68,6 +68,33 @@ public class UserPreferencesEndpointTests
         captured.Single().Method.Should().Be(HttpMethod.Get);
     }
 
+    /// <summary>
+    /// REGRESSION (claim bug): the gateway mints access tokens with the user id
+    /// in the JWT <c>sub</c> claim ONLY (TokenService.BuildAccessToken) and runs
+    /// with <c>MapInboundClaims=false</c>, so a minted token carries no
+    /// <c>ClaimTypes.Sid</c>. The original <c>GetUserId()</c> read only Sid and
+    /// 401'd every such call. With the fall-through fix a sub-only token must now
+    /// authorize and resolve the upstream user id from <c>sub</c>.
+    /// </summary>
+    [Fact]
+    public async Task GetAllPreferences_SubOnlyToken_Authorizes_And_Resolves_UserId_From_Sub()
+    {
+        var captured = new CapturedRequests();
+        var stub = new StubHttpMessageHandler(req =>
+        {
+            captured.Add(req);
+            return JsonResponse("""{ "theme": "dark" }""");
+        });
+
+        using var factory = NewFactory(stub);
+        var client = SubOnlyClient(factory);
+
+        var resp = await client.GetAsync("/api/UserPreferences/preferences");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        captured.Single().RequestUri!.AbsolutePath.Should().Be($"/preferences/{TestUserId}");
+    }
+
     [Fact]
     public async Task GetSinglePreference_Authorized_Returns_Value_From_Upstream_Envelope()
     {
@@ -218,6 +245,31 @@ public class UserPreferencesEndpointTests
         var client = factory.CreateClient();
         client.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", MintToken(factory));
+        return client;
+    }
+
+    /// <summary>Authorizes with a token carrying ONLY the <c>sub</c> claim (no Sid).</summary>
+    private static HttpClient SubOnlyClient(WebApplicationFactory<Program> factory)
+    {
+        var config = factory.Services.GetRequiredService<IConfiguration>();
+        var issuer = config["Jwt:Issuer"] ?? TestIssuer;
+        var audience = config["Jwt:Audience"] ?? TestAudience;
+        var signingKey = config["Jwt:SigningKey"] ?? TestSigningKey;
+
+        var creds = new SigningCredentials(
+            new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey)),
+            SecurityAlgorithms.HmacSha256);
+        var token = new JwtSecurityToken(
+            issuer: issuer,
+            audience: audience,
+            claims: new[] { new Claim("sub", TestUserId) },
+            notBefore: DateTime.UtcNow.AddMinutes(-1),
+            expires: DateTime.UtcNow.AddMinutes(30),
+            signingCredentials: creds);
+
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", new JwtSecurityTokenHandler().WriteToken(token));
         return client;
     }
 

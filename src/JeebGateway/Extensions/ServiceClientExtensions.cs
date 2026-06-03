@@ -357,7 +357,53 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IFormBuilderServiceClient, FormBuilderServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:FormBuilder")));
 
+        AddDbProbeClients(services, config);
+
         return services;
+    }
+
+    /// <summary>
+    /// Registers the additive, read-only "DB probe" named HttpClients consumed
+    /// by <see cref="JeebGateway.Controllers.GatewayDbProbeController"/>. These
+    /// give the gateway (the product front door) a verifiable GET pass-through to
+    /// one DB-backed read on every remaining upstream so each persistence layer
+    /// can be exercised END-TO-END THROUGH THE GATEWAY with a minted token —
+    /// without adding a typed-client method or DTO per route (which would drift
+    /// from the snake_case FastAPI / Phoenix / Actix wire shapes).
+    ///
+    /// Each client carries the org-standard bearer + X-Service-Auth + Polly
+    /// resilience chain (via <see cref="AddNamedDownstreamClient"/>) so the probe
+    /// routes behave exactly like every other downstream call. BaseUrl binding is
+    /// lazy: a missing key does not throw at startup; the controller surfaces a
+    /// 503 ProblemDetails when an upstream is not configured in an environment.
+    ///
+    /// ADDITIVE ONLY — no existing client, route, or flag is changed here.
+    /// </summary>
+    private static void AddDbProbeClients(IServiceCollection services, IConfiguration config)
+    {
+        // notification-service (Mongo read) — GET /notifications. Reuse the same
+        // upstream base the salehly-mirrored ServiceNotificationClient targets
+        // (host port 10026) so the probe and the passthrough agree on the host.
+        AddNamedDownstreamClient(services, config, "db-probe-notification", "ServiceNotificationClient:BaseUrl");
+
+        // geolocation-service (PG read) — GET /locations/user/{user_id}.
+        AddNamedDownstreamClient(services, config, "db-probe-geolocation", "Services:Geolocation:BaseUrl");
+
+        // unified_payment_gateway (PG read, READ-ONLY) —
+        // GET /api/v1/payments/cod_jeeb/by-delivery/{deliveryId}.
+        AddNamedDownstreamClient(services, config, "db-probe-unified-payment", "Services:UnifiedPayment:BaseUrl");
+
+        // realtime-comunication-service (PG read) — GET /admin/topics.
+        AddNamedDownstreamClient(services, config, "db-probe-realtime", "Services:Realtime:BaseUrl");
+
+        // compliment-service (PG read) — GET /list.
+        AddNamedDownstreamClient(services, config, "db-probe-compliment", "Services:Compliment:BaseUrl");
+
+        // ban-service (Redis read) — GET /api/v1/ban/{user_id}/status.
+        AddNamedDownstreamClient(services, config, "db-probe-ban", "Services:Ban:BaseUrl");
+
+        // one-time-password service (PG read) — GET /api/OTP/status/{phoneNumber}.
+        AddNamedDownstreamClient(services, config, "db-probe-otp", "Services:ServiceOTP:BaseUrl");
     }
 
     /// <summary>
