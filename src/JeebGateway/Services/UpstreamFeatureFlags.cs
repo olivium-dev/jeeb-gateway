@@ -159,4 +159,24 @@ public sealed class UpstreamFeatureFlags
     /// flip this on to route through the real upstream.
     /// </summary>
     public bool FormBuilder { get; set; }
+
+    /// <summary>
+    /// ADR-002 PR-3 (owner-approved 2026-06-04) — CONTRACT-AFFECTING, CANARY-GATED.
+    ///
+    /// When true, an illegal delivery transition is rejected with HTTP <b>422</b>
+    /// and the typed <c>transition_not_allowed</c> body that mirrors
+    /// delivery-service (ADR-002 §4), instead of the legacy HTTP <b>400</b>.
+    ///
+    /// DEFAULTS OFF in EVERY environment, including
+    /// <c>appsettings.Production.json</c>. This is the ONE behavior change in the
+    /// ADR-002 reconciliation that is contract-affecting (a client asserting 400
+    /// on an illegal transition would break), so it MUST NOT be flipped live
+    /// without an explicit canary call-out and a mobile consumer notice. While
+    /// off, <see cref="JeebGateway.Controllers.DeliveriesController"/> keeps
+    /// returning the legacy 400 with the existing
+    /// <c>https://jeeb.dev/errors/invalid-transition</c> ProblemDetails — zero
+    /// live behavior change. Flip to true only during the canary window once
+    /// mobile confirms it reads the typed body, not the bare status code.
+    /// </summary>
+    public bool CanonicalTransition422 { get; set; }
 }

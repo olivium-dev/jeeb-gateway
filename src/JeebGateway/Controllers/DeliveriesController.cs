@@ -163,6 +163,27 @@ public class DeliveriesController : ControllerBase
                 return NotFound();
 
             case DeliveryTransitionOutcome.InvalidTransition:
+                // ADR-002 PR-3 (CONTRACT-AFFECTING, CANARY-GATED): when the
+                // CanonicalTransition422 flag is on, an illegal transition is
+                // rejected with HTTP 422 + the typed transition_not_allowed body
+                // that mirrors delivery-service (ADR-002 §4). The flag DEFAULTS
+                // OFF in every environment, so by default this path is unchanged
+                // and still returns the legacy 400 — flip the flag only during
+                // the canary once mobile reads the typed body, not the bare code.
+                if (_flags.CurrentValue.CanonicalTransition422)
+                {
+                    var callerRole = UserIdentity.HasRole(HttpContext, Roles.Jeeber)
+                        ? DeliveryTriggerSource.Jeeber
+                        : UserIdentity.HasRole(HttpContext, Roles.Client)
+                            ? DeliveryTriggerSource.Client
+                            : DeliveryTriggerSource.System;
+                    return CanonicalTransitionProblem.Build(
+                        from: result.Request?.Status,
+                        to: body.Status,
+                        trigger: null,
+                        callerRole: callerRole,
+                        detail: result.Reason);
+                }
                 return BadRequest(new ProblemDetails
                 {
                     Title = "Invalid status transition.",
