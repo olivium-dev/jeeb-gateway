@@ -30,6 +30,9 @@ public class AuthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
             {
                 cfg.AddInMemoryCollection(new Dictionary<string, string?>
                 {
+                    // F3: token-mint gate OFF so the legacy /auth/tokens helper used
+                    // by these auth-flow tests keeps working without a privileged key.
+                    ["Security:TokenMint:Enabled"] = "false",
                     ["Security:RateLimit:Enabled"] = "false"
                 });
             });

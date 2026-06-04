@@ -16,6 +16,16 @@ public class SecurityOptions
     public ApiKeyConfig ApiKey { get; set; } = new();
     public RequestValidationConfig RequestValidation { get; set; } = new();
 
+    /// <summary>
+    /// F3 security-P0 — privileged-caller gate on the credential-less token mint
+    /// (<c>POST /auth/tokens</c>). The unauthenticated mint was an
+    /// account-takeover-class backdoor: any caller could mint a gateway JWT for
+    /// an arbitrary <c>userId</c> with no credential. This block requires an
+    /// internal caller (test harness / CTO / a real auth flow) to present a
+    /// privileged shared key before a token is minted.
+    /// </summary>
+    public TokenMintConfig TokenMint { get; set; } = new();
+
     public class CorsConfig
     {
         /// <summary>Named CORS policy applied to every endpoint.</summary>
@@ -117,6 +127,43 @@ public class SecurityOptions
         /// from secrets manager, never hardcoded in appsettings.
         /// </summary>
         public Dictionary<string, string> ServiceKeys { get; set; } = new();
+    }
+
+    /// <summary>
+    /// F3 — gate on <c>POST /auth/tokens</c> (the credential-less mint).
+    ///
+    /// When <see cref="Enabled"/> is true (the production default), the mint
+    /// requires the caller to present <see cref="HeaderName"/> carrying a value
+    /// that matches <see cref="Key"/> (constant-time compared). A missing key
+    /// yields 401; a present-but-wrong key yields 403.
+    ///
+    /// To avoid a hard dependency on a brand-new pipeline secret being present
+    /// at deploy time (which would lock out the fleet's own verification path),
+    /// <see cref="Key"/> may be left blank, in which case the gate falls back to
+    /// the already-injected JWT signing key (<c>Jwt:SigningKey</c>). A caller who
+    /// already holds the signing key can already forge any token, so reusing it
+    /// as the privileged credential adds no new attack surface while closing the
+    /// *unauthenticated* hole. Set a dedicated <see cref="Key"/> via
+    /// <c>Security__TokenMint__Key</c> to rotate independently of the JWT key.
+    /// </summary>
+    public class TokenMintConfig
+    {
+        /// <summary>
+        /// Master switch. Defaults to <c>true</c> so the mint is gated by
+        /// default; tests and local dev may set it to <c>false</c> to exercise
+        /// the issue/refresh/revoke mechanics without supplying the header.
+        /// </summary>
+        public bool Enabled { get; set; } = true;
+
+        /// <summary>Header carrying the privileged-caller key.</summary>
+        public string HeaderName { get; set; } = "X-Service-Auth-Key";
+
+        /// <summary>
+        /// Privileged shared key. When blank, the gate falls back to the JWT
+        /// signing key (see class remarks). Never commit a real value — inject
+        /// via <c>Security__TokenMint__Key</c> from a swarm secret.
+        /// </summary>
+        public string Key { get; set; } = string.Empty;
     }
 
     public class RequestValidationConfig
