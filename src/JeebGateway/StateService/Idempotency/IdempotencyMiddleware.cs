@@ -118,9 +118,24 @@ public sealed class IdempotencyMiddleware
         if (string.IsNullOrWhiteSpace(candidate) || candidate.Length > MaxKeyLength) return false;
 
         // Scope the key by method+path so the same client key on two different
-        // endpoints cannot collide.
-        key = $"{context.Request.Method}:{context.Request.Path}:{candidate}";
+        // endpoints cannot collide — but the persisted key must be SLASH-FREE
+        // because the state-service exposes GET /idempotency/{key} and a raw
+        // request path ("/prohibited-items/scan") would break path routing.
+        // We therefore hash the {method}:{path} scope into a compact, URL-safe
+        // prefix and append the client-supplied key.
+        var scope = ScopeHash($"{context.Request.Method}:{context.Request.Path}");
+        key = $"{scope}.{candidate}";
         return true;
+    }
+
+    private static string ScopeHash(string scope)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(scope);
+        Span<byte> hash = stackalloc byte[32];
+        System.Security.Cryptography.SHA256.HashData(bytes, hash);
+        // base64url, no padding/slashes — first 16 chars are plenty to scope.
+        return Convert.ToBase64String(hash)
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_')[..16];
     }
 
     private static async Task ReplayAsync(HttpContext context, IdempotencyOutcome outcome)
