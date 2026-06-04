@@ -38,3 +38,49 @@ The brief for T-migrate-gateway-shell explicitly says: "Do NOT start services
 to fetch live specs — that's brittle and risky here." We respect that. The
 placeholders make the BFF shell compile and run; live specs land per-service
 in their migration tickets.
+
+---
+
+## jeeb-state-service (Layer-2 durable rewire — ADR-001-rev2)
+
+`jeeb-state-service.openapi.json` is the LIVE spec fetched from
+`http://192.168.2.50:10073/swagger/v1/swagger.json` and the
+`JeebStateServiceClient.cs` is generated from it via `nswag run nswag-state.json`
+(freshness-gated in CI). Probed live 2026-06-04; every endpoint exercised.
+
+### Contract gaps found (reported, NOT worked around)
+
+These block a *complete* R2–R7 rewire and the full bounce-survival proof. The
+gateway implements durable write-through for each (writes land; the
+security-critical revocation/transition/strike rows now survive a bounce), but
+cannot RECONSTRUCT its in-memory query index from the state-service after a
+bounce because the service is keyed by its own opaque ids:
+
+1. **No read-by-domain-key endpoints.** `GET /v1/state/kyc/{id}`,
+   `refresh-families/{familyId}`, disputes by `caseId` are keyed by the
+   state-service's own GUID. The gateway queries by `userId` / `tokenHash` /
+   `deliveryId` / `contextId`. Needed:
+   - `GET /v1/state/refresh-families/by-hash/{tokenHash} → {subject, familyId, status}`
+     (R2: reconstruct identity on refresh-after-bounce without embedding userId
+     in the opaque token).
+   - `GET /v1/state/kyc?subject={userId}&latest=true` (R3: latest draft after bounce).
+   - `GET /v1/state/disputes?deliveryId=… | contextId=…` (R5: active-case lookup).
+2. **Create/open ops do not echo the new id via the typed client.**
+   `POST refresh-families`, `POST disputes`, `POST kyc` are documented `200/201`
+   with no response schema, so NSwag generates `Task` (void). The gateway can't
+   capture `familyId`/`caseId`/`submissionId`. Document a 201 response body.
+3. **PUT /idempotency and several POSTs documented as `200` with no body.**
+   Forces a read-after-write (`GET /idempotency/{key}`) to learn `inserted` and
+   recover the original body. Works, but doubles the hop. Document the response
+   bodies (`inserted`, `outcome`, `count`, `acquired`) in the OpenAPI so the
+   typed client returns them.
+4. **`POST /v1/state/cancellations/bump` returns 500 for every well-formed
+   request** (probed repeatedly with date-only `windowStart`). R6 cancellation
+   counter is durable-write-blocked until the server-side bug is fixed. Strikes
+   (the other half of R6) work fine.
+
+### What IS fully bounce-survivable today (1:1 contract)
+
+- **R1 idempotency** — `PUT /idempotency` + `GET /idempotency/{key}`; the key IS
+  the domain key. Replay returns the original after a gateway bounce.
+- **R8 locks + rate-limit** — keyed by `lockKey` / `bucket`; 409 = held.

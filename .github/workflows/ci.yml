@@ -7,6 +7,38 @@ on:
     branches: [main]
 
 jobs:
+  stateless-gate:
+    # R9 — assert the gateway stays stateless (no DB) and inventory the
+    # durable-domain rewire debt (ADR-001-rev2).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: R9 stateless-gateway gate
+        run: bash scripts/check-stateless-gateway.sh
+
+  nswag-freshness:
+    # Regenerate the jeeb-state-service NSwag client from the committed spec and
+    # fail if it drifts from the committed client (F5-style freshness gate).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Install NSwag CLI
+        run: dotnet tool install -g NSwag.ConsoleCore --version 14.2.0
+      - name: Regenerate jeeb-state-service client
+        run: ~/.dotnet/tools/nswag run nswag-state.json
+      - name: Fail on client drift
+        run: |
+          if ! git diff --quiet -- src/JeebGateway/Services/Clients/JeebStateServiceClient.cs; then
+            echo "::error::JeebStateServiceClient.cs is stale — regenerate with 'nswag run nswag-state.json' and commit."
+            git diff -- src/JeebGateway/Services/Clients/JeebStateServiceClient.cs | head -80
+            exit 1
+          fi
+          echo "OK: jeeb-state-service NSwag client is fresh."
+
   build-and-test:
     runs-on: ubuntu-latest
 
