@@ -108,6 +108,9 @@ public class RequestValidationMiddlewareTests
                         ["Security:RequestValidation:MaxBodySizeBytes"] = maxBodySize.ToString(),
                         ["Security:RequestValidation:MaxUrlLength"] = maxUrlLength.ToString(),
                         ["Security:RequestValidation:MaxHeaderValueLength"] = "8192",
+                        // F3: gate OFF — request-validation tests must reach the
+                        // controller, not be short-circuited by the mint credential.
+                        ["Security:TokenMint:Enabled"] = "false",
                         ["Security:RateLimit:Enabled"] = "false"
                     });
                 });

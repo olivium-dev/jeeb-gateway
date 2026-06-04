@@ -21,6 +21,14 @@
 #   JEEB_SSH_PRIVATE_KEY    -- deploy private key authorized on the Jeeb swarm host
 #   JEEB_JWT_SIGNING_KEY    -- gateway JWT signing key (injected as env on first create)
 #   JEEB_JWT_PHONE_PEPPER   -- gateway phone-pepper secret (injected on first create)
+#   JEEB_TOKEN_MINT_KEY     -- F3: privileged-caller key gating POST /auth/tokens.
+#                              OPTIONAL — when unset, the gate falls back to the JWT
+#                              signing key (a caller holding that key can already
+#                              forge tokens, so reusing it adds no new attack surface
+#                              while closing the *unauthenticated* mint hole). Set a
+#                              dedicated value to rotate the mint credential
+#                              independently of the JWT key. Injected via env-add on
+#                              every deploy so the running gateway picks it up.
 
 name: Deploy to Jeeb
 
@@ -116,13 +124,18 @@ jobs:
           if docker service ls --format '{{.Name}}' | grep -wq "\$SVC"; then
             docker service update --image '$TAG' --with-registry-auth \
               --update-order stop-first --update-failure-action rollback \
-              --rollback-order stop-first --update-monitor 20s "\$SVC"
+              --rollback-order stop-first --update-monitor 20s \
+              --env-add Security__TokenMint__Enabled='true' \
+              --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
+              "\$SVC"
           else
             docker service create --name "\$SVC" --replicas 1 \
               --publish published=\$EXT,target=\$INT,mode=host \
               --with-registry-auth \
               --env ASPNETCORE_ENVIRONMENT='Production' \
               --env DOTNET_EnableWriteXorExecute='0' \
+              --env Security__TokenMint__Enabled='true' \
+              --env Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
               --env JeebJwt__SigningKey='${{ secrets.JEEB_JWT_SIGNING_KEY }}' \
               --env JeebJwt__PhonePepper='${{ secrets.JEEB_JWT_PHONE_PEPPER }}' \
               --env JeebJwt__Issuer='${{ inputs.jwt_issuer }}' \

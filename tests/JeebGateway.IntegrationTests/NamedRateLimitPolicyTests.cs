@@ -24,6 +24,9 @@ public class NamedRateLimitPolicyTests
                 {
                     cfg.AddInMemoryCollection(new Dictionary<string, string?>
                     {
+                        // F3: gate OFF here — this test exercises the rate-limit
+                        // bucket on /auth/tokens, not the mint credential.
+                        ["Security:TokenMint:Enabled"] = "false",
                         ["Security:RateLimit:Enabled"] = "true",
                         ["Security:RateLimit:AuthTokenBucketLimit"] = bucketLimit.ToString(),
                         ["Security:RateLimit:AuthTokensPerPeriod"] = "1",
@@ -66,6 +69,9 @@ public class NamedRateLimitPolicyTests
                 {
                     cfg.AddInMemoryCollection(new Dictionary<string, string?>
                     {
+                        // F3: gate OFF — this test asserts the mint is NOT 429-limited
+                        // when rate limiting is disabled; not a credential test.
+                        ["Security:TokenMint:Enabled"] = "false",
                         ["Security:RateLimit:Enabled"] = "false"
                     });
                 });

@@ -18,6 +18,12 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly WebApplicationFactory<Program> _factory;
 
+    // F3: the privileged-caller key the mint gate is configured with for these
+    // tests. The happy-path helpers present it in the X-Service-Auth-Key header;
+    // the negative tests omit it or send a wrong value.
+    private const string MintKey = "test-only-mint-key-32-bytes-minimum-xxxxx";
+    private const string MintHeader = "X-Service-Auth-Key";
+
     public TokensEndpointTests(WebApplicationFactory<Program> factory)
     {
         _factory = factory.WithWebHostBuilder(builder =>
@@ -26,16 +32,28 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
             {
                 cfg.AddInMemoryCollection(new Dictionary<string, string?>
                 {
-                    ["Security:RateLimit:Enabled"] = "false"
+                    ["Security:RateLimit:Enabled"] = "false",
+                    // Gate stays ON (production-like) with a known key so the
+                    // happy-path tests exercise the authorized mint path and the
+                    // negative tests below prove the backdoor is closed.
+                    ["Security:TokenMint:Enabled"] = "true",
+                    ["Security:TokenMint:Key"] = MintKey
                 });
             });
         });
     }
 
+    private HttpClient AuthorizedClient()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add(MintHeader, MintKey);
+        return client;
+    }
+
     [Fact]
     public async Task Issue_Returns_AccessToken_With_15_Minute_Lifetime()
     {
-        var client = _factory.CreateClient();
+        var client = AuthorizedClient();
 
         var resp = await client.PostAsJsonAsync("/auth/tokens", new { userId = "u-issue-1" });
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -174,9 +192,46 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
     // Helpers
     // -----------------------------------------------------------------
 
+    // -----------------------------------------------------------------
+    // F3 — privileged-caller gate on the mint (closes the account-takeover
+    // backdoor where a bare {userId} minted a valid gateway JWT).
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task Mint_Without_Privileged_Key_Returns_401()
+    {
+        // Credential-less call — exactly the old backdoor — must be rejected.
+        var resp = await _factory.CreateClient()
+            .PostAsJsonAsync("/auth/tokens", new { userId = "attacker-victim" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Mint_With_Wrong_Privileged_Key_Returns_403()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add(MintHeader, "not-the-right-key");
+
+        var resp = await client.PostAsJsonAsync("/auth/tokens", new { userId = "attacker-victim" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+    }
+
+    [Fact]
+    public async Task Mint_With_Valid_Privileged_Key_Returns_200()
+    {
+        var resp = await AuthorizedClient()
+            .PostAsJsonAsync("/auth/tokens", new { userId = "authorized-caller" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<TokenPairResponse>();
+        body!.AccessToken.Should().NotBeNullOrWhiteSpace();
+    }
+
     private async Task<TokenPairResponse> Issue(string userId)
     {
-        var resp = await _factory.CreateClient()
+        var resp = await AuthorizedClient()
             .PostAsJsonAsync("/auth/tokens", new { userId });
         resp.EnsureSuccessStatusCode();
         return (await resp.Content.ReadFromJsonAsync<TokenPairResponse>())!;

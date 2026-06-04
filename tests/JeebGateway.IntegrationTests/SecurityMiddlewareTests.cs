@@ -79,7 +79,23 @@ public class SecurityMiddlewareTests
     [Fact]
     public async Task Auth_Routes_Are_Anonymous_And_Not_JwtGated()
     {
-        await using var factory = new WebApplicationFactory<Program>();
+        // F3: the route is still anonymous at the JWT-middleware layer — the
+        // mint's privileged-caller gate is an in-controller check, not the
+        // global JWT bearer policy. Disable the mint gate here so this test
+        // continues to assert the *middleware* anonymity property (reaches the
+        // controller and returns 400 for an invalid body, not a 401 from JWT
+        // auth). The gate itself is covered by TokensEndpointTests.
+        await using var factory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureAppConfiguration((_, cfg) =>
+                {
+                    cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["Security:TokenMint:Enabled"] = "false"
+                    });
+                });
+            });
         var client = factory.CreateClient();
 
         // POST /auth/tokens with invalid body returns 400 (BadRequest), not
