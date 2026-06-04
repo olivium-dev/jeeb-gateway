@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -93,6 +94,37 @@ public class StateServiceRewireTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         store.Records.Should().BeEmpty("a failed attempt must remain retryable");
+    }
+
+    // ----------------------------------------------------------------------
+    // DI graph — the NSwag client ctor is (string baseUrl, HttpClient); the
+    // typed-client registration must supply the baseUrl or the gateway
+    // crash-loops on first request (regression guard for the deploy that
+    // rolled back with "Unable to resolve service for type 'System.String'").
+    // ----------------------------------------------------------------------
+
+    [Fact]
+    public void StateServiceClient_Resolves_From_DI_When_Flag_On()
+    {
+        using var factory = new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>()
+            .WithWebHostBuilder(b =>
+            {
+                b.UseSetting("JeebStateService:BaseUrl", "http://127.0.0.1:10073");
+                b.UseSetting("JeebStateService:Enabled", "true");
+                b.ConfigureAppConfiguration((_, cfg) =>
+                    cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["JeebStateService:BaseUrl"] = "http://127.0.0.1:10073",
+                        ["JeebStateService:Enabled"] = "true"
+                    }));
+            });
+
+        using var scope = factory.Services.CreateScope();
+        var act = () => scope.ServiceProvider.GetRequiredService<IJeebStateServiceClient>();
+
+        act.Should().NotThrow("the typed client must resolve with its baseUrl supplied");
+        scope.ServiceProvider.GetRequiredService<IIdempotencyStore>().Should().NotBeNull();
+        scope.ServiceProvider.GetRequiredService<IStateLockStore>().Should().NotBeNull();
     }
 
     // ----------------------------------------------------------------------
