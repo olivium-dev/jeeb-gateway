@@ -32,6 +32,12 @@ public static class StateServiceClientExtensions
                 http.BaseAddress = new Uri(baseUrl);
                 http.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
             })
+            // The NSwag client's ctor is (string baseUrl, HttpClient) because the
+            // spec carries no `servers` block. Supply the baseUrl explicitly so
+            // DI does not try to resolve a bare `string` (which crash-loops the
+            // gateway on first request).
+            .AddTypedClient<IJeebStateServiceClient>((http, _) =>
+                new JeebStateServiceClient(baseUrl, http))
             .AddResilienceHandler("jeeb-state-service", pipeline =>
             {
                 pipeline.AddRetry(new HttpRetryStrategyOptions
