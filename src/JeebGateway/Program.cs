@@ -9,6 +9,7 @@ using JeebGateway.Kyc;
 using JeebGateway.Middleware;
 using JeebGateway.NotificationPreferences;
 using JeebGateway.ProhibitedItems;
+using JeebGateway.StateService;
 using JeebGateway.Ratings;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.ProhibitedItems.Scanner;
@@ -987,6 +988,62 @@ builder.Services.AddHealthChecks()
     .AddCheck<WhisperHealthCheck>("whisper", tags: new[] { "ready" });
 
 // ---------------------------------------------------------------------------
+// jeeb-state-service durable rewire (ADR-001-rev2, Layer-2 R1–R8).
+//
+// The gateway stays STATELESS: every persisted row lives behind the
+// NSwag-typed IJeebStateServiceClient. Behind a feature flag so local/CI runs
+// (no live state-service) fall back to the legacy in-memory stores. A
+// circuit-breaker (in AddJeebStateServiceClient) degrades gracefully on a
+// state-service blip instead of cascading fleet-wide 500s.
+// ---------------------------------------------------------------------------
+var stateOptions = new JeebGateway.StateService.StateServiceOptions
+{
+    BaseUrl = builder.Configuration["JeebStateService:BaseUrl"]
+              ?? builder.Configuration["Services:JeebState:BaseUrl"]
+              ?? string.Empty,
+    TimeoutSeconds = int.TryParse(builder.Configuration["JeebStateService:TimeoutSeconds"], out var ts) ? ts : 5,
+    Enabled = !bool.TryParse(builder.Configuration["JeebStateService:Enabled"], out var en) || en
+};
+var stateServiceWired = stateOptions.Enabled && !string.IsNullOrWhiteSpace(stateOptions.BaseUrl);
+if (stateServiceWired)
+{
+    builder.Services.AddSingleton(stateOptions);
+    builder.Services.AddJeebStateServiceClient(stateOptions);
+
+    // R1 — idempotency (full 1:1; GET-by-key ⇒ bounce-survivable).
+    builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,
+        JeebGateway.StateService.Idempotency.StateServiceIdempotencyStore>();
+
+    // R8 — rate-limit + handover locks (keyed by bucket/lockKey ⇒ bounce-survivable).
+    builder.Services.AddSingleton<JeebGateway.StateService.RateLimiting.IStateRateLimitStore,
+        JeebGateway.StateService.RateLimiting.StateServiceRateLimitStore>();
+    builder.Services.AddSingleton<JeebGateway.StateService.RateLimiting.IStateLockStore,
+        JeebGateway.StateService.RateLimiting.StateServiceLockStore>();
+
+    // R6 — strikes + cancellation counters; R7 — OTP-escalation (durable writes).
+    builder.Services.AddSingleton<JeebGateway.StateService.Strikes.IStateStrikeWriter,
+        JeebGateway.StateService.Strikes.StateServiceStrikeWriter>();
+
+    // R2/R3/R4/R5 — durable write-through (writes land; see contract gap note).
+    builder.Services.AddSingleton<JeebGateway.StateService.Durable.IStateRefreshFamilyWriter,
+        JeebGateway.StateService.Durable.StateServiceRefreshFamilyWriter>();
+    builder.Services.AddSingleton<JeebGateway.StateService.Durable.IStateKycWriter,
+        JeebGateway.StateService.Durable.StateServiceKycWriter>();
+    builder.Services.AddSingleton<JeebGateway.StateService.Durable.IStateRatingWriter,
+        JeebGateway.StateService.Durable.StateServiceRatingWriter>();
+    builder.Services.AddSingleton<JeebGateway.StateService.Durable.IStateDisputeWriter,
+        JeebGateway.StateService.Durable.StateServiceDisputeWriter>();
+
+    // Add jeeb-state-service to the aggregate-health roster (now 18 checks).
+    builder.Services.AddHealthChecks()
+        .AddUrlGroup(
+            new Uri(stateOptions.BaseUrl.TrimEnd('/') + "/health"),
+            name: "jeeb-state-service",
+            failureStatus: Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Degraded,
+            tags: new[] { "ready", "downstream" });
+}
+
+// ---------------------------------------------------------------------------
 // Middleware pipeline
 // ---------------------------------------------------------------------------
 
@@ -1081,6 +1138,16 @@ app.UseAuthorization();
 // Rate limiter must run after authentication so the per-user partition can
 // read the JWT sub claim.
 app.UseRateLimiter();
+
+// R1 — gateway-wide Idempotency-Key handler. Runs after auth (so the key is
+// scoped to an authenticated principal context) and before MapControllers so a
+// replay short-circuits the endpoint. Durability lives in jeeb-state-service,
+// so the guarantee survives a stop-first gateway bounce. Only wired when the
+// state-service is configured.
+if (stateServiceWired)
+{
+    app.UseMiddleware<JeebGateway.StateService.Idempotency.IdempotencyMiddleware>();
+}
 
 app.MapControllers();
 

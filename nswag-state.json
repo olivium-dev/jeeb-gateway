@@ -1,0 +1,24 @@
+{
+  "runtime": "Net80",
+  "documentGenerator": {
+    "fromDocument": {
+      "url": "src/JeebGateway/contracts/jeeb-state-service.openapi.json",
+      "output": null
+    }
+  },
+  "codeGenerators": {
+    "openApiToCSharpClient": {
+      "namespace": "JeebGateway.Services.Clients",
+      "className": "JeebStateServiceClient",
+      "generateClientInterfaces": true,
+      "injectHttpClient": true,
+      "useHttpClientCreationMethod": false,
+      "jsonLibrary": "SystemTextJson",
+      "generateDtoTypes": true,
+      "generateOptionalPropertiesAsNullable": true,
+      "generateNullableReferenceTypes": true,
+      "exceptionClass": "JeebStateServiceApiException",
+      "output": "src/JeebGateway/Services/Clients/JeebStateServiceClient.cs"
+    }
+  }
+}
