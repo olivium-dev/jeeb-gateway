@@ -52,6 +52,15 @@ on:
       otp_base_url:                { description: 'OTP service base URL',             required: true, default: 'http://192.168.2.50:10037' }
       matching_base_url:           { description: 'Matching service base URL (native host)', required: true, default: 'http://192.168.2.50:10025' }
       delivery_base_url:           { description: 'Delivery service base URL (native host)', required: true, default: 'http://192.168.2.50:10051' }
+      # Auth:Otp:ApplicationId — the Jeeb tenant's ApplicationRef GUID in the SHARED
+      # one-time-password service (JEB-1516). AuthOtpController forwards it on every
+      # SendOTP/ValidateOTP (reads OtpSignInOptions.ApplicationId at AuthOtpController.cs:96/148).
+      # appsettings.Production.json:26 commits an intentionally-empty placeholder, documented to
+      # be injected at deploy time per fleet law (live config via GHA, not committed). Without it
+      # the gateway forwards an empty Guid => 502 on /v1/auth/otp/request + 401 on verify. Plain
+      # (non-secret) GUID, so it is a workflow input, NOT a GitHub secret. Default = b05, the same
+      # value seeded into jeeb-otpdb by the OTP deploy, so a no-arg dispatch wires the spine.
+      otp_application_id:          { description: 'Auth__Otp__ApplicationId — Jeeb ApplicationRef in shared one-time-password', required: true, default: '0d51afe1-499f-4a29-a55a-36d2dd223b05' }
       # DEV-ONLY seed/inspect surface (/dev/*). This input is the ONLY supported way to
       # toggle Features__DevEndpoints__Enabled on the running gateway — never set it via a
       # manual `docker service update --env-add/--env-rm` from an operator shell, and never
@@ -179,6 +188,7 @@ jobs:
               --rollback-order stop-first --update-monitor 20s \
               --env-add Security__TokenMint__Enabled='true' \
               --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
+              --env-add Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
               $DEV_FLAG_ARG \
               "\$SVC"
           else
@@ -202,6 +212,7 @@ jobs:
               --env Services__Matching__BaseUrl='${{ inputs.matching_base_url }}' \
               --env Services__Delivery__BaseUrl='${{ inputs.delivery_base_url }}' \
               --env ServiceOTPApi__BaseUrl='${{ inputs.otp_base_url }}' \
+              --env Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
               --reserve-memory 256M \
               '$TAG'
           fi
