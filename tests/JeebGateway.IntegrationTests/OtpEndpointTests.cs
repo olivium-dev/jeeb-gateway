@@ -194,7 +194,7 @@ public class OtpEndpointTests
     }
 
     [Fact]
-    public async Task Send_With_Missing_Fields_Returns_400_ProblemDetails()
+    public async Task Send_With_Missing_Phone_Returns_400_ProblemDetails()
     {
         var stub = new StubServiceOtpClient();
         using var factory = MakeFactory(stub, otpEnabled: true);
@@ -208,15 +208,85 @@ public class OtpEndpointTests
         stub.SendCalls.Should().Be(0);
     }
 
+    // JEB-1516 H6-A regression: a non-GUID applicationId (the legacy "b05"
+    // partition token) must NOT 502/400 — the gateway defaults to the configured
+    // Jeeb tenant GUID and forwards a parseable GUID to the shared service.
+    [Fact]
+    public async Task Send_With_NonGuid_ApplicationId_Defaults_To_Configured_Guid()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, otpEnabled: true, applicationId: JeebTenantGuid);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsJsonAsync("/api/otp/send", new OtpSendRequest(
+            PhoneNumber: "+9613000001",
+            ApplicationId: "b05"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        stub.SendCalls.Should().Be(1);
+        stub.LastSendApplicationId.Should().Be(JeebTenantGuid);
+    }
+
+    [Fact]
+    public async Task Send_With_Omitted_ApplicationId_Defaults_To_Configured_Guid()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, otpEnabled: true, applicationId: JeebTenantGuid);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsJsonAsync("/api/otp/send", new OtpSendRequest(
+            PhoneNumber: "+9613000001",
+            ApplicationId: null));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        stub.SendCalls.Should().Be(1);
+        stub.LastSendApplicationId.Should().Be(JeebTenantGuid);
+    }
+
+    [Fact]
+    public async Task Send_With_WellFormed_Guid_Is_Honoured_Verbatim()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, otpEnabled: true, applicationId: JeebTenantGuid);
+        var http = factory.CreateClient();
+
+        var caller = "11111111-2222-3333-4444-555555555555";
+        var resp = await http.PostAsJsonAsync("/api/otp/send", new OtpSendRequest(
+            PhoneNumber: "+9613000001",
+            ApplicationId: caller));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        stub.LastSendApplicationId.Should().Be(caller);
+    }
+
+    [Fact]
+    public async Task Validate_With_NonGuid_ApplicationId_Defaults_To_Configured_Guid()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, otpEnabled: true, applicationId: JeebTenantGuid);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsJsonAsync("/api/otp/validate", new OtpValidateRequest(
+            PhoneNumber: "+9613000001",
+            Otp: "1234",
+            ApplicationId: "b05"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        stub.ValidateCalls.Should().Be(1);
+        stub.LastValidateApplicationId.Should().Be(JeebTenantGuid);
+    }
+
     // ---------------------------------------------------------------------
     // helpers
     // ---------------------------------------------------------------------
+
+    private const string JeebTenantGuid = "0d51afe1-499f-4a29-a55a-36d2dd223b05";
 
     private static readonly IReadOnlyDictionary<string, IEnumerable<string>> EmptyHeaders =
         new Dictionary<string, IEnumerable<string>>();
 
     private static WebApplicationFactory<Program> MakeFactory(
-        IServiceOTPClient stub, bool otpEnabled) =>
+        IServiceOTPClient stub, bool otpEnabled, string? applicationId = null) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
@@ -224,6 +294,11 @@ public class OtpEndpointTests
                 services.RemoveAll<IServiceOTPClient>();
                 services.AddSingleton(stub);
                 services.Configure<UpstreamFeatureFlags>(f => f.Otp = otpEnabled);
+                if (applicationId is not null)
+                {
+                    services.Configure<JeebGateway.Auth.OtpSignIn.OtpSignInOptions>(
+                        o => o.ApplicationId = applicationId);
+                }
             });
         });
 
@@ -253,6 +328,8 @@ public class OtpEndpointTests
     {
         public int SendCalls { get; private set; }
         public int ValidateCalls { get; private set; }
+        public string? LastSendApplicationId { get; private set; }
+        public string? LastValidateApplicationId { get; private set; }
         public ApiException? SendThrows { get; init; }
         public ApiException? ValidateThrows { get; init; }
 
@@ -262,6 +339,7 @@ public class OtpEndpointTests
         public Task SendOTPAsync(SendOTPRequestUserID? body, CancellationToken cancellationToken)
         {
             SendCalls++;
+            LastSendApplicationId = body?.ApplicationId;
             if (SendThrows is not null) throw SendThrows;
             return Task.CompletedTask;
         }
@@ -272,6 +350,7 @@ public class OtpEndpointTests
         public Task ValidateOTPAsync(ValidateOTPRequestModel? body, CancellationToken cancellationToken)
         {
             ValidateCalls++;
+            LastValidateApplicationId = body?.ApplicationId;
             if (ValidateThrows is not null) throw ValidateThrows;
             return Task.CompletedTask;
         }

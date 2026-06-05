@@ -1,3 +1,4 @@
+using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc;
@@ -41,17 +42,33 @@ public sealed class OtpController : ControllerBase
 {
     private readonly IServiceOTPClient _otpClient;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
+    private readonly IOptions<OtpSignInOptions> _otpOptions;
     private readonly ILogger<OtpController> _log;
 
     public OtpController(
         IServiceOTPClient otpClient,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
+        IOptions<OtpSignInOptions> otpOptions,
         ILogger<OtpController> log)
     {
         _otpClient = otpClient;
         _flags = flags;
+        _otpOptions = otpOptions;
         _log = log;
     }
+
+    /// <summary>
+    /// JEB-1516: resolve the applicationId to forward to the shared OTP service.
+    /// The shared service keys <c>Phone</c> rows by a tenant GUID; callers that
+    /// omit applicationId, or pass a non-GUID alias (e.g. the legacy <c>"b05"</c>
+    /// partition token), previously produced a 502 BadGateway because the
+    /// upstream <c>new Guid(applicationId)</c> threw. Default such cases to the
+    /// configured Jeeb tenant GUID (<c>Auth:Otp:ApplicationId</c>), exactly like
+    /// <see cref="JeebGateway.Auth.OtpSignIn.AuthOtpController"/> does. A
+    /// well-formed GUID supplied by the caller is honoured verbatim.
+    /// </summary>
+    private string ResolveApplicationId(string? requested)
+        => Guid.TryParse(requested, out _) ? requested! : _otpOptions.Value.ApplicationId;
 
     /// <summary>
     /// POST /api/otp/send — request a one-time-password for a phone number
@@ -69,29 +86,31 @@ public sealed class OtpController : ControllerBase
         if (!_flags.CurrentValue.Otp)
             return UpstreamDisabled();
 
-        if (request is null
-            || string.IsNullOrWhiteSpace(request.PhoneNumber)
-            || string.IsNullOrWhiteSpace(request.ApplicationId))
+        if (request is null || string.IsNullOrWhiteSpace(request.PhoneNumber))
         {
             return Problem(
                 title: "Invalid OTP send request",
-                detail: "phoneNumber and applicationId are required.",
+                detail: "phoneNumber is required.",
                 statusCode: StatusCodes.Status400BadRequest,
                 type: "https://datatracker.ietf.org/doc/html/rfc7231#section-6.5.1");
         }
+
+        // JEB-1516: default a missing/non-GUID applicationId to the configured
+        // Jeeb tenant GUID so the upstream Guid.Parse never throws (was a 502).
+        var applicationId = ResolveApplicationId(request.ApplicationId);
 
         try
         {
             await _otpClient.SendOTPAsync(new SendOTPRequestUserID
             {
                 PhoneNumber = request.PhoneNumber!,
-                ApplicationId = request.ApplicationId!
+                ApplicationId = applicationId
             }, ct);
 
             // Never log the phone or any OTP-adjacent data — only the
             // application partition (PR review B5 precedent in DeliveriesController).
             _log.LogInformation(
-                "OTP send triggered for applicationId {ApplicationId}", request.ApplicationId);
+                "OTP send triggered for applicationId {ApplicationId}", applicationId);
 
             return Accepted();
         }
@@ -119,15 +138,18 @@ public sealed class OtpController : ControllerBase
 
         if (request is null
             || string.IsNullOrWhiteSpace(request.PhoneNumber)
-            || string.IsNullOrWhiteSpace(request.Otp)
-            || string.IsNullOrWhiteSpace(request.ApplicationId))
+            || string.IsNullOrWhiteSpace(request.Otp))
         {
             return Problem(
                 title: "Invalid OTP validate request",
-                detail: "phoneNumber, otp and applicationId are required.",
+                detail: "phoneNumber and otp are required.",
                 statusCode: StatusCodes.Status400BadRequest,
                 type: "https://datatracker.ietf.org/doc/html/rfc7231#section-6.5.1");
         }
+
+        // JEB-1516: default a missing/non-GUID applicationId to the configured
+        // Jeeb tenant GUID so the upstream Guid.Parse never throws (was a 502).
+        var applicationId = ResolveApplicationId(request.ApplicationId);
 
         try
         {
@@ -135,11 +157,11 @@ public sealed class OtpController : ControllerBase
             {
                 PhoneNumber = request.PhoneNumber!,
                 Otp = request.Otp!,
-                ApplicationId = request.ApplicationId!
+                ApplicationId = applicationId
             }, ct);
 
             _log.LogInformation(
-                "OTP validated for applicationId {ApplicationId}", request.ApplicationId);
+                "OTP validated for applicationId {ApplicationId}", applicationId);
 
             return Ok();
         }
