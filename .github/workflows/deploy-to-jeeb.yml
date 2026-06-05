@@ -86,6 +86,29 @@ on:
           - 'preserve'
           - 'true'
           - 'false'
+      # Swagger UI / OpenAPI surface (/swagger*). This input is the ONLY supported way to
+      # toggle Features__Swagger__Enabled on the running gateway — never set it via a manual
+      # `docker service update --env-add/--env-rm` from an operator shell, and never commit
+      # `Features__Swagger__Enabled=true` to any appsettings file. jeeb.fds-1.com is PUBLIC, so
+      # when ON the surface is ADMIN-ROLE-GATED in Program.cs (admin token => 200, non-admin
+      # => 404); it is NEVER the open Development/Testing branch, and this input must NEVER be
+      # used in place of flipping ASPNETCORE_ENVIRONMENT (which would open the unauthenticated
+      # /dev + Swagger surface). Three states, mirroring dev_endpoints:
+      #   'preserve' (DEFAULT) => emit NO swagger-flag mutation; whatever the running service has
+      #                           PERSISTS untouched across a `docker service update --image ...`.
+      #                           A fresh prod that never set the flag stays OFF (404).
+      #   'true'                => env-add  Features__Swagger__Enabled=true  (/swagger* ON, admin-gated).
+      #   'false'               => env-rm   Features__Swagger__Enabled       (scrub => 404).
+      # Applied additively on the SAME zero-downtime `docker service update` as dev_endpoints.
+      swagger_ui:
+        description: 'Swagger /swagger* flag (Features__Swagger__Enabled). preserve (default) = leave as-is; true = enable (admin-gated, non-admin 404); false = scrub (404).'
+        required: false
+        default: 'preserve'
+        type: choice
+        options:
+          - 'preserve'
+          - 'true'
+          - 'false'
 
 permissions:
   contents: read
@@ -178,6 +201,25 @@ jobs:
               echo "dev_endpoints=preserve -> (no dev-flag mutation; existing /dev/* state persists)"
               ;;
           esac
+          # Swagger /swagger* flag, controlled EXCLUSIVELY by the swagger_ui input (3-state),
+          # mirroring dev_endpoints. preserve => no mutation (current state persists across the
+          # --image update). true => env-add (admin-gated /swagger* ON). false => env-rm (404).
+          # Idempotent: env-add overwrites if present; --env-rm is a no-op when already absent.
+          # Applied on the SAME zero-downtime update command as DEV_FLAG_ARG / TokenMint.
+          case "${{ inputs.swagger_ui }}" in
+            true)
+              SWAGGER_FLAG_ARG="--env-add Features__Swagger__Enabled=true"
+              echo "swagger_ui=true     -> $SWAGGER_FLAG_ARG  (/swagger* ON, admin-role-gated; non-admin 404)"
+              ;;
+            false)
+              SWAGGER_FLAG_ARG="--env-rm Features__Swagger__Enabled"
+              echo "swagger_ui=false    -> $SWAGGER_FLAG_ARG  (/swagger* will be scrubbed -> 404)"
+              ;;
+            *)
+              SWAGGER_FLAG_ARG=""
+              echo "swagger_ui=preserve -> (no swagger-flag mutation; existing /swagger* state persists)"
+              ;;
+          esac
           ssh jeeb bash -se <<EOF
           set -euo pipefail
           SVC='${{ inputs.service_name }}'; INT='${{ inputs.internal_port }}'; EXT='${{ inputs.external_port }}'
@@ -190,6 +232,7 @@ jobs:
               --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
               --env-add Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
               $DEV_FLAG_ARG \
+              $SWAGGER_FLAG_ARG \
               "\$SVC"
           else
             docker service create --name "\$SVC" --replicas 1 \
