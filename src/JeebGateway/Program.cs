@@ -395,14 +395,15 @@ builder.Services.Configure<UpstreamFeatureFlags>(
 builder.Services.Configure<JeebGateway.Security.DevEndpointOptions>(
     builder.Configuration.GetSection("Features").GetSection("DevEndpoints"));
 
-// Credential-free [DevOnly] OTP mock backing the restored /v1/auth/otp/{request,
-// verify} routes (and the /api/otp/{send,validate} aliases when the dev flag is
-// on). Rides the SAME Features:DevEndpoints:Enabled gate — 404/disabled in prod.
-// Performs NO upstream one-time-password call, sends NO SMS, touches NO Twilio
-// credential. Singleton so its in-memory per-phone OTP/attempt state persists
-// across requests within a process (lets the attempt-cap & lock hold).
-builder.Services.AddSingleton<JeebGateway.Auth.OtpDevMock.IDevOtpMock,
-    JeebGateway.Auth.OtpDevMock.DevOtpMock>();
+// Phone sign-in OTP orchestration options (Auth:Otp). Binds the Jeeb tenant's
+// application id forwarded on every SendOTP/ValidateOTP to the shared
+// one-time-password service, plus the contract ttlSeconds the gateway surfaces
+// on request. The PRODUCTION AuthOtpController (/v1/auth/otp/*) routes through
+// ServiceOTPClient -> one-time-password for send/validate and keeps ONLY the
+// JWT/session mint in the gateway — the in-gateway OTP mock that duplicated
+// send/validate business logic was retired in JEB-1516.
+builder.Services.Configure<JeebGateway.Auth.OtpSignIn.OtpSignInOptions>(
+    builder.Configuration.GetSection(JeebGateway.Auth.OtpSignIn.OtpSignInOptions.SectionName));
 
 // OpenTelemetry
 var serviceName = "jeeb-gateway";
