@@ -51,11 +51,44 @@ created only when an explicit HTTP call hits `POST /dev/seed/user`.
   indistinguishable from "no such endpoint". No response body hints the route is
   real.
 - The flag **defaults `false`** and is committed `false` in **every** appsettings
-  file, including `appsettings.Production.json` (it MUST stay false there). It is
-  flipped on **only** via the environment variable
-  `Features__DevEndpoints__Enabled=true` in the single environment that runs the
-  seeding harness — never committed `true`. Because it is read through
-  `IOptionsMonitor`, a config reload toggles it without a redeploy.
+  file, including `appsettings.Production.json` (it MUST stay false there) — never
+  committed `true`. It is read through `IOptionsMonitor` and set as a **service
+  environment variable** (`Features__DevEndpoints__Enabled=true`) on the single
+  environment that runs the seeding harness.
+
+#### Toggling the flag — `dev_endpoints` workflow input is the ONLY supported way
+
+The flag is controlled **exclusively** through the `dev_endpoints` input of the
+vendored `.github/workflows/deploy-to-jeeb.yml` deploy workflow. **Do NOT** flip it
+with a manual `docker service update --env-add/--env-rm` from an operator shell, and
+do NOT commit `Features__DevEndpoints__Enabled=true` to any appsettings file. All
+deploy and live-config/flag changes go through GitHub Actions only (the workflow uses
+SSH internally; operators trigger it via `gh workflow run` and verify via HTTP).
+
+```bash
+# Turn the /dev/* surface ON (E2E seeding environment only):
+gh workflow run deploy-to-jeeb.yml --repo olivium-dev/jeeb-gateway --ref main \
+  -f service_name=jeeb-gateway -f dev_endpoints=true
+
+# Turn it back OFF (default; restores the 404 production surface):
+gh workflow run deploy-to-jeeb.yml --repo olivium-dev/jeeb-gateway --ref main \
+  -f service_name=jeeb-gateway -f dev_endpoints=false   # or simply omit the input
+```
+
+How the input maps onto the running service (applied on the **same** zero-downtime
+`docker service update` that injects `Security__TokenMint__*`, with `stop-first` +
+`--update-failure-action rollback`):
+
+| `dev_endpoints` | env mutation | `/dev/*` behaviour |
+|---|---|---|
+| `true` | `--env-add Features__DevEndpoints__Enabled=true` | reachable (200) |
+| `false` *(default / omitted)* | `--env-rm Features__DevEndpoints__Enabled` | 404 |
+
+The mutation is idempotent: `--env-add` overwrites an existing value, and `--env-rm`
+is a no-op when the var is already absent, so a default-`false` deploy never errors
+and never changes the production surface. Verify the resulting state via HTTP only —
+`GET /dev/data/users` returns `404` when off and `200` when on — never by SSH-ing in
+to inspect the service env.
 - The whole change is additive: one new controller, one options class, one
   attribute, and three committed `false` config lines. No existing route, DTO,
   status code, or auth requirement changes.
