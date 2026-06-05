@@ -55,18 +55,28 @@ on:
       # DEV-ONLY seed/inspect surface (/dev/*). This input is the ONLY supported way to
       # toggle Features__DevEndpoints__Enabled on the running gateway — never set it via a
       # manual `docker service update --env-add/--env-rm` from an operator shell, and never
-      # commit `Features__DevEndpoints__Enabled=true` to any appsettings file. Default 'false'
-      # => the flag is REMOVED from the service env (env-rm) so /dev/* returns 404. Set 'true'
-      # only for the single environment running the E2E seeding harness. Applied additively on
-      # the SAME zero-downtime `docker service update` that injects Security__TokenMint__*.
+      # commit `Features__DevEndpoints__Enabled=true` to any appsettings file. Three states:
+      #   'preserve' (DEFAULT) => the deploy emits NO dev-flag mutation, so whatever the flag
+      #                           currently is on the running service PERSISTS untouched. A
+      #                           `docker service update --image ...` keeps all unlisted env
+      #                           vars, so a normal no-arg deploy never changes /dev/*. A fresh
+      #                           prod that never set the flag stays OFF (404); an environment
+      #                           explicitly turned ON stays ON across redeploys. This is the
+      #                           prod-safe AND footgun-free default.
+      #   'true'                => env-add  Features__DevEndpoints__Enabled=true  (/dev/* ON).
+      #   'false'               => env-rm   Features__DevEndpoints__Enabled       (scrub => 404).
+      # Set 'true'/'false' ONLY when you intend to change the flag (e.g. arm/disarm the E2E
+      # seeding harness). Applied additively on the SAME zero-downtime `docker service update`
+      # that injects Security__TokenMint__*.
       dev_endpoints:
-        description: 'Enable DEV-only /dev/* seed/inspect endpoints (Features__DevEndpoints__Enabled). Default false => /dev/* returns 404.'
+        description: 'DEV-only /dev/* flag (Features__DevEndpoints__Enabled). preserve (default) = leave as-is; true = enable; false = scrub (404).'
         required: false
-        default: 'false'
+        default: 'preserve'
         type: choice
         options:
-          - 'false'
+          - 'preserve'
           - 'true'
+          - 'false'
 
 permissions:
   contents: read
@@ -132,20 +142,33 @@ jobs:
       - name: Zero-downtime deploy (update if exists, else create)
         run: |
           TAG="${{ steps.build.outputs.tag }}"
-          # DEV-only /dev/* flag, controlled EXCLUSIVELY by the dev_endpoints input.
+          # DEV-only /dev/* flag, controlled EXCLUSIVELY by the dev_endpoints input (3-state).
+          # preserve (DEFAULT) => emit NO dev-flag arg. `docker service update --image ...`
+          #                       preserves every unlisted env var, so the flag's current value
+          #                       PERSISTS across this deploy. A normal no-arg deploy therefore
+          #                       NEVER changes /dev/* — prod that never set it stays OFF (404),
+          #                       an env explicitly armed stays ON. (Fixes the footgun where a
+          #                       default-false deploy silently disabled /dev/*.)
           # true  => env-add  Features__DevEndpoints__Enabled=true  (endpoints ON)
-          # false => env-rm   Features__DevEndpoints__Enabled       (endpoints OFF / 404; default)
+          # false => env-rm   Features__DevEndpoints__Enabled       (scrub => endpoints OFF / 404)
           # Idempotent: env-add overwrites if present; `docker service update --env-rm` is a
-          # no-op when the var is already absent, so a default-false run never errors.
+          # no-op when the var is already absent, so an explicit false run never errors.
           # Applied on the SAME update command as Security__TokenMint__* => one zero-downtime
           # rollout (stop-first + rollback-on-failure), never a separate out-of-band update.
-          if [ "${{ inputs.dev_endpoints }}" = "true" ]; then
-            DEV_FLAG_ARG="--env-add Features__DevEndpoints__Enabled=true"
-            echo "dev_endpoints=true  -> $DEV_FLAG_ARG  (/dev/* will be reachable)"
-          else
-            DEV_FLAG_ARG="--env-rm Features__DevEndpoints__Enabled"
-            echo "dev_endpoints=false -> $DEV_FLAG_ARG  (/dev/* will return 404)"
-          fi
+          case "${{ inputs.dev_endpoints }}" in
+            true)
+              DEV_FLAG_ARG="--env-add Features__DevEndpoints__Enabled=true"
+              echo "dev_endpoints=true     -> $DEV_FLAG_ARG  (/dev/* will be reachable)"
+              ;;
+            false)
+              DEV_FLAG_ARG="--env-rm Features__DevEndpoints__Enabled"
+              echo "dev_endpoints=false    -> $DEV_FLAG_ARG  (/dev/* will be scrubbed -> 404)"
+              ;;
+            *)
+              DEV_FLAG_ARG=""
+              echo "dev_endpoints=preserve -> (no dev-flag mutation; existing /dev/* state persists)"
+              ;;
+          esac
           ssh jeeb bash -se <<EOF
           set -euo pipefail
           SVC='${{ inputs.service_name }}'; INT='${{ inputs.internal_port }}'; EXT='${{ inputs.external_port }}'

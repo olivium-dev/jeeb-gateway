@@ -54,7 +54,9 @@ created only when an explicit HTTP call hits `POST /dev/seed/user`.
   file, including `appsettings.Production.json` (it MUST stay false there) — never
   committed `true`. It is read through `IOptionsMonitor` and set as a **service
   environment variable** (`Features__DevEndpoints__Enabled=true`) on the single
-  environment that runs the seeding harness.
+  environment that runs the seeding harness. Because a fresh prod never sets this
+  env var, prod stays OFF (404) by default even though normal deploys now
+  **preserve** the flag rather than scrubbing it (see below).
 
 #### Toggling the flag — `dev_endpoints` workflow input is the ONLY supported way
 
@@ -65,14 +67,23 @@ do NOT commit `Features__DevEndpoints__Enabled=true` to any appsettings file. Al
 deploy and live-config/flag changes go through GitHub Actions only (the workflow uses
 SSH internally; operators trigger it via `gh workflow run` and verify via HTTP).
 
+The input is **3-state**, and the default is `preserve` — **a normal deploy never
+changes the `/dev/*` flag.** This fixes a footgun where the old 2-state default
+(`false`) ran `--env-rm` on *every* no-arg deploy and silently disabled `/dev/*`.
+
 ```bash
+# Normal deploy — does NOT touch the flag (default 'preserve'); /dev/* keeps whatever
+# state it was in (prod that never armed it stays OFF; an armed env stays ON):
+gh workflow run deploy-to-jeeb.yml --repo olivium-dev/jeeb-gateway --ref main \
+  -f service_name=jeeb-gateway                          # dev_endpoints omitted => preserve
+
 # Turn the /dev/* surface ON (E2E seeding environment only):
 gh workflow run deploy-to-jeeb.yml --repo olivium-dev/jeeb-gateway --ref main \
   -f service_name=jeeb-gateway -f dev_endpoints=true
 
-# Turn it back OFF (default; restores the 404 production surface):
+# Scrub it OFF (restores the 404 production surface — use only when intentionally disarming):
 gh workflow run deploy-to-jeeb.yml --repo olivium-dev/jeeb-gateway --ref main \
-  -f service_name=jeeb-gateway -f dev_endpoints=false   # or simply omit the input
+  -f service_name=jeeb-gateway -f dev_endpoints=false
 ```
 
 How the input maps onto the running service (applied on the **same** zero-downtime
@@ -81,14 +92,18 @@ How the input maps onto the running service (applied on the **same** zero-downti
 
 | `dev_endpoints` | env mutation | `/dev/*` behaviour |
 |---|---|---|
+| `preserve` *(default / omitted)* | *(none — no dev-flag arg emitted)* | unchanged (persists) |
 | `true` | `--env-add Features__DevEndpoints__Enabled=true` | reachable (200) |
-| `false` *(default / omitted)* | `--env-rm Features__DevEndpoints__Enabled` | 404 |
+| `false` | `--env-rm Features__DevEndpoints__Enabled` | 404 |
 
-The mutation is idempotent: `--env-add` overwrites an existing value, and `--env-rm`
-is a no-op when the var is already absent, so a default-`false` deploy never errors
-and never changes the production surface. Verify the resulting state via HTTP only —
-`GET /dev/data/users` returns `404` when off and `200` when on — never by SSH-ing in
-to inspect the service env.
+The deploy mutates the service **incrementally** — `docker service update --image …`
+keeps every env var that the command does not explicitly `--env-add`/`--env-rm`. So
+when `dev_endpoints=preserve` the workflow emits no dev-flag argument at all and the
+flag's current value carries over untouched. The `true`/`false` mutations are
+idempotent: `--env-add` overwrites an existing value, and `--env-rm` is a no-op when
+the var is already absent, so an explicit run never errors. Verify the resulting state
+via HTTP only — `GET /dev/data/users` returns `404` when off and `200` when on —
+never by SSH-ing in to inspect the service env.
 - The whole change is additive: one new controller, one options class, one
   attribute, and three committed `false` config lines. No existing route, DTO,
   status code, or auth requirement changes.
