@@ -422,6 +422,22 @@ builder.Services.Configure<JeebGateway.Security.SwaggerOptions>(
 builder.Services.Configure<JeebGateway.Auth.OtpSignIn.OtpSignInOptions>(
     builder.Configuration.GetSection(JeebGateway.Auth.OtpSignIn.OtpSignInOptions.SectionName));
 
+// F-E (S02, JEB-37 / JEB-1422) — gateway-local phone admission policy + OTP-request
+// burst guard, both evaluated in AuthOtpController BEFORE the one-time-password
+// upstream is dialed (no upstream change). Region gate (LB-only -> invalid_country),
+// E.164 parse (-> invalid_phone), and a per-IP AND per-phone sliding window
+// (-> 429 rate_limited, SendOTP NOT called when throttled). Caps/region are
+// configuration (Auth:Otp:Phone / Auth:Otp:RateLimit) so an env tunes them without
+// a code change. The in-memory limiter is the M3 seam: bind a durable impl in prod.
+builder.Services.Configure<JeebGateway.Auth.OtpSignIn.PhonePolicyOptions>(
+    builder.Configuration.GetSection(JeebGateway.Auth.OtpSignIn.PhonePolicyOptions.SectionName));
+builder.Services.Configure<JeebGateway.Auth.OtpSignIn.OtpRequestRateLimitOptions>(
+    builder.Configuration.GetSection(JeebGateway.Auth.OtpSignIn.OtpRequestRateLimitOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IPhonePolicy,
+    JeebGateway.Auth.OtpSignIn.PhonePolicy>();
+builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IOtpRequestRateLimiter,
+    JeebGateway.Auth.OtpSignIn.InMemoryOtpRequestRateLimiter>();
+
 // OpenTelemetry
 var serviceName = "jeeb-gateway";
 var otlpEndpoint = builder.Configuration["Otel:Endpoint"] ?? "http://localhost:4317";

@@ -47,6 +47,8 @@ public sealed class AuthOtpController : ControllerBase
     private readonly IOptions<OtpSignInOptions> _options;
     private readonly IUsersStore _users;
     private readonly ITokenService _tokens;
+    private readonly IPhonePolicy _phonePolicy;
+    private readonly IOtpRequestRateLimiter _rateLimiter;
     private readonly ILogger<AuthOtpController> _log;
 
     public AuthOtpController(
@@ -55,6 +57,8 @@ public sealed class AuthOtpController : ControllerBase
         IOptions<OtpSignInOptions> options,
         IUsersStore users,
         ITokenService tokens,
+        IPhonePolicy phonePolicy,
+        IOtpRequestRateLimiter rateLimiter,
         ILogger<AuthOtpController> log)
     {
         _otpClient = otpClient;
@@ -62,6 +66,8 @@ public sealed class AuthOtpController : ControllerBase
         _options = options;
         _users = users;
         _tokens = tokens;
+        _phonePolicy = phonePolicy;
+        _rateLimiter = rateLimiter;
         _log = log;
     }
 
@@ -86,6 +92,30 @@ public sealed class AuthOtpController : ControllerBase
         {
             return OtpSignInProblems.Problem(this, StatusCodes.Status400BadRequest, "invalid_phone",
                 "Invalid phone number", "phone is required.");
+        }
+
+        // F-E (S02, JEB-37) — gateway-local phone admission policy, evaluated
+        // BEFORE the upstream is dialed (no upstream change). Parse-first so a
+        // malformed number is invalid_phone, not invalid_country (N4 vs N3).
+        var policy = _phonePolicy.Evaluate(body.Phone);
+        switch (policy.Outcome)
+        {
+            case PhonePolicyOutcome.InvalidPhone:
+                return OtpSignInProblems.Problem(this, StatusCodes.Status400BadRequest, "invalid_phone",
+                    "Invalid phone number", "The phone number is not a valid E.164 number.");
+            case PhonePolicyOutcome.InvalidCountry:
+                return OtpSignInProblems.Problem(this, StatusCodes.Status400BadRequest, "invalid_country",
+                    "Unsupported country", "Sign-in is currently available only for Lebanese (LB) phone numbers.");
+        }
+
+        // F-E burst guard — per-IP AND per-phone sliding window. A throttled
+        // request trips 429 rate_limited and MUST NOT dial the upstream (so a
+        // throttle never costs an SMS; assertion-provable: SendOTP not called).
+        var clientIp = JeebGateway.Security.RateLimitingExtensions.ResolveClientIp(HttpContext);
+        if (!_rateLimiter.TryAcquire(clientIp, body.Phone))
+        {
+            return OtpSignInProblems.Problem(this, StatusCodes.Status429TooManyRequests, "rate_limited",
+                "Too many requests", "Too many OTP requests. Please wait before requesting another code.");
         }
 
         try

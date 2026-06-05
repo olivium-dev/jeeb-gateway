@@ -75,6 +75,17 @@
       (dev/test).
     -->
     <PackageReference Include="StackExchange.Redis" Version="2.8.16" />
+
+    <!--
+      libphonenumber-csharp — the canonical .NET port of Google's libphonenumber,
+      used by the F-E gateway phone policy (Auth/OtpSignIn/PhonePolicy.cs) to
+      E.164-parse and region-classify sign-in phones BEFORE the OTP upstream is
+      dialed. Gateway-local validation only (no upstream change): a non-LB number
+      => 400 invalid_country, an unparseable number => 400 invalid_phone (S02 F-E,
+      JEB-37 / JEB-1422; the libphonenumber consumer the um-exact migration removed
+      is re-introduced here for the dedicated sign-in policy, not normalisation).
+    -->
+    <PackageReference Include="libphonenumber-csharp" Version="8.13.51" />
   </ItemGroup>
 
 </Project>
