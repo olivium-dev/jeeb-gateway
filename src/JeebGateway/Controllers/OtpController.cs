@@ -1,5 +1,3 @@
-using JeebGateway.Auth.OtpDevMock;
-using JeebGateway.Security;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc;
@@ -43,21 +41,15 @@ public sealed class OtpController : ControllerBase
 {
     private readonly IServiceOTPClient _otpClient;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
-    private readonly IOptionsMonitor<DevEndpointOptions> _devEndpoints;
-    private readonly IDevOtpMock _devOtpMock;
     private readonly ILogger<OtpController> _log;
 
     public OtpController(
         IServiceOTPClient otpClient,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
-        IOptionsMonitor<DevEndpointOptions> devEndpoints,
-        IDevOtpMock devOtpMock,
         ILogger<OtpController> log)
     {
         _otpClient = otpClient;
         _flags = flags;
-        _devEndpoints = devEndpoints;
-        _devOtpMock = devOtpMock;
         _log = log;
     }
 
@@ -74,20 +66,6 @@ public sealed class OtpController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Send([FromBody] OtpSendRequest request, CancellationToken ct)
     {
-        // ALIAS via the [DevOnly] OTP mock (S02 ALT-4: /api/otp/send must map to
-        // the SAME handler/shape as /v1/auth/otp/request). When the dev flag is on
-        // this alias speaks the OLD contract ({phone} -> {ttlSeconds}) backed by
-        // the credential-free mock — no upstream, no SMS, no Twilio. When the flag
-        // is off, the existing upstream behaviour below is 100% unchanged.
-        if (_devEndpoints.CurrentValue.Enabled)
-        {
-            // Accept either the OLD { phone } shape or the generic { phoneNumber }.
-            var phone = !string.IsNullOrWhiteSpace(request?.Phone)
-                ? request!.Phone
-                : request?.PhoneNumber;
-            return DevOtpEndpoints.Request(this, _devOtpMock, new OtpRequestDto { Phone = phone });
-        }
-
         if (!_flags.CurrentValue.Otp)
             return UpstreamDisabled();
 
@@ -136,24 +114,6 @@ public sealed class OtpController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Validate([FromBody] OtpValidateRequest request, CancellationToken ct)
     {
-        // ALIAS via the [DevOnly] OTP mock (S02 ALT-4: /api/otp/validate must map to
-        // the SAME handler/shape as /v1/auth/otp/verify). When the dev flag is on
-        // this alias speaks the OLD contract ({phone,code} -> {accessToken,...}) and
-        // a WRONG code FAILS (401 invalid_otp) / attempt cap (429) just like verify.
-        // When the flag is off, the existing upstream behaviour below is unchanged.
-        if (_devEndpoints.CurrentValue.Enabled)
-        {
-            // Accept either the OLD { phone, code } shape or { phoneNumber, otp }.
-            var phone = !string.IsNullOrWhiteSpace(request?.Phone)
-                ? request!.Phone
-                : request?.PhoneNumber;
-            var code = !string.IsNullOrWhiteSpace(request?.Code)
-                ? request!.Code
-                : request?.Otp;
-            return await DevOtpEndpoints.VerifyAsync(
-                this, _devOtpMock, _log, new OtpVerifyDto { Phone = phone, Code = code }, ct);
-        }
-
         if (!_flags.CurrentValue.Otp)
             return UpstreamDisabled();
 
@@ -234,30 +194,20 @@ public sealed class OtpController : ControllerBase
 }
 
 /// <summary>
-/// Gateway request body for <c>POST /api/otp/send</c>.
-///
-/// The original generic-upstream contract is <c>{ phoneNumber, applicationId }</c>.
-/// The properties below are init-settable (not positional) and carry an ADDITIVE
-/// optional <c>phone</c> alias so the deprecated route can ALSO accept the OLD
-/// sign-in contract <c>{ phone }</c> (S02 ALT-4) when the [DevOnly] mock is on —
-/// without breaking the existing <c>{ phoneNumber, applicationId }</c> callers
-/// (those fields still bind unchanged).
+/// Gateway request body for <c>POST /api/otp/send</c> — the generic-upstream
+/// contract <c>{ phoneNumber, applicationId }</c>. The phone sign-in flow has its
+/// own surface at <c>POST /v1/auth/otp/request</c>
+/// (<see cref="JeebGateway.Auth.OtpSignIn.AuthOtpController"/>); this generic
+/// proxy no longer carries the old sign-in alias (the in-gateway OTP mock that
+/// needed it was retired in JEB-1516).
 /// </summary>
-public sealed record OtpSendRequest(string? PhoneNumber, string? ApplicationId)
-{
-    /// <summary>Additive OLD-contract alias for the dev-mock path ({ phone }).</summary>
-    public string? Phone { get; init; }
-}
+public sealed record OtpSendRequest(string? PhoneNumber, string? ApplicationId);
 
 /// <summary>
-/// Gateway request body for <c>POST /api/otp/validate</c>. Carries the original
-/// <c>{ phoneNumber, otp, applicationId }</c> contract plus additive optional
-/// <c>phone</c> / <c>code</c> aliases for the OLD sign-in contract
-/// <c>{ phone, code }</c> on the [DevOnly] mock path (S02 ALT-4).
+/// Gateway request body for <c>POST /api/otp/validate</c> — the generic-upstream
+/// contract <c>{ phoneNumber, otp, applicationId }</c>. The phone sign-in flow
+/// has its own surface at <c>POST /v1/auth/otp/verify</c>
+/// (<see cref="JeebGateway.Auth.OtpSignIn.AuthOtpController"/>); this generic
+/// proxy no longer carries the old sign-in aliases (JEB-1516).
 /// </summary>
-public sealed record OtpValidateRequest(string? PhoneNumber, string? Otp, string? ApplicationId)
-{
-    /// <summary>Additive OLD-contract aliases for the dev-mock path ({ phone, code }).</summary>
-    public string? Phone { get; init; }
-    public string? Code { get; init; }
-}
+public sealed record OtpValidateRequest(string? PhoneNumber, string? Otp, string? ApplicationId);
