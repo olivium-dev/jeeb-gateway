@@ -123,8 +123,92 @@ public class DevEndpointsTests
         json.Should().Contain("\"username\":");
         json.Should().Contain("\"password\":");
         json.Should().Contain("\"confirmPassword\":");
+        // referralCode is a NON-NULL column in user-management; the seed must
+        // always send it (even when the caller omits it) or UM rejects the insert.
+        json.Should().Contain("\"referralCode\":",
+            "user-management requires a non-null referralCode; the seed must always send it");
         json.Should().NotContain("\"phone\"", "UM has no phone field; the gateway must not invent one");
         json.Should().NotContain("\"role\"", "UM has no role field; role is seed metadata only");
+    }
+
+    /// <summary>
+    /// Regression for the seed-400 defect: when the caller does NOT supply a
+    /// referralCode, the gateway must still send a present, non-null
+    /// <c>referralCode</c> (empty string) so the upstream user-management insert
+    /// succeeds. Proves a REAL successful create end-to-end: upstream is hit once
+    /// with a body that carries referralCode, and the gateway returns 200 with a
+    /// non-empty userId — not merely the flag-off 404 case.
+    /// </summary>
+    [Fact]
+    public async Task SeedUser_FlagOn_NoReferralCodeSupplied_StillSendsReferralCode_AndReturns200WithUserId()
+    {
+        var captured = new CapturedRequests();
+        var stub = new StubHttpMessageHandler(req =>
+        {
+            captured.Add(req, req.Content is null ? "" : req.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+            return JsonResponse("""
+                {
+                  "userId": "real-created-id-001",
+                  "username": "sami",
+                  "email": "seed-sami@jeeb.test",
+                  "status": "created",
+                  "createdDate": "2026-06-05T09:00:00Z"
+                }
+                """);
+        });
+
+        using var factory = NewFactory(enabled: true, upstreamHandler: stub);
+        var client = factory.CreateClient();
+
+        // NOTE: no referralCode in the body — this is the persona path that 400'd.
+        var resp = await client.PostAsync("/dev/seed/user", JsonBody("""
+            { "role": "client", "phone": "+96139120001", "displayName": "Sami" }
+            """));
+
+        // The user-facing action SUCCEEDS: 200 + a non-empty canonical userId.
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "with referralCode supplied the upstream insert succeeds and the seed returns 200");
+        var body = await resp.Content.ReadFromJsonAsync<SeedUserResponseDto>();
+        body.Should().NotBeNull();
+        body!.UserId.Should().Be("real-created-id-001");
+        body.UserId.Should().NotBeNullOrWhiteSpace("a real create must return a canonical userId");
+
+        // The wire payload to UM carries a non-null referralCode (empty string).
+        var json = captured.LastBody;
+        json.Should().Contain("\"referralCode\":\"\"",
+            "an omitted referralCode is sent as an empty string so the NOT NULL column is satisfied");
+    }
+
+    /// <summary>
+    /// When the caller DOES supply a referralCode, the gateway forwards it
+    /// verbatim (trimmed) to user-management and the create succeeds.
+    /// </summary>
+    [Fact]
+    public async Task SeedUser_FlagOn_ReferralCodeSupplied_ForwardsIt_AndReturns200WithUserId()
+    {
+        var captured = new CapturedRequests();
+        var stub = new StubHttpMessageHandler(req =>
+        {
+            captured.Add(req, req.Content is null ? "" : req.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+            return JsonResponse("""
+                { "userId": "real-created-id-002", "username": "jad", "email": "seed-jad@jeeb.test", "status": "created" }
+                """);
+        });
+
+        using var factory = NewFactory(enabled: true, upstreamHandler: stub);
+        var client = factory.CreateClient();
+
+        var resp = await client.PostAsync("/dev/seed/user", JsonBody("""
+            { "role": "jeeber", "phone": "+96139120009", "displayName": "Jad", "referralCode": "REF123" }
+            """));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<SeedUserResponseDto>();
+        body!.UserId.Should().Be("real-created-id-002");
+
+        var json = captured.LastBody;
+        json.Should().Contain("\"referralCode\":\"REF123\"",
+            "a caller-supplied referralCode is forwarded verbatim to user-management");
     }
 
     [Fact]

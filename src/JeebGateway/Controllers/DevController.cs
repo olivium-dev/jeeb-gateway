@@ -114,12 +114,25 @@ public sealed class DevController : ControllerBase
             ? GenerateStrongPassword()
             : request.Password!;
 
+        // referralCode is a NON-NULL column in user-management (User.ReferralCode
+        // is IsRequired()/nullable:false). The public POST /api/User/register
+        // 201s only because real clients always carry a referralCode in the body;
+        // the dev seed previously omitted it, so it serialized to null and UM
+        // rejected the insert (NOT NULL violation), surfacing as the seed 400.
+        // Mirror the working path: always send a present, non-null value — the
+        // caller's referralCode when supplied, otherwise an empty string (a valid
+        // non-null value for the unbounded `text` column).
+        var referralCode = string.IsNullOrWhiteSpace(request.ReferralCode)
+            ? string.Empty
+            : request.ReferralCode!.Trim();
+
         var registerRequest = new RegisterUserRequest
         {
             Email = email,
             Password = password,
             ConfirmPassword = password,
             Username = username,
+            ReferralCode = referralCode,
             DateOfBirth = string.IsNullOrWhiteSpace(request.DateOfBirth) ? null : request.DateOfBirth,
         };
 
@@ -397,6 +410,13 @@ public sealed class DevSeedUserRequest
 
     /// <summary>Optional; if omitted the gateway generates a strong random one (never returned).</summary>
     public string? Password { get; set; }
+
+    /// <summary>
+    /// Optional referral code. user-management requires a NON-NULL referralCode
+    /// (the column is IsRequired()); when omitted the gateway sends an empty
+    /// string so the upstream insert succeeds, matching the public register path.
+    /// </summary>
+    public string? ReferralCode { get; set; }
 
     /// <summary>Optional date of birth, ISO date.</summary>
     public string? DateOfBirth { get; set; }
