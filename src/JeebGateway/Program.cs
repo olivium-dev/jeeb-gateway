@@ -27,6 +27,7 @@ using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
 using JeebGateway.Calls;
 using JeebGateway.Whisper;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -151,6 +152,12 @@ builder.Services.AddSwaggerGen(options =>
         Version = "v1",
         Description = "BFF gateway aggregating downstream Jeeb services."
     });
+    // Render [FromForm] IFormFile actions (e.g. POST /kyc/submit) as a
+    // multipart/form-data request body instead of letting Swashbuckle throw
+    // "[FromForm] attribute used with IFormFile" — which otherwise 500s the
+    // /swagger/v1/swagger.json document the moment the admin-gated Swagger
+    // surface is enabled. See MultipartFormFileOperationFilter.
+    options.OperationFilter<JeebGateway.Security.MultipartFormFileOperationFilter>();
 });
 
 // Health checks — the live probe ("self") returns 200 if the process is up;
@@ -394,6 +401,16 @@ builder.Services.Configure<UpstreamFeatureFlags>(
 // external seeding harness. No auto-seed exists anywhere — see DevController.
 builder.Services.Configure<JeebGateway.Security.DevEndpointOptions>(
     builder.Configuration.GetSection("Features").GetSection("DevEndpoints"));
+
+// Swagger UI / OpenAPI flag (Features:Swagger) — additive, fail-closed to 404,
+// admin-role-gated when on. Bound here so the request pipeline can read it via
+// IConfiguration. Defaults false and is committed false in EVERY appsettings
+// (including Production); flipped on only via the env var
+// Features__Swagger__Enabled=true, applied exclusively by the deploy-to-jeeb.yml
+// `swagger_ui` input. jeeb.fds-1.com is PUBLIC, so when ON under Production the
+// surface is admin-gated (non-admin => 404), NOT the open Dev/Testing branch.
+builder.Services.Configure<JeebGateway.Security.SwaggerOptions>(
+    builder.Configuration.GetSection("Features").GetSection("Swagger"));
 
 // Phone sign-in OTP orchestration options (Auth:Otp). Binds the Jeeb tenant's
 // application id forwarded on every SendOTP/ValidateOTP to the shared
@@ -1105,18 +1122,37 @@ app.UseMiddleware<RequestValidationMiddleware>();
 app.UseMiddleware<SecurityHeadersMiddleware>();
 app.UseMiddleware<ApiKeyAuthenticationMiddleware>();
 
-// JEB-67 / T-BE-031 AC7 — Swagger UI is on in Development without auth,
-// gated behind the "admin" role in Staging (so internal QA can browse the
-// surface) and entirely disabled in Production. The staging gate is
-// enforced by middleware that rejects any /swagger request that doesn't
-// carry an authenticated principal with the "admin" role.
+// JEB-67 / T-BE-031 AC7 / C15 — Swagger UI exposure. Two mutually-exclusive
+// branches:
+//   (a) Development OR Testing  => Swagger OPEN, no auth gate. Local/CI only;
+//       these environments are never the public Production host.
+//   (b) Features:Swagger:Enabled == true (additive flag, runs under ANY other
+//       environment INCLUDING Production) => Swagger mounted behind an
+//       admin-ROLE gate: any /swagger request without an authenticated principal
+//       in the "admin" role gets 404 (admin => 200, non-admin => 404).
+// Otherwise (the default for Production: flag false) => Swagger never mounted,
+// so /swagger* returns 404.
+//
+// The admin gate was previously keyed on EnvironmentName == "Staging", which
+// never executes on the live Production host. It is re-keyed here onto the
+// Features:Swagger:Enabled flag (committed-false everywhere; flipped on only via
+// the deploy-to-jeeb.yml `swagger_ui` input) so the SAME admin gate runs under
+// Production. jeeb.fds-1.com is PUBLIC, so we deliberately do NOT reuse the open
+// Development/Testing branch when enabling Swagger in Production — that would
+// leak the full route surface unauthenticated. ASPNETCORE_ENVIRONMENT is never
+// flipped to enable this (that would also open the /dev surface + regress other
+// prod hardening).
+var swaggerEnabled = builder.Configuration
+    .GetSection(JeebGateway.Security.SwaggerOptions.SectionName)
+    .Get<JeebGateway.Security.SwaggerOptions>()?.Enabled ?? false;
+
 if (app.Environment.IsDevelopment()
     || string.Equals(app.Environment.EnvironmentName, "Testing", StringComparison.OrdinalIgnoreCase))
 {
     app.UseSwagger();
     app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Jeeb Gateway v1"));
 }
-else if (string.Equals(app.Environment.EnvironmentName, "Staging", StringComparison.OrdinalIgnoreCase))
+else if (swaggerEnabled)
 {
     app.UseWhen(
         ctx => ctx.Request.Path.StartsWithSegments("/swagger", StringComparison.OrdinalIgnoreCase),
@@ -1124,8 +1160,20 @@ else if (string.Equals(app.Environment.EnvironmentName, "Staging", StringCompari
         {
             branch.Use(async (ctx, next) =>
             {
-                var user = ctx.User;
-                if (user?.Identity?.IsAuthenticated != true || !user.IsInRole("admin"))
+                // This branch is registered BEFORE app.UseAuthentication() in the
+                // pipeline, so ctx.User is not yet populated by the JWT bearer
+                // handler here. Authenticate the bearer scheme explicitly so a
+                // live JWT (e.g. SETUP-2's roles:[admin] token) populates the
+                // principal, then resolve the role through the gateway's shared
+                // UserIdentity — which honors BOTH the JWT "roles" claim AND the
+                // edge-injected X-User-Roles header (the gateway's dual MVP
+                // identity model). admin => 200, everyone else (incl. anon) => 404.
+                var auth = await ctx.AuthenticateAsync(JwtBearerDefaults.AuthenticationScheme);
+                if (auth.Succeeded && auth.Principal is not null)
+                {
+                    ctx.User = auth.Principal;
+                }
+                if (!JeebGateway.Users.UserIdentity.IsAdmin(ctx))
                 {
                     ctx.Response.StatusCode = StatusCodes.Status404NotFound;
                     return;

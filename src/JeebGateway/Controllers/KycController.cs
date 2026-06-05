@@ -53,10 +53,17 @@ public class KycController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [RequestSizeLimit(20_000_000)]
+    // NOTE: IFormFile parameters bind from multipart form-data IMPLICITLY in
+    // ASP.NET Core — they must NOT carry an explicit [FromForm] attribute, or
+    // Swashbuckle throws "[FromForm] attribute used with IFormFile" during
+    // OpenAPI generation (which 500s /swagger/v1/swagger.json the moment the
+    // admin-gated Swagger surface is enabled). Dropping the attribute is
+    // behavior-preserving: the runtime form binding is unchanged. The scalar
+    // form fields keep [FromForm].
     public async Task<IActionResult> Submit(
-        [FromForm] IFormFile? idFront,
-        [FromForm] IFormFile? idBack,
-        [FromForm] IFormFile? selfie,
+        IFormFile? idFront,
+        IFormFile? idBack,
+        IFormFile? selfie,
         [FromForm] string? vehicleType,
         [FromForm] string? vehicleRegistration,
         CancellationToken ct)
