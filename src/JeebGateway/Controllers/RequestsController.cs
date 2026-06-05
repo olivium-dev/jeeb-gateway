@@ -220,6 +220,71 @@ public class RequestsController : ControllerBase
     }
 
     /// <summary>
+    /// Owner-scoped list of the calling Client's delivery requests
+    /// (active and terminal), oldest first. Additive read counterpart to
+    /// the existing <see cref="Create"/> / <see cref="Cancel"/> writes —
+    /// reads only the existing in-memory store via <see cref="IRequestsStore"/>;
+    /// the BFF migration target swaps the store for the NSwag-generated
+    /// delivery-service client without touching this controller.
+    ///
+    /// Returns 200 with a (possibly empty) array of the caller's own
+    /// requests. A Client only ever sees their own rows — the result is
+    /// filtered by the resolved caller id, so there is no cross-client
+    /// data exposure and no id is required in the path.
+    /// </summary>
+    [HttpGet]
+    [RequireRole(Roles.Client)]
+    [RequireActiveUser]
+    [ProducesResponseType(typeof(IReadOnlyList<DeliveryRequestDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> List(CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var clientId, out var problem)) return problem;
+
+        var rows = await _store.ListForClientAsync(clientId, ct);
+        var dtos = rows.Select(ToDto).ToArray();
+        return Ok(dtos);
+    }
+
+    /// <summary>
+    /// Single-request read-by-id for the calling Client. Additive read
+    /// counterpart to the existing <see cref="Cancel"/> route on the same
+    /// <c>{requestId}</c> template — reuses the store's
+    /// <see cref="IRequestsStore.GetAsync"/> and the same ownership guard
+    /// as cancellation.
+    ///
+    /// Returns 200 with the request when it exists and belongs to the
+    /// caller, 404 when the id is unknown, and 404 (NOT 403) when the row
+    /// belongs to a different Client — the not-owner case is masked as
+    /// not-found so a Client cannot probe for the existence of another
+    /// Client's request ids.
+    /// </summary>
+    [HttpGet("{requestId}")]
+    [RequireRole(Roles.Client)]
+    [RequireActiveUser]
+    [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetById(string requestId, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var clientId, out var problem)) return problem;
+
+        var existing = await _store.GetAsync(requestId, ct);
+        if (existing is null) return NotFound();
+
+        // Ownership masking: a row owned by a different Client is reported
+        // as 404 rather than 403 so request-id existence cannot be probed.
+        if (!string.Equals(existing.ClientId, clientId, StringComparison.Ordinal))
+        {
+            return NotFound();
+        }
+
+        return Ok(ToDto(existing));
+    }
+
+    /// <summary>
     /// Client-initiated cancellation. Shared rules for immediate and
     /// scheduled deliveries (T-backend-046 acceptance criterion):
     ///   * Only the owning Client may cancel.

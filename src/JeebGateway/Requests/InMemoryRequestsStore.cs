@@ -606,6 +606,15 @@ public class InMemoryRequestsStore : IRequestsStore
         }
     }
 
+    /// <summary>
+    /// Async owner-scoped list backing <c>GET /requests</c>. Delegates to
+    /// the existing synchronous <see cref="ListForClient"/> so the
+    /// snapshot semantics (write-lock, oldest-first) stay identical — this
+    /// is read-only and adds no new datastore.
+    /// </summary>
+    public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct)
+        => Task.FromResult(ListForClient(clientId));
+
     public Task<int> AnonymizeForClientAsync(string userId, string anonymizedHash, CancellationToken ct)
     {
         lock (_writeLock)

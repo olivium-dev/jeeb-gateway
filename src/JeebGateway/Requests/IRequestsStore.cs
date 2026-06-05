@@ -123,6 +123,18 @@ public interface IRequestsStore
     Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct);
 
     /// <summary>
+    /// Owner-scoped read of every request belonging to
+    /// <paramref name="clientId"/>, oldest first. Backs the additive
+    /// <c>GET /requests</c> list endpoint so a Client can see their own
+    /// order history (active and terminal). Returns an empty list — never
+    /// null — when the Client has no requests. The production Postgres
+    /// store replaces this with a "WHERE client_id = ?" query; the BFF
+    /// migration target (NSwag client over delivery-service) implements
+    /// the same shape so the controller stays storage-agnostic.
+    /// </summary>
+    Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct);
+
+    /// <summary>
     /// BR-10 (T-backend-039): counts the requests where
     /// <see cref="DeliveryRequest.JeeberId"/> equals <paramref name="jeeberId"/>
     /// and the status is in <see cref="RequestStatus.JeeberActiveStates"/>
