@@ -27,6 +27,18 @@ public class InMemoryUsersStore : IUsersStore
         return Task.FromResult(Clone(profile));
     }
 
+    /// <summary>
+    /// S02 Wave-1 (ADR-003, F-C). Idempotent upsert of an upstream-resolved identity
+    /// projection. Replaces the id row so the gateway-minted JWT embeds the OPAQUE
+    /// roles/active_role user-management persisted. Preserves any existing saved
+    /// addresses on the row by leaving the address store untouched.
+    /// </summary>
+    public Task UpsertProjectionAsync(UserProfile profile, CancellationToken ct)
+    {
+        _users[profile.Id] = Clone(profile);
+        return Task.CompletedTask;
+    }
+
     public Task<UserProfile> UpdateProfileAsync(string userId, ProfilePatch patch, CancellationToken ct)
     {
         lock (_writeLock)

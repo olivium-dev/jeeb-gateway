@@ -49,6 +49,7 @@ public sealed class AuthOtpController : ControllerBase
     private readonly ITokenService _tokens;
     private readonly IPhonePolicy _phonePolicy;
     private readonly IOtpRequestRateLimiter _rateLimiter;
+    private readonly IUserManagementDualRoleClient _userManagement;
     private readonly ILogger<AuthOtpController> _log;
 
     public AuthOtpController(
@@ -59,6 +60,7 @@ public sealed class AuthOtpController : ControllerBase
         ITokenService tokens,
         IPhonePolicy phonePolicy,
         IOtpRequestRateLimiter rateLimiter,
+        IUserManagementDualRoleClient userManagement,
         ILogger<AuthOtpController> log)
     {
         _otpClient = otpClient;
@@ -68,6 +70,7 @@ public sealed class AuthOtpController : ControllerBase
         _tokens = tokens;
         _phonePolicy = phonePolicy;
         _rateLimiter = rateLimiter;
+        _userManagement = userManagement;
         _log = log;
     }
 
@@ -193,16 +196,41 @@ public sealed class AuthOtpController : ControllerBase
             return UpstreamFault(ex, "verify");
         }
 
-        // Validate succeeded → mint a REAL session exactly like the historical
-        // production verify path: find-or-create the user keyed on the normalized
-        // phone, then issue an access+refresh pair via the existing TokenService.
-        // This JWT/session mint is orchestration — it STAYS in the gateway.
+        // Validate succeeded → resolve the identity and mint a REAL gateway session.
+        //
+        // F-C (S02 Wave-1, ADR-003): user-management is the identity authority. The
+        // gateway no longer INVENTS the identity from the raw phone in an in-memory
+        // store — it orchestrates UM's phone-keyed find-or-create, which returns the
+        // canonical user id and the user's OPAQUE roles ({customer,driver}). The
+        // gateway then TRANSLATES opaque -> snake_case Jeeb contract ({client,jeeber})
+        // for the response body and STILL signs the sign-in session itself (the JWT
+        // mint is orchestration and stays in the gateway — N11 split-signer: only the
+        // role-switch path is UM-signed).
         var key = (body.Phone ?? string.Empty).Trim();
-        var profile = await _users.GetOrCreateAsync(key, ct);
-        var pair = await _tokens.IssueAsync(profile.Id, profile.Roles, ct);
+        var (userId, opaqueRoles, opaqueActiveRole) = await ResolveIdentityAsync(key, ct);
+
+        // Project the UM-resolved identity locally so the gateway-minted JWT embeds the
+        // SAME active_role/roles claims UM persisted (TokenService reads active_role from
+        // the store). New identities default to the opaque 'customer' single role.
+        await _users.UpsertProjectionAsync(new UserProfile
+        {
+            Id = userId,
+            Phone = key,
+            Name = string.Empty,
+            Roles = opaqueRoles.ToList(),
+            ActiveRole = opaqueActiveRole,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        }, ct);
+
+        var pair = await _tokens.IssueAsync(userId, opaqueRoles, ct);
 
         // Never log the raw phone or code — only the minted user id.
-        _log.LogInformation("auth.otp.verify ok userId={UserId}", profile.Id);
+        _log.LogInformation("auth.otp.verify ok userId={UserId}", userId);
+
+        // Translate the OPAQUE roles to the frozen snake_case Jeeb contract on the way out.
+        var contractRoles = JeebRoleTranslator.ToContract(opaqueRoles);
+        var contractActive = JeebRoleTranslator.ToContract(opaqueActiveRole);
 
         return Ok(new OtpVerifyResponse
         {
@@ -210,11 +238,49 @@ public sealed class AuthOtpController : ControllerBase
             RefreshToken = pair.RefreshToken,
             User = new OtpVerifyUserBlock
             {
-                UserId = profile.Id,
-                ActiveRole = string.IsNullOrWhiteSpace(profile.ActiveRole) ? Roles.Client : profile.ActiveRole,
-                AvailableRoles = profile.Roles.ToArray(),
+                UserId = userId,
+                ActiveRole = string.IsNullOrWhiteSpace(contractActive)
+                    ? JeebRoleTranslator.ContractClient
+                    : contractActive,
+                AvailableRoles = contractRoles.Length > 0
+                    ? contractRoles
+                    : new[] { JeebRoleTranslator.ContractClient },
             },
         });
+    }
+
+    /// <summary>
+    /// F-C identity resolution. When the UM kill switch is ON, orchestrates the shared
+    /// user-management phone find-or-create (the identity authority) and returns the
+    /// canonical id + OPAQUE roles. Degrades SAFELY: a transient UM fault falls back to
+    /// the legacy in-memory find-or-create so a live OTP login is never hard-broken by a
+    /// UM blip (the session is gateway-minted in both branches). When the switch is OFF,
+    /// uses the in-memory path directly (unchanged legacy behavior for existing fixtures).
+    /// </summary>
+    private async Task<(string userId, IReadOnlyList<string> opaqueRoles, string opaqueActiveRole)>
+        ResolveIdentityAsync(string phone, CancellationToken ct)
+    {
+        if (_flags.CurrentValue.UserManagement)
+        {
+            try
+            {
+                var um = await _userManagement.PhoneFindOrCreateAsync(phone, ct);
+                var roles = um.AvailableRoles is { Count: > 0 } ? um.AvailableRoles : new[] { Roles.Client };
+                var active = string.IsNullOrWhiteSpace(um.ActiveRole) ? Roles.Client : um.ActiveRole;
+                return (um.UserId, roles, active);
+            }
+            catch (UserManagementCallException ex)
+            {
+                // Fail-safe: never block a successful OTP validate on a UM blip.
+                _log.LogWarning(
+                    "auth.otp.verify UM find-or-create failed (status {Status}); falling back to in-memory identity",
+                    ex.StatusCode);
+            }
+        }
+
+        var profile = await _users.GetOrCreateAsync(phone, ct);
+        var fallbackActive = string.IsNullOrWhiteSpace(profile.ActiveRole) ? Roles.Client : profile.ActiveRole;
+        return (profile.Id, profile.Roles.ToList(), fallbackActive);
     }
 
     /// <summary>
