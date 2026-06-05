@@ -386,6 +386,15 @@ builder.Services.AddScoped<JeebGateway.Services.ITechnicianReviewService, JeebGa
 builder.Services.Configure<UpstreamFeatureFlags>(
     builder.Configuration.GetSection(UpstreamFeatureFlags.SectionName));
 
+// Dev / test-harness endpoints flag (Features:DevEndpoints) — additive,
+// fail-closed to 404. Bound here so the [DevOnly] action filter can resolve it
+// via IOptionsMonitor. Defaults false and is committed false in EVERY
+// appsettings (including Production); flipped on only via the env var
+// Features__DevEndpoints__Enabled=true in the single environment that runs the
+// external seeding harness. No auto-seed exists anywhere — see DevController.
+builder.Services.Configure<JeebGateway.Security.DevEndpointOptions>(
+    builder.Configuration.GetSection("Features").GetSection("DevEndpoints"));
+
 // OpenTelemetry
 var serviceName = "jeeb-gateway";
 var otlpEndpoint = builder.Configuration["Otel:Endpoint"] ?? "http://localhost:4317";
