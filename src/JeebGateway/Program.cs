@@ -395,6 +395,15 @@ builder.Services.Configure<UpstreamFeatureFlags>(
 builder.Services.Configure<JeebGateway.Security.DevEndpointOptions>(
     builder.Configuration.GetSection("Features").GetSection("DevEndpoints"));
 
+// Credential-free [DevOnly] OTP mock backing the restored /v1/auth/otp/{request,
+// verify} routes (and the /api/otp/{send,validate} aliases when the dev flag is
+// on). Rides the SAME Features:DevEndpoints:Enabled gate — 404/disabled in prod.
+// Performs NO upstream one-time-password call, sends NO SMS, touches NO Twilio
+// credential. Singleton so its in-memory per-phone OTP/attempt state persists
+// across requests within a process (lets the attempt-cap & lock hold).
+builder.Services.AddSingleton<JeebGateway.Auth.OtpDevMock.IDevOtpMock,
+    JeebGateway.Auth.OtpDevMock.DevOtpMock>();
+
 // OpenTelemetry
 var serviceName = "jeeb-gateway";
 var otlpEndpoint = builder.Configuration["Otel:Endpoint"] ?? "http://localhost:4317";
