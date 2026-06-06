@@ -34,4 +34,16 @@ public interface IVoiceTranscriptionClient
     /// shape is identical regardless of which path served the request.
     /// </summary>
     Task<TranscriptionResult> TranscribeAsync(WhisperAudio audio, string language, CancellationToken ct);
+
+    /// <summary>
+    /// Voice-on-create overload (JEB-1431/JEB-67). Forwards the multipart audio to
+    /// the upstream's canonical <c>POST /v1/voice/transcribe</c> with the gateway's
+    /// <paramref name="idempotencyKey"/> (the client requestId) mapped onto the
+    /// generic <c>Idempotency-Key</c> header so a network retry of the same draft
+    /// returns the cached transcript. The transcript VALUE is produced entirely by
+    /// the owning service (real Whisper or its config-gated mock seam) — the gateway
+    /// holds no STT logic. Returns transcript + confidence + resolved language.
+    /// </summary>
+    Task<TranscriptionResult> TranscribeVoiceAsync(
+        WhisperAudio audio, string language, string? idempotencyKey, CancellationToken ct);
 }

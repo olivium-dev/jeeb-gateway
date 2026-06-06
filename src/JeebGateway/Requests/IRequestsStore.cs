@@ -336,7 +336,23 @@ public class CreateRequestInput
 {
     public required string ClientId { get; init; }
     public required string Description { get; init; }
+
+    /// <summary>
+    /// S04 (JEB-1431): optional caller-supplied row id (the voice-create requestId
+    /// idempotency anchor). When null the store mints a fresh GUID (existing
+    /// behaviour). When set, the row is keyed by this id so the voice read-back
+    /// (GET /v1/requests/{requestId}) resolves and idempotent re-submits collapse
+    /// onto the same row. Additive — never required.
+    /// </summary>
+    public string? Id { get; init; }
     public string? Transcription { get; init; }
+
+    /// <summary>
+    /// S04 (JEB-43): STT confidence (0..1) captured at voice-create so the
+    /// read-back (H2) echoes the exact value the create returned. Null on the
+    /// typed-text path. Additive — never required.
+    /// </summary>
+    public double? TranscriptionConfidence { get; init; }
     public string? AudioUrl { get; init; }
     public IReadOnlyList<string> Photos { get; init; } = Array.Empty<string>();
     public string? TierId { get; init; }
