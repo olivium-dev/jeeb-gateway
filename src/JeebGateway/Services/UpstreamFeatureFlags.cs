@@ -181,6 +181,28 @@ public sealed class UpstreamFeatureFlags
     public bool CanonicalTransition422 { get; set; }
 
     /// <summary>
+    /// S03 / ADR-0004 — when true, the KYC JSON submit / ToS-stamp / review flow
+    /// routes to the owning <c>kyc-service</c> (which owns the SM-6 state machine,
+    /// the submission aggregate, the ToS-acceptance record, Idempotency-Key dedup,
+    /// and the role-grant DECISION) via
+    /// <see cref="JeebGateway.Services.Clients.IKycServiceClient"/> instead of the
+    /// interim in-gateway store.
+    ///
+    /// This is a net-new path (the destination service is owner/SSH ESCALATED and
+    /// NOT yet deployed — repo <c>olivium-dev/kyc-service</c> + Postgres
+    /// <c>jeeb_kyc</c> pending), so the flag DEFAULTS OFF in EVERY environment,
+    /// including <c>appsettings.Production.json</c>, where
+    /// <c>Services:Kyc:BaseUrl</c> is a clearly-marked placeholder
+    /// (<c>http://192.168.2.50:PORT_TBD/</c>). While off, the BFF serves S03 via
+    /// the interim in-gateway ref store (a kill-switch fallback, deleted from the
+    /// live path the moment kyc-service ships and this flips). The flag is the ONE
+    /// line that completes the ADR-0004 extraction: flip it on (with a real BaseUrl
+    /// + readiness probe) once kyc-service is live. Mirrors the cdn-service /
+    /// contract-signing-service net-new kill-switch shape exactly.
+    /// </summary>
+    public bool Kyc { get; set; }
+
+    /// <summary>
     /// S02 Wave-1 (ADR-003) — when true, the OTP sign-in find-or-create (F-C) and the
     /// dual-role surfaces (F-A / F-B) orchestrate the shared <c>user-management</c>
     /// service as the identity authority (phone-keyed find-or-create + token-reissuing

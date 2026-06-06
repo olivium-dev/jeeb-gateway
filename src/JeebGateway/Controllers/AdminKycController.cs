@@ -1,32 +1,33 @@
 using JeebGateway.Admin;
 using JeebGateway.Kyc;
+using JeebGateway.Services;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
 
 /// <summary>
-/// T-backend-005 / JEEB-23: admin KYC moderation queue.
+/// T-backend-005 / JEEB-23 / S03 H7-H8 / ADR-0004: admin KYC moderation queue +
+/// review. This controller is a THIN BFF over the KYC domain seam
+/// (<see cref="IKycBffSeam"/>): it composes the KYC review DECISION (kyc-service
+/// when live, interim store while the Kyc flag is off) with the identity mutation
+/// in user-management. It holds NO KYC state itself.
 ///
-/// GET /admin/kyc/queue paginates submissions still in
-/// <see cref="KycStatus.PendingReview"/> ordered by submission time so
-/// reviewers drain the queue oldest-first.
+/// <para><b>The only identity-mutating transition (CP-C / H8).</b> On
+/// <c>approve</c> the seam returns the role-grant INTENT
+/// (<see cref="KycBffReviewResult.GrantsRole"/> = the opaque jeeber role); the
+/// GATEWAY then composes the user-management append (jsonb <c>available_roles</c>,
+/// set-semantics) + token re-issue. kyc-service NEVER calls user-management
+/// (ARCH LAW). The approve commits regardless of the notification fan-out
+/// (off-path, N14) — an approve is never rolled back by a push failure.</para>
 ///
-/// PATCH /admin/kyc/{id}/review accepts one of three actions:
-///   * approve — flips the row to <see cref="KycStatus.Verified"/> and
-///     unlocks the <see cref="Roles.Jeeber"/> role on the user within
-///     5 seconds (AC #2). A confirmation push fires best-effort.
-///   * reject — flips the row to <see cref="KycStatus.Rejected"/>,
-///     stores the reason, and pushes the reason to the user so they
-///     know they can resubmit (AC #3).
-///   * request_resubmit — flips the row to
-///     <see cref="KycStatus.ResubmitRequested"/> and stores the subset
-///     of document steps the user must re-upload. The mobile app uses
-///     that subset to reopen only those steps (AC #4).
-///
-/// Every action lands an entry in <see cref="IAdminAuditLog"/>.
+/// <list type="bullet">
+///   <item>GET <c>/admin/kyc/queue</c> — pending submissions oldest-first (H7/N6).</item>
+///   <item>PATCH <c>/admin/kyc/{id}/review</c> — approve | reject | request_resubmit;
+///     re-review of a finalised row → 409 (N8); RFC7807 throughout.</item>
+/// </list>
 /// </summary>
-[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("admin/kyc")]
 [RequireRole(Roles.Admin)]
@@ -41,15 +42,24 @@ public class AdminKycController : ControllerBase
     private const string ActionReject = "reject_kyc";
     private const string ActionRequestResubmit = "request_resubmit_kyc";
 
-    private readonly IKycService _service;
-    private readonly IKycStore _store;
+    private readonly IKycBffSeam _kyc;
+    private readonly IUserManagementDualRoleClient _userManagement;
+    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IAdminAuditLog _auditLog;
+    private readonly ILogger<AdminKycController> _log;
 
-    public AdminKycController(IKycService service, IKycStore store, IAdminAuditLog auditLog)
+    public AdminKycController(
+        IKycBffSeam kyc,
+        IUserManagementDualRoleClient userManagement,
+        IOptionsMonitor<UpstreamFeatureFlags> flags,
+        IAdminAuditLog auditLog,
+        ILogger<AdminKycController> log)
     {
-        _service = service;
-        _store = store;
+        _kyc = kyc;
+        _userManagement = userManagement;
+        _flags = flags;
         _auditLog = auditLog;
+        _log = log;
     }
 
     [HttpGet("queue")]
@@ -80,7 +90,15 @@ public class AdminKycController : ControllerBase
             });
         }
 
-        var queue = await _store.ListPendingForReviewAsync(page, pageSize, ct);
+        KycBffQueuePage queue;
+        try
+        {
+            queue = await _kyc.GetPendingQueueAsync(page, pageSize, ct);
+        }
+        catch (KycUpstreamDisabledException)
+        {
+            return KycUpstreamDisabled();
+        }
 
         return Ok(new KycQueueResponse
         {
@@ -126,13 +144,10 @@ public class AdminKycController : ControllerBase
             });
         }
 
-        var before = await _store.GetByIdAsync(id, ct);
-        if (before is null) return NotFound();
-
-        KycReviewOutcome? outcome;
+        KycBffReviewResult outcome;
         try
         {
-            outcome = await _service.ReviewAsync(id, new KycReviewInput
+            outcome = await _kyc.ReviewAsync(id, new KycBffReviewInput
             {
                 Action = action,
                 ReviewerId = adminId,
@@ -140,23 +155,42 @@ public class AdminKycController : ControllerBase
                 ResubmitSteps = body.ResubmitSteps
             }, ct);
         }
-        catch (KycReviewValidationException ex)
+        catch (KycUpstreamDisabledException)
         {
-            // Validation failures from the service layer are user-input
-            // problems (missing reason, unknown step name, already-reviewed
-            // row). Map the "already reviewed" case to 409 so the admin UI
-            // can distinguish stale state from a bad request.
-            var status = ex.Message.Contains("no longer pending", StringComparison.OrdinalIgnoreCase)
-                ? StatusCodes.Status409Conflict
-                : StatusCodes.Status400BadRequest;
-            return StatusCode(status, new ProblemDetails
+            return KycUpstreamDisabled();
+        }
+        catch (KycBffNotFoundException)
+        {
+            return NotFound();
+        }
+        catch (KycBffReviewConflictException ex)
+        {
+            // N8: re-review of a finalised submission.
+            return StatusCode(StatusCodes.Status409Conflict, new ProblemDetails
             {
                 Title = ex.Message,
-                Status = status
+                Status = StatusCodes.Status409Conflict
+            });
+        }
+        catch (KycBffReviewValidationException ex)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = ex.Message,
+                Status = StatusCodes.Status400BadRequest
             });
         }
 
-        if (outcome is null) return NotFound();
+        // CP-C / H8: the ONLY identity-mutating transition. On an approve outcome
+        // the seam returns the role-grant INTENT; the GATEWAY composes the UM
+        // append (kyc-service never calls UM). The approve already committed in the
+        // KYC domain, so a UM blip must not roll it back — we surface roleGranted
+        // = false and log, rather than failing the review.
+        var roleGranted = false;
+        if (!string.IsNullOrWhiteSpace(outcome.GrantsRole))
+        {
+            roleGranted = await ComposeRoleGrantAsync(outcome.SubmissionId, outcome.UserId, outcome.GrantsRole!, ct);
+        }
 
         await _auditLog.AppendAsync(new AdminAuditAppend
         {
@@ -164,18 +198,69 @@ public class AdminKycController : ControllerBase
             Action = AuditActionFor(action),
             EntityType = EntityType,
             EntityId = id,
-            BeforeState = Snapshot(before),
-            AfterState = Snapshot(outcome.Submission),
+            BeforeState = new Dictionary<string, object?> { ["status"] = "pending_review" },
+            AfterState = Snapshot(outcome, roleGranted),
             RequestId = HttpContext.TraceIdentifier
         }, ct);
 
         return Ok(new KycReviewResponse
         {
-            Submission = ToResponse(outcome.Submission),
-            RoleGranted = outcome.RoleGranted,
+            Submission = ToResponse(outcome),
+            RoleGranted = roleGranted,
+            // Interim path delivers the status push inline; upstream path composes
+            // notification async off the critical path (N14).
             PushSent = outcome.PushSent
         });
     }
+
+    /// <summary>
+    /// Composes the user-management role append for an approve outcome. When the
+    /// UserManagement upstream is enabled the gateway calls UM (the durable,
+    /// blast-radius-1 jsonb append + token re-issue authority). When it is off,
+    /// the interim seam has already granted the role on the in-gateway store, so
+    /// the grant is reported as effected. Returns whether the role is now held.
+    /// </summary>
+    private async Task<bool> ComposeRoleGrantAsync(
+        string submissionId, string? subjectUserId, string opaqueRole, CancellationToken ct)
+    {
+        if (!_flags.CurrentValue.UserManagement)
+        {
+            // Interim path: the in-gateway service already appended the role.
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(subjectUserId))
+        {
+            _log.LogWarning(
+                "kyc approve {SubmissionId}: review outcome carried no owner; role grant skipped", submissionId);
+            return false;
+        }
+
+        try
+        {
+            var grant = await _userManagement.AppendAvailableRoleAsync(subjectUserId, opaqueRole, ct);
+            return grant.Added || grant.AvailableRoles.Any(
+                r => string.Equals(r, opaqueRole, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (UserManagementCallException ex)
+        {
+            // Approve never rolls back on a UM blip (N14); surface false + log.
+            _log.LogWarning(ex,
+                "kyc approve {SubmissionId}: user-management role append failed (status {Status}); "
+                + "approve committed, role grant deferred", submissionId, ex.StatusCode);
+            return false;
+        }
+    }
+
+    private IActionResult KycUpstreamDisabled() => StatusCode(
+        StatusCodes.Status503ServiceUnavailable,
+        new ProblemDetails
+        {
+            Type = "https://jeeb.dev/errors/upstream-unavailable",
+            Title = "KYC upstream unavailable",
+            Detail = "The KYC service is not enabled.",
+            Status = StatusCodes.Status503ServiceUnavailable
+        });
 
     private static bool TryParseAction(string? raw, out KycReviewAction action, out ProblemDetails error)
     {
@@ -221,38 +306,39 @@ public class AdminKycController : ControllerBase
         _ => action.ToString()
     };
 
-    private static IReadOnlyDictionary<string, object?> Snapshot(KycSubmission s) =>
+    private static IReadOnlyDictionary<string, object?> Snapshot(KycBffReviewResult r, bool roleGranted) =>
         new Dictionary<string, object?>
         {
-            ["status"] = s.Status,
-            ["reviewed_at"] = s.ReviewedAt,
-            ["reviewer_id"] = s.ReviewerId,
-            ["rejection_reason"] = s.RejectionReason,
-            ["resubmit_steps"] = s.ResubmitSteps.ToList()
+            ["status"] = r.Status,
+            ["rejection_reason"] = r.RejectionReason,
+            ["resubmit_steps"] = r.ResubmitSteps.ToList(),
+            ["role_granted"] = roleGranted
         };
 
-    private static KycQueueItem ToQueueItem(KycSubmission s) => new()
+    private static KycQueueItem ToQueueItem(KycBffQueueItem s) => new()
     {
-        Id = s.Id,
+        Id = s.SubmissionId,
         UserId = s.UserId,
         Status = s.Status,
         SubmittedAt = s.SubmittedAt,
-        VehicleType = s.VehicleType,
-        VehicleRegistration = s.VehicleRegistration,
-        LivenessPassed = s.LivenessPassed
+        // Vehicle metadata is not carried on the thin queue projection (kyc-service
+        // owns the full submission); the admin list shows the lifecycle fields.
+        VehicleType = string.Empty,
+        VehicleRegistration = string.Empty,
+        LivenessPassed = false
     };
 
-    private static KycSubmissionResponse ToResponse(KycSubmission s) => new()
+    private static KycSubmissionResponse ToResponse(KycBffReviewResult r) => new()
     {
-        Id = s.Id,
-        UserId = s.UserId,
-        Status = s.Status,
-        SubmittedAt = s.SubmittedAt,
-        ReviewedAt = s.ReviewedAt,
-        RejectionReason = s.RejectionReason,
-        VehicleType = s.VehicleType,
-        VehicleRegistration = s.VehicleRegistration,
-        LivenessPassed = s.LivenessPassed,
-        ResubmitSteps = s.ResubmitSteps.ToList()
+        Id = r.SubmissionId,
+        UserId = string.Empty,
+        Status = r.Status,
+        SubmittedAt = default,
+        ReviewedAt = DateTimeOffset.UtcNow,
+        RejectionReason = r.RejectionReason,
+        VehicleType = string.Empty,
+        VehicleRegistration = string.Empty,
+        LivenessPassed = false,
+        ResubmitSteps = r.ResubmitSteps.ToList()
     };
 }

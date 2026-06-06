@@ -203,6 +203,24 @@ public static class ServiceClientExtensions
             services.AddHttpClient<ICDNServiceClient, CDNServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Cdn")));
 
+        // thin-BFF wire — kyc-service (S03 / ADR-0004): the OWNING microservice for
+        // the KYC domain (SM-6 state machine, submission aggregate, ToS-acceptance
+        // record, Idempotency-Key dedup, role-grant DECISION). Per ARCH LAW
+        // kyc-service calls no sibling; this is the gateway's single seam onto it.
+        //
+        // NOT YET DEPLOYED: the repo olivium-dev/kyc-service + Postgres jeeb_kyc are
+        // owner/SSH ESCALATED. Services:Kyc:BaseUrl in appsettings.Production.json is
+        // a PLACEHOLDER (http://192.168.2.50:PORT_TBD/) and
+        // FeatureFlags:UseUpstream:Kyc is DEFAULT-OFF everywhere, so the gateway
+        // never dials the unroutable host (the KycBffSeam serves the interim
+        // in-gateway store while off). Lazy config (no throw on placeholder BaseUrl)
+        // makes this safe to ship before the service exists. Hand-coded (kyc-service
+        // exposes no reachable OpenAPI doc yet); regenerate via NSwag once it does.
+        AddNamedDownstreamClient(services, config, "kyc", "Services:Kyc:BaseUrl");
+        AttachStandardPipeline(
+            services.AddHttpClient<IKycServiceClient, KycServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Kyc")));
+
         // T-BE-019 (JEB-55): typed client over one-time-password service for the
         // delivery-HANDOVER OTP (ApplicationId delivery_handover_{deliveryId}).
         // This is a POST-AUTH call inside the authenticated delivery flow, so it
@@ -422,7 +440,30 @@ public static class ServiceClientExtensions
         {
             // Trailing slash is required so relative paths like "api/jeeb/..."
             // resolve under the configured prefix rather than replacing it.
-            http.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+            //
+            // Lazy/safe config (matches the kill-switch contract): a PLACEHOLDER
+            // BaseUrl for a not-yet-deployed upstream (e.g.
+            // http://192.168.2.50:PORT_TBD/) is NOT a parseable absolute Uri, so
+            // we must not throw at client-construction time — the consuming
+            // controller short-circuits to 503 while the feature flag is off and
+            // never dials the address. Leaving BaseAddress null is harmless until
+            // a real BaseUrl is set and the flag is flipped.
+            var normalised = baseUrl.TrimEnd('/') + "/";
+            if (Uri.TryCreate(normalised, UriKind.Absolute, out var uri))
+            {
+                try
+                {
+                    // Touch Port: a placeholder like ":PORT_TBD" can pass TryCreate
+                    // but throw on member access; force the parse here so we fall
+                    // through to "leave BaseAddress null" instead of 500-ing later.
+                    _ = uri.Port;
+                    http.BaseAddress = uri;
+                }
+                catch (UriFormatException)
+                {
+                    // Placeholder BaseUrl for a not-yet-deployed upstream — skip.
+                }
+            }
         }
         http.Timeout = TimeSpan.FromSeconds(30);
     }

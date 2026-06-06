@@ -905,17 +905,17 @@ else
 
 // Jeeber KYC submission pipeline (T-backend-004 / JEEB-22).
 //
-// POST /kyc/submit lands ID front/back + selfie in encrypted document
-// storage, runs the liveness check stub, and pushes a queue entry with
-// status 'pending_review' for the admin moderation pipeline. Production
-// wiring swaps the in-memory document storage for S3 with per-object
-// KMS data keys, the liveness stub for a real vendor (e.g. AWS Rekognition
-// or iProov), and the in-memory KYC store for a Postgres-backed
-// implementation colocated with admin_actions.
-builder.Services.AddSingleton<IKycStore, InMemoryKycStore>();
-builder.Services.AddSingleton<IKycDocumentStorage, InMemoryEncryptedDocumentStorage>();
-builder.Services.AddSingleton<IKycLivenessChecker, StubKycLivenessChecker>();
-builder.Services.AddSingleton<IKycService, KycService>();
+// S03 / ADR-0004 — the thin KYC BFF seam onto the KYC DOMAIN. Routes the JSON
+// submit / ToS-stamp / status / queue / review flow to the OWNING kyc-service
+// (live at :10074) via IKycServiceClient when FeatureFlags:UseUpstream:Kyc is ON.
+// The BFF controllers (KycSubmissionBffController, KycStatusBffController,
+// AdminKycController) compose this seam with contract-signing / cdn /
+// user-management and hold ZERO KYC state. The legacy in-gateway KYC domain
+// (InMemoryKycStore + the document/liveness fakes + the in-gateway KycService
+// role-grant) and the interim ref store have been DELETED (ARCH LAW / guardrail
+// #3): there is no in-memory fallback to serve a false-PASS — the seam fails
+// closed (503) when the flag is off.
+builder.Services.AddSingleton<IKycBffSeam, KycBffSeam>();
 
 // Users / profile / saved addresses / admin search (T-backend-029).
 // In-memory store for the MVP; production wiring will proxy to auth-service

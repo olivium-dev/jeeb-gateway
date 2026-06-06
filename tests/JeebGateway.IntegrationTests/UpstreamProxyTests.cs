@@ -171,78 +171,11 @@ public class UpstreamProxyTests
             .Should().Be("/jeeb/jeebers/jeeber-1/location/update");
     }
 
-    // -----------------------------------------------------------------
-    // KYC submit (auth-service)
-    // -----------------------------------------------------------------
-
-    [Fact]
-    public async Task Kyc_Submit_With_Flag_On_Forwards_To_Auth_Upstream()
-    {
-        var captured = new CapturedRequests();
-        var stub = new StubHttpMessageHandler(req =>
-        {
-            captured.Add(req);
-            return JsonResponse(new KycSubmissionResponse
-            {
-                Id = "upstream-kyc-1",
-                UserId = "jeeber-1",
-                Status = "pending_review",
-                SubmittedAt = DateTimeOffset.UnixEpoch,
-                VehicleType = "car",
-                VehicleRegistration = "ABC-123",
-                LivenessPassed = true,
-                ResubmitSteps = Array.Empty<string>()
-            }, HttpStatusCode.Accepted);
-        });
-
-        using var factory = NewFactory(
-            flags: new() { { "FeatureFlags:UseUpstream:Auth", "true" } },
-            configureServices: services =>
-            {
-                ReplaceTypedClient<IAuthServiceClient, AuthServiceClient>(
-                    services, stub, "http://upstream-auth.test");
-            });
-
-        var jeeber = ClientWith(factory, "jeeber-1", "driver");
-
-        using var form = NewKycForm();
-        var resp = await jeeber.PostAsync("/kyc/submit", form);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Accepted);
-        var body = await resp.Content.ReadFromJsonAsync<KycSubmissionResponse>();
-        body!.Id.Should().Be("upstream-kyc-1");
-
-        var sent = captured.Single();
-        sent.RequestUri!.AbsolutePath.Should().Be("/api/jeeb/kyc/submit");
-        sent.Headers.GetValues("X-User-Id").Single().Should().Be("jeeber-1");
-    }
-
-    [Fact]
-    public async Task Kyc_Submit_With_Flag_Off_Uses_InMemory_Pipeline()
-    {
-        var stub = new StubHttpMessageHandler(_ =>
-            throw new InvalidOperationException("upstream must not be called when flag is off"));
-
-        using var factory = NewFactory(
-            flags: new() { { "FeatureFlags:UseUpstream:Auth", "false" } },
-            configureServices: services =>
-            {
-                ReplaceTypedClient<IAuthServiceClient, AuthServiceClient>(
-                    services, stub, "http://upstream-auth.test");
-            });
-
-        var jeeber = ClientWith(factory, "jeeber-flag-off", "driver");
-
-        using var form = NewKycForm();
-        var resp = await jeeber.PostAsync("/kyc/submit", form);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Accepted);
-        var body = await resp.Content.ReadFromJsonAsync<KycSubmissionResponse>();
-        // The in-memory KYC service mints a fresh GUID-based id; we only
-        // need to confirm we did NOT see the upstream-canned id.
-        body!.Id.Should().NotBe("upstream-kyc-1");
-        body.UserId.Should().Be("jeeber-flag-off");
-    }
+    // NOTE: the legacy multipart KYC submit (old in-gateway KycController over the
+    // auth-service proxy / in-memory pipeline) was DELETED in S03 / ADR-0004 — the
+    // gateway now holds ZERO KYC state and the KYC surface is the thin JSON BFF
+    // over the owning kyc-service (see Kyc/KycSubmissionBffEndpointTests). The two
+    // obsolete tests that exercised that removed path were removed with it.
 
     // -----------------------------------------------------------------
     // Helpers
@@ -303,27 +236,6 @@ public class UpstreamProxyTests
                 System.Text.Encoding.UTF8,
                 "application/json")
         };
-    }
-
-    private static MultipartFormDataContent NewKycForm()
-    {
-        var form = new MultipartFormDataContent
-        {
-            { new StringContent("car"), "vehicleType" },
-            { new StringContent("ABC-123"), "vehicleRegistration" }
-        };
-        AddPng(form, "idFront", "front.png");
-        AddPng(form, "idBack", "back.png");
-        AddPng(form, "selfie", "selfie.png");
-        return form;
-    }
-
-    private static void AddPng(MultipartFormDataContent form, string field, string fileName)
-    {
-        var bytes = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
-        var content = new ByteArrayContent(bytes);
-        content.Headers.ContentType = MediaTypeHeaderValue.Parse("image/png");
-        form.Add(content, field, fileName);
     }
 
     private sealed class CapturedRequests

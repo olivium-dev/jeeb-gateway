@@ -104,6 +104,45 @@ public sealed class CdnServiceClientContractTests
     }
 
     [Fact]
+    public async Task MintUploadUrlAsync_Posts_To_UploadUrl_And_Binds_Ticket()
+    {
+        HttpRequestMessage? captured = null;
+        string? capturedBody = null;
+        var handler = new StubHandler((req, ct) =>
+        {
+            captured = req;
+            capturedBody = req.Content!.ReadAsStringAsync(ct).GetAwaiter().GetResult();
+            return Json("""
+            {
+              "uploadUrl": "https://cdn.jeeb.lb/put/id_document_front?sig=abc",
+              "objectRef": "cdn://obj/id_document_front/aa11",
+              "expiresIn": 300
+            }
+            """);
+        });
+        var http = new HttpClient(handler) { BaseAddress = new Uri(CdnBaseUrl + "/") };
+        var sut = new CDNServiceClient(http);
+
+        var ticket = await sut.MintUploadUrlAsync(new CdnUploadUrlRequest
+        {
+            Slot = "id_document_front",
+            ContentType = "image/jpeg",
+            OwnerUserId = "user-1",
+            TtlSeconds = 300,
+        }, ct: default);
+
+        captured.Should().NotBeNull();
+        captured!.Method.Should().Be(HttpMethod.Post);
+        captured.RequestUri!.AbsolutePath.Should().Be("/api/v1/assets/upload-url");
+        capturedBody.Should().Contain("id_document_front");
+        capturedBody.Should().Contain("ownerUserId");
+
+        ticket.UploadUrl.Should().StartWith("https://cdn.jeeb.lb/put/");
+        ticket.ObjectRef.Should().Be("cdn://obj/id_document_front/aa11");
+        ticket.ExpiresInSeconds.Should().Be(300);
+    }
+
+    [Fact]
     public async Task GetAssetAsync_Returns_Null_On_404_Retention_Expiry()
     {
         var handler = new StubHandler((_, _) =>

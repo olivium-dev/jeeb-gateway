@@ -32,6 +32,34 @@ public sealed class CdnController : ControllerBase
     private const int MaxSignedUrlTtlSeconds = 3600;
     private const int DefaultSignedUrlTtlSeconds = 300;
 
+    // BR-2: a brokered signed PUT upload URL must live ≤ 5 minutes. The broker
+    // clamps to this regardless of any requested TTL (defence-in-depth; cdn-service
+    // is the record-of-truth for the actual expiry it stamps).
+    private const int MaxUploadUrlTtlSeconds = 300;
+
+    // The KYC document slots the signed-PUT broker accepts (DEC1, S03 H2/H3).
+    // Generic vocab; the Jeeb-specific field-name mapping lives in the KYC submit
+    // BFF, not here.
+    private static readonly IReadOnlySet<string> AllowedUploadSlots =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "id_document_front",
+            "id_document_back",
+            "vehicle_registration",
+            "selfie_with_liveness",
+        };
+
+    private static readonly IReadOnlySet<string> AllowedUploadContentTypes =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "image/jpeg",
+            "image/jpg",
+            "image/png",
+            "image/webp",
+            "image/heic",
+            "application/pdf",
+        };
+
     private readonly ICDNServiceClient _cdn;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
 
@@ -41,6 +69,83 @@ public sealed class CdnController : ControllerBase
     {
         _cdn = cdn;
         _flags = flags;
+    }
+
+    /// <summary>
+    /// S03 H2/H3 (DEC1). Brokers a short-lived signed <b>PUT</b> upload URL for a
+    /// KYC document slot. The mobile client uploads the bytes DIRECTLY to the
+    /// returned <c>upload_url</c> (H2b) — bytes never re-stream through the gateway —
+    /// then records the <c>object_ref</c> in the KYC submission. <c>expires_in</c>
+    /// is bounded to ≤ 300s (BR-2).
+    ///
+    /// Request: <c>{ "slot": "id_document_front", "content_type": "image/jpeg" }</c>.
+    /// Scoped to the authenticated caller: the owning userId comes from the JWT
+    /// subject, so a caller can only broker uploads under their own id.
+    /// </summary>
+    [HttpPost("")]
+    [ProducesResponseType(typeof(CdnUploadTicketResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> BrokerUploadUrl(
+        [FromBody] CdnUploadUrlBody? body,
+        CancellationToken ct = default)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+
+        if (body is null || string.IsNullOrWhiteSpace(body.Slot))
+        {
+            return Problem(
+                title: "Invalid upload request",
+                detail: "slot is required.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var slot = body.Slot.Trim();
+        if (!AllowedUploadSlots.Contains(slot))
+        {
+            return Problem(
+                title: "Invalid upload slot",
+                detail: $"slot must be one of: {string.Join(", ", AllowedUploadSlots)}.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var contentType = string.IsNullOrWhiteSpace(body.ContentType) ? "image/jpeg" : body.ContentType.Trim();
+        if (!AllowedUploadContentTypes.Contains(contentType))
+        {
+            return Problem(
+                title: "Invalid content type",
+                detail: $"content_type must be one of: {string.Join(", ", AllowedUploadContentTypes)}.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (!_flags.CurrentValue.Cdn) return UpstreamDisabled();
+
+        // Clamp the TTL to the BR-2 bound before dialing cdn-service.
+        var ttl = body.TtlSeconds is > 0 and <= MaxUploadUrlTtlSeconds
+            ? body.TtlSeconds.Value
+            : MaxUploadUrlTtlSeconds;
+
+        var ticket = await _cdn.MintUploadUrlAsync(new CdnUploadUrlRequest
+        {
+            Slot = slot,
+            ContentType = contentType,
+            OwnerUserId = userId,
+            TtlSeconds = ttl,
+        }, ct);
+
+        // Defence-in-depth: never advertise an expiry beyond the BR-2 bound even
+        // if the upstream returns a larger one.
+        var expiresIn = ticket.ExpiresInSeconds is > 0 and <= MaxUploadUrlTtlSeconds
+            ? ticket.ExpiresInSeconds
+            : MaxUploadUrlTtlSeconds;
+
+        return Ok(new CdnUploadTicketResponse
+        {
+            UploadUrl = ticket.UploadUrl,
+            ObjectRef = ticket.ObjectRef,
+            ExpiresIn = expiresIn,
+        });
     }
 
     /// <summary>
@@ -114,4 +219,37 @@ public sealed class CdnController : ControllerBase
         title: "Invalid asset id",
         detail: "Asset id must be a non-empty string.",
         statusCode: StatusCodes.Status400BadRequest);
+}
+
+/// <summary>
+/// Body for <c>POST /api/cdn/assets</c> (the signed-PUT broker). The mobile
+/// client sends the snake_case <c>content_type</c> contract; both casings bind.
+/// </summary>
+public sealed class CdnUploadUrlBody
+{
+    public string? Slot { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("content_type")]
+    public string? ContentType { get; init; }
+
+    /// <summary>Optional requested TTL in seconds; clamped to ≤ 300 (BR-2).</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("ttl_seconds")]
+    public int? TtlSeconds { get; init; }
+}
+
+/// <summary>
+/// Response for <c>POST /api/cdn/assets</c>. Snake_case to match the S03 mobile
+/// contract: <c>upload_url</c> (signed PUT target), <c>object_ref</c> (durable
+/// ref recorded in the submission), <c>expires_in</c> (seconds, ≤ 300, BR-2).
+/// </summary>
+public sealed class CdnUploadTicketResponse
+{
+    [System.Text.Json.Serialization.JsonPropertyName("upload_url")]
+    public required string UploadUrl { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("object_ref")]
+    public required string ObjectRef { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("expires_in")]
+    public required int ExpiresIn { get; init; }
 }

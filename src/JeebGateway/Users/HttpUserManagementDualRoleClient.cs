@@ -83,7 +83,52 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
             string.IsNullOrWhiteSpace(dto.ActiveRole) ? opaqueRole : dto.ActiveRole!);
     }
 
+    public async Task<RoleGrantResult> AppendAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
+    {
+        // ADR-0004 (H8): append to available_roles with set-semantics. UM owns the
+        // jsonb mutation; the gateway only composes the call (kyc-service never does).
+        using var resp = await _http.PostAsJsonAsync(
+            "api/User/role/grant",
+            new RoleGrantBody { UserId = userId, Role = opaqueRole },
+            Json, ct);
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            _log.LogWarning(
+                "user-management role grant returned {Status} for userId={UserId} role={Role}",
+                (int)resp.StatusCode, userId, opaqueRole);
+            throw new UserManagementCallException("role/grant", (int)resp.StatusCode);
+        }
+
+        var dto = await resp.Content.ReadFromJsonAsync<RoleGrantBodyResponse>(Json, ct)
+            ?? throw new UserManagementCallException("role/grant", (int)HttpStatusCode.BadGateway);
+
+        var roles = dto.AvailableRoles is { Length: > 0 }
+            ? dto.AvailableRoles
+            : new[] { opaqueRole };
+
+        // Added: prefer the explicit upstream flag; otherwise infer (the role is now
+        // present, so a missing flag defaults to "added" only when we cannot tell).
+        var added = dto.Added ?? true;
+
+        return new RoleGrantResult(dto.UserId ?? userId, roles, added);
+    }
+
     // ---- wire DTOs (snake_case where UM emits snake_case; PascalCase request fields) ----
+
+    private sealed class RoleGrantBody
+    {
+        [JsonPropertyName("userId")] public string UserId { get; set; } = string.Empty;
+        [JsonPropertyName("role")] public string Role { get; set; } = string.Empty;
+    }
+
+    private sealed class RoleGrantBodyResponse
+    {
+        [JsonPropertyName("userId")] public string? UserId { get; set; }
+        [JsonPropertyName("available_roles")] public string[]? AvailableRoles { get; set; }
+        [JsonPropertyName("added")] public bool? Added { get; set; }
+    }
+
 
     private sealed class PhoneFindOrCreateBody
     {
