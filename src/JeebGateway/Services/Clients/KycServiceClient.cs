@@ -196,15 +196,34 @@ public sealed class KycServiceClient : IKycServiceClient
         }
         response.EnsureSuccessStatusCode();
 
-        // LIVE review response is wrapped: { submission: {...}, grantsRole }.
-        // grantsRole sits at the envelope top-level; all submission fields
-        // (id, subject, status, rejectionReason, resubmitSlots) are nested.
+        // LIVE review response is wrapped: { submission: {...} }. The product-
+        // agnostic kyc-service does NOT name the Jeeb role on its review response
+        // (verified live: an approve returns {submission:{id,subject,
+        // status:"Verified",...}} with NO grantsRole on the envelope OR the
+        // submission; a reject returns status:"Rejected"). That is correct by
+        // ARCH LAW — only the gateway holds Jeeb vocabulary, kyc-service stays a
+        // generic moderation primitive. So the gateway DERIVES the role-grant
+        // INTENT from the outcome status: a review that lands on Verified is an
+        // approve and grants the Jeeb (jeeber) role; any other terminal status
+        // (Rejected / ResubmitRequested / unchanged) grants nothing. This mirrors
+        // the submit path, which likewise stamps the Jeeb role in the gateway. We
+        // still honor an explicit grantsRole if a future kyc-service wrapper emits
+        // one (forward-compat), but never depend on it.
         var envelope = await ReadJsonAsync(response, ct);
-        var grantsRole = ReadString(envelope, "grantsRole");
         var submission = envelope.TryGetProperty("submission", out var sub)
             && sub.ValueKind == JsonValueKind.Object
                 ? sub
                 : envelope;
+        var status = ReadString(submission, "status", "state") ?? throw EmptyId(response);
+        var explicitGrant = ReadString(submission, "grantsRole")
+            ?? ReadString(envelope, "grantsRole");
+        // Derive the grant intent in the gateway: an approve is the only review
+        // outcome that yields Verified, and it is the sole identity-mutating
+        // transition (CP-C / H8). Empty for every non-approve outcome.
+        var grantsRole = explicitGrant
+            ?? (string.Equals(status, "Verified", StringComparison.OrdinalIgnoreCase)
+                ? JeeberRole
+                : null);
 
         return new KycReviewDecision
         {
@@ -212,7 +231,7 @@ public sealed class KycServiceClient : IKycServiceClient
             // The owning user the gateway appends the role to — LIVE field is
             // `subject`. Without it the gateway cannot complete the UM grant.
             UserId = ReadString(submission, "subject", "userId"),
-            Status = ReadString(submission, "status", "state") ?? throw EmptyId(response),
+            Status = status,
             RejectionReason = ReadString(submission, "rejectionReason", "reason"),
             ResubmitSteps = ReadStringList(submission, "resubmitSlots", "resubmitSteps"),
             GrantsRole = grantsRole,
