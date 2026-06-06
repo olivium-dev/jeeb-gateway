@@ -29,6 +29,16 @@
 #                              dedicated value to rotate the mint credential
 #                              independently of the JWT key. Injected via env-add on
 #                              every deploy so the running gateway picks it up.
+#   UMJWT_SIGNING_KEY       -- H-B5: the key user-management SIGNS its re-issued
+#                              role-switch tokens with (UM Jwt:Key, iss=user-management).
+#                              The gateway's "UserManagement" JwtBearer scheme VERIFIES
+#                              UM-issued tokens with this key. Without it the gateway's
+#                              UmJwt:SigningKey falls back to its OWN mint key (a DIFFERENT
+#                              key), so every UM-issued token 401s (split-signer gap).
+#                              Injected via env-add (UmJwt__SigningKey) on update + create.
+#                              This is the leaked shared fleet key (known-debt #6); a
+#                              fleet-wide rotation is tracked separately — do NOT reuse it
+#                              as the gateway's own mint key (JeebJwt__SigningKey).
 
 name: Deploy to Jeeb
 
@@ -231,7 +241,7 @@ jobs:
               --env-add Security__TokenMint__Enabled='true' \
               --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
               --env-add Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
-              --env-rm UmJwt__SigningKey \
+              --env-add UmJwt__SigningKey='${{ secrets.UMJWT_SIGNING_KEY }}' \
               --env-add UmJwt__Issuer='user-management' \
               --env-add UmJwt__Audience='user-management' \
               $DEV_FLAG_ARG \
@@ -249,6 +259,7 @@ jobs:
               --env JeebJwt__PhonePepper='${{ secrets.JEEB_JWT_PHONE_PEPPER }}' \
               --env JeebJwt__Issuer='${{ inputs.jwt_issuer }}' \
               --env JeebJwt__Audience='${{ inputs.jwt_audience }}' \
+              --env UmJwt__SigningKey='${{ secrets.UMJWT_SIGNING_KEY }}' \
               --env UmJwt__Issuer='user-management' \
               --env UmJwt__Audience='user-management' \
               --env Services__Chat__BaseUrl='${{ inputs.chat_base_url }}' \
