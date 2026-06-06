@@ -54,11 +54,15 @@ public static class CapabilityRolePolicy
             [Capabilities.RequestVoiceCreate] = ClientOnly,
             [Capabilities.DeliveryTrackOwn] = ClientOnly,       // STATE
             [Capabilities.MatchingRun] = ClientOnly,
-            [Capabilities.OfferAccept] = ClientOnly,            // CLAIM; BR-1/BR-10/status = STATE
 
             // D. Jeeber-only {jeeber}
             [Capabilities.AvailabilityToggle] = JeeberOnly,
             [Capabilities.OfferSubmit] = JeeberOnly,
+            // JEB-1509: offer.accept repointed {client}->{jeeber}. The previous {client} row was
+            // DEAD (no route declared offer.accept; OffersController.Accept used offer.submit). The
+            // accepting party is the JEEBER the offer was extended to, so the capability lives in the
+            // jeeber family. Runtime allowed type for the Accept route is UNCHANGED ({jeeber}).
+            [Capabilities.OfferAccept] = JeeberOnly,            // CLAIM {jeeber}; BR-1/BR-10/status = STATE
             [Capabilities.OfferEditOwn] = JeeberOnly,           // STATE
             [Capabilities.OfferWithdraw] = JeeberOnly,          // STATE
             [Capabilities.DeliveryGpsStream] = JeeberOnly,
@@ -106,9 +110,15 @@ public static class CapabilityRolePolicy
             [Capabilities.SettlementsManage] = AdminOnly,
             [Capabilities.FinanceRead] = AdminOnly,
             [Capabilities.WalletManage] = AdminOnly,
+            // JEB-1509: fleet-wide push broadcast is admin-only (TIGHTENING — was any-auth L1 fallback).
+            [Capabilities.PushBroadcast] = AdminOnly,
 
             // L. KYC submission {client, jeeber}
             [Capabilities.KycSubmitSelf] = Participant,
+
+            // L2. Contract-signing (JEB-1509) — writes tightened from L1-public to typed L2.
+            [Capabilities.ContractTemplateManage] = AdminOnly,  // RegisterTemplate + CreateContract
+            [Capabilities.ContractSign] = Participant,          // end-user ToS acceptance {client, jeeber}
 
             // M. Legacy UserController admin/internal
             [Capabilities.UsersAdminManage] = AdminOnly,
