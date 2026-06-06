@@ -496,12 +496,34 @@ public static class ServiceClientExtensions
     /// The org-standard outbound resilience pipeline. Used by every downstream
     /// HTTP call from this gateway.
     ///
-    /// - Retry: 3 attempts, exponential backoff (200ms base), jitter, only on
-    ///   transient HTTP errors and HTTP 5xx / 408 / 429.
+    /// - Retry: 3 attempts, exponential backoff (200ms base), jitter, on
+    ///   transient HTTP errors and HTTP 5xx / 408 — but NOT on HTTP 429.
     /// - Circuit breaker: trips at 50% failure ratio over a 30-second sliding
     ///   window (minimum 10 throughput), breaks for 30 seconds.
     /// - Timeout: 10 seconds per attempt — keeps a single slow downstream from
     ///   pinning a request thread.
+    ///
+    /// <para><b>Why 429 is excluded from retry (OTP-429, S02 N2 fix).</b> The
+    /// default <see cref="HttpRetryStrategyOptions"/> predicate
+    /// (<c>HttpClientResiliencePredicates.IsTransient</c>) treats HTTP 429
+    /// (Too Many Requests) as a transient, retryable response AND honors the
+    /// upstream <c>Retry-After</c> header (<c>ShouldRetryAfterHeader = true</c>).
+    /// For the shared one-time-password verify-lockout, the upstream returns
+    /// <b>429 + Retry-After: 60</b> on the 3rd wrong code; the default pipeline
+    /// then SLEEPS ~60s per retry attempt before re-issuing the (still 429)
+    /// request. Stacked across attempts that vastly exceeds any caller timeout,
+    /// so the inbound request appears to HANG / drop the connection instead of
+    /// returning a clean 429 <c>too_many_attempts</c> that
+    /// <see cref="JeebGateway.Auth.OtpSignIn.AuthOtpController"/> already maps.
+    /// A 429 is a deliberate, client-actionable throttle (back off as instructed),
+    /// NOT a transient fault — retrying it inside a single inbound request is
+    /// always wrong (it never succeeds and only adds latency). We therefore
+    /// override <c>ShouldHandle</c> to retry transient errors + 5xx + 408 only,
+    /// and forward any 429 immediately so the controller's existing
+    /// <c>ApiException.StatusCode == 429</c> branch surfaces the proper
+    /// ProblemDetails (with Retry-After) without delay. This is correct fleet-wide
+    /// (delivery-handover OTP, every downstream): a 429 is forwarded, never spun on.
+    /// </para>
     /// </summary>
     private static void ConfigureStandardResilience(ResiliencePipelineBuilder<HttpResponseMessage> b)
     {
@@ -511,6 +533,12 @@ public static class ServiceClientExtensions
             Delay = TimeSpan.FromMilliseconds(200),
             BackoffType = DelayBackoffType.Exponential,
             UseJitter = true,
+            // Retry transient faults + 5xx + 408, but NEVER 429. Mirrors the
+            // default IsTransient predicate MINUS TooManyRequests so a deliberate
+            // upstream throttle is forwarded immediately (see remarks above).
+            ShouldHandle = args => ShouldRetryStandard(args.Outcome.Exception, args.Outcome.Result)
+                ? PredicateResult.True()
+                : PredicateResult.False(),
         });
 
         b.AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
@@ -525,5 +553,34 @@ public static class ServiceClientExtensions
         {
             Timeout = TimeSpan.FromSeconds(10),
         });
+    }
+
+    /// <summary>
+    /// The standard-pipeline retry predicate, factored out for unit testing
+    /// (OTP-429, S02 N2). Retries network/timeout faults and transient HTTP
+    /// responses (5xx + 408) but NEVER HTTP 429 — a deliberate, client-actionable
+    /// throttle must be forwarded immediately, not spun on (retrying a 429 +
+    /// Retry-After is what turned the OTP verify-lockout into a connection hang).
+    /// </summary>
+    /// <param name="exception">The outcome exception, if the attempt threw.</param>
+    /// <param name="response">The outcome response, if the attempt completed.</param>
+    /// <returns><c>true</c> if the attempt should be retried; otherwise <c>false</c>.</returns>
+    internal static bool ShouldRetryStandard(Exception? exception, HttpResponseMessage? response)
+    {
+        // Network/timeout faults (HttpRequestException, TimeoutRejectedException)
+        // remain retryable exactly as the default IsTransient predicate treats them.
+        if (exception is not null)
+            return true;
+
+        if (response is null)
+            return false;
+
+        // 429 is client-actionable, not transient — forward, do not retry.
+        if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            return false;
+
+        // 5xx and 408 are transient and retryable.
+        var code = (int)response.StatusCode;
+        return code >= 500 || code == 408;
     }
 }
