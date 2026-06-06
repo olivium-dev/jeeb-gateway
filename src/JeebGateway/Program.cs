@@ -96,15 +96,67 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 // ---------------------------------------------------------------------------
 builder.Services.Configure<SecurityOptions>(builder.Configuration.GetSection(SecurityOptions.SectionName));
 
-// JWT bearer scheme — validates Authorization: Bearer <jwt> issued by TokenService.
-// Endpoints retain the existing UserIdentity helper which also accepts the
-// edge-injected X-User-Id header for MVP / tests, so registering a scheme
-// here does NOT make the gateway reject untokened MVP traffic.
+// JWT bearer auth (H-B5 / S02 ADR-001-rev3 token-authority): the gateway accepts
+// AND fully validates two issuers, each pinned to its own named scheme keyed on
+// the token's `iss` claim — NOT a widened ValidIssuers/multi-key single scheme.
+// Scheme-per-issuer prevents key confusion: every issuer maps to exactly one
+// signing key and one (iss,aud) pair.
+//
+//   * "Bearer"         -> iss=jeeb-gateway / aud=jeeb-clients, gateway TokenService key.
+//   * "UserManagement" -> iss=user-management / aud=user-management, UM re-issue key.
+//
+// A policy scheme is the default; its ForwardDefaultSelector peeks the unvalidated
+// `iss` to FORWARD to the right validating scheme (selection only — the forwarded
+// scheme still verifies signature + iss + aud + exp). Endpoints retain the existing
+// UserIdentity helper which also accepts the edge-injected X-User-Id header for MVP
+// / tests, so registering schemes here does NOT make the gateway reject untokened
+// MVP traffic.
+// The default scheme name ("Bearer") is taken by the issuer-routing POLICY scheme,
+// so the gateway's own validating JwtBearer scheme is registered under a distinct
+// name. [Authorize] still works because the default authorization policy below lists
+// both validating schemes explicitly.
+const string GatewayBearerScheme = "GatewayBearer";
+
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
 var signingBytes = Encoding.UTF8.GetBytes(jwt.SigningKey);
+
+// UM trust config (optional, no fail-closed: an absent UmJwt section is fine).
+// SECURITY: the UM signing key comes from config/secret only — never a committed
+// literal in the gateway. When unset it falls back to the gateway's own
+// Jwt:SigningKey (operationally the same fleet secret today); supplying a distinct
+// UmJwt:SigningKey lets UM rotate off the leaked fleet key with no code change.
+var umJwt = builder.Configuration.GetSection(UmJwtOptions.SectionName).Get<UmJwtOptions>() ?? new UmJwtOptions();
+var umSigningKey = string.IsNullOrWhiteSpace(umJwt.SigningKey) ? jwt.SigningKey : umJwt.SigningKey;
+var umSigningBytes = Encoding.UTF8.GetBytes(umSigningKey);
+
+const string UmScheme = "UserManagement";
+
 builder.Services
+    // Default scheme is a policy scheme that routes by issuer to a validating scheme.
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(JwtBearerDefaults.AuthenticationScheme, options =>
+    .AddPolicyScheme(JwtBearerDefaults.AuthenticationScheme, JwtBearerDefaults.AuthenticationScheme, options =>
+    {
+        options.ForwardDefaultSelector = context =>
+        {
+            // Peek (do NOT trust) the bearer's `iss` to pick the validating scheme.
+            // Any malformed/missing token falls through to the gateway scheme, which
+            // rejects it — there is no accept-without-validation path here.
+            var authHeader = context.Request.Headers.Authorization.ToString();
+            if (authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
+                var rawToken = authHeader["Bearer ".Length..].Trim();
+                var handler = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler();
+                if (handler.CanReadToken(rawToken)
+                    && string.Equals(handler.ReadJwtToken(rawToken).Issuer, umJwt.Issuer, StringComparison.Ordinal))
+                {
+                    return UmScheme;
+                }
+            }
+            return GatewayBearerScheme;
+        };
+    })
+    // Gateway-issued tokens: iss=jeeb-gateway / aud=jeeb-clients, gateway key.
+    .AddJwtBearer(GatewayBearerScheme, options =>
     {
         options.MapInboundClaims = false;
         options.TokenValidationParameters = new TokenValidationParameters
@@ -120,8 +172,37 @@ builder.Services
             NameClaimType = "sub",
             RoleClaimType = "roles"
         };
+    })
+    // UM re-issued tokens (post-role-switch): iss=user-management / aud=user-management,
+    // UM key. Full signature + iss + aud + exp validation — no blind accept.
+    .AddJwtBearer(UmScheme, options =>
+    {
+        options.MapInboundClaims = false;
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = umJwt.Issuer,
+            ValidateAudience = true,
+            ValidAudience = umJwt.Audience,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(umSigningBytes),
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromSeconds(30),
+            NameClaimType = "sub",
+            RoleClaimType = "roles"
+        };
     });
-builder.Services.AddAuthorization();
+
+// Default authorization policy must accept EITHER validating scheme so [Authorize]
+// (which otherwise challenges only the default/policy scheme) authorizes a principal
+// established by the UM scheme too.
+builder.Services.AddAuthorization(options =>
+{
+    options.DefaultPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder(
+            GatewayBearerScheme, UmScheme)
+        .RequireAuthenticatedUser()
+        .Build();
+});
 
 builder.Services.AddCors(options =>
 {
@@ -878,6 +959,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DataExportProcesso
 // phone change. In-memory refresh-token store for MVP — Postgres-backed
 // implementation lands with the follow-up migration.
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
+builder.Services.Configure<UmJwtOptions>(builder.Configuration.GetSection(UmJwtOptions.SectionName));
 // AddAuthorization() / AddRateLimiter() already TryAdd TimeProvider.System — use
 // TryAdd here so the existing test fixtures that assert Single<TimeProvider> still hold.
 builder.Services.TryAddSingleton(TimeProvider.System);
