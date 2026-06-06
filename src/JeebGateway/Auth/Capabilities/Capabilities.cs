@@ -68,7 +68,7 @@ public static class Capabilities
 
     // ── G. Disputes ───────────────────────────────────────────────────────────────────
     public const string DisputeFile = "dispute.file";                 // {client, jeeber}
-    public const string DisputeReadMine = "dispute.read.mine";        // {client, jeeber}, party = STATE
+    public const string DisputeReadMine = "dispute.read.mine";        // {client, jeeber, admin}; own-vs-any = STATE
     public const string DisputeResolve = "dispute.resolve";           // {admin}
 
     // ── H–J. Misc participant caps {client, jeeber} ───────────────────────────────────

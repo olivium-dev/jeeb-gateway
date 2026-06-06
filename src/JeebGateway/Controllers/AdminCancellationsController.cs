@@ -1,4 +1,5 @@
 using JeebGateway.Admin;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
@@ -17,7 +18,9 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("admin/cancellations")]
-[RequireRole(Roles.Admin)]
+// ADR-005 L2: admin moderation queue. GET = review the queue, PATCH = decide a row —
+// two distinct capabilities, so annotated per-action (replaces the legacy class-level
+// [RequireRole(Roles.Admin)]). Both authorize purely from the 'admin' role claim.
 public class AdminCancellationsController : ControllerBase
 {
     private const int DefaultPageSize = 20;
@@ -47,6 +50,7 @@ public class AdminCancellationsController : ControllerBase
     }
 
     [HttpGet]
+    [RequireCapability(Capabilities.CancellationsReview)]
     [ProducesResponseType(typeof(AdminCancellationsResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> List(
@@ -83,6 +87,7 @@ public class AdminCancellationsController : ControllerBase
     }
 
     [HttpPatch("{deliveryId}")]
+    [RequireCapability(Capabilities.CancellationsDecide)]
     [ProducesResponseType(typeof(AdminCancellationDecisionResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]

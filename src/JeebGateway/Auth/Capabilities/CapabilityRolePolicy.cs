@@ -77,7 +77,13 @@ public static class CapabilityRolePolicy
 
             // G. Disputes
             [Capabilities.DisputeFile] = Participant,
-            [Capabilities.DisputeReadMine] = Participant,       // party = STATE
+            // dispute.read.mine: the coarse READ claim admits client, jeeber AND admin. WHICH rows
+            // each may read is STATE/ownership in the action body (a filer reads only their own
+            // rows; an admin reads any row — the documented "admins may read any row" path). Keeping
+            // admin out of the coarse claim would 403 the admin BEFORE the ownership branch runs,
+            // contradicting the ADR §G "admins read any row" and the tested product contract. The
+            // claim/state split is preserved: L2 grants the read by type, the service scopes the rows.
+            [Capabilities.DisputeReadMine] = AnyAuthenticated,  // party/own-vs-admin = STATE
             [Capabilities.DisputeResolve] = AdminOnly,
 
             // H–J. Misc participant caps {client, jeeber}

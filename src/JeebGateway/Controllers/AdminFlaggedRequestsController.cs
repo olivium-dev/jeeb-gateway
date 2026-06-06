@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -13,7 +14,8 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("admin/prohibited-items/flagged")]
-[RequireRole(Roles.Admin)]
+// ADR-005 L2: review (read the queue / single row) vs decide (clear|uphold) are two
+// distinct admin capabilities, annotated per-action (replaces class [RequireRole(Roles.Admin)]).
 public class AdminFlaggedRequestsController : ControllerBase
 {
     private const int DefaultPageSize = 20;
@@ -28,6 +30,7 @@ public class AdminFlaggedRequestsController : ControllerBase
     }
 
     [HttpGet]
+    [RequireCapability(Capabilities.FlaggedReview)]
     [ProducesResponseType(typeof(FlaggedRequestListResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -81,6 +84,7 @@ public class AdminFlaggedRequestsController : ControllerBase
     }
 
     [HttpGet("{id}")]
+    [RequireCapability(Capabilities.FlaggedReview)]
     [ProducesResponseType(typeof(FlaggedRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
@@ -93,6 +97,7 @@ public class AdminFlaggedRequestsController : ControllerBase
     }
 
     [HttpPost("{id}/decision")]
+    [RequireCapability(Capabilities.FlaggedDecide)]
     [ProducesResponseType(typeof(FlaggedRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

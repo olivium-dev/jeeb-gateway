@@ -33,10 +33,21 @@ public sealed class CapabilityForbiddenResultHandler : IAuthorizationMiddlewareR
         AuthorizationPolicy policy,
         PolicyAuthorizationResult authorizeResult)
     {
-        // Only shape the FORBIDDEN outcome (authenticated caller, wrong user type → Layer 2 403).
-        // Challenged (unauthenticated → Layer 1 401) and Succeeded are left to the default handler
-        // so the Layer-1 shape and challenge semantics are untouched.
-        if (authorizeResult.Forbidden && !context.Response.HasStarted)
+        // Decide 401 (Layer 1 — no valid caller) vs 403 (Layer 2 — valid caller, wrong user type).
+        //
+        // The framework reports Forbidden only when the principal is an AUTHENTICATED user. But the
+        // gateway's by-design edge path identifies a caller via the trusted X-User-Id header WITHOUT
+        // an authenticated principal (mirrored from GatewayAudienceHandler). For such an edge caller a
+        // capability denial surfaces as Challenged (not Forbidden), which the default handler would
+        // turn into 401 — masking a genuine Layer-2 user-type denial as a Layer-1 auth failure and
+        // regressing the legacy RequireRoleAttribute behaviour (it returned 403 for an identified-
+        // but-wrong-role caller). So: if authorization was DENIED (Forbidden OR Challenged) AND the
+        // caller is an IDENTIFIED caller (authenticated principal OR trusted X-User-Id header), it is
+        // a Layer-2 403. A caller that is neither authenticated nor edge-identified is a genuine
+        // Layer-1 401 and is delegated untouched to the default handler (preserving JwtBearer
+        // challenge headers and the Layer-1 response shape — the 401-vs-403 tell is upheld).
+        var denied = authorizeResult.Forbidden || authorizeResult.Challenged;
+        if (denied && IsIdentifiedCaller(context) && !context.Response.HasStarted)
         {
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             context.Response.ContentType = "application/problem+json";
@@ -57,5 +68,23 @@ public sealed class CapabilityForbiddenResultHandler : IAuthorizationMiddlewareR
         }
 
         await Default.HandleAsync(next, context, policy, authorizeResult);
+    }
+
+    /// <summary>
+    /// True when the request carries an IDENTIFIED caller by either of the two signals the gateway
+    /// already trusts (mirrors <see cref="JeebGateway.Auth.GatewayAudienceHandler"/> /
+    /// <see cref="JeebGateway.Users.UserIdentity.TryGetUserId"/>): a validated authenticated
+    /// principal, OR the trusted edge <c>X-User-Id</c> header. Used to map an authorization DENIAL
+    /// to 403 (Layer 2, wrong user type) rather than 401 (Layer 1, no valid caller).
+    /// </summary>
+    private static bool IsIdentifiedCaller(HttpContext context)
+    {
+        if (context.User?.Identity?.IsAuthenticated == true)
+        {
+            return true;
+        }
+
+        return context.Request.Headers.TryGetValue("X-User-Id", out var header)
+            && !string.IsNullOrWhiteSpace(header);
     }
 }

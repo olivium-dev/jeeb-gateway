@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -14,7 +15,9 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("admin/zones")]
-[RequireRole(Roles.Admin)]
+// ADR-005 L2: the admin ops-map (online jeebers by zone) is one admin capability
+// (zones.manage), declared class-level (replaces class [RequireRole(Roles.Admin)]).
+[RequireCapability(Capabilities.ZonesManage)]
 public class AdminZonesController : ControllerBase
 {
     private readonly IAvailabilityStore _store;
