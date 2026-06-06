@@ -277,7 +277,12 @@ builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationM
     JeebGateway.Auth.Capabilities.CapabilityForbiddenResultHandler>();
 builder.Services.Configure<JeebGateway.Auth.Capabilities.CapabilityGuardOptions>(
     builder.Configuration.GetSection(JeebGateway.Auth.Capabilities.CapabilityGuardOptions.SectionName));
-builder.Services.AddHostedService<JeebGateway.Auth.Capabilities.CapabilityCoverageGuard>();
+// Register the guard as a resolvable singleton, then run it as a hosted service that shares the
+// SAME instance. The singleton registration lets tests resolve the concrete guard and assert its
+// FindUncoveredActions() verdict directly (AddHostedService<T> alone only exposes IHostedService).
+builder.Services.AddSingleton<JeebGateway.Auth.Capabilities.CapabilityCoverageGuard>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Auth.Capabilities.CapabilityCoverageGuard>());
 
 builder.Services.AddCors(options =>
 {
