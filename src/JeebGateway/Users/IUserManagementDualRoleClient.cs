@@ -39,7 +39,29 @@ public interface IUserManagementDualRoleClient
     /// gateway maps this straight through to 403 (N5 / ALT-1).</exception>
     /// <exception cref="UserManagementCallException">Any other non-success status.</exception>
     Task<RoleSwitchReissueResult> RoleSwitchAsync(string userId, string opaqueRole, CancellationToken ct);
+
+    /// <summary>
+    /// S03 / ADR-0004 (H8). APPEND <paramref name="opaqueRole"/> to
+    /// <paramref name="userId"/>'s <c>available_roles</c> jsonb in user-management
+    /// (<c>POST /api/User/role/grant</c>), SET-semantics: a role the user already
+    /// holds is a no-op (no duplicate). This is the identity-mutating side of the
+    /// KYC approve transition — kyc-service decides the grant; the GATEWAY composes
+    /// it here (ARCH LAW: kyc-service never calls UM). Returns the user's
+    /// available roles after the append, and whether the role was newly added.
+    /// </summary>
+    /// <exception cref="UserManagementCallException">Any non-success status.</exception>
+    Task<RoleGrantResult> AppendAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct);
 }
+
+/// <summary>
+/// Result of <see cref="IUserManagementDualRoleClient.AppendAvailableRoleAsync"/>.
+/// <see cref="Added"/> is false when the user already held the role (set-semantics
+/// no-op), so the gateway can report idempotent re-approval without a duplicate grant.
+/// </summary>
+public sealed record RoleGrantResult(
+    string UserId,
+    IReadOnlyList<string> AvailableRoles,
+    bool Added);
 
 /// <summary>Result of <see cref="IUserManagementDualRoleClient.PhoneFindOrCreateAsync"/> — OPAQUE roles.</summary>
 public sealed record PhoneFindOrCreateResult(

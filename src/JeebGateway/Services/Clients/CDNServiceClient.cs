@@ -76,6 +76,40 @@ public sealed class CDNServiceClient : ICDNServiceClient
         return payload;
     }
 
+    public async Task<CdnUploadTicket> MintUploadUrlAsync(
+        CdnUploadUrlRequest request,
+        CancellationToken ct)
+    {
+        // POST /api/v1/assets/upload-url — pre-register the slot (no bytes) and
+        // mint a signed PUT target + durable object_ref (DEC1). The client PUTs
+        // bytes straight to upload_url (H2b); they never re-stream the gateway.
+        var body = new
+        {
+            slot = request.Slot,
+            contentType = request.ContentType,
+            ownerUserId = request.OwnerUserId,
+            ttlSeconds = request.TtlSeconds,
+            retentionDays = request.RetentionDays,
+        };
+
+        using var response = await _http.PostAsJsonAsync("api/v1/assets/upload-url", body, JsonOptions, ct);
+        response.EnsureSuccessStatusCode();
+
+        var payload = await response.Content.ReadFromJsonAsync<CdnUploadTicketDto>(JsonOptions, ct);
+        if (payload is null || string.IsNullOrWhiteSpace(payload.UploadUrl) || string.IsNullOrWhiteSpace(payload.ObjectRef))
+        {
+            throw new HttpRequestException(
+                $"Upstream {response.RequestMessage?.RequestUri} returned an empty/invalid upload ticket.");
+        }
+
+        return new CdnUploadTicket
+        {
+            UploadUrl = payload.UploadUrl!,
+            ObjectRef = payload.ObjectRef!,
+            ExpiresInSeconds = payload.ExpiresInSeconds,
+        };
+    }
+
     public async Task<CdnAsset?> GetAssetAsync(string assetId, CancellationToken ct)
     {
         // GET /api/v1/assets/{assetId}. A 404 means the asset expired out of the
@@ -90,5 +124,15 @@ public sealed class CDNServiceClient : ICDNServiceClient
         response.EnsureSuccessStatusCode();
 
         return await response.Content.ReadFromJsonAsync<CdnAsset>(JsonOptions, ct);
+    }
+
+    // Wire DTO for the signed-PUT broker response. Tolerates either expiresIn or
+    // expiresInSeconds on the upstream payload.
+    private sealed class CdnUploadTicketDto
+    {
+        public string? UploadUrl { get; set; }
+        public string? ObjectRef { get; set; }
+        public int ExpiresInSeconds { get; set; }
+        public int ExpiresIn { set => ExpiresInSeconds = value; }
     }
 }

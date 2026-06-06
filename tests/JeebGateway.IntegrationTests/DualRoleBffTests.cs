@@ -299,5 +299,8 @@ public class DualRoleBffTests
             if (RoleSwitchThrows is not null) throw RoleSwitchThrows;
             return Task.FromResult(RoleSwitch);
         }
+
+        public Task<RoleGrantResult> AppendAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
+            => Task.FromResult(new RoleGrantResult(userId, new[] { opaqueRole }, true));
     }
 }

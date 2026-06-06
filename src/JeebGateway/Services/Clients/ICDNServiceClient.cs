@@ -73,6 +73,20 @@ public interface ICDNServiceClient
         CancellationToken ct);
 
     /// <summary>
+    /// Brokers a short-lived signed <b>PUT</b> upload URL via
+    /// <c>POST /api/v1/assets/upload-url</c> (DEC1, S03 H2/H3). The gateway
+    /// pre-registers an asset slot (no bytes) and hands the mobile client a
+    /// signed PUT target + the durable <c>object_ref</c>; the client uploads the
+    /// bytes <b>directly</b> to cdn-service (H2b), never through the gateway. The
+    /// returned <see cref="CdnUploadTicket.ExpiresInSeconds"/> is bounded
+    /// (≤ 300s, BR-2) by cdn-service; the gateway clamps the requested TTL before
+    /// the call as defence-in-depth.
+    /// </summary>
+    Task<CdnUploadTicket> MintUploadUrlAsync(
+        CdnUploadUrlRequest request,
+        CancellationToken ct);
+
+    /// <summary>
     /// Reads an asset's metadata (content type, size, retention/expiry) via
     /// <c>GET /api/v1/assets/{assetId}</c>. Returns <c>null</c> on 404 (asset
     /// expired out of the retention window or never existed).
@@ -133,4 +147,48 @@ public sealed class CdnSignedUrl
 {
     public required string Url { get; init; }
     public DateTimeOffset ExpiresAt { get; init; }
+}
+
+/// <summary>
+/// Gateway-side request to broker a signed PUT upload URL (DEC1). Carries only
+/// the slot classification + MIME type and the owning user — no bytes. The
+/// signed PUT target lets the mobile client upload directly to cdn-service.
+/// </summary>
+public sealed class CdnUploadUrlRequest
+{
+    /// <summary>
+    /// Logical document slot, e.g. <c>id_document_front</c>, <c>id_document_back</c>,
+    /// <c>vehicle_registration</c>, <c>selfie_with_liveness</c>. cdn-service uses
+    /// this for access scoping + retention class.
+    /// </summary>
+    public required string Slot { get; init; }
+
+    /// <summary>MIME type of the bytes the client will PUT, e.g. <c>image/jpeg</c>.</summary>
+    public required string ContentType { get; init; }
+
+    /// <summary>Owning user id, so cdn-service scopes the signed PUT to the owner.</summary>
+    public required string OwnerUserId { get; init; }
+
+    /// <summary>Requested signed-URL TTL in seconds (clamped to ≤ 300, BR-2).</summary>
+    public int TtlSeconds { get; init; } = 300;
+
+    /// <summary>Retention window in days for the eventual asset (default 90).</summary>
+    public int RetentionDays { get; init; } = 90;
+}
+
+/// <summary>
+/// Mirror of cdn-service's signed-PUT broker response (DEC1). The
+/// <see cref="UploadUrl"/> is the signed PUT target; <see cref="ObjectRef"/> is
+/// the durable reference the KYC submission records.
+/// </summary>
+public sealed class CdnUploadTicket
+{
+    /// <summary>Signed PUT URL the client uploads bytes to directly (H2b).</summary>
+    public required string UploadUrl { get; init; }
+
+    /// <summary>Durable object reference recorded in the KYC submission.</summary>
+    public required string ObjectRef { get; init; }
+
+    /// <summary>Seconds until the signed PUT URL expires (≤ 300, BR-2).</summary>
+    public int ExpiresInSeconds { get; init; }
 }
