@@ -231,7 +231,7 @@ jobs:
               --env-add Security__TokenMint__Enabled='true' \
               --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
               --env-add Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
-              --env-add UmJwt__SigningKey='${{ secrets.JEEB_JWT_SIGNING_KEY }}' \
+              --env-rm UmJwt__SigningKey \
               --env-add UmJwt__Issuer='user-management' \
               --env-add UmJwt__Audience='user-management' \
               $DEV_FLAG_ARG \
@@ -249,7 +249,6 @@ jobs:
               --env JeebJwt__PhonePepper='${{ secrets.JEEB_JWT_PHONE_PEPPER }}' \
               --env JeebJwt__Issuer='${{ inputs.jwt_issuer }}' \
               --env JeebJwt__Audience='${{ inputs.jwt_audience }}' \
-              --env UmJwt__SigningKey='${{ secrets.JEEB_JWT_SIGNING_KEY }}' \
               --env UmJwt__Issuer='user-management' \
               --env UmJwt__Audience='user-management' \
               --env Services__Chat__BaseUrl='${{ inputs.chat_base_url }}' \
