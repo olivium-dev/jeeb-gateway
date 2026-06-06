@@ -118,10 +118,14 @@ public sealed class OtpVerifyUserBlock
     [JsonPropertyName("userId")]
     public string UserId { get; init; } = string.Empty;
 
-    [JsonPropertyName("activeRole")]
+    // S02 contract (ADR-003 / SEED-WIRING-SPEC): the verify user block uses the
+    // frozen snake_case Jeeb contract keys, identical to GET /v1/users/me and the
+    // role/switch user block. Harness H-A2/H-B2 assert $.user.available_roles /
+    // $.user.active_role — these MUST be snake_case, not camelCase.
+    [JsonPropertyName("active_role")]
     public string ActiveRole { get; init; } = string.Empty;
 
-    [JsonPropertyName("availableRoles")]
+    [JsonPropertyName("available_roles")]
     public string[] AvailableRoles { get; init; } = Array.Empty<string>();
 }
 

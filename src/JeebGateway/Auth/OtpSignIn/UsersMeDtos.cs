@@ -53,6 +53,7 @@ public sealed class RoleSwitchResponseDto
     [JsonPropertyName("userId")]
     public string UserId { get; init; } = string.Empty;
 
+    // Flat fields retained for backward compatibility with any existing consumer.
     [JsonPropertyName("active_role")]
     public string ActiveRole { get; init; } = string.Empty;
 
@@ -64,4 +65,24 @@ public sealed class RoleSwitchResponseDto
 
     [JsonPropertyName("refreshToken")]
     public string RefreshToken { get; init; } = string.Empty;
+
+    // S02 contract (ADR-003): the role/switch body carries a nested user block so the
+    // dual-role identity is addressable at $.user.active_role / $.user.available_roles —
+    // the same shape as the verify response (OtpVerifyResponse.User). Harness H-B4 / ALT-3
+    // assert $.user.active_role. Additive: the flat fields above are still emitted.
+    [JsonPropertyName("user")]
+    public RoleSwitchUserBlock User { get; init; } = new();
+}
+
+/// <summary>The nested user block inside <see cref="RoleSwitchResponseDto"/>.</summary>
+public sealed class RoleSwitchUserBlock
+{
+    [JsonPropertyName("userId")]
+    public string UserId { get; init; } = string.Empty;
+
+    [JsonPropertyName("active_role")]
+    public string ActiveRole { get; init; } = string.Empty;
+
+    [JsonPropertyName("available_roles")]
+    public string[] AvailableRoles { get; init; } = Array.Empty<string>();
 }
