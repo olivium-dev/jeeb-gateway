@@ -236,6 +236,14 @@ public sealed class KycTosCeremonyAndValidationTests
             return Task.FromResult(new KycTosSignatureResult { TosSignedAt = at, TosAcceptedVersion = version, Replayed = false });
         }
 
+        private readonly ConcurrentDictionary<string, (DateTimeOffset At, string Version)> _tosByUser = new();
+
+        public Task<KycTosSignatureResult> StampStandaloneTosAsync(string userId, KycTosStampPayload payload, CancellationToken ct)
+        {
+            var (at, version) = _tosByUser.GetOrAdd(userId, _ => (DateTimeOffset.UtcNow, payload.TosAcceptedVersion));
+            return Task.FromResult(new KycTosSignatureResult { TosSignedAt = at, TosAcceptedVersion = version, Replayed = false });
+        }
+
         public Task<KycSubmissionView?> GetLatestForUserAsync(string userId, CancellationToken ct)
             => Task.FromResult<KycSubmissionView?>(null);
 

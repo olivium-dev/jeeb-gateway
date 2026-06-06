@@ -275,6 +275,20 @@ public sealed class KycSubmissionBffEndpointTests : IClassFixture<KycSubmissionB
             });
         }
 
+        private readonly ConcurrentDictionary<string, (DateTimeOffset At, string Version)> _tosByUser = new();
+
+        public Task<KycTosSignatureResult> StampStandaloneTosAsync(string userId, KycTosStampPayload payload, CancellationToken ct)
+        {
+            // Idempotent on subject: first sign records now(); replay returns the original.
+            var (at, version) = _tosByUser.GetOrAdd(userId, _ => (DateTimeOffset.UtcNow, payload.TosAcceptedVersion));
+            return Task.FromResult(new KycTosSignatureResult
+            {
+                TosSignedAt = at,
+                TosAcceptedVersion = version,
+                Replayed = false,
+            });
+        }
+
         public Task<KycSubmissionView?> GetLatestForUserAsync(string userId, CancellationToken ct)
         {
             KycSubmissionView? found = _byId.Values.FirstOrDefault(v => v.UserId == userId);
