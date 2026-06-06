@@ -146,10 +146,22 @@ builder.Services
             {
                 var rawToken = authHeader["Bearer ".Length..].Trim();
                 var handler = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler();
-                if (handler.CanReadToken(rawToken)
-                    && string.Equals(handler.ReadJwtToken(rawToken).Issuer, umJwt.Issuer, StringComparison.Ordinal))
+                // N7.2 — a JWT-SHAPED but malformed token (e.g. "garbage.invalid.token")
+                // passes CanReadToken (3 segments) yet ReadJwtToken THROWS on the bad base64,
+                // and that throw escapes the scheme selector as a raw 500. A token we cannot
+                // peek is simply forwarded to the gateway scheme, which validates it and
+                // rejects it as 401 — the auth pipeline owns the rejection, not this selector.
+                try
                 {
-                    return UmScheme;
+                    if (handler.CanReadToken(rawToken)
+                        && string.Equals(handler.ReadJwtToken(rawToken).Issuer, umJwt.Issuer, StringComparison.Ordinal))
+                    {
+                        return UmScheme;
+                    }
+                }
+                catch
+                {
+                    // unparseable token → fall through to the gateway scheme (→ 401)
                 }
             }
             return GatewayBearerScheme;

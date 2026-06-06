@@ -80,14 +80,21 @@ public sealed class UsersMeController : ControllerBase
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauth))
             return unauth;
 
-        // Roles come from the validated session token (the OTP-mint embeds the OPAQUE
-        // roles/active_role). Translate to the snake_case contract. G3 mitigation: the
-        // active_role read here is at most ProfileCacheSeconds stale after a switch (the
-        // switch invalidates the cache; full access-token denylist deferred).
-        var opaqueRoles = UserIdentity.GetRoles(HttpContext);
-        var contractRoles = JeebRoleTranslator.ToContract(opaqueRoles);
+        // active_role comes from the validated session token (the singular CURRENT role).
+        // G3 mitigation: at most ProfileCacheSeconds stale after a switch (the switch
+        // invalidates the cache; full access-token denylist deferred).
         var opaqueActive = HttpContext.User?.FindFirst("active_role")?.Value;
         var contractActive = JeebRoleTranslator.ToContract(opaqueActive);
+
+        // H-B5 — available_roles MUST be the user's FULL role set, not just the active
+        // role the token currently carries. A UM token re-issued by a role/switch embeds
+        // only the now-active role in its "roles" claim, so reading roles straight off the
+        // token would project ["client"] for a [client,jeeber] user. Resolve the full set
+        // from the local UM projection (same source the switch path uses), falling back to
+        // the token claim only when the projection is empty. THIN: no new logic/state — the
+        // user's role membership is owned by user-management; we read + translate it.
+        var opaqueRoles = await ResolveAvailableRolesAsync(userId, ct);
+        var contractRoles = JeebRoleTranslator.ToContract(opaqueRoles);
 
         var cacheKey = ProfileCacheKey(userId);
         if (!_cache.TryGetValue(cacheKey, out ProfileDisplay? display))
