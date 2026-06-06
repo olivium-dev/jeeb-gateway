@@ -240,7 +240,43 @@ builder.Services.AddAuthorization(options =>
         .AddAuthenticationSchemes(GatewayBearerScheme)
         .AddRequirements(new JeebGateway.Auth.GatewayAudienceRequirement())
         .Build();
+
+    // ── ADR-005 Layer 2 (user-type capability authorization) ──────────────────────────
+    // Register ONE named policy per capability from the authoritative cap->roles map. Each
+    // policy runs under the SAME Layer-1 scheme (GatewayBearer), requires an authenticated
+    // caller, then adds a CapabilityRequirement satisfied by CapabilityAuthorizationHandler
+    // (reads roles only, canonicalizes opaque->canonical, intersects with the map; never
+    // reads audience). DefaultPolicy / FallbackPolicy / schemes above are UNTOUCHED.
+    //   Layer 1 failure (wrong/absent audience)        -> 401 (never reaches Layer 2).
+    //   Layer 2 failure (valid caller, wrong user type) -> 403 (CapabilityForbiddenResultHandler).
+    foreach (var capability in JeebGateway.Auth.Capabilities.CapabilityRolePolicy.All)
+    {
+        options.AddPolicy(
+            JeebGateway.Auth.Capabilities.Capabilities.PolicyFor(capability),
+            policy => policy
+                .AddAuthenticationSchemes(GatewayBearerScheme)
+                // Layer 1 identity check — accepts a validated GatewayBearer principal OR the trusted
+                // edge X-User-Id header, IDENTICALLY to the ADR-004 FallbackPolicy. Using
+                // GatewayAudienceRequirement (not bare RequireAuthenticatedUser()) is what preserves
+                // the admin/edge X-User-Id + X-User-Roles path (ADR-005 §7, test T5): a header-only
+                // edge caller has no authenticated principal, so RequireAuthenticatedUser() would 401
+                // it and break the path the ADR mandates keeping. Layer 1 here -> 401 on failure.
+                .AddRequirements(new JeebGateway.Auth.GatewayAudienceRequirement())
+                // Layer 2 user-type capability check -> 403 on failure (CapabilityForbiddenResultHandler).
+                .AddRequirements(new JeebGateway.Auth.Capabilities.CapabilityRequirement(capability)));
+    }
 });
+
+// ADR-005 Layer 2 — handler (resolves+canonicalizes roles), RFC7807 403 result shaper, and the
+// default-deny coverage guard. The guard is PRESENT but report-only in this CORE step
+// (CapabilityGuard:Enforce defaults to false); the final annotation step flips Enforce=true.
+builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationHandler,
+    JeebGateway.Auth.Capabilities.CapabilityAuthorizationHandler>();
+builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationMiddlewareResultHandler,
+    JeebGateway.Auth.Capabilities.CapabilityForbiddenResultHandler>();
+builder.Services.Configure<JeebGateway.Auth.Capabilities.CapabilityGuardOptions>(
+    builder.Configuration.GetSection(JeebGateway.Auth.Capabilities.CapabilityGuardOptions.SectionName));
+builder.Services.AddHostedService<JeebGateway.Auth.Capabilities.CapabilityCoverageGuard>();
 
 builder.Services.AddCors(options =>
 {
