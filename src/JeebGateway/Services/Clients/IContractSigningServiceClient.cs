@@ -176,13 +176,29 @@ public sealed class ContractParty
 }
 
 /// <summary>
+/// The acting principal recorded on a contract write (upstream <c>ActorInfo</c>).
+/// contract-signing-service requires this on <c>POST /v1/contracts</c> (it stamps
+/// the version-1 payload snapshot's actor). For the Jeeb ToS ceremony the actor is
+/// the signing user themselves (<c>type="PARTY"</c>, <c>ref=userId</c>).
+/// </summary>
+public sealed class ActorInfo
+{
+    public string Type { get; init; } = "PARTY";
+    public string Ref { get; init; } = string.Empty;
+    public string? Reason { get; init; }
+}
+
+/// <summary>
 /// Body for <c>POST /v1/contracts</c> (upstream <c>CreateContractRequest</c>):
 /// instantiate <see cref="TemplateId"/> with the listed <see cref="Parties"/>.
+/// <see cref="Actor"/> is REQUIRED by the upstream (it records the actor on the
+/// initial payload snapshot); omitting it yields an upstream 422.
 /// </summary>
 public sealed class CreateContractRequest
 {
     public string TemplateId { get; init; } = string.Empty;
     public IReadOnlyList<ContractParty> Parties { get; init; } = new List<ContractParty>();
+    public ActorInfo Actor { get; init; } = new();
 }
 
 /// <summary>
