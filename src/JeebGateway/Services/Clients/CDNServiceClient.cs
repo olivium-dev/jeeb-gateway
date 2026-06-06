@@ -80,19 +80,19 @@ public sealed class CDNServiceClient : ICDNServiceClient
         CdnUploadUrlRequest request,
         CancellationToken ct)
     {
-        // POST /api/v1/assets/upload-url — pre-register the slot (no bytes) and
-        // mint a signed PUT target + durable object_ref (DEC1). The client PUTs
-        // bytes straight to upload_url (H2b); they never re-stream the gateway.
+        // POST /api/ImageUpload/presign-put — the LIVE cdn-service signed-PUT
+        // broker (DEC1). Mints a signed PUT target + durable objectRef (no bytes).
+        // The client PUTs bytes straight to uploadUrl (H2b); they never re-stream
+        // the gateway. Live request: { slot, contentType, ttlSeconds, extension };
+        // live response: { uploadUrl, method, objectRef, expiresAt, requiredHeaders }.
         var body = new
         {
             slot = request.Slot,
             contentType = request.ContentType,
-            ownerUserId = request.OwnerUserId,
-            ttlSeconds = request.TtlSeconds,
-            retentionDays = request.RetentionDays,
+            ttlSeconds = request.TtlSeconds > 0 ? request.TtlSeconds : 300,
         };
 
-        using var response = await _http.PostAsJsonAsync("api/v1/assets/upload-url", body, JsonOptions, ct);
+        using var response = await _http.PostAsJsonAsync("api/ImageUpload/presign-put", body, JsonOptions, ct);
         response.EnsureSuccessStatusCode();
 
         var payload = await response.Content.ReadFromJsonAsync<CdnUploadTicketDto>(JsonOptions, ct);
@@ -102,11 +102,23 @@ public sealed class CDNServiceClient : ICDNServiceClient
                 $"Upstream {response.RequestMessage?.RequestUri} returned an empty/invalid upload ticket.");
         }
 
+        // Live cdn returns an absolute expiresAt; derive a TTL in seconds, falling
+        // back to either the explicit expiresInSeconds field or the requested TTL.
+        var expiresInSeconds = payload.ExpiresInSeconds;
+        if (expiresInSeconds <= 0 && payload.ExpiresAt is { } at)
+        {
+            expiresInSeconds = (int)Math.Max(0, Math.Round((at - DateTimeOffset.UtcNow).TotalSeconds));
+        }
+        if (expiresInSeconds <= 0)
+        {
+            expiresInSeconds = request.TtlSeconds > 0 ? request.TtlSeconds : 300;
+        }
+
         return new CdnUploadTicket
         {
             UploadUrl = payload.UploadUrl!,
             ObjectRef = payload.ObjectRef!,
-            ExpiresInSeconds = payload.ExpiresInSeconds,
+            ExpiresInSeconds = expiresInSeconds,
         };
     }
 
@@ -126,12 +138,14 @@ public sealed class CDNServiceClient : ICDNServiceClient
         return await response.Content.ReadFromJsonAsync<CdnAsset>(JsonOptions, ct);
     }
 
-    // Wire DTO for the signed-PUT broker response. Tolerates either expiresIn or
-    // expiresInSeconds on the upstream payload.
+    // Wire DTO for the LIVE cdn-service presign-put response
+    // ({ uploadUrl, method, objectRef, expiresAt, requiredHeaders }). Also
+    // tolerates expiresIn / expiresInSeconds for forward-compat.
     private sealed class CdnUploadTicketDto
     {
         public string? UploadUrl { get; set; }
         public string? ObjectRef { get; set; }
+        public DateTimeOffset? ExpiresAt { get; set; }
         public int ExpiresInSeconds { get; set; }
         public int ExpiresIn { set => ExpiresInSeconds = value; }
     }

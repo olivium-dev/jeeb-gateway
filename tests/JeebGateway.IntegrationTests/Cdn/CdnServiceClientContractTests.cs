@@ -112,11 +112,15 @@ public sealed class CdnServiceClientContractTests
         {
             captured = req;
             capturedBody = req.Content!.ReadAsStringAsync(ct).GetAwaiter().GetResult();
+            // LIVE cdn-service presign-put response shape.
             return Json("""
             {
               "uploadUrl": "https://cdn.jeeb.lb/put/id_document_front?sig=abc",
+              "method": "PUT",
               "objectRef": "cdn://obj/id_document_front/aa11",
-              "expiresIn": 300
+              "expiresAt": "2099-01-01T00:05:00Z",
+              "requiredHeaders": {},
+              "provider": "s3"
             }
             """);
         });
@@ -133,13 +137,15 @@ public sealed class CdnServiceClientContractTests
 
         captured.Should().NotBeNull();
         captured!.Method.Should().Be(HttpMethod.Post);
-        captured.RequestUri!.AbsolutePath.Should().Be("/api/v1/assets/upload-url");
+        // LIVE cdn-service signed-PUT broker endpoint.
+        captured.RequestUri!.AbsolutePath.Should().Be("/api/ImageUpload/presign-put");
         capturedBody.Should().Contain("id_document_front");
-        capturedBody.Should().Contain("ownerUserId");
+        capturedBody.Should().Contain("contentType");
 
         ticket.UploadUrl.Should().StartWith("https://cdn.jeeb.lb/put/");
         ticket.ObjectRef.Should().Be("cdn://obj/id_document_front/aa11");
-        ticket.ExpiresInSeconds.Should().Be(300);
+        // expiresAt far in the future -> a large positive TTL was derived.
+        ticket.ExpiresInSeconds.Should().BeGreaterThan(0);
     }
 
     [Fact]
