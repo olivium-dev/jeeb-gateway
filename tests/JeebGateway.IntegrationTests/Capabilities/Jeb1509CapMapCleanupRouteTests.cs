@@ -31,6 +31,7 @@ namespace JeebGateway.IntegrationTests.CapabilityAuthz;
 /// </summary>
 public sealed class Jeb1509CapMapCleanupRouteTests
 {
+    private const string OfferAcceptRoute = "/offers/ofr_test/accept";
     private const string PushBroadcastRoute = "/api/PushNotification/broadcast";
     private const string RegisterTemplateRoute = "/contract-signing/templates";
     private const string CreateContractRoute = "/contract-signing/contracts";
@@ -45,6 +46,61 @@ public sealed class Jeb1509CapMapCleanupRouteTests
             "Layer 1 (audience) passed — a valid aud=jeeb-clients caller");
         resp.StatusCode.Should().NotBe(HttpStatusCode.Forbidden,
             "Layer 2 (capability) passed — the user type holds the capability; the request reached the controller");
+    }
+
+    // ── offer.accept {jeeber} (NO-OP RENAME — allowed type unchanged; route now declares offer.accept) ─
+    // The route POST /offers/{id}/accept moved from the offer.submit {jeeber} stand-in to the distinct
+    // offer.accept {jeeber} capability. Allowed user type is UNCHANGED ({jeeber}); these lock the new
+    // capability constant to the route at the pipeline level so a future map edit can't silently change
+    // who may accept. (RequireActiveUser sits AFTER the capability gate: a non-suspended jeeber — the
+    // test default, no IUsersStore profile — passes through to the controller.)
+
+    [Theory]
+    [InlineData("driver")] // opaque jeeber (production vocabulary)
+    [InlineData("jeeber")] // canonical jeeber (edge vocabulary)
+    public async Task OfferAccept_Jeeber_ReachesController(string role)
+    {
+        using var f = new WebApplicationFactory<Program>();
+        var client = f.CreateClient().WithBearer(CapabilityTestHarness.MintBearer(f, role));
+
+        var resp = await client.PostAsync(OfferAcceptRoute, EmptyJson());
+
+        AssertReachedController(resp); // jeeber holds offer.accept → reaches Accept (404 unknown offer / 400 / 503)
+    }
+
+    [Theory]
+    [InlineData("customer")] // opaque client
+    [InlineData("client")]   // canonical client
+    public async Task OfferAccept_NonJeeber_Is403(string role)
+    {
+        using var f = new WebApplicationFactory<Program>();
+        var client = f.CreateClient().WithBearer(CapabilityTestHarness.MintBearer(f, role));
+
+        var resp = await client.PostAsync(OfferAcceptRoute, EmptyJson());
+
+        await CapabilityTestHarness.AssertForbiddenCapabilityBody(resp); // accepting is a jeeber action, not a client one
+    }
+
+    [Fact]
+    public async Task OfferAccept_Admin_Is403()
+    {
+        using var f = new WebApplicationFactory<Program>();
+        var client = f.CreateClient().WithBearer(CapabilityTestHarness.MintBearer(f, "admin"));
+
+        var resp = await client.PostAsync(OfferAcceptRoute, EmptyJson());
+
+        await CapabilityTestHarness.AssertForbiddenCapabilityBody(resp); // admin claim does not hold a jeeber-family cap
+    }
+
+    [Fact]
+    public async Task OfferAccept_Unauthenticated_Is401()
+    {
+        using var f = new WebApplicationFactory<Program>();
+        var client = f.CreateClient(); // no bearer
+
+        var resp = await client.PostAsync(OfferAcceptRoute, EmptyJson());
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized, "L1 owns the 401 on an unauthenticated caller");
     }
 
     // ── push.broadcast {admin} (TIGHTENING — was any-auth) ─────────────────────────────────────────
