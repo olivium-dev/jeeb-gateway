@@ -124,6 +124,38 @@ public sealed class KycServiceClient : IKycServiceClient
         };
     }
 
+    public async Task<KycTosSignatureResult> StampStandaloneTosAsync(
+        string userId,
+        KycTosStampPayload payload,
+        CancellationToken ct)
+    {
+        // ADDITIVE — S03 E1. The pre-submission ToS acceptance (no submission yet)
+        // keyed by subject; idempotent in kyc-service (replay returns the original
+        // signed_at). The raw blob never lands here — only the contract-signing
+        // proof ref. POST /v1/kyc/tos-acceptances.
+        var wire = new KycStandaloneTosWire
+        {
+            Subject = userId,
+            SignatureBlob = payload.SignatureProofRef,
+            AcceptedVersion = payload.TosAcceptedVersion,
+        };
+
+        using var response = await _http.PostAsJsonAsync("v1/kyc/tos-acceptances", wire, JsonOptions, ct);
+        response.EnsureSuccessStatusCode();
+
+        var doc = await ReadJsonAsync(response, ct);
+        var signedAt = ReadDate(doc, "tosSignedAt", "tos_signed_at")
+            ?? throw new HttpRequestException("kyc-service tos-acceptance returned no tos_signed_at.");
+
+        return new KycTosSignatureResult
+        {
+            TosSignedAt = signedAt,
+            TosAcceptedVersion = ReadString(doc, "tosAcceptedVersion", "tos_accepted_version")
+                ?? payload.TosAcceptedVersion,
+            Replayed = false,
+        };
+    }
+
     public async Task<KycSubmissionView?> GetLatestForUserAsync(string userId, CancellationToken ct)
     {
         var path = $"v1/kyc/submissions/by-user/{Uri.EscapeDataString(userId)}";
@@ -401,6 +433,13 @@ public sealed class KycServiceClient : IKycServiceClient
 
     private sealed class KycTosSignatureWire
     {
+        public string? SignatureBlob { get; init; }
+        public string? AcceptedVersion { get; init; }
+    }
+
+    private sealed class KycStandaloneTosWire
+    {
+        public string? Subject { get; init; }
         public string? SignatureBlob { get; init; }
         public string? AcceptedVersion { get; init; }
     }

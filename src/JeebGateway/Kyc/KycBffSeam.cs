@@ -91,17 +91,24 @@ public sealed class KycBffSeam : IKycBffSeam
     {
         EnsureUpstream();
 
-        // Stamp onto the caller's latest submission. If there is no submission yet
-        // (ToS signed before the package is assembled), the upstream records a
-        // standalone acceptance keyed by the idempotency key.
-        var latest = await _upstream.GetLatestForUserAsync(userId, ct);
-        var submissionId = latest?.SubmissionId ?? idempotencyKey;
-
-        var result = await _upstream.StampTosSignatureAsync(submissionId, new KycTosStampPayload
+        var payload = new KycTosStampPayload
         {
             TosAcceptedVersion = tosAcceptedVersion,
             SignatureProofRef = signatureProofRef,
-        }, idempotencyKey, ct);
+        };
+
+        // The Jeeb ToS is signed BEFORE the KYC package is assembled (H5 precedes
+        // H6), so the user usually has NO submission yet. When a submission exists
+        // we stamp it (idempotent on Idempotency-Key); otherwise we record a
+        // STANDALONE acceptance keyed by the user (idempotent on subject). The old
+        // path passed the idempotency key AS a submission id, which kyc-service
+        // 404'd → gateway 500. Both paths are idempotent so an H5/N10 replay sees
+        // the SAME tos_signed_at.
+        var latest = await _upstream.GetLatestForUserAsync(userId, ct);
+
+        var result = latest is not null
+            ? await _upstream.StampTosSignatureAsync(latest.SubmissionId, payload, idempotencyKey, ct)
+            : await _upstream.StampStandaloneTosAsync(userId, payload, ct);
 
         return new KycBffTosStampResult
         {

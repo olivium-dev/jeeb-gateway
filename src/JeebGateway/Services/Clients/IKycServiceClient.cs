@@ -88,6 +88,19 @@ public interface IKycServiceClient
         CancellationToken ct);
 
     /// <summary>
+    /// ADDITIVE (S03 E1). Records a STANDALONE ToS acceptance keyed by the user
+    /// (subject) via <c>POST /v1/kyc/tos-acceptances</c>, for the common case where
+    /// the ToS is signed BEFORE any submission exists (H5 precedes H6). Idempotent
+    /// in kyc-service: a replay returns the ORIGINAL <c>tos_signed_at</c> (no
+    /// re-stamp, no duplicate — N10). The submit path still mirrors the acceptance
+    /// onto the submission via <c>tos_accepted_version</c>.
+    /// </summary>
+    Task<KycTosSignatureResult> StampStandaloneTosAsync(
+        string userId,
+        KycTosStampPayload payload,
+        CancellationToken ct);
+
+    /// <summary>
     /// Reads the latest submission for a user via
     /// <c>GET /v1/kyc/submissions/by-user/{userId}</c>. Returns <c>null</c> on
     /// 404 (the user has no submission yet).

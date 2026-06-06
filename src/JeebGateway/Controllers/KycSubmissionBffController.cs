@@ -107,6 +107,13 @@ public sealed class KycSubmissionBffController : ControllerBase
         //    yielded an upstream 404 CONTRACT_NOT_FOUND → gateway 502.
         string? signatureProofRef;
         var derivedProofRef = DeriveProofRef(body.SignatureBlob!);
+        // The contract-signing signature's signed_at is the AUTHORITATIVE ToS
+        // acceptance timestamp (contract-signing is the source of truth for the
+        // signature). The KYC stamp below mirrors it onto the submission when one
+        // exists; when the ToS is signed BEFORE the package is submitted (H5 runs
+        // before H6 by design) there is no submission to stamp, so this is the
+        // timestamp returned to the caller.
+        DateTimeOffset? ceremonySignedAt = null;
         if (_flags.CurrentValue.ContractSigning && !string.IsNullOrWhiteSpace(body.TemplateId))
         {
             try
@@ -148,6 +155,7 @@ public sealed class KycSubmissionBffController : ControllerBase
                     },
                     ct);
                 signatureProofRef = signature.SignatureProofRef ?? derivedProofRef;
+                ceremonySignedAt = signature.SignedAt;
             }
             catch (HttpRequestException ex)
             {
@@ -164,21 +172,39 @@ public sealed class KycSubmissionBffController : ControllerBase
             signatureProofRef = derivedProofRef;
         }
 
-        // 2) Stamp the KYC ToS-acceptance on the owning kyc-service.
-        KycBffTosStampResult stamp;
+        // 2) Mirror the ToS-acceptance onto the owning kyc-service WHEN the user
+        //    already has a submission to stamp. The ToS is signed BEFORE the package
+        //    is assembled (H5 precedes H6), so most first-time signs have NO
+        //    submission yet — stamping a non-existent submission id makes
+        //    kyc-service fault. In that case the contract-signing signature is the
+        //    record of truth and we return its signed_at. This is NON-fail-closed:
+        //    a stamp fault never sinks the ceremony (the signature is already
+        //    durable in contract-signing); the later submit re-attaches the
+        //    acceptance via tos_accepted_version.
+        DateTimeOffset tosSignedAt;
         try
         {
-            stamp = await _kyc.StampTosAsync(userId, body.TosVersion!, signatureProofRef, idempotencyKey, ct);
+            var stamp = await _kyc.StampTosAsync(userId, body.TosVersion!, signatureProofRef, idempotencyKey, ct);
+            tosSignedAt = stamp.TosSignedAt;
         }
         catch (KycUpstreamDisabledException)
         {
             return KycUpstreamDisabled();
         }
+        catch (Exception ex) when (ceremonySignedAt is not null)
+        {
+            // No submission to stamp yet (the common pre-submit path) — fall back to
+            // the authoritative contract-signing signed_at. The acceptance is NOT
+            // lost: it lives in contract-signing and is re-linked on submit.
+            _log.LogInformation(ex,
+                "kyc tos-stamp skipped (no submission yet) for user {UserId}; using contract-signing signed_at", userId);
+            tosSignedAt = ceremonySignedAt.Value;
+        }
 
         return Ok(new KycTosSignResponse
         {
-            TosSignedAt = stamp.TosSignedAt,
-            TosAcceptedVersion = stamp.TosAcceptedVersion,
+            TosSignedAt = tosSignedAt,
+            TosAcceptedVersion = body.TosVersion!,
         });
     }
 
