@@ -336,6 +336,15 @@ public class CreateRequestInput
 {
     public required string ClientId { get; init; }
     public required string Description { get; init; }
+
+    /// <summary>
+    /// S04 (JEB-1431): optional caller-supplied row id (the voice-create requestId
+    /// idempotency anchor). When null the store mints a fresh GUID (existing
+    /// behaviour). When set, the row is keyed by this id so the voice read-back
+    /// (GET /v1/requests/{requestId}) resolves and idempotent re-submits collapse
+    /// onto the same row. Additive — never required.
+    /// </summary>
+    public string? Id { get; init; }
     public string? Transcription { get; init; }
 
     /// <summary>

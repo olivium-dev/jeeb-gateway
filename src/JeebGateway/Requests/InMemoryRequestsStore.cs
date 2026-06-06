@@ -700,7 +700,7 @@ public class InMemoryRequestsStore : IRequestsStore
 
     private DeliveryRequest BuildRequest(CreateRequestInput input) => new()
     {
-        Id = Guid.NewGuid().ToString(),
+        Id = string.IsNullOrWhiteSpace(input.Id) ? Guid.NewGuid().ToString() : input.Id,
         ClientId = input.ClientId,
         Status = input.ScheduledAt is null ? RequestStatus.Pending : RequestStatus.Scheduled,
         Description = input.Description,

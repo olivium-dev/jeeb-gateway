@@ -133,6 +133,27 @@ public sealed class RequestVoiceController : ControllerBase
             });
         }
 
+        // (A1) Idempotent re-submit: if a row already exists under this requestId
+        // anchor and belongs to the caller, return it unchanged (no duplicate, no
+        // second Whisper call) — the network-retry / double-tap case.
+        if (!string.IsNullOrWhiteSpace(requestId))
+        {
+            var prior = await _store.GetAsync(requestId, ct);
+            if (prior is not null && string.Equals(prior.ClientId, clientId, StringComparison.Ordinal))
+            {
+                return StatusCode(StatusCodes.Status200OK, new VoiceRequestResponse
+                {
+                    RequestId = prior.Id,
+                    Id = prior.Id,
+                    Status = prior.Status,
+                    Transcription = prior.Transcription,
+                    TranscriptionConfidence = prior.TranscriptionConfidence,
+                    Language = "ar",
+                    TierId = prior.TierId
+                });
+            }
+        }
+
         var tierId = string.IsNullOrWhiteSpace(tier) ? "standard" : tier.Trim();
         if (!await _tiers.ExistsAsync(tierId, ct))
         {
@@ -191,6 +212,9 @@ public sealed class RequestVoiceController : ControllerBase
         // Seed the draft request with the transcript as the description (FR-3.4).
         var input = new CreateRequestInput
         {
+            // Key the row by the requestId anchor so the voice read-back (H2) resolves
+            // and re-submits collapse onto the same row (A1). Null => store mints a GUID.
+            Id = string.IsNullOrWhiteSpace(requestId) ? null : requestId,
             ClientId = clientId,
             Description = string.IsNullOrWhiteSpace(transcript) ? "(voice order)" : transcript,
             Transcription = transcript,
