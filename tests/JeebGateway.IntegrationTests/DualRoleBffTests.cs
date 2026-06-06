@@ -53,9 +53,9 @@ public class DualRoleBffTests
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         var user = doc.RootElement.GetProperty("user");
         user.GetProperty("userId").GetString().Should().Be("kamal-1");
-        user.GetProperty("activeRole").GetString().Should().Be("client",
+        user.GetProperty("active_role").GetString().Should().Be("client",
             "opaque 'customer' MUST translate to the Jeeb contract 'client'");
-        user.GetProperty("availableRoles").EnumerateArray().Select(e => e.GetString())
+        user.GetProperty("available_roles").EnumerateArray().Select(e => e.GetString())
             .Should().BeEquivalentTo(new[] { "client", "jeeber" },
                 "opaque {customer,driver} MUST translate to {client,jeeber}");
         um.FindOrCreateCalls.Should().Be(1, "F-C must orchestrate UM phone find-or-create");
@@ -79,8 +79,8 @@ public class DualRoleBffTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         var user = doc.RootElement.GetProperty("user");
-        user.GetProperty("activeRole").GetString().Should().Be("client");
-        user.GetProperty("availableRoles").EnumerateArray().Select(e => e.GetString())
+        user.GetProperty("active_role").GetString().Should().Be("client");
+        user.GetProperty("available_roles").EnumerateArray().Select(e => e.GetString())
             .Should().BeEquivalentTo(new[] { "client" });
     }
 

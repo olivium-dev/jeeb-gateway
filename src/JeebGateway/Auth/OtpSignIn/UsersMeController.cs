@@ -194,13 +194,22 @@ public sealed class UsersMeController : ControllerBase
             var available = await ResolveAvailableRolesAsync(userId, ct);
             _log.LogInformation("v1/users/me/role/switch ok userId={UserId} newRole={Role}", userId, reissue.ActiveRole);
 
+            var contractActive = JeebRoleTranslator.ToContract(reissue.ActiveRole);
+            var contractAvailable = JeebRoleTranslator.ToContract(available);
+
             return Ok(new RoleSwitchResponseDto
             {
                 UserId = reissue.UserId,
-                ActiveRole = JeebRoleTranslator.ToContract(reissue.ActiveRole),
-                AvailableRoles = JeebRoleTranslator.ToContract(available),
+                ActiveRole = contractActive,
+                AvailableRoles = contractAvailable,
                 AccessToken = reissue.AccessToken,
                 RefreshToken = reissue.RefreshToken,
+                User = new RoleSwitchUserBlock
+                {
+                    UserId = reissue.UserId,
+                    ActiveRole = contractActive,
+                    AvailableRoles = contractAvailable,
+                },
             });
         }
         catch (UserManagementRoleNotAvailableException)

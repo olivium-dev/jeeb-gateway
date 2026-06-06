@@ -219,7 +219,9 @@ public class AuthOtpControllerTests
                 .Should().BeEquivalentTo(new[] { "ttlSeconds" });
         }
 
-        // verify → exactly { accessToken, refreshToken, user{ userId, activeRole, availableRoles } }
+        // verify → exactly { accessToken, refreshToken, user{ userId, active_role, available_roles } }
+        // S02 contract (ADR-003): the user block uses the frozen snake_case Jeeb keys
+        // (matching GET /v1/users/me and the harness H-A2/H-B2 assertions).
         var verResp = await http.PostAsync("/v1/auth/otp/verify",
             JsonBody("""{ "phone": "+9613000006", "code": "1234" }"""));
         verResp.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -228,7 +230,7 @@ public class AuthOtpControllerTests
             doc.RootElement.EnumerateObject().Select(p => p.Name)
                 .Should().BeEquivalentTo(new[] { "accessToken", "refreshToken", "user" });
             doc.RootElement.GetProperty("user").EnumerateObject().Select(p => p.Name)
-                .Should().BeEquivalentTo(new[] { "userId", "activeRole", "availableRoles" });
+                .Should().BeEquivalentTo(new[] { "userId", "active_role", "available_roles" });
         }
     }
 
@@ -309,7 +311,11 @@ public class AuthOtpControllerTests
     private sealed class OtpVerifyUserDto
     {
         public string? UserId { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("active_role")]
         public string? ActiveRole { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("available_roles")]
         public string[]? AvailableRoles { get; set; }
     }
 }
