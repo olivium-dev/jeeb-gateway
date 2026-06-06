@@ -219,9 +219,19 @@ public class AdminKycController : ControllerBase
     /// blast-radius-1 jsonb append + token re-issue authority). When it is off,
     /// the interim seam has already granted the role on the in-gateway store, so
     /// the grant is reported as effected. Returns whether the role is now held.
+    ///
+    /// <para><b>N14 translation (the S03 403 root-fix).</b> The kyc grant INTENT is
+    /// the frozen Jeeb CONTRACT role (e.g. <c>jeeber</c>) — that is the only
+    /// vocabulary the KYC domain knows. user-management stores OPAQUE roles
+    /// (<c>{customer,driver}</c>) and a later <c>role/switch</c> translates
+    /// <c>jeeber → driver</c> before checking <c>available_roles</c>. So the append
+    /// MUST also be translated to opaque here, or it would store the literal
+    /// <c>jeeber</c> while the switch looks for <c>driver</c> → 403. The gateway is
+    /// the sole translation seam (UM never names client/jeeber). A non-contract grant
+    /// role (unlikely) passes through verbatim.</para>
     /// </summary>
     private async Task<bool> ComposeRoleGrantAsync(
-        string submissionId, string? subjectUserId, string opaqueRole, CancellationToken ct)
+        string submissionId, string? subjectUserId, string contractRole, CancellationToken ct)
     {
         if (!_flags.CurrentValue.UserManagement)
         {
@@ -235,6 +245,10 @@ public class AdminKycController : ControllerBase
                 "kyc approve {SubmissionId}: review outcome carried no owner; role grant skipped", submissionId);
             return false;
         }
+
+        // Translate the CONTRACT grant role to the OPAQUE role UM persists, so the
+        // appended role matches what role/switch will look up (jeeber → driver).
+        var opaqueRole = JeebRoleTranslator.ToOpaque(contractRole) ?? contractRole;
 
         try
         {
