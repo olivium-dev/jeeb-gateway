@@ -56,8 +56,40 @@ public static class OtpSignInProblems
         ControllerBase c, int status, string shortType, string title, string detail)
         => Build(c, UsersProblemBaseUri, status, shortType, title, detail);
 
+    /// <summary>
+    /// Build a <b>429 Too Many Requests</b> <c>application/problem+json</c> result
+    /// under the frozen auth <see cref="ProblemBaseUri"/> and, when a positive
+    /// retry hint is supplied, stamp the standard <c>Retry-After</c> response
+    /// header (RFC 7231 §7.1.3, delta-seconds form) plus a mirrored
+    /// <c>retryAfter</c> ProblemDetails extension so JSON-only clients can read it.
+    ///
+    /// <para>Used by the OTP sign-in surface to PROPAGATE an upstream
+    /// one-time-password 429 (request-burst <c>rate_limited</c> /
+    /// verify-too-many-attempts <c>too_many_attempts</c>) as a gateway 429 — the
+    /// gateway never echoes the upstream body, only the machine
+    /// <paramref name="shortType"/> code and the back-off hint.</para>
+    /// </summary>
+    public static ObjectResult TooManyRequests(
+        ControllerBase c, string shortType, string title, string detail, int? retryAfterSeconds = null)
+    {
+        var result = Build(
+            c, ProblemBaseUri, StatusCodes.Status429TooManyRequests, shortType, title, detail,
+            extensions: retryAfterSeconds is > 0
+                ? new Dictionary<string, object?> { ["retryAfter"] = retryAfterSeconds }
+                : null);
+
+        if (retryAfterSeconds is > 0)
+        {
+            // delta-seconds form; harmless if the header already exists (we set, not add).
+            c.HttpContext.Response.Headers["Retry-After"] = retryAfterSeconds.Value.ToString();
+        }
+
+        return result;
+    }
+
     private static ObjectResult Build(
-        ControllerBase c, string baseUri, int status, string shortType, string title, string detail)
+        ControllerBase c, string baseUri, int status, string shortType, string title, string detail,
+        IDictionary<string, object?>? extensions = null)
     {
         var problem = new ProblemDetails
         {
@@ -67,6 +99,13 @@ public static class OtpSignInProblems
             Detail = detail,
             Instance = c.HttpContext.Request.Path,
         };
+
+        if (extensions is not null)
+        {
+            foreach (var kv in extensions)
+                problem.Extensions[kv.Key] = kv.Value;
+        }
+
         return new ObjectResult(problem)
         {
             StatusCode = status,

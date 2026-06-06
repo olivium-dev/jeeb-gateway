@@ -171,6 +171,75 @@ public class AuthOtpControllerTests
     }
 
     // -----------------------------------------------------------------
+    // G8 — verify, client→ApiException(429) → 429 too_many_attempts,
+    //      Retry-After propagated, upstream body NOT echoed (S02 N2).
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task G8_Verify_Upstream429_Maps_To_429_TooManyAttempts_WithRetryAfter()
+    {
+        var stub = new StubServiceOtpClient
+        {
+            ValidateThrows = new ApiException(
+                "too_many_attempts: code 0000 locked", (int)HttpStatusCode.TooManyRequests,
+                "{\"otp\":\"0000\",\"code\":\"too_many_attempts\"}",
+                HeadersWith("Retry-After", "42"), null)
+        };
+        using var factory = MakeFactory(stub, otpEnabled: true);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsync("/v1/auth/otp/verify",
+            JsonBody("""{ "phone": "+9613000007", "code": "0000" }"""));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.TooManyRequests,
+            "an upstream verify lockout MUST propagate as a gateway 429, NOT a 502");
+
+        resp.Headers.TryGetValues("Retry-After", out var ra).Should().BeTrue(
+            "the gateway must forward the upstream back-off hint");
+        ra!.Single().Should().Be("42");
+
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().Contain("too_many_attempts", "the frozen machine code must be preserved");
+        raw.Should().Contain("https://problems.jeeb.lb/auth/too_many_attempts");
+        raw.Should().Contain("\"retryAfter\":42", "the back-off is mirrored as a JSON extension");
+        raw.Should().NotContain("0000", "the upstream body (which may embed the code) must NEVER be echoed");
+        raw.ToLowerInvariant().Should().NotContain("accesstoken", "no token may be minted on a lockout");
+    }
+
+    // -----------------------------------------------------------------
+    // G9 — request, client→ApiException(429) → 429 rate_limited,
+    //      Retry-After propagated (S02 N12 upstream-burst path).
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task G9_Request_Upstream429_Maps_To_429_RateLimited_WithRetryAfter()
+    {
+        var stub = new StubServiceOtpClient
+        {
+            SendThrows = new ApiException(
+                "rate_limited", (int)HttpStatusCode.TooManyRequests,
+                "{\"code\":\"rate_limited\"}", HeadersWith("Retry-After", "30"), null)
+        };
+        using var factory = MakeFactory(stub, otpEnabled: true);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody("""{ "phone": "+9613000008" }"""));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.TooManyRequests,
+            "an upstream request-burst throttle MUST propagate as a gateway 429, NOT a 502");
+
+        resp.Headers.TryGetValues("Retry-After", out var ra).Should().BeTrue();
+        ra!.Single().Should().Be("30");
+
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().Contain("rate_limited", "the frozen machine code must be preserved");
+        raw.Should().Contain("https://problems.jeeb.lb/auth/rate_limited");
+        raw.Should().Contain("\"retryAfter\":30");
+        stub.SendCalls.Should().Be(1, "the single request reaches the upstream before it throttles");
+    }
+
+    // -----------------------------------------------------------------
     // G6 — no OTP logic in gateway: exactly one v1/auth/otp route owner;
     //      the retired mock types are absent from the runtime assembly.
     // -----------------------------------------------------------------
@@ -240,6 +309,9 @@ public class AuthOtpControllerTests
 
     private static readonly IReadOnlyDictionary<string, IEnumerable<string>> EmptyHeaders =
         new Dictionary<string, IEnumerable<string>>();
+
+    private static IReadOnlyDictionary<string, IEnumerable<string>> HeadersWith(string name, string value)
+        => new Dictionary<string, IEnumerable<string>> { [name] = new[] { value } };
 
     private static WebApplicationFactory<Program> MakeFactory(
         IServiceOTPClient stub, bool otpEnabled) =>
