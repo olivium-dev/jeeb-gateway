@@ -18,7 +18,16 @@ internal static class UserIdentity
 {
     public static bool TryGetUserId(HttpContext httpContext, out string userId, out IActionResult problem)
     {
-        var fromClaim = httpContext.User?.FindFirstValue(ClaimTypes.NameIdentifier)
+        // The CANONICAL userId is the gateway's GUID, which the gateway-minted session
+        // embeds as `sub`. UM-reissued role-switch tokens, however, follow the org-wide
+        // user-management convention of `sub = user.Email` and carry the GUID in the `sid`
+        // claim instead (H-B5). Prefer `sid` when present so a UM-issued bearer still
+        // resolves to the SAME GUID the local projection is keyed by; otherwise fall back
+        // to NameIdentifier/`sub` (the gateway-minted path). No UM change required — the
+        // gateway just reads the userId UM already provides.
+        var fromClaim = httpContext.User?.FindFirstValue(ClaimTypes.Sid)
+                        ?? httpContext.User?.FindFirstValue("sid")
+                        ?? httpContext.User?.FindFirstValue(ClaimTypes.NameIdentifier)
                         ?? httpContext.User?.FindFirstValue("sub");
 
         if (!string.IsNullOrWhiteSpace(fromClaim))
