@@ -16,23 +16,26 @@ using Xunit;
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// H-B5 (S02 ADR-001-rev3 token-authority): after a role switch user-management
-/// re-issues the caller's JWT with <c>iss=user-management</c> / <c>aud=user-management</c>.
-/// The gateway must ACCEPT and FULLY VALIDATE that token on protected routes,
-/// ALONGSIDE its own <c>iss=jeeb-gateway</c> tokens — and must REJECT anything
-/// signed with the wrong key (no blind accept; key-confusion closed).
+/// ADR-004 (upgrade-not-switch / gateway-only session audience) auth invariants.
+/// SUPERSEDES the ADR-003 trust invariant this fixture used to encode (a UM-re-issued
+/// <c>aud=user-management</c> token authorizing a client route): there is no role-switch
+/// ceremony, so a client-route session token has exactly ONE valid audience —
+/// <c>aud=jeeb-clients</c>, gateway-issued. A token with <c>aud=user-management</c> on a
+/// client route is now REJECTED (401). This closes the E4b/N5/N7.3 contradiction.
 ///
-/// The auth wiring is a two-scheme, issuer-routed design (NOT a widened
-/// ValidIssuers/multi-key single scheme). These tests drive the full HTTP pipeline
-/// through <see cref="WebApplicationFactory{TEntry}"/> against the real
-/// <c>[Authorize]</c> <c>/api/UserPreferences/preferences</c> route, with the
-/// upstream client stubbed so authorization is the only variable.
-///
-/// Both issuers are trusted with the SAME effective HS256 key in the test host:
-/// the gateway's <c>Jwt:SigningKey</c> (from appsettings), and UM trust
-/// (<c>UmJwt:SigningKey</c> empty) falls back to it — mirroring the live fleet
-/// where UM and the gateway share one secret. The wrong-key case signs with a
-/// distinct key to prove signature validation actually runs on the UM path.
+/// These tests drive the full HTTP pipeline through <see cref="WebApplicationFactory{TEntry}"/>
+/// against the real <c>[Authorize]</c> client routes, with the upstream client stubbed so
+/// authorization is the only variable. Invariants asserted:
+/// <list type="bullet">
+///   <item><description>UM-audience token → <b>401</b> on BOTH <c>/v1/users/me</c> AND
+///     <c>/api/UserPreferences/preferences</c> (the default policy is GatewayBearerScheme-only).</description></item>
+///   <item><description>Gateway-issued (<c>aud=jeeb-clients</c>) token → <b>200</b> (zero regression).</description></item>
+///   <item><description>UM-claimed token signed with the WRONG key → 401 (signature still validates;
+///     no blind accept on the dormant UM scheme).</description></item>
+///   <item><description>Unknown issuer even with a valid key → 401 (issuer pinning).</description></item>
+/// </list>
+/// The test host uses the gateway's <c>Jwt:SigningKey</c> (from appsettings); the wrong-key case
+/// signs with a distinct key to prove signature validation runs even on the rejected UM path.
 /// </summary>
 public class UmIssuerTokenTrustTests
 {
@@ -41,29 +44,29 @@ public class UmIssuerTokenTrustTests
     private const string UmAudience = "user-management";
 
     // -----------------------------------------------------------------
-    // ACCEPT: a real UM-re-issued token authorizes a protected route.
+    // REJECT (E4b/N5/N7.3): a UM-AUDIENCE token, even correctly signed, is
+    // 401 on client routes — the default policy is GatewayBearerScheme-only.
+    // Asserted on TWO distinct [Authorize] client routes.
     // -----------------------------------------------------------------
-    [Fact]
-    public async Task UmIssuedToken_Authorizes_Protected_Route_And_Forwards_Upstream()
+    [Theory]
+    [InlineData("/v1/users/me")]
+    [InlineData("/api/UserPreferences/preferences")]
+    public async Task UmAudienceToken_IsRejected_401(string route)
     {
-        var captured = new CapturedRequests();
-        var stub = new StubHttpMessageHandler(req =>
-        {
-            captured.Add(req);
-            return JsonResponse("""{ "theme": "dark" }""");
-        });
+        var stub = new StubHttpMessageHandler(_ =>
+            throw new InvalidOperationException("upstream must not be called for a UM-audience token on a client route"));
 
         using var factory = NewFactory(stub);
         var client = factory.CreateClient();
+        // Correctly signed with the trusted key — rejection is on AUDIENCE/policy, not signature.
         client.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", MintUmToken(factory, signWithGatewayKey: true));
 
-        var resp = await client.GetAsync("/api/UserPreferences/preferences");
+        var resp = await client.GetAsync(route);
 
-        resp.StatusCode.Should().Be(HttpStatusCode.OK,
-            "a UM-re-issued token (iss=user-management) must authorize H-B5 protected routes");
-        // user id resolves from the UM token's Sid claim into the upstream path.
-        captured.Single().RequestUri!.AbsolutePath.Should().Be($"/preferences/{TestUserId}");
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized,
+            $"ADR-004: a token with aud=user-management must be rejected (401) on the client route {route} — "
+            + "the default authorization policy accepts only the gateway-issued aud=jeeb-clients scheme (E4b/N5/N7.3)");
     }
 
     // -----------------------------------------------------------------

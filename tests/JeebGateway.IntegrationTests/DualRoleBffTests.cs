@@ -108,11 +108,16 @@ public class DualRoleBffTests
     [Fact]
     public async Task FB_GetMe_Returns_SnakeCase_Roles_From_Bearer()
     {
+        // ADR-004: /v1/users/me is now [Authorize]-gated on the gateway session scheme
+        // (aud=jeeb-clients). The roles travel in the gateway-minted bearer's per-role
+        // claims — exactly the production path the OTP-login mint produces. (The MVP
+        // X-User-Id header path is superseded by the one-session-audience model.)
         var um = new StubUm();
         using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
         var http = factory.CreateClient();
-        http.DefaultRequestHeaders.Add("X-User-Id", "kamal-1");
-        http.DefaultRequestHeaders.Add("X-User-Roles", $"{Roles.Client},{Roles.Jeeber}");
+        http.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", MintGatewayBearer(factory, "kamal-1", Roles.Client, Roles.Jeeber));
 
         var resp = await http.GetAsync("/v1/users/me");
 
@@ -135,102 +140,27 @@ public class DualRoleBffTests
     }
 
     // -----------------------------------------------------------------
-    // F-A — POST /v1/users/me/role/switch (error taxonomy + split signer)
+    // ADR-004 (upgrade-not-switch): POST /v1/users/me/role/switch is REMOVED.
+    // The ceremony tests that asserted it (FA_Switch_*) are deleted — there is
+    // no switch endpoint; acting as jeeber is exercising a jeeber-scoped route
+    // with the single gateway-minted session token whose available_roles already
+    // carries jeeber after real S03 KYC approval. The removed-route behavior is
+    // asserted below (404), and the UM-audience 401 invariant lives in
+    // UmIssuerTokenTrustTests.
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task FA_Switch_Unknown_Role_Is_400_InvalidRole_WithoutCallingUM()
-    {
-        var um = new StubUm();
-        using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
-        var http = factory.CreateClient();
-        http.DefaultRequestHeaders.Add("X-User-Id", "kamal-1");
-        http.DefaultRequestHeaders.Add("X-User-Roles", $"{Roles.Client},{Roles.Jeeber}");
-
-        var resp = await http.PostAsync("/v1/users/me/role/switch", Json("""{ "role": "admin" }"""));
-
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, "an unknown role is a gateway-local rejection");
-        (await resp.Content.ReadAsStringAsync()).Should().Contain("invalid_role");
-        um.RoleSwitchCalls.Should().Be(0, "N6 — invalid_role must NOT dial user-management");
-    }
-
-    [Fact]
-    public async Task FA_Switch_RoleNotAvailable_Maps_To_403_DistinctFrom_400()
-    {
-        var um = new StubUm
-        {
-            RoleSwitchThrows = new UserManagementRoleNotAvailableException("kamal-1", Roles.Jeeber)
-        };
-        using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
-        var http = factory.CreateClient();
-        http.DefaultRequestHeaders.Add("X-User-Id", "kamal-1");
-        http.DefaultRequestHeaders.Add("X-User-Roles", Roles.Client);
-
-        var resp = await http.PostAsync("/v1/users/me/role/switch", Json("""{ "role": "jeeber" }"""));
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden, "UM role_not_available is a 403 signal (N5)");
-        (await resp.Content.ReadAsStringAsync()).Should().Contain("role_not_available");
-    }
-
-    [Fact]
-    public async Task FA_Switch_Returns_UM_Reissued_Token_Verbatim_GatewaySignsNothing()
-    {
-        const string umToken = "UM.ISSUED.TOKEN";
-        var um = new StubUm
-        {
-            RoleSwitch = new RoleSwitchReissueResult(
-                UserId: "kamal-1",
-                AccessToken: umToken,
-                RefreshToken: "UM.REFRESH",
-                ActiveRole: Roles.Jeeber)
-        };
-        using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
-        var http = factory.CreateClient();
-        http.DefaultRequestHeaders.Add("X-User-Id", "kamal-1");
-        http.DefaultRequestHeaders.Add("X-User-Roles", $"{Roles.Client},{Roles.Jeeber}");
-
-        var resp = await http.PostAsync("/v1/users/me/role/switch", Json("""{ "role": "jeeber" }"""));
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-        // CP-C / N11 — the gateway returns the UM-issued token VERBATIM (no re-sign).
-        doc.RootElement.GetProperty("accessToken").GetString().Should().Be(umToken,
-            "the switch path must relay the UM-issued token unchanged — the gateway signs nothing here");
-        doc.RootElement.GetProperty("active_role").GetString().Should().Be("jeeber",
-            "opaque 'driver' must translate back to the contract 'jeeber'");
-        um.RoleSwitchCalls.Should().Be(1);
-        um.LastRoleSwitchOpaqueRole.Should().Be(Roles.Jeeber,
-            "the gateway must forward the OPAQUE role to UM, never the Jeeb contract vocab");
-    }
-
-    [Fact]
-    public async Task FA_Switch_To_Client_Always_Allowed()
-    {
-        var um = new StubUm
-        {
-            RoleSwitch = new RoleSwitchReissueResult("kamal-1", "T", "R", Roles.Client)
-        };
-        using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
-        var http = factory.CreateClient();
-        http.DefaultRequestHeaders.Add("X-User-Id", "kamal-1");
-        http.DefaultRequestHeaders.Add("X-User-Roles", $"{Roles.Client},{Roles.Jeeber}");
-
-        var resp = await http.PostAsync("/v1/users/me/role/switch", Json("""{ "role": "client" }"""));
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK, "ALT-3 — switch to client is always 200");
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-        doc.RootElement.GetProperty("active_role").GetString().Should().Be("client");
-    }
-
-    [Fact]
-    public async Task FA_Switch_Unauthenticated_Returns_401()
+    public async Task RoleSwitch_Endpoint_Is_Removed_Returns_404()
     {
         using var factory = MakeFactory(new StubOtp(), new StubUm(), umEnabled: true);
         var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", MintGatewayBearer(factory, "kamal-1", Roles.Client, Roles.Jeeber));
 
         var resp = await http.PostAsync("/v1/users/me/role/switch", Json("""{ "role": "jeeber" }"""));
 
-        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound,
+            "ADR-004 removed the role-switch ceremony — the endpoint no longer exists");
     }
 
     // -----------------------------------------------------------------
@@ -261,6 +191,44 @@ public class DualRoleBffTests
         });
 
     private static StringContent Json(string json) => new(json, Encoding.UTF8, "application/json");
+
+    /// <summary>
+    /// Mints a genuine gateway session bearer (iss=jeeb-gateway / aud=jeeb-clients) signed
+    /// with the test host's Jwt:SigningKey, carrying sub=userId + one "roles" claim per role.
+    /// This is the ADR-004 one-session-audience token the OTP-login mint produces in production.
+    /// </summary>
+    private static string MintGatewayBearer(WebApplicationFactory<Program> factory, string userId, params string[] roles)
+    {
+        var config = factory.Services.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>();
+        var signingKey = config["Jwt:SigningKey"]!;
+        var issuer = config["Jwt:Issuer"]!;
+        var audience = config["Jwt:Audience"]!;
+
+        var creds = new Microsoft.IdentityModel.Tokens.SigningCredentials(
+            new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey)),
+            Microsoft.IdentityModel.Tokens.SecurityAlgorithms.HmacSha256);
+
+        var claims = new List<System.Security.Claims.Claim>
+        {
+            new("sub", userId),
+            new(System.Security.Claims.ClaimTypes.Sid, userId),
+        };
+        if (roles.Length > 0)
+        {
+            claims.Add(new System.Security.Claims.Claim("active_role", roles[0]));
+            foreach (var r in roles) claims.Add(new System.Security.Claims.Claim("roles", r));
+        }
+
+        var token = new System.IdentityModel.Tokens.Jwt.JwtSecurityToken(
+            issuer: issuer,
+            audience: audience,
+            claims: claims,
+            notBefore: DateTime.UtcNow.AddMinutes(-1),
+            expires: DateTime.UtcNow.AddMinutes(30),
+            signingCredentials: creds);
+
+        return new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler().WriteToken(token);
+    }
 
     private sealed class StubOtp : IServiceOTPClient
     {

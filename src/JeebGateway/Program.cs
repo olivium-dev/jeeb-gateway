@@ -205,13 +205,18 @@ builder.Services
         };
     });
 
-// Default authorization policy must accept EITHER validating scheme so [Authorize]
-// (which otherwise challenges only the default/policy scheme) authorizes a principal
-// established by the UM scheme too.
+// ADR-004 (upgrade-not-switch): the default authorization policy accepts ONLY the
+// gateway-issued session scheme (iss=jeeb-gateway / aud=jeeb-clients). A client-route
+// session token has exactly one valid audience. A token with aud=user-management on a
+// client route is therefore rejected (401) — this closes the E4b/N5/N7.3 contradiction
+// that ADR-003's two-scheme policy created. The UmScheme AddJwtBearer registration above
+// is left DORMANT (non-fail-closed, reversible) but is referenced by NO route and is no
+// longer in the default policy. There is no role-switch ceremony; a KYC-upgraded user's
+// next gateway-minted session token carries their full available_roles (incl. jeeber).
 builder.Services.AddAuthorization(options =>
 {
     options.DefaultPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder(
-            GatewayBearerScheme, UmScheme)
+            GatewayBearerScheme)
         .RequireAuthenticatedUser()
         .Build();
 });
@@ -1012,14 +1017,15 @@ builder.Services.AddScoped<JeebGateway.service.ServiceUserManagement.ServiceUser
 });
 
 // ---------------------------------------------------------------------------
-// S02 Wave-1 (ADR-003) dual-role identity seam — the two NEW user-management
-// endpoints (phone find-or-create + token-reissuing role switch) the gateway
-// thin-BFF orchestrates (F-C / F-A / F-B). Hand-authored adapter over the SAME
-// UserManagementServiceApi base address, replaced by a regenerated NSwag client
-// once the UM keystone deploys. Carries the inbound mobile bearer (role/switch
-// is a post-auth call) + the org-standard Polly v8 resilience pipeline (N9:
-// retry w/ jitter + circuit breaker + per-attempt timeout). 30s profile
-// cache-aside backs GET /v1/users/me (F-B).
+// S02 dual-role identity seam (ADR-004 upgrade-not-switch) — the user-management
+// adapter the gateway thin-BFF orchestrates for phone find-or-create (F-C) and the
+// GET /v1/users/me read (F-B). The ADR-003 token-reissuing role-switch member on
+// this client is now DORMANT (no caller): a client is upgraded to jeeber by real
+// S03 KYC approval and the next session mint carries the full role set — there is
+// no switch call. Hand-authored adapter over the SAME UserManagementServiceApi base
+// address, replaced by a regenerated NSwag client once the UM keystone deploys.
+// Org-standard Polly v8 resilience pipeline (N9: retry w/ jitter + circuit breaker
+// + per-attempt timeout). 30s profile cache-aside backs GET /v1/users/me (F-B).
 // ---------------------------------------------------------------------------
 builder.Services.AddMemoryCache();
 builder.Services
