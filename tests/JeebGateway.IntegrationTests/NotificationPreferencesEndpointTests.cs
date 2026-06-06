@@ -20,6 +20,7 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "user-get-1");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
 
         var resp = await client.GetAsync("/users/me/notification-preferences");
 
@@ -49,6 +50,7 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-1");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
 
         var patch = await client.PatchAsJsonAsync(
             "/users/me/notification-preferences",
@@ -72,6 +74,7 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-otp");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
 
         var resp = await client.PatchAsJsonAsync(
             "/users/me/notification-preferences",
@@ -85,6 +88,7 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-crit");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
 
         var resp = await client.PatchAsJsonAsync(
             "/users/me/notification-preferences",
@@ -98,6 +102,7 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-otp-true");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
 
         var resp = await client.PatchAsJsonAsync(
             "/users/me/notification-preferences",
@@ -114,8 +119,10 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     {
         var clientA = _factory.CreateClient();
         clientA.DefaultRequestHeaders.Add("X-User-Id", "user-iso-a");
+        clientA.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
         var clientB = _factory.CreateClient();
         clientB.DefaultRequestHeaders.Add("X-User-Id", "user-iso-b");
+        clientB.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
 
         await clientA.PatchAsJsonAsync(
             "/users/me/notification-preferences",

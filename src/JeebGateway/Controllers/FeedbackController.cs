@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.DTOs.Feedback;
 using JeebGateway.Services;
 using JeebGateway.service.ServiceFeedback;
@@ -76,6 +77,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("comment")]
         [Authorize]
+        [RequireCapability(Capabilities.FeedbackSubmit)] // ADR-005 §H–J {client,jeeber}
         [ProducesResponseType(typeof(CommentResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
@@ -141,6 +143,7 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("comment")]
+        [PublicEndpoint("Feedback read — no auth gate today; L2-public per ADR-005 (behaviour-preserving).")]
         [ProducesResponseType(typeof(GetCommentsResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -184,6 +187,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpDelete("comment")]
         [Authorize]
+        [RequireCapability(Capabilities.FeedbackSubmit)] // ADR-005 §H–J {client,jeeber}; ownership = STATE
         [ProducesResponseType(typeof(int), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
@@ -240,6 +244,7 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("grouped")]
+        [PublicEndpoint("Feedback read — no auth gate today; L2-public per ADR-005 (behaviour-preserving).")]
         [ProducesResponseType(typeof(GetGroupedCommentsResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -285,6 +290,7 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("technician-review")]
+        [PublicEndpoint("Feedback read — no auth gate today; L2-public per ADR-005 (behaviour-preserving).")]
         [ProducesResponseType(typeof(TechnicianReviewResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -327,6 +333,7 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("rating")]
+        [PublicEndpoint("Feedback read — no auth gate today; L2-public per ADR-005 (behaviour-preserving).")]
         [ProducesResponseType(typeof(GetAverageRatingResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]

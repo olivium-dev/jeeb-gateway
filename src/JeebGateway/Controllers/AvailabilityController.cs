@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -7,7 +8,9 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("jeebers/me/availability")]
-[RequireRole(Roles.Jeeber)]
+// ADR-005 L2 §D jeeber-only: class-level (both read + toggle of own availability are jeeber-typed).
+// Replaces class-level [RequireRole(Roles.Jeeber)].
+[RequireCapability(Capabilities.AvailabilityToggle)]
 public class AvailabilityController : ControllerBase
 {
     private readonly IAvailabilityStore _store;

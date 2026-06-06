@@ -262,7 +262,11 @@ public class UserPreferencesEndpointTests
         var token = new JwtSecurityToken(
             issuer: issuer,
             audience: audience,
-            claims: new[] { new Claim("sub", TestUserId) },
+            // ADR-005 §B: UserPreferences is the self capability notification.prefs.self
+            // {client, jeeber, admin}. The real ADR-004 mint emits the plural "roles" claim
+            // (RoleClaimType="roles"); this sub-only token still carries it so L2 authorizes the
+            // self-preferences read while the test continues to exercise sub-only Sid resolution.
+            claims: new[] { new Claim("sub", TestUserId), new Claim("roles", "client") },
             notBefore: DateTime.UtcNow.AddMinutes(-1),
             expires: DateTime.UtcNow.AddMinutes(30),
             signingCredentials: creds);
@@ -305,6 +309,9 @@ public class UserPreferencesEndpointTests
             {
                 new Claim("sub", TestUserId),
                 new Claim(ClaimTypes.Sid, TestUserId),
+                // ADR-005 §B: carry the plural "roles" claim the real ADR-004 mint emits so the L2
+                // self-capability (notification.prefs.self) authorizes this gateway-issued token.
+                new Claim("roles", "client"),
             },
             notBefore: DateTime.UtcNow.AddMinutes(-1),
             expires: DateTime.UtcNow.AddMinutes(30),

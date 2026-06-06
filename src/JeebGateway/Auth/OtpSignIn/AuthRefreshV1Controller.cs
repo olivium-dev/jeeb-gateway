@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Security;
 using JeebGateway.Tokens;
 using Microsoft.AspNetCore.Mvc;
@@ -37,6 +38,8 @@ namespace JeebGateway.Auth.OtpSignIn;
 [EnableRateLimiting(RateLimitingExtensions.AuthTokenBucketPolicy)]
 // ADR-004 D1: public by design — refresh is authenticated by the rotation cookie, not a bearer.
 [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+// ADR-005 §A public — refresh-rotation precedes/renews the session token; bypasses L2.
+[PublicEndpoint("Refresh-rotation — token authenticated by the rotation credential, not a bearer (ADR-005 §A).")]
 public sealed class AuthRefreshV1Controller : ControllerBase
 {
     private readonly ITokenService _tokens;

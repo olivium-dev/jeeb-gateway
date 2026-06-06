@@ -207,6 +207,12 @@ public class UmIssuerTokenTrustTests
                 new Claim(ClaimTypes.Sid, TestUserId),
                 new Claim("active_role", "jeeber"),
                 new Claim("role", "jeeber"),
+                // ADR-005 §B: the real ADR-004 mint (TokenService.BuildAccessToken) emits the PLURAL
+                // "roles" claim per role, and UserIdentity.GetRoles / the bearer RoleClaimType read
+                // "roles" (NOT the singular "role"). Carry it so this gateway-issued token authorizes
+                // the now L2-gated /api/UserPreferences/preferences (notification.prefs.self). The
+                // singular "role"/"active_role" stay for any active-role display assertions.
+                new Claim("roles", "jeeber"),
             },
             notBefore: DateTime.UtcNow.AddMinutes(-1),
             expires: DateTime.UtcNow.AddMinutes(30),

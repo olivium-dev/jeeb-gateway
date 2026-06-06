@@ -1,4 +1,5 @@
 using System.Text.Json;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
@@ -36,6 +37,13 @@ namespace JeebGateway.Controllers;
 /// the upstream is disabled rather than dialing an unconfigured downstream.
 /// </summary>
 [ApiController]
+// ADR-005 §A: the KYC form-schema and contract-template READS are classified public at L2
+// (no user-type capability gate). [PublicEndpoint] opts the whole controller out of the L2
+// capability layer and satisfies the default-deny coverage guard. It does NOT add
+// [AllowAnonymous]: Layer-1 authentication is preserved exactly as today via the imperative
+// UserIdentity.TryGetUserId in each action (still 401 without an identified caller). This is
+// additive and behavior-preserving — no auth posture change.
+[PublicEndpoint("KYC template/schema reads — L2-public per ADR-005 §A; L1 auth preserved in-action")]
 public sealed class KycBffController : ControllerBase
 {
     // The canonical Jeeb KYC form template name in form-builder-service.

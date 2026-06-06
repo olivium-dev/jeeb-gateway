@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
@@ -25,6 +26,9 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/cdn/assets")]
+// ADR-005 L2 §H–J participant {client, jeeber}: all actions are caller-scoped CDN brokering
+// (own-asset upload/read/signed-url). Owner scoping stays STATE in-action / cdn-service.
+[RequireCapability(Capabilities.CdnBroker)]
 public sealed class CdnController : ControllerBase
 {
     // Cap signed-URL lifetime so a leaked link is short-lived. cdn-service is the

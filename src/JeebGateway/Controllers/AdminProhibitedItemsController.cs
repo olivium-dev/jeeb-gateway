@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.ProhibitedItems;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -8,7 +9,9 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("admin/prohibited-items")]
-[RequireRole(Roles.Admin)]
+// ADR-005 L2: all CRUD on the admin prohibited-items catalog is one admin capability
+// (prohibited.manage), declared class-level (replaces class [RequireRole(Roles.Admin)]).
+[RequireCapability(Capabilities.ProhibitedManage)]
 public class AdminProhibitedItemsController : ControllerBase
 {
     private const int DefaultPageSize = 20;

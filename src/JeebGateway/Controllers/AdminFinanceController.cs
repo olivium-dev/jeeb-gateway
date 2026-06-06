@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Financials;
 using Microsoft.AspNetCore.Mvc;
 
@@ -5,6 +6,9 @@ namespace JeebGateway.Controllers;
 
 [ApiController]
 [Route("api/admin/finance")]
+// ADR-005 L2: both actions are admin finance reads (dashboard + top-earners) — one cap,
+// declared class-level. Authorized purely from the 'admin' role claim (super-login).
+[RequireCapability(Capabilities.FinanceRead)]
 public sealed class AdminFinanceController : ControllerBase
 {
     private readonly IAdminFinanceDashboardService _dashboard;

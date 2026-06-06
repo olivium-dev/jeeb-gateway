@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Financials;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -42,6 +43,10 @@ public class SettlementsController : ControllerBase
     }
 
     [HttpPost("{deliveryId}/settle")]
+    // ADR-005 L2 §E: Settle is a delivery-SM/dual-party action — coarse cap delivery.participate
+    // {client, jeeber}. "Only the assigned Jeeber can settle" (callerIsJeeber / NotAuthorized)
+    // is STATE/party-on-delivery and stays in the service — never an L2 policy.
+    [RequireCapability(Capabilities.DeliveryParticipate)]
     [ProducesResponseType(typeof(SettleDeliveryResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -120,6 +125,11 @@ public class SettlementsController : ControllerBase
     }
 
     [HttpGet("{deliveryId}/receipt")]
+    // ADR-005 L2 §E: the receipt is read by the delivery PARTIES — coarse cap
+    // delivery.participate {client, jeeber}. The exact "are you a party / admin override"
+    // (isClient || isJeeber || isAdmin) is STATE and stays in the action body. (Admin's
+    // read-any path is the downstream STATE branch, not an L2 claim — see triage note.)
+    [RequireCapability(Capabilities.DeliveryParticipate)]
     [ProducesResponseType(typeof(ReceiptResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]

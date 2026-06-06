@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Requests;
 using JeebGateway.Users;
@@ -51,7 +52,17 @@ public class OffersController : ControllerBase
     }
 
     [HttpPost("{offerId}/accept")]
-    [RequireRole(Roles.Jeeber)]
+    // ADR-005 L2: BEHAVIOUR-PRESERVING. The live route is [RequireRole(Roles.Jeeber)] and its body is
+    // unambiguously the JEEBER committing to a delivery the offer was extended to (offer.JeeberId ==
+    // caller; BR-10 jeeber active-deliveries cap; BR-1 same-delivery — all STATE, stay below). The
+    // ADR-005 authoritative map keys `offer.accept -> {client}` (a different, client-accepts-bid product
+    // model). Mapping this route to offer.accept(client) would SILENTLY FLIP its allowed user type
+    // jeeber->client — the exact HIGH-impact "migrated route changes allowed user types" risk the ADR
+    // forbids — and break the live accept flow. Per owner non-negotiable (behaviour-preserving) we carry
+    // the {jeeber} capability here. If the client-accept model is intended, that is a PRODUCT change
+    // (mobile + offer-service + tests), NOT an annotation; flagged to TL/Domain-Architect/PO on the bus
+    // (dotnet-client-family #2). STATE (ownership/BR-1/BR-10/status) stays in offer/delivery service.
+    [RequireCapability(Capabilities.OfferSubmit)]
     [RequireActiveUser]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

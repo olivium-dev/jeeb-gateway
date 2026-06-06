@@ -1,4 +1,5 @@
 using JeebGateway.Admin;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Kyc;
 using JeebGateway.Services;
 using JeebGateway.Users;
@@ -30,7 +31,10 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("admin/kyc")]
-[RequireRole(Roles.Admin)]
+// ADR-005 L2: both the queue read and the review decision are the same admin capability
+// (kyc.review), declared class-level (replaces class [RequireRole(Roles.Admin)]). Authorized
+// purely from the 'admin' role claim. The KYC-approve identity mutation (UM append + token
+// re-issue) is a downstream/STATE concern and stays unchanged in the action body.
 public class AdminKycController : ControllerBase
 {
     private const int DefaultPageSize = 20;
@@ -63,6 +67,7 @@ public class AdminKycController : ControllerBase
     }
 
     [HttpGet("queue")]
+    [RequireCapability(Capabilities.KycReview)]
     [ProducesResponseType(typeof(KycQueueResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -110,6 +115,7 @@ public class AdminKycController : ControllerBase
     }
 
     [HttpPatch("{id}/review")]
+    [RequireCapability(Capabilities.KycReview)]
     [ProducesResponseType(typeof(KycReviewResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]

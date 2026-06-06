@@ -219,6 +219,9 @@ public class DataExportEndpointTests
     {
         var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", userId);
+        // ADR-005 §7: edge caller declares its user type. data.export.self is §B {client, jeeber, admin};
+        // a participant edge role satisfies it (the single-use download token route stays anonymous).
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client");
         return client;
     }
 

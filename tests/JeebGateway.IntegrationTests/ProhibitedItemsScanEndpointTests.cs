@@ -328,12 +328,16 @@ public class ProhibitedItemsScanEndpointTests : IClassFixture<WebApplicationFact
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", userId);
+        // ADR-005 §7: edge caller declares its user type. prohibited.scan is a §H–J participant cap
+        // {client, jeeber}; the admin flagged-request review routes use AdminClient ('admin' role).
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client,jeeber");
         return client;
     }
 
     private HttpClient AdminClient(string userId)
     {
-        var client = ClientFor(userId);
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", userId);
         client.DefaultRequestHeaders.Add("X-User-Roles", "admin");
         return client;
     }

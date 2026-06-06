@@ -80,6 +80,29 @@ public class FallbackPolicyUniformAuthTests
             "ADR-004 D1: a valid gateway-issued session bearer (aud=jeeb-clients) satisfies the FallbackPolicy");
     }
 
+    [Theory]
+    // The public auth ENTRY points must stay anonymous under the FallbackPolicy: a caller
+    // logs in / registers WITHOUT a session token. (A 4xx other than 401 — e.g. 400 on an
+    // empty/invalid body, or a non-401 upstream code — proves the auth gate let it THROUGH;
+    // the only forbidden outcome is 401, which would mean the route was wrongly gated.)
+    [InlineData("/api/User/login")]
+    [InlineData("/api/User/register")]
+    [InlineData("/api/User/social")]
+    [InlineData("/api/User/token-login")]
+    [InlineData("/v1/auth/otp/request")]
+    public async Task PublicAuthEntryPoint_NoCredential_Is_Not_401(string route)
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var client = factory.CreateClient();
+
+        var resp = await client.PostAsync(route,
+            new StringContent("{}", System.Text.Encoding.UTF8, "application/json"));
+
+        resp.StatusCode.Should().NotBe(HttpStatusCode.Unauthorized,
+            $"ADR-004 D1: the public auth entry point {route} must remain anonymous ([AllowAnonymous]) — "
+            + "a user authenticates THROUGH it without already holding a session token");
+    }
+
     [Fact]
     public async Task AllowAnonymousRoute_NoCredential_Is_200()
     {

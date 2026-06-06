@@ -1,4 +1,5 @@
 using System.Text.Json;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc;
@@ -27,6 +28,13 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("contract-signing")]
+// ADR-005 L2 §A: contract-template/contract READS are L2-public; the writes (register template / create
+// contract / sign) carry NO ADR-specified L2 user-type — today they rely solely on the L1 fallback
+// (identified caller, preserved). Class-level [PublicEndpoint] opts the whole controller out of L2 (L1
+// auth unchanged), behaviour-preserving and mirroring KycBffController's §A treatment. The ToS-sign
+// ceremony is driven by the KycBff/KycSubmissionBff family (already kyc.submit.self); flagged to
+// TL/PO/Domain-Architect to confirm whether RegisterTemplate should be {admin} (one-line override).
+[PublicEndpoint("Contract template/contract reads + L1-only writes — ADR-005 §A; L1 fallback preserved.")]
 public class ContractSigningController : ControllerBase
 {
     private const int MaxIdLength = 256;

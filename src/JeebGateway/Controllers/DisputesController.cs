@@ -1,4 +1,5 @@
 using JeebGateway.Admin;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Disputes;
 using JeebGateway.Requests;
 using JeebGateway.Users;
@@ -56,6 +57,7 @@ public class DisputesController : ControllerBase
     }
 
     [HttpPost("deliveries/{deliveryId}/dispute")]
+    [RequireCapability(Capabilities.DisputeFile)]
     [ProducesResponseType(typeof(DisputeResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
@@ -124,6 +126,7 @@ public class DisputesController : ControllerBase
     }
 
     [HttpGet("disputes")]
+    [RequireCapability(Capabilities.DisputeReadMine)]
     [ProducesResponseType(typeof(DisputeListResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> ListMine(CancellationToken ct)
@@ -139,6 +142,10 @@ public class DisputesController : ControllerBase
     }
 
     [HttpGet("disputes/{id}")]
+    // ADR-005 L2 §G: coarse cap = dispute.read.mine {client, jeeber, admin}. The own-row-vs-admin
+    // visibility (IsAdmin reads any row, filer reads only their own) is STATE/ownership and
+    // stays in the action body below — never expressed as an L2 policy.
+    [RequireCapability(Capabilities.DisputeReadMine)]
     [ProducesResponseType(typeof(DisputeResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
@@ -167,7 +174,7 @@ public class DisputesController : ControllerBase
     }
 
     [HttpPut("admin/disputes/{id}/resolve")]
-    [RequireRole(Roles.Admin)]
+    [RequireCapability(Capabilities.DisputeResolve)]
     [ProducesResponseType(typeof(DisputeResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]

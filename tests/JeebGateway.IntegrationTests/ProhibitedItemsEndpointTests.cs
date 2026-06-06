@@ -375,12 +375,17 @@ public class ProhibitedItemsEndpointTests : IClassFixture<WebApplicationFactory<
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", userId);
+        // ADR-005 §7: edge caller declares its user type via X-User-Roles. prohibited.ack /
+        // prohibited.scan are §H–J participant caps {client, jeeber}; declare a participant edge role.
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client,jeeber");
         return client;
     }
 
     private HttpClient AdminClient(string userId)
     {
-        var client = ClientFor(userId);
+        // Admin path: identity + the 'admin' edge role (the ADR-005 §K admin claim).
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", userId);
         client.DefaultRequestHeaders.Add("X-User-Roles", "admin");
         return client;
     }

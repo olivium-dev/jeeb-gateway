@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.service.ServiceChat;
 using ChatApiException = JeebGateway.service.ServiceChat.ApiException;
 
@@ -46,6 +47,7 @@ namespace JeebGateway.Controllers
         /// <response code="200">Service is healthy</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("health")]
+        [PublicEndpoint("Chat-service health passthrough — ADR-005 §A public.")]
         [ProducesResponseType(StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult> Health()
@@ -73,6 +75,7 @@ namespace JeebGateway.Controllers
         /// <response code="200">Service is healthy</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("health2")]
+        [PublicEndpoint("Chat-service health passthrough — ADR-005 §A public.")]
         [ProducesResponseType(StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult> Health2()
@@ -100,6 +103,7 @@ namespace JeebGateway.Controllers
         /// <response code="200">Check successful</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("check")]
+        [PublicEndpoint("Chat-service check passthrough — ADR-005 §A public.")]
         [ProducesResponseType(StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult> Check()
@@ -134,6 +138,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -172,6 +177,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/members")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -214,6 +220,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/deactivate")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -251,6 +258,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpGet("channels/{channelId}/summary")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(ChannelSummaryResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -290,6 +298,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpGet("channels/statistics")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F: authed chat read (any-auth preserved; not narrowed to admin)
         [ProducesResponseType(typeof(ChannelStatisticsResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult<ChannelStatisticsResponse>> GetChannelStatistics()
@@ -320,6 +329,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/common")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F: common-channels lookup (read), {client,jeeber}
         [ProducesResponseType(typeof(CommonChannelsResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -356,6 +366,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/firebase")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -398,6 +409,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/messages")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -442,6 +454,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPut("channels/{channelId}/messages")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; ownership = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -485,6 +498,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpGet("channels/{channelId}/messages/{messageId}")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -529,6 +543,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpDelete("channels/{channelId}/messages/{messageId}")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; ownership = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -579,6 +594,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/messages/{messageId}/moderate")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatModerate)] // ADR-005 §F OPEN-1: moderation baked {admin}
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -629,6 +645,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/messages/{messageId}/reply")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -679,6 +696,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/messages/{messageId}/bind")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -729,6 +747,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/messages/{messageId}/mask")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatModerate)] // ADR-005 §F OPEN-1: mask = moderation, baked {admin}
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -779,6 +798,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/messages/{messageId}/unmask")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatModerate)] // ADR-005 §F OPEN-1: unmask = moderation, baked {admin}
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -829,6 +849,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/messages/{messageId}/hide")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatModerate)] // ADR-005 §F OPEN-1: hide = moderation, baked {admin}
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -879,6 +900,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/messages/{messageId}/unhide")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatModerate)] // ADR-005 §F OPEN-1: unhide = moderation, baked {admin}
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -929,6 +951,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/messages/{messageId}/delivered")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -979,6 +1002,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("channels/{channelId}/messages/{messageId}/seen")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -1030,6 +1054,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("members")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; identity scoping = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -1067,6 +1092,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPut("members")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; identity scoping = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -1104,6 +1130,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpGet("members")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; scoping = STATE
         [ProducesResponseType(typeof(MemberResponsePagedList), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult<MemberResponsePagedList>> ListMembers([FromQuery] int? pageSize = null, [FromQuery] string? startAfterDocumentId = null)
@@ -1134,6 +1161,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpGet("members/{memberId}")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; scoping = STATE
         [ProducesResponseType(typeof(MemberResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -1170,6 +1198,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("members/{memberId}/deactivate")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; identity scoping = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -1206,6 +1235,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpDelete("members/{memberId}")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; identity scoping = STATE
         [ProducesResponseType(StatusCodes.Status204NoContent)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -1246,6 +1276,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("sessions/validate-streams")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(ValidateStreamsResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -1282,6 +1313,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("sessions/keep-alive")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(StatusCodes.Status204NoContent)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -1318,6 +1350,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("sessions/validate")]
         [Authorize]
+        [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(StatusCodes.Status204NoContent)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]

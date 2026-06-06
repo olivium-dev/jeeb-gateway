@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Calls;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -6,6 +7,9 @@ namespace JeebGateway.Controllers;
 
 [ApiController]
 [Route("api/calls")]
+// ADR-005 L2 §E delivery dual-party: masked-call session create/end are between the delivery's
+// client and jeeber. Coarse CLAIM {client, jeeber}; party-on-delivery legality stays STATE.
+[RequireCapability(Capabilities.DeliveryParticipate)]
 public sealed class CallsController : ControllerBase
 {
     private readonly IMaskedCallService _calls;

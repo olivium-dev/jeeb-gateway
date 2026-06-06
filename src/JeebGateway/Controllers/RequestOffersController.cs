@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Requests;
 using JeebGateway.Users;
@@ -82,7 +83,8 @@ public class RequestOffersController : ControllerBase
     }
 
     [HttpPost("requests/{requestId}/offers")]
-    [RequireRole(Roles.Jeeber)]
+    // ADR-005 L2 §D jeeber-only: replaces [RequireRole(Roles.Jeeber)]. Fee/cap/one-live-offer = STATE.
+    [RequireCapability(Capabilities.OfferSubmit)]
     [RequireActiveUser]
     [ProducesResponseType(typeof(OfferDto), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -223,7 +225,8 @@ public class RequestOffersController : ControllerBase
     }
 
     [HttpDelete("requests/{requestId}/offers/{offerId}")]
-    [RequireRole(Roles.Jeeber)]
+    // ADR-005 L2 §D jeeber-only (STATE: ownership of the offer stays in-action/owning service).
+    [RequireCapability(Capabilities.OfferWithdraw)]
     [RequireActiveUser]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

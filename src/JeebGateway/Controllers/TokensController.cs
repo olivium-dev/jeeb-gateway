@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Security;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
@@ -23,6 +24,9 @@ namespace JeebGateway.Controllers;
 // ADR-004 D1: public by design — the owner-decided mint backdoor; gated internally by
 // the X-Service-Auth-Key check (AuthorizeMint), not by the bearer audience policy.
 [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+// ADR-005 §A public: token mint (incl. super-login, gated by X-Service-Auth-Key), refresh, revoke.
+// Bypasses L2 — the X-Service-Auth-Key IS the privileged gate (owner decision #2 super-login seam).
+[PublicEndpoint("Token mint/refresh/revoke incl. super-login (X-Service-Auth-Key gated) — ADR-005 §A.")]
 public class TokensController : ControllerBase
 {
     private readonly ITokenService _tokens;

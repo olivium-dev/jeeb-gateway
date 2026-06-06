@@ -1,4 +1,5 @@
 using JeebGateway.Admin;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Disputes.V2;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -46,6 +47,7 @@ public sealed class DisputeCasesController : ControllerBase
     // Open a case for a delivery (the filer is the authenticated user).
     // -----------------------------------------------------------------
     [HttpPost("v1/deliveries/{deliveryId}/escalate")]
+    [RequireCapability(Capabilities.DisputeFile)]
     [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -137,6 +139,7 @@ public sealed class DisputeCasesController : ControllerBase
     // List caller's own cases (opener OR counter-party).
     // -----------------------------------------------------------------
     [HttpGet("v1/disputes")]
+    [RequireCapability(Capabilities.DisputeReadMine)]
     [ProducesResponseType(typeof(DisputeCaseListResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> ListMine(CancellationToken ct)
@@ -158,6 +161,9 @@ public sealed class DisputeCasesController : ControllerBase
     // Single case lookup. Visibility: opener, counter-party, or admin.
     // -----------------------------------------------------------------
     [HttpGet("v1/disputes/{id}")]
+    // ADR-005 L2 §G: coarse cap = dispute.read.mine {client, jeeber, admin}. Party/admin visibility
+    // (opener|counterparty|admin) is STATE and stays in the action body — not an L2 policy.
+    [RequireCapability(Capabilities.DisputeReadMine)]
     [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
@@ -191,10 +197,12 @@ public sealed class DisputeCasesController : ControllerBase
     }
 
     // -----------------------------------------------------------------
-    // Admin resolve. Admin-only via RequireRole.
+    // Admin resolve. ADR-005 L2: admin-only via [RequireCapability(dispute.resolve)]
+    // (replaces the legacy [RequireRole(Roles.Admin)]). Refund-vs-no_action + payment
+    // routing stay STATE in the owning service.
     // -----------------------------------------------------------------
     [HttpPost("admin/v1/disputes/{id}/resolve")]
-    [RequireRole(Roles.Admin)]
+    [RequireCapability(Capabilities.DisputeResolve)]
     [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]

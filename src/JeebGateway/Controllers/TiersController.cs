@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Tiers;
@@ -20,6 +21,8 @@ namespace JeebGateway.Controllers;
 // on the request-creation screen (admin tier CRUD lives in the separate AdminTiersController,
 // which remains session/role-gated). Invariant: Get_Tiers_Does_Not_Require_Authentication.
 [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+// ADR-005 §A public: the public tier catalog read; bypasses L2 (admin tier CRUD is AdminTiersController).
+[PublicEndpoint("Public delivery-tier catalog read — ADR-005 §A public.")]
 public class TiersController : ControllerBase
 {
     private readonly ITiersStore _store;

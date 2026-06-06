@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Tiers;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -13,7 +14,10 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("admin/tiers")]
-[RequireRole(Roles.Admin)]
+// ADR-005 L2: all 5 tier-catalog CRUD actions are one admin capability (tiers.manage),
+// declared class-level (replaces class [RequireRole(Roles.Admin)]). The public read of the
+// tier list lives on the separate TiersController and is [PublicEndpoint] there.
+[RequireCapability(Capabilities.TiersManage)]
 public class AdminTiersController : ControllerBase
 {
     private const int MaxNameLength = 100;

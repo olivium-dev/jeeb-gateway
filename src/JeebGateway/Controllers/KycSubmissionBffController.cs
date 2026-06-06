@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Kyc;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -33,6 +34,11 @@ namespace JeebGateway.Controllers;
 /// RFC 7807 ProblemDetails throughout. Idempotency-Key on both writes (N9/N10).
 /// </summary>
 [ApiController]
+// ADR-005 §L: KYC submission self-service (sign ToS, submit package, read own status) is one
+// capability — kyc.submit.self {client, jeeber}. A client upgrading to jeeber holds {client} at
+// submission time and is authorized. Declared class-level (all three actions share the cap).
+// Per-user ownership, SM-6 legality, and Idempotency-Key dedup stay STATE in kyc-service.
+[RequireCapability(Capabilities.KycSubmitSelf)]
 public sealed class KycSubmissionBffController : ControllerBase
 {
     private const string IdempotencyHeader = "Idempotency-Key";

@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.DTOs.PushNotification;
 using JeebGateway.service.ServicePushNotification;
 using PushNotificationApiException = JeebGateway.service.ServicePushNotification.ApiException;
@@ -70,6 +71,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPut("register")]
         [Authorize]
+        [RequireCapability(Capabilities.NotificationPrefsSelf)] // ADR-005 §B self device-registration
         [ProducesResponseType(typeof(RegisterResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
@@ -129,6 +131,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpDelete("device")]
         [Authorize]
+        [RequireCapability(Capabilities.NotificationPrefsSelf)] // ADR-005 §B self device-management
         [ProducesResponseType(typeof(DeleteByDeviceAndUserResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
@@ -185,6 +188,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpDelete("devices")]
         [Authorize]
+        [RequireCapability(Capabilities.NotificationPrefsSelf)] // ADR-005 §B self device-management
         [ProducesResponseType(typeof(DeleteByUserResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -236,6 +240,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("device/{deviceId}")]
         [Authorize]
+        [RequireCapability(Capabilities.NotificationPrefsSelf)] // ADR-005 §B self device-targeted send
         [ProducesResponseType(typeof(SentPayloadResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
@@ -299,6 +304,11 @@ namespace JeebGateway.Controllers
         /// <response code="422">Validation error</response>
         /// <response code="500">Internal server error</response>
         [HttpPost("broadcast")]
+        // ADR-005 L2: broadcast carried NO auth attribute today (L1 fallback only). Behaviour-preserving
+        // = any-authenticated. NOTE: a fleet-wide broadcast is arguably {admin}; the ADR does not
+        // enumerate push at L2, so this is annotated participant to avoid silently changing the user type.
+        // Flagged to TL/PO for a one-line override to an admin cap if intended.
+        [RequireCapability(Capabilities.NotificationPrefsSelf)]
         [ProducesResponseType(typeof(SentPayloadResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -347,6 +357,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("user")]
         [Authorize]
+        [RequireCapability(Capabilities.NotificationPrefsSelf)] // ADR-005 §B send-to-user (any-auth preserved)
         [ProducesResponseType(typeof(SentPayloadResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
@@ -398,6 +409,7 @@ namespace JeebGateway.Controllers
         /// <response code="200">Service is healthy</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("health")]
+        [PublicEndpoint("Push-notification health passthrough — ADR-005 §A public.")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult<object>> HealthCheck()

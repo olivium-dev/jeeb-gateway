@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Matching;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
@@ -59,7 +60,8 @@ public sealed class MatchingController : ControllerBase
     }
 
     [HttpPost("run")]
-    [RequireRole(Roles.Client)]
+    // ADR-005 L2 §C client-only: replaces [RequireRole(Roles.Client)].
+    [RequireCapability(Capabilities.MatchingRun)]
     [RequireActiveUser]
     [ProducesResponseType(typeof(MatchingRunResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -142,6 +144,11 @@ public sealed class MatchingController : ControllerBase
     /// </summary>
     [HttpGet("users/{userId}")]
     [Authorize]
+    // ADR-005 L2: this read is "authenticated, ANY role" (no user-type restriction) per its
+    // contract. There is no narrower user-type gate here, so it is an explicit L2 public opt-out
+    // (L1 [Authorize] is preserved above — this is NOT [AllowAnonymous]). Marking it preserves the
+    // any-authenticated behaviour exactly and satisfies the default-deny coverage guard.
+    [PublicEndpoint("Authenticated any-role match-candidate read; no L2 user-type gate (L1 auth preserved).")]
     [ProducesResponseType(typeof(MatchingUsersResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

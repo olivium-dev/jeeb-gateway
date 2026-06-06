@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.ProhibitedItems.Scanner;
 using JeebGateway.Users;
@@ -31,6 +32,8 @@ public class ProhibitedItemsScanController : ControllerBase
     }
 
     [HttpPost("scan")]
+    // ADR-005 L2 §H–J participant {client, jeeber}: pre-submission description scan.
+    [RequireCapability(Capabilities.ProhibitedScan)]
     [ProducesResponseType(typeof(ScanResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

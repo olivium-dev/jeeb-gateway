@@ -1,4 +1,5 @@
 using System.Text.Json;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc;
@@ -30,6 +31,11 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("form-builder")]
+// ADR-005 §A public: FormBuilder template/schema READS are §A-public; the form submit + submission-read
+// are config/DB seams that carry no caller identity today (L1 fallback only). Class-level [PublicEndpoint]
+// keeps the whole controller L2-public with the L1 identified-caller behaviour preserved — behaviour-
+// preserving and mirroring KycBffController's §A treatment.
+[PublicEndpoint("FormBuilder template/schema reads + L1-only form seam — ADR-005 §A; L1 fallback preserved.")]
 public class FormBuilderController : ControllerBase
 {
     private const int MaxTemplateNameLength = 256;

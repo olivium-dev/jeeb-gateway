@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.ProhibitedItems;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -17,6 +18,11 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("prohibited-items")]
+// ADR-005 L2 §H–J participant {client, jeeber}: BOTH actions resolve the caller (the LIST returns the
+// caller's per-user acknowledgment state, so it is an identified-participant read today, NOT anonymous;
+// the catalog itself is public but this coupled read+ack endpoint requires a caller). Preserves the
+// existing identified-caller behaviour; ack-version legality stays STATE in-action.
+[RequireCapability(Capabilities.ProhibitedAck)]
 public class ProhibitedItemsController : ControllerBase
 {
     private readonly IProhibitedItemsStore _store;

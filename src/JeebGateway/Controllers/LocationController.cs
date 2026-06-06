@@ -1,4 +1,5 @@
 using System.Text.Json;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -60,6 +61,8 @@ public class LocationController : ControllerBase
     }
 
     [HttpPost("location/update")]
+    // ADR-005 L2 §D jeeber-only: a jeeber streams their GPS batch (caller resolved as jeeberId).
+    [RequireCapability(Capabilities.DeliveryGpsStream)]
     [ProducesResponseType(typeof(LocationUpdateResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -111,6 +114,8 @@ public class LocationController : ControllerBase
     }
 
     [HttpGet("deliveries/{deliveryId}/tracking")]
+    // ADR-005 L2 §C client-only delivery tracking (STATE: party-on-delivery/ownership stays in-action).
+    [RequireCapability(Capabilities.DeliveryTrackOwn)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]

@@ -252,6 +252,7 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
 
         var http = factory.CreateClient();
         http.DefaultRequestHeaders.Add("X-User-Id", seed.ClientId);
+        http.DefaultRequestHeaders.Add("X-User-Roles", "client,jeeber"); // ADR-005 §7 edge user-type
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
         var (eventName, frame) = await ReadFirstSseFrameAsync(http, $"/deliveries/{seed.Id}/tracking", cts.Token);
@@ -316,6 +317,11 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
     {
         var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Add("X-User-Id", userId);
+        // ADR-005 §7: the trusted edge declares the caller's user type via X-User-Roles. These
+        // location routes are §C/§D/§E participant capabilities; a dual-role edge caller satisfies
+        // both delivery.track.own ({client}) and delivery.gps.stream ({jeeber}), matching the ADR
+        // dual-role-one-token model. The L1 identity the tests rely on is unchanged.
+        c.DefaultRequestHeaders.Add("X-User-Roles", "client,jeeber");
         return c;
     }
 
