@@ -20,6 +20,9 @@ namespace JeebGateway.Controllers;
 [ApiController]
 [Route("auth/tokens")]
 [EnableRateLimiting(RateLimitingExtensions.AuthTokenBucketPolicy)]
+// ADR-004 D1: public by design — the owner-decided mint backdoor; gated internally by
+// the X-Service-Auth-Key check (AuthorizeMint), not by the bearer audience policy.
+[Microsoft.AspNetCore.Authorization.AllowAnonymous]
 public class TokensController : ControllerBase
 {
     private readonly ITokenService _tokens;

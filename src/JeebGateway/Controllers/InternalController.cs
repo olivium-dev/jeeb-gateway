@@ -9,6 +9,8 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("internal")]
+// ADR-004 D1: public by design — internal liveness probe, must answer without a token.
+[Microsoft.AspNetCore.Authorization.AllowAnonymous]
 public class InternalController : ControllerBase
 {
     [HttpGet("health")]

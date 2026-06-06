@@ -16,6 +16,8 @@ namespace JeebGateway.Controllers;
 [ApiController]
 [Route("auth")]
 [EnableRateLimiting(RateLimitingExtensions.AuthTokenBucketPolicy)]
+// ADR-004 D1: public by design — refresh/logout operate on the rotation cookie, not a bearer.
+[Microsoft.AspNetCore.Authorization.AllowAnonymous]
 public class AuthController : ControllerBase
 {
     private readonly ITokenService _tokens;
