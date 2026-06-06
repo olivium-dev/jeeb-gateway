@@ -42,11 +42,27 @@ public static class OtpSignInProblems
     /// </summary>
     public static ObjectResult Problem(
         ControllerBase c, int status, string shortType, string title, string detail)
+        => Build(c, ProblemBaseUri, status, shortType, title, detail);
+
+    /// <summary>Frozen RFC 7807 problem-type base URI for the S02 Wave-1 dual-role user surfaces.</summary>
+    public const string UsersProblemBaseUri = "https://problems.jeeb.lb/users";
+
+    /// <summary>
+    /// Build a <c>application/problem+json</c> result under <see cref="UsersProblemBaseUri"/>
+    /// for the dual-role <c>/v1/users/me</c> surfaces (F-A / F-B). Same code-free-detail
+    /// contract as <see cref="Problem"/>.
+    /// </summary>
+    public static ObjectResult UsersProblem(
+        ControllerBase c, int status, string shortType, string title, string detail)
+        => Build(c, UsersProblemBaseUri, status, shortType, title, detail);
+
+    private static ObjectResult Build(
+        ControllerBase c, string baseUri, int status, string shortType, string title, string detail)
     {
         var problem = new ProblemDetails
         {
             Status = status,
-            Type = $"{ProblemBaseUri}/{shortType}",
+            Type = $"{baseUri}/{shortType}",
             Title = title,
             Detail = detail,
             Instance = c.HttpContext.Request.Path,

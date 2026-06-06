@@ -13,6 +13,16 @@ public interface IUsersStore
 
     Task<UserProfile> GetOrCreateAsync(string userId, CancellationToken ct);
 
+    /// <summary>
+    /// S02 Wave-1 (ADR-003, F-C). Inserts or replaces the local projection of an
+    /// identity resolved upstream by user-management (id + OPAQUE roles + active role),
+    /// so the gateway-minted session JWT embeds the SAME <c>active_role</c>/<c>roles</c>
+    /// claims user-management persisted. Additive; the gateway still SIGNS the OTP
+    /// sign-in session (mint stays in the gateway), it just no longer invents the
+    /// identity. Idempotent upsert — safe to call repeatedly.
+    /// </summary>
+    Task UpsertProjectionAsync(UserProfile profile, CancellationToken ct);
+
     Task<UserProfile> UpdateProfileAsync(string userId, ProfilePatch patch, CancellationToken ct);
 
     Task<IReadOnlyList<SavedAddress>> ListAddressesAsync(string userId, CancellationToken ct);

@@ -917,6 +917,31 @@ builder.Services.AddScoped<JeebGateway.service.ServiceUserManagement.ServiceUser
     return new JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient(baseUrl, client);
 });
 
+// ---------------------------------------------------------------------------
+// S02 Wave-1 (ADR-003) dual-role identity seam — the two NEW user-management
+// endpoints (phone find-or-create + token-reissuing role switch) the gateway
+// thin-BFF orchestrates (F-C / F-A / F-B). Hand-authored adapter over the SAME
+// UserManagementServiceApi base address, replaced by a regenerated NSwag client
+// once the UM keystone deploys. Carries the inbound mobile bearer (role/switch
+// is a post-auth call) + the org-standard Polly v8 resilience pipeline (N9:
+// retry w/ jitter + circuit breaker + per-attempt timeout). 30s profile
+// cache-aside backs GET /v1/users/me (F-B).
+// ---------------------------------------------------------------------------
+builder.Services.AddMemoryCache();
+builder.Services
+    .AddHttpClient<JeebGateway.Users.IUserManagementDualRoleClient,
+                   JeebGateway.Users.HttpUserManagementDualRoleClient>(client =>
+    {
+        var apiUrl = builder.Configuration["UserManagementServiceApi:BaseUrl"];
+        if (!string.IsNullOrEmpty(apiUrl))
+        {
+            client.BaseAddress = new Uri(apiUrl);
+        }
+        client.Timeout = TimeSpan.FromSeconds(30);
+    })
+    .AddHttpMessageHandler<JeebGateway.Services.Bff.BearerForwardingHandler>()
+    .AddStandardResilienceHandler();
+
 // Jeeber availability toggle + auto-offline sweeper (T-backend-023).
 // In-memory implementations stand in for the durable Postgres row, the
 // Redis geo index, and the offer-service withdrawal hook described in

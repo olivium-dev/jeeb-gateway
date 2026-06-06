@@ -1,8 +1,8 @@
 # 0002 — S02 identity: dual-role profile, role-switch, refresh rotation, phone policy
 
 **Date:** 2026-06-06
-**Status:** Accepted (Wave 0) / Proposed (Wave 1, blocked on DECISION #1)
-**Deciders:** Senior Software Architect (cto-S02), pending owner on DECISION #1
+**Status:** Accepted (Wave 0). Wave 1 / DECISION #1 resolved and N11 split-signer corrected by [ADR-0003](0003-s02-wave1-dual-role-identity-split-signer.md).
+**Deciders:** Senior Software Architect (cto-S02); DECISION #1 ruled by owner in ADR-0003
 **Technical story:** JEB-37, JEB-38, JEB-39, JEB-1422, JEB-1430 (S02)
 
 ---
