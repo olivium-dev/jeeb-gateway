@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.service.ServiceUserManagement;
 using UserManagementApiException = JeebGateway.service.ServiceUserManagement.ApiException;
 
@@ -62,6 +63,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpGet("check")]
         [Authorize]
+        [RequireCapability(Capabilities.ProfileReadSelf)] // ADR-005 §B self / any-auth
         [ProducesResponseType(StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult> Check()
@@ -92,6 +94,9 @@ namespace JeebGateway.Controllers
         /// <response code="200">Users retrieved successfully</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("all")]
+        // ADR-005 §M admin/internal: bulk user listing is an admin op (users.admin.manage). Carried only
+        // the L1 fallback today; declaring {admin} is the documented ADR posture (reachability triage M).
+        [RequireCapability(Capabilities.UsersAdminManage)]
         [ProducesResponseType(typeof(GetAllUsersResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult<GetAllUsersResponse>> GetAllUsers([FromQuery] int? skip = null, [FromQuery] int? limit = null, [FromQuery] bool? onActive = null)
@@ -120,6 +125,9 @@ namespace JeebGateway.Controllers
         /// <response code="201">User registered successfully</response>
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
+        // ADR-004 D1: public by design — registration precedes any session token.
+        [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+        [PublicEndpoint("Registration precedes any session token — ADR-005 §M/§A public.")]
         [HttpPost("register")]
         [ProducesResponseType(typeof(RegisterUserResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
@@ -156,6 +164,9 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="401">Unauthorized</response>
         /// <response code="500">Internal server error</response>
+        // ADR-004 D1: public by design — email+password login mints the session token.
+        [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+        [PublicEndpoint("Email+password login mints the session token — ADR-005 §M/§A public.")]
         [HttpPost("login")]
         [ProducesResponseType(typeof(LoginResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
@@ -193,6 +204,9 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="401">Unauthorized</response>
         /// <response code="500">Internal server error</response>
+        // ADR-004 D1: public by design — token-login exchanges a login token for a session.
+        [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+        [PublicEndpoint("Token-login exchanges a login token for a session — ADR-005 §M/§A public.")]
         [HttpPost("token-login")]
         [ProducesResponseType(typeof(LoginResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
@@ -221,6 +235,9 @@ namespace JeebGateway.Controllers
             }
         }
 
+        // ADR-004 D1: public by design — userId login entry (gated by its own credential).
+        [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+        [PublicEndpoint("userId login entry (own credential) — ADR-005 §M/§A public.")]
         [HttpPost("login/userId")]
         [ProducesResponseType(typeof(LoginResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -256,6 +273,9 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="401">Unauthorized</response>
         /// <response code="500">Internal server error</response>
+        // ADR-004 D1: public by design — super-login entry, gated by its own SuperAdminPassCode.
+        [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+        [PublicEndpoint("Super-login entry, gated by SuperAdminPassCode — ADR-005 §M/§A public.")]
         [HttpPost("user-id-login")]
         [HttpPost("userid-login")]
         [ProducesResponseType(typeof(SocialLoginResponse), StatusCodes.Status200OK)]
@@ -293,6 +313,9 @@ namespace JeebGateway.Controllers
         /// <response code="200">Logout successful</response>
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
+        // ADR-004 D1: public by design — logout operates on a supplied userId/token, no session gate.
+        [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+        [PublicEndpoint("Logout on a supplied userId/token (no session gate) — ADR-005 §M/§A public.")]
         [HttpPost("logout")]
         [ProducesResponseType(typeof(LogoutResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
@@ -329,6 +352,9 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="401">Unauthorized</response>
         /// <response code="500">Internal server error</response>
+        // ADR-004 D1: public by design — social SSO login mints the session token.
+        [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+        [PublicEndpoint("Social login mints the session token — ADR-005 §M/§A public.")]
         [HttpPost("social")]
         [ProducesResponseType(typeof(SocialLoginResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
@@ -367,6 +393,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("forgot")]
         [Authorize]
+        [RequireCapability(Capabilities.ProfileWriteSelf)] // ADR-005 §B self credential mgmt
         [ProducesResponseType(typeof(ForgotPasswordResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -403,6 +430,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPost("reset")]
         [Authorize]
+        [RequireCapability(Capabilities.ProfileWriteSelf)] // ADR-005 §B self credential mgmt
         [ProducesResponseType(typeof(ResetPasswordResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -431,6 +459,7 @@ namespace JeebGateway.Controllers
 
         [HttpGet("profile/{userId}")]
         [Authorize]
+        [RequireCapability(Capabilities.ProfileReadSelf)] // ADR-005 §B self / any-auth (scoping = STATE)
         [ProducesResponseType(typeof(UserProfileResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult<UserProfileResponse>> ProfileById(string userId)
@@ -463,6 +492,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpGet("profile")]
         [Authorize]
+        [RequireCapability(Capabilities.ProfileReadSelf)] // ADR-005 §B self / any-auth (scoping = STATE)
         [ProducesResponseType(typeof(UserProfileResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
@@ -504,6 +534,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPut("profile")]
         [Authorize]
+        [RequireCapability(Capabilities.ProfileWriteSelf)] // ADR-005 §B self (ownership = STATE)
         [ProducesResponseType(typeof(UpdateUserProfileResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
@@ -533,6 +564,7 @@ namespace JeebGateway.Controllers
 
         [HttpPut("profile/update")]
         [Authorize]
+        [RequireCapability(Capabilities.ProfileWriteSelf)] // ADR-005 §B self (ownership = STATE)
         [ProducesResponseType(typeof(UpdateUserProfileResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult<UpdateUserProfileResponse>> UpdateProfileViaRoute([FromBody] UpdateUserProfileRequest request)
@@ -570,6 +602,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpDelete("profile")]
         [Authorize]
+        [RequireCapability(Capabilities.ProfileWriteSelf)] // ADR-005 §B self (ownership = STATE)
         [ProducesResponseType(typeof(DeleteUserProfileResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
@@ -602,6 +635,7 @@ namespace JeebGateway.Controllers
 
         [HttpDelete("profile/delete")]
         [Authorize]
+        [RequireCapability(Capabilities.ProfileWriteSelf)] // ADR-005 §B self (ownership = STATE)
         [ProducesResponseType(typeof(DeleteUserProfileResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult<DeleteUserProfileResponse>> DeleteProfileByToken()
@@ -645,6 +679,8 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
         [HttpDelete("bulk/emails")]
+        // ADR-005 §M admin/internal: bulk delete-by-emails is an admin op (users.admin.manage).
+        [RequireCapability(Capabilities.UsersAdminManage)]
         [ProducesResponseType(typeof(BulkOperationResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -680,6 +716,9 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
         [HttpPost("device/register")]
+        // ADR-005 §M: device-token registration carries no user-type gate today (L1 fallback only);
+        // L2-public preserves that. Behaviour-preserving.
+        [PublicEndpoint("Device-token register — L1-only today; ADR-005 §M L2-public (behaviour-preserving).")]
         [ProducesResponseType(typeof(RegisterDeviceResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -715,6 +754,8 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
         [HttpPost("device/unregister")]
+        // ADR-005 §M: device-token unregistration carries no user-type gate today (L1 fallback only).
+        [PublicEndpoint("Device-token unregister — L1-only today; ADR-005 §M L2-public (behaviour-preserving).")]
         [ProducesResponseType(typeof(UnregisterDeviceResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -750,6 +791,8 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
         [HttpPost("payment/auth-token")]
+        // ADR-005 §M admin/internal: minting a payment auth-token is a privileged op (users.admin.manage).
+        [RequireCapability(Capabilities.UsersAdminManage)]
         [ProducesResponseType(typeof(PaymentAuthTokenResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -778,6 +821,8 @@ namespace JeebGateway.Controllers
 
         [HttpPost("issue-payment-auth-token")]
         [Authorize]
+        // ADR-005 §M admin/internal: payment auth-token issuance is privileged (users.admin.manage).
+        [RequireCapability(Capabilities.UsersAdminManage)]
         [ProducesResponseType(typeof(PaymentAuthTokenResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult> IssuePaymentAuthToken([FromHeader(Name = "Authorization")] string authorizationHeader, [FromBody] PaymentAuthTokenRequest request)
@@ -820,6 +865,9 @@ namespace JeebGateway.Controllers
         /// <response code="401">Invalid token</response>
         /// <response code="500">Internal server error</response>
         [HttpPost("payment/validate-auth-token")]
+        // ADR-005 §M: payment auth-token validation is an internal verification with no user-type gate
+        // today (L1 fallback only); L2-public preserves that. Behaviour-preserving.
+        [PublicEndpoint("Payment auth-token validation — internal/L1-only; ADR-005 §M L2-public.")]
         [ProducesResponseType(typeof(ValidatePaymentAuthTokenResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]

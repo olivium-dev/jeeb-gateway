@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
@@ -43,6 +44,11 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("deliveries")]
+// ADR-005 L2 §E delivery state-machine / dual-party: class-level coarse CLAIM {client, jeeber}.
+// L2 asserts ONLY the coarse participant role; WHICH party + whether the SM transition is legal +
+// ownership stay STATE in the owning delivery service (it already returns 403/409 from state).
+// Handover-OTP actions override to the handover.otp.read cap (still {client, jeeber}) below.
+[RequireCapability(Capabilities.DeliveryParticipate)]
 public class DeliveriesController : ControllerBase
 {
     private static readonly ActivitySource ActivitySource = new("JeebGateway.Deliveries");
@@ -452,6 +458,8 @@ public class DeliveriesController : ControllerBase
     /// </list>
     /// </summary>
     [HttpPost("{deliveryId}/verify-otp")]
+    // ADR-005 L2 §E handover OTP (still {client, jeeber}; party/SM = STATE).
+    [RequireCapability(Capabilities.HandoverOtpRead)]
     [ProducesResponseType(typeof(OtpVerificationResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -596,6 +604,8 @@ public class DeliveriesController : ControllerBase
     /// OTP is dispatched (PR review B1; per AC1).
     /// </summary>
     [HttpGet("{deliveryId}/otp")]
+    // ADR-005 L2 §E handover OTP trigger (still {client, jeeber}; AtDoor SM state = STATE).
+    [RequireCapability(Capabilities.HandoverOtpRead)]
     [ProducesResponseType(typeof(OtpTriggerResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -731,6 +741,8 @@ public class DeliveriesController : ControllerBase
     /// <see cref="IAdminEscalationStore"/> (PR review B7).
     /// </summary>
     [HttpPost("{deliveryId}/otp/verify")]
+    // ADR-005 L2 §E handover OTP verify (still {client, jeeber}; party/SM/lockout = STATE).
+    [RequireCapability(Capabilities.HandoverOtpRead)]
     [ProducesResponseType(typeof(OtpHandoverVerificationResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]

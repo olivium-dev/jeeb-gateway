@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Security;
 using JeebGateway.service.ServiceUserManagement;
 using Microsoft.AspNetCore.Mvc;
@@ -47,6 +48,8 @@ namespace JeebGateway.Controllers;
 [Produces("application/json")]
 // ADR-004 D1: public by design — dev/test seed + data routes used by the :3040 console.
 [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+// ADR-005 §A public: config-gated dev seam ([DevOnly]); bypasses L2.
+[PublicEndpoint("Config-gated dev seed/data seam ([DevOnly]) — ADR-005 §A public.")]
 public sealed class DevController : ControllerBase
 {
     private readonly ServiceUserManagementClient _userManagement;

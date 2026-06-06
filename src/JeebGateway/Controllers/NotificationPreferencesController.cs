@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.NotificationPreferences;
 using Microsoft.AspNetCore.Mvc;
 
@@ -7,6 +8,8 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("users/me/notification-preferences")]
+// ADR-005 L2 §B self / any-authenticated {client, jeeber, admin}: read + patch of own prefs.
+[RequireCapability(Capabilities.NotificationPrefsSelf)]
 public class NotificationPreferencesController : ControllerBase
 {
     private readonly INotificationPreferencesStore _store;

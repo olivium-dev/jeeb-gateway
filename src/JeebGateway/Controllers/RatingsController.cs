@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Ratings;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -20,6 +21,10 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/deliveries/{deliveryId}")]
+// ADR-005 L2 §E delivery dual-party: class-level coarse CLAIM {client, jeeber} for the rating-read;
+// the POST /rate overrides to rating.submit (also {client, jeeber}). Party + blind/reveal/7-day-window
+// legality stay STATE in the owning score-taking-service.
+[RequireCapability(Capabilities.DeliveryParticipate)]
 public class RatingsController : ControllerBase
 {
     private readonly IRatingService _service;
@@ -30,6 +35,8 @@ public class RatingsController : ControllerBase
     }
 
     [HttpPost("rate")]
+    // ADR-005 L2 §E rating submit (still {client, jeeber}; party = STATE).
+    [RequireCapability(Capabilities.RatingSubmit)]
     [ProducesResponseType(typeof(SubmitRatingResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

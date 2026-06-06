@@ -1,8 +1,13 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+// Alias the capability registry CLASS: inside the JeebGateway.Auth.* namespace, the bare name
+// `Capabilities` binds to the JeebGateway.Auth.Capabilities NAMESPACE, not the class. This alias
+// disambiguates so [RequireCapability(Caps.X)] resolves the constant.
+using Caps = JeebGateway.Auth.Capabilities.Capabilities;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using UmServiceClient = JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient;
@@ -68,6 +73,9 @@ public sealed class UsersMeController : ControllerBase
     // -----------------------------------------------------------------
 
     [HttpGet]
+    // ADR-005 L2 §B self / any-authenticated {client, jeeber, admin}. L1 [Authorize] (class-level,
+    // ADR-004) is preserved; this adds the L2 self-profile capability.
+    [RequireCapability(Caps.ProfileReadSelf)]
     [ProducesResponseType(typeof(UsersMeResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]

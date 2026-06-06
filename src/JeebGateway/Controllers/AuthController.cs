@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Security;
 using JeebGateway.Tokens;
 using Microsoft.AspNetCore.Mvc;
@@ -18,6 +19,10 @@ namespace JeebGateway.Controllers;
 [EnableRateLimiting(RateLimitingExtensions.AuthTokenBucketPolicy)]
 // ADR-004 D1: public by design — refresh/logout operate on the rotation cookie, not a bearer.
 [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+// ADR-005 §A public: legacy refresh + logout operate on the body refresh-token (not a bearer session),
+// so they are anonymous-by-design and bypass L2. (ADR §A notes Logout/Revoke are "any-auth" where they
+// require a bearer; this legacy surface authenticates via the body token, hence public — behaviour-preserving.)
+[PublicEndpoint("Legacy refresh/logout via body refresh-token (not bearer) — ADR-005 §A public.")]
 public class AuthController : ControllerBase
 {
     private readonly ITokenService _tokens;

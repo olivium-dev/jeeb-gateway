@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Requests;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -62,7 +63,8 @@ public class RequestsController : ControllerBase
     }
 
     [HttpPost]
-    [RequireRole(Roles.Client)]
+    // ADR-005 L2 §C client-only: replaces [RequireRole(Roles.Client)]. BR-9 cap stays STATE (in-action).
+    [RequireCapability(Capabilities.RequestCreate)]
     [RequireActiveUser]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -233,7 +235,8 @@ public class RequestsController : ControllerBase
     /// data exposure and no id is required in the path.
     /// </summary>
     [HttpGet]
-    [RequireRole(Roles.Client)]
+    // ADR-005 L2 §C client-only (STATE: ownership — caller-scoped list stays in-action).
+    [RequireCapability(Capabilities.RequestReadOwn)]
     [RequireActiveUser]
     [ProducesResponseType(typeof(IReadOnlyList<DeliveryRequestDto>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -261,7 +264,8 @@ public class RequestsController : ControllerBase
     /// Client's request ids.
     /// </summary>
     [HttpGet("{requestId}")]
-    [RequireRole(Roles.Client)]
+    // ADR-005 L2 §C client-only (STATE: ownership-masking 404 stays in-action).
+    [RequireCapability(Capabilities.RequestReadOwn)]
     [RequireActiveUser]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -296,7 +300,8 @@ public class RequestsController : ControllerBase
     /// terminal (delivered/rated/cancelled/expired/disputed).
     /// </summary>
     [HttpDelete("{requestId}")]
-    [RequireRole(Roles.Client)]
+    // ADR-005 L2 §C client-only (STATE: ownership + terminal-state 403/409 stay in-action).
+    [RequireCapability(Capabilities.RequestCancelOwn)]
     [RequireActiveUser]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

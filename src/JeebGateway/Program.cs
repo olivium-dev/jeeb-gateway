@@ -268,8 +268,9 @@ builder.Services.AddAuthorization(options =>
 });
 
 // ADR-005 Layer 2 — handler (resolves+canonicalizes roles), RFC7807 403 result shaper, and the
-// default-deny coverage guard. The guard is PRESENT but report-only in this CORE step
-// (CapabilityGuard:Enforce defaults to false); the final annotation step flips Enforce=true.
+// default-deny coverage guard. FINAL one-shot step: all ~46 controllers are annotated and the guard
+// ENFORCES (CapabilityGuardOptions.Enforce defaults to true); an un-annotated action now fails startup.
+// CapabilityGuard:Enforce=false remains an emergency operator override only.
 builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationHandler,
     JeebGateway.Auth.Capabilities.CapabilityAuthorizationHandler>();
 builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationMiddlewareResultHandler,

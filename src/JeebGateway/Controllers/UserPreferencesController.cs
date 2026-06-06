@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using System.Security.Claims;
 using Microsoft.Extensions.Logging;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services.Generated.ServiceRemoteUserPreferences;
 using RemoteUserPreferencesApiException = JeebGateway.Services.Generated.ServiceRemoteUserPreferences.ApiException;
 
@@ -13,6 +14,9 @@ namespace JeebGateway.Controllers
     [ApiController]
     [Route("api/[controller]")]
     [Authorize]
+    // ADR-005 L2 §B self / any-authenticated: ALL UserPreferences actions are the caller's own
+    // preferences (notification.prefs.self), class-level. L1 [Authorize] preserved above.
+    [RequireCapability(Capabilities.NotificationPrefsSelf)]
     public class UserPreferencesController : ControllerBase
     {
         private const string PrefKeyFullName = "fullName";

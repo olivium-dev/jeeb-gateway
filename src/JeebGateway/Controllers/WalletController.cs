@@ -3,6 +3,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.service.ServiceWallet;
 using ServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
 using WalletApiException = JeebGateway.service.ServiceWallet.ApiException;
@@ -11,6 +12,11 @@ namespace JeebGateway.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
+    // ADR-005 L2 §K admin (OPEN-2 baked): wallet holder/wallet management (create/add/deactivate/
+    // force-deactivate/system-wallet) is admin-only. These actions carried no explicit user-type gate
+    // (only the L1 fallback identified-caller); declaring {admin} is the documented ADR posture. The
+    // caller's OWN wallet read (holder/wallets) overrides to wallet.read.own ({client, jeeber}) below.
+    [RequireCapability(Capabilities.WalletManage)]
     public class WalletController : ControllerBase
     {
         private readonly ServiceWalletClient _walletClient;
@@ -163,6 +169,9 @@ namespace JeebGateway.Controllers
 
         [HttpGet("holder/wallets")]
         [Authorize]
+        // ADR-005 L2 §H–J: the caller's OWN wallets — wallet.read.own {client, jeeber} (overrides the
+        // class-level admin cap). Scoping to the caller's id stays STATE in-action.
+        [RequireCapability(Capabilities.WalletReadOwn)]
         [ProducesResponseType(typeof(GetHolderWallets), StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> GetHolderWallets()

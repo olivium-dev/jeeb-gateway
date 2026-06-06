@@ -3,6 +3,7 @@ using System.Net.Http;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 
 namespace JeebGateway.Controllers;
@@ -38,6 +39,9 @@ namespace JeebGateway.Controllers;
 [ApiController]
 [Produces("application/json", "application/problem+json")]
 [Authorize]
+// ADR-005 §A public at L2: DB-probe diagnostic reads carry no user-type gate. L1 [Authorize] is
+// preserved (token still required); [PublicEndpoint] opts out of L2 + satisfies the coverage guard.
+[PublicEndpoint("Authenticated DB-probe diagnostics — ADR-005 §A (no L2 user-type; L1 auth preserved).")]
 public sealed class GatewayDbProbeController : ControllerBase
 {
     private readonly IHttpClientFactory _httpClientFactory;

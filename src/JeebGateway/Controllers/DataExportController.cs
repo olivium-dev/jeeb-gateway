@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
 using Microsoft.AspNetCore.Mvc;
@@ -29,6 +30,8 @@ public class DataExportController : ControllerBase
     }
 
     [HttpPost]
+    // ADR-005 L2 §B self / any-authenticated data export.
+    [RequireCapability(Capabilities.DataExportSelf)]
     [ProducesResponseType(typeof(DataExportResponse), StatusCodes.Status202Accepted)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -54,6 +57,8 @@ public class DataExportController : ControllerBase
     }
 
     [HttpGet]
+    // ADR-005 L2 §B self / any-authenticated (STATE: caller-scoped latest stays in-action).
+    [RequireCapability(Capabilities.DataExportSelf)]
     [ProducesResponseType(typeof(DataExportResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -70,6 +75,10 @@ public class DataExportController : ControllerBase
     // credential (capability URL); it is presented anonymously by the link recipient, not
     // via a session bearer. Create (POST) and status (GET) above stay session-authed.
     [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+    // ADR-005 L2: public by design — the unguessable single-use token IS the credential (capability
+    // URL), presented anonymously. [PublicEndpoint] opts out of L2 and satisfies the default-deny guard;
+    // [AllowAnonymous] opts out of L1 (matches the existing ADR-004 D1 decision above).
+    [PublicEndpoint("Capability-URL data-export download — token is the credential (ADR-004 D1).")]
     [HttpGet("{token}/download")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

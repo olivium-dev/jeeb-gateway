@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
@@ -11,6 +12,8 @@ namespace JeebGateway.Controllers;
 [Route("internal")]
 // ADR-004 D1: public by design — internal liveness probe, must answer without a token.
 [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+// ADR-005 §A public.
+[PublicEndpoint("Internal gateway liveness probe — ADR-005 §A public.")]
 public class InternalController : ControllerBase
 {
     [HttpGet("health")]

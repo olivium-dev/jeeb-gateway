@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
@@ -7,6 +8,9 @@ namespace JeebGateway.Controllers;
 [Route("api/[controller]")]
 // ADR-004 D1: public by design — liveness probe, must answer without a token.
 [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+// ADR-005 §A public: bypasses both layers. [AllowAnonymous] opts out of L1; [PublicEndpoint] opts out
+// of L2 and satisfies the default-deny coverage guard.
+[PublicEndpoint("Gateway liveness probe — ADR-005 §A public.")]
 public class HealthController : ControllerBase
 {
     /// <summary>

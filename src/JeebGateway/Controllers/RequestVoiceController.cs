@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -65,7 +66,8 @@ public sealed class RequestVoiceController : ControllerBase
     /// <c>requestId</c> (text, idempotency anchor), <c>tier</c> (text).
     /// </summary>
     [HttpPost]
-    [RequireRole(Roles.Client)]
+    // ADR-005 L2 §C client-only voice create: replaces [RequireRole(Roles.Client)]. BR-9 stays STATE.
+    [RequireCapability(Capabilities.RequestVoiceCreate)]
     [RequireActiveUser]
     [RequestSizeLimit(8 * 1024 * 1024)]
     [ProducesResponseType(typeof(VoiceRequestResponse), StatusCodes.Status201Created)]
@@ -270,7 +272,8 @@ public sealed class RequestVoiceController : ControllerBase
     /// <c>GET /requests/{id}</c>, echoing the voice contract fields.
     /// </summary>
     [HttpGet("{requestId}")]
-    [RequireRole(Roles.Client)]
+    // ADR-005 L2 §C client-only (STATE: ownership stays in-action).
+    [RequireCapability(Capabilities.RequestReadOwn)]
     [RequireActiveUser]
     [ProducesResponseType(typeof(VoiceRequestResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

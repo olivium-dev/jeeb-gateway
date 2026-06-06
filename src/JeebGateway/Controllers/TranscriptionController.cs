@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Whisper;
@@ -38,6 +39,9 @@ public class TranscriptionController : ControllerBase
     }
 
     [HttpPost]
+    // ADR-005 L2 §H–J participant {client, jeeber}: transcription request. The gateway FallbackPolicy
+    // (ADR-004) already requires an identified caller; this declares the participant user-type.
+    [RequireCapability(Capabilities.TranscriptionRequest)]
     [ProducesResponseType(typeof(TranscribeResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(TranscribeResponse), StatusCodes.Status202Accepted)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -118,6 +122,8 @@ public class TranscriptionController : ControllerBase
 
     /// <summary>Lightweight status probe for the Whisper transcription subsystem.</summary>
     [HttpGet("status")]
+    // ADR-005 L2 §A public: Whisper subsystem status/health probe (circuit-breaker state) — no user-type gate.
+    [PublicEndpoint("Whisper subsystem status probe — ADR-005 §A public (health/status family).")]
     [ProducesResponseType(typeof(WhisperStatusResponse), StatusCodes.Status200OK)]
     public IActionResult GetStatus()
     {

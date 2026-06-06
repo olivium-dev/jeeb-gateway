@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.DTOs.Notification;
 using JeebGateway.service.ServiceNotification;
 using NotificationApiException = JeebGateway.service.ServiceNotification.ApiException;
@@ -73,6 +74,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpGet("messages")]
         [Authorize]
+        [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B self / any-auth
         [ProducesResponseType(typeof(PagedNotificationMessagesResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(string), StatusCodes.Status422UnprocessableEntity)]
@@ -134,6 +136,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPatch("notifications/{notificationId}/read")]
         [Authorize]
+        [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B (STATE: ownership in-action)
         [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -186,6 +189,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPatch("notifications/{notificationId}/unread")]
         [Authorize]
+        [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B (STATE: ownership in-action)
         [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
@@ -237,6 +241,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPatch("notifications/bulk/read")]
         [Authorize]
+        [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B (STATE: ownership in-action)
         [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -292,6 +297,7 @@ namespace JeebGateway.Controllers
         /// <response code="500">Internal server error</response>
         [HttpPatch("notifications/bulk/unread")]
         [Authorize]
+        [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B (STATE: ownership in-action)
         [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
@@ -345,6 +351,7 @@ namespace JeebGateway.Controllers
         /// <response code="503">Service is unhealthy</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("health")]
+        [PublicEndpoint("Notification-service health passthrough — ADR-005 §A public.")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status503ServiceUnavailable)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]

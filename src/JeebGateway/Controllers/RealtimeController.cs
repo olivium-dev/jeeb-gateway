@@ -1,5 +1,6 @@
 using System.Net;
 using System.Security.Claims;
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc;
@@ -58,6 +59,12 @@ public sealed class RealtimeController : ControllerBase
     /// caller publish as another user.
     /// </summary>
     [HttpPost("chat/fanout")]
+    // ADR-005 L2 §F chat {client, jeeber}: per-recipient chat fan-out where the SENDER identity comes
+    // from the bearer (the route is edge-driven by the chat participant, never publishes as another user).
+    // Behaviour-preserving = participant. (ADR OPEN-4 baked Realtime.Fanout "internal-only"; this is the
+    // bearer-driven sender path, so participant is correct — a one-line override to {admin}/internal if the
+    // owner intends a service-only fanout.)
+    [RequireCapability(Capabilities.ChatSend)]
     [ProducesResponseType(typeof(RealtimePublishResult), StatusCodes.Status202Accepted)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

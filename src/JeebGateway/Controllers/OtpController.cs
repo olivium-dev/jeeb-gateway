@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -40,6 +41,8 @@ namespace JeebGateway.Controllers;
 [Produces("application/json", "application/problem+json")]
 // ADR-004 D1: public by design — OTP send/validate precede a session token.
 [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+// ADR-005 §A public — bypasses L2.
+[PublicEndpoint("OTP send/validate precede the session token — ADR-005 §A public.")]
 public sealed class OtpController : ControllerBase
 {
     private readonly IServiceOTPClient _otpClient;
