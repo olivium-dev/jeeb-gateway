@@ -140,6 +140,12 @@ public class DeliveryRequest
     public string? Transcription { get; init; }
 
     /// <summary>
+    /// S04 (JEB-43): STT confidence (0..1) from the voice-create. Null on the
+    /// typed-text path. Persisted so the read-back echoes the same value.
+    /// </summary>
+    public double? TranscriptionConfidence { get; init; }
+
+    /// <summary>
     /// Object-storage URL of the original voice recording. NULL when the
     /// Client typed the description rather than recording it.
     /// </summary>

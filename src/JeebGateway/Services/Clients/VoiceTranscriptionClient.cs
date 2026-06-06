@@ -106,6 +106,78 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
             Reason: null);
     }
 
+    /// <summary>
+    /// Voice-on-create (JEB-1431). Forwards the audio to the upstream's canonical
+    /// multipart route <c>POST /v1/voice/transcribe</c> (the route that returns the
+    /// real <c>{transcript, confidence, language, duration_ms}</c> contract, backed
+    /// by the owning service's real Whisper or its config-gated mock seam). The
+    /// gateway requestId is mapped to the generic <c>Idempotency-Key</c> header so a
+    /// retried draft replays the cached transcript. Size (413) / format (415) gates
+    /// are validated at the gateway BEFORE this call (so no Whisper runs on reject);
+    /// this method also surfaces any upstream 413/415 onto a typed exception.
+    /// </summary>
+    public async Task<TranscriptionResult> TranscribeVoiceAsync(
+        WhisperAudio audio, string language, string? idempotencyKey, CancellationToken ct)
+    {
+        using var form = new MultipartFormDataContent();
+        var fileContent = new ByteArrayContent(audio.Content);
+        fileContent.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue(
+                string.IsNullOrWhiteSpace(audio.ContentType) ? "application/octet-stream" : audio.ContentType);
+        form.Add(fileContent, "audio", audio.FileName);
+        form.Add(new StringContent(language), "language_hint");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "v1/voice/transcribe")
+        {
+            Content = form
+        };
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
+        }
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.SendAsync(request, ct);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new WhisperUnavailableException("voice-transcription request timed out");
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new WhisperUnavailableException("voice-transcription transport failure", ex);
+        }
+
+        using var _ = response;
+
+        if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
+        {
+            throw new VoiceAudioRejectedException(413, "audio_too_large");
+        }
+        if (response.StatusCode == HttpStatusCode.UnsupportedMediaType)
+        {
+            throw new VoiceAudioRejectedException(415, "unsupported_format");
+        }
+        if ((int)response.StatusCode >= 500 || response.StatusCode == HttpStatusCode.TooManyRequests
+            || response.StatusCode == HttpStatusCode.ServiceUnavailable)
+        {
+            throw new WhisperUnavailableException(
+                $"voice-transcription returned transient status {(int)response.StatusCode}");
+        }
+
+        response.EnsureSuccessStatusCode();
+
+        var body = await response.Content.ReadFromJsonAsync<V1VoiceUpstreamResponse>(Json, ct);
+        var text = body?.Transcript ?? string.Empty;
+        return new TranscriptionResult(
+            AudioId: Guid.NewGuid().ToString("n"),
+            Outcome: TranscriptionOutcome.Transcribed,
+            Transcription: new WhisperTranscription(text, body?.Language ?? language, body?.Confidence),
+            Reason: null);
+    }
+
     private sealed record TranscribeUpstreamRequest(
         [property: JsonPropertyName("audio_base64")] string AudioBase64,
         [property: JsonPropertyName("file_name")] string FileName,
@@ -115,4 +187,30 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
     private sealed record TranscribeUpstreamResponse(
         [property: JsonPropertyName("text")] string? Text,
         [property: JsonPropertyName("language")] string? Language);
+
+    // Canonical /v1/voice/transcribe response (JEB-43): {transcript, confidence, language, duration_ms}.
+    private sealed record V1VoiceUpstreamResponse(
+        [property: JsonPropertyName("transcript")] string? Transcript,
+        [property: JsonPropertyName("confidence")] double? Confidence,
+        [property: JsonPropertyName("language")] string? Language,
+        [property: JsonPropertyName("duration_ms")] int? DurationMs);
+}
+
+/// <summary>
+/// Raised when the upstream voice service rejects the audio with a typed client
+/// error (413 too large / 415 unsupported format). The gateway voice slice maps
+/// this straight onto the same HTTP status so the reject surfaces before any
+/// request row is created — no Whisper, no draft.
+/// </summary>
+public sealed class VoiceAudioRejectedException : Exception
+{
+    public int StatusCode { get; }
+    public string Reason { get; }
+
+    public VoiceAudioRejectedException(int statusCode, string reason)
+        : base($"voice audio rejected ({statusCode}): {reason}")
+    {
+        StatusCode = statusCode;
+        Reason = reason;
+    }
 }

@@ -337,6 +337,13 @@ public class CreateRequestInput
     public required string ClientId { get; init; }
     public required string Description { get; init; }
     public string? Transcription { get; init; }
+
+    /// <summary>
+    /// S04 (JEB-43): STT confidence (0..1) captured at voice-create so the
+    /// read-back (H2) echoes the exact value the create returned. Null on the
+    /// typed-text path. Additive — never required.
+    /// </summary>
+    public double? TranscriptionConfidence { get; init; }
     public string? AudioUrl { get; init; }
     public IReadOnlyList<string> Photos { get; init; } = Array.Empty<string>();
     public string? TierId { get; init; }

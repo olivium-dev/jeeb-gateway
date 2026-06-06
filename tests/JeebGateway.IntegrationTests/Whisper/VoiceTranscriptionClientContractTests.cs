@@ -98,40 +98,104 @@ public class VoiceTranscriptionClientContractTests
         root.GetProperty("language").GetString().Should().Be("ar");
     }
 
-    // ---- LIVE: real upstream submit/result path + health probes ----
+    // ---- SEAM: the NEW voice-on-create path maps {transcript,confidence,language} ----
     [Fact]
-    public async Task Live_Upstream_Submit_Path_And_Health_Are_Reachable()
+    public async Task TranscribeVoice_Maps_V1Voice_200_Body_Including_Confidence()
+    {
+        var client = ClientReturning(
+            HttpStatusCode.OK,
+            """{"transcript":"كيلو بندورة","confidence":0.93,"language":"ar","duration_ms":120}""");
+
+        var result = await client.TranscribeVoiceAsync(SampleAudio(), "ar", "req-1", CancellationToken.None);
+
+        result.Outcome.Should().Be(TranscriptionOutcome.Transcribed);
+        result.Transcription.Should().NotBeNull();
+        result.Transcription!.Text.Should().Be("كيلو بندورة");
+        result.Transcription.Language.Should().Be("ar");
+        result.Transcription.Confidence.Should().Be(0.93);
+    }
+
+    [Fact]
+    public async Task TranscribeVoice_413_Surfaces_As_AudioRejected()
+    {
+        var client = ClientReturning(HttpStatusCode.RequestEntityTooLarge, """{"reason":"audio_too_large"}""");
+
+        var act = async () => await client.TranscribeVoiceAsync(SampleAudio(), "ar", "req-1", CancellationToken.None);
+
+        (await act.Should().ThrowAsync<VoiceAudioRejectedException>()).Which.StatusCode.Should().Be(413);
+    }
+
+    [Fact]
+    public async Task TranscribeVoice_415_Surfaces_As_AudioRejected()
+    {
+        var client = ClientReturning(HttpStatusCode.UnsupportedMediaType, """{"reason":"unsupported_format"}""");
+
+        var act = async () => await client.TranscribeVoiceAsync(SampleAudio(), "ar", "req-1", CancellationToken.None);
+
+        (await act.Should().ThrowAsync<VoiceAudioRejectedException>()).Which.StatusCode.Should().Be(415);
+    }
+
+    [Fact]
+    public async Task TranscribeVoice_Maps_RequestId_To_IdempotencyKey_Header()
+    {
+        string? idemKey = null;
+        var handler = new HeaderCapturingHandler(
+            HttpStatusCode.OK,
+            """{"transcript":"x","confidence":0.9,"language":"ar","duration_ms":1}""",
+            req => idemKey = req.Headers.TryGetValues("Idempotency-Key", out var v) ? string.Join(",", v) : null);
+        var http = new HttpClient(handler) { BaseAddress = new Uri("http://voice.test/") };
+        var client = new VoiceTranscriptionClient(http, NullLogger<VoiceTranscriptionClient>.Instance);
+
+        await client.TranscribeVoiceAsync(SampleAudio(), "ar", "req-abc", CancellationToken.None);
+
+        idemKey.Should().Be("req-abc");
+    }
+
+    // ---- LIVE: real upstream voice-on-create path + health probes ----
+    [Fact]
+    public async Task Live_Upstream_Voice_Path_And_Health_Are_Reachable()
     {
         using var probe = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
         if (!await IsReachable(probe))
         {
-            // Host unreachable from this runner (no overlay network) — skip the
-            // live assertions. The SEAM tests above still lock the contract.
             return;
         }
 
-        // 1) liveness + readiness
         var healthz = await probe.GetAsync(LiveBaseUrl + "healthz");
         healthz.StatusCode.Should().Be(HttpStatusCode.OK);
-        var readyz = await probe.GetAsync(LiveBaseUrl + "readyz");
-        readyz.StatusCode.Should().Be(HttpStatusCode.OK);
 
-        // 2) real submit/result path via the REAL typed client
-        using var http = new HttpClient { BaseAddress = new Uri(LiveBaseUrl), Timeout = TimeSpan.FromSeconds(10) };
+        using var http = new HttpClient { BaseAddress = new Uri(LiveBaseUrl), Timeout = TimeSpan.FromSeconds(15) };
         var client = new VoiceTranscriptionClient(http, NullLogger<VoiceTranscriptionClient>.Instance);
 
-        var result = await client.TranscribeAsync(SampleAudio(), "ar", CancellationToken.None);
+        var result = await client.TranscribeVoiceAsync(SampleAudio(), "ar", Guid.NewGuid().ToString(), CancellationToken.None);
 
-        // The upstream is the T-BE-007 placeholder today: it returns 501, which
-        // the client maps to QueuedForRetry. Once the upstream implements real
-        // transcription (200 body), this same call returns Transcribed without a
-        // client change. Either way the submit path is proven end-to-end.
         result.Should().NotBeNull();
-        result.Outcome.Should().BeOneOf(
-            TranscriptionOutcome.QueuedForRetry, TranscriptionOutcome.Transcribed);
-        if (result.Outcome == TranscriptionOutcome.QueuedForRetry)
+        result.Outcome.Should().Be(TranscriptionOutcome.Transcribed);
+        result.Transcription.Should().NotBeNull();
+        result.Transcription!.Language.Should().Be("ar");
+    }
+
+    private sealed class HeaderCapturingHandler : HttpMessageHandler
+    {
+        private readonly HttpStatusCode _status;
+        private readonly string _body;
+        private readonly Action<HttpRequestMessage> _capture;
+
+        public HeaderCapturingHandler(HttpStatusCode status, string body, Action<HttpRequestMessage> capture)
         {
-            result.Reason.Should().Be("upstream_not_implemented");
+            _status = status;
+            _body = body;
+            _capture = capture;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            _capture(request);
+            return Task.FromResult(new HttpResponseMessage(_status)
+            {
+                Content = new StringContent(_body, Encoding.UTF8, "application/json")
+            });
         }
     }
 

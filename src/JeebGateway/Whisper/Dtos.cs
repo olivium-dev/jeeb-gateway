@@ -5,7 +5,7 @@ public sealed record WhisperAudio(
     string FileName,
     string ContentType);
 
-public sealed record WhisperTranscription(string Text, string Language);
+public sealed record WhisperTranscription(string Text, string Language, double? Confidence = null);
 
 public enum TranscriptionOutcome
 {
