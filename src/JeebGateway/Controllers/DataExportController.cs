@@ -66,6 +66,10 @@ public class DataExportController : ControllerBase
         return Ok(ToResponse(record));
     }
 
+    // ADR-004 D1: public by design — the unguessable single-use download token IS the
+    // credential (capability URL); it is presented anonymously by the link recipient, not
+    // via a session bearer. Create (POST) and status (GET) above stay session-authed.
+    [Microsoft.AspNetCore.Authorization.AllowAnonymous]
     [HttpGet("{token}/download")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

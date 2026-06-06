@@ -40,6 +40,8 @@ namespace JeebGateway.Auth.OtpSignIn;
 [ApiController]
 [Route("v1/auth/otp")]
 [Produces("application/json", "application/problem+json")]
+// ADR-004 D1: public by design — OTP request/verify precede a session token.
+[Microsoft.AspNetCore.Authorization.AllowAnonymous]
 public sealed class AuthOtpController : ControllerBase
 {
     private readonly IServiceOTPClient _otpClient;

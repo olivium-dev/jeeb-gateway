@@ -38,6 +38,8 @@ namespace JeebGateway.Controllers;
 [ApiController]
 [Route("api/otp")]
 [Produces("application/json", "application/problem+json")]
+// ADR-004 D1: public by design — OTP send/validate precede a session token.
+[Microsoft.AspNetCore.Authorization.AllowAnonymous]
 public sealed class OtpController : ControllerBase
 {
     private readonly IServiceOTPClient _otpClient;

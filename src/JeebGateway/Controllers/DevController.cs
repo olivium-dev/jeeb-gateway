@@ -45,6 +45,8 @@ namespace JeebGateway.Controllers;
 [DevOnly]
 [Route("dev")]
 [Produces("application/json")]
+// ADR-004 D1: public by design — dev/test seed + data routes used by the :3040 console.
+[Microsoft.AspNetCore.Authorization.AllowAnonymous]
 public sealed class DevController : ControllerBase
 {
     private readonly ServiceUserManagementClient _userManagement;

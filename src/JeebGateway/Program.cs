@@ -213,11 +213,32 @@ builder.Services
 // is left DORMANT (non-fail-closed, reversible) but is referenced by NO route and is no
 // longer in the default policy. There is no role-switch ceremony; a KYC-upgraded user's
 // next gateway-minted session token carries their full available_roles (incl. jeeber).
+// IHttpContextAccessor is required by the FallbackPolicy handler below to read the
+// edge-injected X-User-Id header. Safe to register unconditionally (TryAdd).
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationHandler,
+    JeebGateway.Auth.GatewayAudienceHandler>();
+
 builder.Services.AddAuthorization(options =>
 {
     options.DefaultPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder(
             GatewayBearerScheme)
         .RequireAuthenticatedUser()
+        .Build();
+
+    // ADR-004 Directive 1 — apply the gateway-audience auth approach UNIFORMLY to
+    // every route. The FallbackPolicy governs every endpoint that carries NO
+    // authorization metadata (i.e. no [Authorize] and no [AllowAnonymous]); previously
+    // such endpoints were silently anonymous. It requires an identified caller: either
+    // a validated gateway-session bearer (aud=jeeb-clients) authenticated under the
+    // GatewayBearer scheme, OR the trusted edge X-User-Id header (the admin/edge path
+    // we must preserve). Endpoints public by design (token mint, OTP, /health*, swagger,
+    // dev/seed) opt out with [AllowAnonymous]. Routes with explicit [Authorize] keep
+    // running under the DefaultPolicy (GatewayBearer-only) so aud=user-management on a
+    // client route is still 401 (E4b / N5) — the fallback never weakens those.
+    options.FallbackPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder()
+        .AddAuthenticationSchemes(GatewayBearerScheme)
+        .AddRequirements(new JeebGateway.Auth.GatewayAudienceRequirement())
         .Build();
 });
 
@@ -1362,7 +1383,7 @@ app.MapControllers();
 // T-backend-050 — Prometheus scrape endpoint. Returns the OpenMetrics
 // snapshot for the configured MeterProvider (ASP.NET Core HTTP server,
 // HttpClient, and the Jeeb-owned RequestLatencyMetrics histogram).
-app.MapPrometheusScrapingEndpoint("/metrics");
+app.MapPrometheusScrapingEndpoint("/metrics").AllowAnonymous();
 
 // Health endpoints — three distinct surfaces.
 //
@@ -1382,16 +1403,16 @@ app.MapPrometheusScrapingEndpoint("/metrics");
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
     Predicate = _ => false // liveness: always 200 if process is up
-});
+}).AllowAnonymous();
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
 {
     Predicate = check => check.Tags.Contains("ready"),
     ResponseWriter = AggregateHealthResponseWriter.WriteAsync,
-});
+}).AllowAnonymous();
 app.MapHealthChecks("/health", new HealthCheckOptions
 {
     Predicate = _ => false, // liveness alias — never gate on downstreams
-});
+}).AllowAnonymous();
 // /health/aggregate — the JEB-67 / T-BE-031 AC2 dashboard surface, moved OFF
 // the /health liveness path. Runs every check and returns 200 when all Healthy
 // or 503 with a JSON body naming each failing service. External monitoring and
@@ -1402,7 +1423,7 @@ app.MapHealthChecks("/health/aggregate", new HealthCheckOptions
 {
     Predicate = _ => true,
     ResponseWriter = AggregateHealthResponseWriter.WriteAsync,
-});
+}).AllowAnonymous();
 
 app.Run();
 

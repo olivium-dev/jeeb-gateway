@@ -16,6 +16,10 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("tiers")]
+// ADR-004 D1: public by design — the public tier catalog the mobile app renders pre-login
+// on the request-creation screen (admin tier CRUD lives in the separate AdminTiersController,
+// which remains session/role-gated). Invariant: Get_Tiers_Does_Not_Require_Authentication.
+[Microsoft.AspNetCore.Authorization.AllowAnonymous]
 public class TiersController : ControllerBase
 {
     private readonly ITiersStore _store;
