@@ -55,17 +55,20 @@ public sealed class DevController : ControllerBase
     private readonly ILogger<DevController> _logger;
     private readonly JwtOptions _jwt;
     private readonly UmJwtOptions _umJwt;
+    private readonly IConfiguration _config;
 
     public DevController(
         ServiceUserManagementClient userManagement,
         ILogger<DevController> logger,
         IOptions<JwtOptions> jwt,
-        IOptions<UmJwtOptions> umJwt)
+        IOptions<UmJwtOptions> umJwt,
+        IConfiguration config)
     {
         _userManagement = userManagement;
         _logger = logger;
         _jwt = jwt.Value;
         _umJwt = umJwt.Value;
+        _config = config;
     }
 
     /// <summary>
@@ -91,7 +94,10 @@ public sealed class DevController : ControllerBase
             ? "(empty)"
             : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(k)))[..12].ToLowerInvariant();
 
-        string? issuer = null, audience = null, validatesUnderGwKey = "n/a", validatesUnderUmKey = "n/a";
+        // Candidate keys present in gateway config that MIGHT match UM's signer.
+        var jeebJwtKey = _config["JeebJwt:SigningKey"] ?? string.Empty;
+
+        string? issuer = null, audience = null, validatesUnderGwKey = "n/a", validatesUnderUmKey = "n/a", validatesUnderJeebJwtKey = "n/a";
         if (!string.IsNullOrEmpty(raw))
         {
             var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
@@ -102,6 +108,7 @@ public sealed class DevController : ControllerBase
                 audience = jwt.Audiences.FirstOrDefault();
                 validatesUnderGwKey = TryValidate(handler, raw, gwKey, jwt.Issuer, audience);
                 validatesUnderUmKey = TryValidate(handler, raw, umKey, jwt.Issuer, audience);
+                validatesUnderJeebJwtKey = TryValidate(handler, raw, jeebJwtKey, jwt.Issuer, audience);
             }
         }
 
@@ -111,11 +118,13 @@ public sealed class DevController : ControllerBase
             tokenAudience = audience,
             gatewayKeyFingerprint = Fp(gwKey),
             umKeyFingerprint = Fp(umKey),
+            jeebJwtKeyFingerprint = Fp(jeebJwtKey),
             umKeySource = string.IsNullOrWhiteSpace(_umJwt.SigningKey) ? "fallback:Jwt:SigningKey" : "UmJwt:SigningKey",
             umConfigIssuer = _umJwt.Issuer,
             umConfigAudience = _umJwt.Audience,
             signatureValidatesUnderGatewayKey = validatesUnderGwKey,
             signatureValidatesUnderUmKey = validatesUnderUmKey,
+            signatureValidatesUnderJeebJwtKey = validatesUnderJeebJwtKey,
         });
     }
 
