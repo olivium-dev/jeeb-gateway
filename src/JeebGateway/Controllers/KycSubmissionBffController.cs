@@ -95,25 +95,63 @@ public sealed class KycSubmissionBffController : ControllerBase
         //    the raw blob. When contract-signing is not yet deployed (flag off),
         //    derive a deterministic gateway-side proof ref so the ToS-acceptance
         //    record still references a stable, non-PII handle.
+        //
+        //    CEREMONY (the contract-signing primitive is template → contract →
+        //    signature, NOT a one-shot sign-by-template). The Jeeb ToS template
+        //    declares a single accepting party with role_key="client" (see the
+        //    seeded jeeb-client-terms-and-conditions-v1). So we:
+        //      a) CreateContract(template_id, parties:[{role_key:"client",
+        //         party_ref:userId}], actor:{type:"PARTY", ref:userId}) → contractId
+        //      b) Sign(contractId, role_key:"client", party_ref:userId, proofRef)
+        //    Signing a *template id* as if it were a *contract id* (the old bug)
+        //    yielded an upstream 404 CONTRACT_NOT_FOUND → gateway 502.
         string? signatureProofRef;
+        var derivedProofRef = DeriveProofRef(body.SignatureBlob!);
         if (_flags.CurrentValue.ContractSigning && !string.IsNullOrWhiteSpace(body.TemplateId))
         {
             try
             {
-                var signature = await _contractSigning.SignAsync(
-                    body.TemplateId!,
-                    new SignRequest
+                var contract = await _contractSigning.CreateContractAsync(
+                    new CreateContractRequest
                     {
-                        RoleKey = "acceptor",
-                        PartyRef = userId,
-                        SignatureProofRef = DeriveProofRef(body.SignatureBlob!),
+                        TemplateId = body.TemplateId!,
+                        Parties = new List<ContractParty>
+                        {
+                            new() { RoleKey = "client", PartyRef = userId },
+                        },
+                        Actor = new ActorInfo
+                        {
+                            Type = "PARTY",
+                            Ref = userId,
+                            Reason = "jeeb_tos_acceptance",
+                        },
                     },
                     ct);
-                signatureProofRef = signature.SignatureProofRef ?? DeriveProofRef(body.SignatureBlob!);
+
+                if (string.IsNullOrWhiteSpace(contract.ContractId))
+                {
+                    _log.LogWarning("contract-signing CreateContract returned no contract_id for user {UserId}", userId);
+                    return Problem(
+                        type: "https://jeeb.dev/errors/upstream-unavailable",
+                        title: "Signature ceremony failed",
+                        detail: "The contract-signing upstream did not return a contract id.",
+                        statusCode: StatusCodes.Status502BadGateway);
+                }
+
+                var signature = await _contractSigning.SignAsync(
+                    contract.ContractId!,
+                    new SignRequest
+                    {
+                        RoleKey = "client",
+                        PartyRef = userId,
+                        SignatureProofRef = derivedProofRef,
+                    },
+                    ct);
+                signatureProofRef = signature.SignatureProofRef ?? derivedProofRef;
             }
             catch (HttpRequestException ex)
             {
-                _log.LogWarning(ex, "contract-signing SignAsync failed for user {UserId}", userId);
+                _log.LogWarning(ex, "contract-signing ceremony failed for user {UserId}", userId);
                 return Problem(
                     type: "https://jeeb.dev/errors/upstream-unavailable",
                     title: "Signature ceremony failed",
@@ -123,7 +161,7 @@ public sealed class KycSubmissionBffController : ControllerBase
         }
         else
         {
-            signatureProofRef = DeriveProofRef(body.SignatureBlob!);
+            signatureProofRef = derivedProofRef;
         }
 
         // 2) Stamp the KYC ToS-acceptance on the owning kyc-service.
@@ -190,6 +228,13 @@ public sealed class KycSubmissionBffController : ControllerBase
                 detail: $"the following document refs are required: {string.Join(", ", missing)}.",
                 statusCode: StatusCodes.Status400BadRequest);
         }
+
+        // S03 N2 / N3 — field-level validation (JEB-40 AC6 / AC8). These are the
+        // gateway's input-contract checks; the domain still re-validates. We return
+        // a field-scoped RFC 7807 ProblemDetails (which field + which rule) BEFORE
+        // touching the owning kyc-service.
+        var fieldError = await ValidateSubmitFieldsAsync(body, ct);
+        if (fieldError is not null) return fieldError;
 
         var idempotencyKey = ResolveIdempotencyKey();
 
@@ -291,6 +336,108 @@ public sealed class KycSubmissionBffController : ControllerBase
         title: "KYC upstream unavailable",
         detail: "The KYC service is not enabled.",
         statusCode: StatusCodes.Status503ServiceUnavailable);
+
+    // S03 N2 / N3 input-contract validation (JEB-40 AC6 / AC8). Returns a
+    // field-scoped 400 ProblemDetails on the first violation, or null when valid.
+    private static readonly System.Text.RegularExpressions.Regex NationalIdRegex =
+        new(@"^\d{12}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static readonly HashSet<string> AllowedIdTypes =
+        new(StringComparer.OrdinalIgnoreCase) { "national_id", "passport", "residency_permit" };
+
+    private async Task<IActionResult?> ValidateSubmitFieldsAsync(KycSubmitJsonBody body, CancellationToken ct)
+    {
+        // AC6 — id_type must be one of the supported enum values.
+        if (!string.IsNullOrWhiteSpace(body.IdType) && !AllowedIdTypes.Contains(body.IdType!))
+        {
+            return FieldProblem("id_type", $"id_type '{body.IdType}' is not a supported value (expected one of: {string.Join(", ", AllowedIdTypes)}).");
+        }
+
+        // AC6 — id_number must be exactly 12 digits (^\d{12}$). Required for national_id.
+        if (string.IsNullOrWhiteSpace(body.IdNumber))
+        {
+            return FieldProblem("id_number", "id_number is required.");
+        }
+        if (!NationalIdRegex.IsMatch(body.IdNumber!))
+        {
+            return FieldProblem("id_number", "id_number must be exactly 12 digits (^\\d{12}$).");
+        }
+
+        // AC8 — tos_accepted_version must cross-link to a known ToS template
+        // version (no dangling/latent contract reference, BR-3). Resolved against
+        // the live contract-signing catalog so the rule is data-true, not a
+        // hardcoded literal. When contract-signing is unavailable the BFF does NOT
+        // fail closed on this optional cross-link (it lets the domain decide).
+        if (!string.IsNullOrWhiteSpace(body.TosAcceptedVersion) && _flags.CurrentValue.ContractSigning)
+        {
+            string? knownVersion = null;
+            try
+            {
+                var catalog = await _contractSigning.ListTemplatesAsync(ct);
+                knownVersion = ResolveKnownTosVersion(catalog);
+            }
+            catch (HttpRequestException ex)
+            {
+                _log.LogWarning(ex, "contract-signing catalog read failed during ToS cross-link validation");
+                // Do not fail closed on a transient catalog read — defer to the domain.
+            }
+
+            if (knownVersion is not null
+                && !string.Equals(body.TosAcceptedVersion, knownVersion, StringComparison.OrdinalIgnoreCase))
+            {
+                return FieldProblem(
+                    "tos_accepted_version",
+                    $"tos_accepted_version '{body.TosAcceptedVersion}' does not resolve to a known ToS template version.");
+            }
+        }
+
+        return null;
+    }
+
+    // Resolves the version marker ("v1") of the Jeeb client ToS template from the
+    // contract-signing catalog, by name. Mirrors the H4 resolution so submit and
+    // template-fetch agree on the same source of truth.
+    private const string JeebTosTemplateName = "jeeb-client-terms-and-conditions-v1";
+
+    private static string? ResolveKnownTosVersion(JsonElement catalog)
+    {
+        if (catalog.ValueKind != JsonValueKind.Object
+            || !catalog.TryGetProperty("items", out var items)
+            || items.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var item in items.EnumerateArray())
+        {
+            var name = item.ValueKind == JsonValueKind.Object
+                && item.TryGetProperty("name", out var n)
+                && n.ValueKind == JsonValueKind.String
+                    ? n.GetString()
+                    : null;
+            if (string.Equals(name, JeebTosTemplateName, StringComparison.OrdinalIgnoreCase))
+            {
+                // Trailing "-vN" segment is the stable version marker.
+                var idx = name!.LastIndexOf("-v", StringComparison.OrdinalIgnoreCase);
+                return idx >= 0 ? name[(idx + 1)..] : name;
+            }
+        }
+
+        return null;
+    }
+
+    private IActionResult FieldProblem(string field, string detail)
+    {
+        var problem = new ProblemDetails
+        {
+            Type = "https://jeeb.dev/errors/validation",
+            Title = "Invalid submission field",
+            Detail = detail,
+            Status = StatusCodes.Status400BadRequest,
+        };
+        problem.Extensions["field"] = field;
+        return BadRequest(problem);
+    }
 
     private string ResolveIdempotencyKey()
     {
