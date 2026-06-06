@@ -1,8 +1,12 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Security.Cryptography;
 using System.Text;
 using JeebGateway.Security;
 using JeebGateway.service.ServiceUserManagement;
+using JeebGateway.Tokens;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 using UserManagementApiException = JeebGateway.service.ServiceUserManagement.ApiException;
 
 namespace JeebGateway.Controllers;
@@ -49,13 +53,94 @@ public sealed class DevController : ControllerBase
 {
     private readonly ServiceUserManagementClient _userManagement;
     private readonly ILogger<DevController> _logger;
+    private readonly JwtOptions _jwt;
+    private readonly UmJwtOptions _umJwt;
 
     public DevController(
         ServiceUserManagementClient userManagement,
-        ILogger<DevController> logger)
+        ILogger<DevController> logger,
+        IOptions<JwtOptions> jwt,
+        IOptions<UmJwtOptions> umJwt)
     {
         _userManagement = userManagement;
         _logger = logger;
+        _jwt = jwt.Value;
+        _umJwt = umJwt.Value;
+    }
+
+    /// <summary>
+    /// TEMPORARY H-B5 diagnostic (dev-gated, 404 in prod). Reports whether the
+    /// inbound bearer validates under the gateway and UM signing keys, and emits
+    /// NON-SECRET SHA-256 fingerprints of each effective key so we can confirm the
+    /// live key relationship without leaking any secret. No token is minted; the
+    /// raw key bytes never leave the process.
+    /// </summary>
+    [HttpGet("auth/jwt-keycheck")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public IActionResult JwtKeyCheck()
+    {
+        var auth = Request.Headers.Authorization.ToString();
+        var raw = auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+            ? auth["Bearer ".Length..].Trim()
+            : string.Empty;
+
+        var gwKey = _jwt.SigningKey ?? string.Empty;
+        var umKey = string.IsNullOrWhiteSpace(_umJwt.SigningKey) ? gwKey : _umJwt.SigningKey;
+
+        string Fp(string k) => string.IsNullOrEmpty(k)
+            ? "(empty)"
+            : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(k)))[..12].ToLowerInvariant();
+
+        string? issuer = null, audience = null, validatesUnderGwKey = "n/a", validatesUnderUmKey = "n/a";
+        if (!string.IsNullOrEmpty(raw))
+        {
+            var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
+            if (handler.CanReadToken(raw))
+            {
+                var jwt = handler.ReadJwtToken(raw);
+                issuer = jwt.Issuer;
+                audience = jwt.Audiences.FirstOrDefault();
+                validatesUnderGwKey = TryValidate(handler, raw, gwKey, jwt.Issuer, audience);
+                validatesUnderUmKey = TryValidate(handler, raw, umKey, jwt.Issuer, audience);
+            }
+        }
+
+        return Ok(new
+        {
+            tokenIssuer = issuer,
+            tokenAudience = audience,
+            gatewayKeyFingerprint = Fp(gwKey),
+            umKeyFingerprint = Fp(umKey),
+            umKeySource = string.IsNullOrWhiteSpace(_umJwt.SigningKey) ? "fallback:Jwt:SigningKey" : "UmJwt:SigningKey",
+            umConfigIssuer = _umJwt.Issuer,
+            umConfigAudience = _umJwt.Audience,
+            signatureValidatesUnderGatewayKey = validatesUnderGwKey,
+            signatureValidatesUnderUmKey = validatesUnderUmKey,
+        });
+    }
+
+    private static string TryValidate(JwtSecurityTokenHandler handler, string raw, string key, string? iss, string? aud)
+    {
+        if (string.IsNullOrEmpty(key)) return "no-key";
+        try
+        {
+            handler.ValidateToken(raw, new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidIssuer = iss,
+                ValidateAudience = true,
+                ValidAudience = aud,
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key)),
+                ValidateLifetime = false,
+                ClockSkew = TimeSpan.FromSeconds(30),
+            }, out _);
+            return "valid";
+        }
+        catch (Exception ex)
+        {
+            return "invalid:" + ex.GetType().Name;
+        }
     }
 
     /// <summary>
