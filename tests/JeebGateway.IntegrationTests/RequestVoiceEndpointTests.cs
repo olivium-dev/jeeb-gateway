@@ -171,8 +171,13 @@ public class RequestVoiceEndpointTests : IClassFixture<WebApplicationFactory<Pro
     }
 
     private sealed record VoiceResp(
-        string RequestId, string Id, string Status,
-        string? Transcription, double? TranscriptionConfidence, string Language, string? TierId);
+        [property: System.Text.Json.Serialization.JsonPropertyName("requestId")] string RequestId,
+        [property: System.Text.Json.Serialization.JsonPropertyName("id")] string Id,
+        [property: System.Text.Json.Serialization.JsonPropertyName("status")] string Status,
+        [property: System.Text.Json.Serialization.JsonPropertyName("transcription")] string? Transcription,
+        [property: System.Text.Json.Serialization.JsonPropertyName("transcription_confidence")] double? TranscriptionConfidence,
+        [property: System.Text.Json.Serialization.JsonPropertyName("language")] string Language,
+        [property: System.Text.Json.Serialization.JsonPropertyName("tierId")] string? TierId);
 
     /// <summary>Deterministic upstream stub — returns a fixed transcript + confidence.</summary>
     private sealed class StubVoiceClient : IVoiceTranscriptionClient

@@ -316,11 +316,22 @@ public sealed class VoiceOrderForm
 /// <summary>S04 voice-create response contract.</summary>
 public sealed class VoiceRequestResponse
 {
+    // The S04 contract pins snake_case for the voice fields (matching the FastAPI
+    // upstream convention). transcription_confidence needs the explicit snake_case
+    // name so the documented contract field is present (default web serialisation
+    // would emit transcriptionConfidence).
+    [System.Text.Json.Serialization.JsonPropertyName("requestId")]
     public required string RequestId { get; init; }
+    [System.Text.Json.Serialization.JsonPropertyName("id")]
     public required string Id { get; init; }
+    [System.Text.Json.Serialization.JsonPropertyName("status")]
     public required string Status { get; init; }
+    [System.Text.Json.Serialization.JsonPropertyName("transcription")]
     public string? Transcription { get; init; }
+    [System.Text.Json.Serialization.JsonPropertyName("transcription_confidence")]
     public double? TranscriptionConfidence { get; init; }
+    [System.Text.Json.Serialization.JsonPropertyName("language")]
     public required string Language { get; init; }
+    [System.Text.Json.Serialization.JsonPropertyName("tierId")]
     public string? TierId { get; init; }
 }
