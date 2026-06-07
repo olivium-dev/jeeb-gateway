@@ -82,6 +82,21 @@ on:
       cdn_base_url:                { description: 'Services__Cdn__BaseUrl — cdn-service signed-PUT broker (live swarm host)', required: true, default: 'http://192.168.2.50:10072' }
       use_upstream_kyc:            { description: 'FeatureFlags__UseUpstream__Kyc — route KYC BFF to kyc-service (true) or fail-closed 503 (false)', required: true, default: 'true' }
       use_upstream_cdn:            { description: 'FeatureFlags__UseUpstream__Cdn — route CDN broker to cdn-service', required: true, default: 'true' }
+      # S04 / Track C — REAL OpenAI Whisper STT seam. The gateway selects the real
+      # WhisperClient ONLY when Whisper__FakeTranscribe=false AND Whisper__ApiKey is
+      # present; otherwise it uses the network-free FakeWhisperClient. The OpenAI key
+      # is NEVER an input or committed value — it is the GitHub secret OPENAI_API_KEY,
+      # injected below as Whisper__ApiKey. Set whisper_fake='false' to arm real STT
+      # (requires the OPENAI_API_KEY secret to be set on this repo). Default 'true'
+      # keeps the deterministic fake so a no-arg deploy never depends on the key.
+      whisper_fake:
+        description: 'Whisper__FakeTranscribe. true (default) = deterministic fake STT; false = REAL OpenAI Whisper (requires OPENAI_API_KEY secret).'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
       # DEV-ONLY seed/inspect surface (/dev/*). This input is the ONLY supported way to
       # toggle Features__DevEndpoints__Enabled on the running gateway — never set it via a
       # manual `docker service update --env-add/--env-rm` from an operator shell, and never
@@ -259,6 +274,8 @@ jobs:
               --env-add Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
               --env-add FeatureFlags__UseUpstream__Kyc='${{ inputs.use_upstream_kyc }}' \
               --env-add FeatureFlags__UseUpstream__Cdn='${{ inputs.use_upstream_cdn }}' \
+              --env-add Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
+              --env-add Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               $DEV_FLAG_ARG \
               $SWAGGER_FLAG_ARG \
               "\$SVC"
@@ -291,6 +308,8 @@ jobs:
               --env Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
               --env FeatureFlags__UseUpstream__Kyc='${{ inputs.use_upstream_kyc }}' \
               --env FeatureFlags__UseUpstream__Cdn='${{ inputs.use_upstream_cdn }}' \
+              --env Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
+              --env Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               --reserve-memory 256M \
               '$TAG'
           fi

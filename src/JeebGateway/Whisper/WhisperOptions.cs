@@ -15,6 +15,19 @@ public sealed class WhisperOptions
 
     public string? ApiKey { get; set; }
 
+    /// <summary>
+    /// Dev/CI escape hatch. When <c>true</c>, the gateway uses the deterministic
+    /// <see cref="FakeWhisperClient"/> instead of calling the real OpenAI Whisper API.
+    /// Default <c>false</c> = REAL STT. Bound from config key <c>Whisper:FakeTranscribe</c>
+    /// and additionally honored from the flat env var <c>WHISPER_FAKE_TRANSCRIBE</c>
+    /// (normalized in Program.cs so the owner's named lever works as written).
+    /// Note: if <see cref="FakeTranscribe"/> is <c>false</c> but no <see cref="ApiKey"/>
+    /// is present, the gateway auto-falls-back to the fake client (so local/CI runs
+    /// without an OpenAI key never hit the network) and logs a warning. The real
+    /// path activates only when FakeTranscribe=false AND ApiKey is non-empty.
+    /// </summary>
+    public bool FakeTranscribe { get; set; }
+
     /// <summary>Per-attempt timeout. AC: 10 seconds.</summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(10);
 
