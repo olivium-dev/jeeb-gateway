@@ -45,11 +45,19 @@ public static class Capabilities
     public const string RequestVoiceCreate = "request.voice.create";
     public const string DeliveryTrackOwn = "delivery.track.own";      // STATE
     public const string MatchingRun = "matching.run";
-    public const string OfferAccept = "offer.accept";                 // CLAIM; BR-1/BR-10/status = STATE
 
     // ── D. Jeeber-only {jeeber} ───────────────────────────────────────────────────────
     public const string AvailabilityToggle = "availability.toggle";
     public const string OfferSubmit = "offer.submit";
+
+    // JEB-1509: accepting an offer is the JEEBER committing to a delivery the offer was
+    // extended to (offer.JeeberId == caller). This is a distinct {jeeber} capability — NOT
+    // the dead client-accepts-bid model the pre-cleanup map keyed `offer.accept -> {client}`.
+    // OffersController.Accept now declares THIS capability. The runtime allowed user type is
+    // UNCHANGED (was OfferSubmit {jeeber}, now OfferAccept {jeeber}) — a pure no-op rename
+    // that makes the route's intent (accept, not submit) explicit. BR-1/BR-10/status = STATE
+    // and stay in the offer/delivery service.
+    public const string OfferAccept = "offer.accept";                // CLAIM {jeeber}; BR-1/BR-10/status = STATE
     public const string OfferEditOwn = "offer.edit.own";              // STATE
     public const string OfferWithdraw = "offer.withdraw";            // STATE
     public const string DeliveryGpsStream = "delivery.gps.stream";
@@ -92,8 +100,23 @@ public static class Capabilities
     public const string FinanceRead = "finance.read";
     public const string WalletManage = "wallet.manage";
 
+    // JEB-1509: a FLEET-WIDE push broadcast is an operator action. TIGHTENING — pre-cleanup the
+    // broadcast route carried only the L1 fallback (any identified caller). Now {admin}, authorized
+    // purely from the 'admin' role claim a super-login token carries. Self-scoped / device-targeted
+    // sends remain notification.prefs.self (§B), NOT this capability.
+    public const string PushBroadcast = "push.broadcast";
+
     // ── L. KYC submission {client, jeeber} ─────────────────────────────────────────────
     public const string KycSubmitSelf = "kyc.submit.self";
+
+    // ── L2. Contract-signing (JEB-1509) ────────────────────────────────────────────────
+    // Authoring contract templates and instantiating contracts are operator actions.
+    // TIGHTENING — pre-cleanup these writes carried only the L1 fallback (class-level
+    // [PublicEndpoint] => any identified caller). Now {admin}. Template/contract READS stay
+    // L2-public ([PublicEndpoint], L1 fallback unchanged).
+    public const string ContractTemplateManage = "contract.template.manage"; // {admin}: RegisterTemplate + CreateContract
+    // Signing a contract is the END-USER accepting Terms-of-Service. {client, jeeber}.
+    public const string ContractSign = "contract.sign";                       // {client, jeeber}
 
     // ── M. Legacy UserController — admin/internal ──────────────────────────────────────
     public const string UsersAdminManage = "users.admin.manage";      // DeleteByEmails, payment-auth-token

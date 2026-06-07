@@ -28,13 +28,14 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("contract-signing")]
-// ADR-005 L2 §A: contract-template/contract READS are L2-public; the writes (register template / create
-// contract / sign) carry NO ADR-specified L2 user-type — today they rely solely on the L1 fallback
-// (identified caller, preserved). Class-level [PublicEndpoint] opts the whole controller out of L2 (L1
-// auth unchanged), behaviour-preserving and mirroring KycBffController's §A treatment. The ToS-sign
-// ceremony is driven by the KycBff/KycSubmissionBff family (already kyc.submit.self); flagged to
-// TL/PO/Domain-Architect to confirm whether RegisterTemplate should be {admin} (one-line override).
-[PublicEndpoint("Contract template/contract reads + L1-only writes — ADR-005 §A; L1 fallback preserved.")]
+// ADR-005 L2 / JEB-1509: per-action L2 authorization (NO blanket class-level [PublicEndpoint]).
+//   READS  (ListTemplates, GetTemplate, GetContract) stay L2-public ([PublicEndpoint], L1 unchanged).
+//   WRITES tighten from the old L1-only fallback to typed L2:
+//     RegisterTemplate + CreateContract -> contract.template.manage {admin} (operator authoring).
+//     Sign -> contract.sign {client, jeeber} (end-user ToS acceptance).
+// Admin is authorized purely from the 'admin' role claim a super-login token carries (no separate
+// scheme). The KycBff/KycSubmissionBff ToS-sign ceremony calls the upstream client server-side and is
+// unaffected (it is gated by kyc.submit.self on its own route).
 public class ContractSigningController : ControllerBase
 {
     private const int MaxIdLength = 256;
@@ -56,8 +57,10 @@ public class ContractSigningController : ControllerBase
     /// versioned Jeeb Terms-of-Service template (JEB-40 / JEB-41).
     /// </summary>
     [HttpPost("templates")]
+    [RequireCapability(Capabilities.ContractTemplateManage)] // JEB-1509: {admin} (TIGHTENING)
     [ProducesResponseType(typeof(ContractTemplate), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> RegisterTemplate(
         [FromBody] RegisterTemplateRequest request,
@@ -106,6 +109,7 @@ public class ContractSigningController : ControllerBase
     /// <c>/v1/templates</c> collection path).
     /// </summary>
     [HttpGet("templates/list")]
+    [PublicEndpoint("Contract-template catalog read — ADR-005 §A L2-public; L1 fallback preserved.")]
     [ProducesResponseType(typeof(JsonElement), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> ListTemplates(CancellationToken ct = default)
@@ -121,6 +125,7 @@ public class ContractSigningController : ControllerBase
     /// <c>GET /v1/templates/{templateId}</c>.
     /// </summary>
     [HttpGet("templates/{templateId}")]
+    [PublicEndpoint("Contract-template read — ADR-005 §A L2-public; L1 fallback preserved.")]
     [ProducesResponseType(typeof(ContractTemplate), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
@@ -138,8 +143,10 @@ public class ContractSigningController : ControllerBase
     /// <c>POST /v1/contracts</c>.
     /// </summary>
     [HttpPost("contracts")]
+    [RequireCapability(Capabilities.ContractTemplateManage)] // JEB-1509: {admin} (TIGHTENING)
     [ProducesResponseType(typeof(Contract), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> CreateContract(
         [FromBody] CreateContractRequest request,
@@ -172,6 +179,7 @@ public class ContractSigningController : ControllerBase
     /// <c>GET /v1/contracts/{contractId}</c>.
     /// </summary>
     [HttpGet("contracts/{contractId}")]
+    [PublicEndpoint("Contract read — ADR-005 §A L2-public; L1 fallback preserved.")]
     [ProducesResponseType(typeof(Contract), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
@@ -190,8 +198,10 @@ public class ContractSigningController : ControllerBase
     /// acceptance seam (JEB-41).
     /// </summary>
     [HttpPost("contracts/{contractId}/signatures")]
+    [RequireCapability(Capabilities.ContractSign)] // JEB-1509: {client, jeeber} end-user ToS acceptance
     [ProducesResponseType(typeof(Signature), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Sign(
         string contractId,

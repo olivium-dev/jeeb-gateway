@@ -304,11 +304,12 @@ namespace JeebGateway.Controllers
         /// <response code="422">Validation error</response>
         /// <response code="500">Internal server error</response>
         [HttpPost("broadcast")]
-        // ADR-005 L2: broadcast carried NO auth attribute today (L1 fallback only). Behaviour-preserving
-        // = any-authenticated. NOTE: a fleet-wide broadcast is arguably {admin}; the ADR does not
-        // enumerate push at L2, so this is annotated participant to avoid silently changing the user type.
-        // Flagged to TL/PO for a one-line override to an admin cap if intended.
-        [RequireCapability(Capabilities.NotificationPrefsSelf)]
+        [Authorize]
+        // ADR-005 L2 / JEB-1509: a FLEET-WIDE broadcast is an operator action — TIGHTENED to
+        // {admin} (push.broadcast). Pre-cleanup it carried only the L1 fallback (any identified
+        // caller). Self-scoped/device-targeted sends stay notification.prefs.self (§B). Admin is
+        // authorized purely from the 'admin' role claim a super-login token carries.
+        [RequireCapability(Capabilities.PushBroadcast)]
         [ProducesResponseType(typeof(SentPayloadResponse), StatusCodes.Status201Created)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
