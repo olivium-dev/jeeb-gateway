@@ -1212,13 +1212,42 @@ builder.Services.AddSingleton<JeebGateway.Calls.IMaskedCallService, JeebGateway.
 // HttpClient.Timeout is set to Infinite so the service's cancellation policy is authoritative.
 // Retry with exponential backoff (3 attempts, 1s/2s/4s), circuit breaker (5 failures),
 // secondary fallback provider, and health check integration.
-builder.Services.Configure<WhisperOptions>(builder.Configuration.GetSection(WhisperOptions.SectionName));
-builder.Services.AddHttpClient<IWhisperClient, WhisperClient>((sp, http) =>
+// Honor the owner's flat lever name WHISPER_FAKE_TRANSCRIBE in addition to the
+// section-based key Whisper:FakeTranscribe. .NET's default env provider only maps
+// double-underscore keys (Whisper__FakeTranscribe), so we explicitly fold the flat
+// name in here when present. Section/Whisper__ keys still win if both are set.
+var whisperFakeFlat = Environment.GetEnvironmentVariable("WHISPER_FAKE_TRANSCRIBE");
+if (!string.IsNullOrWhiteSpace(whisperFakeFlat)
+    && string.IsNullOrWhiteSpace(builder.Configuration["Whisper:FakeTranscribe"]))
 {
-    var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<WhisperOptions>>().Value;
-    http.BaseAddress = new Uri(opts.BaseUrl.TrimEnd('/') + "/");
-    http.Timeout = Timeout.InfiniteTimeSpan;
-});
+    builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        ["Whisper:FakeTranscribe"] = whisperFakeFlat
+    });
+}
+
+builder.Services.Configure<WhisperOptions>(builder.Configuration.GetSection(WhisperOptions.SectionName));
+
+// STT seam (Track C): select the REAL OpenAI Whisper client when STT is enabled for
+// real (FakeTranscribe=false) AND an API key is present; otherwise fall back to the
+// network-free FakeWhisperClient. The real WhisperClient is never deleted — it remains
+// the production path and is the only branch that opens an HttpClient to OpenAI.
+var whisperOpts = builder.Configuration.GetSection(WhisperOptions.SectionName).Get<WhisperOptions>()
+                  ?? new WhisperOptions();
+var useRealWhisper = !whisperOpts.FakeTranscribe && !string.IsNullOrWhiteSpace(whisperOpts.ApiKey);
+if (useRealWhisper)
+{
+    builder.Services.AddHttpClient<IWhisperClient, WhisperClient>((sp, http) =>
+    {
+        var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<WhisperOptions>>().Value;
+        http.BaseAddress = new Uri(opts.BaseUrl.TrimEnd('/') + "/");
+        http.Timeout = Timeout.InfiniteTimeSpan;
+    });
+}
+else
+{
+    builder.Services.AddSingleton<IWhisperClient, FakeWhisperClient>();
+}
 builder.Services.AddSingleton<IWhisperCircuitBreaker, WhisperCircuitBreaker>();
 builder.Services.AddSingleton<IAudioStore, InMemoryAudioStore>();
 builder.Services.AddSingleton<ITranscriptionFallbackQueue, InMemoryTranscriptionFallbackQueue>();
@@ -1288,6 +1317,25 @@ if (stateServiceWired)
 // ---------------------------------------------------------------------------
 
 var app = builder.Build();
+
+// STT seam visibility (Track C): make the active Whisper path obvious in startup logs.
+if (useRealWhisper)
+{
+    app.Logger.LogInformation(
+        "Whisper STT: REAL OpenAI client active (model={Model}, lang={Language}).",
+        whisperOpts.Model, whisperOpts.Language);
+}
+else if (whisperOpts.FakeTranscribe)
+{
+    app.Logger.LogInformation(
+        "Whisper STT: FAKE client active (Whisper:FakeTranscribe=true). No external calls.");
+}
+else
+{
+    app.Logger.LogWarning(
+        "Whisper STT: FAKE client active because no Whisper:ApiKey is configured "
+        + "while FakeTranscribe=false. Set Whisper__ApiKey to enable REAL transcription.");
+}
 
 // PR #32 review B2 — must run FIRST so every downstream middleware (rate
 // limiter, OTP per-IP partition, auth-correlation logs) sees the real client

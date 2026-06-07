@@ -128,6 +128,74 @@ public class DualRoleBffTests
             .Should().BeEquivalentTo(new[] { "client", "jeeber" });
     }
 
+    /// <summary>
+    /// S02 H-A3 regression lock. A single-role (client-only) identity MUST surface exactly
+    /// ["client"] from GET /v1/users/me — the gateway NEVER inflates the available_roles set
+    /// it received in the bearer's per-role claims. This is the assertion the live S02 H-A3
+    /// red exercised: the red was contaminated UM DATA on a reused phone (the identity carried
+    /// jeeber from a prior in-scenario KYC upgrade), NOT a gateway role-inflation bug. This
+    /// test pins the no-inflation contract so a future regression that ADDS a role is caught.
+    /// </summary>
+    [Fact]
+    public async Task FB_GetMe_SingleRoleClient_Returns_Only_Client()
+    {
+        var um = new StubUm();
+        using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
+        var http = factory.CreateClient();
+        // Bearer carries ONLY the client role — exactly the OTP-login mint for a
+        // never-KYC'd customer identity (Sami's intended fixture state).
+        http.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", MintGatewayBearer(factory, "sami-1", Roles.Client));
+
+        var resp = await http.GetAsync("/v1/users/me");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        doc.RootElement.GetProperty("userId").GetString().Should().Be("sami-1");
+        doc.RootElement.GetProperty("active_role").GetString().Should().Be("client");
+        doc.RootElement.GetProperty("available_roles").EnumerateArray().Select(e => e.GetString())
+            .Should().BeEquivalentTo(new[] { "client" },
+                "a client-only identity MUST surface exactly [client] — the gateway never adds jeeber");
+    }
+
+    /// <summary>
+    /// S02 H-A2 regression lock (companion to FC_Verify_NewIdentity_Defaults_To_Client).
+    /// When UM's phone find-or-create returns a single-role client identity (the intended
+    /// state for a never-KYC'd phone like Sami's), OTP verify MUST surface exactly ["client"]
+    /// — proving the gateway relays UM's available_roles verbatim and never injects jeeber.
+    /// The live H-A2 red was UM holding [client,jeeber] for the reused phone, not the gateway
+    /// inflating the set; this test guards against the gateway ever doing the latter.
+    /// </summary>
+    [Fact]
+    public async Task FC_Verify_SingleRoleClient_Returns_Only_Client()
+    {
+        var otp = new StubOtp();
+        var um = new StubUm
+        {
+            FindOrCreate = new PhoneFindOrCreateResult(
+                UserId: "sami-1",
+                IsNew: false,
+                AvailableRoles: new[] { Roles.Client },
+                ActiveRole: Roles.Client)
+        };
+        using var factory = MakeFactory(otp, um, umEnabled: true);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsync("/v1/auth/otp/verify",
+            Json("""{ "phone": "+9613000391", "code": "1234" }"""));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var user = doc.RootElement.GetProperty("user");
+        user.GetProperty("userId").GetString().Should().Be("sami-1");
+        user.GetProperty("active_role").GetString().Should().Be("client");
+        user.GetProperty("available_roles").EnumerateArray().Select(e => e.GetString())
+            .Should().BeEquivalentTo(new[] { "client" },
+                "a client-only UM identity MUST relay as exactly [client] — no gateway-side role inflation");
+        um.FindOrCreateCalls.Should().Be(1, "verify must orchestrate UM phone find-or-create");
+    }
+
     [Fact]
     public async Task FB_GetMe_Unauthenticated_Returns_401()
     {
