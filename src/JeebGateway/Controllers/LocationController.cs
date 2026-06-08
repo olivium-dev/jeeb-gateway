@@ -1,7 +1,6 @@
 using System.Text.Json;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Requests;
-using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Tracking;
 using JeebGateway.Users;
@@ -41,23 +40,23 @@ public class LocationController : ControllerBase
     private readonly IRequestsStore _requests;
     private readonly IOptionsMonitor<TrackingOptions> _options;
     private readonly TimeProvider _clock;
-    private readonly IGeolocationServiceClient _upstream;
-    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
+    private readonly IDeliveryServiceClient _delivery;
+    private readonly ILogger<LocationController> _logger;
 
     public LocationController(
         ILocationStore store,
         IRequestsStore requests,
         IOptionsMonitor<TrackingOptions> options,
         TimeProvider clock,
-        IGeolocationServiceClient upstream,
-        IOptionsMonitor<UpstreamFeatureFlags> flags)
+        IDeliveryServiceClient delivery,
+        ILogger<LocationController> logger)
     {
         _store = store;
         _requests = requests;
         _options = options;
         _clock = clock;
-        _upstream = upstream;
-        _flags = flags;
+        _delivery = delivery;
+        _logger = logger;
     }
 
     [HttpPost("location/update")]
@@ -91,25 +90,49 @@ public class LocationController : ControllerBase
             });
         }
 
-        if (_flags.CurrentValue.Geolocation)
-        {
-            var upstream = await _upstream.UpdateLocationAsync(jeeberId, body, ct);
-            return Ok(upstream);
-        }
-
+        // Record into the in-memory store: this computes accepted/rejected +
+        // the device-latest fix and backs the SSE tracking read path
+        // (GET /deliveries/{id}/tracking), which has no upstream equivalent in
+        // S06 scope.
         var result = _store.Record(jeeberId, body.Points);
+
+        var latest = result.Latest is null ? null : new GpsPointDto
+        {
+            Lat = result.Latest.Lat,
+            Lng = result.Latest.Lng,
+            Accuracy = result.Latest.Accuracy,
+            Timestamp = result.Latest.DeviceTimestamp
+        };
+
+        // S06 keystone: forward the latest accepted fix to the canonical
+        // delivery-service presence store as a heartbeat. This bumps
+        // last_heartbeat_at + last-known location in the SAME store the matching
+        // run reads for its freshness predicate — so a streaming GPS jeeber stays
+        // in the online set (A2). Routed to delivery-service, NOT geolocation, to
+        // keep ONE presence store (org-law: no cross-service DB read).
+        if (latest is not null)
+        {
+            try
+            {
+                await _delivery.HeartbeatAsync(jeeberId, latest.Lat, latest.Lng, ct);
+            }
+            catch (DeliveryAvailabilityException ex)
+            {
+                // A heartbeat for a jeeber who never went online (404) must not
+                // 500 the GPS ingest path. The in-memory store already retained
+                // the fix for tracking; the presence bump is best-effort. Log and
+                // continue — the response shape is unchanged.
+                _logger.LogWarning(
+                    "delivery-service presence heartbeat for jeeber {JeeberId} returned {Status} ({Reason}); GPS fix retained locally, presence not bumped.",
+                    jeeberId, ex.StatusCode, ex.Reason);
+            }
+        }
 
         return Ok(new LocationUpdateResponse
         {
             Accepted = result.Accepted,
             Rejected = result.Rejected,
-            Latest = result.Latest is null ? null : new GpsPointDto
-            {
-                Lat = result.Latest.Lat,
-                Lng = result.Latest.Lng,
-                Accuracy = result.Latest.Accuracy,
-                Timestamp = result.Latest.DeviceTimestamp
-            }
+            Latest = latest
         });
     }
 

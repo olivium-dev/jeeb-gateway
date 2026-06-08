@@ -4,10 +4,12 @@ using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Requests;
+using JeebGateway.Services.Clients;
 using JeebGateway.Tracking;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -35,7 +37,19 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
 
     public LocationTrackingTests(WebApplicationFactory<Program> factory)
     {
-        _factory = factory;
+        // S06 presence wire: POST /location/update now forwards the latest fix to
+        // delivery-service as a heartbeat. Swap the real HTTP client for the
+        // in-process presence fake so the GPS ingest path resolves without a live
+        // Go upstream; the in-memory ILocationStore (asserted by these tests) is
+        // untouched.
+        _factory = factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IDeliveryServiceClient>();
+                services.AddSingleton<IDeliveryServiceClient>(new FakeDeliveryPresenceClient());
+            });
+        });
     }
 
     // ---- POST /location/update --------------------------------------------------
