@@ -97,6 +97,31 @@ on:
         options:
           - 'true'
           - 'false'
+      # S05 / ADR-006 — DURABLE request-create path (stateless gateway + jeeb-state-service
+      # saga_bundles ledger). The durable idempotent POST /requests path is already BUILT and
+      # deployed behind FeatureFlags:DurableRequests:Enabled, but DORMANT (flag OFF) because no
+      # workflow input could flip it and owner law forbids a hand `docker service update
+      # --env-add` from an operator shell. This input is the ONLY supported way to set
+      # FeatureFlags__DurableRequests__Enabled on the running gateway. It is injected via
+      # --env-add on EVERY deploy (update + create), mirroring whisper_fake, so the value is
+      # deterministic and operator-controllable rather than "whatever the container last had".
+      # Plain boolean (non-secret) => workflow input, NOT a GitHub secret.
+      #   'false' (DEFAULT) => FeatureFlags__DurableRequests__Enabled=false. PRESERVES the
+      #                        current behaviour: a no-arg deploy keeps the durable path DORMANT
+      #                        (gateway uses the legacy in-memory create path; A4 replay still
+      #                        returns a fresh UUID). Nothing changes unless explicitly armed.
+      #   'true'            => FeatureFlags__DurableRequests__Enabled=true. Arms the stateless
+      #                        durable create path (idempotent dedup via jeeb-state-service
+      #                        saga_bundles — A4 replay returns the SAME id). The gateway stays
+      #                        stateless: the ledger lives in jeeb-state-service, not the gateway.
+      durable_requests:
+        description: 'FeatureFlags__DurableRequests__Enabled. false (default) = legacy create path (current behaviour, flag OFF); true = stateless durable idempotent create via jeeb-state-service.'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
       # DEV-ONLY seed/inspect surface (/dev/*). This input is the ONLY supported way to
       # toggle Features__DevEndpoints__Enabled on the running gateway — never set it via a
       # manual `docker service update --env-add/--env-rm` from an operator shell, and never
@@ -276,6 +301,7 @@ jobs:
               --env-add FeatureFlags__UseUpstream__Cdn='${{ inputs.use_upstream_cdn }}' \
               --env-add Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env-add Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
+              --env-add FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
               $DEV_FLAG_ARG \
               $SWAGGER_FLAG_ARG \
               "\$SVC"
@@ -310,6 +336,7 @@ jobs:
               --env FeatureFlags__UseUpstream__Cdn='${{ inputs.use_upstream_cdn }}' \
               --env Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
+              --env FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
               --reserve-memory 256M \
               '$TAG'
           fi
