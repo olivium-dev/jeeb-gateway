@@ -28,7 +28,7 @@ public sealed class DurableRequestsStoreTests
         out RecordingDeliveryClient delivery,
         out RecordingBundleRecorder bundles,
         SagaBundleRecordOutcome bundleOutcome = SagaBundleRecordOutcome.Recorded)
-        => Build(out inner, out delivery, out bundles, out _, bundleOutcome);
+        => Build(out inner, out delivery, out bundles, out _, out _, bundleOutcome);
 
     private static DurableRequestsStore Build(
         out InMemoryRequestsStore inner,
@@ -37,14 +37,26 @@ public sealed class DurableRequestsStoreTests
         out RecordingConversationProvisioner conversations,
         SagaBundleRecordOutcome bundleOutcome = SagaBundleRecordOutcome.Recorded,
         string? conversationId = null)
+        => Build(out inner, out delivery, out bundles, out conversations, out _, bundleOutcome, conversationId);
+
+    private static DurableRequestsStore Build(
+        out InMemoryRequestsStore inner,
+        out RecordingDeliveryClient delivery,
+        out RecordingBundleRecorder bundles,
+        out RecordingConversationProvisioner conversations,
+        out RecordingBroadcastEventRecorder broadcasts,
+        SagaBundleRecordOutcome bundleOutcome = SagaBundleRecordOutcome.Recorded,
+        string? conversationId = null,
+        BroadcastEventRecordOutcome broadcastOutcome = BroadcastEventRecordOutcome.Recorded)
     {
         inner = new InMemoryRequestsStore(Clock);
         delivery = new RecordingDeliveryClient();
         bundles = new RecordingBundleRecorder(bundleOutcome);
         conversations = new RecordingConversationProvisioner(conversationId);
+        broadcasts = new RecordingBroadcastEventRecorder(broadcastOutcome);
         var options = Options.Create(new DurableRequestsOptions { Enabled = true });
         return new DurableRequestsStore(
-            inner, delivery, bundles, conversations, options,
+            inner, delivery, bundles, conversations, broadcasts, options,
             NullLogger<DurableRequestsStore>.Instance);
     }
 
@@ -142,8 +154,9 @@ public sealed class DurableRequestsStoreTests
         var delivery = new RecordingDeliveryClient { EchoMismatchedId = "WRONG-ID" };
         var bundles = new RecordingBundleRecorder(SagaBundleRecordOutcome.Recorded);
         var conversations = new RecordingConversationProvisioner(null);
+        var broadcasts = new RecordingBroadcastEventRecorder(BroadcastEventRecordOutcome.Recorded);
         var store = new DurableRequestsStore(
-            inner, delivery, bundles, conversations,
+            inner, delivery, bundles, conversations, broadcasts,
             Options.Create(new DurableRequestsOptions { Enabled = true }),
             NullLogger<DurableRequestsStore>.Instance);
 
@@ -197,6 +210,78 @@ public sealed class DurableRequestsStoreTests
         // The delivery row (the hard dependency) is still seeded.
         delivery.CreatedRows.Should().ContainSingle();
         conversations.Calls.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task Create_logs_broadcast_event_when_conversation_is_provisioned()
+    {
+        // JEB-50 (S05 H9b): when the broadcasting conversation is created, the
+        // gateway LOGS the broadcast event to the jeeb-state bundler — keyed by
+        // the conversation id (contextId) and carrying phase "broadcasting".
+        var store = Build(out _, out _, out _, out var conversations, out var broadcasts,
+            conversationId: "conv-123");
+
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        created.ConversationId.Should().Be("conv-123");
+        conversations.Calls.Should().ContainSingle();
+
+        // Exactly one broadcast-log row, keyed by the conversation id, phase=broadcasting.
+        broadcasts.Recorded.Should().ContainSingle();
+        broadcasts.Recorded[0].ContextId.Should().Be("conv-123");
+        broadcasts.Recorded[0].Phase.Should().Be("broadcasting");
+    }
+
+    [Fact]
+    public async Task Create_does_not_log_broadcast_when_no_conversation_is_provisioned()
+    {
+        // No broadcasting conversation (chat blip / flag OFF → null id) means the
+        // order never entered the broadcasting phase, so NO broadcast-log row is
+        // appended. The log mirrors the real chat-side phase, not a fiction.
+        var store = Build(out _, out _, out _, out var conversations, out var broadcasts,
+            conversationId: null);
+
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        created.ConversationId.Should().BeNull();
+        conversations.Calls.Should().ContainSingle();
+        broadcasts.Recorded.Should().BeEmpty("no broadcasting conversation → no broadcast log");
+    }
+
+    [Fact]
+    public async Task Create_succeeds_when_broadcast_log_unavailable()
+    {
+        // A state-service blip on the broadcast LOG must NOT fail the order create
+        // (degrade-don't-fail): the conversation is still stamped and the create
+        // still succeeds — the log is the durable audit trail, not a hard dep.
+        var store = Build(out _, out var delivery, out _, out var conversations, out var broadcasts,
+            conversationId: "conv-123",
+            broadcastOutcome: BroadcastEventRecordOutcome.Unavailable);
+
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        created.Id.Should().NotBeNullOrWhiteSpace();
+        created.ConversationId.Should().Be("conv-123");
+        delivery.CreatedRows.Should().ContainSingle();
+        // The recorder WAS invoked (and degraded) — the create did not throw.
+        broadcasts.Recorded.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task Cap_rejection_does_not_log_a_broadcast_event()
+    {
+        // The broadcast log is appended only AFTER a successful insert + provision.
+        // A BR-9 cap rejection throws before any side-effect, so no orphan log row.
+        var store = Build(out _, out _, out _, out _, out var broadcasts,
+            conversationId: "conv-123");
+
+        await store.TryCreateWithLimitAsync(ValidInput(), limit: 1, CancellationToken.None);
+        broadcasts.Recorded.Should().ContainSingle();
+
+        var act = async () => await store.TryCreateWithLimitAsync(ValidInput(), limit: 1, CancellationToken.None);
+        await act.Should().ThrowAsync<TooManyActiveRequestsException>();
+
+        broadcasts.Recorded.Should().ContainSingle("the cap rejection must not log a second broadcast event");
     }
 
     [Fact]
@@ -283,6 +368,20 @@ public sealed class DurableRequestsStoreTests
         {
             Calls.Add((requestId, clientId));
             return Task.FromResult(_conversationId);
+        }
+    }
+
+    private sealed class RecordingBroadcastEventRecorder : IBroadcastEventRecorder
+    {
+        private readonly BroadcastEventRecordOutcome _outcome;
+        public List<(string ContextId, string Phase)> Recorded { get; } = new();
+
+        public RecordingBroadcastEventRecorder(BroadcastEventRecordOutcome outcome) => _outcome = outcome;
+
+        public Task<BroadcastEventRecordOutcome> RecordBroadcastingAsync(string contextId, string phase, CancellationToken ct)
+        {
+            Recorded.Add((contextId, phase));
+            return Task.FromResult(_outcome);
         }
     }
 

@@ -858,11 +858,31 @@ if (durableRequests.Enabled)
         })
         .AddStandardResilienceHandler();
 
+    // JEB-50 (S05 H9b): broadcast-event recorder — typed HttpClient over the SAME
+    // jeeb-state-service base URL + resilience pipeline as the saga recorder, but
+    // targeting POST /v1/state/broadcasts (the additive append-only broadcast-log
+    // bundler). When the conversation provisioner creates a broadcasting channel
+    // for an order, DurableRequestsStore LOGS that broadcast event here so it is
+    // durable and visible cross-service. Degrade-safe: a state-service blip trips
+    // the breaker and the recorder reports Unavailable instead of failing create.
+    builder.Services
+        .AddHttpClient<JeebGateway.StateService.Durable.IBroadcastEventRecorder,
+                       JeebGateway.StateService.Durable.StateServiceBroadcastEventRecorder>(http =>
+        {
+            if (!string.IsNullOrWhiteSpace(bundleBaseUrl))
+            {
+                http.BaseAddress = new Uri(bundleBaseUrl.TrimEnd('/') + "/");
+            }
+            http.Timeout = TimeSpan.FromSeconds(5);
+        })
+        .AddStandardResilienceHandler();
+
     builder.Services.AddSingleton<IRequestsStore>(sp => new DurableRequestsStore(
         sp.GetRequiredService<InMemoryRequestsStore>(),
         sp.GetRequiredService<JeebGateway.Services.Clients.IDeliveryServiceClient>(),
         sp.GetRequiredService<JeebGateway.StateService.Durable.ISagaBundleRecorder>(),
         sp.GetRequiredService<JeebGateway.Conversations.IConversationProvisioner>(),
+        sp.GetRequiredService<JeebGateway.StateService.Durable.IBroadcastEventRecorder>(),
         sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DurableRequestsOptions>>(),
         sp.GetRequiredService<ILogger<DurableRequestsStore>>()));
 }
