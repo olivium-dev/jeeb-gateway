@@ -194,6 +194,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
         return new OfferAcceptWire
         {
             AcceptedOfferId = wire.AcceptedOffer?.Id ?? offerId,
+            JeeberId = wire.AcceptedOffer?.JeeberId,
             ChatThreadId = wire.ChatThreadId,
             OtpCode = wire.OtpCode,
             RejectedOfferIds = wire.RejectedOfferIds ?? new List<string>(),
@@ -237,6 +238,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
                     Envelope = new OfferAcceptWire
                     {
                         AcceptedOfferId = wire.AcceptedOffer?.Id ?? offerId,
+                        JeeberId = wire.AcceptedOffer?.JeeberId,
                         ChatThreadId = wire.ChatThreadId,
                         OtpCode = wire.OtpCode,
                         RejectedOfferIds = wire.RejectedOfferIds ?? new List<string>(),
@@ -364,6 +366,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
     private sealed class AcceptedOffer
     {
         [JsonPropertyName("id")] public string? Id { get; init; }
+        [JsonPropertyName("jeeber_id")] public string? JeeberId { get; init; }
     }
 
     private sealed class ErrorEnvelope

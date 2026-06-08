@@ -12,9 +12,11 @@ using Xunit;
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// BR-10 (T-backend-039): a Jeeber may have at most 2 active deliveries
-/// (statuses accepted, picked_up, heading_off). Offer acceptance must
-/// return 409 once the cap is hit, with a clear error message.
+/// Legacy in-memory accept path (FeatureFlags:UseUpstream:Offer = false).
+/// S07: accepting is a CLIENT action — the request-owning client awards the
+/// delivery to a jeeber's offer. BR-10 (T-backend-039) still caps the OFFER's
+/// jeeber at 2 active deliveries (statuses accepted, picked_up, heading_off);
+/// acceptance returns 409 once the cap is hit, with a clear error message.
 ///
 /// Tests share a single WebApplicationFactory and therefore a single
 /// in-memory store across cases; each test scopes itself with unique
@@ -106,23 +108,23 @@ public class OffersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
-    public async Task Accept_For_Other_Jeebers_Offer_Returns_403()
+    public async Task Accept_By_Non_Owner_Client_Returns_403()
     {
-        var ownerId = $"jeeber-owner-{Guid.NewGuid()}";
-        var clientId = $"client-{Guid.NewGuid()}";
+        var ownerJeeberId = $"jeeber-owner-{Guid.NewGuid()}";
+        var requestOwnerClientId = $"client-owner-{Guid.NewGuid()}";
 
-        var (_, _, offerId) = await SeedOfferAsync(ownerId, clientId);
+        var (_, _, offerId) = await SeedOfferAsync(ownerJeeberId, requestOwnerClientId);
 
-        // A different jeeber tries to claim the offer.
-        var thief = JeeberClient($"jeeber-thief-{Guid.NewGuid()}");
-        var resp = await thief.PostAsync($"/offers/{offerId}/accept", content: null);
+        // A different CLIENT (not the request owner) tries to accept the offer.
+        var intruder = ClientActor($"client-intruder-{Guid.NewGuid()}");
+        var resp = await intruder.PostAsync($"/offers/{offerId}/accept", content: null);
         resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
     }
 
     [Fact]
     public async Task Accept_Unknown_Offer_Returns_404()
     {
-        var client = JeeberClient($"jeeber-404-{Guid.NewGuid()}");
+        var client = ClientActor($"client-404-{Guid.NewGuid()}");
         var resp = await client.PostAsync($"/offers/{Guid.NewGuid()}/accept", content: null);
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
@@ -147,15 +149,15 @@ public class OffersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
-    public async Task Accept_Without_Jeeber_Role_Returns_403()
+    public async Task Accept_With_Jeeber_Role_Returns_403()
     {
+        // S07: accepting is a CLIENT capability. A jeeber-role caller is rejected at
+        // the L2 capability gate (the jeeber only SUBMITS offers, never accepts).
         var clientId = $"client-{Guid.NewGuid()}";
         var (_, _, offerId) = await SeedOfferAsync($"jeeber-role-{Guid.NewGuid()}", clientId);
 
-        var c = _factory.CreateClient();
-        c.DefaultRequestHeaders.Add("X-User-Id", clientId);
-        c.DefaultRequestHeaders.Add("X-User-Roles", "customer");
-        var resp = await c.PostAsync($"/offers/{offerId}/accept", content: null);
+        var jeeber = JeeberClient($"jeeber-caller-{Guid.NewGuid()}");
+        var resp = await jeeber.PostAsync($"/offers/{offerId}/accept", content: null);
         resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
     }
 
@@ -163,6 +165,16 @@ public class OffersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
     // Helpers
     // -----------------------------------------------------------------
 
+    // The acceptor is the request-owning CLIENT (customer role).
+    private HttpClient ClientActor(string clientId)
+    {
+        var c = _factory.CreateClient();
+        c.DefaultRequestHeaders.Add("X-User-Id", clientId);
+        c.DefaultRequestHeaders.Add("X-User-Roles", "customer");
+        return c;
+    }
+
+    // A jeeber-role caller (used to assert the capability gate rejects a non-client acceptor).
     private HttpClient JeeberClient(string jeeberId)
     {
         var c = _factory.CreateClient();
@@ -171,6 +183,7 @@ public class OffersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         return c;
     }
 
+    // Returns an HTTP client authenticated as the request-owning CLIENT (the acceptor).
     private async Task<(HttpClient client, string requestId, string offerId)> SeedOfferAsync(
         string jeeberId, string clientId)
     {
@@ -184,7 +197,7 @@ public class OffersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
         var offer = offers.EnqueueForTest(jeeberId, created.Id);
 
-        return (JeeberClient(jeeberId), created.Id, offer.Id);
+        return (ClientActor(clientId), created.Id, offer.Id);
     }
 
     private async Task<List<string>> SeatActiveDeliveriesAsync(string jeeberId, string clientId, int count)

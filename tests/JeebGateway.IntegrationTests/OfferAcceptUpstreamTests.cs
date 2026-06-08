@@ -40,6 +40,7 @@ public class OfferAcceptUpstreamTests
                 Envelope = new OfferAcceptWire
                 {
                     AcceptedOfferId = "offer-1",
+                    JeeberId = "jeeber-9", // the awarded jeeber, from the upstream envelope
                     ChatThreadId = "thread-9",
                     OtpCode = "4321",
                     RejectedOfferIds = new[] { "offer-2" }
@@ -50,20 +51,24 @@ public class OfferAcceptUpstreamTests
         using var factory = NewUpstreamFactory(fake);
         SeedRouting(factory, offerId: "offer-1", requestId: "req-1");
 
-        var resp = await JeeberClient(factory, "jeeber-1")
+        // The acceptor is the CLIENT who owns the request, not the jeeber.
+        var resp = await ClientActor(factory, "client-sami")
             .PostAsync("/offers/offer-1/accept", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<DeliveryRequestDto>();
         body!.Id.Should().Be("req-1");
         body.Status.Should().Be("accepted");
-        body.JeeberId.Should().Be("jeeber-1");
+        // ClientId is the acting client; JeeberId is the awarded jeeber from the envelope.
+        body.ClientId.Should().Be("client-sami");
+        body.JeeberId.Should().Be("jeeber-9");
 
-        // The gateway forwarded the SAGA call with the resolved requestId and a
+        // The gateway forwarded the SAGA call with the resolved requestId, the CLIENT's
+        // id as the acting user (so the upstream request-owner guard passes), and a
         // server-minted idempotency key — it did not run the auction itself.
         fake.LastRequestId.Should().Be("req-1");
         fake.LastOfferId.Should().Be("offer-1");
-        fake.LastActingUserId.Should().Be("jeeber-1");
+        fake.LastActingUserId.Should().Be("client-sami");
         fake.LastIdempotencyKey.Should().NotBeNullOrWhiteSpace();
         fake.LastIdempotencyKey!.Length.Should().BeGreaterThanOrEqualTo(8);
     }
@@ -78,7 +83,7 @@ public class OfferAcceptUpstreamTests
         using var factory = NewUpstreamFactory(fake);
         SeedRouting(factory, "offer-403", "req-403");
 
-        var resp = await JeeberClient(factory, "mallory")
+        var resp = await ClientActor(factory, "client-mallory")
             .PostAsync("/offers/offer-403/accept", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
@@ -96,7 +101,7 @@ public class OfferAcceptUpstreamTests
         using var factory = NewUpstreamFactory(fake);
         SeedRouting(factory, "offer-410", "req-410");
 
-        var resp = await JeeberClient(factory, "jeeber-410")
+        var resp = await ClientActor(factory, "client-410")
             .PostAsync("/offers/offer-410/accept", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.Gone);
@@ -114,7 +119,7 @@ public class OfferAcceptUpstreamTests
         using var factory = NewUpstreamFactory(fake);
         SeedRouting(factory, "offer-409", "req-409");
 
-        var resp = await JeeberClient(factory, "jeeber-409")
+        var resp = await ClientActor(factory, "client-409")
             .PostAsync("/offers/offer-409/accept", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
@@ -133,10 +138,34 @@ public class OfferAcceptUpstreamTests
         using var factory = NewUpstreamFactory(fake);
         // No SeedRouting → unknown offer.
 
-        var resp = await JeeberClient(factory, "jeeber-404")
+        var resp = await ClientActor(factory, "client-404")
             .PostAsync($"/offers/{Guid.NewGuid()}/accept", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        fake.CallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Accept_AsJeeber_Is403_AtCapabilityGate_NeverReachesUpstream()
+    {
+        // S07 regression guard: the live H5/A6 403 happened because a JEEBER was the
+        // acceptor. With offer.accept keyed {client}, a jeeber caller is rejected at
+        // the L2 capability gate and the saga is NEVER forwarded.
+        var fake = new FakeOfferServiceClient
+        {
+            Result = new OfferAcceptResult { Status = OfferAcceptStatus.Accepted }
+        };
+        using var factory = NewUpstreamFactory(fake);
+        SeedRouting(factory, "offer-jeeber", "req-jeeber");
+
+        var jeeber = factory.CreateClient();
+        jeeber.DefaultRequestHeaders.Add("X-User-Id", "kamal-jeeber");
+        jeeber.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        var resp = await jeeber.PostAsync("/offers/offer-jeeber/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        // The capability filter rejected before the controller ran: the saga was never called.
         fake.CallCount.Should().Be(0);
     }
 
@@ -150,7 +179,7 @@ public class OfferAcceptUpstreamTests
         using var factory = NewUpstreamFactory(fake);
         SeedRouting(factory, "offer-phantom", "req-phantom");
 
-        var resp = await JeeberClient(factory, "jeeber-phantom")
+        var resp = await ClientActor(factory, "client-phantom")
             .PostAsync("/offers/offer-phantom/accept", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
@@ -180,11 +209,14 @@ public class OfferAcceptUpstreamTests
         WebApplicationFactory<Program> factory, string offerId, string requestId)
         => factory.Services.GetRequiredService<IOfferRequestIndex>().Record(offerId, requestId);
 
-    private static HttpClient JeeberClient(WebApplicationFactory<Program> factory, string jeeberId)
+    // S07: the acceptor is the request-owning CLIENT, so the test caller carries the
+    // client role. (A jeeber accepting is now 403'd at the capability gate; that is
+    // asserted in Jeb1509CapMapCleanupRouteTests.OfferAccept_NonClient_Is403.)
+    private static HttpClient ClientActor(WebApplicationFactory<Program> factory, string clientId)
     {
         var c = factory.CreateClient();
-        c.DefaultRequestHeaders.Add("X-User-Id", jeeberId);
-        c.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+        c.DefaultRequestHeaders.Add("X-User-Id", clientId);
+        c.DefaultRequestHeaders.Add("X-User-Roles", "customer");
         return c;
     }
 

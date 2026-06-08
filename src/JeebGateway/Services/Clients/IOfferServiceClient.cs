@@ -180,6 +180,16 @@ public sealed class OfferWire
 public sealed class OfferAcceptWire
 {
     public required string AcceptedOfferId { get; init; }
+
+    /// <summary>
+    /// The winning jeeber's id, decoded from the accept envelope's
+    /// <c>accepted_offer.jeeber_id</c> when present. Lets the gateway surface the
+    /// awarded jeeber on the accept DTO (the acting user is the CLIENT, not the
+    /// jeeber, so it cannot be inferred from the caller). Null when the envelope
+    /// omits it.
+    /// </summary>
+    public string? JeeberId { get; init; }
+
     public string? ChatThreadId { get; init; }
     public string? OtpCode { get; init; }
     public IReadOnlyList<string> RejectedOfferIds { get; init; } = Array.Empty<string>();

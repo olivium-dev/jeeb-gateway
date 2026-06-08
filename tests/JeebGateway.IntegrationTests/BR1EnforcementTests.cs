@@ -200,14 +200,17 @@ public class BR1EnforcementTests : IClassFixture<WebApplicationFactory<Program>>
     // -----------------------------------------------------------------
 
     // -----------------------------------------------------------------
-    // 4. Offer-accept BR-1: Jeeber cannot accept own request
+    // 4. Offer-accept BR-1: a user cannot be both Client and Jeeber on the
+    //    same delivery. S07: accepting is a CLIENT action (the request owner),
+    //    so the dual-role user accepts AS THE CLIENT and BR-1 fires because the
+    //    OFFER's jeeber is the same person who owns the request.
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task Offer_Accept_Returns_409_When_Jeeber_Is_Client_Of_Same_Delivery()
+    public async Task Offer_Accept_Returns_409_When_Offer_Jeeber_Is_Client_Of_Same_Delivery()
     {
         var userId = $"self-accept-{Guid.NewGuid()}";
-        SeedDualRoleUser(userId, activeRole: Roles.Jeeber);
+        SeedDualRoleUser(userId, activeRole: Roles.Client);
 
         var requestStore = _factory.Services.GetRequiredService<IRequestsStore>();
         var request = await requestStore.CreateAsync(new CreateRequestInput
@@ -216,10 +219,12 @@ public class BR1EnforcementTests : IClassFixture<WebApplicationFactory<Program>>
             Description = "My own delivery I want to accept"
         }, CancellationToken.None);
 
+        // The offer on this request is bid by the SAME user (their jeeber persona).
         var offersStore = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
         var offer = offersStore.EnqueueForTest(userId, request.Id);
 
-        var client = CreateAuthenticatedClient(userId, Roles.Jeeber);
+        // The user accepts AS THE CLIENT (the request owner) — reaches the controller.
+        var client = CreateAuthenticatedClient(userId, Roles.Client);
         var resp = await client.PostAsync($"/offers/{offer.Id}/accept", null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.Conflict);

@@ -48,37 +48,37 @@ public sealed class Jeb1509CapMapCleanupRouteTests
             "Layer 2 (capability) passed — the user type holds the capability; the request reached the controller");
     }
 
-    // ── offer.accept {jeeber} (NO-OP RENAME — allowed type unchanged; route now declares offer.accept) ─
-    // The route POST /offers/{id}/accept moved from the offer.submit {jeeber} stand-in to the distinct
-    // offer.accept {jeeber} capability. Allowed user type is UNCHANGED ({jeeber}); these lock the new
-    // capability constant to the route at the pipeline level so a future map edit can't silently change
-    // who may accept. (RequireActiveUser sits AFTER the capability gate: a non-suspended jeeber — the
+    // ── offer.accept {client} (S07: repointed {jeeber}->{client}) ──────────────────────────────────
+    // In the Jeeb auction jeebers SUBMIT offers (offer.submit {jeeber}) and the request-owning CLIENT
+    // ACCEPTS one to award the delivery, so POST /offers/{id}/accept is a {client} action. These lock
+    // the capability-to-route binding at the pipeline level so a future map edit can't silently change
+    // who may accept. (RequireActiveUser sits AFTER the capability gate: a non-suspended client — the
     // test default, no IUsersStore profile — passes through to the controller.)
 
     [Theory]
-    [InlineData("driver")] // opaque jeeber (production vocabulary)
-    [InlineData("jeeber")] // canonical jeeber (edge vocabulary)
-    public async Task OfferAccept_Jeeber_ReachesController(string role)
+    [InlineData("customer")] // opaque client (production vocabulary)
+    [InlineData("client")]   // canonical client (edge vocabulary)
+    public async Task OfferAccept_Client_ReachesController(string role)
     {
         using var f = new WebApplicationFactory<Program>();
         var client = f.CreateClient().WithBearer(CapabilityTestHarness.MintBearer(f, role));
 
         var resp = await client.PostAsync(OfferAcceptRoute, EmptyJson());
 
-        AssertReachedController(resp); // jeeber holds offer.accept → reaches Accept (404 unknown offer / 400 / 503)
+        AssertReachedController(resp); // client holds offer.accept → reaches Accept (404 unknown offer / 400 / 503)
     }
 
     [Theory]
-    [InlineData("customer")] // opaque client
-    [InlineData("client")]   // canonical client
-    public async Task OfferAccept_NonJeeber_Is403(string role)
+    [InlineData("driver")] // opaque jeeber
+    [InlineData("jeeber")] // canonical jeeber
+    public async Task OfferAccept_NonClient_Is403(string role)
     {
         using var f = new WebApplicationFactory<Program>();
         var client = f.CreateClient().WithBearer(CapabilityTestHarness.MintBearer(f, role));
 
         var resp = await client.PostAsync(OfferAcceptRoute, EmptyJson());
 
-        await CapabilityTestHarness.AssertForbiddenCapabilityBody(resp); // accepting is a jeeber action, not a client one
+        await CapabilityTestHarness.AssertForbiddenCapabilityBody(resp); // accepting is a client action; the jeeber only bids
     }
 
     [Fact]
@@ -89,7 +89,7 @@ public sealed class Jeb1509CapMapCleanupRouteTests
 
         var resp = await client.PostAsync(OfferAcceptRoute, EmptyJson());
 
-        await CapabilityTestHarness.AssertForbiddenCapabilityBody(resp); // admin claim does not hold a jeeber-family cap
+        await CapabilityTestHarness.AssertForbiddenCapabilityBody(resp); // admin claim does not hold a client-family cap
     }
 
     [Fact]
