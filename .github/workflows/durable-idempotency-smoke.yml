@@ -1,0 +1,97 @@
+# Durable-requests idempotency smoke (S05 / ADR-006).
+#
+# Proves FeatureFlags__DurableRequests__Enabled=true is LIVE on the gateway:
+# a replayed POST /v1/requests carrying the SAME Idempotency-Key must return
+# the SAME request id (durable dedup via jeeb-state-service). The token-mint
+# key stays a GitHub secret (never printed); the run asserts same-id and fails
+# loudly otherwise. GHA-only, no SSH, no app/route change. One-off / on-demand.
+name: Durable Idempotency Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'Gateway base URL'
+        required: true
+        default: 'https://jeeb.fds-1.com'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: durable-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Replayed POST /requests must return the same id
+        env:
+          BASE: ${{ inputs.base_url }}
+          MINT_KEY: ${{ secrets.JEEB_TOKEN_MINT_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINT_KEY:-}" ]; then
+            echo "::error::JEEB_TOKEN_MINT_KEY secret is not set on this repo — cannot mint a smoke token."
+            exit 1
+          fi
+          RUN_TAG="smoke-durable-${GITHUB_RUN_ID}"
+          IDEM="durable-smoke-${GITHUB_RUN_ID}-$(date +%s)"
+
+          echo "== aggregate health (pre) =="
+          curl -fsS -m 20 -X POST "$BASE/health/aggregate" -o agg.json -w 'HTTP %{http_code}\n'
+          python3 - <<'PY'
+          import json
+          d=json.load(open('agg.json'))
+          bad=[c['name'] for c in d.get('checks',[]) if c.get('status')!='Healthy']
+          print('overall:', d.get('status'), '| failing:', bad or 'EMPTY')
+          assert d.get('status')=='Healthy' and not bad, 'aggregate not Healthy'
+          PY
+
+          echo "== mint client token (key never printed) =="
+          MINT_BODY=$(printf '{"userId":"%s","roles":["client"]}' "$RUN_TAG")
+          HTTP=$(curl -sS -m 20 -o mint.json -w '%{http_code}' \
+            -X POST "$BASE/auth/tokens" \
+            -H 'Content-Type: application/json' \
+            -H "X-Service-Auth-Key: ${MINT_KEY}" \
+            -d "$MINT_BODY")
+          echo "mint HTTP=$HTTP"
+          test "$HTTP" = "200" || { echo "::error::mint failed HTTP=$HTTP"; cat mint.json; exit 1; }
+          TOKEN=$(python3 -c "import json;d=json.load(open('mint.json'));print(d.get('accessToken') or d.get('access_token') or '')")
+          test -n "$TOKEN" || { echo "::error::no accessToken in mint response"; cat mint.json; exit 1; }
+          echo "minted token len=${#TOKEN}"
+
+          REQ_BODY=$(cat <<JSON
+          {"description":"durable idempotency smoke","tierId":"flash","pickupLocation":{"lat":33.8886,"lng":35.4955},"dropoffLocation":{"lat":33.8959,"lng":35.4784},"pickupAddress":"Beirut A","dropoffAddress":"Beirut B"}
+          JSON
+          )
+
+          call() {
+            curl -sS -m 25 -o "$1" -w '%{http_code}' \
+              -X POST "$BASE/v1/requests" \
+              -H 'Content-Type: application/json' \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Idempotency-Key: ${IDEM}" \
+              -d "$REQ_BODY"
+          }
+
+          echo "== first POST /v1/requests =="
+          H1=$(call r1.json); echo "HTTP=$H1"; cat r1.json; echo
+          echo "== replay POST /v1/requests (same Idempotency-Key) =="
+          H2=$(call r2.json); echo "HTTP=$H2"; cat r2.json; echo
+
+          python3 - <<PY
+          import json,sys
+          def rid(f):
+              d=json.load(open(f))
+              return d.get('id') or d.get('Id') or (d.get('request') or {}).get('id')
+          id1, id2 = rid('r1.json'), rid('r2.json')
+          print('id1=',id1)
+          print('id2=',id2)
+          assert id1, 'first create returned no id (HTTP $H1)'
+          assert id2, 'replay returned no id (HTTP $H2)'
+          if id1 != id2:
+              print('::error::DURABLE FLAG NOT ACTIVE — replay returned a DIFFERENT id (%s != %s)'%(id1,id2)); sys.exit(1)
+          print('SMOKE PASS: replay returned the SAME id => FeatureFlags__DurableRequests__Enabled is ON')
+          PY
