@@ -47,8 +47,11 @@ public sealed class HeartBeatServiceClient : IHeartBeatServiceClient
             return await DeserializeAsync<HeartBeatPresence>(response, ct);
         }
 
+        // Carry the upstream Retry-After through verbatim. heart-beat's per-user
+        // toggle limiter (N14 / NFR-6, BR-X-4) returns 429 + Retry-After; the
+        // gateway is thin on this path and re-emits the same backoff hint.
         var reason = await TryReadReasonAsync(response, ct);
-        throw new HeartBeatPresenceException((int)response.StatusCode, reason);
+        throw new HeartBeatPresenceException((int)response.StatusCode, reason, ReadRetryAfter(response));
     }
 
     /// <inheritdoc />
@@ -71,7 +74,36 @@ public sealed class HeartBeatServiceClient : IHeartBeatServiceClient
         }
 
         var reason = await TryReadReasonAsync(response, ct);
-        throw new HeartBeatPresenceException((int)response.StatusCode, reason);
+        throw new HeartBeatPresenceException((int)response.StatusCode, reason, ReadRetryAfter(response));
+    }
+
+    /// <summary>
+    /// Reads the upstream <c>Retry-After</c> header as whole seconds, tolerating
+    /// either the delta-seconds form (heart-beat emits an integer second count) or
+    /// the HTTP-date form. Returns null when absent so callers re-emit nothing.
+    /// </summary>
+    private static string? ReadRetryAfter(HttpResponseMessage response)
+    {
+        var ra = response.Headers.RetryAfter;
+        if (ra is null)
+        {
+            return null;
+        }
+
+        // Delta-seconds form (heart-beat's shape): re-emit verbatim.
+        if (ra.Delta is { } delta)
+        {
+            return ((int)Math.Ceiling(delta.TotalSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        // HTTP-date form: convert to a non-negative seconds delta from now.
+        if (ra.Date is { } date)
+        {
+            var seconds = (int)Math.Ceiling((date - DateTimeOffset.UtcNow).TotalSeconds);
+            return Math.Max(0, seconds).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return null;
     }
 
     private static async Task<T> DeserializeAsync<T>(HttpResponseMessage response, CancellationToken ct)

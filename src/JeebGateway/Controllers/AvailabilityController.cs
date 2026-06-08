@@ -116,7 +116,28 @@ public class AvailabilityController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status429TooManyRequests)]
     public async Task<IActionResult> Patch([FromBody] AvailabilityPatchRequest? body, CancellationToken ct)
+    {
+        // S06 / N14 (NFR-6, BR-X-4): heart-beat owns the per-user presence-toggle
+        // rate-limit (Redis token-bucket on PATCH /v1/presence) and returns
+        // 429 + Retry-After once a single user exceeds the per-minute budget. The
+        // gateway is thin on this path: it FORWARDS the upstream status and the
+        // Retry-After header verbatim rather than swallowing the non-2xx into a 500.
+        // Without this catch the typed client's HeartBeatPresenceException would
+        // propagate as an unhandled 500 (no global mapper exists), so the throttle
+        // would never surface as a 429 to the caller.
+        try
+        {
+            return await PatchCore(body, ct);
+        }
+        catch (HeartBeatPresenceException ex)
+        {
+            return ForwardHeartBeatError(ex);
+        }
+    }
+
+    private async Task<IActionResult> PatchCore(AvailabilityPatchRequest? body, CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var problem)) return problem;
 
@@ -269,6 +290,37 @@ public class AvailabilityController : ControllerBase
                 userId);
             return 0;
         }
+    }
+
+    /// <summary>
+    /// S06 / N14: maps a non-2xx heart-beat presence outcome onto a ProblemDetails
+    /// that FORWARDS the upstream status verbatim (thin BFF). For a throttled
+    /// toggle (429) it also re-emits the upstream <c>Retry-After</c> header so the
+    /// caller gets the same backoff hint heart-beat's token-bucket computed. A
+    /// throttled toggle never mutated presence upstream (heart-beat rejects before
+    /// touching state), so forwarding the status is correct — no compensating write.
+    /// </summary>
+    private IActionResult ForwardHeartBeatError(HeartBeatPresenceException ex)
+    {
+        if (ex.StatusCode == StatusCodes.Status429TooManyRequests && !string.IsNullOrWhiteSpace(ex.RetryAfter))
+        {
+            // Re-emit the upstream Retry-After verbatim (whole seconds).
+            Response.Headers.RetryAfter = ex.RetryAfter;
+        }
+
+        _logger.LogInformation(
+            "Forwarding heart-beat presence {StatusCode} ({Reason}) to caller.",
+            ex.StatusCode,
+            ex.Reason ?? "no reason");
+
+        return StatusCode(ex.StatusCode, new ProblemDetails
+        {
+            Title = ex.StatusCode == StatusCodes.Status429TooManyRequests
+                ? "Availability toggle rate limit exceeded."
+                : "Upstream presence service error.",
+            Detail = ex.Reason,
+            Status = ex.StatusCode
+        });
     }
 
     /// <summary>

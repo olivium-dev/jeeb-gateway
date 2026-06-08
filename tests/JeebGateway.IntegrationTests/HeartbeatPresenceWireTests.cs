@@ -245,6 +245,66 @@ public class HeartbeatPresenceWireTests
         body.WithdrawnOffers.Should().Be(0);
     }
 
+    // -------- N14: heart-beat 429 + Retry-After forwarded verbatim ------------
+
+    [Fact]
+    public async Task N14_HeartBeat_429_Is_Forwarded_With_RetryAfter_Header()
+    {
+        // S06 / N14 (NFR-6, BR-X-4): heart-beat owns the per-user presence-toggle
+        // rate-limit and returns 429 + Retry-After once a user exceeds the budget.
+        // The gateway is thin on this path: it must FORWARD the upstream 429 and
+        // the Retry-After header verbatim — NOT swallow the non-2xx into a 500.
+        var stub = new StubHttpMessageHandler(req =>
+        {
+            var resp = new HttpResponseMessage((HttpStatusCode)429)
+            {
+                Content = new StringContent(
+                    """{"reason":"rate_limited"}""", Encoding.UTF8, "application/json")
+            };
+            // heart-beat emits delta-seconds Retry-After.
+            resp.Headers.TryAddWithoutValidation("Retry-After", "1");
+            return resp;
+        });
+
+        using var factory = NewHeartbeatFactory(s => ReplaceHeartBeatClient(s, stub));
+        var client = JeeberClient(factory, "jeeber-flood");
+
+        var resp = await client.PatchAsJsonAsync("/jeebers/me/availability", new
+        {
+            online = true,
+            vehicleType = "car",
+            zone = "beirut-central"
+        });
+
+        resp.StatusCode.Should().Be((HttpStatusCode)429, "the gateway forwards heart-beat's throttle status verbatim");
+        resp.Headers.Contains("Retry-After").Should().BeTrue("the upstream Retry-After must be re-emitted");
+        resp.Headers.GetValues("Retry-After").Single().Should().Be("1");
+    }
+
+    [Fact]
+    public async Task N14_HeartBeat_429_Without_RetryAfter_Still_Forwards_429()
+    {
+        // Defensive: even if heart-beat omitted Retry-After, the gateway must still
+        // forward the 429 (not 500). The header is simply absent in that case.
+        var stub = new StubHttpMessageHandler(_ =>
+            new HttpResponseMessage((HttpStatusCode)429)
+            {
+                Content = new StringContent("""{"reason":"rate_limited"}""", Encoding.UTF8, "application/json")
+            });
+
+        using var factory = NewHeartbeatFactory(s => ReplaceHeartBeatClient(s, stub));
+        var client = JeeberClient(factory, "jeeber-flood-2");
+
+        var resp = await client.PatchAsJsonAsync("/jeebers/me/availability", new
+        {
+            online = true,
+            vehicleType = "car",
+            zone = "beirut-central"
+        });
+
+        resp.StatusCode.Should().Be((HttpStatusCode)429);
+    }
+
     // -------------------------------------------------------------------------
     // Helpers (mirror PresenceThinWireTests' boundary-stub pattern)
     // -------------------------------------------------------------------------
