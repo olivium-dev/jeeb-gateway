@@ -791,7 +791,61 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProc
 // proxy to delivery-service via NSwag-generated client, backed by the
 // schema in db/migrations/0004 with a SERIALIZABLE-isolation create or
 // a partial unique index on (client_id) WHERE status in active-set.
-builder.Services.AddSingleton<IRequestsStore, InMemoryRequestsStore>();
+//
+// SPINE-FOUNDATION / ADR-006: the create path becomes STATELESS behind
+// FeatureFlags:DurableRequests (default OFF). When ON, DurableRequestsStore
+// decorates the in-memory store — it mints ONE stable id, seeds the canonical
+// delivery row (so POST /matching/run resolves instead of 404-ing) and records
+// the saga in the state-service bundle ledger, while every non-create method
+// delegates to the in-memory model. The in-memory store stays registered as
+// the inner delegate AND as the flag-off path (the instant rollback lever — do
+// NOT delete in this PR; retirement is a separate PR gated on S05–S15 green).
+builder.Services.Configure<DurableRequestsOptions>(
+    builder.Configuration.GetSection(DurableRequestsOptions.SectionName));
+
+var durableRequests = builder.Configuration
+    .GetSection(DurableRequestsOptions.SectionName)
+    .Get<DurableRequestsOptions>() ?? new DurableRequestsOptions();
+
+// The in-memory store is always registered (it is both the flag-off path and
+// the inner delegate of the durable decorator).
+builder.Services.AddSingleton<InMemoryRequestsStore>();
+
+if (durableRequests.Enabled)
+{
+    // Saga bundle recorder — typed HttpClient over jeeb-state-service
+    // POST /v1/state/bundles (the additive saga_bundles ledger). Base URL
+    // resolved identically to the durable-rewire state options below so the
+    // ledger and the typed JeebStateServiceClient hit the same service. A
+    // standard resilience handler (retry + breaker + timeout) means a
+    // state-service blip degrades the recorder to "Unavailable" (the create
+    // still succeeds on the delivery row) instead of cascading a 500.
+    var bundleBaseUrl = builder.Configuration["JeebStateService:BaseUrl"]
+                        ?? builder.Configuration["Services:JeebState:BaseUrl"]
+                        ?? string.Empty;
+    builder.Services
+        .AddHttpClient<JeebGateway.StateService.Durable.ISagaBundleRecorder,
+                       JeebGateway.StateService.Durable.StateServiceSagaBundleRecorder>(http =>
+        {
+            if (!string.IsNullOrWhiteSpace(bundleBaseUrl))
+            {
+                http.BaseAddress = new Uri(bundleBaseUrl.TrimEnd('/') + "/");
+            }
+            http.Timeout = TimeSpan.FromSeconds(5);
+        })
+        .AddStandardResilienceHandler();
+
+    builder.Services.AddSingleton<IRequestsStore>(sp => new DurableRequestsStore(
+        sp.GetRequiredService<InMemoryRequestsStore>(),
+        sp.GetRequiredService<JeebGateway.Services.Clients.IDeliveryServiceClient>(),
+        sp.GetRequiredService<JeebGateway.StateService.Durable.ISagaBundleRecorder>(),
+        sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DurableRequestsOptions>>(),
+        sp.GetRequiredService<ILogger<DurableRequestsStore>>()));
+}
+else
+{
+    builder.Services.AddSingleton<IRequestsStore>(sp => sp.GetRequiredService<InMemoryRequestsStore>());
+}
 
 // Tier-existence probe consumed by RequestsController to enforce
 // T-backend-007's "validate tier exists" criterion. Distinct interface

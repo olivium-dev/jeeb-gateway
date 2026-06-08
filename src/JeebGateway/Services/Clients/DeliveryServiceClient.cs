@@ -67,6 +67,33 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         return await DeserializeAsync<DeliveryRequestUpstream>(response, ct);
     }
 
+    /// <inheritdoc />
+    public async Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct)
+    {
+        // SPINE-FOUNDATION / ADR-006: seed the durable row so matching/run
+        // (request_id mode) resolves. The DTO carries explicit snake_case
+        // JsonPropertyName attrs, so PostAsJsonAsync with the shared web options
+        // emits the Go-expected wire shape.
+        using var response = await _http.PostAsJsonAsync("api/v1/deliveries", body, JsonOptions, ct);
+
+        // Idempotent upstream: ON CONFLICT (id) DO NOTHING. A 409 means the row
+        // already exists for this id (a retried create) — the seed goal is met,
+        // so echo back the id the gateway forwarded rather than treating it as a
+        // failure. 2xx returns the upstream-echoed row.
+        if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            return new DeliveryRowUpstream { Id = body.Id, TenantId = body.TenantId, Status = "Ordered" };
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var reason = await TryReadReasonAsync(response, ct);
+            throw new DeliveryCreateRowException((int)response.StatusCode, reason);
+        }
+
+        return await DeserializeAsync<DeliveryRowUpstream>(response, ct);
+    }
+
     public async Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct)
     {
         using var response = await _http.GetAsync($"jeeb/deliveries/{Uri.EscapeDataString(deliveryId)}", ct);
