@@ -114,6 +114,11 @@ on:
       #       ConversationAutoCreate=<bool> -> FeatureFlags__ConversationAutoCreate__Enabled   (S05 H7/H9b / JEB-50)
       #       UseUpstreamKyc=<bool>         -> FeatureFlags__UseUpstream__Kyc                   (S03 / ADR-0004)
       #       UseUpstreamCdn=<bool>         -> FeatureFlags__UseUpstream__Cdn                   (S03 / ADR-0004)
+      #       UseUpstreamOffer=<bool>       -> FeatureFlags__UseUpstream__Offer                 (S07 — auction/accept)
+      #     NOTE: FeatureFlags__UseUpstream__Offer is ALSO injected UNCONDITIONALLY =true on every
+      #     deploy (see the dedicated --env-add/--env line in the update & create branches below),
+      #     so S07 routes through UpstreamPendingOffersStore even when this map key is omitted.
+      #     Passing UseUpstreamOffer here is redundant-but-harmless (same value, idempotent).
       #     Future spine flags are added to the map's case table below — NO new input, NO cap risk.
       #   * `durable_requests`, `whisper_fake`, `dev_endpoints`, `swagger_ui` keep their OWN
       #     dedicated inputs UNCHANGED (their 3-state / secret-coupled semantics are load-bearing
@@ -126,7 +131,7 @@ on:
       # Example: feature_flags='ConversationAutoCreate=true' arms H7 broadcasting auto-create
       # while leaving Kyc/Cdn at their baked-true defaults.
       feature_flags:
-        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,Heartbeat=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, Heartbeat. Empty = preserve running flags (baked appsettings defaults on fresh create).'
+        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,Heartbeat=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, Heartbeat. Empty = preserve running flags (baked appsettings defaults on fresh create). NOTE: UseUpstream.Offer is forced =true unconditionally every deploy regardless of this input (S07).'
         required: false
         default: ''
       # S04 / Track C — REAL OpenAI Whisper STT seam. The gateway selects the real
@@ -360,6 +365,7 @@ jobs:
                 conversationautocreate) _envvar="FeatureFlags__ConversationAutoCreate__Enabled" ;;
                 useupstreamkyc)         _envvar="FeatureFlags__UseUpstream__Kyc" ;;
                 useupstreamcdn)         _envvar="FeatureFlags__UseUpstream__Cdn" ;;
+                useupstreamoffer)       _envvar="FeatureFlags__UseUpstream__Offer" ;;
                 heartbeat)              _envvar="FeatureFlags__Heartbeat__Enabled" ;;
                 *) echo "::warning::feature_flags: ignoring unknown key '$_key'"; continue ;;
               esac
@@ -393,6 +399,7 @@ jobs:
               --env-add Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               --env-add FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
               --env-add FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
+              --env-add FeatureFlags__UseUpstream__Offer='true' \
               $FEATURE_FLAG_ARGS \
               $DEV_FLAG_ARG \
               $SWAGGER_FLAG_ARG \
@@ -428,6 +435,7 @@ jobs:
               --env Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               --env FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
               --env FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
+              --env FeatureFlags__UseUpstream__Offer='true' \
               $FEATURE_FLAG_CREATE_ARGS \
               --reserve-memory 256M \
               '$TAG'
