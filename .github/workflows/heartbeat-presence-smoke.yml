@@ -26,6 +26,10 @@ on:
         description: 'Gateway base URL (public)'
         required: true
         default: 'https://jeeb.fds-1.com'
+      avail_prefix:
+        description: 'Edge route prefix for the jeeber availability surface (nginx serves it under /api or /v1; bare path 404s)'
+        required: true
+        default: '/api'
       hb_port:
         description: 'heart-beat published host port (gateway-internal)'
         required: true
@@ -54,6 +58,7 @@ jobs:
       HB_PORT: ${{ inputs.hb_port }}
       MINT_KEY: ${{ secrets.JEEB_TOKEN_MINT_KEY }}
       SVC_AUTH: ${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}
+      AVAIL: ${{ inputs.avail_prefix }}
     steps:
       - name: Preflight (secrets present)
         run: |
@@ -122,13 +127,13 @@ jobs:
           set -euo pipefail
           TOKEN=$(cat token.txt)
           HTTP=$(curl -sS -m 20 -o patch_off.json -w '%{http_code}' \
-            -X PATCH "$BASE/jeebers/me/availability" \
+            -X PATCH "$BASE${AVAIL}/jeebers/me/availability" \
             -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
             -d '{"online":false}')
           echo "PATCH offline HTTP=$HTTP"; cat patch_off.json; echo
           test "$HTTP" = "200" || { echo "::error::N13 PATCH offline expected 200 got $HTTP (401 => heart-beat auth FAILED)"; exit 1; }
           HTTP=$(curl -sS -m 20 -o get1.json -w '%{http_code}' \
-            -X GET "$BASE/jeebers/me/availability" -H "Authorization: Bearer $TOKEN")
+            -X GET "$BASE${AVAIL}/jeebers/me/availability" -H "Authorization: Bearer $TOKEN")
           echo "GET HTTP=$HTTP"; cat get1.json; echo
           test "$HTTP" = "200" || { echo "::error::GET availability expected 200 got $HTTP"; exit 1; }
           python3 -c "import json;d=json.load(open('get1.json'));assert d.get('online') is False, f'expected online:false got {d.get(\"online\")}';print('N13 GET online=false OK')"
@@ -139,7 +144,7 @@ jobs:
           TOKEN=$(cat token.txt)
           JID="${{ steps.mint.outputs.jeeber_id }}"
           HTTP=$(curl -sS -m 20 -o patch_on.json -w '%{http_code}' \
-            -X PATCH "$BASE/jeebers/me/availability" \
+            -X PATCH "$BASE${AVAIL}/jeebers/me/availability" \
             -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
             -d '{"online":true,"vehicleType":"car","zone":"beirut-central"}')
           echo "PATCH online HTTP=$HTTP"; cat patch_on.json; echo
@@ -182,7 +187,7 @@ jobs:
           set -euo pipefail
           TOKEN=$(cat token.txt)
           HTTP=$(curl -sS -m 20 -o get2.json -w '%{http_code}' \
-            -X GET "$BASE/jeebers/me/availability" -H "Authorization: Bearer $TOKEN")
+            -X GET "$BASE${AVAIL}/jeebers/me/availability" -H "Authorization: Bearer $TOKEN")
           echo "GET HTTP=$HTTP"; cat get2.json; echo
           test "$HTTP" = "200" || { echo "::error::GET availability expected 200 got $HTTP"; exit 1; }
           python3 -c "import json;d=json.load(open('get2.json'));assert d.get('online') is False, f'expected online:false after sweep got {d.get(\"online\")}';print('N12 via gateway online=false OK')"
