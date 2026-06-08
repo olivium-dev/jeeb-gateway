@@ -186,6 +186,114 @@ public class OfferAcceptUpstreamTests
     }
 
     // -----------------------------------------------------------------
+    // S07 BR-1 inverted-guard regression (attempt 6 fix).
+    //
+    // The legitimate offer ACCEPTOR is ALWAYS the request-owning CLIENT, so
+    // request.ClientId == actor is the NORMAL, correct case. The pre-fix gateway
+    // BR-1 check compared actor against request.ClientId and therefore tripped a
+    // 409 same-delivery-role-violation on EVERY valid accept. The fix compares the
+    // actor against THIS OFFER's recorded bidder instead: a self-offer (actor is
+    // both the request client AND the offer's jeeber) still 409s; an ordinary
+    // client accept does NOT.
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task Accept_By_Request_Owning_Client_Does_Not_Trip_BR1_409()
+    {
+        // The bidding jeeber is a DIFFERENT user from the accepting client — the
+        // ordinary, correct case. Pre-fix this returned 409; it must now reach the
+        // saga and return 200.
+        var fake = new FakeOfferServiceClient
+        {
+            Result = new OfferAcceptResult
+            {
+                Status = OfferAcceptStatus.Accepted,
+                Envelope = new OfferAcceptWire
+                {
+                    AcceptedOfferId = "offer-legit",
+                    JeeberId = "jeeber-other",
+                    ChatThreadId = "thread-legit",
+                    OtpCode = "1357",
+                    RejectedOfferIds = Array.Empty<string>()
+                }
+            }
+        };
+        using var factory = NewUpstreamFactory(fake);
+        // Routing records the offer's bidder (jeeber-other) — NOT the acceptor.
+        SeedRouting(factory, offerId: "offer-legit", requestId: "req-legit", jeeberId: "jeeber-other");
+
+        var resp = await ClientActor(factory, "client-owner")
+            .PostAsync("/offers/offer-legit/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<DeliveryRequestDto>();
+        body!.Id.Should().Be("req-legit");
+        body.Status.Should().Be("accepted");
+        body.ClientId.Should().Be("client-owner");
+        // The saga WAS forwarded with the client's id (BR-1 did not short-circuit).
+        fake.CallCount.Should().Be(1);
+        fake.LastActingUserId.Should().Be("client-owner");
+    }
+
+    [Fact]
+    public async Task Accept_Genuine_Self_Offer_Still_Returns_409_BR1()
+    {
+        // BR-1 self-dealing: the accepting CLIENT is also the JEEBER who bid the
+        // offer being accepted (actor == offer.jeeberId). This is the ONLY
+        // legitimate BR-1 violation on the accept path and must still 409 BEFORE
+        // the saga is forwarded.
+        var fake = new FakeOfferServiceClient
+        {
+            // Must NOT be consulted — BR-1 short-circuits before the saga call.
+            Result = new OfferAcceptResult { Status = OfferAcceptStatus.Accepted }
+        };
+        using var factory = NewUpstreamFactory(fake);
+        // The offer's recorded bidder IS the same user who is now accepting.
+        SeedRouting(factory, offerId: "offer-self", requestId: "req-self", jeeberId: "dual-role-dana");
+
+        var resp = await ClientActor(factory, "dual-role-dana")
+            .PostAsync("/offers/offer-self/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/same-delivery-role-violation");
+        // The saga was NEVER forwarded — BR-1 failed fast.
+        fake.CallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Accept_With_Unknown_Bidder_Defers_BR1_To_Saga_And_Returns_200()
+    {
+        // When the routing index has no jeeber id for the offer (legacy 2-arg
+        // Record / unknown bidder), the gateway must NOT assert a BR-1 violation —
+        // it defers to the offer-service ownership guard. A normal accept proceeds.
+        var fake = new FakeOfferServiceClient
+        {
+            Result = new OfferAcceptResult
+            {
+                Status = OfferAcceptStatus.Accepted,
+                Envelope = new OfferAcceptWire
+                {
+                    AcceptedOfferId = "offer-nobidder",
+                    JeeberId = "jeeber-from-envelope",
+                    ChatThreadId = "thread-nb",
+                    OtpCode = "2468",
+                    RejectedOfferIds = Array.Empty<string>()
+                }
+            }
+        };
+        using var factory = NewUpstreamFactory(fake);
+        // 2-arg Record → no jeeber id recorded.
+        SeedRouting(factory, offerId: "offer-nobidder", requestId: "req-nobidder");
+
+        var resp = await ClientActor(factory, "client-nb")
+            .PostAsync("/offers/offer-nobidder/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        fake.CallCount.Should().Be(1);
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
@@ -208,6 +316,12 @@ public class OfferAcceptUpstreamTests
     private static void SeedRouting(
         WebApplicationFactory<Program> factory, string offerId, string requestId)
         => factory.Services.GetRequiredService<IOfferRequestIndex>().Record(offerId, requestId);
+
+    // S07 BR-1 fix: also seed the offer's bidder so the accept path can detect a
+    // genuine self-offer. Mirrors RequestOffersController.Submit's 3-arg Record.
+    private static void SeedRouting(
+        WebApplicationFactory<Program> factory, string offerId, string requestId, string jeeberId)
+        => factory.Services.GetRequiredService<IOfferRequestIndex>().Record(offerId, requestId, jeeberId);
 
     // S07: the acceptor is the request-owning CLIENT, so the test caller carries the
     // client role. (A jeeber accepting is now 403'd at the capability gate; that is

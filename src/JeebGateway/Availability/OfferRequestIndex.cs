@@ -34,10 +34,31 @@ public interface IOfferRequestIndex
     void Record(string offerId, string requestId);
 
     /// <summary>
+    /// Records the <c>offerId → (requestId, jeeberId)</c> pairing learned at
+    /// offer-submission time. The <paramref name="jeeberId"/> is the immutable
+    /// bidder identity captured when the offer was submitted through this gateway;
+    /// it lets the accept path detect a genuine BR-1 self-offer (the accepting
+    /// CLIENT is also the jeeber who bid the offer) WITHOUT an extra offer-service
+    /// round-trip and WITHOUT recomputing any auction rule. This is a structural
+    /// routing fact, not mutable auction state. Idempotent.
+    /// </summary>
+    void Record(string offerId, string requestId, string? jeeberId);
+
+    /// <summary>
     /// Resolves the requestId an offer was submitted against. Returns
     /// <c>null</c> when the offer is unknown to this gateway instance.
     /// </summary>
     string? ResolveRequestId(string offerId);
+
+    /// <summary>
+    /// Resolves the jeeber (bidder) identity recorded for an offer at submit time.
+    /// Returns <c>null</c> when the offer is unknown to this gateway instance, or
+    /// when the pairing was recorded without a jeeber id (legacy
+    /// <see cref="Record(string,string)"/> overload). Callers must treat a
+    /// <c>null</c> result as "unknown — cannot assert a self-offer" and defer the
+    /// BR-1 self-offer decision to the offer-service, never as "not a self-offer".
+    /// </summary>
+    string? ResolveJeeberId(string offerId);
 }
 
 /// <summary>
@@ -47,18 +68,27 @@ public interface IOfferRequestIndex
 /// </summary>
 public sealed class InMemoryOfferRequestIndex : IOfferRequestIndex
 {
-    private readonly ConcurrentDictionary<string, string> _byOfferId = new(StringComparer.Ordinal);
+    private readonly record struct Pairing(string RequestId, string? JeeberId);
+
+    private readonly ConcurrentDictionary<string, Pairing> _byOfferId = new(StringComparer.Ordinal);
 
     public void Record(string offerId, string requestId)
+        => Record(offerId, requestId, jeeberId: null);
+
+    public void Record(string offerId, string requestId, string? jeeberId)
     {
         if (string.IsNullOrWhiteSpace(offerId) || string.IsNullOrWhiteSpace(requestId))
         {
             return;
         }
 
-        _byOfferId[offerId] = requestId;
+        var normalizedJeeberId = string.IsNullOrWhiteSpace(jeeberId) ? null : jeeberId;
+        _byOfferId[offerId] = new Pairing(requestId, normalizedJeeberId);
     }
 
     public string? ResolveRequestId(string offerId)
-        => _byOfferId.TryGetValue(offerId, out var requestId) ? requestId : null;
+        => _byOfferId.TryGetValue(offerId, out var pairing) ? pairing.RequestId : null;
+
+    public string? ResolveJeeberId(string offerId)
+        => _byOfferId.TryGetValue(offerId, out var pairing) ? pairing.JeeberId : null;
 }
