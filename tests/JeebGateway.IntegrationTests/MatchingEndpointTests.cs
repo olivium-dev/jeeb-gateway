@@ -83,6 +83,61 @@ public class MatchingEndpointTests
     }
 
     [Fact]
+    public async Task Run_Surfaces_TierCode_As_TierId_For_S06_Contract()
+    {
+        // S06 step B1 asserts $.tierId == "flash" (the lowercase tier CODE, not the
+        // UUID). delivery-service returns BOTH tier_code (flash/standard/express)
+        // and tier_id (the stable UUID). The BFF must echo the code as $.tierId.
+        var stub = new StubHttpMessageHandler(_ =>
+            JsonResponse(
+                """
+                {
+                  "request_id":"flash_req","tier_id":"8f1c2d3e-0000-4000-8000-000000000001",
+                  "tier_code":"flash","radius_km":1,
+                  "notified_count":2,"candidate_count":2,
+                  "candidates":[{"user_id":"kamal","vehicle_type":"motorbike","distance_km":0.3,"rating":4.9}],
+                  "elapsed_ms":12
+                }
+                """));
+
+        using var factory = NewFactory(services =>
+            ReplaceDeliveryClient(services, stub, "http://upstream-delivery.test"));
+
+        var client = ClientFor(factory, "client-flash");
+        var resp = await client.PostAsJsonAsync("/matching/run", new { requestId = "flash_req" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<MatchingRunResponse>();
+        // The lowercase CODE is surfaced as $.tierId — NOT the UUID.
+        body!.TierId.Should().Be("flash");
+        body.Candidates.Should().ContainSingle().Which.UserId.Should().Be("kamal");
+    }
+
+    [Fact]
+    public async Task Run_Falls_Back_To_TierId_Uuid_When_TierCode_Absent()
+    {
+        // Backward-compatibility: an older delivery-service that has not yet shipped
+        // tier_code returns only tier_id. The BFF must then echo the UUID (today's
+        // behaviour) rather than emit an empty $.tierId.
+        var stub = new StubHttpMessageHandler(_ =>
+            JsonResponse(
+                """
+                {"request_id":"r","tier_id":"urgent-uuid","radius_km":5,
+                 "notified_count":0,"candidate_count":0,"candidates":[],"elapsed_ms":1}
+                """));
+
+        using var factory = NewFactory(services =>
+            ReplaceDeliveryClient(services, stub, "http://upstream-delivery.test"));
+
+        var client = ClientFor(factory, "client-legacy");
+        var resp = await client.PostAsJsonAsync("/matching/run", new { requestId = "r" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<MatchingRunResponse>();
+        body!.TierId.Should().Be("urgent-uuid");
+    }
+
+    [Fact]
     public async Task Run_Sends_SnakeCase_Body_With_Tenant_To_Upstream()
     {
         // The gateway forwards the body verbatim AND stamps the required

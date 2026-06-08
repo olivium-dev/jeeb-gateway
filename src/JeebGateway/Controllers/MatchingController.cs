@@ -114,7 +114,13 @@ public sealed class MatchingController : ControllerBase
         return Ok(new MatchingRunResponse
         {
             RequestId = result.RequestId,
-            TierId = result.TierId,
+            // Surface the lowercase tier CODE (flash/standard/express) as the BFF
+            // $.tierId, matching the S06 contract. delivery-service returns both
+            // tier_code (the human code) and tier_id (the stable UUID); prefer the
+            // code, and fall back to the UUID only when delivery-service has not
+            // populated tier_code (an older deploy) so the response is never empty.
+            // Additive: no change to the Go contract, just which field the BFF echoes.
+            TierId = string.IsNullOrEmpty(result.TierCode) ? result.TierId : result.TierCode,
             RadiusKm = result.RadiusKm,
             NotifiedCount = result.NotifiedCount,
             CandidateCount = result.CandidateCount,

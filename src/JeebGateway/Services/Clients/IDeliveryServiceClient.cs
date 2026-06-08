@@ -207,6 +207,20 @@ public sealed class DeliveryMatchingRunResult
     [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
     public required string TierId { get; init; }
 
+    /// <summary>
+    /// Additive bind of delivery-service's <c>tier_code</c> (the lowercase human
+    /// tier code, e.g. <c>flash</c>/<c>standard</c>/<c>express</c>). delivery-service
+    /// returns BOTH <c>tier_id</c> (the stable public UUID) and <c>tier_code</c>
+    /// (RunOutcome.TierCode). This is a NEW optional field — it does not alter the
+    /// existing <see cref="TierId"/> binding — so a delivery-service that has not
+    /// yet shipped <c>tier_code</c> simply leaves it null (backward-compatible).
+    /// The controller surfaces this code as the BFF response <c>tierId</c> so the
+    /// S06 contract's <c>$.tierId == "flash"</c> assertion sees the lowercase code,
+    /// not the UUID, with no change to the Go contract.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("tier_code")]
+    public string? TierCode { get; init; }
+
     [System.Text.Json.Serialization.JsonPropertyName("radius_km")]
     public double RadiusKm { get; init; }
 
