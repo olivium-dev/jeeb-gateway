@@ -82,6 +82,60 @@ public class MatchingEndpointTests
         captured.Single().RequestUri!.AbsolutePath.Should().Be("/api/v1/matching/run");
     }
 
+    [Theory]
+    [InlineData("flash")]
+    [InlineData("standard")]
+    [InlineData("express")]
+    public async Task Run_Surfaces_TierCode_As_TierId(string tierCode)
+    {
+        // S06 B1/ALT-4/ALT-4b assert $.tierId == "flash"/"standard"/"express"
+        // (the lowercase tier CODE the client ordered), NOT the tier UUID.
+        // delivery-service returns both tier_id (UUID) and tier_code; the gateway
+        // must surface the CODE on $.tierId.
+        var stub = new StubHttpMessageHandler(_ => JsonResponse(
+            $$"""
+            {
+              "request_id":"del_tc","tier_id":"a1b2-uuid","tier_code":"{{tierCode}}",
+              "radius_km":1,"notified_count":2,"candidate_count":2,"candidates":[],"elapsed_ms":7
+            }
+            """));
+
+        using var factory = NewFactory(services =>
+            ReplaceDeliveryClient(services, stub, "http://upstream-delivery.test"));
+
+        var client = ClientFor(factory, "client-tier");
+        var resp = await client.PostAsJsonAsync("/matching/run", new { requestId = "del_tc" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<MatchingRunResponse>();
+        // $.tierId carries the human-readable code, not the UUID.
+        body!.TierId.Should().Be(tierCode);
+    }
+
+    [Fact]
+    public async Task Run_Falls_Back_To_TierId_Uuid_When_TierCode_Absent()
+    {
+        // An older delivery-service build omitting tier_code must not produce a
+        // null/empty $.tierId — the controller falls back to the tier UUID.
+        var stub = new StubHttpMessageHandler(_ => JsonResponse(
+            """
+            {
+              "request_id":"del_nc","tier_id":"uuid-only","radius_km":1,
+              "notified_count":0,"candidate_count":0,"candidates":[],"elapsed_ms":2
+            }
+            """));
+
+        using var factory = NewFactory(services =>
+            ReplaceDeliveryClient(services, stub, "http://upstream-delivery.test"));
+
+        var client = ClientFor(factory, "client-nc");
+        var resp = await client.PostAsJsonAsync("/matching/run", new { requestId = "del_nc" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<MatchingRunResponse>();
+        body!.TierId.Should().Be("uuid-only");
+    }
+
     [Fact]
     public async Task Run_Sends_SnakeCase_Body_With_Tenant_To_Upstream()
     {

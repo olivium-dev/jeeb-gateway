@@ -99,6 +99,57 @@ public class MatchingRunContractTests
         sentBody.Should().NotContain("pickupLat");
     }
 
+    [Fact]
+    public async Task RunMatchingAsync_Binds_The_SnakeCase_TierCode_Field()
+    {
+        // delivery-service (RunOutcome, run.go) emits BOTH tier_id (UUID) and the
+        // lowercase tier_code (flash/standard/express). The gateway surfaces the
+        // CODE as the client-facing $.tierId (S06 B1/ALT-4/ALT-4b assert
+        // $.tierId == "flash"/"standard"/"express"). Lock the snake_case bind so
+        // tier_code lands on DeliveryMatchingRunResult.TierCode.
+        var client = ClientReturning(
+            HttpStatusCode.OK,
+            """
+            {
+              "request_id":"del_flash","tier_id":"3f2c-uuid","tier_code":"flash",
+              "radius_km":1,"notified_count":2,"candidate_count":2,
+              "candidates":[],"elapsed_ms":12
+            }
+            """);
+
+        var result = await client.RunMatchingAsync(
+            new DeliveryMatchingRunRequest { RequestId = "del_flash", TenantId = "default" },
+            CancellationToken.None);
+
+        // tier_id stays the UUID (unchanged for existing consumers); tier_code is
+        // the new additive bind the controller maps onto $.tierId.
+        result.TierId.Should().Be("3f2c-uuid");
+        result.TierCode.Should().Be("flash");
+    }
+
+    [Fact]
+    public async Task RunMatchingAsync_Tolerates_Missing_TierCode_From_Older_Build()
+    {
+        // An older delivery-service build that omits tier_code must still
+        // deserialize (TierCode is nullable) — the controller then falls back to
+        // tier_id. This proves the additive field never breaks the success path.
+        var client = ClientReturning(
+            HttpStatusCode.OK,
+            """
+            {
+              "request_id":"del_x","tier_id":"tier_express","radius_km":3,
+              "notified_count":0,"candidate_count":0,"candidates":[],"elapsed_ms":4
+            }
+            """);
+
+        var result = await client.RunMatchingAsync(
+            new DeliveryMatchingRunRequest { RequestId = "del_x", TenantId = "default" },
+            CancellationToken.None);
+
+        result.TierId.Should().Be("tier_express");
+        result.TierCode.Should().BeNull();
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.BadRequest, "unknown_vehicle")]
     [InlineData(HttpStatusCode.NotFound, "unknown_tier")]
