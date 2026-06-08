@@ -126,7 +126,7 @@ on:
       # Example: feature_flags='ConversationAutoCreate=true' arms H7 broadcasting auto-create
       # while leaving Kyc/Cdn at their baked-true defaults.
       feature_flags:
-        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,UseUpstreamKyc=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn. Empty = preserve running flags (baked appsettings defaults on fresh create).'
+        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,Heartbeat=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, Heartbeat. Empty = preserve running flags (baked appsettings defaults on fresh create).'
         required: false
         default: ''
       # S04 / Track C — REAL OpenAI Whisper STT seam. The gateway selects the real
@@ -360,6 +360,7 @@ jobs:
                 conversationautocreate) _envvar="FeatureFlags__ConversationAutoCreate__Enabled" ;;
                 useupstreamkyc)         _envvar="FeatureFlags__UseUpstream__Kyc" ;;
                 useupstreamcdn)         _envvar="FeatureFlags__UseUpstream__Cdn" ;;
+                heartbeat)              _envvar="FeatureFlags__Heartbeat__Enabled" ;;
                 *) echo "::warning::feature_flags: ignoring unknown key '$_key'"; continue ;;
               esac
               FEATURE_FLAG_ARGS="$FEATURE_FLAG_ARGS --env-add ${_envvar}=${_val}"
@@ -391,6 +392,7 @@ jobs:
               --env-add Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env-add Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               --env-add FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
+              --env-add FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               $FEATURE_FLAG_ARGS \
               $DEV_FLAG_ARG \
               $SWAGGER_FLAG_ARG \
@@ -425,6 +427,7 @@ jobs:
               --env Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               --env FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
+              --env FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               $FEATURE_FLAG_CREATE_ARGS \
               --reserve-memory 256M \
               '$TAG'
