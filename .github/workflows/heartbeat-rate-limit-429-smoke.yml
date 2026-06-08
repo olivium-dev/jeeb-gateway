@@ -1,0 +1,158 @@
+# S06 / N14 heart-beat presence rate-limit smoke (429 + Retry-After forwarded through the gateway).
+#
+# Proves the N14 fix is LIVE end-to-end against the deployed stack:
+#   * the heart-beat per-user/minute presence-toggle rate limiter is armed (PR#5, sha-f4c8dbb),
+#   * the gateway forwards the upstream 429 verbatim (NOT collapsed to 500) AND re-emits the
+#     upstream Retry-After header (gateway PR#124 / commit 30db9633 — AvailabilityController
+#     ForwardHeartBeatError + ReadRetryAfter).
+#
+# Method: mint one jeeber, then flood PATCH /jeebers/me/availability through the gateway origin
+# (localhost:10000 over the cloudflared SSH tunnel — the public edge does NOT expose this route
+# family; same authentic path the N13 presence smoke uses). Within a single minute one user
+# exceeds the per-user budget, so at least one PATCH MUST return 429 with a non-empty Retry-After.
+#
+# Secrets stay GitHub-managed and are NEVER printed:
+#   JEEB_TOKEN_MINT_KEY   mints the smoke jeeber token (gateway gate).
+#   JEEB_SSH_PRIVATE_KEY  cloudflared SSH key to reach the gateway origin on localhost:10000.
+# GHA-only: no app/route change, no manual docker. On-demand / one-off.
+name: Heartbeat Rate-Limit 429 Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      flood_count:
+        description: 'Number of rapid PATCH calls in one minute (must exceed the per-user budget)'
+        required: true
+        default: '70'
+      server_hostname:
+        description: 'Cloudflare tunnel hostname'
+        required: true
+        default: 'jeeb-ssh.fds-1.com'
+      server_user:
+        description: 'SSH user'
+        required: true
+        default: 'ec2-user'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heartbeat-429-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-22.04
+    env:
+      BASE: 'https://jeeb.fds-1.com'
+      MINT_KEY: ${{ secrets.JEEB_TOKEN_MINT_KEY }}
+      FLOOD: ${{ inputs.flood_count }}
+    steps:
+      - name: Preflight (secrets present)
+        run: |
+          set -euo pipefail
+          [ -n "${MINT_KEY:-}" ] || { echo "::error::JEEB_TOKEN_MINT_KEY secret missing"; exit 1; }
+          echo "secrets present (values not printed)"
+
+      - name: Install cloudflared + write SSH key
+        run: |
+          set -euo pipefail
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb || sudo apt-get install -f -y
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          KEY_MATERIAL="${{ secrets.JEEB_SSH_PRIVATE_KEY }}"
+          if printf '%s' "$KEY_MATERIAL" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$KEY_MATERIAL" > ~/.ssh/id_ed25519
+          else
+            printf '%s' "$KEY_MATERIAL" | base64 -d > ~/.ssh/id_ed25519
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+          cat > ~/.ssh/config <<EOF
+          Host jeeb
+            HostName ${{ inputs.server_hostname }}
+            User ${{ inputs.server_user }}
+            IdentityFile ~/.ssh/id_ed25519
+            ProxyCommand cloudflared access ssh --hostname %h
+            StrictHostKeyChecking accept-new
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: 1) Aggregate health == Healthy, failing == [] (heart-beat must be present)
+        run: |
+          set -euo pipefail
+          curl -sS -m 25 -X POST "$BASE/health/aggregate" -o agg.json -w 'aggregate HTTP %{http_code}\n'
+          python3 - <<'PY'
+          import json
+          d=json.load(open('agg.json'))
+          checks=d.get('checks',[])
+          names=[c.get('name') for c in checks]
+          bad=[c['name'] for c in checks if c.get('status')!='Healthy']
+          print('overall:', d.get('status'), '| checks:', len(checks), '| failing:', bad or '[]')
+          hb=[n for n in names if 'heart' in (n or '').lower() or 'beat' in (n or '').lower() or 'presence' in (n or '').lower()]
+          print('heart-beat-related checks:', hb or '(none named; flag-gated aggregate may fold it differently)')
+          assert d.get('status')=='Healthy', f"aggregate not Healthy: {d.get('status')}"
+          assert not bad, f"failing checks: {bad}"
+          PY
+
+      - name: 2) Mint a jeeber token (key never printed)
+        id: mint
+        run: |
+          set -euo pipefail
+          JID="smoke-n14-${GITHUB_RUN_ID}"
+          echo "jeeber_id=$JID" >> "$GITHUB_OUTPUT"
+          BODY=$(printf '{"userId":"%s","roles":["jeeber"]}' "$JID")
+          HTTP=$(curl -sS -m 20 -o mint.json -w '%{http_code}' \
+            -X POST "$BASE/auth/tokens" -H 'Content-Type: application/json' \
+            -H "X-Service-Auth-Key: ${MINT_KEY}" -d "$BODY")
+          echo "mint HTTP=$HTTP"
+          test "$HTTP" = "200" || { echo "::error::mint failed HTTP=$HTTP"; cat mint.json; exit 1; }
+          TOKEN=$(python3 -c "import json;print(json.load(open('mint.json')).get('accessToken') or json.load(open('mint.json')).get('access_token',''))")
+          [ -n "$TOKEN" ] || { echo "::error::no accessToken in mint response"; cat mint.json; exit 1; }
+          echo "::add-mask::$TOKEN"
+          echo "$TOKEN" > token.txt
+          echo "minted jeeber token for $JID (token masked)"
+
+      - name: 3) N14 FLOOD — >budget PATCH /jeebers/me/availability in one minute -> expect 429 + Retry-After
+        run: |
+          set -euo pipefail
+          TOKEN=$(cat token.txt)
+          # Run the flood ON the host (gateway origin localhost:10000) over the tunnel — the
+          # public edge does not expose /jeebers/me/availability (documented edge gap; same
+          # authentic origin path the N13 presence smoke uses). Toggle online true/false so each
+          # call is a real presence write that the per-user/minute limiter counts.
+          REMOTE=$(cat <<REMOTE_EOF
+          set -e
+          TOKEN='$TOKEN'
+          got429=0; firstRetry=''; n=$FLOOD; codes=''
+          for i in \$(seq 1 \$n); do
+            on=\$([ \$((i % 2)) -eq 0 ] && echo true || echo false)
+            resp=\$(curl -sS -m 8 -D - -o /dev/null \
+              -X PATCH http://localhost:10000/jeebers/me/availability \
+              -H "Authorization: Bearer \$TOKEN" -H 'Content-Type: application/json' \
+              -d "{\"online\":\$on}" 2>/dev/null || true)
+            code=\$(printf '%s' "\$resp" | sed -n 's@^HTTP/[0-9.]* \([0-9]*\).*@\1@p' | head -1)
+            codes="\$codes \$code"
+            if [ "\$code" = "429" ]; then
+              got429=1
+              ra=\$(printf '%s' "\$resp" | tr -d '\r' | sed -n 's@^[Rr]etry-[Aa]fter: *\(.*\)@\1@p' | head -1)
+              if [ -z "\$firstRetry" ]; then firstRetry="\$ra"; fi
+            fi
+          done
+          echo "FLOOD_CODES=\$codes"
+          echo "GOT_429=\$got429"
+          echo "FIRST_RETRY_AFTER=[\$firstRetry]"
+          REMOTE_EOF
+          )
+          OUT=$(ssh jeeb "bash -s" <<< "$REMOTE")
+          echo "$OUT"
+          GOT=$(echo "$OUT" | sed -n 's/^GOT_429=//p' | tail -1)
+          RA=$(echo "$OUT"  | sed -n 's/^FIRST_RETRY_AFTER=\[\(.*\)\]$/\1/p' | tail -1)
+          echo "---- N14 verdict ----"
+          echo "observed a 429 through the gateway: GOT_429=$GOT"
+          echo "Retry-After on first 429: [$RA]"
+          test "$GOT" = "1" || { echo "::error::N14 FAIL — no 429 observed after $FLOOD PATCHes (rate limiter not arming, or gateway collapsing it)"; exit 1; }
+          [ -n "$RA" ] || { echo "::error::N14 FAIL — 429 returned but Retry-After header was empty/dropped by the gateway"; exit 1; }
+          echo "N14 PASS — gateway forwarded heart-beat 429 with Retry-After=[$RA] (not collapsed to 500)."
+
+      - name: Smoke summary
+        run: echo "S06 / N14 rate-limit smoke PASSED — flood produced a 429 + Retry-After surfaced through the gateway."
