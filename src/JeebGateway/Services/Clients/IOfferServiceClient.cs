@@ -30,11 +30,52 @@ namespace JeebGateway.Services.Clients;
 public interface IOfferServiceClient
 {
     /// <summary>
+    /// POST /api/v1/requests — gateway request-bridge (OS-1). Idempotently
+    /// mirrors a gateway-issued delivery request into offer-service so that a
+    /// subsequent <see cref="SubmitAsync"/> against the same <paramref name="requestId"/>
+    /// resolves (offer-service requires the request row to exist before a bid
+    /// can attach to it). The gateway is the system-of-record and forwards the
+    /// id it already minted; offer-service returns 201 on first mirror and 200
+    /// on idempotent replay (the existing lifecycle state is never reset).
+    ///
+    /// <para>This is allowed BFF composition — the gateway pushes a row it owns
+    /// into the offer domain so the offer write resolves; it is NOT
+    /// inter-service domain coupling (the gateway runs no offer-service
+    /// business logic).</para>
+    ///
+    /// <para>Body: <c>{ "request_id", "client_id", "status": "open" }</c>. The
+    /// acting <paramref name="clientId"/> is the request creator (taken from the
+    /// gateway's own request row), NOT <paramref name="actingUserId"/> (the
+    /// bidding Jeeber) — offer-service reads <c>client_id</c> from the body for
+    /// exactly this on-behalf-of mirror.</para>
+    ///
+    /// <para>Returns the mirror outcome so the caller can distinguish a fresh
+    /// mirror from a replay; a 422 (invalid <c>client_id</c>) or 400 (bad
+    /// <c>request_id</c>) surfaces as <see cref="OfferUpstreamValidationException"/>
+    /// rather than a raw throw.</para>
+    /// </summary>
+    Task<RequestMirrorResult> MirrorRequestAsync(
+        string actingUserId,
+        string requestId,
+        string clientId,
+        CancellationToken ct);
+
+    /// <summary>
     /// POST /api/v1/requests/{requestId}/offers — submit a bid as
     /// <paramref name="actingUserId"/>. Returns the created offer on 201.
     /// Translates upstream conflict codes (<c>request_not_open</c>,
     /// duplicate-offer) into the same exceptions the in-memory store throws so
     /// the controller's catch blocks stay unchanged.
+    ///
+    /// <para>Error mapping (GW-2): a 404 means the request row was never
+    /// mirrored into offer-service — surfaced as
+    /// <see cref="OfferRequestNotMirroredException"/> so the caller can mirror
+    /// (via <see cref="MirrorRequestAsync"/>) and retry instead of bubbling a
+    /// raw <see cref="HttpRequestException"/> that the global handler would turn
+    /// into a 502. A 422/400 (payload validation) surfaces as
+    /// <see cref="OfferUpstreamValidationException"/>. Every other non-2xx still
+    /// throws via <c>EnsureSuccessStatusCode()</c> so the global handler emits a
+    /// ProblemDetails 502 rather than a silent mis-map.</para>
     /// </summary>
     Task<OfferWire> SubmitAsync(
         string actingUserId,
@@ -93,6 +134,22 @@ public interface IOfferServiceClient
         string offerId,
         string idempotencyKey,
         CancellationToken ct);
+}
+
+/// <summary>
+/// Outcome of <see cref="IOfferServiceClient.MirrorRequestAsync"/>. The mirror
+/// is idempotent; the gateway treats <see cref="Created"/> and
+/// <see cref="AlreadyMirrored"/> identically for control flow (both mean "the
+/// request row now exists in offer-service, retry the submit"), but the
+/// distinction is preserved for logging / diagnostics.
+/// </summary>
+public enum RequestMirrorResult
+{
+    /// <summary>201 — the request row was created in offer-service for the first time.</summary>
+    Created,
+
+    /// <summary>200 — the request was already mirrored (idempotent replay).</summary>
+    AlreadyMirrored
 }
 
 /// <summary>

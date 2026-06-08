@@ -1,6 +1,7 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Requests;
+using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -187,7 +188,25 @@ public class RequestOffersController : ControllerBase
                 note,
                 MaxLiveOffersPerRequest,
                 _clock.GetUtcNow(),
-                ct);
+                ct,
+                // GW-1: the request creator's id. The upstream-backed store uses
+                // it to mirror the request into offer-service (OS-1) and retry
+                // when the submit 404s because the row was never mirrored. The
+                // in-memory store ignores it.
+                clientId: request.ClientId);
+        }
+        catch (OfferUpstreamValidationException ex)
+        {
+            // GW-2: offer-service rejected the mirror/submit payload (422/400).
+            // A caller-correctable validation failure — surface a 422
+            // ProblemDetails, never the global handler's opaque 502.
+            return UnprocessableEntity(new ProblemDetails
+            {
+                Title = "offer-service rejected the offer payload.",
+                Detail = $"stage={ex.Stage}; upstreamStatus={ex.UpstreamStatus}; code={ex.UpstreamCode ?? "validation_error"}",
+                Status = StatusCodes.Status422UnprocessableEntity,
+                Type = "https://jeeb.dev/errors/offer-upstream-validation"
+            });
         }
         catch (DuplicateOfferException ex)
         {

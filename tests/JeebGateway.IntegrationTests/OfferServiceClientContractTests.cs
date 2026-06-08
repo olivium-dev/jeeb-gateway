@@ -231,6 +231,166 @@ public class OfferServiceClientContractTests
     }
 
     // -----------------------------------------------------------------------
+    // GW-1 / GW-2: request-mirror bridge + submit error mapping (S07 close-out)
+    // -----------------------------------------------------------------------
+
+    private const string ClientId = "44444444-4444-4444-4444-444444444444";
+
+    [Fact]
+    public async Task MirrorRequestAsync_Posts_RequestBridge_Body_And_Maps_201_To_Created()
+    {
+        HttpRequestMessage? captured = null;
+        string? body = null;
+        var client = ClientCapturing(
+            HttpStatusCode.Created,
+            $$"""{"id":"{{RequestId}}","request_id":"{{RequestId}}","client_id":"{{ClientId}}","status":"open"}""",
+            (req, b) => { captured = req; body = b; });
+
+        var result = await client.MirrorRequestAsync(UserId, RequestId, ClientId, CancellationToken.None);
+
+        result.Should().Be(RequestMirrorResult.Created);
+        captured!.Method.Should().Be(HttpMethod.Post);
+        captured.RequestUri!.AbsolutePath.Should().Be("/api/v1/requests");
+        body.Should().Contain($"\"request_id\":\"{RequestId}\"")
+            .And.Contain($"\"client_id\":\"{ClientId}\"")
+            .And.Contain("\"status\":\"open\"");
+    }
+
+    [Fact]
+    public async Task MirrorRequestAsync_Maps_200_Replay_To_AlreadyMirrored()
+    {
+        var client = ClientReturning(HttpStatusCode.OK,
+            $$"""{"id":"{{RequestId}}","request_id":"{{RequestId}}","client_id":"{{ClientId}}","status":"open"}""");
+
+        var result = await client.MirrorRequestAsync(UserId, RequestId, ClientId, CancellationToken.None);
+
+        result.Should().Be(RequestMirrorResult.AlreadyMirrored);
+    }
+
+    [Fact]
+    public async Task MirrorRequestAsync_Maps_422_To_ValidationException()
+    {
+        var client = ClientReturning(HttpStatusCode.UnprocessableEntity,
+            """{"error":{"code":"client_id_invalid","message":"bad client"}}""");
+
+        var act = async () => await client.MirrorRequestAsync(UserId, RequestId, "not-a-uuid", CancellationToken.None);
+
+        var ex = (await act.Should().ThrowAsync<OfferUpstreamValidationException>()).Which;
+        ex.Stage.Should().Be("mirror");
+        ex.UpstreamStatus.Should().Be(422);
+        ex.UpstreamCode.Should().Be("client_id_invalid");
+    }
+
+    [Fact]
+    public async Task SubmitAsync_Maps_404_To_RequestNotMirroredException()
+    {
+        // GW-2: the original H1/H2 failure — offer-service 404s because the
+        // request was never mirrored. Must NOT raw-throw HttpRequestException
+        // (which the global handler turns into a 502); must surface the typed
+        // signal so the store can mirror-then-retry.
+        var client = ClientReturning(HttpStatusCode.NotFound,
+            """{"error":{"code":"request_not_found","message":"unknown request"}}""");
+
+        var act = async () =>
+            await client.SubmitAsync(UserId, RequestId, 1500, 25, null, CancellationToken.None);
+
+        (await act.Should().ThrowAsync<OfferRequestNotMirroredException>())
+            .Which.RequestId.Should().Be(RequestId);
+    }
+
+    [Fact]
+    public async Task SubmitAsync_Maps_422_To_ValidationException()
+    {
+        var client = ClientReturning(HttpStatusCode.UnprocessableEntity,
+            """{"error":{"code":"fee_cents_too_low","message":"min 100"}}""");
+
+        var act = async () =>
+            await client.SubmitAsync(UserId, RequestId, 1, 25, null, CancellationToken.None);
+
+        (await act.Should().ThrowAsync<OfferUpstreamValidationException>())
+            .Which.Stage.Should().Be("submit");
+    }
+
+    [Fact]
+    public async Task UpstreamStore_OnSubmit404_Mirrors_Then_Retries_Submit_Once()
+    {
+        // Sequence the real client: submit#1 → 404 (not mirrored),
+        // mirror → 201, submit#2 (retry) → 201 created offer.
+        var seq = new SequencedHandler(new[]
+        {
+            // submit #1 — request not mirrored yet
+            (HttpMethod.Post, $"/api/v1/requests/{RequestId}/offers", HttpStatusCode.NotFound,
+                """{"error":{"code":"request_not_found","message":"unknown"}}"""),
+            // mirror — OS-1
+            (HttpMethod.Post, "/api/v1/requests", HttpStatusCode.Created,
+                $$"""{"id":"{{RequestId}}","request_id":"{{RequestId}}","client_id":"{{ClientId}}","status":"open"}"""),
+            // submit #2 — now resolves
+            (HttpMethod.Post, $"/api/v1/requests/{RequestId}/offers", HttpStatusCode.Created,
+                $$"""{"id":"{{OfferId}}","request_id":"{{RequestId}}","jeeber_id":"{{UserId}}","fee_cents":1500,"eta_minutes":25,"status":"submitted"}"""),
+        });
+        var client = new OfferServiceClient(new HttpClient(seq) { BaseAddress = new Uri("http://offer-service.test/") });
+        var store = new UpstreamPendingOffersStore(client);
+
+        var offer = await store.TrySubmitAsync(
+            RequestId, UserId, fee: 15m, etaMinutes: 25, note: null,
+            maxPerRequest: 20, at: DateTimeOffset.UtcNow, ct: CancellationToken.None,
+            clientId: ClientId);
+
+        offer.Id.Should().Be(OfferId);
+        offer.Status.Should().Be(PendingOfferStatus.Pending);
+        // Proves the bridge fired: submit, mirror, submit (3 upstream calls).
+        seq.Calls.Should().HaveCount(3);
+        seq.Calls[0].AbsolutePath.Should().Be($"/api/v1/requests/{RequestId}/offers");
+        seq.Calls[1].AbsolutePath.Should().Be("/api/v1/requests");
+        seq.Calls[2].AbsolutePath.Should().Be($"/api/v1/requests/{RequestId}/offers");
+    }
+
+    [Fact]
+    public async Task UpstreamStore_DoesNotLoop_When_Submit404s_After_Mirror()
+    {
+        // Genuine not-found: even after a successful mirror the submit 404s.
+        // The store retries EXACTLY ONCE then lets the 404 surface — no loop.
+        var seq = new SequencedHandler(new[]
+        {
+            (HttpMethod.Post, $"/api/v1/requests/{RequestId}/offers", HttpStatusCode.NotFound,
+                """{"error":{"code":"request_not_found","message":"unknown"}}"""),
+            (HttpMethod.Post, "/api/v1/requests", HttpStatusCode.Created,
+                $$"""{"id":"{{RequestId}}","request_id":"{{RequestId}}","client_id":"{{ClientId}}","status":"open"}"""),
+            (HttpMethod.Post, $"/api/v1/requests/{RequestId}/offers", HttpStatusCode.NotFound,
+                """{"error":{"code":"request_not_found","message":"still unknown"}}"""),
+        });
+        var client = new OfferServiceClient(new HttpClient(seq) { BaseAddress = new Uri("http://offer-service.test/") });
+        var store = new UpstreamPendingOffersStore(client);
+
+        var act = async () => await store.TrySubmitAsync(
+            RequestId, UserId, 15m, 25, null, 20, DateTimeOffset.UtcNow, CancellationToken.None,
+            clientId: ClientId);
+
+        await act.Should().ThrowAsync<OfferRequestNotMirroredException>();
+        seq.Calls.Should().HaveCount(3); // submit, mirror, submit — then surfaced, no 4th
+    }
+
+    [Fact]
+    public async Task UpstreamStore_WithoutClientId_Surfaces_404_Without_Mirroring()
+    {
+        // No clientId threaded (e.g. legacy caller): the store cannot mirror,
+        // so the 404 surfaces unchanged after a single submit — no mirror call.
+        var seq = new SequencedHandler(new[]
+        {
+            (HttpMethod.Post, $"/api/v1/requests/{RequestId}/offers", HttpStatusCode.NotFound,
+                """{"error":{"code":"request_not_found","message":"unknown"}}"""),
+        });
+        var client = new OfferServiceClient(new HttpClient(seq) { BaseAddress = new Uri("http://offer-service.test/") });
+        var store = new UpstreamPendingOffersStore(client);
+
+        var act = async () => await store.TrySubmitAsync(
+            RequestId, UserId, 15m, 25, null, 20, DateTimeOffset.UtcNow, CancellationToken.None);
+
+        await act.Should().ThrowAsync<OfferRequestNotMirroredException>();
+        seq.Calls.Should().HaveCount(1); // submit only — never mirrored
+    }
+
+    // -----------------------------------------------------------------------
     // Live-wire tests (opt-in)
     // -----------------------------------------------------------------------
 
@@ -311,6 +471,50 @@ public class OfferServiceClientContractTests
                 Content = new StringContent(_json, Encoding.UTF8, "application/json"),
                 RequestMessage = request,
             };
+        }
+    }
+
+    /// <summary>
+    /// Replays a fixed script of (method, path, status, json) responses in order,
+    /// recording every request URI. Used to prove the GW-1 mirror-then-retry
+    /// sequence (submit → 404, mirror → 201, submit → 201) without a live
+    /// upstream. Asserts the actual request matches the scripted method+path so a
+    /// mis-routed call fails loudly rather than silently consuming the next step.
+    /// </summary>
+    private sealed class SequencedHandler : HttpMessageHandler
+    {
+        private readonly (HttpMethod Method, string Path, HttpStatusCode Status, string Json)[] _script;
+        private int _index;
+
+        public List<Uri> Calls { get; } = new();
+
+        public SequencedHandler(
+            (HttpMethod Method, string Path, HttpStatusCode Status, string Json)[] script)
+        {
+            _script = script;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Calls.Add(request.RequestUri!);
+
+            if (_index >= _script.Length)
+            {
+                throw new InvalidOperationException(
+                    $"SequencedHandler exhausted: unexpected extra call #{_index + 1} to " +
+                    $"{request.Method} {request.RequestUri!.AbsolutePath}.");
+            }
+
+            var step = _script[_index++];
+            request.Method.Should().Be(step.Method);
+            request.RequestUri!.AbsolutePath.Should().Be(step.Path);
+
+            return Task.FromResult(new HttpResponseMessage(step.Status)
+            {
+                Content = new StringContent(step.Json, Encoding.UTF8, "application/json"),
+                RequestMessage = request,
+            });
         }
     }
 }

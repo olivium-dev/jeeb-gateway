@@ -41,6 +41,53 @@ public sealed class OfferServiceClient : IOfferServiceClient
         _http = http;
     }
 
+    public async Task<RequestMirrorResult> MirrorRequestAsync(
+        string actingUserId,
+        string requestId,
+        string clientId,
+        CancellationToken ct)
+    {
+        // OS-1 reads client_id from the BODY (on-behalf-of mirror), so the
+        // x-user-id header is informational only here — set it for parity /
+        // audit, but the request creator drives ownership.
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/v1/requests");
+        SetUser(request, actingUserId);
+        request.Content = JsonContent.Create(
+            new MirrorRequestBody { RequestId = requestId, ClientId = clientId, Status = "open" },
+            options: JsonOptions);
+
+        using var response = await _http.SendAsync(request, ct);
+
+        switch (response.StatusCode)
+        {
+            case HttpStatusCode.Created:
+                return RequestMirrorResult.Created;
+
+            // 200 == idempotent replay (offer-service sets x-idempotency-replay:true).
+            case HttpStatusCode.OK:
+                return RequestMirrorResult.AlreadyMirrored;
+
+            // 422 (invalid client_id) / 400 (bad request_id uuid): a malformed
+            // mirror payload, not a transport fault. Surface as a typed
+            // validation error so the store/controller can map it to a 4xx
+            // ProblemDetails instead of the global handler's 502.
+            case HttpStatusCode.UnprocessableEntity:
+            case HttpStatusCode.BadRequest:
+            {
+                var code = await ReadErrorCodeAsync(response, ct);
+                throw new OfferUpstreamValidationException(
+                    requestId, (int)response.StatusCode, code, "mirror");
+            }
+
+            default:
+                // 5xx / unexpected: throw so the global handler surfaces a
+                // ProblemDetails 502 rather than silently swallowing the fault.
+                response.EnsureSuccessStatusCode();
+                throw new HttpRequestException(
+                    $"offer-service request-mirror returned unexpected status {(int)response.StatusCode}.");
+        }
+    }
+
     public async Task<OfferWire> SubmitAsync(
         string actingUserId,
         string requestId,
@@ -66,6 +113,27 @@ public sealed class OfferServiceClient : IOfferServiceClient
         {
             var code = await ReadErrorCodeAsync(response, ct);
             throw new OfferUpstreamConflictException(requestId, code);
+        }
+
+        // GW-2: 404 means the request row was never mirrored into offer-service.
+        // Surface a typed signal so the store mirrors-then-retries rather than
+        // letting EnsureSuccessStatusCode() raise an HttpRequestException that
+        // the global handler would turn into an opaque 502 (the original H1/H2
+        // failure mode).
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            var code = await ReadErrorCodeAsync(response, ct);
+            throw new OfferRequestNotMirroredException(requestId, code);
+        }
+
+        // GW-2: 422/400 is a bad submit payload (e.g. fee_cents below the
+        // upstream floor) — surface as a typed validation error so the store /
+        // controller maps it to a 422 ProblemDetails, not a 502.
+        if (response.StatusCode is HttpStatusCode.UnprocessableEntity or HttpStatusCode.BadRequest)
+        {
+            var code = await ReadErrorCodeAsync(response, ct);
+            throw new OfferUpstreamValidationException(
+                requestId, (int)response.StatusCode, code, "submit");
         }
 
         response.EnsureSuccessStatusCode();
@@ -263,6 +331,13 @@ public sealed class OfferServiceClient : IOfferServiceClient
         [JsonPropertyName("note")] public string? Note { get; init; }
     }
 
+    private sealed class MirrorRequestBody
+    {
+        [JsonPropertyName("request_id")] public string RequestId { get; init; } = string.Empty;
+        [JsonPropertyName("client_id")] public string ClientId { get; init; } = string.Empty;
+        [JsonPropertyName("status")] public string Status { get; init; } = "open";
+    }
+
     private sealed class WireOffer
     {
         [JsonPropertyName("id")] public string? Id { get; init; }
@@ -320,5 +395,58 @@ public sealed class OfferUpstreamConflictException : Exception
     {
         RequestId = requestId;
         UpstreamCode = upstreamCode;
+    }
+}
+
+/// <summary>
+/// Raised when offer-service rejects a submit with HTTP 404 — the request row
+/// has never been mirrored into offer-service. Carries the upstream error
+/// <c>code</c> for diagnostics. The <see cref="UpstreamPendingOffersStore"/>
+/// catches this, mirrors the request via
+/// <see cref="IOfferServiceClient.MirrorRequestAsync"/>, then retries the submit
+/// exactly once — the GW-1 self-heal that closes the S07 submit path. If a
+/// submit 404s again <em>after</em> a successful mirror, the exception is allowed
+/// to surface (a genuine not-found, not a missing-mirror) so it maps to a 404
+/// rather than looping.
+/// </summary>
+public sealed class OfferRequestNotMirroredException : Exception
+{
+    public string RequestId { get; }
+    public string? UpstreamCode { get; }
+
+    public OfferRequestNotMirroredException(string requestId, string? upstreamCode)
+        : base($"offer-service has no mirrored request '{requestId}' (upstream code '{upstreamCode ?? "not_found"}').")
+    {
+        RequestId = requestId;
+        UpstreamCode = upstreamCode;
+    }
+}
+
+/// <summary>
+/// Raised when offer-service rejects a mirror or submit with HTTP 422/400 — a
+/// payload validation failure (invalid <c>client_id</c>, malformed
+/// <c>request_id</c>, or a <c>fee_cents</c> below the upstream floor). Carries
+/// the upstream status and error <c>code</c> so the gateway maps it to a 422
+/// ProblemDetails (a caller-correctable 4xx) rather than collapsing it into a
+/// 502 via <c>EnsureSuccessStatusCode()</c>.
+/// </summary>
+public sealed class OfferUpstreamValidationException : Exception
+{
+    public string RequestId { get; }
+    public int UpstreamStatus { get; }
+    public string? UpstreamCode { get; }
+
+    /// <summary>Which call produced the validation failure: <c>"mirror"</c> or <c>"submit"</c>.</summary>
+    public string Stage { get; }
+
+    public OfferUpstreamValidationException(
+        string requestId, int upstreamStatus, string? upstreamCode, string stage)
+        : base($"offer-service rejected the {stage} for request '{requestId}' with {upstreamStatus} " +
+               $"(code '{upstreamCode ?? "validation_error"}').")
+    {
+        RequestId = requestId;
+        UpstreamStatus = upstreamStatus;
+        UpstreamCode = upstreamCode;
+        Stage = stage;
     }
 }

@@ -229,6 +229,10 @@ public class OfferAcceptUpstreamTests
             string actingUserId, string requestId, string offerId, string idempotencyKey, CancellationToken ct)
             => throw new NotSupportedException("Legacy throwing accept is not used on the upstream path.");
 
+        public Task<RequestMirrorResult> MirrorRequestAsync(
+            string actingUserId, string requestId, string clientId, CancellationToken ct)
+            => throw new NotSupportedException("Request-mirror is exercised in OfferServiceClientContractTests, not the accept path.");
+
         public Task<OfferWire> SubmitAsync(
             string actingUserId, string requestId, long feeCents, int etaMinutes, string? note, CancellationToken ct)
             => throw new NotSupportedException();
