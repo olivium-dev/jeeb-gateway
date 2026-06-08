@@ -45,7 +45,10 @@ name: Deploy to Jeeb
 on:
   workflow_dispatch:
     inputs:
-      registry:        { description: 'Container registry',              required: true, default: 'ghcr.io' }
+      # `registry` is a fixed constant (always ghcr.io); it is set as a job-level env
+      # (REGISTRY) rather than a workflow_dispatch input so the dispatch input count
+      # stays at GitHub's hard limit of 25 after `durable_requests` was added (PR #105).
+      # 26 inputs makes the workflow un-dispatchable (HTTP 422 at dispatch time).
       service_name:    { description: 'Swarm service name',              required: true, default: 'jeeb-gateway' }
       internal_port:   { description: 'Container port',                  required: true, default: '8080' }
       external_port:   { description: 'Published host port (Jeeb swarm)',required: true, default: '10000' }
@@ -184,12 +187,13 @@ jobs:
   deploy:
     runs-on: ubuntu-22.04
     env:
-      IMAGE: ${{ inputs.registry }}/olivium-dev/jeeb-gateway
+      REGISTRY: ghcr.io
+      IMAGE: ghcr.io/olivium-dev/jeeb-gateway
     steps:
       - uses: actions/checkout@v4
 
       - name: Log in to GHCR (password via stdin)
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ inputs.registry }} -u ${{ github.actor }} --password-stdin
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
 
       - name: Build and push image (git-SHA tag)
         id: build
@@ -224,7 +228,7 @@ jobs:
           chmod 600 ~/.ssh/config
 
       - name: Remote GHCR login (token via stdin pipe)
-        run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ inputs.registry }} -u ${{ github.actor }} --password-stdin"
+        run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"
 
       - name: Capture current image as rollback target
         id: prev
