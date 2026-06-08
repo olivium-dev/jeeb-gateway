@@ -126,10 +126,22 @@ public sealed class HeartBeatPresenceException : Exception
     public int StatusCode { get; }
     public string? Reason { get; }
 
-    public HeartBeatPresenceException(int statusCode, string? reason)
+    /// <summary>
+    /// The upstream <c>Retry-After</c> header value (whole seconds), carried
+    /// through verbatim when present so the gateway can re-emit it on the surfaced
+    /// response. Populated for throttled (429) presence toggles — heart-beat's
+    /// per-user token-bucket limiter (N14 / NFR-6, BR-X-4) returns
+    /// <c>429 + Retry-After</c>; the gateway is thin on this path and forwards both
+    /// the status and the header rather than re-deriving a backoff. Null when the
+    /// upstream sent no <c>Retry-After</c>.
+    /// </summary>
+    public string? RetryAfter { get; }
+
+    public HeartBeatPresenceException(int statusCode, string? reason, string? retryAfter = null)
         : base($"heart-beat presence returned {statusCode} ({reason ?? "no reason"}).")
     {
         StatusCode = statusCode;
         Reason = reason;
+        RetryAfter = retryAfter;
     }
 }
