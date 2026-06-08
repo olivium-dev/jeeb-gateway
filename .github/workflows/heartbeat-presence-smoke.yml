@@ -131,13 +131,21 @@ jobs:
           ssh jeeb "curl -sS -m 8 -w '\nHTTP %{http_code}\n' -X PATCH -H 'X-Service-Auth-Key: $SVC_AUTH' -H 'Content-Type: application/json' http://localhost:${HB_PORT}/v1/presence -d '{\"userId\":\"diag-direct-${GITHUB_RUN_ID}\",\"online\":true,\"roleKey\":\"jeeber\"}'" || true
           echo "== heart-beat PATCH /v1/presence direct WITHOUT key (expect 401) =="
           ssh jeeb "curl -sS -m 8 -o /dev/null -w 'no-key -> %{http_code}\n' -X PATCH -H 'Content-Type: application/json' http://localhost:${HB_PORT}/v1/presence -d '{\"userId\":\"x\",\"online\":false}'" || true
-          echo "== gateway PATCH availability — full headers + body =="
           TOKEN=$(cat token.txt)
-          curl -sS -m 20 -D - -o gw_body.txt \
-            -X PATCH "$BASE${AVAIL}/jeebers/me/availability" \
-            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-            -d '{"online":false}' | grep -iE '^HTTP|^server:|^content-type:' || true
-          echo "gateway body: $(cat gw_body.txt)"
+          echo "== gateway PATCH via PUBLIC Cloudflare — both prefixes, full headers =="
+          for PFX in /api /v1 ""; do
+            echo "--- PUBLIC PATCH ${PFX}/jeebers/me/availability ---"
+            curl -sS -m 20 -D - -o gwb.txt \
+              -X PATCH "${BASE}${PFX}/jeebers/me/availability" \
+              -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+              -d '{"online":false}' | grep -iE '^HTTP|^server:|^cf-|^content-type:|^location:' || true
+            echo "body: $(cat gwb.txt | head -c 300)"
+          done
+          echo "== gateway PATCH DIRECT over tunnel (localhost:10000, bypasses Cloudflare) — both prefixes =="
+          for PFX in /api /v1 ""; do
+            echo "--- DIRECT PATCH ${PFX}/jeebers/me/availability ---"
+            ssh jeeb "curl -sS -m 8 -D - -o /tmp/d.txt -X PATCH 'http://localhost:10000${PFX}/jeebers/me/availability' -H 'Authorization: Bearer $TOKEN' -H 'Content-Type: application/json' -d '{\"online\":false}' | grep -iE '^HTTP|^server:|^content-type:'; echo body: \$(head -c 300 /tmp/d.txt)" || true
+          done
 
       - name: 3) N13 — PATCH availability {online:false} -> 200; GET -> online:false
         run: |
