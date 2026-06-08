@@ -126,6 +126,21 @@ public class LocationController : ControllerBase
                     "delivery-service presence heartbeat for jeeber {JeeberId} returned {Status} ({Reason}); GPS fix retained locally, presence not bumped.",
                     jeeberId, ex.StatusCode, ex.Reason);
             }
+            catch (HttpRequestException ex)
+            {
+                // A transport-level failure to reach delivery-service (connection
+                // reset, DNS, timeout) must ALSO not 500 the GPS ingest path
+                // (S06 A2 requires 200). The presence heartbeat is strictly
+                // best-effort and additive to the in-memory fix already retained
+                // for the SSE tracking read; surface nothing to the caller. This
+                // widens the existing best-effort net from the typed presence
+                // error to the underlying transport error without changing the
+                // happy-path response shape.
+                _logger.LogWarning(
+                    ex,
+                    "delivery-service presence heartbeat for jeeber {JeeberId} failed at transport level; GPS fix retained locally, presence not bumped.",
+                    jeeberId);
+            }
         }
 
         return Ok(new LocationUpdateResponse
