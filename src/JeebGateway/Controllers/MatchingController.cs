@@ -114,7 +114,12 @@ public sealed class MatchingController : ControllerBase
         return Ok(new MatchingRunResponse
         {
             RequestId = result.RequestId,
-            TierId = result.TierId,
+            // Client-facing $.tierId is the lowercase tier CODE
+            // (flash/standard/express) — the human-readable tier the client
+            // ordered — sourced from delivery-service's tier_code. Fall back to
+            // the tier UUID only if an older delivery-service build omits the
+            // code, so the field is never null/empty.
+            TierId = string.IsNullOrWhiteSpace(result.TierCode) ? result.TierId : result.TierCode!,
             RadiusKm = result.RadiusKm,
             NotifiedCount = result.NotifiedCount,
             CandidateCount = result.CandidateCount,

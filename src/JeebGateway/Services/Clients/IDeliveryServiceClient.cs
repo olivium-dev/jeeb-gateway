@@ -207,6 +207,19 @@ public sealed class DeliveryMatchingRunResult
     [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
     public required string TierId { get; init; }
 
+    /// <summary>
+    /// The tier's stable lowercase <b>code</b> (<c>flash</c>/<c>standard</c>/
+    /// <c>express</c>) — delivery-service's <c>tier_code</c> (RunOutcome.TierCode,
+    /// run.go). ADDITIVE bind: <see cref="TierId"/> still carries the tier UUID
+    /// unchanged for existing consumers that key off the id. The gateway surfaces
+    /// this code as the client-facing <c>$.tierId</c> (MatchingController.Run),
+    /// which is the human-readable tier the client ordered. Nullable so an older
+    /// delivery-service build that omits the field deserializes without throwing
+    /// (the controller falls back to <see cref="TierId"/>).
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("tier_code")]
+    public string? TierCode { get; init; }
+
     [System.Text.Json.Serialization.JsonPropertyName("radius_km")]
     public double RadiusKm { get; init; }
 

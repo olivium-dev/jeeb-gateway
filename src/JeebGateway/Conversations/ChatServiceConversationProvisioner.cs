@@ -48,24 +48,60 @@ public sealed class ChatServiceConversationProvisioner : IConversationProvisione
     {
         if (!_options.Enabled) return null;
 
-        var body = new CreateChannelRequest
-        {
-            // The ordering client is the initiating member of the broadcasting
-            // conversation. Candidate Jeebers join later (S06 fan-out / accept).
-            MemberId = clientId,
-            Name = $"order-{requestId}",
-            Description = "Order broadcasting conversation",
-            // Tag AND Type both carry the broadcasting marker; chat-service's
-            // ResolvePhase matches either, so the phase resolves even if one
-            // marker is dropped by a future chat-service change.
-            Tag = _options.BroadcastingTag,
-            Type = _options.BroadcastingTag,
-        };
-
         try
         {
             await using var scope = _scopeFactory.CreateAsyncScope();
             var chat = scope.ServiceProvider.GetRequiredService<ServiceChatClient>();
+
+            // S05 H9b ROOT-CAUSE FIX: chat-service's POST /api/channels
+            // (ChannelService.CreateChannel) calls _memberRepository.GetByIdAsync
+            // on the supplied MemberId and throws BadRequestException("Member
+            // '...' does not exist") when no matching member row is present. The
+            // user-management clientId is NOT a chat member id, so passing it
+            // straight through made channel-create fail and conversationId
+            // degraded to null even with ConversationAutoCreate ON.
+            //
+            // chat-service MINTS its own member id (MemberService.CreateAsync ->
+            // response.ID = repo.AddAsync(member)); the client cannot supply it.
+            // So we first register a chat member for this order's initiating
+            // client via POST /api/members and use the RETURNED minted id as the
+            // channel's MemberId. The member carries the clientId in its Name for
+            // correlation/observability. Pure thin orchestration over two existing
+            // typed-client calls — the gateway holds no member/conversation state.
+            var memberResponse = await chat.MembersPOST2Async(new CreateMemberRequest
+            {
+                // Carry the user-management client id as the member name so the
+                // chat member is correlatable back to the ordering client.
+                Name = clientId,
+                Nickname = clientId,
+                Type = "client",
+                Tag = _options.BroadcastingTag,
+            }, ct);
+
+            var memberId = memberResponse?.Id;
+            if (string.IsNullOrWhiteSpace(memberId))
+            {
+                _logger.LogWarning(
+                    "Conversation auto-create for order {RequestId} could not register a chat member for client {ClientId}; order persists without a conversation.",
+                    requestId, clientId);
+                return null;
+            }
+
+            var body = new CreateChannelRequest
+            {
+                // The minted chat member id (NOT the raw user-management clientId)
+                // is the initiating member of the broadcasting conversation, so
+                // chat-service's member-existence check passes. Candidate Jeebers
+                // join later (S06 fan-out / accept).
+                MemberId = memberId,
+                Name = $"order-{requestId}",
+                Description = "Order broadcasting conversation",
+                // Tag AND Type both carry the broadcasting marker; chat-service's
+                // ResolvePhase matches either, so the phase resolves even if one
+                // marker is dropped by a future chat-service change.
+                Tag = _options.BroadcastingTag,
+                Type = _options.BroadcastingTag,
+            };
 
             var response = await chat.ChannelsAsync(body, ct);
             var conversationId = response?.Id;
