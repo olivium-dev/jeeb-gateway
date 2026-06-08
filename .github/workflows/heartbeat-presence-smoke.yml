@@ -1,0 +1,191 @@
+# S06 heart-beat presence cutover smoke (N13 + A3/N12 + gateway->heart-beat auth proof).
+#
+# Proves FeatureFlags__Heartbeat__Enabled=true is LIVE end-to-end:
+#   * N13   — authenticated PATCH/GET /jeebers/me/availability round-trips through
+#             heart-beat (200, never 401).
+#   * AUTH  — the gateway->heart-beat call presents a valid X-Service-Auth-Key:
+#             a go-online PATCH (200) writes a heart-beat presence row, confirmed
+#             by reading it directly off heart-beat over the cloudflared SSH tunnel.
+#             A blank/wrong key would 401 the PATCH; a 200 + visible row is proof.
+#   * A3/N12 — the guarded admin sweep-tick flips a heartbeat-less (stale) jeeber
+#             offline (deterministic reconcile), then GET availability shows offline.
+#
+# Secrets stay GitHub-managed and are NEVER printed:
+#   JEEB_TOKEN_MINT_KEY         mints the smoke jeeber token (gateway gate).
+#   HEARTBEAT_SERVICE_AUTH_KEY  X-Service-Auth-Key for the direct heart-beat reads
+#                               + the admin sweep-tick (same value the gateway uses).
+#   JEEB_SSH_PRIVATE_KEY        cloudflared SSH key to reach heart-beat on
+#                               localhost:10075 (gateway-internal, not public).
+# GHA-only: no app/route change, no manual docker. On-demand / one-off.
+name: Heartbeat Presence Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'Gateway base URL (public)'
+        required: true
+        default: 'https://jeeb.fds-1.com'
+      hb_port:
+        description: 'heart-beat published host port (gateway-internal)'
+        required: true
+        default: '10075'
+      server_hostname:
+        description: 'Cloudflare tunnel hostname'
+        required: true
+        default: 'jeeb-ssh.fds-1.com'
+      server_user:
+        description: 'SSH user'
+        required: true
+        default: 'ec2-user'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heartbeat-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-22.04
+    env:
+      BASE: ${{ inputs.base_url }}
+      HB_PORT: ${{ inputs.hb_port }}
+      MINT_KEY: ${{ secrets.JEEB_TOKEN_MINT_KEY }}
+      SVC_AUTH: ${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}
+    steps:
+      - name: Preflight (secrets present)
+        run: |
+          set -euo pipefail
+          [ -n "${MINT_KEY:-}" ] || { echo "::error::JEEB_TOKEN_MINT_KEY secret missing"; exit 1; }
+          [ -n "${SVC_AUTH:-}" ] || { echo "::error::HEARTBEAT_SERVICE_AUTH_KEY secret missing"; exit 1; }
+          echo "secrets present (values not printed)"
+
+      - name: Install cloudflared + write SSH key
+        run: |
+          set -euo pipefail
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb || sudo apt-get install -f -y
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          KEY_MATERIAL="${{ secrets.JEEB_SSH_PRIVATE_KEY }}"
+          if printf '%s' "$KEY_MATERIAL" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$KEY_MATERIAL" > ~/.ssh/id_ed25519
+          else
+            printf '%s' "$KEY_MATERIAL" | base64 -d > ~/.ssh/id_ed25519
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+          cat > ~/.ssh/config <<EOF
+          Host jeeb
+            HostName ${{ inputs.server_hostname }}
+            User ${{ inputs.server_user }}
+            IdentityFile ~/.ssh/id_ed25519
+            ProxyCommand cloudflared access ssh --hostname %h
+            StrictHostKeyChecking accept-new
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: 1) Aggregate health == Healthy, failing == []
+        run: |
+          set -euo pipefail
+          curl -sS -m 25 -X POST "$BASE/health/aggregate" -o agg.json -w 'aggregate HTTP %{http_code}\n'
+          python3 - <<'PY'
+          import json
+          d=json.load(open('agg.json'))
+          bad=[c['name'] for c in d.get('checks',[]) if c.get('status')!='Healthy']
+          print('overall:', d.get('status'), '| failing:', bad or '[]')
+          assert d.get('status')=='Healthy', f"aggregate not Healthy: {d.get('status')}"
+          assert not bad, f"failing checks: {bad}"
+          PY
+
+      - name: 2) Mint a jeeber token (key never printed)
+        id: mint
+        run: |
+          set -euo pipefail
+          JID="smoke-jeeber-hb-${GITHUB_RUN_ID}"
+          echo "jeeber_id=$JID" >> "$GITHUB_OUTPUT"
+          BODY=$(printf '{"userId":"%s","roles":["jeeber"]}' "$JID")
+          HTTP=$(curl -sS -m 20 -o mint.json -w '%{http_code}' \
+            -X POST "$BASE/auth/tokens" -H 'Content-Type: application/json' \
+            -H "X-Service-Auth-Key: ${MINT_KEY}" -d "$BODY")
+          echo "mint HTTP=$HTTP"
+          test "$HTTP" = "200" || { echo "::error::mint failed HTTP=$HTTP"; cat mint.json; exit 1; }
+          TOKEN=$(python3 -c "import json;print(json.load(open('mint.json')).get('accessToken') or json.load(open('mint.json')).get('access_token',''))")
+          [ -n "$TOKEN" ] || { echo "::error::no accessToken in mint response"; cat mint.json; exit 1; }
+          # mask the token in any later accidental echo
+          echo "::add-mask::$TOKEN"
+          echo "$TOKEN" > token.txt
+          echo "minted jeeber token for $JID (token masked)"
+
+      - name: 3) N13 — PATCH availability {online:false} -> 200; GET -> online:false
+        run: |
+          set -euo pipefail
+          TOKEN=$(cat token.txt)
+          HTTP=$(curl -sS -m 20 -o patch_off.json -w '%{http_code}' \
+            -X PATCH "$BASE/jeebers/me/availability" \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+            -d '{"online":false}')
+          echo "PATCH offline HTTP=$HTTP"; cat patch_off.json; echo
+          test "$HTTP" = "200" || { echo "::error::N13 PATCH offline expected 200 got $HTTP (401 => heart-beat auth FAILED)"; exit 1; }
+          HTTP=$(curl -sS -m 20 -o get1.json -w '%{http_code}' \
+            -X GET "$BASE/jeebers/me/availability" -H "Authorization: Bearer $TOKEN")
+          echo "GET HTTP=$HTTP"; cat get1.json; echo
+          test "$HTTP" = "200" || { echo "::error::GET availability expected 200 got $HTTP"; exit 1; }
+          python3 -c "import json;d=json.load(open('get1.json'));assert d.get('online') is False, f'expected online:false got {d.get(\"online\")}';print('N13 GET online=false OK')"
+
+      - name: 4) AUTH PROOF — go-online via gateway writes a heart-beat row (X-Service-Auth-Key valid)
+        run: |
+          set -euo pipefail
+          TOKEN=$(cat token.txt)
+          JID="${{ steps.mint.outputs.jeeber_id }}"
+          HTTP=$(curl -sS -m 20 -o patch_on.json -w '%{http_code}' \
+            -X PATCH "$BASE/jeebers/me/availability" \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+            -d '{"online":true,"vehicleType":"car","zone":"beirut-central"}')
+          echo "PATCH online HTTP=$HTTP"; cat patch_on.json; echo
+          test "$HTTP" = "200" || { echo "::error::go-online PATCH expected 200 got $HTTP (401 => gateway->heart-beat X-Service-Auth-Key REJECTED)"; exit 1; }
+          # Read the row DIRECTLY off heart-beat over the tunnel (service-auth key).
+          # A visible online row proves the gateway authenticated to heart-beat.
+          RAW=$(ssh jeeb "curl -sS -m 8 -H 'X-Service-Auth-Key: $SVC_AUTH' http://localhost:${HB_PORT}/v1/presence/${JID}")
+          echo "heart-beat GET /v1/presence/$JID -> $RAW"
+          python3 - <<PY
+          import json
+          d=json.loads('''$RAW''')
+          assert d.get('userId')=="$JID", f"userId mismatch: {d.get('userId')}"
+          assert d.get('online') is True, f"expected heart-beat online:true got {d.get('online')}"
+          assert d.get('roleKey')=="jeeber", f"roleKey expected jeeber got {d.get('roleKey')}"
+          print("AUTH PROOF OK — gateway wrote heart-beat presence row with a valid X-Service-Auth-Key")
+          PY
+
+      - name: 5) A3/N12 — admin sweep-tick flips the heartbeat-less jeeber offline
+        run: |
+          set -euo pipefail
+          JID="${{ steps.mint.outputs.jeeber_id }}"
+          # The jeeber is online but has sent NO /v1/heartbeat since going online.
+          # Drive the guarded reconcile with now=far-future + idleTtl=1s so the
+          # (now-stale) row crosses the idle threshold and is swept offline.
+          FUTURE=$(( ($(date +%s) + 86400) * 1000 ))
+          SWEEP=$(ssh jeeb "curl -sS -m 8 -X POST -H 'X-Service-Auth-Key: $SVC_AUTH' -H 'Content-Type: application/json' http://localhost:${HB_PORT}/v1/admin/sweep-tick -d '{\"tenant\":\"default\",\"now\":${FUTURE},\"idleTtlSeconds\":1}'")
+          echo "sweep-tick -> $SWEEP"
+          # Read presence directly: must now be offline.
+          RAW=$(ssh jeeb "curl -sS -m 8 -H 'X-Service-Auth-Key: $SVC_AUTH' http://localhost:${HB_PORT}/v1/presence/${JID}")
+          echo "post-sweep heart-beat presence -> $RAW"
+          python3 - <<PY
+          import json
+          d=json.loads('''$RAW''')
+          assert d.get('online') is False, f"A3/N12: expected offline after sweep, got online={d.get('online')}"
+          print("A3/N12 heart-beat row swept offline OK")
+          PY
+
+      - name: 6) N12 surfaced through the gateway — GET availability shows offline
+        run: |
+          set -euo pipefail
+          TOKEN=$(cat token.txt)
+          HTTP=$(curl -sS -m 20 -o get2.json -w '%{http_code}' \
+            -X GET "$BASE/jeebers/me/availability" -H "Authorization: Bearer $TOKEN")
+          echo "GET HTTP=$HTTP"; cat get2.json; echo
+          test "$HTTP" = "200" || { echo "::error::GET availability expected 200 got $HTTP"; exit 1; }
+          python3 -c "import json;d=json.load(open('get2.json'));assert d.get('online') is False, f'expected online:false after sweep got {d.get(\"online\")}';print('N12 via gateway online=false OK')"
+
+      - name: Smoke summary
+        run: echo "S06 heart-beat presence cutover smoke PASSED — N13 + gateway->heart-beat auth + A3/N12 sweep all green."
