@@ -1,9 +1,11 @@
 using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
+using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -24,7 +26,17 @@ public class DualRoleIdentityTests : IClassFixture<WebApplicationFactory<Program
 
     public DualRoleIdentityTests(WebApplicationFactory<Program> factory)
     {
-        _factory = factory;
+        // S06: the jeeber availability toggle now writes THROUGH delivery-service.
+        // Swap the upstream client for the in-process presence fake so the dual-
+        // role jeeber endpoint resolves without a live Go upstream.
+        _factory = factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IDeliveryServiceClient>();
+                services.AddSingleton<IDeliveryServiceClient>(new FakeDeliveryPresenceClient());
+            });
+        });
     }
 
     // -----------------------------------------------------------------

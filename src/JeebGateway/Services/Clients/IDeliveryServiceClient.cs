@@ -75,7 +75,42 @@ public interface IDeliveryServiceClient
 
     Task<DeliveryCancelResult> CancelDeliveryAsync(string deliveryId, DeliveryCancelUpstreamRequest body, CancellationToken ct);
 
+    /// <summary>
+    /// S06 presence wire (DELIVERY-SERVICE-RELOCATION-DESIGN.md §8 — availability
+    /// relocation). Writes the jeeber's online/offline + vehicle + zone +
+    /// last-known location into the canonical delivery-service presence store —
+    /// the SAME store the matching run (<see cref="RunMatchingAsync"/>) reads its
+    /// online set from. Org-law: the gateway holds NO presence state of its own on
+    /// this path; it is a thin BFF passthrough. Canonical route:
+    /// <c>POST /api/v1/jeebers/{jeeberId}/availability</c> (snake_case body).
+    /// </summary>
     Task<JeeberAvailabilityUpstream> SetAvailabilityAsync(JeeberAvailabilityUpstreamRequest body, string jeeberId, CancellationToken ct);
+
+    /// <summary>
+    /// S06 presence read (DELIVERY-SERVICE-RELOCATION-DESIGN.md §8). Reads the
+    /// jeeber's current availability from the canonical delivery-service presence
+    /// store without mutating it. Canonical route:
+    /// <c>GET /api/v1/jeebers/{jeeberId}/availability</c>. Returns
+    /// <see langword="null"/> when the jeeber has no presence row yet (upstream
+    /// 404) so the controller can surface a never-online default rather than 500.
+    /// </summary>
+    Task<JeeberAvailabilityUpstream?> GetAvailabilityAsync(string jeeberId, CancellationToken ct);
+
+    /// <summary>
+    /// S06 GPS heartbeat wire (DELIVERY-SERVICE-RELOCATION-DESIGN.md §8). Bumps
+    /// the jeeber's <c>last_heartbeat_at</c> + last-known location in the SAME
+    /// presence store the matching run reads for its freshness predicate — so a
+    /// streaming GPS jeeber stays in the online set. Org-law: routed to
+    /// delivery-service (not geolocation) to keep ONE presence store and avoid a
+    /// cross-service DB read. Canonical route:
+    /// <c>POST /api/v1/jeebers/{jeeberId}/heartbeat</c> with body
+    /// <c>{ "lat": &lt;lat&gt;, "lng": &lt;lng&gt; }</c>.
+    /// </summary>
+    /// <exception cref="DeliveryAvailabilityException">
+    /// Thrown for a 404 (jeeber never went online) so the controller can map it to
+    /// a 409/400 ProblemDetails rather than a 500.
+    /// </exception>
+    Task<JeeberAvailabilityUpstream> HeartbeatAsync(string jeeberId, double lat, double lng, CancellationToken ct);
 
     /// <summary>
     /// Courier matching (relocated from the gateway's in-memory Haversine engine
@@ -368,24 +403,90 @@ public sealed class DeliveryCancelResult
     public string? Reason { get; init; }
 }
 
+/// <summary>
+/// Request body for delivery-service <c>POST /api/v1/jeebers/{id}/availability</c>.
+/// delivery-service (Go) reads <b>snake_case</b>; the explicit
+/// <see cref="System.Text.Json.Serialization.JsonPropertyName"/> attributes scope
+/// the snake_case mapping to exactly this DTO so the shared
+/// <c>JsonSerializerDefaults.Web</c> (camelCase) options do not emit
+/// <c>vehicleType</c> where Go expects <c>vehicle_type</c>.
+/// </summary>
 public sealed class JeeberAvailabilityUpstreamRequest
 {
+    [System.Text.Json.Serialization.JsonPropertyName("online")]
     public required bool Online { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("vehicle_type")]
     public string? VehicleType { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("zone")]
     public string? Zone { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("lat")]
     public double? Lat { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("lng")]
     public double? Lng { get; init; }
 }
 
+/// <summary>
+/// S06: a non-2xx outcome from a delivery-service presence endpoint
+/// (<c>POST /api/v1/jeebers/{id}/heartbeat</c>) that the controller must map to a
+/// non-500 ProblemDetails. The common case is 404 — a heartbeat for a jeeber who
+/// never went online — which the gateway surfaces as a 409 Conflict rather than
+/// leaking the upstream 404 as an unhandled 500. The gateway is a thin BFF here:
+/// it carries the upstream <see cref="StatusCode"/> through, it does not
+/// re-interpret presence.
+/// </summary>
+public sealed class DeliveryAvailabilityException : Exception
+{
+    public int StatusCode { get; }
+    public string? Reason { get; }
+
+    public DeliveryAvailabilityException(int statusCode, string? reason)
+        : base($"delivery-service presence returned {statusCode} ({reason ?? "no reason"}).")
+    {
+        StatusCode = statusCode;
+        Reason = reason;
+    }
+}
+
+/// <summary>
+/// 2xx body of the delivery-service presence endpoints
+/// (<c>POST/GET /api/v1/jeebers/{id}/availability</c> and
+/// <c>POST /api/v1/jeebers/{id}/heartbeat</c>). delivery-service (Go) emits
+/// <b>snake_case</b>; without the explicit
+/// <see cref="System.Text.Json.Serialization.JsonPropertyName"/> attributes the
+/// shared <c>JsonSerializerDefaults.Web</c> (camelCase) options would fail to bind
+/// <c>jeeber_id</c> onto the <c>required</c> <see cref="JeeberId"/> and throw a
+/// JsonException on the SUCCESS path — surfacing as an unhandled 500 after
+/// delivery-service already committed the presence write. The attributes scope the
+/// snake_case mapping to this DTO without mutating the global naming policy.
+/// </summary>
 public sealed class JeeberAvailabilityUpstream
 {
+    [System.Text.Json.Serialization.JsonPropertyName("jeeber_id")]
     public required string JeeberId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("online")]
     public required bool Online { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("vehicle_type")]
     public string? VehicleType { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("zone")]
     public string? Zone { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("lat")]
     public double? Lat { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("lng")]
     public double? Lng { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("last_seen_at")]
     public DateTimeOffset? LastSeenAt { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("updated_at")]
     public DateTimeOffset UpdatedAt { get; init; }
 }
 

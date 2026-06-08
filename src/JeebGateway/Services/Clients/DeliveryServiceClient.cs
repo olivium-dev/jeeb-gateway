@@ -163,15 +163,62 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
 
     public async Task<JeeberAvailabilityUpstream> SetAvailabilityAsync(JeeberAvailabilityUpstreamRequest body, string jeeberId, CancellationToken ct)
     {
-        using var message = new HttpRequestMessage(HttpMethod.Post, "jeeb/jeebers/me/availability")
-        {
-            Content = JsonContent.Create(body, options: JsonOptions)
-        };
-        message.Headers.Add("X-User-Id", jeeberId);
-
-        using var response = await _http.SendAsync(message, ct);
+        // S06 presence wire. Canonical route carries the jeeber id IN THE PATH
+        // (POST /api/v1/jeebers/{id}/availability) — the same store the matching
+        // run reads its online set from. Body is snake_case (see the DTO's
+        // [JsonPropertyName] attributes). Replaces the never-existing
+        // jeeb/jeebers/me/availability + X-User-Id-header shape.
+        using var response = await _http.PostAsJsonAsync(
+            $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/availability",
+            body,
+            JsonOptions,
+            ct);
         response.EnsureSuccessStatusCode();
         return await DeserializeAsync<JeeberAvailabilityUpstream>(response, ct);
+    }
+
+    /// <inheritdoc />
+    public async Task<JeeberAvailabilityUpstream?> GetAvailabilityAsync(string jeeberId, CancellationToken ct)
+    {
+        // S06 presence read. GET /api/v1/jeebers/{id}/availability — read-only,
+        // never mutates. A 404 (no presence row yet) maps to null so the
+        // controller can return a never-online default instead of a 500.
+        using var response = await _http.GetAsync(
+            $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/availability",
+            ct);
+
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        response.EnsureSuccessStatusCode();
+        return await DeserializeAsync<JeeberAvailabilityUpstream>(response, ct);
+    }
+
+    /// <inheritdoc />
+    public async Task<JeeberAvailabilityUpstream> HeartbeatAsync(string jeeberId, double lat, double lng, CancellationToken ct)
+    {
+        // S06 GPS heartbeat wire. POST /api/v1/jeebers/{id}/heartbeat bumps
+        // last_heartbeat_at + last-known location in the SAME presence store the
+        // matching run reads for freshness. Body { lat, lng } (snake_case-clean —
+        // both keys are already lowercase under the web-default policy).
+        using var response = await _http.PostAsJsonAsync(
+            $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/heartbeat",
+            new HeartbeatRequest(lat, lng),
+            JsonOptions,
+            ct);
+
+        if (response.IsSuccessStatusCode)
+        {
+            return await DeserializeAsync<JeeberAvailabilityUpstream>(response, ct);
+        }
+
+        // 404 (jeeber never went online) and any other non-2xx surface as a typed
+        // presence exception so the controller maps them to a non-500
+        // ProblemDetails rather than leaking an unhandled 500.
+        var reason = await TryReadReasonAsync(response, ct);
+        throw new DeliveryAvailabilityException((int)response.StatusCode, reason);
     }
 
     /// <inheritdoc />
@@ -237,6 +284,13 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
 
     private sealed record HandoverVerifyRequest(
         [property: System.Text.Json.Serialization.JsonPropertyName("success")] bool Success);
+
+    // S06 heartbeat body: { "lat": <lat>, "lng": <lng> } (delivery-service
+    // heartbeatRequest shape; both keys lowercase). Explicit names lock the wire
+    // format independent of the global naming policy.
+    private sealed record HeartbeatRequest(
+        [property: System.Text.Json.Serialization.JsonPropertyName("lat")] double Lat,
+        [property: System.Text.Json.Serialization.JsonPropertyName("lng")] double Lng);
 
     private sealed record HandoverProblemBody(
         [property: System.Text.Json.Serialization.JsonPropertyName("reason")] string? Reason,

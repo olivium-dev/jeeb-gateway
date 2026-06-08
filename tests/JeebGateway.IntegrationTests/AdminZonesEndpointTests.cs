@@ -2,9 +2,11 @@ using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Availability;
+using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -218,7 +220,15 @@ public class AdminZonesEndpointTests : IClassFixture<AdminZonesEndpointTests.Fix
 
     public sealed class Fixture
     {
-        public WebApplicationFactory<Program> Factory() => new WebApplicationFactory<Program>();
+        public WebApplicationFactory<Program> Factory() => new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                // S06: GoOnline/GoOffline now PATCH availability THROUGH
+                // delivery-service. The admin ops-map still reads the mirrored
+                // in-memory store; swap the upstream client for the in-process
+                // presence fake so the toggle resolves without a live Go upstream.
+                builder.ConfigureServices(UseFakeDeliveryPresence);
+            });
 
         public WebApplicationFactory<Program> FactoryWithBoundaries(IEnumerable<ZoneBoundary> boundaries)
         {
@@ -235,8 +245,16 @@ public class AdminZonesEndpointTests : IClassFixture<AdminZonesEndpointTests.Fix
                     {
                         opts.Boundaries = snapshot;
                     });
+
+                    UseFakeDeliveryPresence(services);
                 });
             });
+        }
+
+        private static void UseFakeDeliveryPresence(IServiceCollection services)
+        {
+            services.RemoveAll<IDeliveryServiceClient>();
+            services.AddSingleton<IDeliveryServiceClient>(new FakeDeliveryPresenceClient());
         }
     }
 

@@ -95,62 +95,41 @@ public class UpstreamProxyTests
     // -----------------------------------------------------------------
 
     // -----------------------------------------------------------------
-    // Location update (geolocation-service)
+    // Location update — S06 presence wire.
+    //
+    // The legacy FeatureFlags:UseUpstream:Geolocation branch was REMOVED:
+    // both old branches were broken (the geolocation client targeted a
+    // /jeeb/jeebers/{id}/location/update route that does not exist). The GPS
+    // ingest now UNCONDITIONALLY (a) records the batch to the in-memory store
+    // (backs the SSE tracking read) and (b) forwards the device-latest fix to
+    // delivery-service as a heartbeat — the SAME presence store the matching run
+    // reads for freshness (DELIVERY-SERVICE-RELOCATION-DESIGN.md §8). There is no
+    // geolocation flag on this path anymore. The full heartbeat contract
+    // (route, body, 404-tolerance) is locked in PresenceThinWireTests.
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task Location_Update_With_Flag_Off_Writes_To_InMemory_Store()
-    {
-        var stub = new StubHttpMessageHandler(_ =>
-            throw new InvalidOperationException("upstream must not be called when flag is off"));
-
-        using var factory = NewFactory(
-            flags: new() { { "FeatureFlags:UseUpstream:Geolocation", "false" } },
-            configureServices: services =>
-            {
-                ReplaceTypedClient<IGeolocationServiceClient, GeolocationServiceClient>(
-                    services, stub, "http://upstream-geo.test");
-            });
-
-        var jeeber = ClientWith(factory, "jeeber-1", "driver");
-        var resp = await jeeber.PostAsJsonAsync("/location/update", new
-        {
-            points = new[]
-            {
-                new { lat = 31.95, lng = 35.92, accuracy = 5.0, timestamp = DateTimeOffset.UtcNow }
-            }
-        });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var body = await resp.Content.ReadFromJsonAsync<LocationUpdateResponse>();
-        body!.Accepted.Should().Be(1);
-    }
-
-    [Fact]
-    public async Task Location_Update_With_Flag_On_Forwards_To_Geolocation_Upstream()
+    public async Task Location_Update_Records_InMemory_And_Heartbeats_Delivery_Presence()
     {
         var captured = new CapturedRequests();
         var stub = new StubHttpMessageHandler(req =>
         {
             captured.Add(req);
-            return JsonResponse(new LocationUpdateResponse
+            return JsonResponse(new
             {
-                Accepted = 7,
-                Rejected = 1,
-                Latest = new GpsPointDto
-                {
-                    Lat = 31.95, Lng = 35.92, Accuracy = 4.2,
-                    Timestamp = DateTimeOffset.UnixEpoch
-                }
+                jeeber_id = "jeeber-1",
+                online = true,
+                lat = 31.95,
+                lng = 35.92,
+                updated_at = DateTimeOffset.UnixEpoch
             });
         });
 
         using var factory = NewFactory(
-            flags: new() { { "FeatureFlags:UseUpstream:Geolocation", "true" } },
             configureServices: services =>
             {
-                ReplaceTypedClient<IGeolocationServiceClient, GeolocationServiceClient>(
-                    services, stub, "http://upstream-geo.test");
+                ReplaceTypedClient<IDeliveryServiceClient, DeliveryServiceClient>(
+                    services, stub, "http://upstream-delivery.test");
             });
 
         var jeeber = ClientWith(factory, "jeeber-1", "driver");
@@ -164,11 +143,15 @@ public class UpstreamProxyTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<LocationUpdateResponse>();
-        body!.Accepted.Should().Be(7);
-        body.Rejected.Should().Be(1);
+        // The gateway response shape is unchanged — accepted/rejected come from
+        // the in-memory store, NOT from any upstream body.
+        body!.Accepted.Should().Be(1);
+        body.Rejected.Should().Be(0);
 
+        // The latest fix was forwarded to the canonical delivery-service presence
+        // heartbeat route (jeeber id in the path).
         captured.Single().RequestUri!.AbsolutePath
-            .Should().Be("/jeeb/jeebers/jeeber-1/location/update");
+            .Should().Be("/api/v1/jeebers/jeeber-1/heartbeat");
     }
 
     // NOTE: the legacy multipart KYC submit (old in-gateway KycController over the

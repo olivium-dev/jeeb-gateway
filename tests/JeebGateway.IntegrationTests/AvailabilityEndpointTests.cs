@@ -3,8 +3,10 @@ using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Availability;
 using JeebGateway.Push;
+using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Xunit;
 
@@ -310,6 +312,13 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
                     services.Remove(notifier);
                     services.AddSingleton<InMemoryAutoOfflineNotifier>();
                     services.AddSingleton<IAutoOfflineNotifier>(sp => sp.GetRequiredService<InMemoryAutoOfflineNotifier>());
+
+                    // S06 presence wire: the controller now writes/reads presence
+                    // through delivery-service. Swap the real HTTP client for an
+                    // in-process fake so the toggle/GET response shapes resolve
+                    // without a live Go upstream. The geo-index + sweeper
+                    // assertions still come from the mirrored in-memory store.
+                    UseFakeDeliveryPresence(services);
                 });
             });
 
@@ -326,8 +335,16 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
                     var clock = services.Single(d => d.ServiceType == typeof(TimeProvider));
                     services.Remove(clock);
                     services.AddSingleton<TimeProvider>(new FakeClock(new DateTimeOffset(2026, 5, 15, 12, 0, 0, TimeSpan.Zero)));
+
+                    UseFakeDeliveryPresence(services);
                 });
             });
+
+        private static void UseFakeDeliveryPresence(IServiceCollection services)
+        {
+            services.RemoveAll<IDeliveryServiceClient>();
+            services.AddSingleton<IDeliveryServiceClient>(new FakeDeliveryPresenceClient());
+        }
     }
 
     private sealed class FakeClock : TimeProvider
