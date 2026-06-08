@@ -247,6 +247,30 @@ public class PresenceThinWireTests
     }
 
     [Fact]
+    public async Task Location_Update_Heartbeat_TransportFailure_Does_Not_500_The_Ingest()
+    {
+        // S06 A2 hardening: a transport-level failure reaching delivery-service
+        // (connection reset, DNS, timeout — surfaced as HttpRequestException, NOT
+        // a typed DeliveryAvailabilityException) must ALSO not 500 the GPS ingest.
+        // The presence heartbeat is strictly best-effort; the in-memory fix is
+        // still retained for the SSE tracking read, so the caller sees 200.
+        var stub = new StubHttpMessageHandler(_ =>
+            throw new HttpRequestException("simulated transport failure to delivery-service"));
+
+        using var factory = NewFactory(s => ReplaceDeliveryClient(s, stub));
+        var client = JeeberClient(factory, "jeeber-transport");
+
+        var resp = await client.PostAsJsonAsync("/location/update", new
+        {
+            points = new[] { new { lat = 24.0, lng = 46.0, accuracy = (double?)null, timestamp = DateTimeOffset.UtcNow } }
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<LocationUpdateResponse>(JsonOpts);
+        body!.Accepted.Should().Be(1);
+    }
+
+    [Fact]
     public async Task Location_Update_All_Rejected_Sends_No_Heartbeat()
     {
         // When every point is out-of-range there is no latest fix → no heartbeat.
