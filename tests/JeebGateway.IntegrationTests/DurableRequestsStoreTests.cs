@@ -1,4 +1,5 @@
 using FluentAssertions;
+using JeebGateway.Conversations;
 using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
 using JeebGateway.StateService.Durable;
@@ -27,13 +28,23 @@ public sealed class DurableRequestsStoreTests
         out RecordingDeliveryClient delivery,
         out RecordingBundleRecorder bundles,
         SagaBundleRecordOutcome bundleOutcome = SagaBundleRecordOutcome.Recorded)
+        => Build(out inner, out delivery, out bundles, out _, bundleOutcome);
+
+    private static DurableRequestsStore Build(
+        out InMemoryRequestsStore inner,
+        out RecordingDeliveryClient delivery,
+        out RecordingBundleRecorder bundles,
+        out RecordingConversationProvisioner conversations,
+        SagaBundleRecordOutcome bundleOutcome = SagaBundleRecordOutcome.Recorded,
+        string? conversationId = null)
     {
         inner = new InMemoryRequestsStore(Clock);
         delivery = new RecordingDeliveryClient();
         bundles = new RecordingBundleRecorder(bundleOutcome);
+        conversations = new RecordingConversationProvisioner(conversationId);
         var options = Options.Create(new DurableRequestsOptions { Enabled = true });
         return new DurableRequestsStore(
-            inner, delivery, bundles, options,
+            inner, delivery, bundles, conversations, options,
             NullLogger<DurableRequestsStore>.Instance);
     }
 
@@ -130,8 +141,9 @@ public sealed class DurableRequestsStoreTests
         var inner = new InMemoryRequestsStore(Clock);
         var delivery = new RecordingDeliveryClient { EchoMismatchedId = "WRONG-ID" };
         var bundles = new RecordingBundleRecorder(SagaBundleRecordOutcome.Recorded);
+        var conversations = new RecordingConversationProvisioner(null);
         var store = new DurableRequestsStore(
-            inner, delivery, bundles,
+            inner, delivery, bundles, conversations,
             Options.Create(new DurableRequestsOptions { Enabled = true }),
             NullLogger<DurableRequestsStore>.Instance);
 
@@ -139,6 +151,71 @@ public sealed class DurableRequestsStoreTests
 
         // A row-id mismatch would silently re-introduce the matching 404 — it must throw.
         await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task Create_auto_creates_broadcasting_conversation_and_stamps_id()
+    {
+        // JEB-50 (S05 H7 / H9b): the durable create path auto-creates the
+        // broadcasting conversation and surfaces its id on the row so the create
+        // DTO + read-back carry conversationId.
+        var store = Build(out _, out _, out var bundles, out var conversations,
+            conversationId: "conv-123");
+
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        // The conversation was provisioned exactly once, for THIS order, by the
+        // ordering client.
+        conversations.Calls.Should().ContainSingle();
+        conversations.Calls[0].RequestId.Should().Be(created.Id);
+        conversations.Calls[0].ClientId.Should().Be("client-1");
+
+        // The id is stamped onto the created row (surfaced as conversationId).
+        created.ConversationId.Should().Be("conv-123");
+
+        // ...and persists on read-back (GET /requests/{id} → conversationId).
+        var roundTrip = await store.GetAsync(created.Id, CancellationToken.None);
+        roundTrip!.ConversationId.Should().Be("conv-123");
+
+        // ...and is recorded in the saga audit trail.
+        bundles.Recorded.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task Create_succeeds_when_conversation_provisioner_returns_null()
+    {
+        // A chat blip (or the auto-create flag OFF) degrades to null — the order
+        // create STILL succeeds; ConversationId is simply left unset. A chat
+        // outage must never fail POST /requests.
+        var store = Build(out _, out var delivery, out _, out var conversations,
+            conversationId: null);
+
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        created.Id.Should().NotBeNullOrWhiteSpace();
+        created.ConversationId.Should().BeNull();
+        // The delivery row (the hard dependency) is still seeded.
+        delivery.CreatedRows.Should().ContainSingle();
+        conversations.Calls.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task Cap_rejection_does_not_provision_a_conversation()
+    {
+        // The conversation is provisioned only AFTER a successful insert. A BR-9
+        // cap rejection throws before any side-effect, so no orphan conversation
+        // is created.
+        var store = Build(out _, out _, out _, out var conversations,
+            conversationId: "conv-should-not-happen");
+
+        await store.TryCreateWithLimitAsync(ValidInput(), limit: 1, CancellationToken.None);
+        conversations.Calls.Should().ContainSingle();
+
+        var act = async () => await store.TryCreateWithLimitAsync(ValidInput(), limit: 1, CancellationToken.None);
+        await act.Should().ThrowAsync<TooManyActiveRequestsException>();
+
+        // Still exactly one provision — the rejected create provisioned nothing.
+        conversations.Calls.Should().ContainSingle("the cap rejection must not provision a conversation");
     }
 
     [Fact]
@@ -192,6 +269,20 @@ public sealed class DurableRequestsStoreTests
         {
             Recorded.Add((sourceId, tag));
             return Task.FromResult(_outcome);
+        }
+    }
+
+    private sealed class RecordingConversationProvisioner : IConversationProvisioner
+    {
+        private readonly string? _conversationId;
+        public List<(string RequestId, string ClientId)> Calls { get; } = new();
+
+        public RecordingConversationProvisioner(string? conversationId) => _conversationId = conversationId;
+
+        public Task<string?> CreateBroadcastingConversationAsync(string requestId, string clientId, CancellationToken ct)
+        {
+            Calls.Add((requestId, clientId));
+            return Task.FromResult(_conversationId);
         }
     }
 

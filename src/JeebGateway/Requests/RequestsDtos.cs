@@ -231,6 +231,21 @@ public class DeliveryRequest
     public DateTimeOffset? AcceptedAt { get; set; }
 
     /// <summary>
+    /// JEB-50 (S05 H7 / H9b): id of the broadcasting conversation auto-created
+    /// for this order. Set ONCE by the gateway's stateless create orchestration
+    /// (<c>DurableRequestsStore</c>) immediately after the delivery row is seeded
+    /// — the gateway thinly composes the chat-service <c>POST /api/channels</c>
+    /// (tag=<c>broadcasting</c>) typed client and stamps the returned channel id
+    /// here. Mutable (like <see cref="Status"/> / <see cref="JeeberId"/>) so the
+    /// already-inserted row carries the id without a re-insert. Null when the
+    /// conversation auto-create flag is OFF or the chat-service was unavailable
+    /// at create time (a chat blip must never fail the order create). Surfaced to
+    /// the client as <c>conversationId</c> so <c>GET /api/Chat/channels/{id}/summary</c>
+    /// resolves the broadcasting conversation.
+    /// </summary>
+    public string? ConversationId { get; set; }
+
+    /// <summary>
     /// One-time code the Client presents to the Jeeber at hand-off
     /// (T-backend-013). Issued by the store when the row enters
     /// <see cref="RequestStatus.Accepted"/> and consumed on the
@@ -400,6 +415,16 @@ public class DeliveryRequestDto
     public DateTimeOffset? ScheduledAt { get; init; }
     public string? JeeberId { get; init; }
     public DateTimeOffset? AcceptedAt { get; init; }
+
+    /// <summary>
+    /// JEB-50 (S05 H7 / H9b): the broadcasting conversation auto-created for
+    /// this order, surfaced so the client can read the conversation phase via
+    /// <c>GET /api/Chat/channels/{conversationId}/summary</c> (which returns
+    /// <c>phase: "broadcasting"</c>). Null when conversation auto-create is OFF
+    /// or the chat-service was unavailable at create time — additive and
+    /// nullable, so a consumer that ignores it is unaffected.
+    /// </summary>
+    public string? ConversationId { get; init; }
 
     /// <summary>
     /// True once the row has transitioned through <see cref="RequestStatus.PickedUp"/>

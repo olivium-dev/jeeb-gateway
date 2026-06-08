@@ -1,3 +1,4 @@
+using JeebGateway.Conversations;
 using JeebGateway.Requests.OtpHandover;
 using JeebGateway.Services.Clients;
 using JeebGateway.StateService.Durable;
@@ -46,6 +47,7 @@ public sealed class DurableRequestsStore : IRequestsStore
     private readonly IRequestsStore _inner;
     private readonly IDeliveryServiceClient _delivery;
     private readonly ISagaBundleRecorder _bundles;
+    private readonly IConversationProvisioner _conversations;
     private readonly DurableRequestsOptions _options;
     private readonly ILogger<DurableRequestsStore> _logger;
 
@@ -53,12 +55,14 @@ public sealed class DurableRequestsStore : IRequestsStore
         IRequestsStore inner,
         IDeliveryServiceClient delivery,
         ISagaBundleRecorder bundles,
+        IConversationProvisioner conversations,
         IOptions<DurableRequestsOptions> options,
         ILogger<DurableRequestsStore> logger)
     {
         _inner = inner;
         _delivery = delivery;
         _bundles = bundles;
+        _conversations = conversations;
         _options = options.Value;
         _logger = logger;
     }
@@ -141,7 +145,24 @@ public sealed class DurableRequestsStore : IRequestsStore
                 $"Delivery row id ({row.Id}) does not match request id ({created.Id}); matching/run would 404.");
         }
 
-        // (b) Record the saga — opaque state keyed by the same id as sourceId.
+        // (b) JEB-50 (S05 H7): auto-create the broadcasting conversation and
+        // stamp its id onto the already-inserted row so the create DTO and the
+        // read-back (GET /requests/{id}) surface conversationId, which H9b reads
+        // via GET /api/Chat/channels/{conversationId}/summary. Thin orchestration
+        // only — the provisioner composes the chat-service typed client and owns
+        // no conversation state. SECONDARY side-effect of create: the provisioner
+        // degrades to null on a chat blip (or when the flag is OFF) so a chat
+        // outage never fails the order create. Stamping a mutable property on the
+        // row reference already held in the inner store needs no re-insert and
+        // does not affect the BR-9 cap (the row is already counted).
+        var conversationId = await _conversations.CreateBroadcastingConversationAsync(
+            created.Id, created.ClientId, ct);
+        if (!string.IsNullOrWhiteSpace(conversationId))
+        {
+            created.ConversationId = conversationId;
+        }
+
+        // (c) Record the saga — opaque state keyed by the same id as sourceId.
         await _bundles.RecordCreatedAsync(
             sourceId: created.Id,
             tag: _options.SagaTag,
@@ -151,6 +172,7 @@ public sealed class DurableRequestsStore : IRequestsStore
                 request_id = created.Id,
                 client_id = created.ClientId,
                 tier_id = created.TierId,
+                conversation_id = created.ConversationId,
                 scheduled = created.ScheduledAt is not null,
                 created_at = created.CreatedAt,
             },
