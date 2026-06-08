@@ -23,6 +23,26 @@ public interface IDeliveryServiceClient
 
     Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct);
 
+    /// <summary>
+    /// SPINE-FOUNDATION / ADR-006: seed a durable delivery row in the canonical
+    /// delivery-service <c>deliveries</c> table via the additive create-row
+    /// endpoint <c>POST /api/v1/deliveries</c>. The gateway forwards its minted
+    /// request id as the row <c>id</c> so the same id is stable across
+    /// create → <c>POST /api/v1/matching/run</c> (request_id mode) — without
+    /// this row the matching run returns <c>ErrUnknownRequest</c> (404).
+    ///
+    /// Idempotent upstream (<c>ON CONFLICT (id) DO NOTHING</c>) so a retried
+    /// create collapses onto the same row. delivery-service owns the row's
+    /// state machine; the gateway only seeds <c>(id, tenant_id, client_id,
+    /// tier_id, pickup_lat/lng, status='Ordered')</c>. snake_case body (Go).
+    /// </summary>
+    /// <exception cref="DeliveryCreateRowException">
+    /// Thrown for a non-2xx (and non-409-idempotent) upstream status so the
+    /// durable store surfaces a real failure rather than silently dropping the
+    /// row.
+    /// </exception>
+    Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct);
+
     Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct);
 
     Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct);
@@ -259,6 +279,78 @@ public sealed class LatLngUpstream
 {
     public required double Lat { get; init; }
     public required double Lng { get; init; }
+}
+
+/// <summary>
+/// SPINE-FOUNDATION / ADR-006: request body for the additive create-row
+/// endpoint <c>POST /api/v1/deliveries</c>. delivery-service (Go) reads
+/// <b>snake_case</b>; the explicit
+/// <see cref="System.Text.Json.Serialization.JsonPropertyName"/> attributes
+/// scope the snake_case mapping to exactly this DTO so the shared
+/// <c>JsonSerializerDefaults.Web</c> (camelCase) options do not emit
+/// <c>clientId</c>/<c>tierId</c> where Go expects <c>client_id</c>/<c>tier_id</c>.
+///
+/// The gateway supplies its minted request id as <see cref="Id"/> so the row id
+/// is stable across create → matching/run. Only the matching-resolve columns are
+/// seeded (<c>tier_id</c>, <c>pickup_lat/lng</c>); delivery-service owns the rest
+/// of the lifecycle.
+/// </summary>
+public sealed class CreateDeliveryRowUpstream
+{
+    [System.Text.Json.Serialization.JsonPropertyName("id")]
+    public required string Id { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tenant_id")]
+    public required string TenantId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("client_id")]
+    public required string ClientId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
+    public required string TierId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup_lat")]
+    public required double PickupLat { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup_lng")]
+    public required double PickupLng { get; init; }
+}
+
+/// <summary>
+/// SPINE-FOUNDATION / ADR-006: 2xx body of <c>POST /api/v1/deliveries</c>.
+/// delivery-service (Go) emits <b>snake_case</b>. The gateway only needs the
+/// echoed <c>id</c> to confirm the seeded row id matches the minted request id
+/// (request_id stability — a mismatch silently re-introduces the matching 404).
+/// </summary>
+public sealed class DeliveryRowUpstream
+{
+    [System.Text.Json.Serialization.JsonPropertyName("id")]
+    public required string Id { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tenant_id")]
+    public string? TenantId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("status")]
+    public string? Status { get; init; }
+}
+
+/// <summary>
+/// SPINE-FOUNDATION / ADR-006: a non-2xx (and non-idempotent-409) outcome from
+/// <c>POST /api/v1/deliveries</c>. The durable store surfaces this rather than
+/// silently dropping the row — a missing delivery row is exactly the bug
+/// (matching 404) ADR-006 fixes, so a seed failure must not be swallowed.
+/// </summary>
+public sealed class DeliveryCreateRowException : Exception
+{
+    public int StatusCode { get; }
+    public string? Reason { get; }
+
+    public DeliveryCreateRowException(int statusCode, string? reason)
+        : base($"delivery-service create-row returned {statusCode} ({reason ?? "no reason"}).")
+    {
+        StatusCode = statusCode;
+        Reason = reason;
+    }
 }
 
 public sealed class DeliveryRequestUpstream
