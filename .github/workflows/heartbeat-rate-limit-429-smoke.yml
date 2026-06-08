@@ -118,27 +118,35 @@ jobs:
           TOKEN=$(cat token.txt)
           # Run the flood ON the host (gateway origin localhost:10000) over the tunnel — the
           # public edge does not expose /jeebers/me/availability (documented edge gap; same
-          # authentic origin path the N13 presence smoke uses). Toggle online true/false so each
-          # call is a real presence write that the per-user/minute limiter counts.
+          # authentic origin path the N13 presence smoke uses).
+          #
+          # Body shape: bare {"online":false}. This is an ALWAYS-VALID toggle (gateway 200) that
+          # reaches heart-beat's per-user toggle limiter on EVERY call — heart-beat's
+          # handleSetPresence runs the limiter for any valid toggle regardless of online value,
+          # rejecting with 429+Retry-After BEFORE mutating presence. (A {"online":true} body would
+          # need vehicleType+zone or the gateway 400s it BEFORE calling heart-beat, so half the
+          # calls would never consume a token and the budget of 60/min would not be crossed.)
+          # With FLOOD>60 in one minute, the 61st valid toggle MUST come back 429.
           REMOTE=$(cat <<REMOTE_EOF
           set -e
           TOKEN='$TOKEN'
-          got429=0; firstRetry=''; n=$FLOOD; codes=''
+          got429=0; firstRetry=''; n=$FLOOD; codes=''; n200=0; n429=0
           for i in \$(seq 1 \$n); do
-            on=\$([ \$((i % 2)) -eq 0 ] && echo true || echo false)
             resp=\$(curl -sS -m 8 -D - -o /dev/null \
               -X PATCH http://localhost:10000/jeebers/me/availability \
               -H "Authorization: Bearer \$TOKEN" -H 'Content-Type: application/json' \
-              -d "{\"online\":\$on}" 2>/dev/null || true)
+              -d '{"online":false}' 2>/dev/null || true)
             code=\$(printf '%s' "\$resp" | sed -n 's@^HTTP/[0-9.]* \([0-9]*\).*@\1@p' | head -1)
             codes="\$codes \$code"
+            [ "\$code" = "200" ] && n200=\$((n200+1))
             if [ "\$code" = "429" ]; then
-              got429=1
+              n429=\$((n429+1)); got429=1
               ra=\$(printf '%s' "\$resp" | tr -d '\r' | sed -n 's@^[Rr]etry-[Aa]fter: *\(.*\)@\1@p' | head -1)
               if [ -z "\$firstRetry" ]; then firstRetry="\$ra"; fi
             fi
           done
           echo "FLOOD_CODES=\$codes"
+          echo "COUNT_200=\$n200 COUNT_429=\$n429"
           echo "GOT_429=\$got429"
           echo "FIRST_RETRY_AFTER=[\$firstRetry]"
           REMOTE_EOF
