@@ -1,4 +1,6 @@
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.ProhibitedItems;
+using JeebGateway.ProhibitedItems.Scanner;
 using JeebGateway.Requests;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -45,25 +47,59 @@ public class RequestsController : ControllerBase
     private static readonly System.Text.RegularExpressions.Regex UrlShape =
         new(@"^(https?|s3)://[^\s]+$", System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    /// <summary>
+    /// JEB-45 (S05 N5): the only INITIAL statuses a create may legally land on.
+    /// The server picks <c>pending</c> (immediate) or <c>scheduled</c> (when a
+    /// future <c>scheduledAt</c> is supplied); any other client-supplied status
+    /// is an illegal initial transition and is rejected with 422. Compared
+    /// case-insensitively.
+    /// </summary>
+    private static readonly IReadOnlySet<string> LegalInitialStatuses =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            RequestStatus.Pending,
+            RequestStatus.Scheduled
+        };
+
     private readonly IRequestsStore _store;
     private readonly ITiersStore _tiers;
     private readonly TimeProvider _clock;
     private readonly ScheduledDeliveryOptions _scheduledOptions;
+    private readonly IProhibitedItemScanner _scanner;
+    private readonly IProhibitedItemsStore _prohibited;
+    private readonly CreateModerationOptions _moderation;
 
     public RequestsController(
         IRequestsStore store,
         ITiersStore tiers,
         TimeProvider clock,
-        IOptions<ScheduledDeliveryOptions> scheduledOptions)
+        IOptions<ScheduledDeliveryOptions> scheduledOptions,
+        IProhibitedItemScanner scanner,
+        IProhibitedItemsStore prohibited,
+        IOptions<CreateModerationOptions> moderation)
     {
         _store = store;
         _tiers = tiers;
         _clock = clock;
         _scheduledOptions = scheduledOptions.Value;
+        _scanner = scanner;
+        _prohibited = prohibited;
+        _moderation = moderation.Value;
     }
 
+    /// <summary>
+    /// Create a delivery request. Accepts BOTH <c>application/json</c> (the
+    /// existing typed body) AND <c>multipart/form-data</c> (A2, the voice-first
+    /// create path) on the SAME route — the action reads the request shape from
+    /// the Content-Type and binds either path into the canonical
+    /// <see cref="CreateRequestBody"/>, then runs one create pipeline. Kept as a
+    /// SINGLE action (not two <c>[Consumes]</c>-split actions) so the OpenAPI 3.0
+    /// document — consumed by NSwag BFF client generation and the Swagger UI —
+    /// has no conflicting method/path combination.
+    /// </summary>
     [HttpPost]
     // ADR-005 L2 §C client-only: replaces [RequireRole(Roles.Client)]. BR-9 cap stays STATE (in-action).
+    [Consumes("application/json", "multipart/form-data")]
     [RequireCapability(Capabilities.RequestCreate)]
     [RequireActiveUser]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status201Created)]
@@ -71,7 +107,44 @@ public class RequestsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
-    public async Task<IActionResult> Create([FromBody] CreateRequestBody? body, CancellationToken ct)
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
+    public async Task<IActionResult> Create(CancellationToken ct)
+    {
+        // A2: bind from multipart form when the submit is multipart/form-data;
+        // otherwise read the typed JSON body (existing behaviour). Both converge
+        // on the canonical CreateRequestBody and the single create pipeline.
+        CreateRequestBody? body;
+        if (Request.HasFormContentType)
+        {
+            body = await BindFromFormAsync();
+        }
+        else
+        {
+            try
+            {
+                body = await Request.ReadFromJsonAsync<CreateRequestBody>(ct);
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return BadRequest(new ProblemDetails
+                {
+                    Title = "Request body is not valid JSON.",
+                    Status = StatusCodes.Status400BadRequest
+                });
+            }
+        }
+
+        return await CreateCore(body, ct);
+    }
+
+    /// <summary>
+    /// Create pipeline shared by the JSON and multipart entry points. Order is
+    /// load-bearing: identity → body/description → N5 initial-transition guard
+    /// (422) → scheduled validation → location/tier/url/photo validation (400) →
+    /// moderation gate (N1 block 409 / A1.1 ack 409) → BR-9 atomic store insert
+    /// (N3 409). A rejection at any gate persists no row.
+    /// </summary>
+    private async Task<IActionResult> CreateCore(CreateRequestBody? body, CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var clientId, out var problem)) return problem;
 
@@ -81,6 +154,23 @@ public class RequestsController : ControllerBase
             {
                 Title = "description is required.",
                 Status = StatusCodes.Status400BadRequest
+            });
+        }
+
+        // JEB-45 (S05 N5): create-time initial-transition guard. The status is
+        // server-authoritative — a client may not seed the row into an arbitrary
+        // lifecycle state. A supplied status that is not a legal INITIAL state
+        // (pending / scheduled) is an illegal initial transition: 422
+        // transition_not_allowed, no row persisted. A legal value (or none) is a
+        // no-op and falls through to the normal server-assigned status.
+        if (!string.IsNullOrWhiteSpace(body.Status) && !LegalInitialStatuses.Contains(body.Status))
+        {
+            return UnprocessableEntity(new ProblemDetails
+            {
+                Title = "Illegal initial status for a new request.",
+                Detail = $"A request may only be created in 'pending' or 'scheduled'; got '{body.Status}'.",
+                Status = StatusCodes.Status422UnprocessableEntity,
+                Type = "https://jeeb.dev/errors/transition-not-allowed"
             });
         }
 
@@ -187,6 +277,14 @@ public class RequestsController : ControllerBase
             }
         }
 
+        // JEB-63 (S05 N1 / A1.1): gateway-owned create-time prohibited-items
+        // moderation gate. Flag-gated (default OFF) so today's green path is
+        // unchanged until the lexicon is seeded and the flip is owner-approved.
+        // Runs AFTER all field validation (so 400 ordering is preserved) and
+        // BEFORE the store insert (so a rejected create persists no row).
+        var moderation = await EvaluateModerationAsync(clientId, body.Description, ct);
+        if (moderation is not null) return moderation;
+
         var input = new CreateRequestInput
         {
             ClientId = clientId,
@@ -219,6 +317,48 @@ public class RequestsController : ControllerBase
         }
 
         return Created($"/requests/{created.Id}", ToDto(created));
+    }
+
+    /// <summary>
+    /// A2 (S05): binds the multipart/form-data create body into the canonical
+    /// <see cref="CreateRequestBody"/>. Pickup/dropoff are flat lat/lng form
+    /// fields (form data is not nested). A voice-payload file may accompany the
+    /// fields and is accepted (and ignored here — STT lives in S04
+    /// POST /transcribe), so a voice-first upload binds cleanly. When no
+    /// <c>description</c> is supplied the raw <c>transcription</c> text is used as
+    /// the description, so a voice-first submit still satisfies the
+    /// "description required" contract.
+    /// </summary>
+    private async Task<CreateRequestBody> BindFromFormAsync()
+    {
+        var form = await Request.ReadFormAsync();
+
+        GeoPoint? Point(string latKey, string lngKey) =>
+            double.TryParse(form[latKey], System.Globalization.CultureInfo.InvariantCulture, out var lat)
+            && double.TryParse(form[lngKey], System.Globalization.CultureInfo.InvariantCulture, out var lng)
+                ? new GeoPoint { Lat = lat, Lng = lng }
+                : null;
+
+        string? Field(string key) => form.TryGetValue(key, out var v) && !string.IsNullOrWhiteSpace(v)
+            ? v.ToString()
+            : null;
+
+        var description = Field("description");
+        var transcription = Field("transcription");
+
+        return new CreateRequestBody
+        {
+            // Voice-first: fall back to the transcription text when no edited
+            // description was supplied so the "description required" contract holds.
+            Description = string.IsNullOrWhiteSpace(description) ? transcription : description,
+            Transcription = transcription,
+            TierId = Field("tierId"),
+            PickupLocation = Point("pickupLat", "pickupLng"),
+            DropoffLocation = Point("dropoffLat", "dropoffLng"),
+            PickupAddress = Field("pickupAddress"),
+            DropoffAddress = Field("dropoffAddress"),
+            Status = Field("status")
+        };
     }
 
     /// <summary>
@@ -350,6 +490,78 @@ public class RequestsController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>
+    /// JEB-63 (S05 N1 / A1.1) create-time moderation gate. Pure orchestration:
+    /// composes the gateway-owned <see cref="IProhibitedItemScanner"/> over the
+    /// gateway-owned lexicon (N11 keeps the lexicon out of ban-service) and the
+    /// per-user ack ledger. Returns:
+    ///   <list type="bullet">
+    ///     <item>null — allowed (gate off, no review-grade match, or warn already
+    ///       acknowledged): the create proceeds.</item>
+    ///     <item>409 <c>prohibited_item_blocked</c> — a block-severity match;
+    ///       an ack does NOT override it (AC7).</item>
+    ///     <item>409 <c>prohibited_item_requires_ack</c> — a warn-severity match
+    ///       and the caller has not acknowledged the current lexicon version.</item>
+    ///   </list>
+    /// No-op (returns null) when the gate flag is OFF — today's green path.
+    /// </summary>
+    private async Task<IActionResult?> EvaluateModerationAsync(string clientId, string description, CancellationToken ct)
+    {
+        if (!_moderation.Enabled) return null;
+
+        var scan = await _scanner.ScanAsync(description, ct);
+        var severity = scan.GatingSeverity;
+        if (severity is null) return null;
+
+        var matchDtos = scan.Matches
+            .Select(m => new ModerationMatchDto(m.ItemName, m.Category, m.Severity.ToString().ToLowerInvariant()))
+            .ToList();
+
+        if (severity == ProhibitedSeverity.Block)
+        {
+            // AC1 / AC7: block is a hard reject; prohibited_ack must NOT override.
+            return Conflict(new ProhibitedItemProblemDetails
+            {
+                Title = "This request contains a prohibited item and cannot be created.",
+                Status = StatusCodes.Status409Conflict,
+                Type = "https://jeeb.dev/errors/prohibited-item-blocked",
+                Reason = "prohibited_item_blocked",
+                Matches = matchDtos
+            });
+        }
+
+        // Warn severity: allowed only once the caller has acknowledged the
+        // CURRENT lexicon version. Re-using the same version semantics as
+        // GET /prohibited-items + POST /prohibited-items/acknowledge so the ack
+        // the mobile ack-dialog records is the one that clears this gate.
+        var active = await _prohibited.ListActiveAsync(ct);
+        var currentVersion = ComputeLexiconVersion(active);
+        var ack = await _prohibited.GetAcknowledgmentAsync(clientId, ct);
+        var acknowledged = ack is not null && string.Equals(ack.Version, currentVersion, StringComparison.Ordinal);
+
+        if (acknowledged) return null;
+
+        return Conflict(new ProhibitedItemProblemDetails
+        {
+            Title = "This request contains an item that requires acknowledgment before it can be created.",
+            Status = StatusCodes.Status409Conflict,
+            Type = "https://jeeb.dev/errors/prohibited-item-requires-ack",
+            Reason = "prohibited_item_requires_ack",
+            Matches = matchDtos
+        });
+    }
+
+    /// <summary>
+    /// Lexicon version = max UpdatedAt across the active set (or "empty"). MUST
+    /// match <c>ProhibitedItemsController.ComputeVersion</c> so the ack recorded
+    /// against the GET /prohibited-items version clears the create-time warn gate.
+    /// </summary>
+    private static string ComputeLexiconVersion(IReadOnlyList<ProhibitedItem> items)
+    {
+        if (items.Count == 0) return "empty";
+        return items.Max(i => i.UpdatedAt).ToUniversalTime().ToString("O");
+    }
+
     private static DeliveryRequestDto ToDto(DeliveryRequest r) => new()
     {
         Id = r.Id,
@@ -370,3 +582,20 @@ public class RequestsController : ControllerBase
         AcceptedAt = r.AcceptedAt
     };
 }
+
+/// <summary>
+/// RFC7807 ProblemDetails extended with the create-moderation <c>reason</c> and
+/// the matched-lexicon <c>matches</c> (JEB-63 AC1/AC3). Serialised as additional
+/// members alongside the standard ProblemDetails fields.
+/// </summary>
+public sealed class ProhibitedItemProblemDetails : ProblemDetails
+{
+    [System.Text.Json.Serialization.JsonPropertyName("reason")]
+    public string Reason { get; set; } = string.Empty;
+
+    [System.Text.Json.Serialization.JsonPropertyName("matches")]
+    public IReadOnlyList<ModerationMatchDto> Matches { get; set; } = Array.Empty<ModerationMatchDto>();
+}
+
+/// <summary>One matched lexicon entry surfaced on a moderation 409.</summary>
+public sealed record ModerationMatchDto(string Keyword, string Category, string Severity);

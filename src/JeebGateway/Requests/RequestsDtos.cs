@@ -367,6 +367,19 @@ public class CreateRequestBody
     /// behavior — status starts as <c>pending</c>).
     /// </summary>
     public DateTimeOffset? ScheduledAt { get; set; }
+
+    /// <summary>
+    /// JEB-45 (S05 N5): optional client-supplied INITIAL status. The server is
+    /// authoritative — a request always starts at <c>pending</c> (or
+    /// <c>scheduled</c> when <see cref="ScheduledAt"/> is set). This field exists
+    /// only so the create path can REJECT an illegal initial state (e.g.
+    /// <c>Picked</c>/<c>delivered</c>) with 422 <c>transition_not_allowed</c>
+    /// rather than silently ignoring it. Absent / null = today's behaviour
+    /// (server assigns the status). Additive — never required; a legal initial
+    /// value (<c>pending</c>/<c>scheduled</c>, case-insensitive) is accepted as
+    /// a no-op.
+    /// </summary>
+    public string? Status { get; set; }
 }
 
 public class DeliveryRequestDto

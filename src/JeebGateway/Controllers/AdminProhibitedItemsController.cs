@@ -96,6 +96,7 @@ public class AdminProhibitedItemsController : ControllerBase
         if (ValidateName(body.Name, out var nameError) is false) return nameError!;
         if (ValidateCategory(body.Category, out var categoryError) is false) return categoryError!;
         if (ValidateDescription(body.Description, out var descError) is false) return descError!;
+        if (TryParseSeverity(body.Severity, ProhibitedSeverity.Block, out var severity, out var sevError) is false) return sevError!;
 
         try
         {
@@ -103,7 +104,8 @@ public class AdminProhibitedItemsController : ControllerBase
             {
                 Name = body.Name!,
                 Category = body.Category!,
-                Description = body.Description
+                Description = body.Description,
+                Severity = severity
             }, adminId, ct);
 
             return CreatedAtAction(nameof(Get), new { id = created.Id }, ToDto(created));
@@ -137,6 +139,12 @@ public class AdminProhibitedItemsController : ControllerBase
         if (body.Name is not null && ValidateName(body.Name, out var nameError) is false) return nameError!;
         if (body.Category is not null && ValidateCategory(body.Category, out var categoryError) is false) return categoryError!;
         if (body.Description is not null && ValidateDescription(body.Description, out var descError) is false) return descError!;
+        ProhibitedSeverity? severityPatch = null;
+        if (body.Severity is not null)
+        {
+            if (TryParseSeverity(body.Severity, ProhibitedSeverity.Block, out var parsed, out var sevError) is false) return sevError!;
+            severityPatch = parsed;
+        }
 
         try
         {
@@ -145,6 +153,7 @@ public class AdminProhibitedItemsController : ControllerBase
                 Name = body.Name,
                 Category = body.Category,
                 Description = body.Description,
+                Severity = severityPatch,
                 Active = body.Active
             }, adminId, ct);
 
@@ -236,12 +245,48 @@ public class AdminProhibitedItemsController : ControllerBase
         Status = StatusCodes.Status400BadRequest
     });
 
+    /// <summary>
+    /// Parses the wire severity string ("warn"|"block", case-insensitive) for
+    /// JEB-63. A null/blank value yields <paramref name="fallback"/>; any other
+    /// unrecognised value is a 400. Additive validation — existing callers that
+    /// omit severity hit the fallback and are unaffected.
+    /// </summary>
+    private bool TryParseSeverity(string? wire, ProhibitedSeverity fallback, out ProhibitedSeverity severity, out IActionResult? error)
+    {
+        error = null;
+        if (string.IsNullOrWhiteSpace(wire))
+        {
+            severity = fallback;
+            return true;
+        }
+
+        switch (wire.Trim().ToLowerInvariant())
+        {
+            case "warn":
+                severity = ProhibitedSeverity.Warn;
+                return true;
+            case "block":
+                severity = ProhibitedSeverity.Block;
+                return true;
+            default:
+                severity = fallback;
+                error = BadRequest(new ProblemDetails
+                {
+                    Title = "severity must be 'warn' or 'block'.",
+                    Detail = $"got '{wire}'",
+                    Status = StatusCodes.Status400BadRequest
+                });
+                return false;
+        }
+    }
+
     private static ProhibitedItemDto ToDto(ProhibitedItem i) => new()
     {
         Id = i.Id,
         Name = i.Name,
         Category = i.Category,
         Description = i.Description,
+        Severity = i.Severity.ToString().ToLowerInvariant(),
         Active = i.Active,
         CreatedAt = i.CreatedAt,
         UpdatedAt = i.UpdatedAt

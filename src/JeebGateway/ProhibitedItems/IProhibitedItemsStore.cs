@@ -29,6 +29,13 @@ public class ProhibitedItemCreate
     public required string Name { get; init; }
     public required string Category { get; init; }
     public string? Description { get; init; }
+
+    /// <summary>
+    /// JEB-63 moderation severity. Additive — defaults to
+    /// <see cref="ProhibitedSeverity.Block"/> so an admin create that omits it
+    /// keeps the stricter hard-reject behaviour.
+    /// </summary>
+    public ProhibitedSeverity Severity { get; init; } = ProhibitedSeverity.Block;
 }
 
 public class ProhibitedItemPatch
@@ -36,6 +43,9 @@ public class ProhibitedItemPatch
     public string? Name { get; init; }
     public string? Category { get; init; }
     public string? Description { get; init; }
+
+    /// <summary>JEB-63 moderation severity (null = leave unchanged). Additive.</summary>
+    public ProhibitedSeverity? Severity { get; init; }
     public bool? Active { get; init; }
 }
 

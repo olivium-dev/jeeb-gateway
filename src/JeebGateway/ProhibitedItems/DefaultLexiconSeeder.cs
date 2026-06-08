@@ -1,0 +1,81 @@
+using Microsoft.Extensions.Hosting;
+
+namespace JeebGateway.ProhibitedItems;
+
+/// <summary>
+/// JEB-63 (S05): seeds a minimal default prohibited-items lexicon at startup so
+/// the gateway-owned create-time moderation gate has terms to match. Only
+/// registered when <c>FeatureFlags:CreateModeration:Enabled=true</c>, so the
+/// flag-OFF path keeps today's empty-lexicon behaviour (GET /prohibited-items →
+/// items:[], version:'empty').
+///
+/// Idempotent: skips entirely when the catalog already holds any item, so a
+/// gateway restart (or an admin who has already seeded the lexicon out-of-band)
+/// does not duplicate entries. The lexicon stays GATEWAY-OWNED — the N11
+/// boundary guard requires the prohibited-items lexicon to live only under the
+/// gateway listKey, never in ban-service.
+///
+/// Severity mapping mirrors the S05 contract: an alcohol term ("arak") is a
+/// <see cref="ProhibitedSeverity.Block"/> hard reject; a bladed-weapon term
+/// ("kitchen knife") is a <see cref="ProhibitedSeverity.Warn"/> ack-gate.
+/// </summary>
+public sealed class DefaultLexiconSeeder : IHostedService
+{
+    private const string SeedAdmin = "system:lexicon-seed";
+
+    /// <summary>
+    /// (name, category, severity). Names match the scanner's exact/word-boundary
+    /// matching against a normalized description, so "a bottle of arak" hits
+    /// "arak" and "a kitchen knife" hits "kitchen knife".
+    /// </summary>
+    private static readonly (string Name, string Category, ProhibitedSeverity Severity)[] Defaults =
+    {
+        ("arak", "alcohol", ProhibitedSeverity.Block),
+        ("alcohol", "alcohol", ProhibitedSeverity.Block),
+        ("kitchen knife", "weapon", ProhibitedSeverity.Warn),
+        ("knife", "weapon", ProhibitedSeverity.Warn),
+    };
+
+    private readonly IProhibitedItemsStore _store;
+    private readonly ILogger<DefaultLexiconSeeder> _logger;
+
+    public DefaultLexiconSeeder(IProhibitedItemsStore store, ILogger<DefaultLexiconSeeder> logger)
+    {
+        _store = store;
+        _logger = logger;
+    }
+
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        var existing = await _store.ListActiveAsync(cancellationToken);
+        if (existing.Count > 0)
+        {
+            _logger.LogInformation(
+                "Prohibited-items lexicon already has {Count} active item(s); skipping default seed.",
+                existing.Count);
+            return;
+        }
+
+        var seeded = 0;
+        foreach (var (name, category, severity) in Defaults)
+        {
+            try
+            {
+                await _store.CreateAsync(
+                    new ProhibitedItemCreate { Name = name, Category = category, Severity = severity },
+                    SeedAdmin,
+                    cancellationToken);
+                seeded++;
+            }
+            catch (DuplicateProhibitedItemNameException)
+            {
+                // Another concurrent seed or an admin entry already covers this
+                // name — idempotent, not an error.
+            }
+        }
+
+        _logger.LogInformation("Seeded {Count} default prohibited-items lexicon entries (create-moderation ON).", seeded);
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+}

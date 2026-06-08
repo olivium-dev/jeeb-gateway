@@ -66,6 +66,7 @@ public class InMemoryProhibitedItemsStore : IProhibitedItemsStore
             Name = input.Name.Trim(),
             Category = input.Category,
             Description = input.Description,
+            Severity = input.Severity,
             Active = true,
             CreatedBy = adminUserId,
             UpdatedBy = adminUserId,
@@ -107,6 +108,7 @@ public class InMemoryProhibitedItemsStore : IProhibitedItemsStore
 
             if (patch.Category is { } category) existing.Category = category;
             if (patch.Description is not null) existing.Description = patch.Description;
+            if (patch.Severity is { } severity) existing.Severity = severity;
             if (patch.Active is { } active) existing.Active = active;
 
             existing.UpdatedBy = adminUserId;
@@ -159,6 +161,7 @@ public class InMemoryProhibitedItemsStore : IProhibitedItemsStore
         Name = i.Name,
         Category = i.Category,
         Description = i.Description,
+        Severity = i.Severity,
         Active = i.Active,
         CreatedBy = i.CreatedBy,
         UpdatedBy = i.UpdatedBy,
