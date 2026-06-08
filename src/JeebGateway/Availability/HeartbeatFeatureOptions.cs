@@ -54,4 +54,35 @@ public sealed class HeartbeatFeatureOptions
     /// code change; the Jeeb default is the opaque literal <c>"jeeber"</c>.
     /// </summary>
     public string RoleKey { get; init; } = "jeeber";
+
+    /// <summary>
+    /// S06 AUTH CONTRACT — the static service-auth key the gateway presents to
+    /// heart-beat as the <c>X-Service-Auth-Key</c> header on every
+    /// <c>PATCH /v1/presence</c> / <c>GET /v1/presence/{userId}</c> call.
+    ///
+    /// <para>
+    /// heart-beat's auth middleware accepts EITHER this static
+    /// <c>X-Service-Auth-Key</c> (constant-time compared against its own
+    /// <c>HEARTBEAT_SERVICE_AUTH_KEY</c>) OR a JWKS-validated end-user JWT. The
+    /// gateway is a BFF process — it has already authenticated the mobile user —
+    /// so it authenticates to heart-beat as the trusted CALLER PROCESS via this
+    /// static key, which grants the service-auth principal that may act on any
+    /// <c>userId</c>. This is the minimal, secure, additive handshake: it reuses
+    /// the path heart-beat already implements, requires no fleet-wide
+    /// <c>ServiceAuth:Enabled</c> flip, and adds no new crypto.
+    /// </para>
+    ///
+    /// <para>
+    /// SECRET — never logged, never committed. Injected per environment from a
+    /// swarm secret via <c>FeatureFlags__Heartbeat__ServiceAuthKey</c> (the SAME
+    /// value the secrets engineer sets as heart-beat's
+    /// <c>HEARTBEAT_SERVICE_AUTH_KEY</c> repo secret). Blank (the committed
+    /// default) means the header is not attached — harmless while
+    /// <see cref="Enabled"/> is false, since the gateway never dials heart-beat
+    /// then. The flag MUST NOT be flipped on in any environment where this key is
+    /// blank (heart-beat would 401); enforced by the smoke test that gates the
+    /// cutover.
+    /// </para>
+    /// </summary>
+    public string ServiceAuthKey { get; init; } = string.Empty;
 }
