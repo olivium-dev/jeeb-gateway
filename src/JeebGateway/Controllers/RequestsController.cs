@@ -579,7 +579,8 @@ public class RequestsController : ControllerBase
         CreatedAt = r.CreatedAt,
         ScheduledAt = r.ScheduledAt,
         JeeberId = r.JeeberId,
-        AcceptedAt = r.AcceptedAt
+        AcceptedAt = r.AcceptedAt,
+        ConversationId = r.ConversationId
     };
 }
 

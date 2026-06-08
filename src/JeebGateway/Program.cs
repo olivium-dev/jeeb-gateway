@@ -803,6 +803,20 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProc
 builder.Services.Configure<DurableRequestsOptions>(
     builder.Configuration.GetSection(DurableRequestsOptions.SectionName));
 
+// JEB-50 (S05 H7): gateway-owned conversation auto-create on order create.
+// The provisioner is ALWAYS registered (the durable store ctor depends on it),
+// but it is a no-op that returns null unless FeatureFlags:ConversationAutoCreate
+// :Enabled=true — so today's green create path is byte-for-byte unchanged until
+// the flag is flipped. It is thin orchestration over the already-registered
+// ServiceChatClient (chat-service POST /api/channels), holding no state.
+builder.Services.Configure<JeebGateway.Conversations.ConversationProvisionOptions>(
+    builder.Configuration.GetSection(JeebGateway.Conversations.ConversationProvisionOptions.SectionName));
+// Singleton: the provisioner captures only IServiceScopeFactory (a singleton)
+// and opens a fresh scope per call to resolve the SCOPED ServiceChatClient, so
+// it is safe to inject into the singleton DurableRequestsStore.
+builder.Services.AddSingleton<JeebGateway.Conversations.IConversationProvisioner,
+                              JeebGateway.Conversations.ChatServiceConversationProvisioner>();
+
 var durableRequests = builder.Configuration
     .GetSection(DurableRequestsOptions.SectionName)
     .Get<DurableRequestsOptions>() ?? new DurableRequestsOptions();
@@ -839,6 +853,7 @@ if (durableRequests.Enabled)
         sp.GetRequiredService<InMemoryRequestsStore>(),
         sp.GetRequiredService<JeebGateway.Services.Clients.IDeliveryServiceClient>(),
         sp.GetRequiredService<JeebGateway.StateService.Durable.ISagaBundleRecorder>(),
+        sp.GetRequiredService<JeebGateway.Conversations.IConversationProvisioner>(),
         sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DurableRequestsOptions>>(),
         sp.GetRequiredService<ILogger<DurableRequestsStore>>()));
 }
