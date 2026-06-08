@@ -318,14 +318,56 @@ public sealed class CreateDeliveryRowUpstream
 
 /// <summary>
 /// SPINE-FOUNDATION / ADR-006: 2xx body of <c>POST /api/v1/deliveries</c>.
-/// delivery-service (Go) emits <b>snake_case</b>. The gateway only needs the
-/// echoed <c>id</c> to confirm the seeded row id matches the minted request id
-/// (request_id stability — a mismatch silently re-introduces the matching 404).
+/// delivery-service (Go, rest.go) emits <b>snake_case</b> and keys the echoed
+/// row id as <c>delivery_id</c> — the SAME shape as the OTP issue/verify bodies,
+/// NOT <c>id</c>. The gateway only needs that echoed id to confirm the seeded
+/// row id equals the minted request id (request_id stability).
 /// </summary>
+/// <remarks>
+/// A4 fix: bind the id from the canonical <c>delivery_id</c> wire key. Before
+/// this, the id bound from <c>id</c>, so against the real <c>delivery_id</c> body
+/// it read back <c>null</c> and <c>DurableRequestsStore</c>'s stability assertion
+/// (<c>row.Id == created.Id</c>) threw → 500 on the durable create path →
+/// <c>durable_requests</c> rolled back → A4 idempotent replay returned a NEW id.
+/// A backward-compatible <c>id</c> alias is retained as a fallback so any
+/// older/alternate upstream shape that still emits <c>id</c> binds (additive,
+/// non-breaking). <c>delivery_id</c> wins when both keys are present, regardless
+/// of document order.
+/// </remarks>
 public sealed class DeliveryRowUpstream
 {
+    private string? _id;
+
+    /// <summary>
+    /// Canonical row id, bound from <c>delivery_id</c> (delivery-service rest.go)
+    /// and, as a fallback, from a legacy <c>id</c> key. Non-empty after a
+    /// successful 2xx bind so the durable stability assertion can compare it
+    /// against the request id.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string Id
+    {
+        get => _id ?? string.Empty;
+        init { if (!string.IsNullOrEmpty(value)) _id = value; }
+    }
+
+    /// <summary>Primary wire mapping: delivery-service emits <c>delivery_id</c>.</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("delivery_id")]
+    [System.Text.Json.Serialization.JsonInclude]
+    public string? DeliveryId
+    {
+        get => _id;
+        init { if (!string.IsNullOrEmpty(value)) _id = value; }
+    }
+
+    /// <summary>Backward-compatible fallback: legacy <c>id</c> key (loses to <c>delivery_id</c>).</summary>
     [System.Text.Json.Serialization.JsonPropertyName("id")]
-    public required string Id { get; init; }
+    [System.Text.Json.Serialization.JsonInclude]
+    public string? LegacyId
+    {
+        get => null;
+        init { if (_id is null && !string.IsNullOrEmpty(value)) _id = value; }
+    }
 
     [System.Text.Json.Serialization.JsonPropertyName("tenant_id")]
     public string? TenantId { get; init; }
