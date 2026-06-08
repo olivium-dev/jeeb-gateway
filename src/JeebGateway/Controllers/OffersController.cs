@@ -207,8 +207,11 @@ public class OffersController : ControllerBase
     /// recomputed here — the offer-service owns every negative (403/410/409/404)
     /// and the race-safe single-winner guarantee. The one gateway-owned
     /// pre-forward check is BR-1 (same user cannot be both Client and Jeeber on
-    /// one delivery), a Jeeb product composition rule spanning request-creator
-    /// identity rather than auction state.
+    /// one delivery). Because the actor here is the request-owning CLIENT, the only
+    /// legitimate BR-1 violation is a genuine self-offer (actor == the bidding
+    /// jeeber of the accepted offer), so the check compares the actor against THIS
+    /// offer's recorded bidder — never against request.ClientId, which would trip
+    /// on every valid accept.
     /// </summary>
     private async Task<IActionResult> AcceptViaUpstreamAsync(
         string offerId, string actorId, CancellationToken ct)
@@ -225,10 +228,23 @@ public class OffersController : ControllerBase
             return NotFound();
         }
 
-        // BR-1 fast-fail (gateway-owned composition rule). The accepting CLIENT must
-        // not also be a jeeber on this delivery. Cheap and avoids a pointless saga
-        // round-trip; the offer-service does not know the Jeeb dual-role coupling.
-        if (await _dualRole.WouldViolateSameDeliveryRuleAsync(actorId, requestId, ct))
+        // BR-1 fast-fail (gateway-owned composition rule). BR-1 forbids a user from
+        // acting as BOTH Client and Jeeber on the SAME delivery. On the accept path
+        // the actor IS the request-owning CLIENT (request.client_id == actor is the
+        // normal, correct case — the offer-service guard authorizes exactly that),
+        // so the only legitimate BR-1 violation here is a genuine SELF-OFFER: the
+        // accepting client is also the jeeber who bid the offer being accepted.
+        //
+        // We therefore compare the actor against THIS OFFER's bidder (recorded at
+        // submit time in the routing index), NOT against request.ClientId — the
+        // latter trips on every valid accept. When the index has no jeeber id for
+        // the offer (unknown / legacy pairing), we do NOT assert a violation here;
+        // the offer-service request-scoped accept guard (request.client_id == actor)
+        // and the role-switch guard remain the authoritative owners of dual-role
+        // self-dealing, so we let the saga decide rather than guess.
+        var offerJeeberId = _offerRequestIndex.ResolveJeeberId(offerId);
+        if (offerJeeberId is not null
+            && string.Equals(offerJeeberId, actorId, StringComparison.Ordinal))
         {
             return Conflict(new ProblemDetails
             {

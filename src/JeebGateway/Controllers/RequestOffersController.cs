@@ -229,11 +229,13 @@ public class RequestOffersController : ControllerBase
             });
         }
 
-        // Record the offerId → requestId routing pairing so the offer-scoped
-        // accept route (POST /offers/{offerId}/accept) can forward to the
-        // request-scoped offer-service accept saga. This is a thin BFF routing
-        // concern, not auction state (see IOfferRequestIndex).
-        _offerRequestIndex.Record(created.Id, requestId);
+        // Record the offerId → (requestId, jeeberId) routing pairing so the
+        // offer-scoped accept route (POST /offers/{offerId}/accept) can (a)
+        // forward to the request-scoped offer-service accept saga and (b) detect
+        // a genuine BR-1 self-offer (accepting CLIENT == this offer's bidder)
+        // without an extra round-trip. This is a thin BFF routing concern, not
+        // auction state (see IOfferRequestIndex).
+        _offerRequestIndex.Record(created.Id, requestId, created.JeeberId);
 
         // Realtime fan-out is best-effort: the offer is already durable, so
         // a notifier failure must not flip the 201 into a 5xx. The Client
