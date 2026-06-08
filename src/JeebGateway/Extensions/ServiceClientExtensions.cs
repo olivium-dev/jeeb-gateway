@@ -52,6 +52,14 @@ public static class ServiceClientExtensions
         services.AddTransient<BearerForwardingHandler>();
         services.AddTransient<ServiceAuthSigningHandler>();
 
+        // S06 / ADR-HB-001 AUTH CONTRACT — the heart-beat-only static
+        // X-Service-Auth-Key handler (attached to the heart-beat typed client
+        // below). heart-beat accepts a static service-auth key OR a
+        // JWKS-validated user JWT, but NOT the gateway's HMAC X-Service-Auth
+        // scheme, so the gateway authenticates as the trusted caller process via
+        // this static key. No-op when the key is unconfigured (flag-off default).
+        services.AddTransient<Services.Clients.HeartBeatServiceAuthKeyHandler>();
+
         // TODO(T-backend-bff-auth): auth-service — wire NSwag-generated AuthServiceClient
         //   contract: src/JeebGateway/contracts/auth-service.openapi.json
         //   migrates: AuthController, TokensController (currently in-memory)
@@ -374,6 +382,45 @@ public static class ServiceClientExtensions
         AttachStandardPipeline(
             services.AddHttpClient<IFormBuilderServiceClient, FormBuilderServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:FormBuilder")));
+
+        // thin-BFF wire — heart-beat (S06 / ADR-HB-001): the NEW reusable presence
+        // service (Go + Redis) that owns the online bit + lastSeenAt recency + the
+        // TTL idle-sweep. Typed client over PATCH /v1/presence + GET
+        // /v1/presence/{userId} (camelCase wire). Consumed by AvailabilityController
+        // when FeatureFlags:Heartbeat:Enabled is true; while off (the default this
+        // round) the availability surface keeps using the delivery-service presence
+        // wire, so this registration is inert until the flag flips.
+        //
+        // NOT YET DEPLOYED: Services:HeartBeat:BaseUrl in appsettings.Production.json
+        // is a PLACEHOLDER (http://192.168.2.50:PORT_TBD/) pending the one-time repo
+        // create + Redis provisioning + GHA deploy of heart-beat, and
+        // FeatureFlags:Heartbeat:Enabled is DEFAULT-OFF everywhere, so the gateway
+        // never dials the unroutable host. Lazy config (BindBaseAddress does not
+        // throw on a placeholder/PORT_TBD BaseUrl) makes this safe to ship before the
+        // service exists. Hand-coded (heart-beat exposes no reachable OpenAPI doc
+        // yet); regenerate via NSwag once it does. AttachStandardPipeline gives this
+        // typed client its own bearer + X-Service-Auth + resilience chain.
+        AddNamedDownstreamClient(services, config, "heart-beat", "Services:HeartBeat:BaseUrl");
+        var heartBeatBuilder = services.AddHttpClient<IHeartBeatServiceClient, HeartBeatServiceClient>(http =>
+            BindBaseAddress(http, config, "Services:HeartBeat"));
+        // S06 AUTH CONTRACT — handler order is load-bearing (handlers added EARLIER
+        // are OUTER; the LAST-added runs INNERMOST, closest to the wire):
+        //   1. BearerForwardingHandler        — forward the inbound mobile JWT
+        //   2. ServiceAuthSigningHandler      — (fleet) HMAC X-Service-Auth, if enabled
+        //   3. HeartBeatServiceAuthKeyHandler — set the static X-Service-Auth-Key AND
+        //      STRIP any inherited HMAC, so heart-beat's middleware (which checks the
+        //      HMAC FIRST and 401s on a non-shared signature without falling through)
+        //      always reaches the static-key path. This makes the fresh
+        //      HEARTBEAT_SERVICE_AUTH_KEY the authoritative credential and is robust
+        //      even if ServiceAuth:Enabled is later flipped on fleet-wide.
+        //   4. resilience (retry/breaker/timeout) — OUTERMOST so the static key is
+        //      re-applied on every retried attempt.
+        // We inline (not AttachStandardPipeline) only to insert (3) between the auth
+        // headers and the resilience handler.
+        heartBeatBuilder.AddHttpMessageHandler<BearerForwardingHandler>();
+        heartBeatBuilder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
+        heartBeatBuilder.AddHttpMessageHandler<Services.Clients.HeartBeatServiceAuthKeyHandler>();
+        heartBeatBuilder.AddResilienceHandler("standard", ConfigureStandardResilience);
 
         AddDbProbeClients(services, config);
 
