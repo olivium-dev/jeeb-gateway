@@ -48,4 +48,14 @@ public sealed class DurableRequestsOptions
     /// matching run resolve under the same tenant.
     /// </summary>
     public string TenantId { get; init; } = "default";
+
+    /// <summary>
+    /// JEB-50 (S05 H9b): the <c>phase</c> value logged to the jeeb-state bundler
+    /// broadcast-log (<c>POST /v1/state/broadcasts</c>) when an order's
+    /// broadcasting conversation is auto-created. MUST match the marker
+    /// chat-service's <c>ResolvePhase</c> surfaces on the summary (the H9b
+    /// <c>$.phase == "broadcasting"</c> assertion) so the durable log and the
+    /// chat-read phase agree. Stable literal; overridable only for tests.
+    /// </summary>
+    public string BroadcastingPhase { get; init; } = "broadcasting";
 }

@@ -3066,6 +3066,19 @@ namespace JeebGateway.service.ServiceChat
         [Newtonsoft.Json.JsonProperty("seenBy", Required = Newtonsoft.Json.Required.DisallowNull, NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
         public System.Collections.Generic.ICollection<MessageSeenInfo> SeenBy { get; set; }
 
+        // S05 H9b / JEB-50: chat-service's ChannelSummaryService surfaces the
+        // conversation lifecycle `phase` on its summary response (PR #75 —
+        // "broadcasting" for an order-broadcasting channel, "direct" otherwise).
+        // The gateway's chat client is hand-maintained (no nswag-chat.json
+        // regenerates it), so it must carry this property to deserialize and
+        // FORWARD chat's phase through GET /api/Chat/channels/{id}/summary.
+        // Purely additive: a new nullable field on the response — no existing
+        // consumer is affected, and the gateway holds no phase state (it forwards
+        // exactly what chat-service computes). Defaults to "direct" so the field
+        // is always present even against an older chat-service that omits it.
+        [Newtonsoft.Json.JsonProperty("phase", Required = Newtonsoft.Json.Required.Default, NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public string Phase { get; set; } = "direct";
+
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.2.0.0 (NJsonSchema v11.1.0.0 (Newtonsoft.Json v13.0.0.0))")]

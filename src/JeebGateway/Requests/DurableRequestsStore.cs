@@ -48,6 +48,7 @@ public sealed class DurableRequestsStore : IRequestsStore
     private readonly IDeliveryServiceClient _delivery;
     private readonly ISagaBundleRecorder _bundles;
     private readonly IConversationProvisioner _conversations;
+    private readonly IBroadcastEventRecorder _broadcasts;
     private readonly DurableRequestsOptions _options;
     private readonly ILogger<DurableRequestsStore> _logger;
 
@@ -56,6 +57,7 @@ public sealed class DurableRequestsStore : IRequestsStore
         IDeliveryServiceClient delivery,
         ISagaBundleRecorder bundles,
         IConversationProvisioner conversations,
+        IBroadcastEventRecorder broadcasts,
         IOptions<DurableRequestsOptions> options,
         ILogger<DurableRequestsStore> logger)
     {
@@ -63,6 +65,7 @@ public sealed class DurableRequestsStore : IRequestsStore
         _delivery = delivery;
         _bundles = bundles;
         _conversations = conversations;
+        _broadcasts = broadcasts;
         _options = options.Value;
         _logger = logger;
     }
@@ -160,6 +163,25 @@ public sealed class DurableRequestsStore : IRequestsStore
         if (!string.IsNullOrWhiteSpace(conversationId))
         {
             created.ConversationId = conversationId;
+
+            // (b.1) JEB-50 (S05 H9b): the order has entered the broadcasting
+            // phase (a broadcasting-tagged conversation now exists in chat). Per
+            // the OWNER DIRECTIVE, LOG that broadcast event to the jeeb-state
+            // bundler so it is durable and visible cross-service. This is fired
+            // ONLY when the provisioner returned a real conversation id — i.e.
+            // only when ConversationAutoCreate is ON and chat actually created the
+            // broadcasting channel — so it is implicitly flag-gated by the same
+            // switch that produces the conversation. Thin orchestration: the
+            // gateway composes the chat-create + the state-log; it holds no
+            // broadcast/phase state of its own (chat owns the phase, state-service
+            // owns the durable log). DEGRADE-DON'T-FAIL: a state-service blip
+            // returns Unavailable and the order create still succeeds — mirroring
+            // the saga-bundle recorder. The broadcast log is the audit trail, not
+            // the matching-resolve hard dependency.
+            await _broadcasts.RecordBroadcastingAsync(
+                contextId: conversationId,
+                phase: _options.BroadcastingPhase,
+                ct);
         }
 
         // (c) Record the saga — opaque state keyed by the same id as sourceId.
