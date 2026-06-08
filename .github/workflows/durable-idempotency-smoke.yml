@@ -39,14 +39,24 @@ jobs:
           RUN_TAG="smoke-durable-${GITHUB_RUN_ID}"
           IDEM="durable-smoke-${GITHUB_RUN_ID}-$(date +%s)"
 
+          # Aggregate health is informational here. The durable create path depends
+          # ONLY on delivery-service + jeeb-state-service; those two MUST be Healthy.
+          # An unrelated downstream (e.g. notification-service) being Unhealthy must
+          # NOT mask the durable same-id assertion, so we gate on the two deps, not
+          # on overall==Healthy.
           echo "== aggregate health (pre) =="
-          curl -fsS -m 20 -X POST "$BASE/health/aggregate" -o agg.json -w 'HTTP %{http_code}\n'
+          curl -sS -m 20 -X POST "$BASE/health/aggregate" -o agg.json -w 'HTTP %{http_code}\n' || true
           python3 - <<'PY'
           import json
           d=json.load(open('agg.json'))
-          bad=[c['name'] for c in d.get('checks',[]) if c.get('status')!='Healthy']
-          print('overall:', d.get('status'), '| failing:', bad or 'EMPTY')
-          assert d.get('status')=='Healthy' and not bad, 'aggregate not Healthy'
+          checks={c['name']:c['status'] for c in d.get('checks',[])}
+          bad=[n for n,s in checks.items() if s!='Healthy']
+          print('overall:', d.get('status'), '| non-Healthy:', bad or 'EMPTY')
+          deps=['delivery-service','jeeb-state-service']
+          for dep in deps:
+              s=checks.get(dep,'MISSING')
+              print(f'  durable-dep {dep}: {s}')
+              assert s=='Healthy', f'durable dependency {dep} is {s} — cannot smoke durable path'
           PY
 
           echo "== mint client token (key never printed) =="
