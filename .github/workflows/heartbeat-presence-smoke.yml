@@ -122,6 +122,23 @@ jobs:
           echo "$TOKEN" > token.txt
           echo "minted jeeber token for $JID (token masked)"
 
+      - name: 2b) DIAGNOSTIC — direct heart-beat reachability + gateway response dump
+        run: |
+          set -euo pipefail
+          echo "== heart-beat /health/ready (direct, over tunnel) =="
+          ssh jeeb "curl -sS -m 8 -o /dev/null -w 'hb /health/ready -> %{http_code}\n' http://localhost:${HB_PORT}/health/ready" || true
+          echo "== heart-beat PATCH /v1/presence direct with static key (expect 200) =="
+          ssh jeeb "curl -sS -m 8 -w '\nHTTP %{http_code}\n' -X PATCH -H 'X-Service-Auth-Key: $SVC_AUTH' -H 'Content-Type: application/json' http://localhost:${HB_PORT}/v1/presence -d '{\"userId\":\"diag-direct-${GITHUB_RUN_ID}\",\"online\":true,\"roleKey\":\"jeeber\"}'" || true
+          echo "== heart-beat PATCH /v1/presence direct WITHOUT key (expect 401) =="
+          ssh jeeb "curl -sS -m 8 -o /dev/null -w 'no-key -> %{http_code}\n' -X PATCH -H 'Content-Type: application/json' http://localhost:${HB_PORT}/v1/presence -d '{\"userId\":\"x\",\"online\":false}'" || true
+          echo "== gateway PATCH availability — full headers + body =="
+          TOKEN=$(cat token.txt)
+          curl -sS -m 20 -D - -o gw_body.txt \
+            -X PATCH "$BASE${AVAIL}/jeebers/me/availability" \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+            -d '{"online":false}' | grep -iE '^HTTP|^server:|^content-type:' || true
+          echo "gateway body: $(cat gw_body.txt)"
+
       - name: 3) N13 — PATCH availability {online:false} -> 200; GET -> online:false
         run: |
           set -euo pipefail
