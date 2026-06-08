@@ -54,15 +54,19 @@ public static class CapabilityRolePolicy
             [Capabilities.RequestVoiceCreate] = ClientOnly,
             [Capabilities.DeliveryTrackOwn] = ClientOnly,       // STATE
             [Capabilities.MatchingRun] = ClientOnly,
+            // S07 (fix/s07-gateway-accept-client-actor): offer.accept repointed {jeeber}->{client}.
+            // In the Jeeb auction, JEEBERS SUBMIT offers (bids) on a CLIENT's delivery request; the
+            // CLIENT who owns the request then ACCEPTS one jeeber's offer to award the delivery. The
+            // accepting party is therefore the request-owning CLIENT, not the jeeber. The JEB-1509
+            // {jeeber} mapping inverted this (it modelled "the jeeber accepts"), which 403'd the real
+            // acceptor at L2 before the route ran, and — paired with the gateway forwarding the jeeber
+            // as x-user-id — produced the live S07 H5/A6 403 against the offer-service request-owner
+            // guard (acceptance.ex:177 `request.client_id == actor_id`). offer.submit remains {jeeber}.
+            [Capabilities.OfferAccept] = ClientOnly,            // CLAIM {client}; BR-1/race/status = STATE
 
             // D. Jeeber-only {jeeber}
             [Capabilities.AvailabilityToggle] = JeeberOnly,
             [Capabilities.OfferSubmit] = JeeberOnly,
-            // JEB-1509: offer.accept repointed {client}->{jeeber}. The previous {client} row was
-            // DEAD (no route declared offer.accept; OffersController.Accept used offer.submit). The
-            // accepting party is the JEEBER the offer was extended to, so the capability lives in the
-            // jeeber family. Runtime allowed type for the Accept route is UNCHANGED ({jeeber}).
-            [Capabilities.OfferAccept] = JeeberOnly,            // CLAIM {jeeber}; BR-1/BR-10/status = STATE
             [Capabilities.OfferEditOwn] = JeeberOnly,           // STATE
             [Capabilities.OfferWithdraw] = JeeberOnly,          // STATE
             [Capabilities.DeliveryGpsStream] = JeeberOnly,

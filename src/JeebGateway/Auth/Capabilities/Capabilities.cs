@@ -48,16 +48,16 @@ public static class Capabilities
 
     // ── D. Jeeber-only {jeeber} ───────────────────────────────────────────────────────
     public const string AvailabilityToggle = "availability.toggle";
+    // Submitting an offer (bid) on a client's request is a JEEBER action; accepting is not
+    // (see offer.accept in the client-only group below).
     public const string OfferSubmit = "offer.submit";
 
-    // JEB-1509: accepting an offer is the JEEBER committing to a delivery the offer was
-    // extended to (offer.JeeberId == caller). This is a distinct {jeeber} capability — NOT
-    // the dead client-accepts-bid model the pre-cleanup map keyed `offer.accept -> {client}`.
-    // OffersController.Accept now declares THIS capability. The runtime allowed user type is
-    // UNCHANGED (was OfferSubmit {jeeber}, now OfferAccept {jeeber}) — a pure no-op rename
-    // that makes the route's intent (accept, not submit) explicit. BR-1/BR-10/status = STATE
-    // and stay in the offer/delivery service.
-    public const string OfferAccept = "offer.accept";                // CLAIM {jeeber}; BR-1/BR-10/status = STATE
+    // S07: offer.accept is keyed {client}, NOT {jeeber}. In the Jeeb auction jeebers SUBMIT
+    // offers and the request-owning CLIENT ACCEPTS one to award the delivery, so the
+    // capability lives in the client-only group (CapabilityRolePolicy section C). The constant
+    // stays here next to its sibling offer.* names for discoverability; the role mapping is the
+    // authority. The JEB-1509 {jeeber} mapping was inverted and produced the live S07 H5/A6 403.
+    public const string OfferAccept = "offer.accept";                // CLAIM {client}; BR-1/race/status = STATE
     public const string OfferEditOwn = "offer.edit.own";              // STATE
     public const string OfferWithdraw = "offer.withdraw";            // STATE
     public const string DeliveryGpsStream = "delivery.gps.stream";
