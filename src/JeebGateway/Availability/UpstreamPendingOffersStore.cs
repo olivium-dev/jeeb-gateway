@@ -68,10 +68,42 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
         string? note,
         int maxPerRequest,
         DateTimeOffset at,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? clientId = null)
     {
         var feeCents = ToCents(fee);
 
+        try
+        {
+            return await SubmitOnceAsync(requestId, jeeberId, feeCents, etaMinutes, note, maxPerRequest, ct);
+        }
+        catch (OfferRequestNotMirroredException) when (clientId is { Length: > 0 })
+        {
+            // GW-1 self-heal. offer-service 404'd because the request row was
+            // never mirrored. Mirror it (idempotent OS-1) on the request
+            // creator's behalf, then retry the submit EXACTLY ONCE. If the
+            // retry 404s again, the not-found is genuine (not a missing mirror)
+            // and is allowed to surface as a 404, so we never loop.
+            await _client.MirrorRequestAsync(jeeberId, requestId, clientId!, ct);
+            return await SubmitOnceAsync(requestId, jeeberId, feeCents, etaMinutes, note, maxPerRequest, ct);
+        }
+    }
+
+    /// <summary>
+    /// One submit attempt with the 409 → duplicate/cap translation. The 404
+    /// (<see cref="OfferRequestNotMirroredException"/>) and 422/400
+    /// (<see cref="OfferUpstreamValidationException"/>) cases are surfaced by the
+    /// client and handled by the caller (mirror-retry / ProblemDetails mapping).
+    /// </summary>
+    private async Task<PendingOffer> SubmitOnceAsync(
+        string requestId,
+        string jeeberId,
+        long feeCents,
+        int etaMinutes,
+        string? note,
+        int maxPerRequest,
+        CancellationToken ct)
+    {
         try
         {
             var wire = await _client.SubmitAsync(jeeberId, requestId, feeCents, etaMinutes, note, ct);
@@ -92,7 +124,8 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
                 throw new DuplicateOfferException(requestId, jeeberId, existingOfferId: "(upstream)");
             }
 
-            throw new TooManyOffersForRequestException(requestId, liveCount: maxPerRequest, limit: maxPerRequest);
+            throw new TooManyOffersForRequestException(
+                requestId, liveCount: maxPerRequest, limit: maxPerRequest);
         }
     }
 

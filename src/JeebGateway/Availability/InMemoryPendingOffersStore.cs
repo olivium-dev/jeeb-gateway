@@ -119,8 +119,13 @@ public class InMemoryPendingOffersStore : IPendingOffersStore
         string? note,
         int maxPerRequest,
         DateTimeOffset at,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? clientId = null)
     {
+        // clientId is an upstream-mirror hint only; the in-memory store owns its
+        // own request graph and never mirrors, so it is intentionally ignored.
+        _ = clientId;
+
         lock (_writeLock)
         {
             // Scan once and capture both pieces of state we need: the live

@@ -52,6 +52,14 @@ public interface IPendingOffersStore
     ///     does NOT block re-submission (acceptance criterion: withdraw+re-offer).</item>
     /// </list>
     /// Returns the new offer in the <see cref="PendingOfferStatus.Pending"/> state.
+    ///
+    /// <para><paramref name="clientId"/> is the request creator's id, threaded
+    /// through purely so the upstream-backed store
+    /// (<see cref="UpstreamPendingOffersStore"/>) can mirror the request into
+    /// offer-service (OS-1) when the submit 404s because the request row was
+    /// never mirrored. It is optional and ignored by the in-memory store; when
+    /// null the upstream store cannot self-heal a missing mirror and the 404
+    /// surfaces unchanged.</para>
     /// </summary>
     Task<PendingOffer> TrySubmitAsync(
         string requestId,
@@ -61,7 +69,8 @@ public interface IPendingOffersStore
         string? note,
         int maxPerRequest,
         DateTimeOffset at,
-        CancellationToken ct);
+        CancellationToken ct,
+        string? clientId = null);
 
     /// <summary>
     /// Atomic withdraw (T-backend-010). Only the owning Jeeber may retract
