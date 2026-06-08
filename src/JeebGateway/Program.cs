@@ -957,22 +957,26 @@ builder.Services.AddSingleton<IProhibitedItemScanner, ProhibitedItemScanner>();
 builder.Services.AddSingleton<IFlaggedRequestStore, InMemoryFlaggedRequestStore>();
 
 // JEB-63 (S05 N1 / A1.1): gateway-owned create-time prohibited-items moderation
-// gate flag (default OFF). When ON, RequestsController.Create runs the scanner
-// before persisting and hard-rejects block-severity / soft-rejects warn-severity
-// items. The lexicon stays gateway-owned (N11) — no ban-service coupling. Flip
-// via FeatureFlags__CreateModeration__Enabled=true (a deploy workflow_dispatch
-// input), staging-first; this PR does NOT flip it.
+// gate flag (default ON, INDEPENDENT of FeatureFlags:DurableRequests). When ON,
+// RequestsController.Create runs the scanner before persisting and hard-rejects
+// block-severity / soft-rejects warn-severity items. The lexicon stays
+// gateway-owned (N11) — no ban-service coupling. The gate runs whether or not
+// the durable saga create path is active (the two flags are independent). To
+// disable explicitly set FeatureFlags__CreateModeration__Enabled=false.
 builder.Services.Configure<JeebGateway.Requests.CreateModerationOptions>(
     builder.Configuration.GetSection(JeebGateway.Requests.CreateModerationOptions.SectionName));
 
 // When the moderation gate is ON, seed a minimal default lexicon so the live
-// gate has terms to match (the gate is inert against an empty lexicon). Gated on
-// the same flag so the flag-OFF path keeps today's empty-lexicon behaviour
-// (A1.2 items:[], version:'empty') byte-for-byte. Hosted so it runs once the
-// singleton store is built. Additive + idempotent (skips if any item exists).
-var createModerationEnabled = bool.TryParse(
-    builder.Configuration[$"{JeebGateway.Requests.CreateModerationOptions.SectionName}:Enabled"],
-    out var cmEnabled) && cmEnabled;
+// gate has terms to match (the gate is inert against an empty lexicon). Default
+// is ON: the seeder registers UNLESS the flag is explicitly false, mirroring
+// CreateModerationOptions.Enabled's default-true (absence of the key = ON).
+// Hosted so it runs once the singleton store is built. Additive + idempotent
+// (skips if any item already exists, so an admin-seeded lexicon is preserved).
+var createModerationEnabled =
+    !bool.TryParse(
+        builder.Configuration[$"{JeebGateway.Requests.CreateModerationOptions.SectionName}:Enabled"],
+        out var cmEnabled)
+    || cmEnabled;
 if (createModerationEnabled)
 {
     builder.Services.AddHostedService<JeebGateway.ProhibitedItems.DefaultLexiconSeeder>();

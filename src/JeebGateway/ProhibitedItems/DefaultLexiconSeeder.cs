@@ -4,10 +4,12 @@ namespace JeebGateway.ProhibitedItems;
 
 /// <summary>
 /// JEB-63 (S05): seeds a minimal default prohibited-items lexicon at startup so
-/// the gateway-owned create-time moderation gate has terms to match. Only
-/// registered when <c>FeatureFlags:CreateModeration:Enabled=true</c>, so the
-/// flag-OFF path keeps today's empty-lexicon behaviour (GET /prohibited-items →
-/// items:[], version:'empty').
+/// the gateway-owned create-time moderation gate has terms to match. Registered
+/// whenever <c>FeatureFlags:CreateModeration:Enabled</c> is not explicitly
+/// <c>false</c> (default ON), so the moderation gate has a populated lexicon
+/// independent of the durable-requests flag. Setting the flag to <c>false</c>
+/// skips the seeder and keeps the empty-lexicon behaviour (GET /prohibited-items
+/// → items:[], version:'empty').
 ///
 /// Idempotent: skips entirely when the catalog already holds any item, so a
 /// gateway restart (or an admin who has already seeded the lexicon out-of-band)

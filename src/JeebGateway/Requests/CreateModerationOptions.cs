@@ -13,12 +13,17 @@ namespace JeebGateway.Requests;
 ///       the current lexicon version, then lets the create through (AC3).</item>
 ///   </list>
 ///
-/// Default is <b>false</b> so today's green path (S05 H3 → 201, plus A3/A5/N3)
-/// is byte-for-byte unchanged until the lexicon is seeded and the gate is
-/// flipped ON via a deploy <c>workflow_dispatch</c> input (owner-gated; this PR
-/// does NOT flip it). The gate is purely orchestration: it composes the
-/// existing gateway-owned <c>IProhibitedItemScanner</c> + ack ledger and the
-/// lexicon stays gateway-owned (N11), so no gateway-side domain logic and no
+/// Default is now <b>true</b> (S05 round-2): prohibited-items screening is a
+/// safety control, so it is ON by default and — critically — DECOUPLED from
+/// <c>FeatureFlags:DurableRequests</c>. The two flags are independent: the
+/// moderation gate runs (and the lexicon is seeded) regardless of whether the
+/// durable saga create path is active, so "arak"/"knife" are rejected with 409
+/// (N1/A1.1) whether durable_requests is ON or OFF. To disable the gate (e.g. a
+/// staging soak with a not-yet-curated lexicon) set
+/// <c>FeatureFlags__CreateModeration__Enabled=false</c> explicitly; absence of
+/// the key means ON. The gate is purely orchestration: it composes the existing
+/// gateway-owned <c>IProhibitedItemScanner</c> + ack ledger and the lexicon
+/// stays gateway-owned (N11), so no gateway-side domain logic and no
 /// ban-service coupling is introduced.
 /// </summary>
 public sealed class CreateModerationOptions
@@ -26,9 +31,10 @@ public sealed class CreateModerationOptions
     public const string SectionName = "FeatureFlags:CreateModeration";
 
     /// <summary>
-    /// Master switch. Default <c>false</c> = no create-time moderation gate
-    /// (today's behaviour). Flip via
-    /// <c>FeatureFlags__CreateModeration__Enabled=true</c> staging-first.
+    /// Master switch for create-time prohibited-items screening. Default
+    /// <c>true</c> (ON, independent of the durable-requests flag). Set
+    /// <c>FeatureFlags__CreateModeration__Enabled=false</c> to turn the gate
+    /// off explicitly.
     /// </summary>
-    public bool Enabled { get; init; }
+    public bool Enabled { get; init; } = true;
 }

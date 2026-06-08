@@ -9,14 +9,15 @@ using Xunit;
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// S05 create-path gates that do NOT depend on the moderation flag:
+/// S05 create-path gates exercised with the DEFAULT factory (no overrides):
 ///   * N5 — illegal initial status ("Picked") → 422 transition_not_allowed.
-///   * A2 — multipart/form-data create → 201 (the voice-first create path).
-///   * Flag-OFF regression — with the default (moderation OFF) factory, a
-///     "kitchen knife" / "arak" order still creates 201 (today's behaviour is
-///     byte-for-byte unchanged; the gate is additive and default-off).
+///   * A2 — multipart/form-data create with CLEAN text → 201 (voice-first path).
+///   * Moderation default-ON — with the default factory (moderation flag unset),
+///     a "kitchen knife" / "arak" order is rejected with 409, proving the gate is
+///     ON by default and decoupled from FeatureFlags:DurableRequests (which is
+///     also unset here). Clean creates in this class still return 201.
 ///
-/// Default factory = FeatureFlags:CreateModeration:Enabled unset (OFF).
+/// Default factory = FeatureFlags:CreateModeration:Enabled unset (ON by default).
 /// </summary>
 public class CreateGatesEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 {
@@ -136,14 +137,14 @@ public class CreateGatesEndpointTests : IClassFixture<WebApplicationFactory<Prog
         dto!.Description.Should().Be("deliver groceries from the corner shop");
     }
 
-    // ----- Flag-OFF regression: gate is additive + default-off ----------------
+    // ----- Moderation default-ON: gate fires with no flag override ------------
 
     [Theory]
     [InlineData("a kitchen knife")]
     [InlineData("a bottle of arak from the shop")]
-    public async Task Gate_Off_By_Default_Prohibited_Text_Still_Creates_201(string description)
+    public async Task Gate_On_By_Default_Prohibited_Text_Is_Rejected_409(string description)
     {
-        var client = ClientFor("s05-gateoff-" + description.GetHashCode());
+        var client = ClientFor("s05-gateon-" + description.GetHashCode());
 
         var resp = await client.PostAsJsonAsync("/requests", new
         {
@@ -153,8 +154,8 @@ public class CreateGatesEndpointTests : IClassFixture<WebApplicationFactory<Prog
             dropoffLocation = new { lat = 33.89, lng = 35.51 }
         });
 
-        resp.StatusCode.Should().Be(HttpStatusCode.Created,
-            "the create-moderation gate is additive and default-OFF, so today's path is unchanged");
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict,
+            "the create-moderation gate is ON by default and decoupled from durable_requests, so a prohibited item is rejected with 409 regardless of the durable flag");
     }
 
     // ----------------------------------------------------------------- helpers
