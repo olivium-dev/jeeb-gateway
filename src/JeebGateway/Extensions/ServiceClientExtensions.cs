@@ -375,6 +375,28 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IFormBuilderServiceClient, FormBuilderServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:FormBuilder")));
 
+        // thin-BFF wire — heart-beat (S06 / ADR-HB-001): the NEW reusable presence
+        // service (Go + Redis) that owns the online bit + lastSeenAt recency + the
+        // TTL idle-sweep. Typed client over PATCH /v1/presence + GET
+        // /v1/presence/{userId} (camelCase wire). Consumed by AvailabilityController
+        // when FeatureFlags:Heartbeat:Enabled is true; while off (the default this
+        // round) the availability surface keeps using the delivery-service presence
+        // wire, so this registration is inert until the flag flips.
+        //
+        // NOT YET DEPLOYED: Services:HeartBeat:BaseUrl in appsettings.Production.json
+        // is a PLACEHOLDER (http://192.168.2.50:PORT_TBD/) pending the one-time repo
+        // create + Redis provisioning + GHA deploy of heart-beat, and
+        // FeatureFlags:Heartbeat:Enabled is DEFAULT-OFF everywhere, so the gateway
+        // never dials the unroutable host. Lazy config (BindBaseAddress does not
+        // throw on a placeholder/PORT_TBD BaseUrl) makes this safe to ship before the
+        // service exists. Hand-coded (heart-beat exposes no reachable OpenAPI doc
+        // yet); regenerate via NSwag once it does. AttachStandardPipeline gives this
+        // typed client its own bearer + X-Service-Auth + resilience chain.
+        AddNamedDownstreamClient(services, config, "heart-beat", "Services:HeartBeat:BaseUrl");
+        AttachStandardPipeline(
+            services.AddHttpClient<IHeartBeatServiceClient, HeartBeatServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:HeartBeat")));
+
         AddDbProbeClients(services, config);
 
         return services;

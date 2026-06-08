@@ -554,6 +554,15 @@ builder.Services.AddScoped<JeebGateway.Services.ITechnicianReviewService, JeebGa
 builder.Services.Configure<UpstreamFeatureFlags>(
     builder.Configuration.GetSection(UpstreamFeatureFlags.SectionName));
 
+// S06 / ADR-HB-001 — heart-beat presence cutover flag (FeatureFlags:Heartbeat).
+// Bound here so AvailabilityController can resolve it via IOptions. Default false
+// in EVERY environment this round (heart-beat not yet deployed); while off the
+// availability surface keeps using the delivery-service presence wire. Flip via
+// FeatureFlags__Heartbeat__Enabled=true (deploy workflow_dispatch), staging-first,
+// after heart-beat is live and smoke-passed.
+builder.Services.Configure<JeebGateway.Availability.HeartbeatFeatureOptions>(
+    builder.Configuration.GetSection(JeebGateway.Availability.HeartbeatFeatureOptions.SectionName));
+
 // Dev / test-harness endpoints flag (Features:DevEndpoints) — additive,
 // fail-closed to 404. Bound here so the [DevOnly] action filter can resolve it
 // via IOptionsMonitor. Defaults false and is committed false in EVERY
