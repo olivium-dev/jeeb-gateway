@@ -1,7 +1,7 @@
 # Durable-requests idempotency smoke (S05 / ADR-006).
 #
 # Proves FeatureFlags__DurableRequests__Enabled=true is LIVE on the gateway:
-# a replayed POST /v1/requests carrying the SAME Idempotency-Key must return
+# a replayed POST /requests carrying the SAME Idempotency-Key must return
 # the SAME request id (durable dedup via jeeb-state-service). The token-mint
 # key stays a GitHub secret (never printed); the run asserts same-id and fails
 # loudly otherwise. GHA-only, no SSH, no app/route change. One-off / on-demand.
@@ -67,18 +67,21 @@ jobs:
           JSON
           )
 
+          # NOTE: the durable JSON typed-text create path is POST /requests
+          # (RequestsController). POST /requests is the S04 VOICE surface
+          # (RequestVoiceController) and requires an audio multipart part.
           call() {
             curl -sS -m 25 -o "$1" -w '%{http_code}' \
-              -X POST "$BASE/v1/requests" \
+              -X POST "$BASE/requests" \
               -H 'Content-Type: application/json' \
               -H "Authorization: Bearer ${TOKEN}" \
               -H "Idempotency-Key: ${IDEM}" \
               -d "$REQ_BODY"
           }
 
-          echo "== first POST /v1/requests =="
+          echo "== first POST /requests =="
           H1=$(call r1.json); echo "HTTP=$H1"; cat r1.json; echo
-          echo "== replay POST /v1/requests (same Idempotency-Key) =="
+          echo "== replay POST /requests (same Idempotency-Key) =="
           H2=$(call r2.json); echo "HTTP=$H2"; cat r2.json; echo
 
           python3 - <<PY
