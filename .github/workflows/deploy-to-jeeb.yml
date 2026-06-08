@@ -49,6 +49,14 @@ on:
       # (REGISTRY) rather than a workflow_dispatch input so the dispatch input count
       # stays at GitHub's hard limit of 25 after `durable_requests` was added (PR #105).
       # 26 inputs makes the workflow un-dispatchable (HTTP 422 at dispatch time).
+      #
+      # FeatureFlags spine flags are NOT added as one-input-per-flag (that path hit the cap).
+      # They are consolidated into the single generic `feature_flags` Key=Value map input
+      # (declared below), parsed in the deploy job into FeatureFlags__* env vars. This added
+      # ConversationAutoCreate (S05 H7/H9b) AND every future spine flag with ZERO new inputs —
+      # the workflow can never re-hit the 25-input cap on flag growth. The former dedicated
+      # `use_upstream_kyc`/`use_upstream_cdn` boolean inputs were folded into the map (net -2 +1),
+      # leaving 24 inputs (one slot spare).
       service_name:    { description: 'Swarm service name',              required: true, default: 'jeeb-gateway' }
       internal_port:   { description: 'Container port',                  required: true, default: '8080' }
       external_port:   { description: 'Published host port (Jeeb swarm)',required: true, default: '10000' }
@@ -83,8 +91,44 @@ on:
       # injecting them here makes the flag/host operator-controllable on every deploy.
       kyc_base_url:                { description: 'Services__Kyc__BaseUrl — owning kyc-service (live swarm host)',  required: true, default: 'http://192.168.2.50:10074' }
       cdn_base_url:                { description: 'Services__Cdn__BaseUrl — cdn-service signed-PUT broker (live swarm host)', required: true, default: 'http://192.168.2.50:10072' }
-      use_upstream_kyc:            { description: 'FeatureFlags__UseUpstream__Kyc — route KYC BFF to kyc-service (true) or fail-closed 503 (false)', required: true, default: 'true' }
-      use_upstream_cdn:            { description: 'FeatureFlags__UseUpstream__Cdn — route CDN broker to cdn-service', required: true, default: 'true' }
+      # ── GENERIC FeatureFlags map (the spine flag overlay) ──────────────────────────
+      # GitHub caps workflow_dispatch at 25 inputs; this workflow already hit that cap once
+      # (the fixed `registry` constant was moved to a job-level env to claw a slot back —
+      # see line ~48). To keep adding spine FeatureFlags without ever re-hitting the cap, the
+      # per-flag boolean inputs are CONSOLIDATED into this ONE generic map instead of one
+      # input per flag. `feature_flags` is a comma-separated list of `Key=Value` pairs whose
+      # Key is the LAST segment of a `FeatureFlags:<...>:Enabled` (or `FeatureFlags:UseUpstream:<...>`)
+      # config path; the deploy job maps each to its full `FeatureFlags__*` env var and injects
+      # it via --env-add on the SAME zero-downtime service update (and --env on first create).
+      #
+      # This input REPLACES the former dedicated `use_upstream_kyc` / `use_upstream_cdn`
+      # boolean inputs (net -2 +1 = 24 inputs, one slot spare). It is ADDITIVE and
+      # backward-compatible:
+      #   * Empty (DEFAULT '') => emit NO map-driven flag mutation. On `docker service update
+      #     --image ...` every unlisted env var is PRESERVED, so a no-arg deploy leaves all
+      #     FeatureFlags exactly as the running service had them. On a FRESH create the gateway
+      #     reads appsettings.Production.json, which already bakes UseUpstream.Kyc=true and
+      #     UseUpstream.Cdn=true — so dropping the two dedicated inputs changes NOTHING for a
+      #     default deploy (same true values, just sourced from committed config not an input).
+      #   * Recognised keys (case-insensitive), each mapping to its env var:
+      #       ConversationAutoCreate=<bool> -> FeatureFlags__ConversationAutoCreate__Enabled   (S05 H7/H9b / JEB-50)
+      #       UseUpstreamKyc=<bool>         -> FeatureFlags__UseUpstream__Kyc                   (S03 / ADR-0004)
+      #       UseUpstreamCdn=<bool>         -> FeatureFlags__UseUpstream__Cdn                   (S03 / ADR-0004)
+      #     Future spine flags are added to the map's case table below — NO new input, NO cap risk.
+      #   * `durable_requests`, `whisper_fake`, `dev_endpoints`, `swagger_ui` keep their OWN
+      #     dedicated inputs UNCHANGED (their 3-state / secret-coupled semantics are load-bearing
+      #     and out of scope here). In particular `durable_requests` is untouched, so a deploy
+      #     that passes durable_requests=true STILL arms the durable path exactly as before —
+      #     the durable flag, currently ON in production, STAYS ON.
+      #   * Unknown keys are IGNORED with a warning (fail-open on parse, never fail the deploy
+      #     on a typo); a value other than true/false is rejected (guardrail: no silent garbage
+      #     into an env var).
+      # Example: feature_flags='ConversationAutoCreate=true' arms H7 broadcasting auto-create
+      # while leaving Kyc/Cdn at their baked-true defaults.
+      feature_flags:
+        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,UseUpstreamKyc=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn. Empty = preserve running flags (baked appsettings defaults on fresh create).'
+        required: false
+        default: ''
       # S04 / Track C — REAL OpenAI Whisper STT seam. The gateway selects the real
       # WhisperClient ONLY when Whisper__FakeTranscribe=false AND Whisper__ApiKey is
       # present; otherwise it uses the network-free FakeWhisperClient. The OpenAI key
@@ -285,6 +329,49 @@ jobs:
               echo "swagger_ui=preserve -> (no swagger-flag mutation; existing /swagger* state persists)"
               ;;
           esac
+          # ── Generic FeatureFlags map parser ────────────────────────────────────────────
+          # Parse the `feature_flags` comma-separated Key=Value overlay into --env-add args.
+          # Each recognised key maps to its full FeatureFlags__* env var. Empty input => no
+          # args (a no-arg deploy preserves the running flags; a fresh create uses the
+          # appsettings.Production.json baked defaults). Value must be true/false. Unknown
+          # keys warn-and-skip (never fail the deploy on a typo). The SAME parsed string is
+          # used for both the update (--env-add) and create (--env) branches, so the two
+          # code paths can never drift. This REPLACES the former dedicated
+          # FeatureFlags__UseUpstream__Kyc/Cdn injections (now expressible via the map).
+          FEATURE_FLAG_ARGS=""
+          RAW_FLAGS="${{ inputs.feature_flags }}"
+          if [ -n "$RAW_FLAGS" ]; then
+            IFS=',' read -ra _PAIRS <<< "$RAW_FLAGS"
+            for _pair in "${_PAIRS[@]}"; do
+              # trim surrounding whitespace
+              _pair="$(echo "$_pair" | xargs)"
+              [ -z "$_pair" ] && continue
+              _key="${_pair%%=*}"
+              _val="${_pair#*=}"
+              _key="$(echo "$_key" | xargs)"
+              _val="$(echo "$_val" | xargs)"
+              # guardrail: value MUST be true/false (no silent garbage into an env var)
+              if [ "$_val" != "true" ] && [ "$_val" != "false" ]; then
+                echo "::error::feature_flags: '$_key' has non-boolean value '$_val' (expected true|false)"; exit 1
+              fi
+              # case-insensitive key match -> full FeatureFlags__* env var name
+              _lkey="$(echo "$_key" | tr '[:upper:]' '[:lower:]')"
+              case "$_lkey" in
+                conversationautocreate) _envvar="FeatureFlags__ConversationAutoCreate__Enabled" ;;
+                useupstreamkyc)         _envvar="FeatureFlags__UseUpstream__Kyc" ;;
+                useupstreamcdn)         _envvar="FeatureFlags__UseUpstream__Cdn" ;;
+                *) echo "::warning::feature_flags: ignoring unknown key '$_key'"; continue ;;
+              esac
+              FEATURE_FLAG_ARGS="$FEATURE_FLAG_ARGS --env-add ${_envvar}=${_val}"
+              echo "feature_flags: $_key=$_val -> --env-add ${_envvar}=${_val}"
+            done
+          else
+            echo "feature_flags=empty -> (no map-driven flag mutation; running flags / baked appsettings defaults preserved)"
+          fi
+          # On first-create the service has no prior env to preserve, so the same map args are
+          # passed as --env (create uses --env, update uses --env-add; the FLAG token strings
+          # are identical aside from that one keyword, which we substitute below).
+          FEATURE_FLAG_CREATE_ARGS="${FEATURE_FLAG_ARGS//--env-add /--env }"
           ssh jeeb bash -se <<EOF
           set -euo pipefail
           SVC='${{ inputs.service_name }}'; INT='${{ inputs.internal_port }}'; EXT='${{ inputs.external_port }}'
@@ -301,11 +388,10 @@ jobs:
               --env-add UmJwt__Audience='user-management' \
               --env-add Services__Kyc__BaseUrl='${{ inputs.kyc_base_url }}' \
               --env-add Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
-              --env-add FeatureFlags__UseUpstream__Kyc='${{ inputs.use_upstream_kyc }}' \
-              --env-add FeatureFlags__UseUpstream__Cdn='${{ inputs.use_upstream_cdn }}' \
               --env-add Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env-add Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               --env-add FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
+              $FEATURE_FLAG_ARGS \
               $DEV_FLAG_ARG \
               $SWAGGER_FLAG_ARG \
               "\$SVC"
@@ -336,11 +422,10 @@ jobs:
               --env Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
               --env Services__Kyc__BaseUrl='${{ inputs.kyc_base_url }}' \
               --env Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
-              --env FeatureFlags__UseUpstream__Kyc='${{ inputs.use_upstream_kyc }}' \
-              --env FeatureFlags__UseUpstream__Cdn='${{ inputs.use_upstream_cdn }}' \
               --env Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               --env FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
+              $FEATURE_FLAG_CREATE_ARGS \
               --reserve-memory 256M \
               '$TAG'
           fi
