@@ -133,6 +133,65 @@ public class OfferServiceClientContractTests
             .Which.Should().Be("idem-key-12345678");
     }
 
+    [Fact]
+    public async Task AcceptWithStatusAsync_Maps_200_To_Accepted_With_Envelope()
+    {
+        HttpRequestMessage? captured = null;
+        var client = ClientCapturing(
+            HttpStatusCode.OK,
+            $$"""
+              {"accepted_offer":{"id":"{{OfferId}}"},
+               "rejected_offer_ids":["aaa"],"chat_thread_id":"thread-7","otp_code":"9876"}
+              """,
+            (req, _) => captured = req);
+
+        var result = await client.AcceptWithStatusAsync(
+            UserId, RequestId, OfferId, "idem-key-12345678", CancellationToken.None);
+
+        result.Status.Should().Be(OfferAcceptStatus.Accepted);
+        result.Envelope.Should().NotBeNull();
+        result.Envelope!.AcceptedOfferId.Should().Be(OfferId);
+        result.Envelope.ChatThreadId.Should().Be("thread-7");
+        result.Envelope.OtpCode.Should().Be("9876");
+        captured!.Headers.GetValues("Idempotency-Key").Should().ContainSingle()
+            .Which.Should().Be("idem-key-12345678");
+        captured.RequestUri!.AbsolutePath.Should().Be(
+            $"/api/v1/requests/{RequestId}/offers/{OfferId}/accept");
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden, OfferAcceptStatus.NotOwner)]
+    [InlineData(HttpStatusCode.Gone, OfferAcceptStatus.Expired)]
+    [InlineData(HttpStatusCode.Conflict, OfferAcceptStatus.Conflict)]
+    [InlineData(HttpStatusCode.NotFound, OfferAcceptStatus.NotFound)]
+    public async Task AcceptWithStatusAsync_Forwards_Upstream_Negative_Verbatim(
+        HttpStatusCode upstream, OfferAcceptStatus expected)
+    {
+        // Negative bodies carry an error envelope; the client preserves the
+        // status and never throws (so the gateway can map it, not mask it).
+        var client = ClientReturning(upstream,
+            """{"error":{"code":"some_upstream_code","message":"nope"}}""");
+
+        var result = await client.AcceptWithStatusAsync(
+            UserId, RequestId, OfferId, "idem-key-12345678", CancellationToken.None);
+
+        result.Status.Should().Be(expected);
+        result.Envelope.Should().BeNull();
+        result.UpstreamCode.Should().Be("some_upstream_code");
+    }
+
+    [Fact]
+    public async Task AcceptWithStatusAsync_Tolerates_Empty_Negative_Body()
+    {
+        var client = ClientReturning(HttpStatusCode.Gone, string.Empty);
+
+        var result = await client.AcceptWithStatusAsync(
+            UserId, RequestId, OfferId, "idem-key-12345678", CancellationToken.None);
+
+        result.Status.Should().Be(OfferAcceptStatus.Expired);
+        result.UpstreamCode.Should().BeNull();
+    }
+
     // -----------------------------------------------------------------------
     // Adapter mapping seam (dollars↔cents, status collapse) through the store
     // -----------------------------------------------------------------------

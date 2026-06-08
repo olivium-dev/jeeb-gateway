@@ -60,8 +60,34 @@ public interface IOfferServiceClient
     /// auction close. The <c>Idempotency-Key</c> header is mandatory upstream;
     /// callers supply <paramref name="idempotencyKey"/> (>= 8 chars). Returns
     /// the accept-result envelope on 200.
+    ///
+    /// <para>Throws <see cref="HttpRequestException"/> on any non-2xx. This is
+    /// the legacy seam kept for the existing contract test; new callers should
+    /// use <see cref="AcceptWithStatusAsync"/>, which forwards the upstream
+    /// status verbatim instead of throwing — required so the gateway can map
+    /// offer-service's 403/410/409/404 negatives through to the caller rather
+    /// than masking them as a raw 500.</para>
     /// </summary>
     Task<OfferAcceptWire> AcceptAsync(
+        string actingUserId,
+        string requestId,
+        string offerId,
+        string idempotencyKey,
+        CancellationToken ct);
+
+    /// <summary>
+    /// POST /api/v1/requests/{requestId}/offers/{offerId}/accept — atomic
+    /// auction close that <b>preserves the upstream HTTP status</b> instead of
+    /// throwing on non-2xx. offer-service's <c>FallbackController</c> already
+    /// maps its saga outcomes to canonical statuses
+    /// (200 accepted / 403 non-owner / 410 request_expired / 409 already_accepted
+    /// or cap / 404 not_found); this method surfaces that status to the gateway
+    /// controller so it can be forwarded verbatim. The gateway runs no auction
+    /// rules of its own — the offer-service is the sole owner of the saga (OTP
+    /// mint, chat-thread open, sibling rejection, request transition, SELECT FOR
+    /// UPDATE + optimistic_lock race-safety).
+    /// </summary>
+    Task<OfferAcceptResult> AcceptWithStatusAsync(
         string actingUserId,
         string requestId,
         string offerId,
@@ -110,4 +136,45 @@ public enum OfferWithdrawResult
     NotFound,
     NotOwned,
     NotPending
+}
+
+/// <summary>
+/// Canonical outcome of an upstream accept, derived verbatim from the
+/// offer-service HTTP status so the gateway controller can re-emit the matching
+/// status without re-deriving any auction rule.
+/// </summary>
+public enum OfferAcceptStatus
+{
+    /// <summary>200 — auction closed; <see cref="OfferAcceptResult.Envelope"/> set.</summary>
+    Accepted,
+
+    /// <summary>403 — caller is not the offer's owning Jeeber (offer-service forbidden).</summary>
+    NotOwner,
+
+    /// <summary>410 — the request expired before acceptance (offer-service request_expired).</summary>
+    Expired,
+
+    /// <summary>409 — the offer/request is no longer acceptable (already accepted, cap hit).</summary>
+    Conflict,
+
+    /// <summary>404 — phantom offer/request unknown to offer-service.</summary>
+    NotFound
+}
+
+/// <summary>
+/// Status-preserving accept outcome. On <see cref="OfferAcceptStatus.Accepted"/>
+/// the <see cref="Envelope"/> carries the saga result (winning offer, OTP, chat
+/// thread, rejected siblings); for every negative status the
+/// <see cref="UpstreamCode"/> carries the offer-service error code (when present)
+/// purely for logging / diagnostics.
+/// </summary>
+public sealed class OfferAcceptResult
+{
+    public required OfferAcceptStatus Status { get; init; }
+
+    /// <summary>Set only when <see cref="Status"/> is <see cref="OfferAcceptStatus.Accepted"/>.</summary>
+    public OfferAcceptWire? Envelope { get; init; }
+
+    /// <summary>offer-service error <c>code</c> for negative statuses, when the body carried one.</summary>
+    public string? UpstreamCode { get; init; }
 }

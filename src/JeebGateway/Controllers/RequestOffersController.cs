@@ -63,6 +63,7 @@ public class RequestOffersController : ControllerBase
     private readonly IRequestsStore _requests;
     private readonly IDualRoleService _dualRole;
     private readonly IOfferRealtimeNotifier _realtime;
+    private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly TimeProvider _clock;
     private readonly ILogger<RequestOffersController> _logger;
 
@@ -71,6 +72,7 @@ public class RequestOffersController : ControllerBase
         IRequestsStore requests,
         IDualRoleService dualRole,
         IOfferRealtimeNotifier realtime,
+        IOfferRequestIndex offerRequestIndex,
         TimeProvider clock,
         ILogger<RequestOffersController> logger)
     {
@@ -78,6 +80,7 @@ public class RequestOffersController : ControllerBase
         _requests = requests;
         _dualRole = dualRole;
         _realtime = realtime;
+        _offerRequestIndex = offerRequestIndex;
         _clock = clock;
         _logger = logger;
     }
@@ -206,6 +209,12 @@ public class RequestOffersController : ControllerBase
                 Type = "https://jeeb.dev/errors/offers-per-request-exceeded"
             });
         }
+
+        // Record the offerId → requestId routing pairing so the offer-scoped
+        // accept route (POST /offers/{offerId}/accept) can forward to the
+        // request-scoped offer-service accept saga. This is a thin BFF routing
+        // concern, not auction state (see IOfferRequestIndex).
+        _offerRequestIndex.Record(created.Id, requestId);
 
         // Realtime fan-out is best-effort: the offer is already durable, so
         // a notifier failure must not flip the 201 into a 5xx. The Client

@@ -133,6 +133,76 @@ public sealed class OfferServiceClient : IOfferServiceClient
         };
     }
 
+    public async Task<OfferAcceptResult> AcceptWithStatusAsync(
+        string actingUserId,
+        string requestId,
+        string offerId,
+        string idempotencyKey,
+        CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"api/v1/requests/{Uri.EscapeDataString(requestId)}/offers/{Uri.EscapeDataString(offerId)}/accept");
+        SetUser(request, actingUserId);
+        request.Headers.TryAddWithoutValidation(IdempotencyHeader, idempotencyKey);
+        request.Content = JsonContent.Create(new { }, options: JsonOptions);
+
+        using var response = await _http.SendAsync(request, ct);
+
+        // Forward the upstream status VERBATIM — offer-service's FallbackController
+        // is the authority for 403/410/409/404. We never re-derive these here.
+        switch (response.StatusCode)
+        {
+            case HttpStatusCode.OK:
+            case HttpStatusCode.Created:
+            {
+                var wire = await response.Content.ReadFromJsonAsync<AcceptEnvelope>(JsonOptions, ct)
+                    ?? throw new HttpRequestException(
+                        $"offer-service {response.RequestMessage?.RequestUri} returned an empty accept body.");
+
+                var replayed = response.Headers.TryGetValues("x-idempotency-replay", out var values)
+                               && values.Any(v => string.Equals(v, "true", StringComparison.OrdinalIgnoreCase));
+
+                return new OfferAcceptResult
+                {
+                    Status = OfferAcceptStatus.Accepted,
+                    Envelope = new OfferAcceptWire
+                    {
+                        AcceptedOfferId = wire.AcceptedOffer?.Id ?? offerId,
+                        ChatThreadId = wire.ChatThreadId,
+                        OtpCode = wire.OtpCode,
+                        RejectedOfferIds = wire.RejectedOfferIds ?? new List<string>(),
+                        Replayed = replayed,
+                    },
+                };
+            }
+
+            case HttpStatusCode.Forbidden:
+                return await NegativeAsync(OfferAcceptStatus.NotOwner, response, ct);
+
+            case HttpStatusCode.Gone:
+                return await NegativeAsync(OfferAcceptStatus.Expired, response, ct);
+
+            case HttpStatusCode.Conflict:
+                return await NegativeAsync(OfferAcceptStatus.Conflict, response, ct);
+
+            case HttpStatusCode.NotFound:
+                return await NegativeAsync(OfferAcceptStatus.NotFound, response, ct);
+
+            default:
+                // 5xx / unexpected: throw so the global handler surfaces a
+                // ProblemDetails rather than a silent mis-map. Do NOT collapse
+                // an unexpected upstream status into a fabricated success.
+                response.EnsureSuccessStatusCode();
+                throw new HttpRequestException(
+                    $"offer-service accept returned unexpected status {(int)response.StatusCode}.");
+        }
+    }
+
+    private static async Task<OfferAcceptResult> NegativeAsync(
+        OfferAcceptStatus status, HttpResponseMessage response, CancellationToken ct)
+        => new() { Status = status, UpstreamCode = await ReadErrorCodeAsync(response, ct) };
+
     private static void SetUser(HttpRequestMessage request, string actingUserId)
         => request.Headers.TryAddWithoutValidation(UserIdHeader, actingUserId);
 
@@ -170,8 +240,10 @@ public sealed class OfferServiceClient : IOfferServiceClient
             var env = await response.Content.ReadFromJsonAsync<ErrorEnvelope>(JsonOptions, ct);
             return env?.Error?.Code;
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is JsonException or NotSupportedException or HttpRequestException)
         {
+            // Empty / non-JSON negative body — the status alone drives the
+            // gateway response, the code is logging-only.
             return null;
         }
     }

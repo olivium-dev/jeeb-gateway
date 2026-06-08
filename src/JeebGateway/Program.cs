@@ -1262,6 +1262,12 @@ builder.Services.AddSingleton<IPendingOffersStore>(sp =>
 
     return sp.GetRequiredService<InMemoryPendingOffersStore>();
 });
+// Offer → request routing index (S07 accept saga). Records the immutable
+// offerId → requestId pairing at submit time so the offer-scoped accept route
+// (POST /offers/{id}/accept) can forward to the request-scoped offer-service
+// accept saga under FeatureFlags:UseUpstream:Offer. Routing concern only — no
+// auction domain state lives here.
+builder.Services.AddSingleton<IOfferRequestIndex, InMemoryOfferRequestIndex>();
 // Realtime "new offer" fan-out for T-backend-010. Stubbed in-memory for
 // the MVP (records dispatched events so tests can assert delivery);
 // production wiring will swap for a SignalR / realtime-service client
@@ -1436,11 +1442,23 @@ if (stateServiceWired)
             tags: new[] { "ready", "downstream" });
 }
 
+// Global RFC 7807 ProblemDetails + last-line exception handler. Guarantees an
+// unhandled exception (notably an upstream non-2xx that bubbles up as an
+// HttpRequestException) is mapped to application/problem+json instead of an
+// opaque raw 500 — the S07 root-cause hardening for "negatives masked to 500".
+// Additive: controllers that already return typed results never throw, so they
+// are untouched.
+builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<JeebGateway.Infrastructure.UpstreamExceptionHandler>();
+
 // ---------------------------------------------------------------------------
 // Middleware pipeline
 // ---------------------------------------------------------------------------
 
 var app = builder.Build();
+
+// Must be registered early in the pipeline so it wraps the whole request.
+app.UseExceptionHandler();
 
 // STT seam visibility (Track C): make the active Whisper path obvious in startup logs.
 if (useRealWhisper)
