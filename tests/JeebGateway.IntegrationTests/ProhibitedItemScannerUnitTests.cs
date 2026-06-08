@@ -112,6 +112,37 @@ public class ProhibitedItemScannerUnitTests
         DamerauLevenshtein.Distance("kitten", "sitting", 1).Should().BeGreaterThan(1);
     }
 
+    [Fact]
+    public async Task Match_Carries_Item_Severity_And_GatingSeverity_Picks_Block()
+    {
+        var scanner = NewScannerWithSeverity(
+            ("arak", "alcohol", ProhibitedSeverity.Block),
+            ("kitchen knife", "weapon", ProhibitedSeverity.Warn));
+
+        var block = await scanner.ScanAsync("a bottle of arak", default);
+        block.Matches.Should().ContainSingle().Which.Severity.Should().Be(ProhibitedSeverity.Block);
+        block.GatingSeverity.Should().Be(ProhibitedSeverity.Block);
+
+        var warn = await scanner.ScanAsync("a kitchen knife", default);
+        warn.Matches.Should().ContainSingle().Which.Severity.Should().Be(ProhibitedSeverity.Warn);
+        warn.GatingSeverity.Should().Be(ProhibitedSeverity.Warn);
+
+        var clean = await scanner.ScanAsync("two manakish and water", default);
+        clean.GatingSeverity.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task GatingSeverity_Is_Block_When_Both_Severities_Present()
+    {
+        var scanner = NewScannerWithSeverity(
+            ("arak", "alcohol", ProhibitedSeverity.Block),
+            ("kitchen knife", "weapon", ProhibitedSeverity.Warn));
+
+        var mixed = await scanner.ScanAsync("a kitchen knife and a bottle of arak", default);
+        mixed.GatingSeverity.Should().Be(ProhibitedSeverity.Block,
+            "block outranks warn when both are present");
+    }
+
     private static ProhibitedItemScanner NewScanner(params (string Name, string Category)[] items)
     {
         var store = new InMemoryProhibitedItemsStore();
@@ -120,6 +151,20 @@ public class ProhibitedItemScannerUnitTests
             store.CreateAsync(new ProhibitedItemCreate
             {
                 Name = name, Category = category, Description = null
+            }, "admin-test", default).GetAwaiter().GetResult();
+        }
+        return new ProhibitedItemScanner(store, new InMemorySynonymRegistry());
+    }
+
+    private static ProhibitedItemScanner NewScannerWithSeverity(
+        params (string Name, string Category, ProhibitedSeverity Severity)[] items)
+    {
+        var store = new InMemoryProhibitedItemsStore();
+        foreach (var (name, category, severity) in items)
+        {
+            store.CreateAsync(new ProhibitedItemCreate
+            {
+                Name = name, Category = category, Description = null, Severity = severity
             }, "admin-test", default).GetAwaiter().GetResult();
         }
         return new ProhibitedItemScanner(store, new InMemorySynonymRegistry());

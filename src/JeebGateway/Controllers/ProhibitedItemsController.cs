@@ -112,6 +112,7 @@ public class ProhibitedItemsController : ControllerBase
         Name = i.Name,
         Category = i.Category,
         Description = i.Description,
+        Severity = i.Severity.ToString().ToLowerInvariant(),
         Active = i.Active,
         CreatedAt = i.CreatedAt,
         UpdatedAt = i.UpdatedAt

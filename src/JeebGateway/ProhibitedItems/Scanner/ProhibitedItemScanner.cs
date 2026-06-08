@@ -116,7 +116,8 @@ public class ProhibitedItemScanner : IProhibitedItemScanner
                     MatchedTerm = rawTerm,
                     Evidence = term,
                     MatchType = originalType,
-                    Confidence = 1.0
+                    Confidence = 1.0,
+                    Severity = item.Severity
                 });
             }
             return;
@@ -135,7 +136,8 @@ public class ProhibitedItemScanner : IProhibitedItemScanner
                 MatchedTerm = rawTerm,
                 Evidence = single,
                 MatchType = originalType,
-                Confidence = 1.0
+                Confidence = 1.0,
+                Severity = item.Severity
             });
             return;
         }
@@ -168,7 +170,8 @@ public class ProhibitedItemScanner : IProhibitedItemScanner
                     MatchedTerm = rawTerm,
                     Evidence = tok,
                     MatchType = ProhibitedMatchType.Fuzzy,
-                    Confidence = confidence
+                    Confidence = confidence,
+                    Severity = item.Severity
                 };
             }
         }
