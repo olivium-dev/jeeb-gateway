@@ -891,6 +891,22 @@ else
     builder.Services.AddSingleton<IRequestsStore>(sp => sp.GetRequiredService<InMemoryRequestsStore>());
 }
 
+// S06 (B1/B2/B3/ALT-2/ALT-3/ALT-4/ALT-4b/N5/N6): just-in-time delivery-row
+// mirror for POST /matching/run. Registered AFTER IRequestsStore (it reads the
+// request from whichever store the durable flag selected) and depends on the
+// already-registered IDeliveryServiceClient (idempotent POST /api/v1/deliveries).
+// Default-ON (MatchingMirrorOptions.Enabled) so a request that lives only in the
+// gateway's in-memory store is seeded into delivery-service right before the run
+// — closing the matching/run 404 without arming the heavier DurableRequests
+// spine. Thin BFF orchestration only; instant rollback via
+// FeatureFlags__MatchingMirror__Enabled=false. Scoped to match the controller's
+// request lifetime; its deps (IRequestsStore, IDeliveryServiceClient) are
+// resolvable in request scope.
+builder.Services.Configure<JeebGateway.Matching.MatchingMirrorOptions>(
+    builder.Configuration.GetSection(JeebGateway.Matching.MatchingMirrorOptions.SectionName));
+builder.Services.AddScoped<JeebGateway.Matching.IDeliveryRowMirror,
+                           JeebGateway.Matching.DeliveryRowMirror>();
+
 // Tier-existence probe consumed by RequestsController to enforce
 // T-backend-007's "validate tier exists" criterion. Distinct interface
 // from JeebGateway.Tiers.ITiersStore (the admin/catalog surface).
