@@ -448,6 +448,53 @@ public class OfferAcceptUpstreamTests
     }
 
     // -----------------------------------------------------------------
+    // S07 H5/A3/N7 regression guard (JEB-45 conflation) — the offer-accept DTO
+    // must report the OFFER-acceptance status "accepted" EVEN WHEN
+    // UseUpstream:Delivery is ON (the live fleet posture). JEB-45 leaked the
+    // spawned delivery's canonical entry state ("Ordered") into this DTO via a
+    // `_flags.Delivery ? Ordered : Accepted` ternary, regressing S07 H5
+    // ($.status=="accepted") 47->43. The accept DTO carries offer-acceptance, not
+    // delivery lifecycle state (ARCH LAW: accept DTO must not leak delivery status).
+    // -----------------------------------------------------------------
+    [Fact]
+    public async Task Accept_With_Delivery_Upstream_On_Still_Returns_Offer_Status_Accepted()
+    {
+        var fake = new FakeOfferServiceClient
+        {
+            Result = new OfferAcceptResult
+            {
+                Status = OfferAcceptStatus.Accepted,
+                Envelope = new OfferAcceptWire
+                {
+                    AcceptedOfferId = "offer-deliv-on",
+                    JeeberId = "kamal-winner", // the awarded jeeber, from the upstream envelope
+                    ChatThreadId = "thread-deliv-on",
+                    OtpCode = "1234",
+                    RejectedOfferIds = Array.Empty<string>()
+                }
+            }
+        };
+
+        // Delivery kill-switch ON — the live fleet posture that triggered the regression.
+        using var factory = NewUpstreamFactory(fake, new FakeDeliveryServiceClient(), deliveryUpstream: true);
+        SeedRouting(factory, offerId: "offer-deliv-on", requestId: "req-deliv-on", jeeberId: "kamal-winner");
+
+        var resp = await ClientActor(factory, "client-sami")
+            .PostAsync("/offers/offer-deliv-on/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<DeliveryRequestDto>();
+        body!.Id.Should().Be("req-deliv-on");
+        // The OFFER-acceptance status — NOT the delivery's canonical "Ordered" state —
+        // even though UseUpstream:Delivery is ON. (S07 H5 assertion.)
+        body.Status.Should().Be("accepted");
+        body.Status.Should().NotBe("Ordered");
+        // S07 H5 also asserts $.jeeberId == winner.
+        body.JeeberId.Should().Be("kamal-winner");
+        body.ClientId.Should().Be("client-sami");
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
@@ -459,14 +506,18 @@ public class OfferAcceptUpstreamTests
     // the suite is deterministic and never dials a real upstream; the default fake
     // reports 0 active (under cap) so every pre-BR-10 assertion is unaffected.
     private static WebApplicationFactory<Program> NewUpstreamFactory(
-        IOfferServiceClient fake, IDeliveryServiceClient delivery)
+        IOfferServiceClient fake, IDeliveryServiceClient delivery, bool deliveryUpstream = false)
         => new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
                 builder.ConfigureAppConfiguration((_, cfg) =>
                     cfg.AddInMemoryCollection(new Dictionary<string, string?>
                     {
-                        { "FeatureFlags:UseUpstream:Offer", "true" }
+                        { "FeatureFlags:UseUpstream:Offer", "true" },
+                        // JEB-45 regression guard: exercise the live fleet posture
+                        // (Delivery kill-switch ON) so the accept DTO status mapping
+                        // is asserted under the exact flag combination that regressed S07.
+                        { "FeatureFlags:UseUpstream:Delivery", deliveryUpstream ? "true" : "false" }
                     }));
                 builder.ConfigureTestServices(services =>
                 {

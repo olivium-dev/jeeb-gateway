@@ -410,6 +410,7 @@ jobs:
               --env-add FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               --env-add FeatureFlags__UseUpstream__Offer='true' \
               --env-add FeatureFlags__UseUpstream__Delivery='true' \
+              --env-add FeatureFlags__UseUpstream__Chat='true' \
               $FEATURE_FLAG_ARGS \
               $DEV_FLAG_ARG \
               $SWAGGER_FLAG_ARG \
@@ -447,6 +448,7 @@ jobs:
               --env FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               --env FeatureFlags__UseUpstream__Offer='true' \
               --env FeatureFlags__UseUpstream__Delivery='true' \
+              --env FeatureFlags__UseUpstream__Chat='true' \
               $FEATURE_FLAG_CREATE_ARGS \
               --reserve-memory 256M \
               '$TAG'

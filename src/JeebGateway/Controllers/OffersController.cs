@@ -727,15 +727,25 @@ public class OffersController : ControllerBase
         {
             Id = requestId,
             ClientId = actorId,
-            // Canonical-vocab fix (JEB-45): when the delivery kill-switch is ON,
-            // delivery-service owns the SM and the just-accepted row lives at the
-            // canonical entry state 'Ordered' (the SM has no accept-time edge — the
-            // jeeber-tap → Picked transition is the first move). Surfacing the
-            // hardcoded legacy literal "accepted" here is what made S15 SETUP-6 /
-            // S09 SETUP-7 read "accepted" where they expect "Ordered". When the flag
-            // is OFF the gateway runs its legacy linear snake_case SM, whose
-            // post-accept state IS "accepted" — so the legacy literal is preserved.
-            Status = _flags.Delivery ? CanonicalDeliveryVocab.Ordered : RequestStatus.Accepted,
+            // ARCH LAW (accept DTO must not leak delivery status): this is the
+            // OFFER-ACCEPT response, so its status field reports the OFFER-acceptance
+            // outcome — "accepted" — unconditionally. It is NOT the delivery's
+            // lifecycle state.
+            //
+            // Two distinct facts were previously conflated here: (1) the auction
+            // outcome (this offer was accepted) and (2) the spawned delivery's
+            // canonical SM state ("Ordered"). The JEB-45 ternary
+            // (`_flags.Delivery ? CanonicalDeliveryVocab.Ordered : ...`) leaked the
+            // delivery state into the offer-accept DTO, so with UseUpstream:Delivery
+            // forced ON on the live fleet POST /offers/{id}/accept returned
+            // "Ordered" and regressed S07 H5/A3/N7 (H5 asserts $.status=="accepted").
+            //
+            // The delivery's canonical "Ordered" entry state belongs ONLY to the
+            // delivery read/transition surfaces (GET /deliveries/{id}, PATCH
+            // transition) which JEB-45's other edits already own and which are left
+            // untouched. The offer-accept DTO must surface "accepted" regardless of
+            // the Delivery flag.
+            Status = RequestStatus.Accepted,
             Description = string.Empty,
             PickupAddress = null,
             DropoffAddress = null,
