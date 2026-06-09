@@ -5,6 +5,11 @@ using JeebGateway.Security;
 using JeebGateway.service.ServiceUserManagement;
 using Microsoft.AspNetCore.Mvc;
 using UserManagementApiException = JeebGateway.service.ServiceUserManagement.ApiException;
+// JEB-1472: the regenerated UserManagement NSwag client now emits a ProblemDetails
+// DTO (the bumped UM 1.1.0 contract documents RFC 7807 error bodies). Alias the bare
+// ProblemDetails name back to the ASP.NET Core MVC type these attributes intend, to
+// resolve the CS0104 ambiguity with JeebGateway.service.ServiceUserManagement.ProblemDetails.
+using ProblemDetails = Microsoft.AspNetCore.Mvc.ProblemDetails;
 
 namespace JeebGateway.Controllers;
 
