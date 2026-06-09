@@ -18,5 +18,9 @@ public enum NotificationTrigger
     AutoOffline,
     RatingRevealed,
     LowRatingFlag,
-    DisputeUpdate
+    DisputeUpdate,
+    // Weekly COD settlement paid (JEB-1476). The generic settlement event is
+    // emitted by the shared payment gateway; the gateway owns mapping it to a
+    // Jeeber recipient + the localized push copy.
+    SettlementPaid
 }

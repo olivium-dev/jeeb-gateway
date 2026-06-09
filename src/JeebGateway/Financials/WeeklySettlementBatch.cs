@@ -9,6 +9,15 @@ public sealed class WeeklySettlementOptions
     public TimeSpan Interval { get; set; } = TimeSpan.FromHours(24);
     public DayOfWeek SettlementDay { get; set; } = DayOfWeek.Monday;
     public int MaxBatchSize { get; set; } = 500;
+
+    /// <summary>
+    /// IANA timezone the weekly COD settlement cadence is evaluated in
+    /// (JEB-1476). The "Beirut weekly" cadence is a Jeeb PRODUCT business rule
+    /// and therefore lives HERE in the gateway, not in the shared payment
+    /// gateway. <see cref="SettlementDay"/> is interpreted in this zone so the
+    /// batch fires on the local Monday rather than a UTC Monday.
+    /// </summary>
+    public string TimeZoneId { get; set; } = "Asia/Beirut";
 }
 
 public interface ISettlementBatchStore
@@ -42,7 +51,10 @@ public sealed class WeeklySettlementBatch : BackgroundService
         {
             await Task.Delay(_opts.Value.Interval, _clock, stoppingToken);
 
-            var now = _clock.GetUtcNow();
+            // Evaluate the cadence in the configured product timezone (default
+            // Asia/Beirut) — the Beirut-weekly COD cadence is a Jeeb business
+            // rule owned by the gateway (JEB-1476).
+            var now = ToConfiguredZone(_clock.GetUtcNow());
             if (now.DayOfWeek != _opts.Value.SettlementDay)
                 continue;
 
@@ -69,6 +81,30 @@ public sealed class WeeklySettlementBatch : BackgroundService
             {
                 _log.LogError(ex, "Weekly settlement batch failed");
             }
+        }
+    }
+
+    /// <summary>
+    /// Converts a UTC instant into the configured settlement timezone
+    /// (default Asia/Beirut). Falls back to the original instant if the host
+    /// does not know the timezone id, so the batch never crashes on a missing
+    /// tz database entry.
+    /// </summary>
+    private DateTimeOffset ToConfiguredZone(DateTimeOffset utcNow)
+    {
+        var tzId = _opts.Value.TimeZoneId;
+        if (string.IsNullOrWhiteSpace(tzId))
+            return utcNow;
+
+        try
+        {
+            var tz = TimeZoneInfo.FindSystemTimeZoneById(tzId);
+            return TimeZoneInfo.ConvertTime(utcNow, tz);
+        }
+        catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
+        {
+            _log.LogWarning(ex, "Settlement timezone {TimeZoneId} not found; evaluating cadence in UTC", tzId);
+            return utcNow;
         }
     }
 }
