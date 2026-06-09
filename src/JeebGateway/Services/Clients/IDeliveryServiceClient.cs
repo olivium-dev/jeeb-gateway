@@ -149,6 +149,28 @@ public interface IDeliveryServiceClient
     /// the controller maps the upstream status straight through as RFC 7807.
     /// </exception>
     Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct);
+
+    /// <summary>
+    /// S07 / BR-10: reads the number of ACTIVE deliveries currently held by the
+    /// given jeeber from the canonical delivery-service count endpoint
+    /// <c>GET /api/v1/jeebers/{id}/active-deliveries-count</c>. "Active" is owned by
+    /// delivery-service (status NOT IN the terminal set Done/Cancelled/
+    /// FailedNeedsEscalation); the gateway never re-derives it. Used by the accept
+    /// orchestrator to short-circuit a would-be third assignment with a 409
+    /// <c>too-many-active-deliveries</c> BEFORE forwarding the accept saga.
+    ///
+    /// Org-law (no inter-service coupling): the gateway composes via this typed
+    /// client; delivery-service owns the deliveries table and the count query.
+    /// </summary>
+    /// <returns>The jeeber's current active-delivery count (0 when unknown to the
+    /// upstream — a jeeber with no rows yet).</returns>
+    /// <exception cref="DeliveryActiveCountException">
+    /// Thrown for a non-2xx (other than the 404 "no rows" case, which maps to 0) so
+    /// the caller can decide its degrade posture. The accept path treats a fault as
+    /// "under cap" (log + continue) so a delivery-service blip never fails an
+    /// otherwise-valid accept; the offer-service Conflict remains the backstop.
+    /// </exception>
+    Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct);
 }
 
 /// <summary>
@@ -269,6 +291,44 @@ public sealed class DeliveryMatchingException : Exception
 
     public DeliveryMatchingException(int statusCode, string? reason)
         : base($"delivery-service matching returned {statusCode} ({reason ?? "no reason"}).")
+    {
+        StatusCode = statusCode;
+        Reason = reason;
+    }
+}
+
+/// <summary>
+/// S07 / BR-10: 200 body of delivery-service
+/// <c>GET /api/v1/jeebers/{id}/active-deliveries-count</c> —
+/// <c>{ jeeber_id, active_count }</c>. delivery-service (Go) emits
+/// <b>snake_case</b>; the explicit
+/// <see cref="System.Text.Json.Serialization.JsonPropertyName"/> attributes bind
+/// the count under the shared <c>JsonSerializerDefaults.Web</c> options without
+/// mutating the global naming policy other client methods depend on.
+/// </summary>
+public sealed class JeeberActiveDeliveriesCount
+{
+    [System.Text.Json.Serialization.JsonPropertyName("jeeber_id")]
+    public string? JeeberId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("active_count")]
+    public int ActiveCount { get; init; }
+}
+
+/// <summary>
+/// S07 / BR-10: a non-2xx outcome from the delivery-service active-count endpoint
+/// (excluding the 404 "no rows yet" case, which the client maps to 0). The accept
+/// orchestrator catches this and degrades to "under cap" (log + continue) so a
+/// delivery-service blip never converts an otherwise-valid accept into a 5xx; the
+/// offer-service Conflict remains the authoritative backstop for the cap.
+/// </summary>
+public sealed class DeliveryActiveCountException : Exception
+{
+    public int StatusCode { get; }
+    public string? Reason { get; }
+
+    public DeliveryActiveCountException(int statusCode, string? reason)
+        : base($"delivery-service active-deliveries-count returned {statusCode} ({reason ?? "no reason"}).")
     {
         StatusCode = statusCode;
         Reason = reason;

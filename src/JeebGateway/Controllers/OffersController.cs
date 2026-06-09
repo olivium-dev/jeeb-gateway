@@ -49,7 +49,9 @@ public class OffersController : ControllerBase
     private readonly IOfferServiceClient _offerService;
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly IConversationProvisioner _conversations;
+    private readonly IDeliveryServiceClient _deliveryService;
     private readonly UpstreamFeatureFlags _flags;
+    private readonly DeliveryClientOptions _deliveryOptions;
     private readonly ILogger<OffersController> _logger;
 
     public OffersController(
@@ -60,7 +62,9 @@ public class OffersController : ControllerBase
         IOfferServiceClient offerService,
         IOfferRequestIndex offerRequestIndex,
         IConversationProvisioner conversations,
+        IDeliveryServiceClient deliveryService,
         IOptions<UpstreamFeatureFlags> flags,
+        IOptions<DeliveryClientOptions> deliveryOptions,
         ILogger<OffersController> logger)
     {
         _offers = offers;
@@ -70,7 +74,9 @@ public class OffersController : ControllerBase
         _offerService = offerService;
         _offerRequestIndex = offerRequestIndex;
         _conversations = conversations;
+        _deliveryService = deliveryService;
         _flags = flags.Value;
+        _deliveryOptions = deliveryOptions.Value;
         _logger = logger;
     }
 
@@ -257,6 +263,56 @@ public class OffersController : ControllerBase
                 Status = StatusCodes.Status409Conflict,
                 Type = "https://jeeb.dev/errors/same-delivery-role-violation"
             });
+        }
+
+        // BR-10 pre-forward cap (gateway-owned composition rule). A jeeber may hold
+        // at most ActiveDeliveriesLimit (default 2) concurrent ACTIVE deliveries.
+        // Accepting an offer assigns the delivery to the OFFER'S jeeber (the bidder),
+        // NOT the accepting client — so the cap is checked against offerJeeberId, the
+        // recorded bidder, exactly mirroring the legacy in-memory path which keys the
+        // cap on offer.JeeberId. delivery-service owns the authoritative active count
+        // (status NOT IN terminal); the gateway short-circuits to 409 here BEFORE
+        // forwarding the saga so no third delivery is ever created.
+        //
+        // Why pre-forward (not just rely on offer-service): offer-service does not
+        // enforce BR-10 today (6 successive accepts all returned 200 on the live
+        // fleet — the baseline N7 red), so the gateway BFF is the enforcement point.
+        //
+        // Degrade-don't-fail: a delivery-service blip on the count read must NEVER
+        // turn an otherwise-valid accept into a 5xx (that would regress S01-S06 happy
+        // accepts). On a fault we LOG and treat the jeeber as under-cap, letting the
+        // accept proceed; the offer-service Conflict mapping (OfferAcceptStatus.
+        // Conflict -> 409) remains the backstop. The cap is best-effort-at-gateway.
+        if (offerJeeberId is not null)
+        {
+            var limit = _deliveryOptions.ActiveDeliveriesLimit;
+            int? activeCount = null;
+            try
+            {
+                activeCount = await _deliveryService.CountActiveDeliveriesByJeeberAsync(offerJeeberId, ct);
+            }
+            catch (Exception ex)
+            {
+                // delivery-service unreachable / non-2xx: do not block the accept.
+                _logger.LogWarning(ex,
+                    "BR-10 active-delivery count for jeeber {JeeberId} (offer {OfferId}) failed; " +
+                    "treating as under cap and forwarding the accept (offer-service Conflict is the backstop).",
+                    offerJeeberId, offerId);
+            }
+
+            if (activeCount is int count && count >= limit)
+            {
+                _logger.LogInformation(
+                    "BR-10: rejecting accept of offer {OfferId} — jeeber {JeeberId} already holds {Count} active deliveries (limit {Limit}); no third delivery created.",
+                    offerId, offerJeeberId, count, limit);
+                return Conflict(new ProblemDetails
+                {
+                    Title = LimitExceededMessage,
+                    Detail = $"Jeeber has {count} active deliveries (limit {limit}).",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/too-many-active-deliveries"
+                });
+            }
         }
 
         // Server-minted Idempotency-Key (>= 8 chars) so the offer-service can

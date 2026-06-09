@@ -272,6 +272,35 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         throw new DeliveryMatchingException((int)response.StatusCode, reason);
     }
 
+    /// <inheritdoc />
+    public async Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct)
+    {
+        // S07 / BR-10: read-only count of the jeeber's ACTIVE deliveries from the
+        // canonical delivery-service endpoint. delivery-service owns the "active"
+        // definition (status NOT IN Done/Cancelled/FailedNeedsEscalation); the
+        // gateway never re-derives it. snake_case body (Go) — bound via the DTO's
+        // explicit [JsonPropertyName] under the shared web-default options.
+        using var response = await _http.GetAsync(
+            $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/active-deliveries-count",
+            ct);
+
+        // A jeeber with no delivery rows yet is "0 active", not an error — map the
+        // upstream 404 to 0 so a brand-new jeeber's first accept is never blocked.
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return 0;
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var reason = await TryReadReasonAsync(response, ct);
+            throw new DeliveryActiveCountException((int)response.StatusCode, reason);
+        }
+
+        var body = await DeserializeAsync<JeeberActiveDeliveriesCount>(response, ct);
+        return body.ActiveCount;
+    }
+
     private static async Task<T> DeserializeAsync<T>(HttpResponseMessage response, CancellationToken ct)
     {
         var payload = await response.Content.ReadFromJsonAsync<T>(JsonOptions, ct);
