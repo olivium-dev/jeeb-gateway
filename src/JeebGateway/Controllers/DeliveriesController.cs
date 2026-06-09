@@ -38,8 +38,8 @@ namespace JeebGateway.Controllers;
 /// </list>
 ///
 /// Anything else — skipping a step, going backwards, leaving a terminal
-/// state, supplying an unknown status string — is rejected with 400 by
-/// the <see cref="DeliveryStateMachine"/>.
+/// state, supplying an unknown status string — is rejected by the canonical
+/// state machine owned by delivery-service (the gateway forwards the verdict).
 /// </summary>
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
@@ -231,103 +231,26 @@ public class DeliveriesController : ControllerBase
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
 
-        // ---- Canonical SM-1 path (FeatureFlags:UseUpstream:Delivery) -------------
-        // delivery-service owns the state machine. The gateway accepts the canonical
+        // ---- Canonical SM-1 path (JEB-1479 cut-over) -----------------------------
+        // delivery-service owns the delivery state machine. The legacy in-gateway
+        // linear state-machine guard and the local-store transition write path
+        // were RETIRED in JEB-1479 — this route no longer touches the local store.
+        // The gateway is now an unconditional thin BFF: it accepts the canonical
         // request body (the suite drives {trigger:"pickup"}, {to:"Picked"}, and the
         // legacy {status:"in_transit"} alias), maps it onto the canonical
         // POST /api/v1/deliveries/{id}/transition contract, and forwards verbatim —
         // returning the upstream canonical status (Ordered/Picked/InTransit/AtDoor/
-        // Done). The legacy-enum DeliveryStateMachine guard is NOT consulted here:
-        // an illegal edge is rejected by delivery-service with a typed 422, not by
-        // the gateway's pre-JEB-1433 linear snake_case SM.
-        if (_flags.CurrentValue.Delivery)
-        {
-            return await PatchStatusViaDeliveryServiceAsync(deliveryId, body, callerId, ct);
-        }
-
-        if (body is null || string.IsNullOrWhiteSpace(body.Status))
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = "status is required.",
-                Status = StatusCodes.Status400BadRequest,
-                Type = "https://jeeb.dev/errors/invalid-transition"
-            });
-        }
-
-        var result = await _store.TryTransitionAsync(deliveryId, body.Status, body.Otp, ct);
-
-        switch (result.Outcome)
-        {
-            case DeliveryTransitionOutcome.NotFound:
-                return NotFound();
-
-            case DeliveryTransitionOutcome.InvalidTransition:
-                // ADR-002 PR-3 (CONTRACT-AFFECTING, CANARY-GATED): when the
-                // CanonicalTransition422 flag is on, an illegal transition is
-                // rejected with HTTP 422 + the typed transition_not_allowed body
-                // that mirrors delivery-service (ADR-002 §4). The flag DEFAULTS
-                // OFF in every environment, so by default this path is unchanged
-                // and still returns the legacy 400 — flip the flag only during
-                // the canary once mobile reads the typed body, not the bare code.
-                if (_flags.CurrentValue.CanonicalTransition422)
-                {
-                    var callerRole = UserIdentity.HasRole(HttpContext, Roles.Jeeber)
-                        ? DeliveryTriggerSource.Jeeber
-                        : UserIdentity.HasRole(HttpContext, Roles.Client)
-                            ? DeliveryTriggerSource.Client
-                            : DeliveryTriggerSource.System;
-                    return CanonicalTransitionProblem.Build(
-                        from: result.Request?.Status,
-                        to: body.Status,
-                        trigger: null,
-                        callerRole: callerRole,
-                        detail: result.Reason);
-                }
-                return BadRequest(new ProblemDetails
-                {
-                    Title = "Invalid status transition.",
-                    Detail = result.Reason,
-                    Status = StatusCodes.Status400BadRequest,
-                    Type = "https://jeeb.dev/errors/invalid-transition"
-                });
-
-            case DeliveryTransitionOutcome.OtpRequired:
-                return BadRequest(new ProblemDetails
-                {
-                    Title = "OTP is required to mark the delivery as delivered.",
-                    Status = StatusCodes.Status400BadRequest,
-                    Type = "https://jeeb.dev/errors/otp-required"
-                });
-
-            case DeliveryTransitionOutcome.OtpMismatch:
-                return BadRequest(new ProblemDetails
-                {
-                    Title = "Supplied OTP does not match.",
-                    Status = StatusCodes.Status400BadRequest,
-                    Type = "https://jeeb.dev/errors/otp-mismatch"
-                });
-
-            case DeliveryTransitionOutcome.Committed:
-                // Status flipped — notify the counterparty. Pushes are fire-
-                // and-forget per T-backend-022: a transient failure must
-                // not roll back the state transition, so we don't await
-                // failures here, just log them.
-                await NotifyOtherPartyAsync(result.Request!, result.PreviousStatus!, ct);
-                return Ok(ToDto(result.Request!));
-
-            default:
-                // Defensive — every outcome is handled above. If a new
-                // enum value lands without a controller branch, fail
-                // closed rather than returning a misleading 200.
-                return Problem(
-                    title: "Unhandled transition outcome.",
-                    statusCode: StatusCodes.Status500InternalServerError);
-        }
+        // Done). An illegal edge is rejected by delivery-service with a typed 422.
+        //
+        // The legacy V2 mobile route stays alive here (deprecated alias, never a
+        // 404): the V2→V3 transition-name adapter is CanonicalDeliveryVocab in this
+        // gateway, not delivery-service.
+        return await PatchStatusViaDeliveryServiceAsync(deliveryId, body, callerId, ct);
     }
 
     /// <summary>
-    /// Canonical SM-1 transition path (FeatureFlags:UseUpstream:Delivery ON).
+    /// Canonical SM-1 transition path (the only PATCH /status path since the
+    /// JEB-1479 cut-over retired the local linear state machine).
     /// Resolves the canonical target state from the request body (explicit
     /// <c>to</c>, friendly <c>trigger</c> word, or legacy <c>status</c> alias),
     /// derives the party source from the caller role, and forwards to

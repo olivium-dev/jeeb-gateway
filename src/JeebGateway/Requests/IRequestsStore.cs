@@ -167,29 +167,13 @@ public interface IRequestsStore
         DateTimeOffset at,
         CancellationToken ct);
 
-    /// <summary>
-    /// Atomically advances <paramref name="requestId"/> through one step of
-    /// the <see cref="DeliveryStateMachine"/> (T-backend-013). The state
-    /// guard, OTP check, and side-effects all run under the store's write
-    /// lock so a racing PATCH cannot observe a stale status and double-fire.
-    ///
-    /// Side-effects committed inside the same critical section:
-    /// <list type="bullet">
-    ///   <item>Transitioning into <see cref="RequestStatus.PickedUp"/> flips
-    ///     <see cref="DeliveryRequest.GpsTrackingActive"/> to true.</item>
-    ///   <item>Transitioning into <see cref="RequestStatus.Delivered"/>
-    ///     requires <paramref name="otp"/> to match
-    ///     <see cref="DeliveryRequest.DeliveryOtp"/>; a missing or
-    ///     mismatched value returns
-    ///     <see cref="DeliveryTransitionOutcome.OtpRequired"/> /
-    ///     <see cref="DeliveryTransitionOutcome.OtpMismatch"/>.</item>
-    /// </list>
-    /// </summary>
-    Task<DeliveryTransitionResult> TryTransitionAsync(
-        string requestId,
-        string toStatus,
-        string? otp,
-        CancellationToken ct);
+    // JEB-1479 cut-over: the legacy single-step delivery-transition path
+    // (TryTransitionAsync + the retired linear state-machine guard) was
+    // removed. The canonical state machine is owned by delivery-service; the
+    // gateway forwards PATCH /deliveries/{id}/status to its
+    // POST /api/v1/deliveries/{id}/transition contract via the NSwag-generated
+    // IDeliveryServiceClient. This store keeps backing Requests/Offers/
+    // RequestOffers/Disputes/Ratings/Settlement/Cancellation/OtpHandover.
 
     /// <summary>
     /// T-backend-024 (JEEB-42): atomic cancellation. Under the store's

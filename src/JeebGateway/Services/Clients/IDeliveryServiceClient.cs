@@ -703,7 +703,7 @@ public sealed class DeliveryReadUpstream
 /// <summary>
 /// A non-2xx outcome from the canonical SM-1 transition endpoint. The gateway is
 /// a thin BFF on the SM path: it does NOT re-validate the transition (the legacy
-/// <c>DeliveryStateMachine</c> is bypassed when the kill-switch is on) — it forwards
+/// in-gateway linear state-machine guard was retired in JEB-1479) — it forwards
 /// the delivery-service verdict verbatim. Carries the typed reason/from/to/trigger
 /// from the upstream <c>errorBody</c> so the controller can render RFC 7807 +
 /// the canonical 422 extension fields without re-deriving anything.
