@@ -38,4 +38,51 @@ public interface IConversationProvisioner
         string requestId,
         string clientId,
         CancellationToken ct);
+
+    /// <summary>
+    /// S07 H6d (fix C): advances an already-provisioned broadcasting conversation
+    /// to the <c>accepted</c> phase when the request owner accepts a jeeber's
+    /// offer. ORCHESTRATION ONLY — the gateway is the SOLE chat caller (org no-
+    /// coupling law; offer-service holds no chat client). On a successful accept
+    /// the gateway:
+    /// <list type="number">
+    ///   <item>mints/adds the <b>winning</b> jeeber as a member of the channel
+    ///     (POST /api/members → POST /api/channels/{id}/members) so the accepted
+    ///     conversation has the client + winning jeeber as active participants;</item>
+    ///   <item>tags the channel <c>accepted</c> so chat-service's
+    ///     <c>ChannelSummaryService.ResolvePhase</c> can surface
+    ///     <c>phase: "accepted"</c> once it recognises the marker (the recognise-
+    ///     "accepted" half is a chat-service change tracked separately — see the
+    ///     implementation remarks);</item>
+    ///   <item>best-effort deactivates each supplied losing chat member id
+    ///     (PATCH /api/members/{id}/deactivate) so the auction losers drop out
+    ///     while history is retained.</item>
+    /// </list>
+    ///
+    /// DEGRADE-DON'T-FAIL: a chat-service blip (timeout, 5xx, null id) is logged
+    /// and swallowed — a chat outage must NEVER turn a successful offer accept
+    /// into a 5xx. Returns the winning jeeber's minted chat member id on success,
+    /// or <c>null</c> when auto-create is disabled / there is no conversation id /
+    /// the chat call degraded. Mirrors
+    /// <see cref="CreateBroadcastingConversationAsync"/>'s contract.
+    /// </summary>
+    /// <param name="conversationId">
+    /// The channel id minted at create time and stamped on the request
+    /// (<c>DeliveryRequest.ConversationId</c>). When null/empty the method is a
+    /// no-op (the order never got a broadcasting conversation).
+    /// </param>
+    /// <param name="winningJeeberId">
+    /// The user-management id of the jeeber whose offer was accepted. Recorded on
+    /// the new chat member's name for correlation.
+    /// </param>
+    /// <param name="losingMemberIds">
+    /// Chat member ids of the losing offerers to deactivate. May be empty when the
+    /// gateway has not retained the losers' chat member ids (see remarks) — the
+    /// winner-add + accepted-tag still run.
+    /// </param>
+    Task<string?> AdvanceToAcceptedAsync(
+        string? conversationId,
+        string winningJeeberId,
+        IReadOnlyList<string> losingMemberIds,
+        CancellationToken ct);
 }
