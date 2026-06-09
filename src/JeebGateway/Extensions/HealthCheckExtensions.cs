@@ -82,7 +82,14 @@ public static class HealthCheckExtensions
         AddDownstreamProbe(checks, config, "geolocation-service",     "Services:Geolocation:BaseUrl",     healthPath: "health");
         AddDownstreamProbe(checks, config, "offer-service",           "Services:Offer:BaseUrl",           healthPath: "health");
         AddDownstreamProbe(checks, config, "ban-service",             "Services:Ban:BaseUrl",             healthPath: "health");
-        AddDownstreamProbe(checks, config, "unified-payment-gateway", "Services:UnifiedPayment:BaseUrl",  healthPath: "health");
+
+        // unified-payment-gateway (Elixir UPG) was decoupled (sha-553711610c2a /
+        // main 9f05a991): the old GET /health route was REMOVED (now 404) and the
+        // new decoupled surface is GET /api/v1/gateways (verified 200 on the swarm,
+        // trailing-slash variant also 200). Probe the readiness path it actually
+        // serves; bare /health here 404s and falsely 503s the gateway aggregate.
+        // Critical-path: a genuine UPG readiness failure remains fatal (Unhealthy).
+        AddDownstreamProbe(checks, config, "unified-payment-gateway", "Services:UnifiedPayment:BaseUrl",  healthPath: "api/v1/gateways");
 
         // voice-transcription serves /healthz (not /health).
         AddDownstreamProbe(checks, config, "voice-transcription",     "Services:VoiceTranscription:BaseUrl", healthPath: "healthz");
