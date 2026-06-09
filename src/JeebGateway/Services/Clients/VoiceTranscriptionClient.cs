@@ -108,13 +108,16 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
 
     /// <summary>
     /// Voice-on-create (JEB-1431). Forwards the audio to the upstream's canonical
-    /// multipart route <c>POST /v1/voice/transcribe</c> (the route that returns the
-    /// real <c>{transcript, confidence, language, duration_ms}</c> contract, backed
-    /// by the owning service's real Whisper or its config-gated mock seam). The
-    /// gateway requestId is mapped to the generic <c>Idempotency-Key</c> header so a
-    /// retried draft replays the cached transcript. Size (413) / format (415) gates
-    /// are validated at the gateway BEFORE this call (so no Whisper runs on reject);
-    /// this method also surfaces any upstream 413/415 onto a typed exception.
+    /// multipart route <c>POST /v1/transcribe</c> (the single stable contract route
+    /// pinned by JEB-1483, returning <c>{transcript, confidence, language,
+    /// duration_ms}</c>, backed by the owning service's real Whisper or its
+    /// config-gated mock seam). The legacy <c>/v1/voice/transcribe</c> alias is now
+    /// deprecated upstream (JEB-1482), so the gateway consumes the canonical path
+    /// only. The gateway requestId is mapped to the generic <c>Idempotency-Key</c>
+    /// header so a retried draft replays the cached transcript. Size (413) / format
+    /// (415) gates are validated at the gateway BEFORE this call (so no Whisper runs
+    /// on reject); this method also surfaces any upstream 413/415 onto a typed
+    /// exception.
     /// </summary>
     public async Task<TranscriptionResult> TranscribeVoiceAsync(
         WhisperAudio audio, string language, string? idempotencyKey, CancellationToken ct)
@@ -127,7 +130,7 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
         form.Add(fileContent, "audio", audio.FileName);
         form.Add(new StringContent(language), "language_hint");
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, "v1/voice/transcribe")
+        using var request = new HttpRequestMessage(HttpMethod.Post, "v1/transcribe")
         {
             Content = form
         };
@@ -188,7 +191,7 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
         [property: JsonPropertyName("text")] string? Text,
         [property: JsonPropertyName("language")] string? Language);
 
-    // Canonical /v1/voice/transcribe response (JEB-43): {transcript, confidence, language, duration_ms}.
+    // Canonical /v1/transcribe response: {transcript, confidence, language, duration_ms}.
     private sealed record V1VoiceUpstreamResponse(
         [property: JsonPropertyName("transcript")] string? Transcript,
         [property: JsonPropertyName("confidence")] double? Confidence,
