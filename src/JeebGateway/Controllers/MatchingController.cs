@@ -47,15 +47,18 @@ public sealed class MatchingController : ControllerBase
 
     private readonly IDeliveryServiceClient _delivery;
     private readonly IMatchingServiceClient _matchesRead;
+    private readonly IDeliveryRowMirror _rowMirror;
     private readonly string _tenantId;
 
     public MatchingController(
         IDeliveryServiceClient delivery,
         IMatchingServiceClient matchesRead,
+        IDeliveryRowMirror rowMirror,
         IConfiguration config)
     {
         _delivery = delivery;
         _matchesRead = matchesRead;
+        _rowMirror = rowMirror;
         _tenantId = config["Services:Delivery:TenantId"] ?? DefaultTenantId;
     }
 
@@ -79,6 +82,24 @@ public sealed class MatchingController : ControllerBase
                 Title = "Request body is required.",
                 Status = StatusCodes.Status400BadRequest
             });
+        }
+
+        // S06 just-in-time mirror: in request_id mode the request row may live
+        // ONLY in the gateway's in-memory store (the create-time durable mirror in
+        // DurableRequestsStore is gated behind the heavier FeatureFlags:Durable
+        // Requests switch). Before forwarding, best-effort seed the canonical
+        // delivery-service deliveries row so POST /api/v1/matching/run resolves it
+        // instead of returning 404 unknown_request_id. This is thin BFF
+        // orchestration: the gateway composes two existing delivery-service typed
+        // -client calls (idempotent seed-row → run) — it does NOT couple two
+        // microservices and it holds no matching/delivery domain state. The seed is
+        // BEST-EFFORT and NEVER throws: the dry-run/preview shape (no requestId),
+        // an unknown id, or a seed hiccup all fall through to delivery-service,
+        // which stays the canonical authority for the run outcome (including a
+        // genuine 404). Skipped entirely when MatchingMirror.Enabled is false.
+        if (!string.IsNullOrWhiteSpace(body.RequestId))
+        {
+            await _rowMirror.EnsureSeededAsync(body.RequestId, ct);
         }
 
         // Thin BFF: forward verbatim to delivery-service, which owns input
