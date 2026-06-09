@@ -1321,7 +1321,16 @@ builder.Services.AddSingleton<IPendingOffersStore>(sp =>
 // (POST /offers/{id}/accept) can forward to the request-scoped offer-service
 // accept saga under FeatureFlags:UseUpstream:Offer. Routing concern only — no
 // auction domain state lives here.
-builder.Services.AddSingleton<IOfferRequestIndex, InMemoryOfferRequestIndex>();
+// The in-memory index is the fast, authoritative-within-instance read/write model.
+// Registered as its concrete type so the durable decorator (wired in the
+// jeeb-state-service block below, only when state-service is enabled) can compose it
+// as its local cache + fallback. The IOfferRequestIndex mapping defaults to this
+// in-memory instance; when state-service is wired it is re-pointed at the durable
+// write-through decorator (last registration wins). Pre-S08 behaviour is unchanged
+// when state-service is off.
+builder.Services.AddSingleton<InMemoryOfferRequestIndex>();
+builder.Services.AddSingleton<IOfferRequestIndex>(
+    sp => sp.GetRequiredService<InMemoryOfferRequestIndex>());
 // Realtime "new offer" fan-out for T-backend-010. Stubbed in-memory for
 // the MVP (records dispatched events so tests can assert delivery);
 // production wiring will swap for a SignalR / realtime-service client
@@ -1466,6 +1475,16 @@ if (stateServiceWired)
     // R1 — idempotency (full 1:1; GET-by-key ⇒ bounce-survivable).
     builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,
         JeebGateway.StateService.Idempotency.StateServiceIdempotencyStore>();
+
+    // S08 (A3/N9) — DURABLE offer→request routing. Re-point IOfferRequestIndex at the
+    // write-through decorator so the offerId → (requestId, jeeberId) pairing survives a
+    // gateway bounce and is shared across replicas (mirrored into the R1 idempotency KV,
+    // GET-by-key bounce-survivable). The InMemoryOfferRequestIndex registered above is
+    // composed as the decorator's fast local cache + degrade-don't-fail fallback. This
+    // overrides the default in-memory IOfferRequestIndex mapping (last registration wins)
+    // and fixes the per-replica / lost-on-restart spurious 404 on offer edit/accept.
+    builder.Services.AddSingleton<IOfferRequestIndex,
+        JeebGateway.StateService.Durable.StateServiceOfferRequestIndex>();
 
     // R8 — rate-limit + handover locks (keyed by bucket/lockKey ⇒ bounce-survivable).
     builder.Services.AddSingleton<JeebGateway.StateService.RateLimiting.IStateRateLimitStore,
