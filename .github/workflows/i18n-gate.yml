@@ -1,0 +1,29 @@
+name: AC7 i18n gate (Jeeb KYC flavors)
+
+# JEB-1473 — the AC7 i18n gate now lives WITH the Jeeb product assets in this
+# repo (relocated out of the shared form-builder-service). It walks the Jeeb KYC
+# flavor schemas under product/form-builder/flavors and asserts every field
+# references a kyc.jeeb.v1.* ARB key (no literal copy strings).
+"on":
+  push:
+    paths:
+      - "product/form-builder/**"
+      - ".github/workflows/i18n-gate.yml"
+  pull_request:
+    paths:
+      - "product/form-builder/**"
+      - ".github/workflows/i18n-gate.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  i18n-gate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Run AC7 i18n key check
+        run: bash product/form-builder/qa/i18n-key-check.sh

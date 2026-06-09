@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
@@ -53,6 +54,25 @@ public sealed class KycBffController : ControllerBase
     // contract-signing-service (resolved to a service-minted template_id at
     // runtime — never a hardcoded literal id).
     private const string JeebTosTemplateName = "jeeb_tos_v1";
+
+    // JEB-1473 — Jeeb-domain submission/approval-unlock wiring. This was leaked
+    // into the shared form-builder-service (its removed GET
+    // /templates/{name}/submission endpoint hardcoded
+    // "auth-service:/api/jeeb/users/me/role" as the approval-unlock default).
+    // Per Golden Rule 2 the shared service now holds only generic template data;
+    // the Jeeb-domain downstream wiring is owned HERE in the gateway. On approve
+    // the gateway appends the unlocked role in user-management (see KycBffSeam
+    // review flow), so the canonical approval-unlock descriptor is the UM role
+    // toggle route.
+    private const string ApprovalUnlocksRoute = "user-management:/api/v1/users/me/role";
+
+    // The submission seam metadata the shared step-based template declares
+    // (endpoint/method/outputStatus). Kept here as the gateway-owned projection
+    // so callers that previously read form-builder's /submission get the same
+    // shape from the product gateway.
+    private const string SubmissionEndpoint = "/kyc/submit";
+    private const string SubmissionMethod = "POST";
+    private const string SubmissionOutputStatus = "pending_review";
 
     private readonly IFormBuilderServiceClient _formBuilder;
     private readonly IContractSigningServiceClient _contractSigning;
@@ -143,6 +163,65 @@ public sealed class KycBffController : ControllerBase
             ["document_url"] = documentUrl,
             ["locale"] = locale,
             ["name"] = JeebTosTemplateName,
+        };
+
+        return Ok(payload);
+    }
+
+    /// <summary>
+    /// JEB-1473. Resolves the Jeeb KYC <b>submission / approval-unlock wiring</b>
+    /// for the canonical template <c>jeeb_jeeber_v1</c>. This is the gateway-owned
+    /// replacement for the form-builder-service <c>GET /templates/{name}/submission</c>
+    /// endpoint that was removed (it leaked the hardcoded
+    /// <c>auth-service:/api/jeeb/users/me/role</c> approval-unlock default into the
+    /// shared service). The template existence is confirmed against the live
+    /// upstream via the typed <see cref="IFormBuilderServiceClient.SchemaAsync"/>
+    /// (Golden Rule 4 — BFF aggregation through the generated/typed client, no
+    /// hand-rolled HttpClient); the downstream wiring (<c>approvalUnlocks</c>,
+    /// accepted ToS template id) is composed HERE from the gateway-owned
+    /// Jeeb-domain mapping (Golden Rule 2).
+    /// </summary>
+    [HttpGet("v1/kyc/jeeb/submission-wiring")]
+    [ProducesResponseType(typeof(JsonElement), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> GetSubmissionWiring(CancellationToken ct = default)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!_flags.CurrentValue.FormBuilder) return FormBuilderDisabled();
+
+        // Confirm the canonical template resolves upstream via the typed client.
+        // A 404 from the upstream means the template is not registered as data in
+        // the (now-generic) form-builder-service.
+        try
+        {
+            _ = await _formBuilder.SchemaAsync(JeebKycTemplateName, AcceptLanguage(), ct);
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return Problem(
+                title: "KYC template not registered",
+                detail: $"form-builder-service has no template registered under '{JeebKycTemplateName}'.",
+                statusCode: StatusCodes.Status404NotFound);
+        }
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["template_name"] = JeebKycTemplateName,
+            ["canonical_template_id"] = JeebKycTemplateName,
+            ["template_version"] = TemplateVersionFor(JeebKycTemplateName),
+            ["submission"] = new Dictionary<string, object?>
+            {
+                ["endpoint"] = SubmissionEndpoint,
+                ["method"] = SubmissionMethod,
+                ["outputStatus"] = SubmissionOutputStatus,
+                ["downstream"] = new Dictionary<string, object?>
+                {
+                    ["approvalUnlocks"] = ApprovalUnlocksRoute,
+                    ["acceptedTosTemplateId"] = JeebTosTemplateName,
+                },
+            },
         };
 
         return Ok(payload);
