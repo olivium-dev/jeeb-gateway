@@ -328,12 +328,17 @@ public sealed class OfferServiceClient : IOfferServiceClient
         string offerId,
         CancellationToken ct)
     {
-        // S08 A5: POST /offers/{offerId}/reject (offer-scoped, mirroring the S07
-        // accept_by_offer route). offer-service owns the reject saga + the
+        // S08 A5: POST /api/v1/offers/{offerId}/reject (offer-scoped, mirroring the
+        // S07 accept_by_offer route). offer-service owns the reject saga + the
         // StateMachine :reject transition; the gateway forwards the actor and the
-        // status verbatim.
+        // status verbatim. The "api/v1/" prefix is REQUIRED — the offer client's
+        // BaseAddress (Services:Offer:BaseUrl) is host:port with NO path, and every
+        // other method here carries "api/v1/" (submit line 53/100, accept line
+        // 177/214). Omitting it resolved to /offers/{id}/reject which offer-service
+        // does not route -> live 404 (the route exists only under the /api/v1 scope,
+        // router.ex:49). Caught at the deploy smoke gate, not by unit tests.
         using var request = new HttpRequestMessage(
-            HttpMethod.Post, $"offers/{Uri.EscapeDataString(offerId)}/reject");
+            HttpMethod.Post, $"api/v1/offers/{Uri.EscapeDataString(offerId)}/reject");
         SetUser(request, actingUserId);
         request.Content = JsonContent.Create(new { }, options: JsonOptions);
 
