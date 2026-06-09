@@ -138,6 +138,84 @@ public sealed class JeebConversationsBffTests
         fake.LastAppend.IdempotencyKey.Should().Be("idem-h3-1");
     }
 
+    [Fact]
+    public async Task H4_AppendResponse_EchoesTheJustPostedMessage_AudienceAll_BodyAuthor_NotForeign()
+    {
+        // H4 regression: the append RESPONSE must be the message created for THIS
+        // request — correct author (bearer sub), kind, audience("all"), body —
+        // round-tripping the open audience/payload shapes faithfully across the
+        // STJ-bind -> Newtonsoft-wire -> STJ-out serializer hops, NEVER a foreign /
+        // mangled (audience=null, {"ValueKind":N}) message.
+        var fake = new FakeJeebConversationClient();
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, samiUserId) = await MintSession(http, "+9613001830");
+
+        var msg = new HttpRequestMessage(HttpMethod.Post, "/v1/conversations/conv-h4/messages")
+        {
+            Content = JsonContent.Create(new
+            {
+                kind = "text",
+                audience = "all",
+                body = "On my way",
+            }),
+        };
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().NotContain("ValueKind", "the audience must echo as a value, never the JsonElement struct shape");
+        var json = JObject.Parse(raw);
+
+        // The response echoes the just-posted message verbatim.
+        json["kind"]!.Value<string>().Should().Be("text");
+        json["body"]!.Value<string>().Should().Be("On my way");
+        json["audience"]!.Value<string>().Should().Be("all");
+        // author is the BEARER sub (sami), not kamal/a foreign author.
+        json["author_id"]!.Value<string>().Should().Be(samiUserId);
+
+        // The gateway forwarded a FAITHFUL audience JsonElement to chat-service
+        // (the value "all"), not a mangled struct.
+        fake.LastAppend!.Audience!.Value.GetString().Should().Be("all");
+        fake.LastAppend.Body.Should().Be("On my way");
+    }
+
+    [Fact]
+    public async Task H4_AppendStructuredResponse_EchoesPayloadVerbatim()
+    {
+        var fake = new FakeJeebConversationClient();
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, kamalUserId) = await MintSession(http, "+9613001831");
+
+        var msg = new HttpRequestMessage(HttpMethod.Post, "/v1/conversations/conv-h4b/messages")
+        {
+            Content = JsonContent.Create(new
+            {
+                kind = "structured",
+                subtype = "jeeb.offer",
+                audience = "all",
+                payload = new { offerId = "off-1", priceUsd = 35, etaMinutes = 25 },
+            }),
+        };
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().NotContain("ValueKind");
+        var json = JObject.Parse(raw);
+        json["subtype"]!.Value<string>().Should().Be("jeeb.offer");
+        json["author_id"]!.Value<string>().Should().Be(kamalUserId);
+        json["audience"]!.Value<string>().Should().Be("all");
+        json["payload"]!["offerId"]!.Value<string>().Should().Be("off-1");
+        json["payload"]!["priceUsd"]!.Value<int>().Should().Be(35);
+        json["payload"]!["etaMinutes"]!.Value<int>().Should().Be(25);
+    }
+
     // ---------------------------------------------------------------------
     // H5 / N1 — viewer-filtered read; gateway forwards viewer, never filters
     // ---------------------------------------------------------------------
