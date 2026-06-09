@@ -16,6 +16,27 @@ public sealed class UpstreamFeatureFlags
     public bool Matching { get; set; }
     public bool Geolocation { get; set; }
 
+    /// <summary>
+    /// S08 (JEB-50/51/52/53) — when true, the Jeeb <b>conversation</b> BFF
+    /// (<see cref="JeebGateway.Controllers.JeebConversationsController"/>: create,
+    /// append/list structured messages, membership-by-correlation, and the
+    /// <c>/v1/realtime/jeeb:chat:{id}</c> REST visibility gate) routes through the
+    /// real chat-service conversation aggregate via
+    /// <see cref="JeebGateway.Conversations.Client.IJeebConversationClient"/>.
+    ///
+    /// This is a NET-NEW path: chat-service's conversation aggregate is added in a
+    /// sequenced upstream PR (chat-service first), so the flag is a runtime kill
+    /// switch, NOT a fallback to local state — while off, the conversation BFF
+    /// returns <c>503 ProblemDetails</c> instead of dialing endpoints that do not
+    /// exist yet (mirroring the cdn-service / contract-signing-service net-new
+    /// kill-switch shape exactly). The gateway holds NO conversation state and
+    /// computes NO visibility: chat-service owns the domain + the VisibilityFilter.
+    /// Flip on (with the chat-service conversation aggregate deployed) once PR-1
+    /// ships. Default false in every environment keeps the existing generic
+    /// <c>ChatController</c> passthrough untouched.
+    /// </summary>
+    public bool Chat { get; set; }
+
     // Notification — REMOVED. The notification read surface is now a stateless
     // passthrough over the salehly-mirrored NSwag ServiceNotificationClient
     // (registered in Program.cs as the named client "ServiceNotificationClient")

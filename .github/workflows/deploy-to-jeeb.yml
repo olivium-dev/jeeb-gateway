@@ -131,7 +131,7 @@ on:
       # Example: feature_flags='ConversationAutoCreate=true' arms H7 broadcasting auto-create
       # while leaving Kyc/Cdn at their baked-true defaults.
       feature_flags:
-        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,Heartbeat=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, Heartbeat. Empty = preserve running flags (baked appsettings defaults on fresh create). NOTE: UseUpstream.Offer is forced =true unconditionally every deploy regardless of this input (S07).'
+        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,Heartbeat=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamChat, Heartbeat. Empty = preserve running flags (baked appsettings defaults on fresh create). NOTE: UseUpstream.Offer is forced =true unconditionally every deploy regardless of this input (S07). S08: pass UseUpstreamChat=true to arm the conversation BFF (default off -> 503).'
         required: false
         default: ''
       # S04 / Track C — REAL OpenAI Whisper STT seam. The gateway selects the real
@@ -366,6 +366,7 @@ jobs:
                 useupstreamkyc)         _envvar="FeatureFlags__UseUpstream__Kyc" ;;
                 useupstreamcdn)         _envvar="FeatureFlags__UseUpstream__Cdn" ;;
                 useupstreamoffer)       _envvar="FeatureFlags__UseUpstream__Offer" ;;
+                useupstreamchat)        _envvar="FeatureFlags__UseUpstream__Chat" ;;
                 heartbeat)              _envvar="FeatureFlags__Heartbeat__Enabled" ;;
                 *) echo "::warning::feature_flags: ignoring unknown key '$_key'"; continue ;;
               esac

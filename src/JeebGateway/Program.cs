@@ -408,6 +408,27 @@ builder.Services.AddScoped<JeebGateway.service.ServiceChat.ServiceChatClient>(sp
     return new JeebGateway.service.ServiceChat.ServiceChatClient(baseUrl, client);
 });
 
+// S08 (JEB-50/51/52/53) — the Jeeb CONVERSATION typed client. Same chat-service
+// host as ServiceChatClient (ChatServiceApi:BaseUrl), but a distinct typed client
+// over chat-service's NET-NEW conversation aggregate (create-or-get by
+// correlation, structured/text append, viewer-filtered list, membership check).
+// Hand-authored to the agreed contract (the BanServiceClient precedent) until the
+// chat-service conversation aggregate ships and regenerate-clients.sh can target
+// it. The BFF controller (JeebConversationsController) is the SOLE chat caller and
+// holds no conversation state; chat-service owns the domain + the VisibilityFilter.
+// Behind IJeebConversationClient so the controller is integration-testable with a
+// fake. The typed HttpClient registration supplies BaseAddress; the live path is
+// gated by FeatureFlags:UseUpstream:Chat (default off -> 503) until PR-1 ships.
+builder.Services.AddHttpClient<JeebGateway.Conversations.Client.IJeebConversationClient,
+                               JeebGateway.Conversations.Client.JeebConversationClient>(client =>
+{
+    var apiUrl = builder.Configuration["ChatServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl);
+    }
+});
+
 // Notification (ServiceNotificationClient) — salehly sibling mirror. The
 // NSwag-generated ServiceNotificationClient (Services/ServiceNotificationClient.cs,
 // namespace JeebGateway.service.ServiceNotification) is registered exactly as
