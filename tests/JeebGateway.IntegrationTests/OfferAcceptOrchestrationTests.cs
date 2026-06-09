@@ -322,7 +322,7 @@ public class OfferAcceptOrchestrationTests
             => throw new NotSupportedException();
 
         public Task<OfferMutationResult> EditAsync(
-            string actingUserId, string requestId, string offerId, long? feeCents, int? etaMinutes, string? note, CancellationToken ct)
+            string actingUserId, string requestId, string offerId, long? feeCents, int? etaMinutes, string? note, int? maxEdits, CancellationToken ct)
             => throw new NotSupportedException();
 
         public Task<OfferMutationResult> RejectAsync(

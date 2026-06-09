@@ -41,8 +41,6 @@ public class OfferAcceptUpstreamTests
                 {
                     AcceptedOfferId = "offer-1",
                     JeeberId = "jeeber-9", // the awarded jeeber, from the upstream envelope
-                    ChatThreadId = "thread-9",
-                    OtpCode = "4321",
                     RejectedOfferIds = new[] { "offer-2" }
                 }
             }
@@ -212,8 +210,6 @@ public class OfferAcceptUpstreamTests
                 {
                     AcceptedOfferId = "offer-legit",
                     JeeberId = "jeeber-other",
-                    ChatThreadId = "thread-legit",
-                    OtpCode = "1357",
                     RejectedOfferIds = Array.Empty<string>()
                 }
             }
@@ -276,8 +272,6 @@ public class OfferAcceptUpstreamTests
                 {
                     AcceptedOfferId = "offer-nobidder",
                     JeeberId = "jeeber-from-envelope",
-                    ChatThreadId = "thread-nb",
-                    OtpCode = "2468",
                     RejectedOfferIds = Array.Empty<string>()
                 }
             }
@@ -343,8 +337,6 @@ public class OfferAcceptUpstreamTests
                 {
                     AcceptedOfferId = "offer-under",
                     JeeberId = "jeeber-under",
-                    ChatThreadId = "thread-under",
-                    OtpCode = "9999",
                     RejectedOfferIds = Array.Empty<string>()
                 }
             }
@@ -376,8 +368,6 @@ public class OfferAcceptUpstreamTests
                 {
                     AcceptedOfferId = "offer-blip",
                     JeeberId = "jeeber-blip",
-                    ChatThreadId = "thread-blip",
-                    OtpCode = "1111",
                     RejectedOfferIds = Array.Empty<string>()
                 }
             }
@@ -415,8 +405,6 @@ public class OfferAcceptUpstreamTests
                 {
                     AcceptedOfferId = "offer-assign",
                     JeeberId = "jeeber-assign-winner",
-                    ChatThreadId = "thread-assign",
-                    OtpCode = "4242",
                     RejectedOfferIds = Array.Empty<string>()
                 }
             }
@@ -468,8 +456,6 @@ public class OfferAcceptUpstreamTests
                 {
                     AcceptedOfferId = "offer-deliv-on",
                     JeeberId = "kamal-winner", // the awarded jeeber, from the upstream envelope
-                    ChatThreadId = "thread-deliv-on",
-                    OtpCode = "1234",
                     RejectedOfferIds = Array.Empty<string>()
                 }
             }
@@ -603,7 +589,7 @@ public class OfferAcceptUpstreamTests
             => throw new NotSupportedException();
 
         public Task<OfferMutationResult> EditAsync(
-            string actingUserId, string requestId, string offerId, long? feeCents, int? etaMinutes, string? note, CancellationToken ct)
+            string actingUserId, string requestId, string offerId, long? feeCents, int? etaMinutes, string? note, int? maxEdits, CancellationToken ct)
             => throw new NotSupportedException("Edit is exercised in OfferMutationEndpointTests, not the accept path.");
 
         public Task<OfferMutationResult> RejectAsync(
