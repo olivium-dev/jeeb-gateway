@@ -261,33 +261,9 @@ public class RequestOffersController : ControllerBase
         // conversation id (chat was down at create) must NEVER turn the offer 201
         // into a 5xx — every failure is logged and swallowed, exactly like the
         // realtime fan-out below.
-        if (_flags.Chat && !string.IsNullOrWhiteSpace(request.ConversationId))
+        if (_flags.Chat)
         {
-            try
-            {
-                await _conversations.AddParticipantAsync(
-                    request.ConversationId,
-                    new AddJeebParticipantRequest
-                    {
-                        UserId = created.JeeberId,
-                        RoleInConvo = "jeeber_offerer",
-                    },
-                    ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "Failed to seat offering jeeber {JeeberId} on conversation {ConversationId} "
-                    + "for request {RequestId}; offer stays 201, the jeeber will read 403 until reconciled.",
-                    created.JeeberId, request.ConversationId, requestId);
-            }
-        }
-        else if (_flags.Chat)
-        {
-            _logger.LogInformation(
-                "Offer {OfferId} on request {RequestId}: no conversation id on the ledger row; "
-                + "skipping jeeber-seat (chat was unavailable at create, or auto-create is off).",
-                created.Id, requestId);
+            await SeatOfferingJeeberAsync(request, created, requestId, ct);
         }
 
         // Realtime fan-out is best-effort: the offer is already durable, so
@@ -342,6 +318,75 @@ public class RequestOffersController : ControllerBase
             }),
             _ => StatusCode(StatusCodes.Status500InternalServerError)
         };
+    }
+
+    /// <summary>
+    /// S08 (B) — seat the offering jeeber as a <c>jeeber_offerer</c> participant on the
+    /// request's conversation so they (and only they + the client) read the conversation
+    /// 200 while a true non-member still 403s. chat-service is the membership authority;
+    /// the gateway forwards (conversationId, jeeberId, role) and computes NO membership.
+    ///
+    /// <para>CONVERSATION-ID RESOLUTION (the H5/N3/N4/A6 fix). The conversation can be
+    /// created down two paths that do not both stamp the id onto the gateway's request
+    /// ledger row: (1) order-create auto-create
+    /// (<c>DurableRequestsStore.CreateBroadcastingConversationAsync</c>) writes
+    /// <c>request.ConversationId</c>; (2) the client's explicit
+    /// <c>POST /v1/chat/jeeb/conversations</c> creates the conversation in chat-service
+    /// keyed by <c>correlation_key == requestId</c> but does NOT write the id back onto
+    /// the request row. In case (2) <c>request.ConversationId</c> is empty at offer-submit,
+    /// so the previous guard skipped the seat and the seated-but-unseated jeeber 403'd.
+    /// We therefore fall back to resolving the conversation by its correlation key (==
+    /// requestId) via chat-service — the membership authority and the SOLE owner of the
+    /// conversation-by-correlation lookup — before seating. The gateway holds no
+    /// conversation state; it only composes the read+seat.</para>
+    ///
+    /// <para>DEGRADE-DON'T-FAIL: every failure (chat blip, no conversation yet, lookup
+    /// 404) is logged and swallowed — the offer is already durable and the 201 is
+    /// committed, so a seat failure must NEVER flip it to a 5xx. A jeeber that could not
+    /// be seated simply reads 403 until reconciled, exactly as before.</para>
+    /// </summary>
+    private async Task SeatOfferingJeeberAsync(
+        DeliveryRequest request, PendingOffer created, string requestId, CancellationToken ct)
+    {
+        try
+        {
+            // Prefer the id already stamped on the ledger row (order-create auto-create
+            // path); otherwise resolve it from chat-service by correlation key (==
+            // requestId) for the client-created-conversation path. chat-service owns the
+            // by-correlation lookup; the gateway does not derive the id itself.
+            var conversationId = request.ConversationId;
+            if (string.IsNullOrWhiteSpace(conversationId))
+            {
+                var conversation = await _conversations.GetConversationByCorrelationAsync(requestId, ct);
+                conversationId = conversation?.ConversationId;
+            }
+
+            if (string.IsNullOrWhiteSpace(conversationId))
+            {
+                _logger.LogInformation(
+                    "Offer {OfferId} on request {RequestId}: no conversation resolvable on the ledger row "
+                    + "or by correlation key; skipping jeeber-seat (chat was unavailable at create, "
+                    + "auto-create is off, and no conversation was created for the request yet).",
+                    created.Id, requestId);
+                return;
+            }
+
+            await _conversations.AddParticipantAsync(
+                conversationId,
+                new AddJeebParticipantRequest
+                {
+                    UserId = created.JeeberId,
+                    RoleInConvo = "jeeber_offerer",
+                },
+                ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to seat offering jeeber {JeeberId} on the conversation for request {RequestId}; "
+                + "offer stays 201, the jeeber will read 403 until reconciled.",
+                created.JeeberId, requestId);
+        }
     }
 
     private static OfferDto ToDto(PendingOffer o) => new()

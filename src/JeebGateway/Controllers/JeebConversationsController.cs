@@ -1,6 +1,5 @@
 using System;
 using System.Net;
-using System.Security.Claims;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -8,6 +7,7 @@ using JeebGateway.Auth.Capabilities;
 using JeebGateway.Conversations.Client;
 using JeebGateway.Conversations.Realtime;
 using JeebGateway.Services;
+using JeebGateway.Users;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -493,21 +493,22 @@ public sealed class JeebConversationsController : ControllerBase
             Status = StatusCodes.Status503ServiceUnavailable,
         });
 
+    /// <summary>
+    /// Resolve the bearer viewer identity for the conversation read/append/membership
+    /// paths. Delegates to the SHARED <see cref="UserIdentity.TryGetUserId"/> so the
+    /// viewer id forwarded on a READ is resolved by the IDENTICAL rule the offer-submit
+    /// SEAT path uses (<c>RequestOffersController</c> seats via the same helper). This
+    /// closes a latent identity-divergence gap: a UM-reissued role-switch token carries
+    /// the canonical GUID in the <c>sid</c> claim with <c>sub == email</c> (H-B5), so the
+    /// seat path (sid-first) and a sub-only read resolver would key the participant and
+    /// the viewer to DIFFERENT ids — seating the jeeber by GUID but reading as their
+    /// email, which would 403 a legitimately seated member. Resolving both through
+    /// <see cref="UserIdentity.TryGetUserId"/> (sid → sub → X-User-Id) guarantees the
+    /// seated participant id and the read viewer id can never diverge. For the suite's
+    /// HS256 tokens (sub == userId, no sid) the resolved value is unchanged.
+    /// </summary>
     private bool TryGetUserId(out string userId, out IActionResult problem)
-    {
-        var fromClaim = User?.FindFirstValue(ClaimTypes.NameIdentifier)
-                        ?? User?.FindFirstValue("sub");
-        if (!string.IsNullOrWhiteSpace(fromClaim))
-        {
-            userId = fromClaim;
-            problem = null!;
-            return true;
-        }
-
-        userId = string.Empty;
-        problem = Unauthorized();
-        return false;
-    }
+        => UserIdentity.TryGetUserId(HttpContext, out userId, out problem);
 }
 
 /// <summary>
