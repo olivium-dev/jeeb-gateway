@@ -114,23 +114,43 @@ public class OfferServiceClientContractTests
     public async Task AcceptAsync_Binds_Envelope_And_Sends_IdempotencyKey()
     {
         HttpRequestMessage? captured = null;
+        // JEB-1474: the accept envelope is ONLY the generic transition outcome —
+        // accepted offer id (+ canonical actor_id) and rejected sibling ids. No
+        // otp_code / chat_thread_id are emitted by the shared service anymore.
         var client = ClientCapturing(
             HttpStatusCode.OK,
             $$"""
-              {"request":{"id":"{{RequestId}}","status":"accepted","accepted_offer_id":"{{OfferId}}","chat_thread_id":"thread-1"},
-               "accepted_offer":{"id":"{{OfferId}}","jeeber_id":"{{UserId}}","fee_cents":1500,"eta_minutes":25,"status":"accepted"},
-               "rejected_offer_ids":["aaa","bbb"],"chat_thread_id":"thread-1","otp_code":"1234"}
+              {"request":{"id":"{{RequestId}}","status":"accepted","accepted_offer_id":"{{OfferId}}"},
+               "accepted_offer":{"id":"{{OfferId}}","actor_id":"{{UserId}}","fee_cents":1500,"eta_minutes":25,"status":"accepted"},
+               "rejected_offer_ids":["aaa","bbb"]}
               """,
             (req, _) => captured = req);
 
         var result = await client.AcceptAsync(UserId, RequestId, OfferId, "idem-key-12345678", CancellationToken.None);
 
         result.AcceptedOfferId.Should().Be(OfferId);
-        result.ChatThreadId.Should().Be("thread-1");
-        result.OtpCode.Should().Be("1234");
+        result.JeeberId.Should().Be(UserId);
         result.RejectedOfferIds.Should().BeEquivalentTo(new[] { "aaa", "bbb" });
         captured!.Headers.GetValues("Idempotency-Key").Should().ContainSingle()
             .Which.Should().Be("idem-key-12345678");
+    }
+
+    [Fact]
+    public async Task AcceptAsync_FallsBack_To_Deprecated_JeeberId_Alias()
+    {
+        // Backward-compat: until every offer row is backfilled, the deprecated
+        // jeeber_id alias may arrive without actor_id; the client must still
+        // resolve the winning actor.
+        var client = ClientReturning(
+            HttpStatusCode.OK,
+            $$"""
+              {"accepted_offer":{"id":"{{OfferId}}","jeeber_id":"{{UserId}}"},
+               "rejected_offer_ids":[]}
+              """);
+
+        var result = await client.AcceptAsync(UserId, RequestId, OfferId, "idem-key-12345678", CancellationToken.None);
+
+        result.JeeberId.Should().Be(UserId);
     }
 
     [Fact]
@@ -140,8 +160,8 @@ public class OfferServiceClientContractTests
         var client = ClientCapturing(
             HttpStatusCode.OK,
             $$"""
-              {"accepted_offer":{"id":"{{OfferId}}"},
-               "rejected_offer_ids":["aaa"],"chat_thread_id":"thread-7","otp_code":"9876"}
+              {"accepted_offer":{"id":"{{OfferId}}","actor_id":"{{UserId}}"},
+               "rejected_offer_ids":["aaa"]}
               """,
             (req, _) => captured = req);
 
@@ -151,8 +171,8 @@ public class OfferServiceClientContractTests
         result.Status.Should().Be(OfferAcceptStatus.Accepted);
         result.Envelope.Should().NotBeNull();
         result.Envelope!.AcceptedOfferId.Should().Be(OfferId);
-        result.Envelope.ChatThreadId.Should().Be("thread-7");
-        result.Envelope.OtpCode.Should().Be("9876");
+        result.Envelope.JeeberId.Should().Be(UserId);
+        result.Envelope.RejectedOfferIds.Should().BeEquivalentTo(new[] { "aaa" });
         captured!.Headers.GetValues("Idempotency-Key").Should().ContainSingle()
             .Which.Should().Be("idem-key-12345678");
         captured.RequestUri!.AbsolutePath.Should().Be(

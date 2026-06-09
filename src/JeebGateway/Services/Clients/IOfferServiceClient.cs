@@ -124,9 +124,11 @@ public interface IOfferServiceClient
     /// (200 accepted / 403 non-owner / 410 request_expired / 409 already_accepted
     /// or cap / 404 not_found); this method surfaces that status to the gateway
     /// controller so it can be forwarded verbatim. The gateway runs no auction
-    /// rules of its own — the offer-service is the sole owner of the saga (OTP
-    /// mint, chat-thread open, sibling rejection, request transition, SELECT FOR
-    /// UPDATE + optimistic_lock race-safety).
+    /// rules of its own — offer-service is the sole owner of the generic
+    /// single-winner transition (sibling rejection, request transition, SELECT FOR
+    /// UPDATE + optimistic_lock race-safety). JEB-1474: OTP mint / chat-thread /
+    /// notification fan-out are NOT part of that saga; the gateway orchestrates
+    /// them after a successful accept.
     /// </summary>
     Task<OfferAcceptResult> AcceptWithStatusAsync(
         string actingUserId,
@@ -137,14 +139,21 @@ public interface IOfferServiceClient
 
     /// <summary>
     /// S08 A3 — PUT /api/v1/requests/{requestId}/offers/{offerId} — a JEEBER edits
-    /// their own pending bid (fee / eta / note). offer-service owns the edit rule
-    /// (<c>Auction.edit_offer</c>, ≤ 2 edits, only the owning jeeber, only while
-    /// submitted/edited) and the <c>edited</c> status transition; the gateway runs
-    /// no edit rule of its own. The upstream route is REQUEST-scoped, so the gateway
-    /// resolves <paramref name="requestId"/> from its routing index and forwards the
-    /// actor as <c>x-user-id</c> (offer-service authorizes <c>offer.jeeber_id ==
-    /// actor</c>). Returns the status-preserving outcome so the controller forwards
-    /// the upstream status verbatim (200 edited / 403 not-owner / 404 not-found /
+    /// their own pending bid (fee / eta / note). offer-service owns the generic
+    /// edit transition (<c>Auction.edit_offer</c>, only the owning jeeber, only
+    /// while submitted/edited) and the <c>edited</c> status transition; the gateway
+    /// runs no edit rule of its own. The upstream route is REQUEST-scoped, so the
+    /// gateway resolves <paramref name="requestId"/> from its routing index and
+    /// forwards the actor as <c>x-user-id</c> (offer-service authorizes
+    /// <c>offer.actor_id == actor</c>).
+    ///
+    /// <para>JEB-1474: the literal edit cap is a Jeeb PRODUCT policy and no longer
+    /// lives in the shared service. The gateway supplies it per request via
+    /// <paramref name="maxEdits"/> (the Jeeb cap is 2); offer-service enforces the
+    /// supplied ceiling and returns 409/422 when it is exceeded.</para>
+    ///
+    /// Returns the status-preserving outcome so the controller forwards the
+    /// upstream status verbatim (200 edited / 403 not-owner / 404 not-found /
     /// 409 not-editable or edit-cap-reached). Only non-null fee/eta/note are sent —
     /// a partial edit (e.g. fee only, the A3 body) leaves the other fields untouched.
     /// </summary>
@@ -155,6 +164,7 @@ public interface IOfferServiceClient
         long? feeCents,
         int? etaMinutes,
         string? note,
+        int? maxEdits,
         CancellationToken ct);
 
     /// <summary>
@@ -253,25 +263,26 @@ public sealed class OfferWire
 }
 
 /// <summary>
-/// Minimal decode of the accept envelope. The gateway's accept path runs its
-/// own request-transition orchestration (BR-1 / BR-10, OTP, chat) so it only
-/// needs to know the accept succeeded and which offer won.
+/// Minimal decode of the accept envelope. JEB-1474: the shared offer-service
+/// accept returns ONLY the generic transition outcome — the accepted offer id
+/// and the rejected sibling ids. OTP minting, chat-thread provisioning and
+/// notification fan-out are Jeeb-domain side effects the GATEWAY owns (via its
+/// own typed OTP/chat/notification clients in <c>OrchestrateAcceptedAsync</c>),
+/// so they are no longer read off this envelope.
 /// </summary>
 public sealed class OfferAcceptWire
 {
     public required string AcceptedOfferId { get; init; }
 
     /// <summary>
-    /// The winning jeeber's id, decoded from the accept envelope's
-    /// <c>accepted_offer.jeeber_id</c> when present. Lets the gateway surface the
-    /// awarded jeeber on the accept DTO (the acting user is the CLIENT, not the
-    /// jeeber, so it cannot be inferred from the caller). Null when the envelope
-    /// omits it.
+    /// The winning jeeber's id, decoded from the accept envelope's generic
+    /// <c>accepted_offer.actor_id</c> (falling back to the deprecated
+    /// <c>jeeber_id</c> alias) when present. Lets the gateway surface the awarded
+    /// jeeber on the accept DTO (the acting user is the CLIENT, not the jeeber, so
+    /// it cannot be inferred from the caller). Null when the envelope omits it.
     /// </summary>
     public string? JeeberId { get; init; }
 
-    public string? ChatThreadId { get; init; }
-    public string? OtpCode { get; init; }
     public IReadOnlyList<string> RejectedOfferIds { get; init; } = Array.Empty<string>();
     public bool Replayed { get; init; }
 }
@@ -310,8 +321,8 @@ public enum OfferAcceptStatus
 
 /// <summary>
 /// Status-preserving accept outcome. On <see cref="OfferAcceptStatus.Accepted"/>
-/// the <see cref="Envelope"/> carries the saga result (winning offer, OTP, chat
-/// thread, rejected siblings); for every negative status the
+/// the <see cref="Envelope"/> carries the generic transition result (winning
+/// offer id, rejected sibling ids); for every negative status the
 /// <see cref="UpstreamCode"/> carries the offer-service error code (when present)
 /// purely for logging / diagnostics.
 /// </summary>

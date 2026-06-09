@@ -16,9 +16,11 @@ namespace JeebGateway.Controllers;
 /// Client-facing offer acceptance endpoint. In the Jeeb auction a CLIENT creates a
 /// delivery request, JEEBERS submit offers (bids) on it, and the request-owning
 /// CLIENT accepts one jeeber's offer to award the delivery. Accepting is therefore
-/// a CLIENT action keyed on request ownership; the offer-service saga owns the
-/// race-safe single-winner transition, OTP mint, chat-thread open, and sibling
-/// rejection. The gateway forwards the CLIENT's identity to the request-scoped
+/// a CLIENT action keyed on request ownership; the offer-service accept owns ONLY
+/// the generic, product-agnostic transition (race-safe single-winner + sibling
+/// rejection), while the Jeeb-specific post-accept side effects (OTP mint,
+/// chat-thread open, delivery winner assignment, notification fan-out) are owned
+/// by the gateway. The gateway forwards the CLIENT's identity to the request-scoped
 /// offer-service accept route (whose guard authorizes <c>request.client_id ==
 /// actor</c>) and re-emits the upstream status verbatim.
 ///
@@ -35,6 +37,13 @@ public class OffersController : ControllerBase
 {
     /// <summary>BR-10: per-Jeeber maximum of concurrent active deliveries.</summary>
     public const int ActiveDeliveriesLimit = 2;
+
+    /// <summary>
+    /// JEB-1474 — the Jeeb offer edit cap. This is a PRODUCT policy owned by the
+    /// gateway, not the shared offer-service. It is forwarded as <c>max_edits</c>
+    /// so offer-service enforces the ceiling without hardcoding the literal "2".
+    /// </summary>
+    public const int OfferEditCap = 2;
 
     /// <summary>
     /// Mobile-app renders this verbatim in the error banner when the cap
@@ -106,11 +115,15 @@ public class OffersController : ControllerBase
 
         // Thin-BFF wire: when the offer ledger is the real offer-service, the
         // gateway does NOT re-run the auction. It forwards to the offer-service
-        // accept saga (which owns OTP mint, chat-thread open, sibling rejection,
-        // request transition, and SELECT FOR UPDATE + optimistic_lock
-        // race-safety) and re-emits the upstream status verbatim. The in-memory
-        // Get/Accept seam below (which throws NotSupportedException upstream) is
-        // never touched on this path.
+        // accept endpoint, which owns ONLY the generic transition (race-safe
+        // single-winner via SELECT FOR UPDATE + optimistic_lock, request
+        // transition, and sibling rejection) and returns just the accepted offer
+        // id + rejected sibling ids. The Jeeb-specific post-accept side effects —
+        // OTP mint, chat-thread open, delivery winner assignment, notification
+        // fan-out — are owned HERE in the gateway (see PostAcceptOrchestration),
+        // not in the shared service (JEB-1474). The gateway re-emits the upstream
+        // status verbatim. The in-memory Get/Accept seam below (which throws
+        // NotSupportedException upstream) is never touched on this path.
         if (_flags.Offer)
         {
             return await AcceptViaUpstreamAsync(offerId, actorId, ct);
@@ -275,7 +288,7 @@ public class OffersController : ControllerBase
         try
         {
             result = await _offerService.EditAsync(
-                actorId, requestId, offerId, feeCents, body.EtaMinutes, body.Note, ct);
+                actorId, requestId, offerId, feeCents, body.EtaMinutes, body.Note, OfferEditCap, ct);
         }
         catch (System.Exception ex)
         {
