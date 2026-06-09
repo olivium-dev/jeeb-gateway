@@ -444,14 +444,52 @@ public class OffersController : ControllerBase
         // (H6c) The durable delivery row already exists — it was seeded at create
         // (DurableRequestsStore.PersistSagaAsync) with deliveryId == requestId, so
         // GET /deliveries/{requestId}/otp resolves the gateway's local row off the
-        // SAME id the accept response surfaces ($.id). No accept-time delivery-row
-        // CREATE is needed (a second row would split the id), and we deliberately do
-        // NOT force a delivery-service status transition here: the canonical Go SM
-        // (Ordered → Picked → InTransit → AtDoor → Done) has no accept-time edge, and
-        // the handover-OTP surface is gated on AtDoor regardless — so an accept-time
-        // transition would be both invalid and useless. The winning jeeber is recorded
-        // on the gateway's request ledger (H6b above) which backs the delivery read.
+        // SAME id the accept response surfaces ($.id). We do NOT force a
+        // delivery-service status transition here: the canonical Go SM
+        // (Ordered → Picked → InTransit → AtDoor → Done) has no accept-time edge.
         //
+        // S07 N7 / BR-10 — ASSIGN THE WINNING JEEBER ONTO THE DELIVERY ROW. The seed
+        // row was created BEFORE any jeeber was known, so its jeeber_id is NULL and
+        // it does not yet count against the winner's active-delivery cap. Here we
+        // re-POST the SAME delivery id carrying jeeber_id = winningJeeberId; the
+        // idempotent /api/v1/deliveries upsert assigns the jeeber ONLY when the row is
+        // still unassigned (delivery-service guards `WHERE jeeber_id IS NULL`, never
+        // steals), so the accepted delivery now counts toward BR-10 and the NEXT
+        // accept of a 3rd offer for the same jeeber is short-circuited to 409 by the
+        // pre-forward cap above. The id/tier/pickup come from the synced ledger row
+        // (the same data the create-seed used). DEGRADE-DON'T-FAIL: a delivery-service
+        // blip here only means the cap can't see this delivery yet — it must never
+        // turn a committed accept into a 5xx, so every failure is logged and swallowed.
+        // No row read-back is asserted; this is a best-effort assignment mirror.
+        if (synced is not null && !string.IsNullOrWhiteSpace(synced.Id))
+        {
+            try
+            {
+                await _deliveryService.CreateDeliveryRowAsync(new CreateDeliveryRowUpstream
+                {
+                    Id = synced.Id,
+                    TenantId = _deliveryOptions.TenantId,
+                    ClientId = synced.ClientId,
+                    JeeberId = winningJeeberId,
+                    TierId = synced.TierId ?? string.Empty,
+                    PickupLat = synced.PickupLocation?.Lat ?? 0d,
+                    PickupLng = synced.PickupLocation?.Lng ?? 0d,
+                }, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Post-accept BR-10 delivery-assignment for request {RequestId} (jeeber {JeeberId}) failed; accept stays 200 — the delivery will not count toward the jeeber's active-delivery cap until reconciled.",
+                    requestId, winningJeeberId);
+            }
+        }
+        else
+        {
+            _logger.LogInformation(
+                "Post-accept BR-10 delivery-assignment for request {RequestId}: ledger row not synced locally; skipping the jeeber-assignment mirror (the offer-service accept still committed; cap visibility deferred).",
+                requestId);
+        }
+
         // NOTE (escalated, not a gateway bug): GET /deliveries/{id}/otp TRIGGERS a
         // handover OTP and is contractually 400 until status == at_door; it cannot
         // return 200 at the accepted state. The H6c "OTP 200 at accept" assertion is

@@ -396,6 +396,57 @@ public class OfferAcceptUpstreamTests
         fake.CallCount.Should().Be(1);
     }
 
+    // S07 N7 / BR-10 — the post-accept assignment mirror. A successful accept must
+    // assign the WINNING jeeber onto the delivery-service row (seeded unassigned at
+    // create time) so the delivery counts toward that jeeber's active-delivery cap;
+    // otherwise the count stays 0 and a 3rd accept is never short-circuited (the live
+    // N7 red). This is the precondition that makes "2 genuine accepts -> 2 deliveries
+    // -> 3rd accept 409" real rather than faked.
+    [Fact]
+    public async Task Accept_Assigns_Winning_Jeeber_Onto_Delivery_Row_For_BR10()
+    {
+        var delivery = new FakeDeliveryServiceClient { ActiveCount = 0 };
+        var fake = new FakeOfferServiceClient
+        {
+            Result = new OfferAcceptResult
+            {
+                Status = OfferAcceptStatus.Accepted,
+                Envelope = new OfferAcceptWire
+                {
+                    AcceptedOfferId = "offer-assign",
+                    JeeberId = "jeeber-assign-winner",
+                    ChatThreadId = "thread-assign",
+                    OtpCode = "4242",
+                    RejectedOfferIds = Array.Empty<string>()
+                }
+            }
+        };
+        using var factory = NewUpstreamFactory(fake, delivery);
+
+        // A real ledger row must exist for the post-accept orchestration to resolve
+        // the delivery id/client/tier/pickup it re-POSTs (the production + suite path).
+        var store = factory.Services.GetRequiredService<JeebGateway.Requests.IRequestsStore>();
+        var request = await store.CreateAsync(new JeebGateway.Requests.CreateRequestInput
+        {
+            ClientId = "client-assign",
+            Description = "BR-10 assignment mirror",
+            TierId = "standard",
+            PickupLocation = new JeebGateway.Requests.GeoPoint { Lat = 24.71, Lng = 46.67 }
+        }, CancellationToken.None);
+        SeedRouting(factory, offerId: "offer-assign", requestId: request.Id, jeeberId: "jeeber-assign-winner");
+
+        var resp = await ClientActor(factory, "client-assign")
+            .PostAsync("/offers/offer-assign/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        // The assignment mirror fired with the WINNING jeeber on the SAME delivery id.
+        delivery.CreateRowCallCount.Should().Be(1);
+        delivery.LastCreatedRow.Should().NotBeNull();
+        delivery.LastCreatedRow!.JeeberId.Should().Be("jeeber-assign-winner");
+        delivery.LastCreatedRow!.Id.Should().Be(request.Id);
+        delivery.LastCreatedRow!.ClientId.Should().Be("client-assign");
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
@@ -515,6 +566,11 @@ public class OfferAcceptUpstreamTests
         public Exception? Fault { get; init; }
         public string? LastCountedJeeberId { get; private set; }
 
+        // S07 N7 — capture the post-accept BR-10 delivery-assignment mirror so a test
+        // can assert the winning jeeber is written onto the delivery row.
+        public CreateDeliveryRowUpstream? LastCreatedRow { get; private set; }
+        public int CreateRowCallCount { get; private set; }
+
         public Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct)
         {
             LastCountedJeeberId = jeeberId;
@@ -529,7 +585,14 @@ public class OfferAcceptUpstreamTests
         public Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct)
             => throw new NotSupportedException();
         public Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct)
-            => throw new NotSupportedException();
+        {
+            // S07 N7 — the post-accept BR-10 assignment mirror calls this with the
+            // winning jeeber on the delivery row. Record it (idempotent upsert shape:
+            // echo the supplied id back) so a test can assert the assignment fired.
+            CreateRowCallCount++;
+            LastCreatedRow = body;
+            return Task.FromResult(new DeliveryRowUpstream { DeliveryId = body.Id });
+        }
         public Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct)
             => throw new NotSupportedException();
         public Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct)

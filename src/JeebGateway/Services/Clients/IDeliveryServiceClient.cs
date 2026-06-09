@@ -379,6 +379,19 @@ public sealed class CreateDeliveryRowUpstream
     [System.Text.Json.Serialization.JsonPropertyName("client_id")]
     public required string ClientId { get; init; }
 
+    /// <summary>
+    /// S07 N7 / BR-10 — the winning jeeber the accepted delivery is assigned to.
+    /// OPTIONAL: omitted (null) for the S06 matching-mirror seed (the row is
+    /// created unassigned at request time, before any jeeber is known) so that
+    /// path is byte-for-byte unchanged. Populated on the post-accept mirror so the
+    /// delivery counts against the jeeber's active-delivery cap. delivery-service
+    /// upserts it ONLY when the row is still unassigned (late-assignment, never
+    /// steals), so a re-POST of an already-assigned row is an idempotent no-op.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("jeeber_id")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? JeeberId { get; init; }
+
     [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
     public required string TierId { get; init; }
 
