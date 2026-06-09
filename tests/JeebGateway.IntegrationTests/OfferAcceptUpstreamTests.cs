@@ -294,10 +294,121 @@ public class OfferAcceptUpstreamTests
     }
 
     // -----------------------------------------------------------------
+    // S07 N7 / BR-10 — per-jeeber active-delivery cap (default 2).
+    //
+    // Accepting an offer assigns the delivery to the OFFER'S jeeber. If that jeeber
+    // already holds >= ActiveDeliveriesLimit ACTIVE deliveries (counted by
+    // delivery-service), the gateway must short-circuit to 409
+    // too-many-active-deliveries BEFORE forwarding the saga — so no third delivery
+    // is created. Below the cap the accept proceeds unchanged.
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task Accept_When_OfferJeeber_AtCap_Returns_409_Without_Forwarding_Saga()
+    {
+        // The offer's bidder (jeeber-busy) already holds 2 active deliveries.
+        var fake = new FakeOfferServiceClient
+        {
+            // Must NOT be consulted — BR-10 short-circuits before the saga call.
+            Result = new OfferAcceptResult { Status = OfferAcceptStatus.Accepted }
+        };
+        var delivery = new FakeDeliveryServiceClient { ActiveCount = 2 };
+        using var factory = NewUpstreamFactory(fake, delivery);
+        // Record the offer's bidder so the cap is checked against THAT jeeber.
+        SeedRouting(factory, offerId: "offer-cap", requestId: "req-cap", jeeberId: "jeeber-busy");
+
+        var resp = await ClientActor(factory, "client-cap")
+            .PostAsync("/offers/offer-cap/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/too-many-active-deliveries");
+        // The cap was checked against the OFFER'S jeeber (the bidder), not the actor.
+        delivery.LastCountedJeeberId.Should().Be("jeeber-busy");
+        // No third delivery: the saga was NEVER forwarded.
+        fake.CallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Accept_When_OfferJeeber_UnderCap_Forwards_Saga_And_Returns_200()
+    {
+        // The offer's bidder holds 1 active delivery — below the cap of 2 — so the
+        // accept proceeds exactly as before and forwards to the saga.
+        var fake = new FakeOfferServiceClient
+        {
+            Result = new OfferAcceptResult
+            {
+                Status = OfferAcceptStatus.Accepted,
+                Envelope = new OfferAcceptWire
+                {
+                    AcceptedOfferId = "offer-under",
+                    JeeberId = "jeeber-under",
+                    ChatThreadId = "thread-under",
+                    OtpCode = "9999",
+                    RejectedOfferIds = Array.Empty<string>()
+                }
+            }
+        };
+        var delivery = new FakeDeliveryServiceClient { ActiveCount = 1 };
+        using var factory = NewUpstreamFactory(fake, delivery);
+        SeedRouting(factory, offerId: "offer-under", requestId: "req-under", jeeberId: "jeeber-under");
+
+        var resp = await ClientActor(factory, "client-under")
+            .PostAsync("/offers/offer-under/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        delivery.LastCountedJeeberId.Should().Be("jeeber-under");
+        fake.CallCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Accept_When_DeliveryService_CountFaults_Degrades_To_UnderCap_And_Returns_200()
+    {
+        // Degrade-don't-fail: a delivery-service blip on the BR-10 count read must
+        // NOT turn an otherwise-valid accept into a 5xx (that would regress S01-S06
+        // happy accepts). The gateway logs and treats the jeeber as under cap.
+        var fake = new FakeOfferServiceClient
+        {
+            Result = new OfferAcceptResult
+            {
+                Status = OfferAcceptStatus.Accepted,
+                Envelope = new OfferAcceptWire
+                {
+                    AcceptedOfferId = "offer-blip",
+                    JeeberId = "jeeber-blip",
+                    ChatThreadId = "thread-blip",
+                    OtpCode = "1111",
+                    RejectedOfferIds = Array.Empty<string>()
+                }
+            }
+        };
+        var delivery = new FakeDeliveryServiceClient
+        {
+            Fault = new DeliveryActiveCountException(503, "service_unavailable")
+        };
+        using var factory = NewUpstreamFactory(fake, delivery);
+        SeedRouting(factory, offerId: "offer-blip", requestId: "req-blip", jeeberId: "jeeber-blip");
+
+        var resp = await ClientActor(factory, "client-blip")
+            .PostAsync("/offers/offer-blip/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        fake.CallCount.Should().Be(1);
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
     private static WebApplicationFactory<Program> NewUpstreamFactory(IOfferServiceClient fake)
+        => NewUpstreamFactory(fake, new FakeDeliveryServiceClient());
+
+    // S07 / BR-10: the accept path now reads the offer-jeeber's active-delivery
+    // count from delivery-service before forwarding. Stub IDeliveryServiceClient so
+    // the suite is deterministic and never dials a real upstream; the default fake
+    // reports 0 active (under cap) so every pre-BR-10 assertion is unaffected.
+    private static WebApplicationFactory<Program> NewUpstreamFactory(
+        IOfferServiceClient fake, IDeliveryServiceClient delivery)
         => new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
@@ -310,6 +421,8 @@ public class OfferAcceptUpstreamTests
                 {
                     services.RemoveAll<IOfferServiceClient>();
                     services.AddSingleton(fake);
+                    services.RemoveAll<IDeliveryServiceClient>();
+                    services.AddSingleton(delivery);
                 });
             });
 
@@ -385,6 +498,57 @@ public class OfferAcceptUpstreamTests
 
         public Task<OfferWithdrawResult> WithdrawAsync(
             string actingUserId, string requestId, string offerId, CancellationToken ct)
+            => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// S07 / BR-10 test double for delivery-service. Only
+    /// <see cref="CountActiveDeliveriesByJeeberAsync"/> is exercised on the accept
+    /// path; it returns <see cref="ActiveCount"/> (default 0 = under cap) or throws
+    /// <see cref="Fault"/> when set, so the gateway's cap enforcement and
+    /// degrade-don't-fail posture can be asserted deterministically. Every other
+    /// member throws — the accept path must not call them.
+    /// </summary>
+    private sealed class FakeDeliveryServiceClient : IDeliveryServiceClient
+    {
+        public int ActiveCount { get; init; }
+        public Exception? Fault { get; init; }
+        public string? LastCountedJeeberId { get; private set; }
+
+        public Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct)
+        {
+            LastCountedJeeberId = jeeberId;
+            if (Fault is not null) throw Fault;
+            return Task.FromResult(ActiveCount);
+        }
+
+        public Task<IReadOnlyList<JeebGateway.Tiers.DeliveryTierDto>> ListTiersAsync(CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<ShipmentsListDto> ListShipmentsAsync(string? orderId, string? stage, int? limit, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<DeliveryRequestUpstream> StatusTransitionAsync(string deliveryId, string status, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<DeliveryHandoverIssueResult> IssueHandoverOtpAsync(string deliveryId, string? codeHash, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(string deliveryId, bool success, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<DeliveryCancelResult> CancelDeliveryAsync(string deliveryId, DeliveryCancelUpstreamRequest body, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<JeeberAvailabilityUpstream> SetAvailabilityAsync(JeeberAvailabilityUpstreamRequest body, string jeeberId, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<JeeberAvailabilityUpstream?> GetAvailabilityAsync(string jeeberId, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<JeeberAvailabilityUpstream> HeartbeatAsync(string jeeberId, double lat, double lng, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct)
             => throw new NotSupportedException();
     }
 }

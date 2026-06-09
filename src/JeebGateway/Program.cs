@@ -554,6 +554,14 @@ builder.Services.AddScoped<JeebGateway.Services.ITechnicianReviewService, JeebGa
 builder.Services.Configure<UpstreamFeatureFlags>(
     builder.Configuration.GetSection(UpstreamFeatureFlags.SectionName));
 
+// S07 / BR-10 — delivery-service typed-client tunables (active-delivery cap).
+// Bound from the existing Services:Delivery block (which holds the upstream
+// BaseUrl) so the per-jeeber concurrent-active-delivery limit is config-driven;
+// defaults to 2 (OffersController.ActiveDeliveriesLimit) when unset, preserving
+// the historical BR-10 default with zero behaviour change.
+builder.Services.Configure<JeebGateway.Services.DeliveryClientOptions>(
+    builder.Configuration.GetSection(JeebGateway.Services.DeliveryClientOptions.SectionName));
+
 // S06 / ADR-HB-001 — heart-beat presence cutover flag (FeatureFlags:Heartbeat).
 // Bound here so AvailabilityController can resolve it via IOptions. Default false
 // in EVERY environment this round (heart-beat not yet deployed); while off the
