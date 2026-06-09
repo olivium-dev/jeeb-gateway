@@ -139,6 +139,51 @@ public class DeliveriesController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// GET /deliveries/{deliveryId} — single-read of one delivery (S15/S09/S13).
+    ///
+    /// Reads the gateway's state-machine mirror via
+    /// <see cref="IRequestsStore.GetAsync"/>. When
+    /// <c>FeatureFlags:UseUpstream:Delivery</c> is on the durable store already
+    /// reflects the canonical delivery-service row, so no extra upstream hop is
+    /// needed — the gateway stays a thin BFF that composes its own store (no
+    /// microservice→microservice coupling, no domain logic).
+    ///
+    /// Returns:
+    /// <list type="bullet">
+    ///   <item>200 + <see cref="DeliveryRequestDto"/> when the row exists.</item>
+    ///   <item>404 for an unknown id — this is the explicit fix for the S13 E5
+    ///     quirk where the prior read-by-id surface returned 500 for an unknown
+    ///     delivery. Unknown ⇒ 404, never 500.</item>
+    ///   <item>401 when no caller identity is present (auth fires pre-routing).</item>
+    /// </list>
+    ///
+    /// L2 §E coarse {client, jeeber} participation claim applies at the class
+    /// level; WHICH party may read which row stays STATE in the owning service
+    /// when the canonical path is enabled. The gateway does not re-implement
+    /// per-row ownership here — it surfaces the composed mirror.
+    /// </summary>
+    [HttpGet("{deliveryId}")]
+    [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetById(string deliveryId, CancellationToken ct)
+    {
+        using var activity = ActivitySource.StartActivity("get_delivery_by_id");
+        activity?.SetTag("delivery.id", deliveryId);
+
+        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+
+        var delivery = await _store.GetAsync(deliveryId, ct);
+        if (delivery is null)
+        {
+            // Unknown id is a clean 404 ProblemDetails, not a 500 (S13 E5 fix).
+            return NotFound();
+        }
+
+        return Ok(ToDto(delivery));
+    }
+
     [HttpPatch("{deliveryId}/status")]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
