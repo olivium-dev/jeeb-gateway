@@ -126,6 +126,57 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         return await DeserializeAsync<DeliveryRequestUpstream>(response, ct);
     }
 
+    public async Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
+        string deliveryId,
+        string to,
+        string partySource,
+        string actorId,
+        string actorRole,
+        CancellationToken ct)
+    {
+        // Canonical SM-1 surface: POST /api/v1/deliveries/{id}/transition with
+        // body { to, trigger } where `trigger` is the PARTY SOURCE. delivery-service
+        // derives the business trigger and validates the edge — the gateway never
+        // re-implements the SM. X-Actor-* carry the gateway-resolved identity the
+        // Go service's extractActor reads (it has no JWKS of its own).
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}/transition")
+        {
+            Content = JsonContent.Create(new CanonicalTransitionRequest(to, partySource), options: JsonOptions)
+        };
+        request.Headers.TryAddWithoutValidation("X-Actor-ID", actorId);
+        request.Headers.TryAddWithoutValidation("X-Actor-Role", actorRole);
+
+        using var response = await _http.SendAsync(request, ct);
+
+        if (response.IsSuccessStatusCode)
+        {
+            return await DeserializeAsync<DeliveryTransitionUpstream>(response, ct);
+        }
+
+        var problem = await TryReadTransitionProblemAsync(response, ct);
+        throw new DeliveryTransitionException(
+            (int)response.StatusCode,
+            problem?.Reason,
+            problem?.From,
+            problem?.To,
+            problem?.Trigger);
+    }
+
+    public async Task<DeliveryReadUpstream?> GetCanonicalDeliveryAsync(string deliveryId, CancellationToken ct)
+    {
+        using var response = await _http.GetAsync(
+            $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}", ct);
+
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+        response.EnsureSuccessStatusCode();
+        return await DeserializeAsync<DeliveryReadUpstream>(response, ct);
+    }
+
     public async Task<DeliveryHandoverIssueResult> IssueHandoverOtpAsync(string deliveryId, string? codeHash, CancellationToken ct)
     {
         // Frozen contract: POST /api/v1/deliveries/{id}/otp/issue
@@ -334,6 +385,38 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
             return null;
         }
     }
+
+    /// <summary>
+    /// Reads the typed <c>errorBody</c> off a non-2xx canonical-transition
+    /// response (<c>{ reason, from, to, trigger, detail }</c>), tolerating a
+    /// missing/non-JSON body (a proxy 5xx page) — returns null in that case.
+    /// </summary>
+    private static async Task<TransitionProblemBody?> TryReadTransitionProblemAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        if (response.Content.Headers.ContentLength is 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await response.Content.ReadFromJsonAsync<TransitionProblemBody>(JsonOptions, ct);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private sealed record CanonicalTransitionRequest(
+        [property: System.Text.Json.Serialization.JsonPropertyName("to")] string To,
+        [property: System.Text.Json.Serialization.JsonPropertyName("trigger")] string Trigger);
+
+    private sealed record TransitionProblemBody(
+        [property: System.Text.Json.Serialization.JsonPropertyName("reason")] string? Reason,
+        [property: System.Text.Json.Serialization.JsonPropertyName("from")] string? From,
+        [property: System.Text.Json.Serialization.JsonPropertyName("to")] string? To,
+        [property: System.Text.Json.Serialization.JsonPropertyName("trigger")] string? Trigger);
 
     private sealed record HandoverIssueRequest(
         [property: System.Text.Json.Serialization.JsonPropertyName("code_hash")] string? CodeHash);

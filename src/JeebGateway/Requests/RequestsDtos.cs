@@ -476,4 +476,20 @@ public class PatchStatusBody
     /// a missing or mismatched value rejects with 400.
     /// </summary>
     public string? Otp { get; set; }
+
+    /// <summary>
+    /// Canonical SM-1 (JEB-45) friendly trigger word — <c>pickup</c> / <c>depart</c>
+    /// / <c>arrive</c> / <c>admin_resolve</c>. Additive: only consulted on the
+    /// canonical path (FeatureFlags:UseUpstream:Delivery ON). The legacy in-memory
+    /// SM ignores it and continues to read <see cref="Status"/>.
+    /// </summary>
+    public string? Trigger { get; set; }
+
+    /// <summary>
+    /// Canonical SM-1 explicit target state — <c>Picked</c> / <c>InTransit</c> /
+    /// <c>AtDoor</c> / <c>Done</c> / <c>FailedNeedsEscalation</c>. Additive: only
+    /// consulted on the canonical path; takes precedence over
+    /// <see cref="Trigger"/> when both are present.
+    /// </summary>
+    public string? To { get; set; }
 }
