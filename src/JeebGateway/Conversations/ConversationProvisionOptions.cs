@@ -33,4 +33,15 @@ public sealed class ConversationProvisionOptions
     /// overridable only for tests.
     /// </summary>
     public string BroadcastingTag { get; init; } = "broadcasting";
+
+    /// <summary>
+    /// S07 H6d: the <c>tag</c>/<c>type</c> the gateway stamps on the channel when
+    /// an offer is accepted, so chat-service's <c>ChannelSummaryService.ResolvePhase</c>
+    /// can surface <c>phase: "accepted"</c> (the H6d assertion). MUST match the
+    /// marker chat-service reads once its ResolvePhase recognises an "accepted"
+    /// phase (a chat-service change tracked as a separate PR — today ResolvePhase
+    /// only recognises "broadcasting" and defaults everything else to "direct").
+    /// Stable literal; overridable only for tests.
+    /// </summary>
+    public string AcceptedTag { get; init; } = "accepted";
 }

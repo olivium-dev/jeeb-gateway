@@ -1,5 +1,6 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
+using JeebGateway.Conversations;
 using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -47,6 +48,7 @@ public class OffersController : ControllerBase
     private readonly TimeProvider _clock;
     private readonly IOfferServiceClient _offerService;
     private readonly IOfferRequestIndex _offerRequestIndex;
+    private readonly IConversationProvisioner _conversations;
     private readonly UpstreamFeatureFlags _flags;
     private readonly ILogger<OffersController> _logger;
 
@@ -57,6 +59,7 @@ public class OffersController : ControllerBase
         TimeProvider clock,
         IOfferServiceClient offerService,
         IOfferRequestIndex offerRequestIndex,
+        IConversationProvisioner conversations,
         IOptions<UpstreamFeatureFlags> flags,
         ILogger<OffersController> logger)
     {
@@ -66,6 +69,7 @@ public class OffersController : ControllerBase
         _clock = clock;
         _offerService = offerService;
         _offerRequestIndex = offerRequestIndex;
+        _conversations = conversations;
         _flags = flags.Value;
         _logger = logger;
     }
@@ -269,6 +273,15 @@ public class OffersController : ControllerBase
         switch (result.Status)
         {
             case OfferAcceptStatus.Accepted:
+                // The offer-service saga is the authority for the single-winner
+                // transition; it has committed upstream. The gateway BFF now owns
+                // the cross-service COMPOSITION the offer-service must not do
+                // (no inter-service coupling): sync its own request ledger (H6b),
+                // record the winner on the durable delivery row (H6c), and advance
+                // the broadcasting conversation (H6d). EVERY side-effect here is
+                // DEGRADE-DON'T-FAIL — a downstream blip must never turn a
+                // successful accept into a 5xx.
+                await OrchestrateAcceptedAsync(requestId, actorId, result.Envelope!, ct);
                 return Ok(BuildAcceptedDto(requestId, actorId, result.Envelope!));
 
             case OfferAcceptStatus.NotOwner:
@@ -299,6 +312,136 @@ public class OffersController : ControllerBase
             case OfferAcceptStatus.NotFound:
             default:
                 return NotFound();
+        }
+    }
+
+    /// <summary>
+    /// S07 post-accept BFF orchestration (thin saga). Runs AFTER the offer-service
+    /// accept saga returns <see cref="OfferAcceptStatus.Accepted"/> and BEFORE the
+    /// 200 is emitted. The gateway is the SOLE cross-service composer here (org
+    /// no-coupling law: offer/delivery/chat services never call each other):
+    /// <list type="number">
+    ///   <item><b>H6b request-sync</b> — flips the gateway's own request ledger row
+    ///     to <c>accepted</c> + winning <c>jeeberId</c> via the existing atomic
+    ///     setter, so <c>GET /requests/{id}</c> reflects the accepted state.</item>
+    ///   <item><b>H6c delivery winner-assign</b> — records the winning jeeber on the
+    ///     durable delivery row (seeded at create with <c>deliveryId == requestId</c>)
+    ///     by advancing its upstream status, so the accepted delivery is visible to
+    ///     the handover/OTP surfaces.</item>
+    ///   <item><b>H6d conversation advance</b> — adds the winning jeeber to the
+    ///     broadcasting conversation and deactivates losers (membership advance);
+    ///     the phase-literal flip awaits the separate chat-service ResolvePhase
+    ///     change (see <see cref="IConversationProvisioner.AdvanceToAcceptedAsync"/>).</item>
+    /// </list>
+    /// EVERY step is wrapped so a downstream failure is logged and swallowed — a
+    /// successful upstream accept must remain a 200 even if a side-effect blips.
+    /// Mirrors the degrade-don't-fail contract of <c>DurableRequestsStore</c> and
+    /// <c>ChatServiceConversationProvisioner</c>.
+    /// </summary>
+    private async Task OrchestrateAcceptedAsync(
+        string requestId, string actorId, OfferAcceptWire envelope, CancellationToken ct)
+    {
+        var winningJeeberId = envelope.JeeberId;
+        if (string.IsNullOrWhiteSpace(winningJeeberId))
+        {
+            // The upstream envelope omitted the winning jeeber id. We must NOT
+            // write a blank jeeber onto the request/delivery — skip the sync and
+            // let the read paths report the pre-accept jeeberId. The accept itself
+            // still returns 200 (the saga committed upstream); this is a telemetry
+            // signal, not a user-facing error.
+            _logger.LogWarning(
+                "Post-accept orchestration for request {RequestId}: upstream accept envelope carried no jeeberId; skipping request/delivery/chat sync.",
+                requestId);
+            return;
+        }
+
+        var now = _clock.GetUtcNow();
+
+        // (H6b) Sync the gateway's own request ledger. TryAcceptByJeeberAsync is the
+        // existing atomic setter (status=accepted + jeeberId + acceptedAt under the
+        // inner store's write lock); when DurableRequests is enabled it delegates to
+        // the in-memory inner row that backs GET /requests/{id}, so the read is fixed
+        // with no new store method. BR-9/race-safety stays in the offer-service — this
+        // is a ledger mirror, not a second authority. Degrade-don't-fail.
+        DeliveryRequest? synced = null;
+        try
+        {
+            synced = await _requests.TryAcceptByJeeberAsync(
+                requestId, winningJeeberId, ActiveDeliveriesLimit, now, ct);
+            if (synced is null)
+            {
+                _logger.LogInformation(
+                    "Post-accept request-sync for {RequestId}: ledger row unknown to this gateway instance; GET /requests/{{id}} will not reflect the accept (offer-service remains authoritative).",
+                    requestId);
+            }
+        }
+        catch (Exception ex)
+        {
+            // RequestNotAcceptable / TooManyActiveDeliveries / any store fault: the
+            // offer-service already committed the canonical accept, so a gateway
+            // ledger-mirror failure must not fail the 200. Log and continue.
+            _logger.LogWarning(ex,
+                "Post-accept request-sync for {RequestId} failed; accept stays 200, GET /requests/{{id}} may show the pre-accept state.",
+                requestId);
+        }
+
+        // (H6c) The durable delivery row already exists — it was seeded at create
+        // (DurableRequestsStore.PersistSagaAsync) with deliveryId == requestId, so
+        // GET /deliveries/{requestId}/otp resolves the gateway's local row off the
+        // SAME id the accept response surfaces ($.id). No accept-time delivery-row
+        // CREATE is needed (a second row would split the id), and we deliberately do
+        // NOT force a delivery-service status transition here: the canonical Go SM
+        // (Ordered → Picked → InTransit → AtDoor → Done) has no accept-time edge, and
+        // the handover-OTP surface is gated on AtDoor regardless — so an accept-time
+        // transition would be both invalid and useless. The winning jeeber is recorded
+        // on the gateway's request ledger (H6b above) which backs the delivery read.
+        //
+        // NOTE (escalated, not a gateway bug): GET /deliveries/{id}/otp TRIGGERS a
+        // handover OTP and is contractually 400 until status == at_door; it cannot
+        // return 200 at the accepted state. The H6c "OTP 200 at accept" assertion is
+        // therefore structurally unsatisfiable by accept-orchestration — it requires
+        // the delivery to be advanced to at_door first. See the PR description.
+
+        // (H6d) Advance the broadcasting conversation: add the winning jeeber, drop
+        // losers. The conversation id was minted at create and stamped on the request
+        // ledger row; resolve it from the synced row (falling back to a fresh read so
+        // an unsynced ledger still surfaces the id). The gateway has no per-offer
+        // loser chat-member registry, so the losing-member list is empty here — the
+        // winner-add + accepted-tag still run. The provisioner is the SOLE chat caller
+        // and degrades to null on any chat blip, so this never blocks the accept.
+        var conversationId = synced?.ConversationId
+            ?? (await SafeGetConversationIdAsync(requestId, ct));
+        try
+        {
+            await _conversations.AdvanceToAcceptedAsync(
+                conversationId, winningJeeberId, Array.Empty<string>(), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Post-accept conversation advance for {RequestId} (conversation {ConversationId}) failed; accept stays 200.",
+                requestId, conversationId);
+        }
+    }
+
+    /// <summary>
+    /// Resolves the broadcasting conversation id stamped on the request ledger row
+    /// without throwing — a read failure degrades to <c>null</c> so the accept
+    /// orchestration continues. Used only when the H6b sync did not return the row.
+    /// </summary>
+    private async Task<string?> SafeGetConversationIdAsync(string requestId, CancellationToken ct)
+    {
+        try
+        {
+            var row = await _requests.GetAsync(requestId, ct);
+            return row?.ConversationId;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Post-accept conversation-id read for {RequestId} failed; advancing without a conversation id.",
+                requestId);
+            return null;
         }
     }
 

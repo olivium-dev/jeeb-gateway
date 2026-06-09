@@ -127,4 +127,110 @@ public sealed class ChatServiceConversationProvisioner : IConversationProvisione
             return null;
         }
     }
+
+    /// <inheritdoc />
+    public async Task<string?> AdvanceToAcceptedAsync(
+        string? conversationId,
+        string winningJeeberId,
+        IReadOnlyList<string> losingMemberIds,
+        CancellationToken ct)
+    {
+        if (!_options.Enabled) return null;
+
+        // No broadcasting conversation was provisioned for this order (chat was
+        // down at create, or ConversationAutoCreate was off then). Nothing to
+        // advance — degrade silently. The accept itself is unaffected.
+        if (string.IsNullOrWhiteSpace(conversationId)) return null;
+
+        try
+        {
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var chat = scope.ServiceProvider.GetRequiredService<ServiceChatClient>();
+
+            // (1) Mint the WINNING jeeber as a chat member. chat-service mints the
+            //     member id (MemberService.CreateAsync → response.ID); the client
+            //     cannot supply it — same constraint as the client member at
+            //     create. Carry the user-management jeeber id on Name/Nickname for
+            //     correlation. Tag the member 'accepted' so a future chat-service
+            //     ResolvePhase can attribute the winner role.
+            var memberResponse = await chat.MembersPOST2Async(new CreateMemberRequest
+            {
+                Name = winningJeeberId,
+                Nickname = winningJeeberId,
+                Type = "jeeber",
+                Tag = _options.AcceptedTag,
+            }, ct);
+
+            var winnerMemberId = memberResponse?.Id;
+            if (string.IsNullOrWhiteSpace(winnerMemberId))
+            {
+                _logger.LogWarning(
+                    "Accept-advance for conversation {ConversationId} could not register a chat member for winning jeeber {JeeberId}; conversation left in broadcasting phase.",
+                    conversationId, winningJeeberId);
+                return null;
+            }
+
+            // (2) Add the minted winning-jeeber member to the channel so the
+            //     accepted conversation has client + winning jeeber as active
+            //     participants (POST /api/channels/{id}/members). Best-effort:
+            //     if chat rejects the add we still attempted loser-removal below.
+            try
+            {
+                await chat.MembersPOSTAsync(conversationId, new AddChannelMembersRequest
+                {
+                    ChannelId = conversationId,
+                    MemberId = winnerMemberId,
+                }, ct);
+            }
+            catch (Exception addEx)
+            {
+                _logger.LogWarning(addEx,
+                    "Accept-advance: adding winning jeeber member {MemberId} to channel {ConversationId} failed; continuing (degrade-don't-fail).",
+                    winnerMemberId, conversationId);
+            }
+
+            // (3) Deactivate each losing offerer's chat member id
+            //     (PATCH /api/members/{id}/deactivate) so the auction losers drop
+            //     out while history is retained. There is NO channel-member 'pop'
+            //     verb in the generated client; member-deactivate is the supported
+            //     loser-removal verb. Each is independent + best-effort.
+            foreach (var loserMemberId in losingMemberIds)
+            {
+                if (string.IsNullOrWhiteSpace(loserMemberId)) continue;
+                try
+                {
+                    await chat.Deactivate2Async(loserMemberId, ct);
+                }
+                catch (Exception deactivateEx)
+                {
+                    _logger.LogWarning(deactivateEx,
+                        "Accept-advance: deactivating losing chat member {MemberId} on channel {ConversationId} failed; continuing.",
+                        loserMemberId, conversationId);
+                }
+            }
+
+            // PHASE NOTE (H6d): flipping the channel's phase to 'accepted' so
+            // GET /api/Chat/channels/{id}/summary reports phase="accepted"
+            // requires BOTH (a) a chat-service ResolvePhase change to recognise an
+            // 'accepted' Tag/Type marker (today it only recognises "broadcasting"
+            // and defaults everything else to "direct") AND (b) a chat-service
+            // channel-advance endpoint to UPDATE the channel Tag/Type — neither
+            // exists in the generated client today. That is a separate chat-service
+            // PR + NSwag regen. This gateway method therefore advances the
+            // MEMBERSHIP (winner added, losers deactivated); the phase literal flip
+            // lands when the chat-service change ships. The accept is never blocked
+            // by this gap.
+            return winnerMemberId;
+        }
+        catch (Exception ex)
+        {
+            // A chat-service outage must NEVER turn a successful offer accept into
+            // a 5xx. Degrade: the conversation is left in its prior phase and the
+            // accept still returns 200. Mirrors the create-path contract.
+            _logger.LogWarning(ex,
+                "Accept-advance for conversation {ConversationId} unavailable; accept succeeds, conversation phase unchanged.",
+                conversationId);
+            return null;
+        }
+    }
 }
