@@ -35,6 +35,50 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         _factory = factory;
     }
 
+    // -------- GET /deliveries/{id} single-read (S15/S09/S13) ------------------
+    //
+    // The single-read is the one genuinely-missing gateway route in the
+    // delivery-lifecycle keystone. It reads the gateway SM mirror via
+    // IRequestsStore.GetAsync and must return 200+body for a known row, 404
+    // (NOT 500 — the S13 E5 fix) for an unknown id, and 401 with no identity.
+
+    [Fact]
+    public async Task GetById_KnownDelivery_Returns200WithBody()
+    {
+        var seed = await SeedAsync(initialStatus: RequestStatus.Accepted);
+        var http = AuthClient(seed.JeeberId);
+
+        var resp = await http.GetAsync($"/deliveries/{seed.Id}");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var dto = await resp.Content.ReadFromJsonAsync<DeliveryDto>();
+        dto!.Id.Should().Be(seed.Id);
+        dto.ClientId.Should().Be(seed.ClientId);
+        dto.Status.Should().Be(RequestStatus.Accepted);
+        dto.JeeberId.Should().Be(seed.JeeberId);
+    }
+
+    [Fact]
+    public async Task GetById_UnknownDelivery_Returns404_NotFound_NotServerError()
+    {
+        var http = AuthClient("jeeber-404");
+
+        // S13 E5: an unknown id MUST surface as a clean 404, never a 500.
+        var resp = await http.GetAsync($"/deliveries/unknown-{Guid.NewGuid()}");
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        ((int)resp.StatusCode).Should().BeLessThan(500, "unknown id is a 404, never a server error (S13 E5)");
+    }
+
+    [Fact]
+    public async Task GetById_NoIdentity_Returns401()
+    {
+        var seed = await SeedAsync();
+        var anon = _factory.CreateClient();
+
+        var resp = await anon.GetAsync($"/deliveries/{seed.Id}");
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
     // -------- happy path: full chain ------------------------------------------
 
     [Fact]
