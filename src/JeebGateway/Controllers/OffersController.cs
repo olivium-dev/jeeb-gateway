@@ -555,7 +555,15 @@ public class OffersController : ControllerBase
         {
             Id = requestId,
             ClientId = actorId,
-            Status = "accepted",
+            // Canonical-vocab fix (JEB-45): when the delivery kill-switch is ON,
+            // delivery-service owns the SM and the just-accepted row lives at the
+            // canonical entry state 'Ordered' (the SM has no accept-time edge — the
+            // jeeber-tap → Picked transition is the first move). Surfacing the
+            // hardcoded legacy literal "accepted" here is what made S15 SETUP-6 /
+            // S09 SETUP-7 read "accepted" where they expect "Ordered". When the flag
+            // is OFF the gateway runs its legacy linear snake_case SM, whose
+            // post-accept state IS "accepted" — so the legacy literal is preserved.
+            Status = _flags.Delivery ? CanonicalDeliveryVocab.Ordered : RequestStatus.Accepted,
             Description = string.Empty,
             PickupAddress = null,
             DropoffAddress = null,

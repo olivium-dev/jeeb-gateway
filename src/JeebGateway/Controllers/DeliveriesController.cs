@@ -174,6 +174,41 @@ public class DeliveriesController : ControllerBase
 
         if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
 
+        // ---- Canonical read-through (FeatureFlags:UseUpstream:Delivery) ----------
+        // delivery-service owns the canonical row + its SM-1 status vocab
+        // (Ordered/Picked/InTransit/AtDoor/Done). The gateway reads it through so
+        // the surfaced $.status is canonical, not the gateway's legacy snake_case
+        // mirror. Unknown id ⇒ 404 (NOT 500 — preserves the S13 E5 contract). A
+        // transport blip degrades to the local mirror so a read never hard-fails.
+        if (_flags.CurrentValue.Delivery)
+        {
+            try
+            {
+                var canonical = await _deliveryClient.GetCanonicalDeliveryAsync(deliveryId, ct);
+                if (canonical is null)
+                {
+                    return NotFound();
+                }
+                return Ok(new DeliveryRequestDto
+                {
+                    Id = canonical.DeliveryId,
+                    ClientId = canonical.ClientId ?? string.Empty,
+                    Status = canonical.Status,
+                    Description = string.Empty,
+                    TierId = canonical.TierId,
+                    JeeberId = canonical.JeeberId,
+                    CreatedAt = canonical.CreatedAt
+                });
+            }
+            catch (HttpRequestException hre)
+            {
+                _log.LogWarning(hre,
+                    "Canonical delivery read-through failed for {DeliveryId}; falling back to the local mirror.",
+                    deliveryId);
+                // fall through to the local mirror below
+            }
+        }
+
         var delivery = await _store.GetAsync(deliveryId, ct);
         if (delivery is null)
         {
@@ -194,7 +229,21 @@ public class DeliveriesController : ControllerBase
         [FromBody] PatchStatusBody? body,
         CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
+
+        // ---- Canonical SM-1 path (FeatureFlags:UseUpstream:Delivery) -------------
+        // delivery-service owns the state machine. The gateway accepts the canonical
+        // request body (the suite drives {trigger:"pickup"}, {to:"Picked"}, and the
+        // legacy {status:"in_transit"} alias), maps it onto the canonical
+        // POST /api/v1/deliveries/{id}/transition contract, and forwards verbatim —
+        // returning the upstream canonical status (Ordered/Picked/InTransit/AtDoor/
+        // Done). The legacy-enum DeliveryStateMachine guard is NOT consulted here:
+        // an illegal edge is rejected by delivery-service with a typed 422, not by
+        // the gateway's pre-JEB-1433 linear snake_case SM.
+        if (_flags.CurrentValue.Delivery)
+        {
+            return await PatchStatusViaDeliveryServiceAsync(deliveryId, body, callerId, ct);
+        }
 
         if (body is null || string.IsNullOrWhiteSpace(body.Status))
         {
@@ -274,6 +323,154 @@ public class DeliveriesController : ControllerBase
                 return Problem(
                     title: "Unhandled transition outcome.",
                     statusCode: StatusCodes.Status500InternalServerError);
+        }
+    }
+
+    /// <summary>
+    /// Canonical SM-1 transition path (FeatureFlags:UseUpstream:Delivery ON).
+    /// Resolves the canonical target state from the request body (explicit
+    /// <c>to</c>, friendly <c>trigger</c> word, or legacy <c>status</c> alias),
+    /// derives the party source from the caller role, and forwards to
+    /// delivery-service's <c>POST /api/v1/deliveries/{id}/transition</c>. The
+    /// upstream verdict is surfaced verbatim:
+    /// <list type="bullet">
+    ///   <item>200 + the canonical status returned by delivery-service;</item>
+    ///   <item>422 <c>transition_not_allowed</c> / <c>otp_required</c> with the
+    ///     typed from/to/trigger extension fields;</item>
+    ///   <item>403 wrong-party, 404 unknown, 400 malformed — mapped 1:1.</item>
+    /// </list>
+    /// The gateway does NOT re-validate the edge — delivery-service owns the SM.
+    /// </summary>
+    private async Task<IActionResult> PatchStatusViaDeliveryServiceAsync(
+        string deliveryId,
+        PatchStatusBody? body,
+        string callerId,
+        CancellationToken ct)
+    {
+        if (body is null || !CanonicalDeliveryVocab.TryResolveTarget(body, out var canonicalTo))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "A canonical target is required (provide one of: to, trigger, status).",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/invalid-transition"
+            });
+        }
+
+        var partySource = CanonicalDeliveryVocab.PartySourceFor(HttpContext);
+        var actorRole = CanonicalDeliveryVocab.ActorRoleFor(HttpContext);
+
+        try
+        {
+            var upstream = await _deliveryClient.CanonicalTransitionAsync(
+                deliveryId, canonicalTo, partySource, callerId, actorRole, ct);
+
+            // Best-effort mirror so a subsequent GET (legacy fall-through, or a
+            // replica that has not read-through yet) is not stale. delivery-service
+            // is the canonical writer — this never fails the 200.
+            try
+            {
+                await _store.SetStatusAsync(deliveryId, upstream.Status, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "Canonical transition mirror failed for delivery {DeliveryId} (status {Status}); upstream write is authoritative.",
+                    deliveryId, upstream.Status);
+            }
+
+            // Surface the canonical row verbatim (status = upstream canonical vocab).
+            return Ok(new DeliveryRequestDto
+            {
+                Id = upstream.DeliveryId,
+                ClientId = string.Empty,
+                Status = upstream.Status,
+                Description = string.Empty,
+                CreatedAt = default,
+                AcceptedAt = upstream.TransitionedAt
+            });
+        }
+        catch (DeliveryTransitionException dte)
+        {
+            return MapTransitionException(dte, deliveryId);
+        }
+        catch (HttpRequestException hre)
+        {
+            _log.LogError(hre,
+                "Canonical transition upstream network failure for delivery {DeliveryId}.",
+                deliveryId);
+            return Problem(
+                title: "Delivery service unavailable.",
+                detail: "Unable to reach delivery-service to apply the transition.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+    }
+
+    /// <summary>
+    /// Maps a <see cref="DeliveryTransitionException"/> (a non-2xx from the
+    /// canonical SM-1 transition endpoint) onto the gateway's RFC 7807 surface,
+    /// echoing the typed from/to/trigger extension fields. The gateway forwards
+    /// the upstream verdict; it does not re-interpret it.
+    /// </summary>
+    private IActionResult MapTransitionException(DeliveryTransitionException dte, string deliveryId)
+    {
+        switch (dte.StatusCode)
+        {
+            case StatusCodes.Status404NotFound:
+                return NotFound();
+
+            case StatusCodes.Status403Forbidden:
+                return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
+                {
+                    Title = "You are not a party to this delivery.",
+                    Detail = dte.Reason,
+                    Status = StatusCodes.Status403Forbidden,
+                    Type = "https://jeeb.dev/errors/wrong-party"
+                });
+
+            case StatusCodes.Status422UnprocessableEntity:
+            {
+                // transition_not_allowed | otp_required — surface the typed body.
+                var isOtp = string.Equals(dte.Reason, "otp_required", StringComparison.Ordinal);
+                var problem = new ProblemDetails
+                {
+                    Title = isOtp
+                        ? "OTP is required to complete this transition."
+                        : "Invalid status transition.",
+                    Detail = dte.Reason,
+                    Status = StatusCodes.Status422UnprocessableEntity,
+                    Type = isOtp
+                        ? "https://jeeb.dev/errors/otp-required"
+                        : "https://jeeb.dev/errors/transition-not-allowed"
+                };
+                if (dte.Reason is { } reason) problem.Extensions["reason"] = reason;
+                if (dte.From is { } from) problem.Extensions["from"] = from;
+                if (dte.To is { } to) problem.Extensions["to"] = to;
+                if (dte.Trigger is { } trig) problem.Extensions["trigger"] = trig;
+                return new ObjectResult(problem)
+                {
+                    StatusCode = StatusCodes.Status422UnprocessableEntity,
+                    ContentTypes = { "application/problem+json" }
+                };
+            }
+
+            case StatusCodes.Status400BadRequest:
+                return BadRequest(new ProblemDetails
+                {
+                    Title = "Invalid status transition.",
+                    Detail = dte.Reason,
+                    Status = StatusCodes.Status400BadRequest,
+                    Type = "https://jeeb.dev/errors/invalid-transition"
+                });
+
+            default:
+                _log.LogError(
+                    "Canonical transition unexpected delivery-service status {UpstreamStatus} for delivery {DeliveryId}.",
+                    dte.StatusCode, deliveryId);
+                return Problem(
+                    title: "Delivery transition failed.",
+                    detail: "delivery-service returned an unexpected status.",
+                    statusCode: StatusCodes.Status502BadGateway);
         }
     }
 

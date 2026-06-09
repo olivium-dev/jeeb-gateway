@@ -1048,6 +1048,47 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
             });
         }
 
+        // ---- Canonical SM-1 transition path (flag-on) capture/config ----
+        public List<(string DeliveryId, string To, string PartySource, string ActorId, string ActorRole)> CanonicalTransitionCalls { get; } = new();
+
+        /// <summary>When set, CanonicalTransitionAsync throws this instead of 200.</summary>
+        public DeliveryTransitionException? TransitionThrows { get; set; }
+
+        /// <summary>Status returned on a 200 transition; defaults to the requested target.</summary>
+        public string? TransitionReturnsStatus { get; set; }
+
+        /// <summary>When set, GetCanonicalDeliveryAsync returns this (null ⇒ 404).</summary>
+        public DeliveryReadUpstream? CanonicalReadReturns { get; set; }
+        public bool CanonicalReadReturnsNull { get; set; }
+        public List<string> CanonicalReadCalls { get; } = new();
+
+        public Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
+            string deliveryId, string to, string partySource, string actorId, string actorRole, CancellationToken ct)
+        {
+            CanonicalTransitionCalls.Add((deliveryId, to, partySource, actorId, actorRole));
+            if (TransitionThrows is not null) throw TransitionThrows;
+            return Task.FromResult(new DeliveryTransitionUpstream
+            {
+                DeliveryId     = deliveryId,
+                Status         = TransitionReturnsStatus ?? to,
+                TransitionId   = Guid.NewGuid().ToString(),
+                TransitionedAt = DateTimeOffset.UtcNow
+            });
+        }
+
+        public Task<DeliveryReadUpstream?> GetCanonicalDeliveryAsync(string deliveryId, CancellationToken ct)
+        {
+            CanonicalReadCalls.Add(deliveryId);
+            if (CanonicalReadReturnsNull) return Task.FromResult<DeliveryReadUpstream?>(null);
+            return Task.FromResult<DeliveryReadUpstream?>(CanonicalReadReturns ?? new DeliveryReadUpstream
+            {
+                DeliveryId = deliveryId,
+                ClientId   = "client-id",
+                Status     = "Ordered",
+                CreatedAt  = DateTimeOffset.UtcNow
+            });
+        }
+
         // The remaining methods are not exercised by the OTP tests; throw
         // explicitly so an accidental call is loud.
         public Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct) => throw new NotSupportedException();

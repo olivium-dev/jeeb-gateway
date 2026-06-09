@@ -58,6 +58,46 @@ public interface IDeliveryServiceClient
     Task<DeliveryRequestUpstream> StatusTransitionAsync(string deliveryId, string status, CancellationToken ct);
 
     /// <summary>
+    /// Canonical SM-1 transition (JEB-45 / T-BE-009, design §2.2). Forwards to
+    /// the delivery-service RESTful surface <c>POST /api/v1/deliveries/{id}/transition</c>
+    /// with the body <c>{ to, trigger }</c> — where <c>trigger</c> is the PARTY
+    /// SOURCE (<c>jeeber|client|admin|system</c>), NOT the internal business
+    /// reason. delivery-service derives the business trigger via its own
+    /// <c>triggerForTarget(to, source)</c> map and validates the edge against the
+    /// delivery's actual current state, so the gateway never re-implements the SM.
+    ///
+    /// The <paramref name="actorId"/> / <paramref name="actorRole"/> are sent as
+    /// the <c>X-Actor-ID</c> / <c>X-Actor-Role</c> headers the service reads
+    /// (it has no JWKS of its own — the gateway is the JWT authority and forwards
+    /// the resolved identity).
+    /// </summary>
+    /// <returns><see cref="DeliveryTransitionUpstream"/> on 200 — the canonical
+    /// <c>status</c> (Ordered/Picked/InTransit/AtDoor/Done/…) + <c>transition_id</c>
+    /// + <c>transitioned_at</c>.</returns>
+    /// <exception cref="DeliveryTransitionException">
+    /// Thrown for any non-2xx (422 <c>transition_not_allowed</c>/<c>otp_required</c>,
+    /// 403 <c>wrong_party</c>, 404, 400) carrying the typed upstream reason so the
+    /// controller can surface it verbatim as RFC 7807 — the gateway forwards the
+    /// SM verdict, it does not author it.
+    /// </exception>
+    Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
+        string deliveryId,
+        string to,
+        string partySource,
+        string actorId,
+        string actorRole,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Canonical single-read read-through: <c>GET /api/v1/deliveries/{id}</c>
+    /// (JEB-45 design §2.2). Returns the canonical projection — its <c>status</c>
+    /// is the SM-1 vocab (Ordered/Picked/InTransit/AtDoor/Done) the suite asserts.
+    /// Read-only, no actor required (server-to-server, same cluster).
+    /// </summary>
+    /// <returns><see cref="DeliveryReadUpstream"/> on 200; <c>null</c> on 404.</returns>
+    Task<DeliveryReadUpstream?> GetCanonicalDeliveryAsync(string deliveryId, CancellationToken ct);
+
+    /// <summary>
     /// T-BE-019 (JEB-55): the durable AtDoor-gate half of the handover OTP.
     /// Calls the frozen delivery-service contract
     /// <c>POST /api/v1/deliveries/{id}/otp/issue</c>. delivery-service owns
@@ -606,6 +646,89 @@ public sealed class DeliveryHandoverException : Exception
         AttemptsRemaining = attemptsRemaining;
         EscalationId = escalationId;
         LockedAt = lockedAt;
+    }
+}
+
+/// <summary>
+/// 200 body of the canonical SM-1 transition
+/// <c>POST /api/v1/deliveries/{id}/transition</c> — delivery-service (Go) emits
+/// <b>snake_case</b> <c>{ delivery_id, status, transition_id, transitioned_at }</c>.
+/// The explicit <see cref="System.Text.Json.Serialization.JsonPropertyName"/>
+/// attributes scope snake_case binding to this DTO under the shared
+/// <c>JsonSerializerDefaults.Web</c> options without mutating the global policy.
+/// <see cref="Status"/> is the canonical vocab (Ordered/Picked/InTransit/AtDoor/Done).
+/// </summary>
+public sealed class DeliveryTransitionUpstream
+{
+    [System.Text.Json.Serialization.JsonPropertyName("delivery_id")]
+    public required string DeliveryId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("status")]
+    public required string Status { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("transition_id")]
+    public string? TransitionId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("transitioned_at")]
+    public DateTimeOffset? TransitionedAt { get; init; }
+}
+
+/// <summary>
+/// 200 body of the canonical single-read <c>GET /api/v1/deliveries/{id}</c>.
+/// delivery-service (Go) emits <b>snake_case</b>; only the fields the gateway
+/// projects onto its <c>DeliveryRequestDto</c> are bound here. <see cref="Status"/>
+/// is the canonical SM-1 vocab.
+/// </summary>
+public sealed class DeliveryReadUpstream
+{
+    [System.Text.Json.Serialization.JsonPropertyName("delivery_id")]
+    public required string DeliveryId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("client_id")]
+    public string? ClientId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("jeeber_id")]
+    public string? JeeberId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("status")]
+    public required string Status { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
+    public string? TierId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("created_at")]
+    public DateTimeOffset CreatedAt { get; init; }
+}
+
+/// <summary>
+/// A non-2xx outcome from the canonical SM-1 transition endpoint. The gateway is
+/// a thin BFF on the SM path: it does NOT re-validate the transition (the legacy
+/// <c>DeliveryStateMachine</c> is bypassed when the kill-switch is on) — it forwards
+/// the delivery-service verdict verbatim. Carries the typed reason/from/to/trigger
+/// from the upstream <c>errorBody</c> so the controller can render RFC 7807 +
+/// the canonical 422 extension fields without re-deriving anything.
+/// </summary>
+public sealed class DeliveryTransitionException : Exception
+{
+    public int StatusCode { get; }
+    public string? Reason { get; }
+    public string? From { get; }
+    public string? To { get; }
+    public string? Trigger { get; }
+
+    public DeliveryTransitionException(
+        int statusCode,
+        string? reason,
+        string? from = null,
+        string? to = null,
+        string? trigger = null)
+        : base($"delivery-service transition returned {statusCode} ({reason ?? "no reason"}).")
+    {
+        StatusCode = statusCode;
+        Reason = reason;
+        From = from;
+        To = to;
+        Trigger = trigger;
     }
 }
 
