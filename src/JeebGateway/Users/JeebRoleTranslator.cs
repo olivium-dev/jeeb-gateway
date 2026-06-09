@@ -85,3 +85,23 @@ public static class JeebRoleTranslator
     /// <summary>True when <paramref name="contractRole"/> is one of the two frozen Jeeb contract roles.</summary>
     public static bool IsContractRole(string? contractRole) => ToOpaque(contractRole) is not null;
 }
+
+/// <summary>
+/// JEB-1472 (AC3) — raised when an inbound Jeeb role that reaches the translation seam
+/// is NOT one of the frozen contract roles in <see cref="JeebRoleTranslator.ContractRoles"/>
+/// (<c>{client, jeeber}</c>). The gateway is the SOLE owner of this whitelist (the shared
+/// user-management service is product-agnostic), so a non-contract role must be rejected at
+/// the gateway boundary as <c>invalid_role</c> (RFC 7807 400) rather than forwarded verbatim.
+/// Callers map this to a 400 ProblemDetails (type <c>https://jeeb.dev/errors/invalid-role</c>).
+/// </summary>
+public sealed class InvalidContractRoleException : Exception
+{
+    /// <summary>The rejected, non-contract role value (echoed in the 400 detail).</summary>
+    public string ContractRole { get; }
+
+    public InvalidContractRoleException(string? contractRole)
+        : base($"Role '{contractRole}' is not a recognised Jeeb contract role.")
+    {
+        ContractRole = contractRole ?? string.Empty;
+    }
+}
