@@ -540,13 +540,13 @@ public sealed class AppendMessageBody
     public string? Subtype { get; set; }
 
     [JsonPropertyName("audience")]
-    public object? Audience { get; set; }
+    public System.Text.Json.JsonElement? Audience { get; set; }
 
     [JsonPropertyName("body")]
     public string? Body { get; set; }
 
     [JsonPropertyName("payload")]
-    public object? Payload { get; set; }
+    public System.Text.Json.JsonElement? Payload { get; set; }
 }
 
 /// <summary>

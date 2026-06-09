@@ -139,17 +139,30 @@ public sealed class AppendJeebMessageRequest
     [JsonProperty("subtype")]
     public string? Subtype { get; set; }
 
-    /// <summary>all | per-recipient set. Defaults applied by chat-service when omitted.</summary>
+    /// <summary>
+    /// all | per-recipient set. An OPEN shape the gateway carries verbatim (chat
+    /// owns its meaning). Typed as <see cref="System.Text.Json.JsonElement"/> and
+    /// marshalled by <see cref="RawJsonElementConverter"/> so the STJ-bound value
+    /// from the request body ("all" / a structured set) is written to chat-service
+    /// as raw JSON — never as the JsonElement struct shape (the H4 bug).
+    /// </summary>
     [JsonProperty("audience")]
-    public object? Audience { get; set; }
+    [JsonConverter(typeof(RawJsonElementConverter))]
+    public System.Text.Json.JsonElement? Audience { get; set; }
 
     /// <summary>Free-text body (text kind).</summary>
     [JsonProperty("body")]
     public string? Body { get; set; }
 
-    /// <summary>Round-tripped structured payload (structured kind).</summary>
+    /// <summary>
+    /// Round-tripped structured payload (structured kind). OPEN shape carried
+    /// verbatim — same JsonElement + <see cref="RawJsonElementConverter"/> treatment
+    /// as <see cref="Audience"/> so a structured payload survives the
+    /// STJ-bind → Newtonsoft-write hop intact.
+    /// </summary>
     [JsonProperty("payload")]
-    public object? Payload { get; set; }
+    [JsonConverter(typeof(RawJsonElementConverter))]
+    public System.Text.Json.JsonElement? Payload { get; set; }
 
     /// <summary>Author resolved from the bearer by the gateway — NEVER from caller body.</summary>
     [JsonProperty("author_id")]
@@ -183,13 +196,26 @@ public sealed class JeebMessageResponse
     [Stj.JsonPropertyName("author_id")]
     public string? AuthorId { get; set; }
 
+    /// <summary>
+    /// The audience chat-service stamped on THIS message — round-tripped verbatim.
+    /// <see cref="RawJsonElementConverter"/> reads chat-service's raw JSON (Newtonsoft
+    /// wire) into a <see cref="System.Text.Json.JsonElement"/>; the STJ response
+    /// serializer then emits it natively (e.g. <c>"all"</c>), so the append response
+    /// echoes the audience chat-service actually created — not a mangled JObject (H4).
+    /// </summary>
     [JsonProperty("audience")]
+    [JsonConverter(typeof(RawJsonElementConverter))]
     [Stj.JsonPropertyName("audience")]
-    public object? Audience { get; set; }
+    public System.Text.Json.JsonElement? Audience { get; set; }
 
+    /// <summary>
+    /// The structured payload chat-service stamped on THIS message — round-tripped
+    /// verbatim via <see cref="RawJsonElementConverter"/> (same as <see cref="Audience"/>).
+    /// </summary>
     [JsonProperty("payload")]
+    [JsonConverter(typeof(RawJsonElementConverter))]
     [Stj.JsonPropertyName("payload")]
-    public object? Payload { get; set; }
+    public System.Text.Json.JsonElement? Payload { get; set; }
 
     [JsonProperty("body")]
     [Stj.JsonPropertyName("body")]
