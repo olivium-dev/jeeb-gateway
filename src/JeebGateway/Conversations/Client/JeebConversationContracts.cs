@@ -33,19 +33,42 @@ namespace JeebGateway.Conversations.Client;
 /// </summary>
 public sealed class CreateJeebConversationRequest
 {
-    [JsonProperty("request_id")]
+    // chat-service's CreateConversationRequest is the canonical contract:
+    //   { correlation_key, owner_user_id, owner_role_in_convo?, phase? }
+    // The gateway translates client vocabulary (request_id / client_user_id) onto
+    // it on the wire. The C# property names stay request-shaped so the controller
+    // assignment is unchanged; only the JSON field names are the chat-service ones.
+    // correlation_key IS the idempotency authority (replay returns the same
+    // conversation_id, INV-3) — there is no separate idempotency_key field upstream.
+    [JsonProperty("correlation_key")]
     public string RequestId { get; set; } = string.Empty;
 
-    [JsonProperty("client_user_id")]
+    [JsonProperty("owner_user_id")]
     public string ClientUserId { get; set; } = string.Empty;
 
     /// <summary>
-    /// The Idempotency-Key forwarded verbatim from the caller (== request_id for
-    /// H1/A1). chat-service is the idempotency authority: a replay with the same
-    /// key returns the SAME conversation_id (INV-3) rather than creating a
-    /// duplicate. The gateway only forwards it; it holds no idempotency state.
+    /// The conversation owner's role. The H1 client-created conversation seeds the
+    /// owner as <c>client</c> (participants[0].role_in_convo == "client", INV-3).
     /// </summary>
-    [JsonProperty("idempotency_key")]
+    [JsonProperty("owner_role_in_convo")]
+    public string OwnerRoleInConvo { get; set; } = "client";
+
+    /// <summary>
+    /// Initial phase. H1 asserts the created conversation is in <c>broadcasting</c>
+    /// (offers are still arriving); chat-service advances it to <c>accepted</c> on
+    /// the post-accept membership flip (H7). Defaulted here so the gateway pins the
+    /// create-time phase rather than relying on a chat-service default.
+    /// </summary>
+    [JsonProperty("phase")]
+    public string Phase { get; set; } = "broadcasting";
+
+    /// <summary>
+    /// Forwarded Idempotency-Key (== request_id for H1/A1). NOT serialized onto the
+    /// chat-service wire (correlation_key is the idempotency authority); retained so
+    /// the controller can keep assigning it without a compile break. JsonIgnore keeps
+    /// it off the request body.
+    /// </summary>
+    [JsonIgnore]
     public string? IdempotencyKey { get; set; }
 }
 
