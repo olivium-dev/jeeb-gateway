@@ -1355,6 +1355,11 @@ builder.Services.AddHostedService<AutoOfflineSweeper>();
 // row reaches a terminal status.
 builder.Services.Configure<TrackingOptions>(builder.Configuration.GetSection(TrackingOptions.SectionName));
 builder.Services.AddSingleton<ILocationStore, InMemoryLocationStore>();
+// S09 (JEB-54): shared delivery-participant resolver backing the live-tracking
+// SSE alias, the delivery-scoped location ingest authz, and the settlement-intent
+// read. Stateless BFF composition over IRequestsStore + IDeliveryServiceClient —
+// honours the canonical-vs-mirror split (FeatureFlags:UseUpstream:Delivery).
+builder.Services.AddSingleton<IDeliveryParticipantResolver, DeliveryParticipantResolver>();
 
 // Real-time chat (T-backend-012) — REMOVED.
 // The jeeb-specific SignalR hub (/hubs/chat), ChatDispatcher, and in-memory

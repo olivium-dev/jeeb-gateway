@@ -1,5 +1,6 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Financials;
+using JeebGateway.Tracking;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 
@@ -30,15 +31,18 @@ public class SettlementsController : ControllerBase
 {
     private readonly ISettlementService _settlements;
     private readonly ISettlementStore _store;
+    private readonly IDeliveryParticipantResolver _participants;
     private readonly TimeProvider _clock;
 
     public SettlementsController(
         ISettlementService settlements,
         ISettlementStore store,
+        IDeliveryParticipantResolver participants,
         TimeProvider clock)
     {
         _settlements = settlements;
         _store = store;
+        _participants = participants;
         _clock = clock;
     }
 
@@ -166,6 +170,104 @@ public class SettlementsController : ControllerBase
         var receipt = ReceiptGenerator.Generate(stamped, _clock.GetUtcNow());
         return Ok(receipt);
     }
+
+    /// <summary>
+    /// GET /v1/deliveries/{id}/settlement (S09 H8 / JEB-54).
+    ///
+    /// The settlement-intent READ. Returns the open commission intent for a
+    /// delivery (idempotent on deliveryId — a repeat read never double-creates
+    /// and the duplicate verify after Done does NOT double-settle, A7/N11). S09
+    /// asserts only the enqueue + window-open; the fee math + ledger posting are
+    /// the S10 concern behind POST /deliveries/{id}/settle.
+    ///
+    /// <para>
+    /// Authorization mirrors the receipt read: the delivery parties (Client /
+    /// Jeeber) + admin may read. Party membership is resolved via the
+    /// delivery-service-backed <see cref="IDeliveryParticipantResolver"/> — the
+    /// authority for who is bound to the delivery — so a non-party gets 403 and
+    /// an unknown delivery gets 404. No cross-service DB read: the gateway
+    /// composes the delivery-service party verdict with its own settlement store.
+    /// </para>
+    /// </summary>
+    [HttpGet("/v1/deliveries/{deliveryId}/settlement")]
+    // ADR-005 L2 §E: the settlement intent is read by the delivery PARTIES — coarse
+    // cap delivery.participate {client, jeeber}. Exact party/admin membership is STATE,
+    // resolved in-action against delivery-service (same shape as the receipt read).
+    [RequireCapability(Capabilities.DeliveryParticipate)]
+    [ProducesResponseType(typeof(SettlementIntentResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetSettlementIntent(string deliveryId, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+
+        // A persisted settlement (the Jeeber already recorded the cash) is the
+        // authoritative party + state source — read it first so a settled
+        // delivery reflects the real row verbatim and the read is idempotent.
+        var settlement = await _settlements.GetByDeliveryAsync(deliveryId, ct);
+        if (settlement is not null)
+        {
+            var isClient = string.Equals(settlement.ClientId, userId, StringComparison.Ordinal);
+            var isJeeber = string.Equals(settlement.JeeberId, userId, StringComparison.Ordinal);
+            if (!isClient && !isJeeber && !UserIdentity.IsAdmin(HttpContext))
+            {
+                return Forbidden();
+            }
+
+            return Ok(new SettlementIntentResponse
+            {
+                DeliveryId = settlement.DeliveryId,
+                State = settlement.State,
+                Created = true,
+                SettlementId = settlement.Id,
+                Total = settlement.Total,
+                Currency = settlement.Currency,
+            });
+        }
+
+        // No persisted settlement yet — resolve the delivery to authorize the
+        // caller and to decide whether the commission window has opened. The
+        // intent is "open" (pending_settlement) once the delivery reaches the
+        // settle-able terminal state (Done / delivered); before that there is
+        // no intent to read.
+        var participants = await _participants.ResolveAsync(deliveryId, ct);
+        if (participants is null)
+        {
+            return NotFound();
+        }
+
+        if (!participants.IsParty(userId) && !UserIdentity.IsAdmin(HttpContext))
+        {
+            return Forbidden();
+        }
+
+        var windowOpen = IsSettleable(participants.Status);
+        return Ok(new SettlementIntentResponse
+        {
+            DeliveryId = participants.DeliveryId,
+            State = windowOpen ? SettlementState.PendingSettlement : "not_ready",
+            Created = windowOpen,
+        });
+    }
+
+    /// <summary>
+    /// True when the delivery has reached the handover-complete terminal state
+    /// against which a settlement may be recorded — the canonical <c>Done</c> or
+    /// the legacy mirror <c>delivered</c>/<c>rated</c>. The commission intent
+    /// window opens here (H8 enqueue assertion).
+    /// </summary>
+    private static bool IsSettleable(string status) =>
+        string.Equals(status, "Done", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(status, "delivered", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(status, "rated", StringComparison.OrdinalIgnoreCase);
+
+    private IActionResult Forbidden() => StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
+    {
+        Title = "You are not a party to this delivery.",
+        Status = StatusCodes.Status403Forbidden,
+        Type = "https://jeeb.dev/errors/settlement-not-a-party",
+    });
 
     private static SettleDeliveryResponse ToResponse(Settlement s) => new()
     {

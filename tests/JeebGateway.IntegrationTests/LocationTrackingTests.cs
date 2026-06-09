@@ -378,6 +378,11 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
         HttpClient http, string path, CancellationToken ct)
     {
         using var req = new HttpRequestMessage(HttpMethod.Get, path);
+        // S09 (JEB-54): the tracking route now content-negotiates — an explicit
+        // Accept: text/event-stream selects the SSE relay; any other Accept gets
+        // the one-shot JSON polyline body. The SSE clients these tests exercise
+        // declare the stream Accept, matching the live mobile subscription.
+        req.Headers.Add("Accept", "text/event-stream");
         var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         resp.EnsureSuccessStatusCode();
         resp.Content.Headers.ContentType!.MediaType.Should().Be("text/event-stream");
