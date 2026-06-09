@@ -211,6 +211,48 @@ public sealed class JeebMessageListResponse
 }
 
 /// <summary>
+/// S08 (B) — add-participant body for chat-service's
+/// <c>POST /api/conversations/{id}/participants</c> (AddParticipantAsync). The
+/// gateway seats the offer jeeber as a member when they submit an offer so the
+/// per-jeeber VisibilityFilter lets them read (200) and non-members 403.
+/// snake_case wire (chat-service contract); the gateway forwards verbatim.
+/// </summary>
+public sealed class AddJeebParticipantRequest
+{
+    [JsonProperty("user_id")]
+    public string UserId { get; set; } = string.Empty;
+
+    /// <summary>One of: client | jeeber_offerer | jeeber_winner. Offer-submit seats jeeber_offerer.</summary>
+    [JsonProperty("role_in_convo")]
+    public string RoleInConvo { get; set; } = "jeeber_offerer";
+}
+
+/// <summary>
+/// S08 (D) — phase-advance body for chat-service's
+/// <c>PATCH /api/conversations/{id}/phase</c> (AdvancePhaseAsync). chat-service
+/// flips phase, promotes the winner role and soft-removes the other jeebers
+/// atomically. The gateway composes this post-accept; it computes no membership.
+/// </summary>
+public sealed class AdvanceJeebPhaseRequest
+{
+    /// <summary>broadcasting | accepted | direct. Post-accept the gateway sends "accepted".</summary>
+    [JsonProperty("phase")]
+    public string Phase { get; set; } = "accepted";
+
+    /// <summary>The winning jeeber's user id — promoted to <c>jeeber_winner</c>.</summary>
+    [JsonProperty("winner_user_id")]
+    public string? WinnerUserId { get; set; }
+
+    /// <summary>Role to assign the winner. Defaults to <c>jeeber_winner</c>.</summary>
+    [JsonProperty("winner_role_in_convo")]
+    public string WinnerRoleInConvo { get; set; } = "jeeber_winner";
+
+    /// <summary>When true chat-service soft-removes the non-winning participants (loser kick).</summary>
+    [JsonProperty("remove_others")]
+    public bool RemoveOthers { get; set; } = true;
+}
+
+/// <summary>
 /// chat-service's answer to "is {viewer} an active participant of {conversation}?".
 /// The single membership read that backs both the REST 403 gate (N1/N2) and the
 /// WS-ticket issue path. chat-service is the membership authority.

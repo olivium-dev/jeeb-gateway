@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Conversations.Client;
+using JeebGateway.Conversations.Realtime;
 using JeebGateway.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -49,15 +50,18 @@ namespace JeebGateway.Controllers;
 public sealed class JeebConversationsController : ControllerBase
 {
     private readonly IJeebConversationClient _client;
+    private readonly IRealtimeTicketIssuer _ticketIssuer;
     private readonly UpstreamFeatureFlags _flags;
     private readonly ILogger<JeebConversationsController> _logger;
 
     public JeebConversationsController(
         IJeebConversationClient client,
+        IRealtimeTicketIssuer ticketIssuer,
         IOptions<UpstreamFeatureFlags> flags,
         ILogger<JeebConversationsController> logger)
     {
         _client = client;
+        _ticketIssuer = ticketIssuer;
         _flags = flags.Value;
         _logger = logger;
     }
@@ -425,11 +429,31 @@ public sealed class JeebConversationsController : ControllerBase
         // suite topic is jeeb:chat:{id}; the realtime channel is
         // jeeb_conversation:{id} — this descriptor maps the two so the client knows
         // which Phoenix topic to join. The gateway does not open the socket.
+        //
+        // S08 (D / H6): mint a short-lived signed membership ticket scoped to
+        // (conversation, viewer, role) so realtime can authorize the WS join WITHOUT
+        // calling chat-service (no inter-service coupling — the authority is encoded
+        // in the gateway-signed ticket). Ticket minting failure degrades to a null
+        // ticket but still returns the 200 descriptor (the REST pre-check is intact).
+        string? ticket = null;
+        try
+        {
+            ticket = _ticketIssuer.Issue(conversationId, viewerId, membership.RoleInConvo);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Realtime ticket mint for conversation {ConversationId} viewer {ViewerId} failed; "
+                + "returning the descriptor without a ticket.",
+                conversationId, viewerId);
+        }
+
         return Ok(new RealtimeChannelDescriptor
         {
             ConversationId = conversationId,
             Topic = $"jeeb_conversation:{conversationId}",
             RoleInConvo = membership.RoleInConvo,
+            Ticket = ticket,
         });
     }
 
@@ -525,13 +549,24 @@ public sealed class AppendMessageBody
 }
 
 /// <summary>
-/// The 200 descriptor the realtime gate hands a member: the Phoenix topic + the
-/// viewer's role, so the client upgrades to the right WS topic. The gateway never
-/// opens the socket itself.
+/// The 200 descriptor the realtime gate hands a member: the Phoenix topic, the
+/// viewer's role, and a short-lived signed membership TICKET the client presents on
+/// the WS upgrade (S08 D / H6). The gateway never opens the socket itself — it runs
+/// the chat-service membership check, then mints the ticket so
+/// realtime-comunication-service can authorize the join WITHOUT calling chat-service
+/// (no inter-service coupling; the authority is encoded in the signed ticket).
 /// </summary>
 public sealed class RealtimeChannelDescriptor
 {
     public string ConversationId { get; set; } = string.Empty;
     public string Topic { get; set; } = string.Empty;
     public string? RoleInConvo { get; set; }
+
+    /// <summary>
+    /// Signed, short-lived membership ticket scoped to (conversation, viewer, role).
+    /// The client passes it on the WS connect/join; realtime verifies it. Null only
+    /// if ticket minting is unavailable (the descriptor still returns 200 so the
+    /// REST pre-check is unaffected).
+    /// </summary>
+    public string? Ticket { get; set; }
 }
