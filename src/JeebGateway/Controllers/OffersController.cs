@@ -207,6 +207,178 @@ public class OffersController : ControllerBase
         return Ok(ToDto(accepted));
     }
 
+    // -------------------------------------------------------------------------
+    // S08 A3 — offer EDIT (jeeber edits their own pending bid).
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// S08 A3 — a JEEBER edits their own pending offer (fee / eta / note). The
+    /// mobile route is offer-scoped (<c>PUT /v1/offers/{offerId}</c>) while the
+    /// canonical offer-service edit route is request-scoped
+    /// (<c>PUT /api/v1/requests/{requestId}/offers/{offerId}</c>), so the gateway
+    /// resolves the requestId from its routing index (learned at submit) and
+    /// forwards the actor as <c>x-user-id</c>. offer-service owns the edit rule
+    /// (only the owning jeeber, ≤ 2 edits, only while submitted/edited) and the
+    /// <c>edited</c> transition; the gateway re-derives nothing and forwards the
+    /// upstream status verbatim. ProblemDetails on every negative (RFC 7807).
+    /// </summary>
+    [HttpPut("/v1/offers/{offerId}")]
+    [RequireCapability(Capabilities.OfferEditOwn)] // {jeeber}; ownership (offer.jeeber_id == actor) = STATE (offer-service)
+    [RequireActiveUser]
+    [ProducesResponseType(typeof(OfferWire), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> Edit(
+        string offerId, [FromBody] EditOfferBody? body, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var actorId, out var problem)) return problem;
+
+        // Offer edit is an UPSTREAM-only surface: there is no legacy in-memory edit
+        // path. When the offer kill-switch is off the gateway is not the offer
+        // record-of-truth, so the edit cannot be honoured — 503 (kill-switch shape),
+        // never a fabricated 200.
+        if (!_flags.Offer)
+        {
+            return OfferUpstreamUnavailable("edit");
+        }
+
+        if (body is null || (body.Fee is null && body.EtaMinutes is null && body.Note is null))
+        {
+            return Problem(
+                title: "At least one of fee, etaMinutes, or note is required to edit an offer.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var requestId = _offerRequestIndex.ResolveRequestId(offerId);
+        if (requestId is null)
+        {
+            // Unknown to this gateway instance (never submitted through here / index
+            // lost on restart). 404 is the correct contract for a phantom offer.
+            _logger.LogInformation(
+                "Edit for offer {OfferId} could not resolve a requestId from the routing index; returning 404.",
+                offerId);
+            return NotFound();
+        }
+
+        // Dollars → cents on the wire (offer-service is cents-based, mirroring submit).
+        long? feeCents = body.Fee is decimal fee ? (long)Math.Round(fee * 100m) : null;
+
+        OfferMutationResult result;
+        try
+        {
+            result = await _offerService.EditAsync(
+                actorId, requestId, offerId, feeCents, body.EtaMinutes, body.Note, ct);
+        }
+        catch (System.Exception ex)
+        {
+            _logger.LogWarning(ex, "offer-service edit for offer {OfferId} failed.", offerId);
+            return OfferUpstreamUnavailable("edit");
+        }
+
+        return MapMutation(result, "edit");
+    }
+
+    // -------------------------------------------------------------------------
+    // S08 A5 — offer REJECT (request-owning client declines one bid).
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// S08 A5 — the request-owning CLIENT rejects a single jeeber's bid (distinct
+    /// from the accept-saga's automatic sibling rejection). The route is offer-scoped
+    /// (<c>POST /v1/offers/{offerId}/reject</c>), mirroring the offer-scoped reject
+    /// route added to offer-service; the gateway forwards the actor as
+    /// <c>x-user-id</c> and the upstream status verbatim. offer-service owns the
+    /// reject rule (only the request's client may reject; submitted/edited → rejected
+    /// with an already-rejected guard) and the transition. The gateway re-derives
+    /// nothing. ProblemDetails on every negative (RFC 7807).
+    /// </summary>
+    [HttpPost("/v1/offers/{offerId}/reject")]
+    [RequireCapability(Capabilities.OfferReject)] // {client}; authz (request.client_id == actor) = STATE (offer-service)
+    [RequireActiveUser]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> Reject(string offerId, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var actorId, out var problem)) return problem;
+
+        // Reject is an UPSTREAM-only surface (no legacy in-memory reject path). With
+        // the offer kill-switch off the gateway is not the offer record-of-truth.
+        if (!_flags.Offer)
+        {
+            return OfferUpstreamUnavailable("reject");
+        }
+
+        OfferMutationResult result;
+        try
+        {
+            result = await _offerService.RejectAsync(actorId, offerId, ct);
+        }
+        catch (System.Exception ex)
+        {
+            _logger.LogWarning(ex, "offer-service reject for offer {OfferId} failed.", offerId);
+            return OfferUpstreamUnavailable("reject");
+        }
+
+        return MapMutation(result, "reject");
+    }
+
+    /// <summary>
+    /// Maps a status-preserving <see cref="OfferMutationResult"/> onto the caller
+    /// response: 200 (with the edit projection when present) or the matching negative
+    /// ProblemDetails. The gateway re-derives no rule — it forwards the upstream
+    /// outcome verbatim.
+    /// </summary>
+    private IActionResult MapMutation(OfferMutationResult result, string action) => result.Status switch
+    {
+        OfferMutationStatus.Ok => result.Offer is not null ? Ok(result.Offer) : Ok(),
+
+        OfferMutationStatus.NotOwner => StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
+        {
+            Title = action == "reject"
+                ? "Only the request owner can reject an offer."
+                : "Only the offer's owner can edit it.",
+            Status = StatusCodes.Status403Forbidden,
+            Type = "https://jeeb.dev/errors/offer-not-owned"
+        }),
+
+        OfferMutationStatus.Conflict => Conflict(new ProblemDetails
+        {
+            Title = action == "reject"
+                ? "Offer can no longer be rejected."
+                : "Offer can no longer be edited.",
+            Detail = action == "reject"
+                ? "The offer was already rejected, accepted, or withdrawn."
+                : "The offer is no longer pending or has reached its edit limit.",
+            Status = StatusCodes.Status409Conflict,
+            Type = "https://jeeb.dev/errors/offer-not-pending"
+        }),
+
+        // NotFound (and any unmapped status) → 404 phantom offer.
+        _ => NotFound()
+    };
+
+    /// <summary>
+    /// 503 kill-switch ProblemDetails for the upstream-only offer mutation surfaces
+    /// (edit / reject) — mirrors the conversation BFF's UpstreamUnavailable shape.
+    /// </summary>
+    private ObjectResult OfferUpstreamUnavailable(string action) => StatusCode(
+        StatusCodes.Status503ServiceUnavailable,
+        new ProblemDetails
+        {
+            Title = $"The offer {action} surface is not available.",
+            Detail = "offer-service is not wired (FeatureFlags:UseUpstream:Offer is off) "
+                + "or is unreachable; the gateway holds no offer record-of-truth of its own.",
+            Status = StatusCodes.Status503ServiceUnavailable,
+        });
+
     /// <summary>
     /// Upstream accept path (FeatureFlags:UseUpstream:Offer = true). The acting user
     /// is the request-owning CLIENT awarding the delivery to a jeeber's offer.

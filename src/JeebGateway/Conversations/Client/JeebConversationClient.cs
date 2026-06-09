@@ -102,6 +102,19 @@ public sealed class JeebConversationClient : IJeebConversationClient
         return await SendAsync<JeebMessageListResponse>(msg, ct);
     }
 
+    public async Task<JeebMessageListResponse> ListMessagesSinceForViewerAsync(
+        string conversationId, string viewerUserId, string cursor, CancellationToken ct)
+    {
+        // chat-service: GET /api/conversations/{id}/messages/since/{cursor}?viewer={viewerUserId}
+        // chat-service owns the VisibilityFilter and returns only the viewer's
+        // post-cursor slice — IDENTICAL filtering to the full read (A6 parity).
+        var url = $"api/conversations/{Uri.EscapeDataString(conversationId)}"
+                + $"/messages/since/{Uri.EscapeDataString(cursor)}"
+                + $"?viewer={Uri.EscapeDataString(viewerUserId)}";
+        using var msg = new HttpRequestMessage(HttpMethod.Get, url);
+        return await SendAsync<JeebMessageListResponse>(msg, ct);
+    }
+
     public async Task<JeebConversationMembership> GetMembershipAsync(
         string conversationId, string viewerUserId, CancellationToken ct)
     {

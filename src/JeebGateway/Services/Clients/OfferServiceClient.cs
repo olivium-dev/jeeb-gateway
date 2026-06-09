@@ -269,6 +269,109 @@ public sealed class OfferServiceClient : IOfferServiceClient
         }
     }
 
+    public async Task<OfferMutationResult> EditAsync(
+        string actingUserId,
+        string requestId,
+        string offerId,
+        long? feeCents,
+        int? etaMinutes,
+        string? note,
+        CancellationToken ct)
+    {
+        // S08 A3: PUT /api/v1/requests/{requestId}/offers/{offerId} (request-scoped,
+        // mirroring offer-service router.ex `put "/requests/:request_id/offers/:offer_id"`).
+        using var request = new HttpRequestMessage(
+            HttpMethod.Put,
+            $"api/v1/requests/{Uri.EscapeDataString(requestId)}/offers/{Uri.EscapeDataString(offerId)}");
+        SetUser(request, actingUserId);
+        // Only send the fields the caller supplied — a partial edit (A3 sends fee
+        // only) must leave eta/note untouched. The upstream changeset ignores nulls;
+        // omitting them keeps the contract a true PATCH-over-PUT.
+        request.Content = JsonContent.Create(
+            new EditBody { FeeCents = feeCents, EtaMinutes = etaMinutes, Note = note },
+            options: JsonOptions);
+
+        using var response = await _http.SendAsync(request, ct);
+
+        switch (response.StatusCode)
+        {
+            case HttpStatusCode.OK:
+            case HttpStatusCode.Created:
+                return new OfferMutationResult
+                {
+                    Status = OfferMutationStatus.Ok,
+                    Offer = await DeserializeOfferAsync(response, ct),
+                };
+
+            case HttpStatusCode.Forbidden:
+                return await MutationNegativeAsync(OfferMutationStatus.NotOwner, response, ct);
+
+            case HttpStatusCode.NotFound:
+                return await MutationNegativeAsync(OfferMutationStatus.NotFound, response, ct);
+
+            // 409 (not editable / edit-cap reached) and 422/410 (edit window closed)
+            // all mean "no longer mutable" — forward as Conflict.
+            case HttpStatusCode.Conflict:
+            case HttpStatusCode.UnprocessableEntity:
+            case HttpStatusCode.Gone:
+                return await MutationNegativeAsync(OfferMutationStatus.Conflict, response, ct);
+
+            default:
+                response.EnsureSuccessStatusCode();
+                throw new HttpRequestException(
+                    $"offer-service edit returned unexpected status {(int)response.StatusCode}.");
+        }
+    }
+
+    public async Task<OfferMutationResult> RejectAsync(
+        string actingUserId,
+        string offerId,
+        CancellationToken ct)
+    {
+        // S08 A5: POST /offers/{offerId}/reject (offer-scoped, mirroring the S07
+        // accept_by_offer route). offer-service owns the reject saga + the
+        // StateMachine :reject transition; the gateway forwards the actor and the
+        // status verbatim.
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post, $"offers/{Uri.EscapeDataString(offerId)}/reject");
+        SetUser(request, actingUserId);
+        request.Content = JsonContent.Create(new { }, options: JsonOptions);
+
+        using var response = await _http.SendAsync(request, ct);
+
+        switch (response.StatusCode)
+        {
+            case HttpStatusCode.OK:
+            case HttpStatusCode.Created:
+            case HttpStatusCode.NoContent:
+                // Reject returns no offer body in the contract — the status alone is
+                // the outcome. Do not attempt to deserialize an offer projection.
+                return new OfferMutationResult { Status = OfferMutationStatus.Ok };
+
+            case HttpStatusCode.Forbidden:
+                return await MutationNegativeAsync(OfferMutationStatus.NotOwner, response, ct);
+
+            case HttpStatusCode.NotFound:
+                return await MutationNegativeAsync(OfferMutationStatus.NotFound, response, ct);
+
+            // 409 (already rejected / not rejectable) and 410/422 (window closed)
+            // all mean "no longer rejectable" — forward as Conflict.
+            case HttpStatusCode.Conflict:
+            case HttpStatusCode.Gone:
+            case HttpStatusCode.UnprocessableEntity:
+                return await MutationNegativeAsync(OfferMutationStatus.Conflict, response, ct);
+
+            default:
+                response.EnsureSuccessStatusCode();
+                throw new HttpRequestException(
+                    $"offer-service reject returned unexpected status {(int)response.StatusCode}.");
+        }
+    }
+
+    private static async Task<OfferMutationResult> MutationNegativeAsync(
+        OfferMutationStatus status, HttpResponseMessage response, CancellationToken ct)
+        => new() { Status = status, UpstreamCode = await ReadErrorCodeAsync(response, ct) };
+
     private static async Task<OfferAcceptResult> NegativeAsync(
         OfferAcceptStatus status, HttpResponseMessage response, CancellationToken ct)
         => new() { Status = status, UpstreamCode = await ReadErrorCodeAsync(response, ct) };
@@ -330,6 +433,18 @@ public sealed class OfferServiceClient : IOfferServiceClient
     {
         [JsonPropertyName("fee_cents")] public long FeeCents { get; init; }
         [JsonPropertyName("eta_minutes")] public int EtaMinutes { get; init; }
+        [JsonPropertyName("note")] public string? Note { get; init; }
+    }
+
+    /// <summary>
+    /// S08 A3 edit body. Nullable so a partial edit only sends the supplied fields;
+    /// the configured <see cref="JsonOptions"/> emits nulls, which the offer-service
+    /// changeset ignores, so an absent field is left unchanged.
+    /// </summary>
+    private sealed class EditBody
+    {
+        [JsonPropertyName("fee_cents")] public long? FeeCents { get; init; }
+        [JsonPropertyName("eta_minutes")] public int? EtaMinutes { get; init; }
         [JsonPropertyName("note")] public string? Note { get; init; }
     }
 

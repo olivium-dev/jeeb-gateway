@@ -56,6 +56,26 @@ public interface IJeebConversationClient
         CancellationToken ct);
 
     /// <summary>
+    /// S08 A6 — viewer-filtered DELTA read. Returns ONLY the messages created
+    /// AFTER <paramref name="cursor"/> that the viewer may see. The gateway forwards
+    /// both the viewer and the cursor verbatim; chat-service applies the SAME
+    /// VisibilityFilter as <see cref="ListMessagesForViewerAsync"/> (the parity
+    /// invariant — the delta path must never leak a message the full read hides).
+    /// The gateway computes no visibility and no windowing itself. A non-member is
+    /// denied with 403 by chat-service's membership gate, forwarded verbatim.
+    /// </summary>
+    /// <param name="cursor">
+    /// Opaque resume token (a message id or timestamp) the client held before
+    /// reconnecting; chat-service interprets it. Forwarded verbatim — the gateway
+    /// does not parse it.
+    /// </param>
+    Task<JeebMessageListResponse> ListMessagesSinceForViewerAsync(
+        string conversationId,
+        string viewerUserId,
+        string cursor,
+        CancellationToken ct);
+
+    /// <summary>
     /// Authoritative membership check used by the REST visibility gate
     /// (N1 read-403, N2 realtime-403) and the WS-ticket issuer. chat-service is the
     /// membership authority; the gateway holds no membership state.

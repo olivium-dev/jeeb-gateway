@@ -320,5 +320,13 @@ public class OfferAcceptOrchestrationTests
         public Task<OfferWithdrawResult> WithdrawAsync(
             string actingUserId, string requestId, string offerId, CancellationToken ct)
             => throw new NotSupportedException();
+
+        public Task<OfferMutationResult> EditAsync(
+            string actingUserId, string requestId, string offerId, long? feeCents, int? etaMinutes, string? note, CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public Task<OfferMutationResult> RejectAsync(
+            string actingUserId, string offerId, CancellationToken ct)
+            => throw new NotSupportedException();
     }
 }

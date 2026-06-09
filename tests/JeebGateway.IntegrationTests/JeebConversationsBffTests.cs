@@ -184,6 +184,75 @@ public sealed class JeebConversationsBffTests
     }
 
     // ---------------------------------------------------------------------
+    // A6 — viewer-filtered DELTA read (messages since a cursor)
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public async Task A6_ListMessagesSince_Returns200_And_ForwardsViewerAndCursor()
+    {
+        var fake = new FakeJeebConversationClient();
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, kamalUserId) = await MintSession(http, "+9613001820");
+
+        var msg = new HttpRequestMessage(
+            HttpMethod.Get, "/v1/conversations/conv-1/messages/since/cursor-42");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        // The gateway forwarded the BEARER as viewer + the cursor verbatim; the
+        // delta path filters via the SAME chat-service VisibilityFilter (parity).
+        fake.LastSinceViewer.Should().Be(kamalUserId);
+        fake.LastSinceConversationId.Should().Be("conv-1");
+        fake.LastSinceCursor.Should().Be("cursor-42");
+        var json = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        json["messages"]!.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task A6_NonMemberDeltaRead_Forwards403_VerbatimFromChatService()
+    {
+        // A non-member delta read is denied at chat-service's membership gate; the
+        // gateway forwards the 403 verbatim (no leak via the delta path, INV-1).
+        var fake = new FakeJeebConversationClient
+        {
+            SinceThrows = new JeebConversationApiException(HttpStatusCode.Forbidden, "not_in_membership"),
+        };
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, _) = await MintSession(http, "+9613001821");
+
+        var msg = new HttpRequestMessage(
+            HttpMethod.Get, "/v1/conversations/conv-1/messages/since/cursor-42");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await resp.Content.ReadAsStringAsync()).Should().NotContain("\"messages\":");
+    }
+
+    [Fact]
+    public async Task A6_DeltaRead_FlagOff_Returns503_DoesNotDialChatService()
+    {
+        var fake = new FakeJeebConversationClient();
+        using var factory = MakeFactory(fake, chatEnabled: false); // flag OFF
+        var http = factory.CreateClient();
+        var (token, _) = await MintSession(http, "+9613001822");
+
+        var msg = new HttpRequestMessage(
+            HttpMethod.Get, "/v1/conversations/conv-1/messages/since/cursor-42");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        fake.SinceCalls.Should().Be(0);
+    }
+
+    // ---------------------------------------------------------------------
     // N2 / H6 — realtime visibility gate
     // ---------------------------------------------------------------------
 
@@ -484,6 +553,32 @@ public sealed class JeebConversationsBffTests
                 Messages = new List<JeebMessageResponse>
                 {
                     new() { MessageId = "msg-1", Kind = "text", Body = "hi" },
+                },
+            });
+        }
+
+        public string? LastSinceConversationId { get; private set; }
+        public string? LastSinceViewer { get; private set; }
+        public string? LastSinceCursor { get; private set; }
+        public int SinceCalls { get; private set; }
+        public JeebConversationApiException? SinceThrows { get; init; }
+
+        public Task<JeebMessageListResponse> ListMessagesSinceForViewerAsync(
+            string conversationId, string viewerUserId, string cursor, CancellationToken ct)
+        {
+            SinceCalls++;
+            LastSinceConversationId = conversationId;
+            LastSinceViewer = viewerUserId;
+            LastSinceCursor = cursor;
+            if (SinceThrows is not null)
+            {
+                throw SinceThrows;
+            }
+            return Task.FromResult(new JeebMessageListResponse
+            {
+                Messages = new List<JeebMessageResponse>
+                {
+                    new() { MessageId = "msg-delta-1", Kind = "text", Body = "delta" },
                 },
             });
         }

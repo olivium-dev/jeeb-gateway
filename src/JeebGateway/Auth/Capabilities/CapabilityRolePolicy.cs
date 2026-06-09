@@ -63,6 +63,10 @@ public static class CapabilityRolePolicy
             // as x-user-id — produced the live S07 H5/A6 403 against the offer-service request-owner
             // guard (acceptance.ex:177 `request.client_id == actor_id`). offer.submit remains {jeeber}.
             [Capabilities.OfferAccept] = ClientOnly,            // CLAIM {client}; BR-1/race/status = STATE
+            // S08 A5: the request-owning CLIENT rejects one jeeber's bid (mirrors
+            // offer.accept). authz (only the request's client) + the rejected
+            // transition stay in offer-service.
+            [Capabilities.OfferReject] = ClientOnly,            // CLAIM {client}; authz/status = STATE
 
             // D. Jeeber-only {jeeber}
             [Capabilities.AvailabilityToggle] = JeeberOnly,
