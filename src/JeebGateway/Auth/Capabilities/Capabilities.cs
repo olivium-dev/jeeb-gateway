@@ -58,6 +58,11 @@ public static class Capabilities
     // stays here next to its sibling offer.* names for discoverability; the role mapping is the
     // authority. The JEB-1509 {jeeber} mapping was inverted and produced the live S07 H5/A6 403.
     public const string OfferAccept = "offer.accept";                // CLAIM {client}; BR-1/race/status = STATE
+    // S08 A5: rejecting a single jeeber's bid is a CLIENT action (the request owner
+    // declines one offer), mirroring offer.accept's {client} mapping — NOT a jeeber
+    // action. STATE (only the request's client may reject, the rejected transition)
+    // stays in offer-service.
+    public const string OfferReject = "offer.reject";                // CLAIM {client}; authz/status = STATE
     public const string OfferEditOwn = "offer.edit.own";              // STATE
     public const string OfferWithdraw = "offer.withdraw";            // STATE
     public const string DeliveryGpsStream = "delivery.gps.stream";

@@ -15,6 +15,21 @@ public class CreateOfferBody
 }
 
 /// <summary>
+/// S08 A3 — PUT /v1/offers/{offerId} payload. A jeeber edits their own pending
+/// bid; every field is optional so a partial edit (the A3 body sends <c>fee</c>
+/// only) leaves the unsent fields untouched. Same wire field names as
+/// <see cref="CreateOfferBody"/> (<c>fee</c> in the client's currency, gross;
+/// <c>etaMinutes</c>; <c>note</c>). offer-service owns the edit rule and the
+/// ≤ 2-edits cap — the gateway only forwards the supplied fields.
+/// </summary>
+public class EditOfferBody
+{
+    public decimal? Fee { get; set; }
+    public int? EtaMinutes { get; set; }
+    public string? Note { get; set; }
+}
+
+/// <summary>
 /// Public projection of <see cref="PendingOffer"/>. Mirrors the offers
 /// table in db/migrations/0007 minus the Client-side terminal timestamps
 /// the gateway does not own yet.

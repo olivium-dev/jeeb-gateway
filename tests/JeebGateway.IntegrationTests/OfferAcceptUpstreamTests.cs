@@ -550,6 +550,14 @@ public class OfferAcceptUpstreamTests
         public Task<OfferWithdrawResult> WithdrawAsync(
             string actingUserId, string requestId, string offerId, CancellationToken ct)
             => throw new NotSupportedException();
+
+        public Task<OfferMutationResult> EditAsync(
+            string actingUserId, string requestId, string offerId, long? feeCents, int? etaMinutes, string? note, CancellationToken ct)
+            => throw new NotSupportedException("Edit is exercised in OfferMutationEndpointTests, not the accept path.");
+
+        public Task<OfferMutationResult> RejectAsync(
+            string actingUserId, string offerId, CancellationToken ct)
+            => throw new NotSupportedException("Reject is exercised in OfferMutationEndpointTests, not the accept path.");
     }
 
     /// <summary>

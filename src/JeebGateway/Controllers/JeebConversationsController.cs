@@ -300,6 +300,61 @@ public sealed class JeebConversationsController : ControllerBase
     }
 
     // ---------------------------------------------------------------------
+    // A6 — viewer-filtered DELTA read (messages since a cursor).
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// S08 A6 — list the conversation's messages created AFTER <paramref name="cursor"/>,
+    /// FILTERED for the bearer viewer. Used on reconnect to fetch only the delta the
+    /// client missed while offline. The gateway forwards the viewer + the cursor;
+    /// chat-service applies the SAME VisibilityFilter as the full read
+    /// (<see cref="ListMessages"/>), so the delta path can never leak a message the
+    /// full read hides (the parity invariant, INV-1). A non-member is denied with
+    /// 403 by chat-service's membership gate — forwarded verbatim, never an empty 200.
+    /// </summary>
+    [HttpGet("v1/conversations/{conversationId}/messages/since/{cursor}")]
+    [Authorize]
+    [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; membership = STATE (chat-service)
+    [ProducesResponseType(typeof(JeebMessageListResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> ListMessagesSince(
+        string conversationId,
+        string cursor,
+        CancellationToken ct)
+    {
+        if (!TryGetUserId(out var viewerId, out var unauthorized))
+        {
+            return unauthorized;
+        }
+
+        if (!_flags.Chat)
+        {
+            return UpstreamUnavailable();
+        }
+
+        if (string.IsNullOrWhiteSpace(conversationId) || string.IsNullOrWhiteSpace(cursor))
+        {
+            return Problem(
+                title: "conversationId and cursor are required.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        try
+        {
+            var result = await _client.ListMessagesSinceForViewerAsync(
+                conversationId, viewerId, cursor, ct);
+            return Ok(result);
+        }
+        catch (JeebConversationApiException ex)
+        {
+            return ForwardUpstream(ex, "list messages since cursor");
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // N2 / H6 — realtime visibility gate (REST membership pre-check).
     // ---------------------------------------------------------------------
 

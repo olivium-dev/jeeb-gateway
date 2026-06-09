@@ -134,6 +134,86 @@ public interface IOfferServiceClient
         string offerId,
         string idempotencyKey,
         CancellationToken ct);
+
+    /// <summary>
+    /// S08 A3 — PUT /api/v1/requests/{requestId}/offers/{offerId} — a JEEBER edits
+    /// their own pending bid (fee / eta / note). offer-service owns the edit rule
+    /// (<c>Auction.edit_offer</c>, ≤ 2 edits, only the owning jeeber, only while
+    /// submitted/edited) and the <c>edited</c> status transition; the gateway runs
+    /// no edit rule of its own. The upstream route is REQUEST-scoped, so the gateway
+    /// resolves <paramref name="requestId"/> from its routing index and forwards the
+    /// actor as <c>x-user-id</c> (offer-service authorizes <c>offer.jeeber_id ==
+    /// actor</c>). Returns the status-preserving outcome so the controller forwards
+    /// the upstream status verbatim (200 edited / 403 not-owner / 404 not-found /
+    /// 409 not-editable or edit-cap-reached). Only non-null fee/eta/note are sent —
+    /// a partial edit (e.g. fee only, the A3 body) leaves the other fields untouched.
+    /// </summary>
+    Task<OfferMutationResult> EditAsync(
+        string actingUserId,
+        string requestId,
+        string offerId,
+        long? feeCents,
+        int? etaMinutes,
+        string? note,
+        CancellationToken ct);
+
+    /// <summary>
+    /// S08 A5 — POST /offers/{offerId}/reject — the request-owning CLIENT rejects a
+    /// single jeeber's bid (distinct from the accept-saga's automatic sibling
+    /// rejection). offer-service owns the reject rule (only the owning request's
+    /// client may reject; <c>StateMachine.apply :reject</c>: submitted/edited →
+    /// rejected, with an <c>:already_rejected</c> guard) and the <c>rejected</c>
+    /// status transition. This route is OFFER-scoped upstream (mirroring the S07
+    /// <c>accept_by_offer</c> route), so no requestId resolution is needed; the
+    /// gateway forwards the actor as <c>x-user-id</c>. Returns the status-preserving
+    /// outcome so the controller forwards the upstream status verbatim
+    /// (200 rejected / 403 not-owner / 404 not-found / 409 not-rejectable or
+    /// already-rejected).
+    /// </summary>
+    Task<OfferMutationResult> RejectAsync(
+        string actingUserId,
+        string offerId,
+        CancellationToken ct);
+}
+
+/// <summary>
+/// Status-preserving outcome of an offer mutation (edit / reject) derived verbatim
+/// from the offer-service HTTP status, so the gateway controller can re-emit the
+/// matching status without re-deriving any auction rule. Mirrors
+/// <see cref="OfferAcceptResult"/>. <see cref="Offer"/> carries the updated offer
+/// projection on <see cref="OfferMutationStatus.Ok"/> (for the edit response body);
+/// it is null for reject (the reject contract returns no offer body) and every
+/// negative status.
+/// </summary>
+public sealed class OfferMutationResult
+{
+    public required OfferMutationStatus Status { get; init; }
+
+    /// <summary>Set only on <see cref="OfferMutationStatus.Ok"/> for the edit projection; null otherwise.</summary>
+    public OfferWire? Offer { get; init; }
+
+    /// <summary>offer-service error <c>code</c> for negative statuses, when the body carried one.</summary>
+    public string? UpstreamCode { get; init; }
+}
+
+/// <summary>
+/// Canonical outcome of an offer edit / reject, derived verbatim from the
+/// offer-service HTTP status. The gateway maps each onto the same caller-facing
+/// status, re-deriving no auction rule.
+/// </summary>
+public enum OfferMutationStatus
+{
+    /// <summary>200 — the mutation applied; <see cref="OfferMutationResult.Offer"/> set for edit.</summary>
+    Ok,
+
+    /// <summary>403 — caller is not authorized (not the offer's jeeber for edit; not the request's client for reject).</summary>
+    NotOwner,
+
+    /// <summary>404 — phantom offer/request unknown to offer-service.</summary>
+    NotFound,
+
+    /// <summary>409 — the offer is no longer mutable (not pending, edit-cap reached, already rejected).</summary>
+    Conflict
 }
 
 /// <summary>
