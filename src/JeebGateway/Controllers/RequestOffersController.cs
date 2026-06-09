@@ -1,10 +1,13 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
+using JeebGateway.Conversations.Client;
 using JeebGateway.Requests;
+using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
 
@@ -65,6 +68,8 @@ public class RequestOffersController : ControllerBase
     private readonly IDualRoleService _dualRole;
     private readonly IOfferRealtimeNotifier _realtime;
     private readonly IOfferRequestIndex _offerRequestIndex;
+    private readonly IJeebConversationClient _conversations;
+    private readonly UpstreamFeatureFlags _flags;
     private readonly TimeProvider _clock;
     private readonly ILogger<RequestOffersController> _logger;
 
@@ -74,6 +79,8 @@ public class RequestOffersController : ControllerBase
         IDualRoleService dualRole,
         IOfferRealtimeNotifier realtime,
         IOfferRequestIndex offerRequestIndex,
+        IJeebConversationClient conversations,
+        IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         ILogger<RequestOffersController> logger)
     {
@@ -82,6 +89,8 @@ public class RequestOffersController : ControllerBase
         _dualRole = dualRole;
         _realtime = realtime;
         _offerRequestIndex = offerRequestIndex;
+        _conversations = conversations;
+        _flags = flags.Value;
         _clock = clock;
         _logger = logger;
     }
@@ -236,6 +245,50 @@ public class RequestOffersController : ControllerBase
         // without an extra round-trip. This is a thin BFF routing concern, not
         // auction state (see IOfferRequestIndex).
         _offerRequestIndex.Record(created.Id, requestId, created.JeeberId);
+
+        // S08 (B) — SEAT THE OFFERING JEEBER AS A CONVERSATION PARTICIPANT.
+        // The conversation aggregate is created at order-create seating ONLY the
+        // client owner; the offer jeebers are never added, so H5/N3/N4/A6 correctly
+        // 403 for them until they are seated. When a jeeber submits an offer on the
+        // request we add them to the request's conversation as `jeeber_offerer` so
+        // they (and only they + the client) can read the conversation (200) while a
+        // true non-member still 403s. The gateway is the SOLE chat caller (org
+        // no-coupling law) and computes NO membership — it forwards
+        // (conversationId, jeeberId, role) to chat-service, the membership authority.
+        //
+        // DEGRADE-DON'T-FAIL: the offer is already durable and the 201 is committed.
+        // A chat blip, a disabled Chat flag, or a request row that never got a
+        // conversation id (chat was down at create) must NEVER turn the offer 201
+        // into a 5xx — every failure is logged and swallowed, exactly like the
+        // realtime fan-out below.
+        if (_flags.Chat && !string.IsNullOrWhiteSpace(request.ConversationId))
+        {
+            try
+            {
+                await _conversations.AddParticipantAsync(
+                    request.ConversationId,
+                    new AddJeebParticipantRequest
+                    {
+                        UserId = created.JeeberId,
+                        RoleInConvo = "jeeber_offerer",
+                    },
+                    ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Failed to seat offering jeeber {JeeberId} on conversation {ConversationId} "
+                    + "for request {RequestId}; offer stays 201, the jeeber will read 403 until reconciled.",
+                    created.JeeberId, request.ConversationId, requestId);
+            }
+        }
+        else if (_flags.Chat)
+        {
+            _logger.LogInformation(
+                "Offer {OfferId} on request {RequestId}: no conversation id on the ledger row; "
+                + "skipping jeeber-seat (chat was unavailable at create, or auto-create is off).",
+                created.Id, requestId);
+        }
 
         // Realtime fan-out is best-effort: the offer is already durable, so
         // a notifier failure must not flip the 201 into a 5xx. The Client

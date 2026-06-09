@@ -429,6 +429,15 @@ builder.Services.AddHttpClient<JeebGateway.Conversations.Client.IJeebConversatio
     }
 });
 
+// S08 (D / H6,N2) — the realtime membership-ticket issuer. The /v1/realtime gate
+// mints a short-lived signed ticket scoped to (conversation, viewer, role) after
+// the chat-service membership check, so realtime-comunication-service can authorize
+// the WS join without calling chat-service (no inter-service coupling). HS256 over
+// the gateway's existing Jwt:SigningKey (the same secret the realtime Guardian
+// pipeline verifies the session bearer with). Singleton — the key is read once.
+builder.Services.AddSingleton<JeebGateway.Conversations.Realtime.IRealtimeTicketIssuer,
+                              JeebGateway.Conversations.Realtime.RealtimeTicketIssuer>();
+
 // Notification (ServiceNotificationClient) — salehly sibling mirror. The
 // NSwag-generated ServiceNotificationClient (Services/ServiceNotificationClient.cs,
 // namespace JeebGateway.service.ServiceNotification) is registered exactly as

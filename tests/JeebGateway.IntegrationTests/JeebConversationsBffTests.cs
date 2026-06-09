@@ -591,6 +591,43 @@ public sealed class JeebConversationsBffTests
             LastMembershipViewer = viewerUserId;
             return Task.FromResult(Membership);
         }
+
+        public AddJeebParticipantRequest? LastAddParticipant { get; private set; }
+        public string? LastAddParticipantConversationId { get; private set; }
+        public int AddParticipantCalls { get; private set; }
+
+        public Task<JeebConversationParticipant> AddParticipantAsync(
+            string conversationId, AddJeebParticipantRequest request, CancellationToken ct)
+        {
+            AddParticipantCalls++;
+            LastAddParticipantConversationId = conversationId;
+            LastAddParticipant = request;
+            return Task.FromResult(new JeebConversationParticipant
+            {
+                UserId = request.UserId,
+                RoleInConvo = request.RoleInConvo,
+                RemovedAt = null,
+            });
+        }
+
+        public AdvanceJeebPhaseRequest? LastAdvancePhase { get; private set; }
+        public string? LastAdvancePhaseConversationId { get; private set; }
+        public int AdvancePhaseCalls { get; private set; }
+
+        public Task<JeebConversationResponse> AdvancePhaseAsync(
+            string conversationId, AdvanceJeebPhaseRequest request, CancellationToken ct)
+        {
+            AdvancePhaseCalls++;
+            LastAdvancePhaseConversationId = conversationId;
+            LastAdvancePhase = request;
+            return Task.FromResult(new JeebConversationResponse
+            {
+                ConversationId = conversationId,
+                CorrelationKey = conversationId,
+                Phase = request.Phase,
+                Participants = new List<JeebConversationParticipant>(),
+            });
+        }
     }
 
     /// <summary>No-op OTP upstream so the verify path mints a real session (sub == userId).</summary>

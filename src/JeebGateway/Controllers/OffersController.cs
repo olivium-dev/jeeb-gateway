@@ -1,6 +1,7 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations;
+using JeebGateway.Conversations.Client;
 using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -49,6 +50,7 @@ public class OffersController : ControllerBase
     private readonly IOfferServiceClient _offerService;
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly IConversationProvisioner _conversations;
+    private readonly IJeebConversationClient _conversationAggregate;
     private readonly IDeliveryServiceClient _deliveryService;
     private readonly UpstreamFeatureFlags _flags;
     private readonly DeliveryClientOptions _deliveryOptions;
@@ -62,6 +64,7 @@ public class OffersController : ControllerBase
         IOfferServiceClient offerService,
         IOfferRequestIndex offerRequestIndex,
         IConversationProvisioner conversations,
+        IJeebConversationClient conversationAggregate,
         IDeliveryServiceClient deliveryService,
         IOptions<UpstreamFeatureFlags> flags,
         IOptions<DeliveryClientOptions> deliveryOptions,
@@ -74,6 +77,7 @@ public class OffersController : ControllerBase
         _offerService = offerService;
         _offerRequestIndex = offerRequestIndex;
         _conversations = conversations;
+        _conversationAggregate = conversationAggregate;
         _deliveryService = deliveryService;
         _flags = flags.Value;
         _deliveryOptions = deliveryOptions.Value;
@@ -509,8 +513,8 @@ public class OffersController : ControllerBase
                 // the broadcasting conversation (H6d). EVERY side-effect here is
                 // DEGRADE-DON'T-FAIL — a downstream blip must never turn a
                 // successful accept into a 5xx.
-                await OrchestrateAcceptedAsync(requestId, actorId, result.Envelope!, ct);
-                return Ok(BuildAcceptedDto(requestId, actorId, result.Envelope!));
+                var conversationPhase = await OrchestrateAcceptedAsync(requestId, actorId, result.Envelope!, ct);
+                return Ok(BuildAcceptedDto(requestId, actorId, result.Envelope!, conversationPhase));
 
             case OfferAcceptStatus.NotOwner:
                 return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
@@ -566,7 +570,14 @@ public class OffersController : ControllerBase
     /// Mirrors the degrade-don't-fail contract of <c>DurableRequestsStore</c> and
     /// <c>ChatServiceConversationProvisioner</c>.
     /// </summary>
-    private async Task OrchestrateAcceptedAsync(
+    /// <returns>
+    /// The conversation phase resolved from chat-service's phase-advance (H7/N9
+    /// surface it as <c>conversation_phase</c>). Null when the conversation could
+    /// not be advanced (chat disabled / unavailable / no conversation id) — the
+    /// accept DTO then defaults the phase to "accepted" (the saga committed), never
+    /// 5xx-ing the accept.
+    /// </returns>
+    private async Task<string?> OrchestrateAcceptedAsync(
         string requestId, string actorId, OfferAcceptWire envelope, CancellationToken ct)
     {
         var winningJeeberId = envelope.JeeberId;
@@ -580,7 +591,7 @@ public class OffersController : ControllerBase
             _logger.LogWarning(
                 "Post-accept orchestration for request {RequestId}: upstream accept envelope carried no jeeberId; skipping request/delivery/chat sync.",
                 requestId);
-            return;
+            return null;
         }
 
         var now = _clock.GetUtcNow();
@@ -688,6 +699,49 @@ public class OffersController : ControllerBase
                 "Post-accept conversation advance for {RequestId} (conversation {ConversationId}) failed; accept stays 200.",
                 requestId, conversationId);
         }
+
+        // (H7/N9) Advance the CONVERSATION AGGREGATE phase to "accepted". The legacy
+        // channels provisioner above advances MEMBERSHIP only and cannot flip the
+        // aggregate phase (see its PHASE NOTE) — the S08 conversation aggregate
+        // (driven via /v1/conversations/*) is a SEPARATE chat-service surface that
+        // owns the phase + winner promotion + loser soft-removal atomically via
+        // PATCH /api/conversations/{id}/phase. We call it here so H7/N9 read
+        // $.conversation_phase == "accepted" and the winner becomes jeeber_winner.
+        //
+        // The aggregate's conversation id == correlation_key == requestId (auto
+        // conversation-per-request), so we advance by requestId. chat-service is the
+        // authority; the gateway reads back the resulting phase and surfaces it.
+        //
+        // DEGRADE-DON'T-FAIL: a chat blip / disabled flag returns null and the accept
+        // DTO defaults conversation_phase to "accepted" (the saga committed) — it must
+        // NEVER 5xx the accept.
+        if (!_flags.Chat)
+        {
+            return null;
+        }
+
+        try
+        {
+            var advanced = await _conversationAggregate.AdvancePhaseAsync(
+                requestId,
+                new AdvanceJeebPhaseRequest
+                {
+                    Phase = "accepted",
+                    WinnerUserId = winningJeeberId,
+                    WinnerRoleInConvo = "jeeber_winner",
+                    RemoveOthers = true,
+                },
+                ct);
+            return string.IsNullOrWhiteSpace(advanced.Phase) ? "accepted" : advanced.Phase;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Post-accept conversation-aggregate phase advance for request {RequestId} failed; "
+                + "accept stays 200, conversation_phase defaults to 'accepted'.",
+                requestId);
+            return null;
+        }
     }
 
     /// <summary>
@@ -721,8 +775,8 @@ public class OffersController : ControllerBase
     /// awarded <c>JeeberId</c> comes from the envelope's winning offer (falling back
     /// to empty when the upstream envelope omits it).
     /// </summary>
-    private DeliveryRequestDto BuildAcceptedDto(
-        string requestId, string actorId, OfferAcceptWire envelope)
+    private OfferAcceptResultDto BuildAcceptedDto(
+        string requestId, string actorId, OfferAcceptWire envelope, string? conversationPhase)
         => new()
         {
             Id = requestId,
@@ -732,27 +786,27 @@ public class OffersController : ControllerBase
             // outcome — "accepted" — unconditionally. It is NOT the delivery's
             // lifecycle state.
             //
-            // Two distinct facts were previously conflated here: (1) the auction
-            // outcome (this offer was accepted) and (2) the spawned delivery's
-            // canonical SM state ("Ordered"). The JEB-45 ternary
-            // (`_flags.Delivery ? CanonicalDeliveryVocab.Ordered : ...`) leaked the
-            // delivery state into the offer-accept DTO, so with UseUpstream:Delivery
-            // forced ON on the live fleet POST /offers/{id}/accept returned
+            // Two distinct facts were previously conflated in the old
+            // DeliveryRequestDto projection: (1) the auction outcome (this offer was
+            // accepted) and (2) the spawned delivery's canonical SM state ("Ordered").
+            // The JEB-45 ternary leaked the delivery state into the offer-accept DTO,
+            // so with UseUpstream:Delivery forced ON POST /offers/{id}/accept returned
             // "Ordered" and regressed S07 H5/A3/N7 (H5 asserts $.status=="accepted").
-            //
-            // The delivery's canonical "Ordered" entry state belongs ONLY to the
-            // delivery read/transition surfaces (GET /deliveries/{id}, PATCH
-            // transition) which JEB-45's other edits already own and which are left
-            // untouched. The offer-accept DTO must surface "accepted" regardless of
-            // the Delivery flag.
+            // This dedicated accept DTO surfaces "accepted" unconditionally — the
+            // S07 P0 fix is preserved, no delivery status leaks.
             Status = RequestStatus.Accepted,
-            Description = string.Empty,
-            PickupAddress = null,
-            DropoffAddress = null,
-            CreatedAt = default,
-            ScheduledAt = null,
             JeeberId = envelope.JeeberId ?? string.Empty,
-            AcceptedAt = _clock.GetUtcNow()
+            AcceptedAt = _clock.GetUtcNow(),
+            // S08 (H7/N9): the winning jeeber and the advanced conversation phase.
+            // winner_user_id == the awarded jeeber (same value as jeeberId, exposed
+            // under the snake_case key the S08 suite asserts). conversation_phase is
+            // the phase chat-service returned from the aggregate advance; when chat
+            // is disabled/unavailable it defaults to "accepted" (the saga committed)
+            // so the accept never 5xxs and the assertion still holds.
+            WinnerUserId = envelope.JeeberId ?? string.Empty,
+            ConversationPhase = string.IsNullOrWhiteSpace(conversationPhase)
+                ? RequestStatus.Accepted
+                : conversationPhase,
         };
 
     private static DeliveryRequestDto ToDto(DeliveryRequest r) => new()
@@ -768,4 +822,51 @@ public class OffersController : ControllerBase
         JeeberId = r.JeeberId,
         AcceptedAt = r.AcceptedAt
     };
+}
+
+/// <summary>
+/// S07/S08 — dedicated response for <c>POST /offers/{offerId}/accept</c>. This is
+/// the OFFER-ACCEPT result, NOT a delivery projection: it is intentionally a
+/// SEPARATE type from <see cref="DeliveryRequestDto"/> so the accept surface never
+/// re-acquires delivery-lifecycle fields and can never leak the delivery's
+/// canonical SM state (the S07 P0 regression). It carries:
+/// <list type="bullet">
+///   <item>the S07-asserted fields (<c>id</c>, <c>clientId</c>,
+///     <c>status</c>=="accepted", <c>jeeberId</c>, <c>acceptedAt</c>) — camelCase
+///     per the host's default System.Text.Json policy, byte-compatible with the
+///     DeliveryRequestDto the accept previously returned; and</item>
+///   <item>the S08 additions (<c>winner_user_id</c>, <c>conversation_phase</c>) —
+///     pinned to snake_case because the S08 suite asserts those exact keys
+///     (H7/N9 <c>$.winner_user_id</c> / <c>$.conversation_phase</c>).</item>
+/// </list>
+/// Additive: a consumer reading only the S07 fields is unaffected; the two new
+/// keys are extra.
+/// </summary>
+public sealed class OfferAcceptResultDto
+{
+    public required string Id { get; init; }
+    public required string ClientId { get; init; }
+
+    /// <summary>Always "accepted" — the OFFER-acceptance outcome, never a delivery state.</summary>
+    public required string Status { get; init; }
+
+    /// <summary>The awarded jeeber (camelCase — S07 asserts <c>$.jeeberId</c>).</summary>
+    public string? JeeberId { get; init; }
+
+    public DateTimeOffset? AcceptedAt { get; init; }
+
+    /// <summary>
+    /// S08 (H7/N9) — the winning jeeber's user id under the snake_case key the suite
+    /// asserts (<c>$.winner_user_id</c>). Same value as <see cref="JeeberId"/>.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("winner_user_id")]
+    public string? WinnerUserId { get; init; }
+
+    /// <summary>
+    /// S08 (H7/N9) — the conversation aggregate phase after the post-accept advance
+    /// (<c>$.conversation_phase</c>), resolved from chat-service. Defaults to
+    /// "accepted" when chat is disabled/unavailable so the accept never 5xxs.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("conversation_phase")]
+    public string? ConversationPhase { get; init; }
 }

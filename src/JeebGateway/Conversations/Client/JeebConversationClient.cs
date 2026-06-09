@@ -125,6 +125,30 @@ public sealed class JeebConversationClient : IJeebConversationClient
         return await SendAsync<JeebConversationMembership>(msg, ct);
     }
 
+    public async Task<JeebConversationParticipant> AddParticipantAsync(
+        string conversationId, AddJeebParticipantRequest request, CancellationToken ct)
+    {
+        // chat-service: POST /api/conversations/{id}/participants  { user_id, role_in_convo }
+        var url = $"api/conversations/{Uri.EscapeDataString(conversationId)}/participants";
+        using var msg = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = JsonContent(request),
+        };
+        return await SendAsync<JeebConversationParticipant>(msg, ct);
+    }
+
+    public async Task<JeebConversationResponse> AdvancePhaseAsync(
+        string conversationId, AdvanceJeebPhaseRequest request, CancellationToken ct)
+    {
+        // chat-service: PATCH /api/conversations/{id}/phase  { phase, winner_user_id, winner_role_in_convo, remove_others }
+        var url = $"api/conversations/{Uri.EscapeDataString(conversationId)}/phase";
+        using var msg = new HttpRequestMessage(HttpMethod.Patch, url)
+        {
+            Content = JsonContent(request),
+        };
+        return await SendAsync<JeebConversationResponse>(msg, ct);
+    }
+
     // -----------------------------------------------------------------
     // transport
     // -----------------------------------------------------------------

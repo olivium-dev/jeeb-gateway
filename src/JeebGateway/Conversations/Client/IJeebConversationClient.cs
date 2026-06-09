@@ -84,4 +84,33 @@ public interface IJeebConversationClient
         string conversationId,
         string viewerUserId,
         CancellationToken ct);
+
+    /// <summary>
+    /// S08 (B) — seat a participant on the conversation aggregate. chat-service
+    /// already exposes <c>POST /api/conversations/{id}/participants</c>
+    /// (AddParticipantAsync) and owns the membership state; the gateway only
+    /// composes the call. Used when a jeeber submits an offer on a request so the
+    /// offer jeebers become members and can read (200) / non-members 403. The
+    /// gateway never invents membership — it forwards (conversationId, userId, role).
+    /// Idempotent on the chat-service side (re-seating the same user is a no-op).
+    /// </summary>
+    Task<JeebConversationParticipant> AddParticipantAsync(
+        string conversationId,
+        AddJeebParticipantRequest request,
+        CancellationToken ct);
+
+    /// <summary>
+    /// S08 (D / H7,N9) — advance the conversation aggregate to the accepted phase.
+    /// chat-service exposes <c>PATCH /api/conversations/{id}/phase</c>
+    /// (AdvancePhaseAsync) which atomically flips phase=accepted, promotes the
+    /// winner role (jeeber_winner) and soft-removes losers. chat-service owns the
+    /// transition; the gateway only composes it post-accept and reads back the
+    /// resulting phase to surface as <c>conversation_phase</c>. This is the
+    /// conversation-aggregate path (NOT the legacy channels provisioner, which
+    /// cannot flip phase — see ChatServiceConversationProvisioner PHASE NOTE).
+    /// </summary>
+    Task<JeebConversationResponse> AdvancePhaseAsync(
+        string conversationId,
+        AdvanceJeebPhaseRequest request,
+        CancellationToken ct);
 }
