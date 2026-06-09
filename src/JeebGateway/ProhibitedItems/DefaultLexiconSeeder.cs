@@ -15,7 +15,8 @@ namespace JeebGateway.ProhibitedItems;
 /// gateway restart (or an admin who has already seeded the lexicon out-of-band)
 /// does not duplicate entries. The lexicon stays GATEWAY-OWNED — the N11
 /// boundary guard requires the prohibited-items lexicon to live only under the
-/// gateway listKey, never in ban-service.
+/// gateway list key (<see cref="JeebModerationList.ListKey"/> =
+/// <c>jeeb-prohibited-items</c>), never in ban-service.
 ///
 /// Severity mapping mirrors the S05 contract: an alcohol term ("arak") is a
 /// <see cref="ProhibitedSeverity.Block"/> hard reject; a bladed-weapon term
@@ -76,7 +77,10 @@ public sealed class DefaultLexiconSeeder : IHostedService
             }
         }
 
-        _logger.LogInformation("Seeded {Count} default prohibited-items lexicon entries (create-moderation ON).", seeded);
+        _logger.LogInformation(
+            "Seeded {Count} default prohibited-items lexicon entries into gateway-owned list '{ListKey}' (create-moderation ON).",
+            seeded,
+            JeebModerationList.ListKey);
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
