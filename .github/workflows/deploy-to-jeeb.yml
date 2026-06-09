@@ -72,7 +72,7 @@ on:
       push_notification_base_url:  { description: 'Push-notification service base URL',required: true, default: 'http://192.168.2.50:10040' }
       otp_base_url:                { description: 'OTP service base URL',             required: true, default: 'http://192.168.2.50:10037' }
       matching_base_url:           { description: 'Matching service base URL (native host)', required: true, default: 'http://192.168.2.50:10025' }
-      delivery_base_url:           { description: 'Delivery service base URL (native host)', required: true, default: 'http://192.168.2.50:10051' }
+      delivery_base_url:           { description: 'Delivery service base URL (live Jeeb swarm publishes on :10055 — S07 H6c accept->delivery-create)', required: true, default: 'http://192.168.2.50:10055' }
       # Auth:Otp:ApplicationId — the Jeeb tenant's ApplicationRef GUID in the SHARED
       # one-time-password service (JEB-1516). AuthOtpController forwards it on every
       # SendOTP/ValidateOTP (reads OtpSignInOptions.ApplicationId at AuthOtpController.cs:96/148).
@@ -395,6 +395,8 @@ jobs:
               --env-add UmJwt__Audience='user-management' \
               --env-add Services__Kyc__BaseUrl='${{ inputs.kyc_base_url }}' \
               --env-add Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
+              --env-add Services__Chat__BaseUrl='${{ inputs.chat_base_url }}' \
+              --env-add Services__Delivery__BaseUrl='${{ inputs.delivery_base_url }}' \
               --env-add Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env-add Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               --env-add FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
