@@ -115,10 +115,15 @@ on:
       #       UseUpstreamKyc=<bool>         -> FeatureFlags__UseUpstream__Kyc                   (S03 / ADR-0004)
       #       UseUpstreamCdn=<bool>         -> FeatureFlags__UseUpstream__Cdn                   (S03 / ADR-0004)
       #       UseUpstreamOffer=<bool>       -> FeatureFlags__UseUpstream__Offer                 (S07 — auction/accept)
-      #     NOTE: FeatureFlags__UseUpstream__Offer is ALSO injected UNCONDITIONALLY =true on every
-      #     deploy (see the dedicated --env-add/--env line in the update & create branches below),
-      #     so S07 routes through UpstreamPendingOffersStore even when this map key is omitted.
-      #     Passing UseUpstreamOffer here is redundant-but-harmless (same value, idempotent).
+      #       UseUpstreamDelivery=<bool>    -> FeatureFlags__UseUpstream__Delivery              (S09/S13/S15 — canonical delivery SM-1)
+      #     NOTE: FeatureFlags__UseUpstream__Offer AND FeatureFlags__UseUpstream__Delivery are
+      #     ALSO injected UNCONDITIONALLY =true on every deploy (see the dedicated --env-add/--env
+      #     lines in the update & create branches below), so S07 routes through
+      #     UpstreamPendingOffersStore and S09/S13/S15 route through the canonical delivery
+      #     state-machine (SM-1: Ordered/Picked/InTransit/AtDoor/Done, trigger-keyed PATCH,
+      #     AtDoor OTP handover, settlement-on-Done) even when the map keys are omitted.
+      #     Passing UseUpstreamOffer / UseUpstreamDelivery here is redundant-but-harmless
+      #     (same value, idempotent).
       #     Future spine flags are added to the map's case table below — NO new input, NO cap risk.
       #   * `durable_requests`, `whisper_fake`, `dev_endpoints`, `swagger_ui` keep their OWN
       #     dedicated inputs UNCHANGED (their 3-state / secret-coupled semantics are load-bearing
@@ -131,7 +136,7 @@ on:
       # Example: feature_flags='ConversationAutoCreate=true' arms H7 broadcasting auto-create
       # while leaving Kyc/Cdn at their baked-true defaults.
       feature_flags:
-        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,Heartbeat=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamChat, Heartbeat. Empty = preserve running flags (baked appsettings defaults on fresh create). NOTE: UseUpstream.Offer is forced =true unconditionally every deploy regardless of this input (S07). S08: pass UseUpstreamChat=true to arm the conversation BFF (default off -> 503).'
+        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,Heartbeat=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamDelivery, UseUpstreamChat, Heartbeat. Empty = preserve running flags (baked appsettings defaults on fresh create). NOTE: UseUpstream.Offer AND UseUpstream.Delivery are forced =true unconditionally every deploy regardless of this input (S07 / S09-S13-S15). S08: pass UseUpstreamChat=true to arm the conversation BFF (default off -> 503).'
         required: false
         default: ''
       # S04 / Track C — REAL OpenAI Whisper STT seam. The gateway selects the real
@@ -366,6 +371,7 @@ jobs:
                 useupstreamkyc)         _envvar="FeatureFlags__UseUpstream__Kyc" ;;
                 useupstreamcdn)         _envvar="FeatureFlags__UseUpstream__Cdn" ;;
                 useupstreamoffer)       _envvar="FeatureFlags__UseUpstream__Offer" ;;
+                useupstreamdelivery)    _envvar="FeatureFlags__UseUpstream__Delivery" ;;
                 useupstreamchat)        _envvar="FeatureFlags__UseUpstream__Chat" ;;
                 heartbeat)              _envvar="FeatureFlags__Heartbeat__Enabled" ;;
                 *) echo "::warning::feature_flags: ignoring unknown key '$_key'"; continue ;;
@@ -403,6 +409,7 @@ jobs:
               --env-add FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
               --env-add FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               --env-add FeatureFlags__UseUpstream__Offer='true' \
+              --env-add FeatureFlags__UseUpstream__Delivery='true' \
               $FEATURE_FLAG_ARGS \
               $DEV_FLAG_ARG \
               $SWAGGER_FLAG_ARG \
@@ -439,6 +446,7 @@ jobs:
               --env FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
               --env FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               --env FeatureFlags__UseUpstream__Offer='true' \
+              --env FeatureFlags__UseUpstream__Delivery='true' \
               $FEATURE_FLAG_CREATE_ARGS \
               --reserve-memory 256M \
               '$TAG'
