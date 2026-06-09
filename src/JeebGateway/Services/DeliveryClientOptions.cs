@@ -24,4 +24,13 @@ public sealed class DeliveryClientOptions
     /// <c>Services:Delivery:ActiveDeliveriesLimit</c> to override.
     /// </summary>
     public int ActiveDeliveriesLimit { get; set; } = 2;
+
+    /// <summary>
+    /// Tenant the gateway scopes delivery-service rows under. delivery-service
+    /// keys its lookups on <c>(id, tenant_id)</c>, so the post-accept delivery
+    /// assignment (S07 N7) must re-POST under the SAME tenant the row was seeded
+    /// with at create time. Mirrors <c>DeliveryRowMirror</c>'s resolution; defaults
+    /// to "default" when <c>Services:Delivery:TenantId</c> is unset.
+    /// </summary>
+    public string TenantId { get; set; } = "default";
 }
