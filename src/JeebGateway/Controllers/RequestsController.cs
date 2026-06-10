@@ -297,6 +297,11 @@ public class RequestsController : ControllerBase
             DropoffLocation = body.DropoffLocation,
             PickupAddress = body.PickupAddress,
             DropoffAddress = body.DropoffAddress,
+            // T-BE-019 (JEB-55): thread the recipient phone through to the
+            // store so DeliveryRequest.RecipientPhone is populated and the
+            // at-door handover OTP can be dispatched (else the OTP trigger
+            // returns 400 recipient-phone-missing for every delivery).
+            RecipientPhone = body.RecipientPhone,
             ScheduledAt = body.ScheduledAt
         };
 
@@ -357,6 +362,9 @@ public class RequestsController : ControllerBase
             DropoffLocation = Point("dropoffLat", "dropoffLng"),
             PickupAddress = Field("pickupAddress"),
             DropoffAddress = Field("dropoffAddress"),
+            // T-BE-019 (JEB-55): multipart parity with the JSON create body so
+            // a voice-first form submit also carries the handover OTP phone.
+            RecipientPhone = Field("recipientPhone"),
             Status = Field("status")
         };
     }
@@ -576,6 +584,7 @@ public class RequestsController : ControllerBase
         DropoffLocation = r.DropoffLocation,
         PickupAddress = r.PickupAddress,
         DropoffAddress = r.DropoffAddress,
+        RecipientPhone = r.RecipientPhone,
         CreatedAt = r.CreatedAt,
         ScheduledAt = r.ScheduledAt,
         JeeberId = r.JeeberId,
