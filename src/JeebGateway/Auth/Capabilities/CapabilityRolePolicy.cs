@@ -139,6 +139,9 @@ public static class CapabilityRolePolicy
 
             // M. Legacy UserController admin/internal
             [Capabilities.UsersAdminManage] = AdminOnly,
+
+            // N. Notification dispatch (JEB-1494): render + push a notification to a user — admin only.
+            [Capabilities.NotificationDispatch] = AdminOnly,
         };
 
     /// <summary>All capability names in the map — drives the startup policy-registration loop.</summary>
