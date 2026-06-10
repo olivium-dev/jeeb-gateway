@@ -136,5 +136,9 @@ public sealed class InMemorySettlementStore : ISettlementStore
         SettledAt = s.SettledAt,
         ReceiptGeneratedAt = s.ReceiptGeneratedAt,
         LedgerEntryId = s.LedgerEntryId,
+        BatchId = s.BatchId,
+        BatchedAt = s.BatchedAt,
+        PaidAt = s.PaidAt,
+        CodState = s.CodState,
     };
 }

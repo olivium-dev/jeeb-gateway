@@ -780,7 +780,18 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 // Track per-controller migrations against GATEWAY-REMEDIATION-PLAN.md.
 // ===========================================================================
 
-// Cash settlement + receipt API (T-backend-016 / JEEB-34).
+// JEB-56: JeebPricingOptions — makes commission rates and floor config-overridable.
+// Defaults match CommissionCalculator constants (Standard=15%, Express=20%, etc.).
+builder.Services.Configure<JeebPricingOptions>(
+    builder.Configuration.GetSection(JeebPricingOptions.SectionName));
+
+// Cash settlement + receipt API (T-backend-016 / JEEB-34 → JEB-56).
+//
+// JEB-56: PostgresSettlementStore replaces InMemorySettlementStore when
+// GatewayPostgres:ConnectionString is configured. The store is the durable
+// COD settlement ledger (settlements table, migration 0015). When the
+// connection string is absent (local dev / CI without Postgres), the in-memory
+// fallback keeps the vertical exercisable.
 //
 // SettlementService re-computes the Jeeb fee (commission % per tier +
 // 2% insurance, min 1000 LBP) from the row's tier and posts a single
