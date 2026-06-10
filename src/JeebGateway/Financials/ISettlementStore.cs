@@ -32,12 +32,18 @@ public interface ISettlementStore
     /// the verbatim per-settlement gross/commission/net — zero re-arithmetic on
     /// the wallet copy (BR-16). A null window bound means unbounded on that side
     /// (lifetime read).
+    ///
+    /// <para>JEB-58: pass <paramref name="codStates"/> to restrict by COD lifecycle state.
+    /// Null/empty = no cod_state filter (returns all). Earnings endpoints pass
+    /// <c>["batched","paid"]</c> — <c>recorded</c> rows are pending batch and excluded
+    /// from earnings per TL-PIN-JEB-510 §3.</para>
     /// </summary>
     Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
         string jeeberId,
         DateTimeOffset? from,
         DateTimeOffset? to,
-        CancellationToken ct);
+        CancellationToken ct,
+        IReadOnlyCollection<string>? codStates = null);
 
     /// <summary>Looks up a settlement by its own primary key.</summary>
     Task<Settlement?> GetByIdAsync(string settlementId, CancellationToken ct);
@@ -55,4 +61,36 @@ public interface ISettlementStore
     /// read. Idempotent — repeat calls do not advance the timestamp.
     /// </summary>
     Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, DateTimeOffset at, CancellationToken ct);
+
+    // ── JEB-56/57 batch lifecycle ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns all settlement rows with <see cref="CodSettlementState.Recorded"/>
+    /// whose <see cref="Settlement.SettledAt"/> falls within the given window.
+    /// Used by the weekly batch cron to gather settlements for the closing window.
+    /// </summary>
+    Task<IReadOnlyList<Settlement>> ListRecordedInWindowAsync(
+        DateTimeOffset windowStart,
+        DateTimeOffset windowEnd,
+        int limit,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Atomically transitions a batch of settlement rows from
+    /// <see cref="CodSettlementState.Recorded"/> to <see cref="CodSettlementState.Batched"/>,
+    /// setting <c>batch_id</c> and <c>batched_at</c>. Rows already in a later state
+    /// are skipped (idempotent).
+    /// </summary>
+    Task MarkBatchedAsync(
+        IReadOnlyList<string> settlementIds,
+        Guid batchId,
+        DateTimeOffset at,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Atomically transitions all settlements linked to <paramref name="batchId"/>
+    /// from <see cref="CodSettlementState.Batched"/> to <see cref="CodSettlementState.Paid"/>,
+    /// setting <c>paid_at</c>. Rows already in <c>paid</c> state are skipped (idempotent).
+    /// </summary>
+    Task MarkPaidByBatchAsync(Guid batchId, DateTimeOffset paidAt, CancellationToken ct);
 }

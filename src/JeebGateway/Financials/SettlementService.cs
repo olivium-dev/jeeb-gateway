@@ -85,21 +85,26 @@ public sealed class SettlementService : ISettlementService
         }
 
         var existing = await _store.GetByDeliveryAsync(deliveryId, ct);
-        if (existing is not null)
+        if (existing is not null && existing.GoodsCost > 0m)
         {
-            // Idempotent re-submission: the original numbers stand. We do
+            // Idempotent re-submission with real data: the original numbers stand. We do
             // not re-post the ledger entry — the wallet client itself is
             // idempotent on the settlement id, but skipping the call
             // keeps the settled-at timestamp stable as well.
             return new SettlementResult(SettlementOutcome.AlreadySettled, existing, null);
         }
 
+        // If there is an existing COD intent row (created by OTP verify, goodsCost=0),
+        // we skip creating a new row and fall through to create/update with real amounts.
+        // The TryInsertAsync will return the existing row if deliveryId conflicts.
+
         var tier = CommissionCalculator.ResolveTier(delivery.TierId);
         var breakdown = CommissionCalculator.Calculate(body.GoodsCost, tier);
 
+        var settlementId = existing?.Id ?? Guid.NewGuid().ToString();
         var settlement = new Settlement
         {
-            Id = Guid.NewGuid().ToString(),
+            Id = settlementId,
             DeliveryId = delivery.Id,
             ClientId = delivery.ClientId,
             JeeberId = delivery.JeeberId!,
@@ -114,11 +119,12 @@ public sealed class SettlementService : ISettlementService
             Currency = CurrencyLbp,
             PaymentMethod = paymentMethod,
             State = SettlementState.Settled,
+            CodState = CodSettlementState.Recorded,
             SettledAt = _clock.GetUtcNow(),
         };
 
         var (row, inserted) = await _store.TryInsertAsync(settlement, ct);
-        if (!inserted)
+        if (!inserted && row.GoodsCost > 0m)
         {
             return new SettlementResult(SettlementOutcome.AlreadySettled, row, null);
         }

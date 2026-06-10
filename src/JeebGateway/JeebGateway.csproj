@@ -28,6 +28,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.11" />
+    <PackageReference Include="Npgsql" Version="8.0.5" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
     <!--
       Newtonsoft.Json — required by every NSwag-generated salehly mirror client
@@ -96,6 +97,13 @@
       startup via QuestPDF.Settings.License = LicenseType.Community.
     -->
     <PackageReference Include="QuestPDF" Version="2026.2.4" />
+  </ItemGroup>
+
+  <!-- JEB-59: embed Arabic font so Docker/CI builds can render Arabic PDFs -->
+  <ItemGroup>
+    <Content Include="..\..\assets\fonts\NotoSansArabic-Regular.ttf"
+             CopyToOutputDirectory="PreserveNewest"
+             Link="assets\fonts\NotoSansArabic-Regular.ttf" />
   </ItemGroup>
 
 </Project>

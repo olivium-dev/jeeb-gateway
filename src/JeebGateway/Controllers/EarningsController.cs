@@ -7,6 +7,8 @@ using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Net.Http.Headers;
 
+// EarningsStatementTokenService is a new JEB-59 type — injected via DI.
+
 namespace JeebGateway.Controllers;
 
 [ApiController]
@@ -18,13 +20,16 @@ public sealed class EarningsController : ControllerBase
 {
     private readonly IEarningsAggregationService _earnings;
     private readonly IEarningsPdfGenerator _pdf;
+    private readonly EarningsStatementTokenService _tokens;
 
     public EarningsController(
         IEarningsAggregationService earnings,
-        IEarningsPdfGenerator pdf)
+        IEarningsPdfGenerator pdf,
+        EarningsStatementTokenService tokens)
     {
         _earnings = earnings;
-        _pdf = pdf;
+        _pdf      = pdf;
+        _tokens   = tokens;
     }
 
     [HttpGet("summary")]
@@ -86,6 +91,75 @@ public sealed class EarningsController : ControllerBase
         var projection = await _earnings.GetLifetimeProjectionAsync(userId, ct);
         return ConditionalProjection(projection);
     }
+
+    /// <summary>
+    /// JEB-59: Generate a signed URL for the PDF statement (24 h expiry by default).
+    /// GET /api/earnings/statement/link?from=&amp;to=&amp;language=
+    /// Returns { url, expiresAt } — the URL points to /api/earnings/statement/download?token=...
+    /// </summary>
+    [HttpGet("statement/link")]
+    [RequireCapability(Capabilities.EarningsPdfOwn)]
+    [ProducesResponseType(typeof(EarningsStatementLink), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    public IActionResult GetStatementLink(
+        [FromQuery] DateTimeOffset from,
+        [FromQuery] DateTimeOffset to,
+        [FromQuery] string language = "en",
+        CancellationToken ct = default)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var problem))
+            return problem;
+
+        if (from > to)
+            return InvalidRange(from, to);
+
+        var (token, expiresAt) = _tokens.Create(userId, from, to, language);
+
+        // Build the download URL using the current request base
+        var downloadUrl = $"{Request.Scheme}://{Request.Host}/api/earnings/statement/download?token={Uri.EscapeDataString(token)}";
+
+        return Ok(new EarningsStatementLink(downloadUrl, expiresAt));
+    }
+
+    /// <summary>
+    /// JEB-59: Download PDF using a signed token.
+    /// GET /api/earnings/statement/download?token=...
+    /// The token is validated (HMAC + expiry + jeeberId match). No Bearer token required —
+    /// the signed token IS the authorization for this endpoint.
+    /// </summary>
+    [HttpGet("statement/download")]
+    // No [RequireCapability] — the signed token IS the authorization for this endpoint.
+    // Standard [Authorize] not required; the token carries jeeberId + expiry + HMAC.
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> DownloadStatementViaToken(
+        [FromQuery] string token,
+        CancellationToken ct = default)
+    {
+        // Caller identity from Bearer token (if present) is used only for jeeberId match.
+        // If no Bearer, we validate only the signed token's integrity and expiry.
+        UserIdentity.TryGetUserId(HttpContext, out var callerId, out _);
+
+        if (string.IsNullOrWhiteSpace(token))
+            return Unauthorized(TokenExpiredProblem);
+
+        var (valid, payload) = _tokens.Validate(token, callerId ?? string.Empty);
+        if (!valid || payload is null)
+            return Unauthorized(TokenExpiredProblem);
+
+        var result = await _pdf.GenerateAsync(
+            new EarningsStatementRequest(payload.JeeberId, payload.PeriodStart, payload.PeriodEnd, payload.Lang),
+            ct);
+
+        return File(result.PdfBytes, result.ContentType, result.FileName);
+    }
+
+    private static readonly ProblemDetails TokenExpiredProblem = new()
+    {
+        Title  = "Earnings statement URL has expired or is invalid.",
+        Status = StatusCodes.Status401Unauthorized,
+        Type   = "https://jeeb.dev/errors/earnings-url-expired"
+    };
 
     [HttpGet("statement")]
     [RequireCapability(Capabilities.EarningsPdfOwn)] // §D STATE: ownership in-action
