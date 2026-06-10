@@ -54,11 +54,34 @@ public class DeliveryHandoverContractTests
             HttpStatusCode.OK,
             $$"""{"delivery_id":"{{DeliveryId}}","verified":true,"status":"Done"}""");
 
-        var result = await client.VerifyHandoverOtpAsync(DeliveryId, success: true, CancellationToken.None);
+        var result = await client.VerifyHandoverOtpAsync(
+            DeliveryId, success: true, actorId: "client_1", actorRole: "client", CancellationToken.None);
 
         result.DeliveryId.Should().Be(DeliveryId);
         result.Verified.Should().BeTrue();
         result.Status.Should().Be("Done");
+    }
+
+    [Fact]
+    public async Task VerifyHandoverOtpAsync_Forwards_Actor_Headers_To_DeliveryService()
+    {
+        // Gap A guard: the AtDoor→Done leg authorises the actor from X-Actor-*.
+        // Without these headers delivery-service returns 403 wrong_party and the
+        // delivery never reaches Done (the gateway used to mask that as a 502).
+        var handler = new CapturingHandler(
+            HttpStatusCode.OK,
+            $$"""{"delivery_id":"{{DeliveryId}}","verified":true,"status":"Done"}""");
+        var http = new HttpClient(handler) { BaseAddress = new Uri("http://delivery.test/") };
+        var client = new DeliveryServiceClient(http);
+
+        var result = await client.VerifyHandoverOtpAsync(
+            DeliveryId, success: true, actorId: "client_42", actorRole: "client", CancellationToken.None);
+
+        result.Verified.Should().BeTrue();
+        handler.LastRequest.Should().NotBeNull();
+        handler.LastRequest!.Headers.GetValues("X-Actor-ID").Should().ContainSingle().Which.Should().Be("client_42");
+        handler.LastRequest!.Headers.GetValues("X-Actor-Role").Should().ContainSingle().Which.Should().Be("client");
+        handler.LastRequest!.RequestUri!.AbsolutePath.Should().Be($"/api/v1/deliveries/{DeliveryId}/otp/verify");
     }
 
     [Fact]
@@ -70,7 +93,7 @@ public class DeliveryHandoverContractTests
             """{"reason":"invalid_code","attempts_remaining":2}""");
 
         var act = async () =>
-            await client.VerifyHandoverOtpAsync(DeliveryId, success: false, CancellationToken.None);
+            await client.VerifyHandoverOtpAsync(DeliveryId, success: false, actorId: "client_1", actorRole: "client", CancellationToken.None);
 
         var ex = (await act.Should().ThrowAsync<DeliveryHandoverException>()).Which;
         ex.StatusCode.Should().Be((int)HttpStatusCode.Unauthorized);
@@ -88,7 +111,7 @@ public class DeliveryHandoverContractTests
             """{"reason":"locked","escalation_id":"esc_fixed","locked_at":"2026-05-31T12:00:00Z"}""");
 
         var act = async () =>
-            await client.VerifyHandoverOtpAsync(DeliveryId, success: false, CancellationToken.None);
+            await client.VerifyHandoverOtpAsync(DeliveryId, success: false, actorId: "client_1", actorRole: "client", CancellationToken.None);
 
         var ex = (await act.Should().ThrowAsync<DeliveryHandoverException>()).Which;
         ex.StatusCode.Should().Be((int)HttpStatusCode.Locked);
@@ -126,6 +149,36 @@ public class DeliveryHandoverContractTests
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            var response = new HttpResponseMessage(_status)
+            {
+                Content = new StringContent(_jsonBody, Encoding.UTF8, "application/json"),
+                RequestMessage = request
+            };
+            return Task.FromResult(response);
+        }
+    }
+
+    /// <summary>
+    /// Like <see cref="SingleResponseHandler"/> but retains the outbound request so
+    /// a test can assert the forwarded headers (X-Actor-ID / X-Actor-Role).
+    /// </summary>
+    private sealed class CapturingHandler : HttpMessageHandler
+    {
+        private readonly HttpStatusCode _status;
+        private readonly string _jsonBody;
+
+        public HttpRequestMessage? LastRequest { get; private set; }
+
+        public CapturingHandler(HttpStatusCode status, string jsonBody)
+        {
+            _status = status;
+            _jsonBody = jsonBody;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            LastRequest = request;
             var response = new HttpResponseMessage(_status)
             {
                 Content = new StringContent(_jsonBody, Encoding.UTF8, "application/json"),

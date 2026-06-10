@@ -125,13 +125,35 @@ public interface IDeliveryServiceClient
     /// attempt counter and lock.
     /// </summary>
     /// <returns><see cref="DeliveryHandoverVerifyResult"/> on 200 (verified).</returns>
+    /// <remarks>
+    /// On <paramref name="success"/>=true delivery-service runs the AtDoor→Done
+    /// SM transition, which validates AND authorises the actor (its <c>extractActor</c>
+    /// reads the <c>X-Actor-ID</c>/<c>X-Actor-Role</c> headers — it has no JWKS of
+    /// its own). The gateway therefore MUST forward the authenticated caller's
+    /// identity; an empty/missing role yields a 403 <c>wrong_party</c> upstream
+    /// (the gateway maps that to 403, never a 502). This mirrors
+    /// <see cref="CanonicalTransitionAsync"/>.
+    /// </remarks>
+    /// <param name="actorId">
+    /// The gateway-resolved authenticated caller id (the same value
+    /// <c>UserIdentity.TryGetUserId</c> yields), forwarded as <c>X-Actor-ID</c>.
+    /// </param>
+    /// <param name="actorRole">
+    /// The canonical party role (<c>client|jeeber|admin|system</c>) from
+    /// <c>CanonicalDeliveryVocab.ActorRoleFor</c>, forwarded as <c>X-Actor-Role</c>.
+    /// </param>
     /// <exception cref="DeliveryHandoverException">
     /// Thrown for 401 <c>invalid_code</c> (with <c>attempts_remaining</c>),
     /// 423 <c>locked</c> (with <c>escalation_id</c>), 409 <c>not_at_door</c>,
-    /// and 404 so the controller maps the upstream status straight through
-    /// as RFC 7807.
+    /// 403 <c>wrong_party</c>, and 404 so the controller maps the upstream
+    /// status straight through as RFC 7807.
     /// </exception>
-    Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(string deliveryId, bool success, CancellationToken ct);
+    Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(
+        string deliveryId,
+        bool success,
+        string actorId,
+        string actorRole,
+        CancellationToken ct);
 
     Task<DeliveryCancelResult> CancelDeliveryAsync(string deliveryId, DeliveryCancelUpstreamRequest body, CancellationToken ct);
 

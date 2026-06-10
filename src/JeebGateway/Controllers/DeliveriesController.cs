@@ -1033,7 +1033,10 @@ public class DeliveriesController : ControllerBase
 
         var correlationId = Activity.Current?.Id ?? HttpContext.TraceIdentifier;
 
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        // Capture the authenticated caller identity: on the upstream compose path
+        // it is forwarded as X-Actor-* so delivery-service can validate + authorise
+        // the AtDoor→Done SM transition (its extractActor has no JWKS of its own).
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
 
         if (body is null || string.IsNullOrWhiteSpace(body.Code))
         {
@@ -1060,7 +1063,11 @@ public class DeliveriesController : ControllerBase
         // The raw code never leaves the gateway↔one-time-password hop (AC5).
         if (_flags.CurrentValue.Delivery)
         {
-            return await VerifyOtpViaDeliveryServiceAsync(deliveryId, delivery, body.Code!, correlationId, activity, ct);
+            // X-Actor-* identity for the durable AtDoor→Done leg: the canonical
+            // party role (client|jeeber|admin|system) + the authenticated caller id.
+            var actorRole = CanonicalDeliveryVocab.ActorRoleFor(HttpContext);
+            return await VerifyOtpViaDeliveryServiceAsync(
+                deliveryId, delivery, body.Code!, callerId, actorRole, correlationId, activity, ct);
         }
 
         // PR review B1: handover OTP applies at the `at_door` step.
@@ -1391,6 +1398,8 @@ public class DeliveriesController : ControllerBase
         string deliveryId,
         DeliveryRequest delivery,
         string code,
+        string actorId,
+        string actorRole,
         string correlationId,
         Activity? activity,
         CancellationToken ct)
@@ -1455,7 +1464,7 @@ public class DeliveriesController : ControllerBase
         DeliveryHandoverVerifyResult result;
         try
         {
-            result = await _deliveryClient.VerifyHandoverOtpAsync(deliveryId, success, ct);
+            result = await _deliveryClient.VerifyHandoverOtpAsync(deliveryId, success, actorId, actorRole, ct);
         }
         catch (DeliveryHandoverException dhx)
         {
@@ -1536,6 +1545,28 @@ public class DeliveriesController : ControllerBase
                     Status = StatusCodes.Status409Conflict,
                     Type   = "https://jeeb.dev/errors/not-at-door"
                 });
+
+            case StatusCodes.Status403Forbidden:
+                // wrong_party — delivery-service's authorise rejected the actor on
+                // the AtDoor→Done leg (the X-Actor-* did not match the assigned
+                // client/jeeber). Forward the upstream verdict verbatim instead of
+                // masking it as a 502; the route is already cap-gated {client,jeeber},
+                // so this is defensive (e.g. a caller authed for a delivery they are
+                // not a party to).
+                _log.LogWarning(
+                    "handover.verify_forbidden deliveryId={DeliveryId} correlationId={CorrelationId} reason={Reason}",
+                    deliveryId, correlationId, dhx.Reason);
+                return new ObjectResult(new ProblemDetails
+                {
+                    Title  = "Not authorised for this handover.",
+                    Detail = "You are not a party to this delivery's handover.",
+                    Status = StatusCodes.Status403Forbidden,
+                    Type   = "https://jeeb.dev/errors/handover-wrong-party"
+                })
+                {
+                    StatusCode   = StatusCodes.Status403Forbidden,
+                    ContentTypes = { "application/problem+json" }
+                };
 
             case StatusCodes.Status401Unauthorized:
             {
