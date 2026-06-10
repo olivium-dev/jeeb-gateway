@@ -28,8 +28,9 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
 
     public async Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct)
     {
+        // JEB-1487 Rule 1: canonical route is now /api/v1/ — no alias.
         using var resp = await _http.PostAsJsonAsync(
-            "api/users/phone-identity/find-or-create",
+            "api/v1/users/phone-identity/find-or-create",
             new PhoneFindOrCreateBody { Phone = phone },
             Json, ct);
 
@@ -44,12 +45,15 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         var dto = await resp.Content.ReadFromJsonAsync<PhoneFindOrCreateBodyResponse>(Json, ct)
             ?? throw new UserManagementCallException("phone/find-or-create", (int)HttpStatusCode.BadGateway);
 
-        var roles = dto.AvailableRoles is { Length: > 0 }
-            ? dto.AvailableRoles
-            : new[] { Roles.Client };
-        var active = string.IsNullOrWhiteSpace(dto.ActiveRole) ? Roles.Client : dto.ActiveRole!;
-
-        return new PhoneFindOrCreateResult(dto.UserId ?? string.Empty, dto.IsNew, roles, active);
+        // JEB-1480/JEB-1487 (GR2): the shared UM phone-identity endpoint is IDENTITY-ONLY
+        // — { userId, isNew, phoneHashRef }. No roles, no raw phone, no Jeeb vocabulary.
+        // Default role decoration and all claim shaping live HERE in the gateway.
+        return new PhoneFindOrCreateResult(
+            dto.UserId ?? string.Empty,
+            dto.IsNew,
+            dto.PhoneHashRef ?? string.Empty,
+            new[] { Roles.Client },
+            Roles.Client);
     }
 
     public async Task<RoleSwitchReissueResult> RoleSwitchAsync(string userId, string opaqueRole, CancellationToken ct)
@@ -135,12 +139,13 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         [JsonPropertyName("phone")] public string Phone { get; set; } = string.Empty;
     }
 
+    // JEB-1487 (GR2): mirrors the de-leaked shared contract — IDENTITY ONLY.
+    // { userId, isNew, phoneHashRef } — raw phone removed, no roles, no Jeeb vocab.
     private sealed class PhoneFindOrCreateBodyResponse
     {
         [JsonPropertyName("userId")] public string? UserId { get; set; }
         [JsonPropertyName("isNew")] public bool IsNew { get; set; }
-        [JsonPropertyName("available_roles")] public string[]? AvailableRoles { get; set; }
-        [JsonPropertyName("active_role")] public string? ActiveRole { get; set; }
+        [JsonPropertyName("phoneHashRef")] public string? PhoneHashRef { get; set; }
     }
 
     private sealed class RoleSwitchBody

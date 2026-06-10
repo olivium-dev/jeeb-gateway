@@ -4,11 +4,10 @@ namespace JeebGateway.Requests;
 /// The canonical SM-1 delivery state machine (ADR-002, owner-approved 2026-06-04).
 ///
 /// This is the gateway-side, trigger-keyed <c>map[from][trigger] → to</c> freeze
-/// of <c>delivery-service/internal/status/status.go::transitions</c>. It replaces
-/// the modelling power of the legacy linear <see cref="DeliveryStateMachine"/>
-/// chain WITHOUT removing it — the legacy class stays as a behavior-preserving
-/// happy-path guard while in-flight orders drain (ADR-002 §6 / D4). New code
-/// should consult <see cref="DeliverySm"/>.
+/// of <c>delivery-service/internal/status/status.go::transitions</c>. It is the
+/// only gateway-side delivery SM model: the legacy linear snake_case chain guard
+/// was RETIRED in JEB-1479 (the gateway now forwards transitions to
+/// delivery-service). New code should consult <see cref="DeliverySm"/>.
 ///
 /// Why trigger-keyed (ADR-002 D2): two <c>Ordered → Cancelled</c> edges exist
 /// with different penalty semantics (<c>client_cancel_no_fee</c> vs

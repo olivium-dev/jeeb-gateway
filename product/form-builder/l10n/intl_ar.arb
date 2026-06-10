@@ -1,0 +1,15 @@
+{
+  "@@locale": "ar",
+  "@@x-purpose": "Jeeb KYC v1 (jeeb_jeeber_v1) — ARB keys for form-builder-service flavors/jeeb_jeeber_v1/*.json. Convention: kyc.jeeb.v1.<field_id>.<slot> (LEAD 14763 §4).",
+  "kyc.jeeb.v1.id_document_front_url.label": "صورة الهوية (الوجه الأمامي)",
+  "kyc.jeeb.v1.id_document_back_url.label": "صورة الهوية (الوجه الخلفي)",
+  "kyc.jeeb.v1.id_type.label": "نوع وثيقة الهوية",
+  "kyc.jeeb.v1.id_number.label": "رقم وثيقة الهوية",
+  "kyc.jeeb.v1.driver_license_number.label": "رقم رخصة القيادة",
+  "kyc.jeeb.v1.driver_license_expiry.label": "تاريخ انتهاء رخصة القيادة",
+  "kyc.jeeb.v1.vehicle_registration_url.label": "صورة دفتر تسجيل المركبة",
+  "kyc.jeeb.v1.vehicle_plate_number.label": "رقم لوحة المركبة",
+  "kyc.jeeb.v1.vehicle_year_make_model.label": "سنة الصنع والشركة المصنّعة والطراز",
+  "kyc.jeeb.v1.selfie_with_liveness_url.label": "صورة شخصية مع التحقق الحي",
+  "kyc.jeeb.v1.tos_accepted_version.label": "الشروط والأحكام"
+}

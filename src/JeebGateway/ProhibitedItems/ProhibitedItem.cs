@@ -12,7 +12,8 @@ namespace JeebGateway.ProhibitedItems;
 ///   </list>
 /// Additive on the existing catalog row. The lexicon stays gateway-owned (the
 /// N11 boundary guard requires the lexicon to live ONLY under the gateway's
-/// listKey, never in ban-service), so severity is a gateway concern.
+/// list key <see cref="JeebModerationList.ListKey"/> = <c>jeeb-prohibited-items</c>,
+/// never in ban-service), so severity is a gateway concern.
 /// </summary>
 public enum ProhibitedSeverity
 {

@@ -64,12 +64,15 @@ public sealed class S08GatewayCloseoutTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
 
-        // The gateway seated the OFFERING jeeber as jeeber_offerer on the request's
-        // conversation — forwarding only (conversationId, jeeberId, role).
+        // JEB-1488 (correction #1 / GR2): the gateway seated the offering jeeber under
+        // the GENERIC permission tag mapped from the Jeeb role — the Jeeb role name
+        // "jeeber_offerer" never crosses to the shared chat-service.
         chat.AddParticipantCalls.Should().Be(1);
         chat.LastAddParticipantConversationId.Should().Be(conversationId);
         chat.LastAddParticipant!.UserId.Should().Be(jeeberId);
-        chat.LastAddParticipant.RoleInConvo.Should().Be("jeeber_offerer");
+        chat.LastAddParticipant.RoleInConvo.Should().Be(ConversationParticipantTag.Participant);
+        ConversationParticipantTag.IsForbiddenUpstreamToken(chat.LastAddParticipant.RoleInConvo)
+            .Should().BeFalse();
     }
 
     [Fact]
@@ -160,7 +163,11 @@ public sealed class S08GatewayCloseoutTests
         chat.LastAdvancePhaseConversationId.Should().Be(requestId);
         chat.LastAdvancePhase!.Phase.Should().Be("accepted");
         chat.LastAdvancePhase.WinnerUserId.Should().Be("jeeber-kamal");
-        chat.LastAdvancePhase.WinnerRoleInConvo.Should().Be("jeeber_winner");
+        // JEB-1488 (correction #1 / GR2): the winner is promoted under the GENERIC
+        // permission tag — the Jeeb role name "jeeber_winner" never crosses upstream.
+        chat.LastAdvancePhase.WinnerRoleInConvo.Should().Be(ConversationParticipantTag.PrimaryParticipant);
+        ConversationParticipantTag.IsForbiddenUpstreamToken(chat.LastAdvancePhase.WinnerRoleInConvo)
+            .Should().BeFalse();
         chat.LastAdvancePhase.RemoveOthers.Should().BeTrue();
     }
 
@@ -195,9 +202,15 @@ public sealed class S08GatewayCloseoutTests
     [Fact]
     public async Task RealtimeGate_Member_Returns200_With_SignedTicket_ScopedTo_Conversation_And_Viewer()
     {
+        // chat-service stores and returns only the GENERIC permission tag (correction
+        // #1) — the gateway re-derives the Jeeb role for its own realtime ticket below.
         var chat = new RecordingJeebConversationClient
         {
-            Membership = new JeebConversationMembership { IsMember = true, RoleInConvo = "jeeber_offerer" },
+            Membership = new JeebConversationMembership
+            {
+                IsMember = true,
+                RoleInConvo = ConversationParticipantTag.Participant,
+            },
         };
         using var factory = NewRealtimeFactory(chat);
         var http = factory.CreateClient();
@@ -220,6 +233,8 @@ public sealed class S08GatewayCloseoutTests
         var jwt = new JwtSecurityTokenHandler().ReadJwtToken(ticket);
         jwt.Subject.Should().Be(viewerId);
         jwt.Claims.Should().Contain(c => c.Type == "conv" && c.Value == "conv-h6");
+        // The gateway re-derived the Jeeb role from the generic tag chat-service
+        // returned, so its OWN realtime service still receives the Jeeb vocabulary.
         jwt.Claims.Should().Contain(c => c.Type == "role" && c.Value == "jeeber_offerer");
         jwt.ValidTo.Should().BeAfter(DateTime.UtcNow);
     }
@@ -484,7 +499,7 @@ public sealed class S08GatewayCloseoutTests
             => throw new NotSupportedException();
 
         public Task<OfferMutationResult> EditAsync(
-            string actingUserId, string requestId, string offerId, long? feeCents, int? etaMinutes, string? note, CancellationToken ct)
+            string actingUserId, string requestId, string offerId, long? feeCents, int? etaMinutes, string? note, int? maxEdits, CancellationToken ct)
             => throw new NotSupportedException();
 
         public Task<OfferMutationResult> RejectAsync(

@@ -17,7 +17,12 @@ public sealed class GeolocationServiceClient : IGeolocationServiceClient
 
     public async Task<LocationUpdateResponse> UpdateLocationAsync(string jeeberId, LocationUpdateRequest body, CancellationToken ct)
     {
-        var path = $"jeeb/jeebers/{Uri.EscapeDataString(jeeberId)}/location/update";
+        // JEB-1485: geolocation-service is now generic. The batch heartbeat
+        // ingest is the product-agnostic POST /location/update, which derives
+        // the principal from the forwarded bearer (no id in the path). jeeberId
+        // is retained on the gateway-side signature for tracing/compat.
+        _ = jeeberId;
+        const string path = "location/update";
         using var response = await _http.PostAsJsonAsync(path, body, JsonOptions, ct);
         response.EnsureSuccessStatusCode();
         var payload = await response.Content.ReadFromJsonAsync<LocationUpdateResponse>(JsonOptions, ct);
@@ -30,12 +35,15 @@ public sealed class GeolocationServiceClient : IGeolocationServiceClient
 
     public async Task<Stream> OpenTrackingStreamAsync(string deliveryId, TrackingStreamQuery query, CancellationToken ct)
     {
-        var url = $"jeeb/deliveries/{Uri.EscapeDataString(deliveryId)}/tracking";
-        var qs = new List<string>();
-        if (!string.IsNullOrEmpty(query.JeeberId)) qs.Add($"jeeber_id={Uri.EscapeDataString(query.JeeberId)}");
-        if (query.DropoffLat.HasValue) qs.Add($"dropoff_lat={query.DropoffLat.Value}");
-        if (query.DropoffLng.HasValue) qs.Add($"dropoff_lng={query.DropoffLng.Value}");
-        if (qs.Count > 0) url += "?" + string.Join('&', qs);
+        // JEB-1485: the shared service exposes an opaque, generic per-track SSE
+        // stream: GET /v1/geo/tracks/{trackId}/tracking/stream. The Jeeb delivery
+        // id maps onto the generic trackId; all participant + in_transit lifecycle
+        // gating is enforced in the gateway (LocationController) BEFORE this
+        // upstream subscription is opened. The previous dropoff_*/jeeber_id query
+        // hints (a hand-rolled extension the generic service does not model) are
+        // dropped — the gateway already owns dropoff/polyline projection.
+        _ = query;
+        var url = $"v1/geo/tracks/{Uri.EscapeDataString(deliveryId)}/tracking/stream";
 
         var message = new HttpRequestMessage(HttpMethod.Get, url);
         // ResponseHeadersRead avoids buffering the SSE stream — we hand the

@@ -24,8 +24,13 @@ public interface IUserManagementDualRoleClient
 {
     /// <summary>
     /// Find-or-create the UM identity for <paramref name="phone"/> (E.164). Returns the
-    /// canonical user id plus the user's OPAQUE roles. Idempotent: a repeated call for the
-    /// same phone returns the same id with <c>isNew = false</c>.
+    /// canonical user id. Idempotent: a repeated call for the same phone returns the same
+    /// id with <c>isNew = false</c>.
+    ///
+    /// <para>JEB-1480 (GR2): the shared UM phone-identity endpoint is IDENTITY-ONLY and
+    /// no longer emits roles. The DEFAULT role and all role/claim shaping are applied
+    /// HERE in the gateway — the returned <see cref="PhoneFindOrCreateResult"/> carries
+    /// the gateway's default opaque role decoration, NOT a UM-supplied claim.</para>
     /// </summary>
     /// <exception cref="UserManagementCallException">The upstream returned a non-success status.</exception>
     Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct);
@@ -63,10 +68,17 @@ public sealed record RoleGrantResult(
     IReadOnlyList<string> AvailableRoles,
     bool Added);
 
-/// <summary>Result of <see cref="IUserManagementDualRoleClient.PhoneFindOrCreateAsync"/> — OPAQUE roles.</summary>
+/// <summary>
+/// Result of <see cref="IUserManagementDualRoleClient.PhoneFindOrCreateAsync"/>. The id is
+/// UM-canonical; role decoration is GATEWAY-OWNED (JEB-1480/JEB-1487 / GR2) — UM returns
+/// IDENTITY ONLY. <see cref="PhoneHashRef"/> is the opaque HMAC-SHA256 lookup key emitted
+/// by UM (non-reversible); callers may store it for audit/dedup without holding a raw phone.
+/// OPAQUE role strings ({customer,driver}).
+/// </summary>
 public sealed record PhoneFindOrCreateResult(
     string UserId,
     bool IsNew,
+    string PhoneHashRef,
     IReadOnlyList<string> AvailableRoles,
     string ActiveRole);
 

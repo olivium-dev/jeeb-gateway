@@ -261,9 +261,6 @@ public sealed class DurableRequestsStore : IRequestsStore
     public Task<DeliveryRequest?> TryAcceptByJeeberAsync(string requestId, string jeeberId, int limit, DateTimeOffset at, CancellationToken ct)
         => _inner.TryAcceptByJeeberAsync(requestId, jeeberId, limit, at, ct);
 
-    public Task<DeliveryTransitionResult> TryTransitionAsync(string requestId, string toStatus, string? otp, CancellationToken ct)
-        => _inner.TryTransitionAsync(requestId, toStatus, otp, ct);
-
     public Task<CancellationStoreResult?> TryCancelAsync(string requestId, IReadOnlySet<string> allowedFromStates, string targetStatus, string cancelledBy, string? reason, DateTimeOffset at, CancellationToken ct)
         => _inner.TryCancelAsync(requestId, allowedFromStates, targetStatus, cancelledBy, reason, at, ct);
 

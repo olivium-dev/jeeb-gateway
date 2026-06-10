@@ -1,0 +1,8 @@
+{
+  "flavor": "client",
+  "audience": "Client role only",
+  "overrides": {
+    "visibleSteps": []
+  },
+  "note": "Clients do not submit KYC for the MVP — phone verification is sufficient. This file exists so the engine treats KYC as a Jeeber-only flavor without erroring."
+}

@@ -36,6 +36,9 @@ public static class PushTriggerCategoryMap
         // events the participant needs to see regardless of preferences.
         NotificationTrigger.LowRatingFlag => null,
         NotificationTrigger.DisputeUpdate => null,
+        // Settlement-paid is a financial event the Jeeber must always see
+        // (their money moved) — always-on, like KYC (JEB-1476).
+        NotificationTrigger.SettlementPaid => null,
         _ => throw new ArgumentOutOfRangeException(nameof(trigger), trigger, "Unknown trigger")
     };
 

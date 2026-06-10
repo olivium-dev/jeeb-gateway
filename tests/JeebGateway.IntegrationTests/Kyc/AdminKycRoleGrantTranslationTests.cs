@@ -56,6 +56,42 @@ public sealed class AdminKycRoleGrantTranslationTests
     }
 
     [Fact]
+    public async Task Approve_With_Unknown_ContractRole_Returns_400_InvalidRole_And_Never_Calls_UserManagement()
+    {
+        // JEB-1472 / AC3: the relocated {client,jeeber} whitelist must be ENFORCED at runtime.
+        // A grant intent carrying a role outside the contract set must be rejected as
+        // invalid_role 400 at the gateway boundary, NOT forwarded verbatim to UM.
+        var seam = new StubKycSeam
+        {
+            ReviewOutcome = new KycBffReviewResult
+            {
+                SubmissionId = "sub-3",
+                UserId = "applicant-3",
+                Status = "Verified",
+                GrantsRole = "wizard", // NOT a Jeeb contract role ({client,jeeber})
+            }
+        };
+        var um = new CapturingUm();
+
+        using var factory = MakeFactory(seam, um);
+        var admin = AdminClient(factory, "admin-3");
+
+        var resp = await admin.PatchAsync("/admin/kyc/sub-3/review",
+            JsonContent.Create(new { action = "approve" }));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetailsProbe>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/invalid-role");
+        problem.Title.Should().Be("invalid_role");
+        problem.Status.Should().Be(400);
+        problem.Detail.Should().Contain("wizard");
+
+        // The unknown role is rejected BEFORE the translation seam reaches UM.
+        um.AppendCalls.Should().Be(0);
+    }
+
+    [Fact]
     public async Task Reject_Does_Not_Append_Any_Role()
     {
         var seam = new StubKycSeam
@@ -115,6 +151,14 @@ public sealed class AdminKycRoleGrantTranslationTests
         public bool PushSent { get; set; }
     }
 
+    private sealed class ProblemDetailsProbe
+    {
+        public string? Type { get; set; }
+        public string? Title { get; set; }
+        public int? Status { get; set; }
+        public string? Detail { get; set; }
+    }
+
     private sealed class CapturingUm : IUserManagementDualRoleClient
     {
         public int AppendCalls { get; private set; }
@@ -130,7 +174,7 @@ public sealed class AdminKycRoleGrantTranslationTests
         }
 
         public Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct)
-            => Task.FromResult(new PhoneFindOrCreateResult(phone, false, new[] { Roles.Client }, Roles.Client));
+            => Task.FromResult(new PhoneFindOrCreateResult(phone, false, string.Empty, new[] { Roles.Client }, Roles.Client));
 
         public Task<RoleSwitchReissueResult> RoleSwitchAsync(string userId, string opaqueRole, CancellationToken ct)
             => Task.FromResult(new RoleSwitchReissueResult(userId, "a", "r", opaqueRole));

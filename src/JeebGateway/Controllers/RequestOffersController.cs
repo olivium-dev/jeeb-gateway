@@ -1,5 +1,6 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
+using JeebGateway.Conversations;
 using JeebGateway.Conversations.Client;
 using JeebGateway.Requests;
 using JeebGateway.Services;
@@ -376,7 +377,11 @@ public class RequestOffersController : ControllerBase
                 new AddJeebParticipantRequest
                 {
                     UserId = created.JeeberId,
-                    RoleInConvo = "jeeber_offerer",
+                    // JEB-1488 (correction #1 / GR2): seat the offering jeeber under the
+                    // GENERIC permission tag the gateway maps the Jeeb role onto — the
+                    // Jeeb role name never crosses to the shared chat-service.
+                    RoleInConvo = ConversationParticipantTag.FromJeebRole(
+                        ConversationParticipantTag.JeebOffererRole),
                 },
                 ct);
         }

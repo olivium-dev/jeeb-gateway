@@ -194,9 +194,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
         return new OfferAcceptWire
         {
             AcceptedOfferId = wire.AcceptedOffer?.Id ?? offerId,
-            JeeberId = wire.AcceptedOffer?.JeeberId,
-            ChatThreadId = wire.ChatThreadId,
-            OtpCode = wire.OtpCode,
+            JeeberId = wire.AcceptedOffer?.WinningActorId,
             RejectedOfferIds = wire.RejectedOfferIds ?? new List<string>(),
             Replayed = replayed,
         };
@@ -238,9 +236,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
                     Envelope = new OfferAcceptWire
                     {
                         AcceptedOfferId = wire.AcceptedOffer?.Id ?? offerId,
-                        JeeberId = wire.AcceptedOffer?.JeeberId,
-                        ChatThreadId = wire.ChatThreadId,
-                        OtpCode = wire.OtpCode,
+                        JeeberId = wire.AcceptedOffer?.WinningActorId,
                         RejectedOfferIds = wire.RejectedOfferIds ?? new List<string>(),
                         Replayed = replayed,
                     },
@@ -276,6 +272,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
         long? feeCents,
         int? etaMinutes,
         string? note,
+        int? maxEdits,
         CancellationToken ct)
     {
         // S08 A3: PUT /api/v1/requests/{requestId}/offers/{offerId} (request-scoped,
@@ -287,8 +284,13 @@ public sealed class OfferServiceClient : IOfferServiceClient
         // Only send the fields the caller supplied — a partial edit (A3 sends fee
         // only) must leave eta/note untouched. The upstream changeset ignores nulls;
         // omitting them keeps the contract a true PATCH-over-PUT.
+        //
+        // JEB-1474: the edit cap is a Jeeb PRODUCT policy, not a shared-service
+        // constant — the gateway supplies `max_edits` so offer-service enforces the
+        // Jeeb ceiling without hardcoding it. Omitted (null) => offer-service falls
+        // back to its configured default.
         request.Content = JsonContent.Create(
-            new EditBody { FeeCents = feeCents, EtaMinutes = etaMinutes, Note = note },
+            new EditBody { FeeCents = feeCents, EtaMinutes = etaMinutes, Note = note, MaxEdits = maxEdits },
             options: JsonOptions);
 
         using var response = await _http.SendAsync(request, ct);
@@ -398,7 +400,8 @@ public sealed class OfferServiceClient : IOfferServiceClient
         {
             Id = wire.Id ?? string.Empty,
             RequestId = wire.RequestId ?? string.Empty,
-            JeeberId = wire.JeeberId ?? string.Empty,
+            // Prefer the canonical generic identity; fall back to the deprecated alias.
+            JeeberId = (!string.IsNullOrWhiteSpace(wire.ActorId) ? wire.ActorId : wire.JeeberId) ?? string.Empty,
             FeeCents = wire.FeeCents,
             EtaMinutes = wire.EtaMinutes,
             Note = wire.Note,
@@ -451,6 +454,13 @@ public sealed class OfferServiceClient : IOfferServiceClient
         [JsonPropertyName("fee_cents")] public long? FeeCents { get; init; }
         [JsonPropertyName("eta_minutes")] public int? EtaMinutes { get; init; }
         [JsonPropertyName("note")] public string? Note { get; init; }
+
+        /// <summary>
+        /// JEB-1474 — the Jeeb edit cap, supplied per request by the gateway so the
+        /// shared service does not hardcode the literal "2". Null => offer-service
+        /// uses its configured fallback.
+        /// </summary>
+        [JsonPropertyName("max_edits")] public int? MaxEdits { get; init; }
     }
 
     private sealed class MirrorRequestBody
@@ -464,6 +474,11 @@ public sealed class OfferServiceClient : IOfferServiceClient
     {
         [JsonPropertyName("id")] public string? Id { get; init; }
         [JsonPropertyName("request_id")] public string? RequestId { get; init; }
+
+        // Canonical, product-agnostic submitter identity (JEB-1474). The
+        // deprecated `jeeber_id` alias is still emitted for backward compat and
+        // used only as a fallback below.
+        [JsonPropertyName("actor_id")] public string? ActorId { get; init; }
         [JsonPropertyName("jeeber_id")] public string? JeeberId { get; init; }
         [JsonPropertyName("fee_cents")] public long FeeCents { get; init; }
         [JsonPropertyName("eta_minutes")] public int EtaMinutes { get; init; }
@@ -475,18 +490,29 @@ public sealed class OfferServiceClient : IOfferServiceClient
         [JsonPropertyName("withdrawn_at")] public DateTimeOffset? WithdrawnAt { get; init; }
     }
 
+    // JEB-1474: the accept envelope is ONLY the generic transition outcome —
+    // accepted offer id + rejected sibling ids. No otp_code / chat_thread_id are
+    // emitted by the shared service anymore (gateway owns those side effects).
     private sealed class AcceptEnvelope
     {
         [JsonPropertyName("accepted_offer")] public AcceptedOffer? AcceptedOffer { get; init; }
         [JsonPropertyName("rejected_offer_ids")] public List<string>? RejectedOfferIds { get; init; }
-        [JsonPropertyName("chat_thread_id")] public string? ChatThreadId { get; init; }
-        [JsonPropertyName("otp_code")] public string? OtpCode { get; init; }
     }
 
     private sealed class AcceptedOffer
     {
         [JsonPropertyName("id")] public string? Id { get; init; }
+
+        // Canonical, product-agnostic identity of the winning actor.
+        [JsonPropertyName("actor_id")] public string? ActorId { get; init; }
+
+        // Deprecated, read-compatible alias still emitted by offer-service for
+        // backward compatibility. Used only as a fallback.
         [JsonPropertyName("jeeber_id")] public string? JeeberId { get; init; }
+
+        /// <summary>Prefer the canonical generic id; fall back to the deprecated alias.</summary>
+        public string? WinningActorId =>
+            !string.IsNullOrWhiteSpace(ActorId) ? ActorId : JeeberId;
     }
 
     private sealed class ErrorEnvelope

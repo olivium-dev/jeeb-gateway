@@ -1,0 +1,18 @@
+{
+  "flavor": "jeeber",
+  "audience": "Users requesting Jeeber role",
+  "overrides": {
+    "visibleSteps": ["id_front", "id_back", "selfie_liveness", "vehicle_type", "vehicle_registration"],
+    "resubmissionPolicy": {
+      "rejectedStepsOnly": true,
+      "maxAttempts": 3
+    }
+  },
+  "tierEligibility": {
+    "motorbike":   ["express", "standard", "food_delivery", "on_the_way"],
+    "sedan":       ["express", "standard", "wholesale", "food_delivery", "on_the_way"],
+    "suv":         ["express", "standard", "wholesale", "on_the_way"],
+    "van":         ["wholesale", "standard"],
+    "pickup_truck":["wholesale", "standard"]
+  }
+}

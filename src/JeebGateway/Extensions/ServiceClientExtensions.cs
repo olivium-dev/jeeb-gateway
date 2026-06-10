@@ -1,3 +1,4 @@
+using JeebGateway.Financials;
 using JeebGateway.Services.Bff;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Http.Resilience;
@@ -421,6 +422,25 @@ public static class ServiceClientExtensions
         heartBeatBuilder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
         heartBeatBuilder.AddHttpMessageHandler<Services.Clients.HeartBeatServiceAuthKeyHandler>();
         heartBeatBuilder.AddResilienceHandler("standard", ConfigureStandardResilience);
+
+        // JEB-1484 (GR3 + GR4) — typed client over the Unified Payment Gateway's
+        // GENERIC external-settlement endpoint (POST /api/v1/payments/settlements/
+        // record). The Jeeb fee policy is computed in the gateway
+        // (CommissionCalculator / SettlementService); UPG records the pre-computed
+        // gross/fee/net. UpgSettlementLedgerClient (the ISettlementLedgerClient
+        // impl, wired in Program.cs behind FeatureFlags:UseUpstream:Payments) maps
+        // a settlement onto this client. AttachStandardPipeline gives it the same
+        // bearer + X-Service-Auth (ServiceAuth gating) + resilience chain as every
+        // other typed client. BindBaseAddress resolves Services:UnifiedPayment
+        // [:BaseUrl] with a trailing slash so "api/v1/payments/..." resolves under
+        // the host (lazy/safe: a missing BaseUrl leaves BaseAddress null and the
+        // flag stays off). HAND-CODED transport pending NSwag regeneration of
+        // ServiceUnifiedPaymentGatewayClient from
+        // contracts/unified-payment-gateway.openapi.json (deferred to CI; the build
+        // host has no dotnet nswag tool) — tracked as GR4 debt.
+        AttachStandardPipeline(
+            services.AddHttpClient<IUpgSettlementClient, UpgSettlementClient>(http =>
+                BindBaseAddress(http, config, "Services:UnifiedPayment")));
 
         AddDbProbeClients(services, config);
 

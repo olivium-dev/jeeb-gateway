@@ -195,7 +195,23 @@ public class AdminKycController : ControllerBase
         var roleGranted = false;
         if (!string.IsNullOrWhiteSpace(outcome.GrantsRole))
         {
-            roleGranted = await ComposeRoleGrantAsync(outcome.SubmissionId, outcome.UserId, outcome.GrantsRole!, ct);
+            try
+            {
+                roleGranted = await ComposeRoleGrantAsync(outcome.SubmissionId, outcome.UserId, outcome.GrantsRole!, ct);
+            }
+            catch (InvalidContractRoleException ex)
+            {
+                // JEB-1472 / AC3: the relocated {client,jeeber} whitelist rejects an unknown Jeeb
+                // contract role at the gateway boundary (RFC 7807 invalid_role 400) — the gateway
+                // never persists a non-contract role to the shared, product-agnostic UM service.
+                return BadRequest(new ProblemDetails
+                {
+                    Type = "https://jeeb.dev/errors/invalid-role",
+                    Title = "invalid_role",
+                    Detail = ex.Message,
+                    Status = StatusCodes.Status400BadRequest
+                });
+            }
         }
 
         await _auditLog.AppendAsync(new AdminAuditAppend
@@ -233,12 +249,32 @@ public class AdminKycController : ControllerBase
     /// <c>jeeber → driver</c> before checking <c>available_roles</c>. So the append
     /// MUST also be translated to opaque here, or it would store the literal
     /// <c>jeeber</c> while the switch looks for <c>driver</c> → 403. The gateway is
-    /// the sole translation seam (UM never names client/jeeber). A non-contract grant
-    /// role (unlikely) passes through verbatim.</para>
+    /// the sole translation seam (UM never names client/jeeber).</para>
+    ///
+    /// <para><b>JEB-1472 (AC3) — whitelist enforcement.</b> The relocated Jeeb contract
+    /// whitelist (<see cref="JeebRoleTranslator.ContractRoles"/>) is enforced HERE, the live
+    /// inbound seam where a Jeeb role reaches the translator. A grant role that is not a
+    /// recognised contract role is REJECTED (<see cref="InvalidContractRoleException"/> →
+    /// <c>invalid_role</c> 400) BEFORE any grant — interim or UM — instead of being forwarded
+    /// verbatim. This is the production caller that makes the relocated whitelist real.</para>
     /// </summary>
     private async Task<bool> ComposeRoleGrantAsync(
         string submissionId, string? subjectUserId, string contractRole, CancellationToken ct)
     {
+        // JEB-1472 / AC3: enforce the gateway-owned Jeeb contract whitelist BEFORE any grant
+        // (interim or UM). An unknown contract role must not be forwarded verbatim — reject it
+        // as invalid_role so the relocated {client,jeeber} whitelist has a real runtime enforcer.
+        // Translating now also yields the OPAQUE role UM persists (jeeber → driver), so the
+        // appended role matches what the role checks look up.
+        var opaqueRole = JeebRoleTranslator.ToOpaque(contractRole);
+        if (opaqueRole is null)
+        {
+            _log.LogWarning(
+                "kyc approve {SubmissionId}: grant role '{Role}' is not a recognised Jeeb contract role; "
+                + "rejecting as invalid_role", submissionId, contractRole);
+            throw new InvalidContractRoleException(contractRole);
+        }
+
         if (!_flags.CurrentValue.UserManagement)
         {
             // Interim path: the in-gateway service already appended the role.
@@ -251,10 +287,6 @@ public class AdminKycController : ControllerBase
                 "kyc approve {SubmissionId}: review outcome carried no owner; role grant skipped", submissionId);
             return false;
         }
-
-        // Translate the CONTRACT grant role to the OPAQUE role UM persists, so the
-        // appended role matches what role/switch will look up (jeeber → driver).
-        var opaqueRole = JeebRoleTranslator.ToOpaque(contractRole) ?? contractRole;
 
         try
         {

@@ -59,6 +59,7 @@ SERVICES=(
   "ban-service|BanServiceClient|JeebGateway.Services.Generated.BanService|http://localhost:10065/api-docs/openapi.json|BAN_SERVICE_OPENAPI_URL"                      # confirmed: Rust/utoipa OpenAPI 3.1 at /api-docs/openapi.json. NOTE: client is HAND-CODED (Services/Clients/BanServiceClient.cs) not NSwag-generated — snake_case + OAS-3.1 nullable arrays; row kept for spec drift detection.
   "feedback-service|FeedbackServiceClient|JeebGateway.Services.Generated.FeedbackService|http://localhost:10064/swagger/v1/swagger.json|FEEDBACK_SERVICE_OPENAPI_URL" # TODO: confirm spec URL (feedback-service exposes liveness-only on :10064)
   "voice-transcription-service|VoiceTranscriptionClient|JeebGateway.Services.Generated.VoiceTranscription|http://localhost:10062/openapi.json|VOICE_TRANSCRIPTION_OPENAPI_URL" # TODO: confirm spec URL (health probe is /healthz on :10062)
+  "unified-payment-gateway|ServiceUnifiedPaymentGatewayClient|JeebGateway.Services.Generated.UnifiedPaymentGateway|http://localhost:4000/api/v1/openapi|UNIFIED_PAYMENT_GATEWAY_OPENAPI_URL" # JEB-1484: UPG generic settlement (Phoenix OpenApiSpex at /api/v1/openapi, dev-only). NOTE: client is HAND-CODED (Financials/UpgSettlementClient.cs) pending NSwag regen — row pins contracts/unified-payment-gateway.openapi.json for drift detection + CI generation of ServiceUnifiedPaymentGatewayClient.
 )
 
 # ---------------------------------------------------------------------------

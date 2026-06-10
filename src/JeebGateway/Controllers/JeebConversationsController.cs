@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Conversations;
 using JeebGateway.Conversations.Client;
 using JeebGateway.Conversations.Realtime;
 using JeebGateway.Services;
@@ -125,7 +126,7 @@ public sealed class JeebConversationsController : ControllerBase
             // replay via the conversation already existing — it returns the same
             // id either way, so we surface 201 for the create call. A1 accepts
             // 200 OR 201, so 201 here is contract-correct for both).
-            return StatusCode(StatusCodes.Status201Created, result);
+            return StatusCode(StatusCodes.Status201Created, ProjectToJeebRoles(result));
         }
         catch (JeebConversationApiException ex)
         {
@@ -173,7 +174,7 @@ public sealed class JeebConversationsController : ControllerBase
         try
         {
             var result = await _client.GetConversationByCorrelationAsync(correlationKey, ct);
-            return Ok(result);
+            return Ok(ProjectToJeebRoles(result));
         }
         catch (JeebConversationApiException ex)
         {
@@ -435,10 +436,16 @@ public sealed class JeebConversationsController : ControllerBase
         // calling chat-service (no inter-service coupling — the authority is encoded
         // in the gateway-signed ticket). Ticket minting failure degrades to a null
         // ticket but still returns the 200 descriptor (the REST pre-check is intact).
+        // JEB-1488 (correction #1 / GR2): chat-service stores and returns only a
+        // GENERIC permission tag. The gateway re-derives the Jeeb role HERE before
+        // handing it to its own Jeeb realtime service (ticket) and mobile client
+        // (descriptor) — the Jeeb vocabulary lives in the gateway, never upstream.
+        var jeebRole = ConversationParticipantTag.ToJeebRole(membership.RoleInConvo);
+
         string? ticket = null;
         try
         {
-            ticket = _ticketIssuer.Issue(conversationId, viewerId, membership.RoleInConvo);
+            ticket = _ticketIssuer.Issue(conversationId, viewerId, jeebRole);
         }
         catch (Exception ex)
         {
@@ -452,7 +459,7 @@ public sealed class JeebConversationsController : ControllerBase
         {
             ConversationId = conversationId,
             Topic = $"jeeb_conversation:{conversationId}",
-            RoleInConvo = membership.RoleInConvo,
+            RoleInConvo = jeebRole,
             Ticket = ticket,
         });
     }
@@ -460,6 +467,25 @@ public sealed class JeebConversationsController : ControllerBase
     // ---------------------------------------------------------------------
     // helpers
     // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// JEB-1488 (correction #1 / GR2) — re-derive the Jeeb participant role from the
+    /// GENERIC permission tag chat-service stores, so the projection the gateway hands
+    /// its own Jeeb mobile client speaks the Jeeb vocabulary while the shared service
+    /// never sees a Jeeb role name. Unknown/legacy tags pass through unchanged.
+    /// </summary>
+    private static JeebConversationResponse ProjectToJeebRoles(JeebConversationResponse response)
+    {
+        if (response?.Participants is { Count: > 0 })
+        {
+            foreach (var participant in response.Participants)
+            {
+                participant.RoleInConvo = ConversationParticipantTag.ToJeebRole(participant.RoleInConvo)
+                    ?? participant.RoleInConvo;
+            }
+        }
+        return response!;
+    }
 
     private IActionResult ForwardUpstream(JeebConversationApiException ex, string action)
     {

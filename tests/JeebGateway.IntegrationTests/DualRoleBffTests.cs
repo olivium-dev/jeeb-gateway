@@ -40,6 +40,7 @@ public class DualRoleBffTests
             FindOrCreate = new PhoneFindOrCreateResult(
                 UserId: "kamal-1",
                 IsNew: false,
+                PhoneHashRef: string.Empty,
                 AvailableRoles: new[] { Roles.Client, Roles.Jeeber }, // customer, driver
                 ActiveRole: Roles.Client)
         };
@@ -68,6 +69,7 @@ public class DualRoleBffTests
         var um = new StubUm
         {
             FindOrCreate = new PhoneFindOrCreateResult("new-1", IsNew: true,
+                PhoneHashRef: string.Empty,
                 AvailableRoles: new[] { Roles.Client }, ActiveRole: Roles.Client)
         };
         using var factory = MakeFactory(otp, um, umEnabled: true);
@@ -176,6 +178,7 @@ public class DualRoleBffTests
             FindOrCreate = new PhoneFindOrCreateResult(
                 UserId: "sami-1",
                 IsNew: false,
+                PhoneHashRef: string.Empty,
                 AvailableRoles: new[] { Roles.Client },
                 ActiveRole: Roles.Client)
         };
@@ -315,7 +318,7 @@ public class DualRoleBffTests
         public string? LastRoleSwitchOpaqueRole { get; private set; }
 
         public PhoneFindOrCreateResult FindOrCreate { get; init; } =
-            new("default-1", false, new[] { Roles.Client }, Roles.Client);
+            new("default-1", false, string.Empty, new[] { Roles.Client }, Roles.Client);
         public RoleSwitchReissueResult RoleSwitch { get; init; } =
             new("default-1", "access", "refresh", Roles.Client);
         public UserManagementCallException? FindOrCreateThrows { get; init; }

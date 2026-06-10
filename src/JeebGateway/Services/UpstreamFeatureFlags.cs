@@ -238,4 +238,23 @@ public sealed class UpstreamFeatureFlags
     /// behavior to preserve when off.
     /// </summary>
     public bool UserManagement { get; set; }
+
+    /// <summary>
+    /// JEB-1489 — when true, the Jeeb mutual-blind ratings BFF
+    /// (<see cref="JeebGateway.Controllers.JeebRatingsController"/>,
+    /// <c>/v1/ratings/jeeb/*</c>) routes through the SHARED, product-agnostic
+    /// blind-rating reveal primitive in feedback-service (<c>POST /ratings</c>,
+    /// <c>GET /ratings/{correlationId}/reveal</c>) via the NSwag-generated
+    /// <see cref="JeebGateway.service.ServiceFeedback.ServiceFeedbackClient"/>
+    /// (GR4). All Jeeb semantics (Sami/Kamal roles, deliveryId&lt;-&gt;correlationId
+    /// linkage, partition value, tag taxonomy, generic-&gt;Jeeb projection) live in
+    /// the gateway (GR2 — see <see cref="JeebGateway.Ratings.Jeeb.JeebRatingVocabulary"/>).
+    ///
+    /// DEFAULTS OFF in EVERY environment. This is a NET-NEW route surface, so the
+    /// flag is a runtime kill switch: while off the endpoints return 503 and the
+    /// existing in-gateway mutual-blind path (<c>/api/deliveries/{id}/rate</c>)
+    /// stays the untouched live default (GR1 non-breaking). Flip on once the
+    /// feedback-service blind-rating primitive is deployed.
+    /// </summary>
+    public bool Ratings { get; set; }
 }
