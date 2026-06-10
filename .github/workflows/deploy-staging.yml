@@ -56,6 +56,11 @@ on:
           - 'false'
           - 'true'
 
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
 concurrency:
   group: deploy-staging-gateway
   cancel-in-progress: false
