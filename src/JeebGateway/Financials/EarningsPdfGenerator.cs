@@ -97,7 +97,10 @@ public sealed class EarningsStatementTokenService
         catch { return (false, null); }
 
         if (payload.ExpiresAt < _clock.GetUtcNow()) return (false, null);
-        if (!string.Equals(payload.JeeberId, callerId, StringComparison.Ordinal))
+        // If a Bearer token is present, its identity must match the signed-token's subject.
+        // If no Bearer is present (callerId is empty), validate only token integrity + expiry.
+        if (!string.IsNullOrEmpty(callerId) &&
+            !string.Equals(payload.JeeberId, callerId, StringComparison.Ordinal))
             return (false, null);
 
         return (true, payload);
