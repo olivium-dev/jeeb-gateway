@@ -151,6 +151,30 @@ public class VoiceTranscriptionClientContractTests
         idemKey.Should().Be("req-abc");
     }
 
+    // ---- SEAM: voice-on-create posts to the CANONICAL /v1/transcribe path (JEB-1483 C7) ----
+    [Fact]
+    public async Task TranscribeVoice_Posts_To_Canonical_V1_Transcribe_Path()
+    {
+        string? path = null;
+        string? method = null;
+        var handler = new HeaderCapturingHandler(
+            HttpStatusCode.OK,
+            """{"transcript":"x","confidence":0.9,"language":"ar","duration_ms":1}""",
+            req =>
+            {
+                path = req.RequestUri?.AbsolutePath;
+                method = req.Method.Method;
+            });
+        var http = new HttpClient(handler) { BaseAddress = new Uri("http://voice.test/") };
+        var client = new VoiceTranscriptionClient(http, NullLogger<VoiceTranscriptionClient>.Instance);
+
+        await client.TranscribeVoiceAsync(SampleAudio(), "ar", "req-1", CancellationToken.None);
+
+        method.Should().Be("POST");
+        // Canonical pinned contract route — NOT the deprecated /v1/voice/transcribe alias.
+        path.Should().Be("/v1/transcribe");
+    }
+
     // ---- LIVE: real upstream voice-on-create path + health probes ----
     [Fact]
     public async Task Live_Upstream_Voice_Path_And_Health_Are_Reachable()

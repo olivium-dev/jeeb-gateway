@@ -37,7 +37,8 @@ public interface IVoiceTranscriptionClient
 
     /// <summary>
     /// Voice-on-create overload (JEB-1431/JEB-67). Forwards the multipart audio to
-    /// the upstream's canonical <c>POST /v1/voice/transcribe</c> with the gateway's
+    /// the upstream's CANONICAL <c>POST /v1/transcribe</c> (JEB-1483 C7 — not the
+    /// deprecated <c>/v1/voice/transcribe</c> alias) with the gateway's
     /// <paramref name="idempotencyKey"/> (the client requestId) mapped onto the
     /// generic <c>Idempotency-Key</c> header so a network retry of the same draft
     /// returns the cached transcript. The transcript VALUE is produced entirely by
