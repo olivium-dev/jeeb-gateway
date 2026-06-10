@@ -200,7 +200,12 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         throw new DeliveryHandoverException((int)response.StatusCode, reason);
     }
 
-    public async Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(string deliveryId, bool success, CancellationToken ct)
+    public async Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(
+        string deliveryId,
+        bool success,
+        string actorId,
+        string actorRole,
+        CancellationToken ct)
     {
         // Frozen contract: POST /api/v1/deliveries/{id}/otp/verify
         //   body { success:bool }  (NO raw code — AC5)
@@ -208,11 +213,24 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         //   401 -> { reason:"invalid_code", attempts_remaining }
         //   423 -> { reason:"locked", escalation_id }
         //   409 -> { reason:"not_at_door" } | 404
-        using var response = await _http.PostAsJsonAsync(
-            $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}/otp/verify",
-            new HandoverVerifyRequest(success),
-            JsonOptions,
-            ct);
+        //   403 -> { reason:"wrong_party" }  (actor not validated/authorised)
+        //
+        // On success=true the durable gate runs the AtDoor→Done SM transition,
+        // which validates + authorises the actor. delivery-service's extractActor
+        // reads X-Actor-* (it has no JWKS), so we MUST forward the gateway-resolved
+        // caller identity — exactly as CanonicalTransitionAsync does. Without these
+        // headers the transition fails authorisation (403 wrong_party) and the
+        // delivery never reaches Done.
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}/otp/verify")
+        {
+            Content = JsonContent.Create(new HandoverVerifyRequest(success), options: JsonOptions)
+        };
+        request.Headers.TryAddWithoutValidation("X-Actor-ID", actorId);
+        request.Headers.TryAddWithoutValidation("X-Actor-Role", actorRole);
+
+        using var response = await _http.SendAsync(request, ct);
 
         if (response.IsSuccessStatusCode)
         {

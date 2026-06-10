@@ -769,6 +769,13 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         delivery.VerifyCalls[0].DeliveryId.Should().Be(seed.Id);
         delivery.VerifyCalls[0].Success.Should().BeTrue();
 
+        // Gap A: the gateway forwards the authenticated caller as the actor so
+        // delivery-service can authorise the AtDoor→Done SM transition. Without
+        // this, the second leg returns 403 wrong_party and the gateway used to
+        // mask it as a 502 (delivery never reached Done).
+        delivery.VerifyCalls[0].ActorId.Should().Be(seed.JeeberId);
+        delivery.VerifyCalls[0].ActorRole.Should().Be("jeeber");
+
         // AC6: handover.verified emitted with the delivery id.
         logCapture.Records.Should().Contain(r =>
             r.Message.Contains("handover.verified") && r.Message.Contains(seed.Id));
@@ -1018,7 +1025,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
 
         // ---- T-BE-019 downstream compose path (flag-on) capture/config ----
         public List<(string DeliveryId, string? CodeHash)> IssueCalls { get; } = new();
-        public List<(string DeliveryId, bool Success)> VerifyCalls { get; } = new();
+        public List<(string DeliveryId, bool Success, string ActorId, string ActorRole)> VerifyCalls { get; } = new();
 
         /// <summary>When set, IssueHandoverOtpAsync throws this instead of 200.</summary>
         public DeliveryHandoverException? IssueThrows { get; set; }
@@ -1037,9 +1044,9 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
             });
         }
 
-        public Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(string deliveryId, bool success, CancellationToken ct)
+        public Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(string deliveryId, bool success, string actorId, string actorRole, CancellationToken ct)
         {
-            VerifyCalls.Add((deliveryId, success));
+            VerifyCalls.Add((deliveryId, success, actorId, actorRole));
             if (VerifyThrows is not null) throw VerifyThrows;
             return Task.FromResult(new DeliveryHandoverVerifyResult
             {
