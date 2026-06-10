@@ -1,0 +1,1923 @@
+{
+  "components": {
+    "responses": {},
+    "schemas": {
+      "CaptureRequest": {
+        "description": "Optional body for capture — omit amount to capture the full authorized amount",
+        "properties": {
+          "amount": {
+            "description": "Amount to capture (optional, defaults to full amount)",
+            "format": "double",
+            "type": "number",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "title": "CaptureRequest",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.CaptureRequest",
+        "x-validate": null
+      },
+      "CreatePaymentRequest": {
+        "example": {
+          "amount": 10.0,
+          "callback_url": "https://example.com/callback",
+          "currency": "KWD",
+          "customer": {
+            "email": "john@example.com",
+            "name": "John"
+          },
+          "gateway": "myfatoorah",
+          "payment_method": "visa"
+        },
+        "properties": {
+          "amount": {
+            "description": "Payment amount",
+            "format": "double",
+            "minimum": 0,
+            "type": "number",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "callback_url": {
+            "description": "URL to redirect after payment",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "currency": {
+            "description": "ISO currency code",
+            "enum": [
+              "KWD",
+              "SAR",
+              "AED",
+              "BHD",
+              "QAR",
+              "OMR",
+              "EGP",
+              "JOD",
+              "USD"
+            ],
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "customer": {
+            "$ref": "#/components/schemas/CustomerInfo"
+          },
+          "error_url": {
+            "description": "URL to redirect on error/cancel",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "external_reference": {
+            "description": "Merchant-side reference",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "gateway": {
+            "description": "Gateway identifier (e.g. myfatoorah)",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "metadata": {
+            "description": "Arbitrary key-value metadata",
+            "type": "object",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "operation_type": {
+            "description": "Operation type",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "payment_method": {
+            "description": "Payment method (visa, knet, etc.)",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "gateway",
+          "amount",
+          "currency"
+        ],
+        "title": "CreatePaymentRequest",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.CreatePaymentRequest",
+        "x-validate": null
+      },
+      "CreateRecurringRequest": {
+        "example": {
+          "amount": 9.99,
+          "currency": "KWD",
+          "gateway": "myfatoorah",
+          "iteration": 12,
+          "recurring_type": "monthly",
+          "retry_count": 3
+        },
+        "properties": {
+          "amount": {
+            "description": "Recurring amount",
+            "format": "double",
+            "minimum": 0,
+            "type": "number",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "callback_url": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "currency": {
+            "description": "ISO currency code",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "customer_reference": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "error_url": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "gateway": {
+            "description": "Gateway identifier",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "interval_days": {
+            "description": "Interval in days (required for custom type)",
+            "type": "integer",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "iteration": {
+            "description": "Number of iterations",
+            "minimum": 1,
+            "type": "integer",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "metadata": {
+            "type": "object",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "recurring_type": {
+            "enum": [
+              "daily",
+              "weekly",
+              "monthly",
+              "custom"
+            ],
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "retry_count": {
+            "description": "Max retries on failure (0-5)",
+            "maximum": 5,
+            "minimum": 0,
+            "type": "integer",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "gateway",
+          "amount",
+          "currency",
+          "recurring_type",
+          "iteration",
+          "retry_count"
+        ],
+        "title": "CreateRecurringRequest",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.CreateRecurringRequest",
+        "x-validate": null
+      },
+      "CreateSessionRequest": {
+        "example": {
+          "amount": 25.0,
+          "currency": "KWD",
+          "gateway": "myfatoorah"
+        },
+        "properties": {
+          "amount": {
+            "description": "Session amount",
+            "format": "double",
+            "type": "number",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "currency": {
+            "description": "ISO currency code",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "gateway": {
+            "description": "Gateway identifier",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "payment_mode": {
+            "description": "Payment mode",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "gateway",
+          "amount",
+          "currency"
+        ],
+        "title": "CreateSessionRequest",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.CreateSessionRequest",
+        "x-validate": null
+      },
+      "Customer": {
+        "properties": {
+          "gateway": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "reference": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "saved_cards": {
+            "items": {
+              "type": "object",
+              "x-struct": null,
+              "x-validate": null
+            },
+            "type": "array",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "reference",
+          "gateway",
+          "saved_cards"
+        ],
+        "title": "Customer",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.Customer",
+        "x-validate": null
+      },
+      "CustomerInfo": {
+        "description": "Customer information embedded in a payment request",
+        "properties": {
+          "email": {
+            "format": "email",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "mobile": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "name": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "reference": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "title": "CustomerInfo",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.CustomerInfo",
+        "x-validate": null
+      },
+      "CustomerResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Customer"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "CustomerResponse",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.CustomerResponse",
+        "x-validate": null
+      },
+      "ErrorBody": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/ErrorDetail"
+            },
+            "type": "array",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "message": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "details"
+        ],
+        "title": "ErrorBody",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.ErrorBody",
+        "x-validate": null
+      },
+      "ErrorDetail": {
+        "properties": {
+          "field": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "message": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "title": "ErrorDetail",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.ErrorDetail",
+        "x-validate": null
+      },
+      "ErrorResponse": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.ErrorResponse",
+        "x-validate": null
+      },
+      "ExternalSettlement": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "currency": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "external_ref": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "fee_amount": {
+            "description": "Decimal-as-string.",
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "gross_amount": {
+            "description": "Decimal-as-string.",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "metadata": {
+            "nullable": true,
+            "type": "object",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "net_amount": {
+            "description": "Decimal-as-string.",
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "payee_ref": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "source": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "batched",
+              "paid",
+              "reversed"
+            ],
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "updated_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "external_ref",
+          "gross_amount",
+          "currency",
+          "status"
+        ],
+        "title": "ExternalSettlement",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.ExternalSettlement",
+        "x-validate": null
+      },
+      "ExternalSettlementResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ExternalSettlement"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "ExternalSettlementResponse",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.ExternalSettlementResponse",
+        "x-validate": null
+      },
+      "Gateway": {
+        "example": {
+          "currencies": [
+            "KWD",
+            "SAR"
+          ],
+          "name": "myfatoorah",
+          "payment_methods": [
+            "visa",
+            "mastercard",
+            "knet"
+          ]
+        },
+        "properties": {
+          "currencies": {
+            "description": "Supported currencies",
+            "items": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            },
+            "type": "array",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "name": {
+            "description": "Gateway identifier",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "payment_methods": {
+            "description": "Supported payment methods",
+            "items": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            },
+            "type": "array",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "name",
+          "payment_methods",
+          "currencies"
+        ],
+        "title": "Gateway",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.Gateway",
+        "x-validate": null
+      },
+      "GatewayListResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/Gateway"
+            },
+            "type": "array",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "GatewayListResponse",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.GatewayListResponse",
+        "x-validate": null
+      },
+      "Payment": {
+        "properties": {
+          "amount": {
+            "format": "double",
+            "type": "number",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "created_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "currency": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "customer_email": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "customer_name": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "customer_reference": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "external_reference": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "gateway": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "gateway_invoice_id": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "gateway_payment_id": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "operation_type": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "payment_method": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "payment_url": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "paid",
+              "failed",
+              "authorized",
+              "cancelled",
+              "refunded"
+            ],
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "updated_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "id",
+          "gateway",
+          "status",
+          "amount",
+          "currency"
+        ],
+        "title": "Payment",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.Payment",
+        "x-validate": null
+      },
+      "PaymentDetailResponse": {
+        "properties": {
+          "data": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Payment"
+              },
+              {
+                "properties": {
+                  "customer": {
+                    "description": "Gateway customer details",
+                    "type": "object",
+                    "x-struct": null,
+                    "x-validate": null
+                  },
+                  "transaction": {
+                    "description": "Gateway transaction details",
+                    "type": "object",
+                    "x-struct": null,
+                    "x-validate": null
+                  }
+                },
+                "type": "object",
+                "x-struct": null,
+                "x-validate": null
+              }
+            ],
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "PaymentDetailResponse",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.PaymentDetailResponse",
+        "x-validate": null
+      },
+      "PaymentResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Payment"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "PaymentResponse",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.PaymentResponse",
+        "x-validate": null
+      },
+      "RecordExternalSettlementRequest": {
+        "example": {
+          "currency": "USD",
+          "externalRef": "ORD-001",
+          "feeAmount": "1.50",
+          "grossAmount": "10.00",
+          "netAmount": "8.50",
+          "payeeRef": "PRV-42",
+          "source": "partner.cod"
+        },
+        "properties": {
+          "currency": {
+            "default": "USD",
+            "description": "ISO 4217 currency. Defaults to USD.",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "externalRef": {
+            "description": "Caller's natural idempotency key within the source. Unique per (source, externalRef).",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "feeAmount": {
+            "description": "Caller-computed platform fee (Decimal-as-string). Optional. UPG performs NO fee computation.",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "grossAmount": {
+            "description": "Gross amount collected, encoded as a JSON string to preserve Decimal precision (e.g. \"10.00\").",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "metadata": {
+            "description": "Arbitrary JSON-coercible metadata, opaque to UPG.",
+            "type": "object",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "netAmount": {
+            "description": "Caller-computed net payable to the payee (Decimal-as-string). Optional.",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "payeeRef": {
+            "description": "Opaque identifier of the party to be settled. UPG never interprets it.",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "source": {
+            "description": "Opaque settlement-channel namespace owned by the caller (e.g. \"partner.cod\"). UPG never interprets it.",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "source",
+          "externalRef",
+          "grossAmount"
+        ],
+        "title": "RecordExternalSettlementRequest",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.RecordExternalSettlementRequest",
+        "x-validate": null
+      },
+      "RecurringPlan": {
+        "properties": {
+          "amount": {
+            "format": "double",
+            "type": "number",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "created_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "currency": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "external_reference": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "gateway": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "gateway_recurring_id": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "interval_days": {
+            "nullable": true,
+            "type": "integer",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "iteration": {
+            "type": "integer",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "payment_url": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "recurring_type": {
+            "enum": [
+              "daily",
+              "weekly",
+              "monthly",
+              "custom"
+            ],
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "retry_count": {
+            "type": "integer",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "status": {
+            "enum": [
+              "active",
+              "cancelled",
+              "completed",
+              "paused"
+            ],
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "id",
+          "gateway",
+          "status",
+          "recurring_type",
+          "iteration",
+          "retry_count",
+          "amount",
+          "currency"
+        ],
+        "title": "RecurringPlan",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.RecurringPlan",
+        "x-validate": null
+      },
+      "RecurringResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RecurringPlan"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "RecurringResponse",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.RecurringResponse",
+        "x-validate": null
+      },
+      "Refund": {
+        "properties": {
+          "amount": {
+            "format": "double",
+            "type": "number",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "created_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "payment_id": {
+            "format": "uuid",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "reason": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "success",
+              "failed"
+            ],
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "id",
+          "payment_id",
+          "amount",
+          "status"
+        ],
+        "title": "Refund",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.Refund",
+        "x-validate": null
+      },
+      "RefundRequest": {
+        "properties": {
+          "amount": {
+            "description": "Refund amount",
+            "format": "double",
+            "type": "number",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "reason": {
+            "description": "Reason for refund",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "title": "RefundRequest",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.RefundRequest",
+        "x-validate": null
+      },
+      "RefundResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Refund"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "RefundResponse",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.RefundResponse",
+        "x-validate": null
+      },
+      "Session": {
+        "properties": {
+          "amount": {
+            "format": "double",
+            "type": "number",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "currency": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "gateway": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "gateway_session_id": {
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "session_expiry": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          },
+          "status": {
+            "enum": [
+              "created",
+              "used",
+              "expired"
+            ],
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "id",
+          "gateway",
+          "status",
+          "amount",
+          "currency"
+        ],
+        "title": "Session",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.Session",
+        "x-validate": null
+      },
+      "SessionResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Session"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "SessionResponse",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.SessionResponse",
+        "x-validate": null
+      },
+      "WebhookResponse": {
+        "example": {
+          "status": "received"
+        },
+        "properties": {
+          "status": {
+            "type": "string",
+            "x-struct": null,
+            "x-validate": null
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "WebhookResponse",
+        "type": "object",
+        "x-struct": "Elixir.UnifiedPaymentGatewayWeb.Schemas.WebhookResponse",
+        "x-validate": null
+      }
+    }
+  },
+  "info": {
+    "description": "Unified API for multiple payment gateways (MyFatoorah, Stripe, etc.)",
+    "title": "Unified Payment Gateway API",
+    "version": "1.1.0"
+  },
+  "openapi": "3.0.0",
+  "paths": {
+    "/api/v1/customers/{reference}": {
+      "get": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "GetCustomer",
+        "parameters": [
+          {
+            "description": "Customer reference",
+            "in": "path",
+            "name": "reference",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerResponse"
+                }
+              }
+            },
+            "description": "Customer details"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Customer not found"
+          }
+        },
+        "summary": "Get customer and saved cards",
+        "tags": []
+      }
+    },
+    "/api/v1/gateways": {
+      "get": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "Gateways",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayListResponse"
+                }
+              }
+            },
+            "description": "List of gateways"
+          }
+        },
+        "summary": "List enabled gateways",
+        "tags": []
+      }
+    },
+    "/api/v1/payments": {
+      "post": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "CreatePayment",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePaymentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentResponse"
+                }
+              }
+            },
+            "description": "Payment created"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway error"
+          }
+        },
+        "summary": "Create payment",
+        "tags": []
+      }
+    },
+    "/api/v1/payments/settlements/record": {
+      "post": {
+        "callbacks": {},
+        "deprecated": false,
+        "description": "Product-agnostic settlement primitive. Idempotent on `(source, externalRef)`: replays return 200 with the existing record; conflicting replays (same key, different gross/fee/net) return 409. UPG performs NO fee/commission computation — callers pass pre-computed amounts. Legacy COD aliases (`/payments/cod/*`) are retained as deprecated forwarders to this endpoint.",
+        "operationId": "RecordExternalSettlement",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordExternalSettlementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExternalSettlementResponse"
+                }
+              }
+            },
+            "description": "Idempotent replay (existing record)"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExternalSettlementResponse"
+                }
+              }
+            },
+            "description": "Settlement recorded"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Idempotency conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Record a generic external settlement intent",
+        "tags": []
+      }
+    },
+    "/api/v1/payments/settlements/{source}/{external_ref}": {
+      "get": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "GetExternalSettlement",
+        "parameters": [
+          {
+            "description": "Settlement-channel namespace",
+            "in": "path",
+            "name": "source",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          },
+          {
+            "description": "Caller idempotency key within the source",
+            "in": "path",
+            "name": "external_ref",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExternalSettlementResponse"
+                }
+              }
+            },
+            "description": "Settlement"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Settlement not found"
+          }
+        },
+        "summary": "Get an external settlement by (source, external_ref)",
+        "tags": []
+      }
+    },
+    "/api/v1/payments/{id}": {
+      "get": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "GetPayment",
+        "parameters": [
+          {
+            "description": "Payment ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentDetailResponse"
+                }
+              }
+            },
+            "description": "Payment details"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Payment not found"
+          }
+        },
+        "summary": "Get payment details",
+        "tags": []
+      }
+    },
+    "/api/v1/payments/{id}/capture": {
+      "post": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "CapturePayment",
+        "parameters": [
+          {
+            "description": "Payment ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentResponse"
+                }
+              }
+            },
+            "description": "Captured"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Payment not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid state transition"
+          }
+        },
+        "summary": "Capture authorized payment",
+        "tags": []
+      }
+    },
+    "/api/v1/payments/{id}/refund": {
+      "post": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "RefundPayment",
+        "parameters": [
+          {
+            "description": "Payment ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefundRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefundResponse"
+                }
+              }
+            },
+            "description": "Refund created"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Payment not found"
+          }
+        },
+        "summary": "Refund payment",
+        "tags": []
+      }
+    },
+    "/api/v1/payments/{id}/release": {
+      "post": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "ReleasePayment",
+        "parameters": [
+          {
+            "description": "Payment ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentResponse"
+                }
+              }
+            },
+            "description": "Released"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Payment not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid state transition"
+          }
+        },
+        "summary": "Release authorized payment",
+        "tags": []
+      }
+    },
+    "/api/v1/recurring": {
+      "post": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "CreateRecurring",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRecurringRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecurringResponse"
+                }
+              }
+            },
+            "description": "Recurring created"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway error"
+          }
+        },
+        "summary": "Create recurring plan",
+        "tags": []
+      }
+    },
+    "/api/v1/recurring/{id}": {
+      "get": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "GetRecurring",
+        "parameters": [
+          {
+            "description": "Recurring plan ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecurringResponse"
+                }
+              }
+            },
+            "description": "Recurring details"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Recurring plan not found"
+          }
+        },
+        "summary": "Get recurring plan",
+        "tags": []
+      }
+    },
+    "/api/v1/recurring/{id}/cancel": {
+      "post": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "CancelRecurring",
+        "parameters": [
+          {
+            "description": "Recurring plan ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecurringResponse"
+                }
+              }
+            },
+            "description": "Cancelled"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Recurring plan not found"
+          }
+        },
+        "summary": "Cancel recurring",
+        "tags": []
+      }
+    },
+    "/api/v1/recurring/{id}/resume": {
+      "post": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "ResumeRecurring",
+        "parameters": [
+          {
+            "description": "Recurring plan ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecurringResponse"
+                }
+              }
+            },
+            "description": "Resumed"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Recurring plan not found"
+          }
+        },
+        "summary": "Resume recurring",
+        "tags": []
+      }
+    },
+    "/api/v1/sessions": {
+      "post": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "CreateSession",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Session created"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway error"
+          }
+        },
+        "summary": "Create embedded session",
+        "tags": []
+      }
+    },
+    "/api/v1/sessions/{id}": {
+      "get": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "GetSession",
+        "parameters": [
+          {
+            "description": "Session ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Session details"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found"
+          }
+        },
+        "summary": "Get session",
+        "tags": []
+      }
+    },
+    "/api/v1/webhooks/{gateway}": {
+      "post": {
+        "callbacks": {},
+        "deprecated": false,
+        "operationId": "Webhook",
+        "parameters": [
+          {
+            "description": "Gateway name",
+            "in": "path",
+            "name": "gateway",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "x-struct": null,
+              "x-validate": null
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "x-struct": null,
+                "x-validate": null
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookResponse"
+                }
+              }
+            },
+            "description": "Received"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          }
+        },
+        "summary": "Webhook receiver",
+        "tags": []
+      }
+    }
+  },
+  "security": [],
+  "servers": [
+    {
+      "description": "Development",
+      "url": "http://localhost:4000",
+      "variables": {}
+    }
+  ],
+  "tags": []
+}

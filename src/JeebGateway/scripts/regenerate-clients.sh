@@ -52,6 +52,13 @@ SERVICES=(
   "geolocation-service|GeolocationServiceClient|JeebGateway.Services.Generated.GeolocationService|http://localhost:8085/openapi.json|GEOLOCATION_SERVICE_OPENAPI_URL"
   "push-notification|PushNotificationClient|JeebGateway.Services.Generated.PushNotification|http://localhost:8080/openapi.json|PUSH_NOTIFICATION_OPENAPI_URL"
   "delivery-service|DeliveryServiceClient|JeebGateway.Services.Generated.DeliveryService|http://localhost:8081/swagger/v1/swagger.json|DELIVERY_SERVICE_OPENAPI_URL"
+  # unified_payment_gateway (UPG) — shared, product-agnostic payments service (Elixir/Phoenix, OpenApiSpex at /api/v1/openapi).
+  # JEB-1484 de-leaked the COD settlement surface into the generic
+  # `/api/v1/payments/settlements/*` primitive (committed-real spec, v1.1.0). The
+  # typed ServiceUnifiedPaymentGatewayClient + GR3 settlement routing through UPG
+  # are DEFERRED until the owner-gated UPG PR is deployed (the generic endpoint is
+  # not yet live in prod). Spec committed now so client-freshness can be tracked.
+  "unified-payment-gateway|ServiceUnifiedPaymentGatewayClient|JeebGateway.Services.Generated.UnifiedPaymentGateway|http://localhost:4000/api/v1/openapi|UNIFIED_PAYMENT_GATEWAY_OPENAPI_URL"
   # thin-BFF fan-out upstreams (offer / ban / feedback / voice). Default URLs use the
   # service host port from the ticket + the conventional Swashbuckle spec path; the
   # per-service agent owns confirming the real spec path and wiring the client/flag.
@@ -59,6 +66,7 @@ SERVICES=(
   "ban-service|BanServiceClient|JeebGateway.Services.Generated.BanService|http://localhost:10065/api-docs/openapi.json|BAN_SERVICE_OPENAPI_URL"                      # confirmed: Rust/utoipa OpenAPI 3.1 at /api-docs/openapi.json. NOTE: client is HAND-CODED (Services/Clients/BanServiceClient.cs) not NSwag-generated — snake_case + OAS-3.1 nullable arrays; row kept for spec drift detection.
   "feedback-service|FeedbackServiceClient|JeebGateway.Services.Generated.FeedbackService|http://localhost:10064/swagger/v1/swagger.json|FEEDBACK_SERVICE_OPENAPI_URL" # TODO: confirm spec URL (feedback-service exposes liveness-only on :10064)
   "voice-transcription-service|VoiceTranscriptionClient|JeebGateway.Services.Generated.VoiceTranscription|http://localhost:10062/openapi.json|VOICE_TRANSCRIPTION_OPENAPI_URL" # TODO: confirm spec URL (health probe is /healthz on :10062)
+  "unified-payment-gateway|ServiceUnifiedPaymentGatewayClient|JeebGateway.Services.Generated.UnifiedPaymentGateway|http://localhost:4000/api/v1/openapi|UNIFIED_PAYMENT_GATEWAY_OPENAPI_URL" # JEB-1484: UPG generic settlement (Phoenix OpenApiSpex at /api/v1/openapi, dev-only). NOTE: client is HAND-CODED (Financials/UpgSettlementClient.cs) pending NSwag regen — row pins contracts/unified-payment-gateway.openapi.json for drift detection + CI generation of ServiceUnifiedPaymentGatewayClient.
 )
 
 # ---------------------------------------------------------------------------
