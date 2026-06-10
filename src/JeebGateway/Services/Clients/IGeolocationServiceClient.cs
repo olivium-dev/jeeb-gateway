@@ -3,11 +3,19 @@ using JeebGateway.Tracking;
 namespace JeebGateway.Services.Clients;
 
 /// <summary>
-/// Typed proxy over geolocation-service (Python FastAPI). Two endpoints:
-///  - POST jeeb/jeebers/{id}/location/update — batched GPS ingest.
-///  - GET  jeeb/deliveries/{id}/tracking — SSE stream (returns a raw
-///    <see cref="Stream"/> so the controller can re-emit framed bytes
-///    without buffering the entire stream).
+/// Typed proxy over the SHARED, product-agnostic geolocation-service
+/// (Python FastAPI). The upstream contract is generic (JEB-1485):
+///  - POST v1/geo/location/... batched GPS ingest via the generic
+///    POST /location/update (principal derived from the forwarded bearer).
+///  - GET  v1/geo/tracks/{trackId}/tracking/stream — opaque per-track SSE
+///    stream (returns a raw <see cref="Stream"/> so the controller can
+///    re-emit framed bytes without buffering the entire stream).
+///
+/// Jeeb-domain semantics (delivery participants, in_transit lifecycle gating,
+/// dropoff/polyline projection) live in the gateway (LocationController) and
+/// are enforced BEFORE any upstream subscription. NSwag-typed-client
+/// regeneration from contracts/geolocation-service.openapi.json is GR4 debt
+/// (see scripts/regenerate-clients.sh) — deferred to CI/owner.
 /// </summary>
 public interface IGeolocationServiceClient
 {
