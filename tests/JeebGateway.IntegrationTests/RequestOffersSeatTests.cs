@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using JeebGateway.Availability;
+using JeebGateway.Conversations;
 using JeebGateway.Conversations.Client;
 using JeebGateway.Requests;
 using JeebGateway.Services;
@@ -55,7 +56,9 @@ public sealed class RequestOffersSeatTests
         fake.AddParticipantCalls.Should().Be(1);
         fake.LastAddParticipantConversationId.Should().Be("conv-on-ledger");
         fake.LastAddParticipant!.UserId.Should().Be(jeeberId);
-        fake.LastAddParticipant.RoleInConvo.Should().Be("jeeber_offerer");
+        // JEB-1488 (correction #1 / GR2): seated under the GENERIC permission tag, not
+        // the Jeeb role name "jeeber_offerer".
+        fake.LastAddParticipant.RoleInConvo.Should().Be(ConversationParticipantTag.Participant);
         fake.CorrelationLookups.Should().Be(0, "the ledger already carried the conversation id");
     }
 
@@ -82,7 +85,8 @@ public sealed class RequestOffersSeatTests
         fake.AddParticipantCalls.Should().Be(1);
         fake.LastAddParticipantConversationId.Should().Be("conv-by-correlation");
         fake.LastAddParticipant!.UserId.Should().Be(jeeberId);
-        fake.LastAddParticipant.RoleInConvo.Should().Be("jeeber_offerer");
+        // JEB-1488 (correction #1 / GR2): generic permission tag, not the Jeeb role name.
+        fake.LastAddParticipant.RoleInConvo.Should().Be(ConversationParticipantTag.Participant);
     }
 
     [Fact]
