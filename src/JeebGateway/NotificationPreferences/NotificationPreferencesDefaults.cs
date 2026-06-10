@@ -5,7 +5,9 @@ public static class NotificationPreferencesDefaults
     public static readonly IReadOnlyList<string> AlwaysOnChannels = new[]
     {
         "otp",
-        "system_critical"
+        "system_critical",
+        "kyc",
+        "disputes"
     };
 
     public static UserNotificationPreferences NewDefault(string userId) => new()
@@ -16,6 +18,7 @@ public static class NotificationPreferencesDefaults
         StatusChanges = true,
         RatingReminders = true,
         Promotions = true,
+        Settlements = true,
         UpdatedAt = DateTimeOffset.UtcNow
     };
 }

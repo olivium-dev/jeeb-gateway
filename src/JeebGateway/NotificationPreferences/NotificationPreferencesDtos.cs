@@ -4,13 +4,7 @@ public class NotificationPreferencesResponse
 {
     public required string UserId { get; init; }
     public required NotificationPreferencesCategoryToggles Preferences { get; init; }
-
-    /// <summary>
-    /// Channels the user cannot mute via this API. The notification-service must
-    /// always deliver these regardless of <see cref="Preferences"/>.
-    /// </summary>
     public required IReadOnlyList<string> AlwaysOn { get; init; }
-
     public required DateTimeOffset UpdatedAt { get; init; }
 }
 
