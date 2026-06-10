@@ -1,0 +1,23 @@
+{
+  "runtime": "Net90",
+  "documentGenerator": {
+    "fromDocument": {
+      "url": "src/JeebGateway/contracts/unified-payment-gateway.openapi.json",
+      "output": null
+    }
+  },
+  "codeGenerators": {
+    "openApiToCSharpClient": {
+      "namespace": "JeebGateway.Services.Generated.UnifiedPaymentGateway",
+      "className": "ServiceUnifiedPaymentGatewayClient",
+      "generateClientInterfaces": true,
+      "injectHttpClient": true,
+      "useHttpClientCreationMethod": false,
+      "jsonLibrary": "SystemTextJson",
+      "generateDtoTypes": true,
+      "generateOptionalPropertiesAsNullable": true,
+      "generateNullableReferenceTypes": true,
+      "output": "src/JeebGateway/Services/Generated/ServiceUnifiedPaymentGatewayClient.cs"
+    }
+  }
+}

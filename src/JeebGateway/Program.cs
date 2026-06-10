@@ -900,6 +900,18 @@ builder.Services.AddSingleton<IPushNotificationService, PushNotificationService>
 builder.Services.AddSingleton<PushRetryQueueProcessor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProcessor>());
 
+// JEB-1494: Gateway notification render→dispatch primitive.
+// INotificationDispatchOutbox: in-memory for MVP; swap for Postgres-backed
+// implementation (notification_dispatch_outbox table) when persistence is needed.
+// INotificationTemplateRenderer: static catalog; replace with an HTTP call to
+// notification-service GET /render/{key} when that endpoint is live.
+builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationDispatchOutbox,
+                               JeebGateway.Services.Dispatch.InMemoryNotificationDispatchOutbox>();
+builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationTemplateRenderer,
+                               JeebGateway.Services.Dispatch.StaticNotificationTemplateRenderer>();
+builder.Services.AddScoped<JeebGateway.Services.Dispatch.IJeebNotificationDispatcher,
+                            JeebGateway.Services.Dispatch.JeebNotificationDispatcher>();
+
 // Delivery requests — BR-9 concurrency cap enforcement at creation
 // (T-backend-049). In-memory store for the MVP; production wiring will
 // proxy to delivery-service via NSwag-generated client, backed by the
@@ -1089,6 +1101,9 @@ builder.Services.AddSingleton<JeebGateway.Tiers.ITiersStore, JeebGateway.Tiers.I
 builder.Services.Configure<RequestExpiryOptions>(builder.Configuration.GetSection(RequestExpiryOptions.SectionName));
 builder.Services.AddSingleton<InMemoryRequestExpiryNotifier>();
 builder.Services.AddSingleton<IRequestExpiryNotifier>(sp => sp.GetRequiredService<InMemoryRequestExpiryNotifier>());
+// JEB-1508: default to the no-op recorder; overridden by the durable
+// StateServiceRequestExpiryRecorder below when stateServiceWired == true.
+builder.Services.AddSingleton<IRequestExpiryRecorder>(NoOpRequestExpiryRecorder.Instance);
 builder.Services.AddSingleton<RequestExpirySweeper>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RequestExpirySweeper>());
 
@@ -1595,6 +1610,13 @@ if (stateServiceWired)
     // R6 — strikes + cancellation counters; R7 — OTP-escalation (durable writes).
     builder.Services.AddSingleton<JeebGateway.StateService.Strikes.IStateStrikeWriter,
         JeebGateway.StateService.Strikes.StateServiceStrikeWriter>();
+
+    // JEB-1508: durable TTL-sweep expiry recorder. Re-points IRequestExpiryRecorder at the
+    // state-service-backed implementation using the R1 idempotency KV. Overrides the no-op
+    // singleton registered above; last-wins DI semantics. A state-service blip degrades to
+    // in-memory-only (the no-op contract) rather than failing the sweep.
+    builder.Services.AddSingleton<IRequestExpiryRecorder,
+        JeebGateway.Requests.StateServiceRequestExpiryRecorder>();
 
     // R2/R3/R4/R5 — durable write-through (writes land; see contract gap note).
     builder.Services.AddSingleton<JeebGateway.StateService.Durable.IStateRefreshFamilyWriter,
