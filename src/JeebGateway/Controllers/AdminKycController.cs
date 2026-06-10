@@ -169,6 +169,15 @@ public class AdminKycController : ControllerBase
         {
             return NotFound();
         }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            // JEB-1522 (manual-approval flow): the live kyc-service answers 404 for an
+            // unknown submission id, which the typed client surfaces as an
+            // HttpRequestException(404) rather than KycBffNotFoundException. Without
+            // this mapping the global handler turns it into a misleading 502 — the
+            // admin reviewing a stale/unknown id must see the declared 404.
+            return NotFound();
+        }
         catch (KycBffReviewConflictException ex)
         {
             // N8: re-review of a finalised submission.
