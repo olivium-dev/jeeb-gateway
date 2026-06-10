@@ -1,9 +1,9 @@
 namespace JeebGateway.NotificationPreferences;
 
 /// <summary>
-/// Storage abstraction for per-user notification toggles. The default in-memory
-/// implementation is intended for early-MVP local runs; production wiring will
-/// proxy to the notification-service backing store via an NSwag-generated client.
+/// Storage abstraction for per-user notification toggles. Production uses
+/// <see cref="RemoteUserPreferencesNotificationPreferencesStore"/> backed by the
+/// Rust remote-user-preferences service (JEB-1498).
 /// </summary>
 public interface INotificationPreferencesStore
 {
@@ -22,4 +22,5 @@ public class NotificationPreferencesPatch
     public bool? StatusChanges { get; init; }
     public bool? RatingReminders { get; init; }
     public bool? Promotions { get; init; }
+    public bool? Settlements { get; init; }
 }

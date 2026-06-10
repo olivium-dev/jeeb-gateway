@@ -781,10 +781,20 @@ builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient
     return new JeebGateway.service.ServiceWallet.ServiceWalletClient(baseUrl, client);
 });
 
-// Notification preferences (T-backend-031).
-// In-memory implementation for MVP; swap for an NSwag-generated notification-service
-// client once the downstream preferences endpoints land.
-builder.Services.AddSingleton<INotificationPreferencesStore, InMemoryNotificationPreferencesStore>();
+// Notification preferences (T-backend-031 / JEB-1498).
+// Wired to the generic remote-user-preferences service (Rust, :10067) when
+// FeatureFlags:UseUpstream:RemoteUserPreferences=true, so preferences survive
+// restarts. Preferences stored as opaque JSON blob "jeeb.notification_prefs" (GR2).
+// InMemoryNotificationPreferencesStore is the dev/test fallback.
+if (builder.Configuration.GetValue("FeatureFlags:UseUpstream:RemoteUserPreferences", false))
+{
+    builder.Services.AddSingleton<INotificationPreferencesStore,
+        JeebGateway.NotificationPreferences.RemoteUserPreferencesNotificationPreferencesStore>();
+}
+else
+{
+    builder.Services.AddSingleton<INotificationPreferencesStore, InMemoryNotificationPreferencesStore>();
+}
 
 // Push notification pipeline (T-backend-022).
 //

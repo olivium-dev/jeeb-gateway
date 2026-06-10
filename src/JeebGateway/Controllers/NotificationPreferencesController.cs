@@ -5,10 +5,8 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
 
-[Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
-[Route("users/me/notification-preferences")]
-// ADR-005 L2 §B self / any-authenticated {client, jeeber, admin}: read + patch of own prefs.
+[Route("api/users/me/notification-preferences")]
 [RequireCapability(Capabilities.NotificationPrefsSelf)]
 public class NotificationPreferencesController : ControllerBase
 {
@@ -25,7 +23,6 @@ public class NotificationPreferencesController : ControllerBase
     public async Task<IActionResult> Get(CancellationToken ct)
     {
         if (!TryGetUserId(out var userId, out var problem)) return problem;
-
         var prefs = await _store.GetAsync(userId, ct);
         return Ok(ToResponse(prefs));
     }
@@ -39,30 +36,24 @@ public class NotificationPreferencesController : ControllerBase
         if (!TryGetUserId(out var userId, out var problem)) return problem;
 
         if (body is null)
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = "Request body is required.",
-                Status = StatusCodes.Status400BadRequest
-            });
-        }
+            return BadRequest(new ProblemDetails { Title = "Request body is required.", Status = StatusCodes.Status400BadRequest });
 
-        if (body.Otp is false || body.SystemCritical is false)
-        {
+        if (body.Otp is false || body.SystemCritical is false || body.Kyc is false || body.Disputes is false)
             return BadRequest(new ProblemDetails
             {
-                Title = "OTP and system_critical channels cannot be disabled.",
-                Detail = "Remove 'otp' and 'systemCritical' from the request body, or set them to true.",
+                Title = "Transactional channels cannot be disabled.",
+                Detail = "Remove 'otp', 'systemCritical', 'kyc', and 'disputes' from the request body, or set them to true.",
                 Status = StatusCodes.Status400BadRequest
             });
-        }
 
         var patch = new NotificationPreferencesPatch
         {
             Offers = body.Offers,
             Chat = body.Chat,
             StatusChanges = body.StatusChanges,
-            RatingReminders = body.RatingReminders
+            RatingReminders = body.RatingReminders,
+            Promotions = body.Promotions,
+            Settlements = body.Settlements
         };
 
         var updated = await _store.UpdateAsync(userId, patch, ct);
@@ -73,22 +64,18 @@ public class NotificationPreferencesController : ControllerBase
     {
         var fromClaim = User?.FindFirstValue(ClaimTypes.NameIdentifier)
                         ?? User?.FindFirstValue("sub");
-
         if (!string.IsNullOrWhiteSpace(fromClaim))
         {
             userId = fromClaim;
             problem = null!;
             return true;
         }
-
-        // MVP fallback while JWT validation isn't wired up yet: header injected by edge.
         if (Request.Headers.TryGetValue("X-User-Id", out var header) && !string.IsNullOrWhiteSpace(header))
         {
             userId = header.ToString();
             problem = null!;
             return true;
         }
-
         userId = string.Empty;
         problem = Unauthorized();
         return false;
@@ -102,7 +89,9 @@ public class NotificationPreferencesController : ControllerBase
             Offers = prefs.Offers,
             Chat = prefs.Chat,
             StatusChanges = prefs.StatusChanges,
-            RatingReminders = prefs.RatingReminders
+            RatingReminders = prefs.RatingReminders,
+            Promotions = prefs.Promotions,
+            Settlements = prefs.Settlements
         },
         AlwaysOn = NotificationPreferencesDefaults.AlwaysOnChannels,
         UpdatedAt = prefs.UpdatedAt
