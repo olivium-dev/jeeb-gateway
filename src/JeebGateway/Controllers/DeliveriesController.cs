@@ -1,4 +1,5 @@
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Financials;
 using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
@@ -53,6 +54,7 @@ public class DeliveriesController : ControllerBase
 {
     private static readonly ActivitySource ActivitySource = new("JeebGateway.Deliveries");
     private readonly IRequestsStore _store;
+    private readonly ISettlementStore _settlementStore;
     private readonly IPushNotificationService _push;
     private readonly ICancellationService _cancellations;
     private readonly IAdminEscalationStore _escalations;
@@ -101,6 +103,7 @@ public class DeliveriesController : ControllerBase
 
     public DeliveriesController(
         IRequestsStore store,
+        ISettlementStore settlementStore,
         IPushNotificationService push,
         ICancellationService cancellations,
         IAdminEscalationStore escalations,
@@ -114,6 +117,7 @@ public class DeliveriesController : ControllerBase
         ILogger<DeliveriesController> log)
     {
         _store = store;
+        _settlementStore = settlementStore;
         _push = push;
         _cancellations = cancellations;
         _escalations = escalations;
@@ -745,6 +749,16 @@ public class DeliveriesController : ControllerBase
                 // push to both parties, mirroring the PATCH /status path.
                 var req = result.Request!;
                 await NotifyOtherPartyAsync(req, RequestStatus.HeadingOff, ct);
+
+                // FT-07: enqueue a pending-settlement placeholder so the
+                // financial pipeline has a record immediately at handover-
+                // complete. The Jeeber will fill in the actual goods cost via
+                // POST /deliveries/{id}/settle; SettlementService.SettleAsync
+                // will atomically replace this placeholder. Uses deliveryId as
+                // the natural idempotency key (TryInsertAsync is a no-op when
+                // the row already exists).
+                await TryEnqueuePendingSettlementAsync(req, ct);
+
                 return Ok(new OtpVerificationResponse
                 {
                     Delivery = ToDto(req),
@@ -1123,6 +1137,15 @@ public class DeliveriesController : ControllerBase
             // Clear the attempt + lockout markers (no-op if absent).
             await _cache.RemoveAsync(AttemptsCacheKey(deliveryId), ct);
             await _cache.RemoveAsync(LockoutCacheKey(deliveryId), ct);
+
+            // FT-07: enqueue the pending-settlement placeholder so the
+            // financial pipeline has a record at handover-complete.
+            // Re-read the updated row so its status reflects Delivered.
+            var deliveredRow = await _store.GetAsync(deliveryId, ct);
+            if (deliveredRow is not null)
+            {
+                await TryEnqueuePendingSettlementAsync(deliveredRow, ct);
+            }
 
             // AC6: emit the canonical handover.verified event. No request
             // body, no exception messages — only the delivery id and a
@@ -1634,6 +1657,66 @@ public class DeliveriesController : ControllerBase
                     title:      "Handover OTP failed",
                     detail:     "delivery-service returned an unexpected status.",
                     statusCode: StatusCodes.Status502BadGateway);
+        }
+    }
+
+    // ---- FT-07: settlement pipeline enqueue -----------------------------------
+
+    /// <summary>
+    /// Creates a <see cref="SettlementState.PendingSettlement"/> placeholder row
+    /// in the settlement store immediately after a successful handover-OTP verification.
+    /// Idempotent: <see cref="ISettlementStore.TryInsertAsync"/> is a no-op when a
+    /// row for the same delivery id already exists, so a duplicate OTP-verify (the A7
+    /// idempotent-replay path) cannot create a second placeholder. The placeholder is
+    /// upgraded to a fully-computed settlement row when the Jeeber calls
+    /// POST /deliveries/{id}/settle via <see cref="ISettlementStore.ReplacePendingAsync"/>.
+    ///
+    /// Commission is pre-computed at minimum-fee (GoodsCost=0) so the pipeline
+    /// record is structurally complete from the moment the window opens; the Jeeber's
+    /// actual goods cost replaces these numbers at settle time.
+    /// </summary>
+    private async Task TryEnqueuePendingSettlementAsync(DeliveryRequest req, CancellationToken ct)
+    {
+        try
+        {
+            var tier = CommissionCalculator.ResolveTier(req.TierId);
+            var breakdown = CommissionCalculator.Calculate(0m, tier);
+
+            var pending = new Settlement
+            {
+                Id              = Guid.NewGuid().ToString(),
+                DeliveryId      = req.Id,
+                ClientId        = req.ClientId,
+                JeeberId        = req.JeeberId ?? string.Empty,
+                TierId          = req.TierId ?? string.Empty,
+                GoodsCost       = breakdown.GoodsCost,
+                CommissionTier  = breakdown.Tier,
+                CommissionRate  = breakdown.CommissionRate,
+                Commission      = breakdown.Commission,
+                Insurance       = breakdown.Insurance,
+                Total           = breakdown.Total,
+                MinimumFeeApplied = breakdown.MinimumFeeApplied,
+                Currency        = SettlementService.CurrencyLbp,
+                PaymentMethod   = SettlementService.PaymentMethodCash,
+                State           = SettlementState.PendingSettlement,
+                SettledAt       = _clock.GetUtcNow(),
+            };
+
+            var (_, inserted) = await _settlementStore.TryInsertAsync(pending, ct);
+            if (inserted)
+            {
+                _log.LogInformation(
+                    "settlement.pending_enqueued deliveryId={DeliveryId} settlementId={SettlementId}",
+                    req.Id, pending.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Settlement enqueue is best-effort at handover time — the delivery
+            // status has already transitioned. Log so reconciliation can replay.
+            _log.LogWarning(ex,
+                "settlement.pending_enqueue_failed deliveryId={DeliveryId}; window still open via settlement intent endpoint",
+                req.Id);
         }
     }
 
