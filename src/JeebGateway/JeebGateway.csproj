@@ -99,4 +99,11 @@
     <PackageReference Include="QuestPDF" Version="2026.2.4" />
   </ItemGroup>
 
+  <!-- JEB-59: embed Arabic font so Docker/CI builds can render Arabic PDFs -->
+  <ItemGroup>
+    <Content Include="..\..\assets\fonts\NotoSansArabic-Regular.ttf"
+             CopyToOutputDirectory="PreserveNewest"
+             Link="assets\fonts\NotoSansArabic-Regular.ttf" />
+  </ItemGroup>
+
 </Project>

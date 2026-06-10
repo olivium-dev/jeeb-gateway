@@ -1547,9 +1547,33 @@ else
 
 // T-backend-019 / S10 H6 (JEB-59): Earnings PDF statement generation.
 // Real application/pdf via QuestPDF (Community license set below), bilingual
+// JEB-59: EarningsStatement config (signed URL TTL + HMAC key)
+builder.Services.Configure<JeebGateway.Financials.EarningsStatementOptions>(
+    builder.Configuration.GetSection(JeebGateway.Financials.EarningsStatementOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Financials.EarningsStatementTokenService>();
 // en/ar — replaces the legacy text/plain stub.
 QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
-builder.Services.AddSingleton<JeebGateway.Financials.IEarningsPdfGenerator, JeebGateway.Financials.QuestPdfEarningsStatementGenerator>();
+
+// JEB-59: register NotoSansArabic font for correct Arabic glyph shaping in Docker/CI.
+// QuestPDF.Drawing.FontManager is the correct namespace (QuestPDF.Infrastructure.FontManager
+// was renamed in 2022.8+).
+{
+    var fontPath = System.IO.Path.Combine(
+        System.AppContext.BaseDirectory, "assets", "fonts", "NotoSansArabic-Regular.ttf");
+    if (System.IO.File.Exists(fontPath))
+    {
+        using var stream = System.IO.File.OpenRead(fontPath);
+        QuestPDF.Drawing.FontManager.RegisterFont(stream);
+    }
+}
+
+// JEB-59: cached PDF generator (inner = QuestPdf, outer = IMemoryCache decorator)
+builder.Services.AddSingleton<JeebGateway.Financials.QuestPdfEarningsStatementGenerator>();
+builder.Services.AddSingleton<JeebGateway.Financials.IEarningsPdfGenerator>(sp =>
+    new JeebGateway.Financials.CachedEarningsPdfGenerator(
+        sp.GetRequiredService<JeebGateway.Financials.QuestPdfEarningsStatementGenerator>(),
+        sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
+        sp.GetRequiredService<TimeProvider>()));
 
 // T-backend-033: Admin finance dashboard API.
 builder.Services.AddSingleton<JeebGateway.Financials.IAdminFinanceDashboardService, JeebGateway.Financials.AdminFinanceDashboardService>();
