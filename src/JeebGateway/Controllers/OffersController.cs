@@ -741,7 +741,11 @@ public class OffersController : ControllerBase
                 {
                     Phase = "accepted",
                     WinnerUserId = winningJeeberId,
-                    WinnerRoleInConvo = "jeeber_winner",
+                    // JEB-1488 (correction #1 / GR2): promote the winner under the
+                    // GENERIC permission tag mapped from the Jeeb role — no Jeeb role
+                    // name crosses the boundary to the shared chat-service.
+                    WinnerRoleInConvo = ConversationParticipantTag.FromJeebRole(
+                        ConversationParticipantTag.JeebWinnerRole),
                     RemoveOthers = true,
                 },
                 ct);

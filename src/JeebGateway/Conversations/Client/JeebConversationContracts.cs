@@ -86,7 +86,13 @@ public sealed class JeebConversationParticipant
     [Stj.JsonPropertyName("user_id")]
     public string UserId { get; set; } = string.Empty;
 
-    /// <summary>One of: client | jeeber_offerer | jeeber_winner.</summary>
+    /// <summary>
+    /// The GENERIC permission tag (JEB-1488 / GR2): one of
+    /// <see cref="ConversationParticipantTag.Owner"/> ("client"),
+    /// <see cref="ConversationParticipantTag.Participant"/>, or
+    /// <see cref="ConversationParticipantTag.PrimaryParticipant"/>. The Jeeb role is
+    /// mapped to this tag by the gateway — never a raw Jeeb role name on the wire.
+    /// </summary>
     [JsonProperty("role_in_convo")]
     [Stj.JsonPropertyName("role_in_convo")]
     public string RoleInConvo { get; set; } = string.Empty;
@@ -248,9 +254,13 @@ public sealed class AddJeebParticipantRequest
     [JsonProperty("user_id")]
     public string UserId { get; set; } = string.Empty;
 
-    /// <summary>One of: client | jeeber_offerer | jeeber_winner. Offer-submit seats jeeber_offerer.</summary>
+    /// <summary>
+    /// The GENERIC permission tag seated upstream (JEB-1488 / GR2). Offer-submit seats
+    /// <see cref="ConversationParticipantTag.Participant"/> (the gateway's mapping of
+    /// the Jeeb <c>jeeber_offerer</c> role) — no Jeeb role name crosses the boundary.
+    /// </summary>
     [JsonProperty("role_in_convo")]
-    public string RoleInConvo { get; set; } = "jeeber_offerer";
+    public string RoleInConvo { get; set; } = ConversationParticipantTag.Participant;
 }
 
 /// <summary>
@@ -265,13 +275,18 @@ public sealed class AdvanceJeebPhaseRequest
     [JsonProperty("phase")]
     public string Phase { get; set; } = "accepted";
 
-    /// <summary>The winning jeeber's user id — promoted to <c>jeeber_winner</c>.</summary>
+    /// <summary>The winning participant's user id — promoted to the primary lane.</summary>
     [JsonProperty("winner_user_id")]
     public string? WinnerUserId { get; set; }
 
-    /// <summary>Role to assign the winner. Defaults to <c>jeeber_winner</c>.</summary>
+    /// <summary>
+    /// The GENERIC permission tag assigned to the winner upstream (JEB-1488 / GR2).
+    /// Defaults to <see cref="ConversationParticipantTag.PrimaryParticipant"/> — the
+    /// gateway's mapping of the Jeeb <c>jeeber_winner</c> role; no Jeeb role name
+    /// crosses the boundary.
+    /// </summary>
     [JsonProperty("winner_role_in_convo")]
-    public string WinnerRoleInConvo { get; set; } = "jeeber_winner";
+    public string WinnerRoleInConvo { get; set; } = ConversationParticipantTag.PrimaryParticipant;
 
     /// <summary>When true chat-service soft-removes the non-winning participants (loser kick).</summary>
     [JsonProperty("remove_others")]

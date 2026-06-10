@@ -153,11 +153,17 @@ public sealed class ChatServiceConversationProvisioner : IConversationProvisione
             //     create. Carry the user-management jeeber id on Name/Nickname for
             //     correlation. Tag the member 'accepted' so a future chat-service
             //     ResolvePhase can attribute the winner role.
+            //
+            // JEB-1488 (correction #1 / GR2): the member Type that crosses to the
+            // shared chat-service is a GENERIC permission tag, never the Jeeb role
+            // name. ConversationParticipantTag.PrimaryParticipant ("participant_primary")
+            // carries the winner lane without leaking "jeeber" upstream; the gateway
+            // re-derives the Jeeb role on read-back.
             var memberResponse = await chat.MembersPOST2Async(new CreateMemberRequest
             {
                 Name = winningJeeberId,
                 Nickname = winningJeeberId,
-                Type = "jeeber",
+                Type = ConversationParticipantTag.PrimaryParticipant,
                 Tag = _options.AcceptedTag,
             }, ct);
 
