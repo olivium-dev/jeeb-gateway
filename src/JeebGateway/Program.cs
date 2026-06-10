@@ -651,6 +651,14 @@ builder.Services.Configure<JeebGateway.Services.DeliveryClientOptions>(
 builder.Services.Configure<JeebGateway.Availability.HeartbeatFeatureOptions>(
     builder.Configuration.GetSection(JeebGateway.Availability.HeartbeatFeatureOptions.SectionName));
 
+// JEB-1502: test control-plane options + job registry.
+// The plane is fail-closed (Enabled=false) by default in every environment.
+// The shared-secret header requirement provides a second gate when Enabled is true.
+builder.Services.Configure<JeebGateway.TestControlPlane.TestControlPlaneOptions>(
+    builder.Configuration.GetSection(JeebGateway.TestControlPlane.TestControlPlaneOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.TestControlPlane.ITestJobRegistry,
+                              JeebGateway.TestControlPlane.TestJobRegistry>();
+
 // Dev / test-harness endpoints flag (Features:DevEndpoints) — additive,
 // fail-closed to 404. Bound here so the [DevOnly] action filter can resolve it
 // via IOptionsMonitor. Defaults false and is committed false in EVERY
@@ -1354,9 +1362,16 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DataExportProcesso
 // implementation lands with the follow-up migration.
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
 builder.Services.Configure<UmJwtOptions>(builder.Configuration.GetSection(UmJwtOptions.SectionName));
-// AddAuthorization() / AddRateLimiter() already TryAdd TimeProvider.System — use
-// TryAdd here so the existing test fixtures that assert Single<TimeProvider> still hold.
-builder.Services.TryAddSingleton(TimeProvider.System);
+// JEB-1502: register FakeTimeProvider as the singleton TimeProvider so the test
+// control-plane can shift the clock for ALL time-dependent background jobs without
+// any per-job patching. At zero offset this is behaviourally identical to
+// TimeProvider.System — no observable difference in production.
+// AddSingleton (not TryAdd) so our registration wins over any earlier internal
+// TryAdd from AddRateLimiter/AddAuthorization.
+builder.Services.AddSingleton<JeebGateway.TestControlPlane.FakeTimeProvider>(
+    _ => new JeebGateway.TestControlPlane.FakeTimeProvider(TimeProvider.System));
+builder.Services.AddSingleton<TimeProvider>(
+    sp => sp.GetRequiredService<JeebGateway.TestControlPlane.FakeTimeProvider>());
 builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
 builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
@@ -1579,9 +1594,13 @@ builder.Services.AddSingleton<JeebGateway.Financials.IEarningsPdfGenerator>(sp =
 builder.Services.AddSingleton<JeebGateway.Financials.IAdminFinanceDashboardService, JeebGateway.Financials.AdminFinanceDashboardService>();
 
 // T-backend-021: 7-day rating reveal cron job.
+// JEB-1502: registered as singleton first so ITestJobRegistry can resolve it and call
+// SweepOnceAsync (the same code path the background loop uses).
 builder.Services.Configure<JeebGateway.Ratings.RatingRevealOptions>(
     builder.Configuration.GetSection(JeebGateway.Ratings.RatingRevealOptions.SectionName));
-builder.Services.AddHostedService<JeebGateway.Ratings.RatingRevealJob>();
+builder.Services.AddSingleton<JeebGateway.Ratings.RatingRevealJob>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Ratings.RatingRevealJob>());
 
 // T-backend-040: Low-rating auto-flag and admin notification.
 builder.Services.Configure<JeebGateway.Ratings.LowRatingFlagOptions>(
@@ -1734,6 +1753,35 @@ builder.Services.AddExceptionHandler<JeebGateway.Infrastructure.UpstreamExceptio
 // ---------------------------------------------------------------------------
 
 var app = builder.Build();
+
+// JEB-1502: populate the test job registry. Each entry delegates to the job's
+// own sweep method — the SAME code path the background scheduler calls. No
+// test-only forks. settlement-batch is registered here as a placeholder;
+// WS-A will wire in the real RunBatchAsync after implementing durable settlement.
+var testJobRegistry = app.Services.GetRequiredService<JeebGateway.TestControlPlane.ITestJobRegistry>();
+var ratingRevealJob = app.Services.GetRequiredService<JeebGateway.Ratings.RatingRevealJob>();
+var requestExpirySweeper = app.Services.GetRequiredService<RequestExpirySweeper>();
+var weeklyBatch = app.Services.GetRequiredService<JeebGateway.Financials.WeeklySettlementBatch>();
+
+testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
+{
+    Name = "rating-reveal",
+    Description = "Reveal ratings past the 7-day blind window (RatingRevealJob.SweepOnceAsync).",
+    RunAsync = ct => ratingRevealJob.SweepOnceAsync(ct)
+});
+testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
+{
+    Name = "request-expiry-sweep",
+    Description = "Expire overdue requests and send nudges (RequestExpirySweeper.SweepOnceAsync).",
+    RunAsync = ct => requestExpirySweeper.SweepOnceAsync(ct)
+});
+// settlement-batch: placeholder; WS-A registers the real delegate during Wave 2.
+testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
+{
+    Name = "settlement-batch",
+    Description = "Weekly settlement batch (WeeklySettlementBatch.RunBatchAsync). Placeholder — WS-A wires durable impl.",
+    RunAsync = ct => weeklyBatch.RunBatchAsync(ct)
+});
 
 // Must be registered early in the pipeline so it wraps the whole request.
 app.UseExceptionHandler();
