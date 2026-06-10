@@ -39,6 +39,29 @@ jobs:
           fi
           echo "OK: jeeb-state-service NSwag client is fresh."
 
+  nswag-otp-freshness:
+    # JEB-1499: Regenerate the OTP service NSwag client from the committed spec
+    # and fail if it drifts from the committed client (freshness gate).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+      - name: Install NSwag CLI
+        run: dotnet tool install -g NSwag.ConsoleCore --version 14.2.0
+      - name: Regenerate OTP service client
+        run: ~/.dotnet/tools/nswag run nswag-otp.json
+      - name: Fail on client drift
+        run: |
+          if ! git diff --quiet -- src/JeebGateway/Services/Clients/ServiceOTPClient.cs; then
+            echo "::error::ServiceOTPClient.cs is stale — regenerate with 'nswag run nswag-otp.json' and commit."
+            git diff -- src/JeebGateway/Services/Clients/ServiceOTPClient.cs | head -80
+            exit 1
+          fi
+          echo "OK: OTP service NSwag client is fresh."
+
   build-and-test:
     runs-on: ubuntu-latest
 
