@@ -194,7 +194,11 @@ public class DeliveriesController : ControllerBase
     /// when the canonical path is enabled. The gateway does not re-implement
     /// per-row ownership here — it surfaces the composed mirror.
     /// </summary>
+    // FT-02: the original relative route GET /deliveries/{id} is retained for
+    // backward compat; the absolute route GET /v1/deliveries/{id} satisfies
+    // JEB-152 which expected a versioned BFF delivery status endpoint post-JEB-1433.
     [HttpGet("{deliveryId}")]
+    [HttpGet("/v1/deliveries/{deliveryId}")]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
