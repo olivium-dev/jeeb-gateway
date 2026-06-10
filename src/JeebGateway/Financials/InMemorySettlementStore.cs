@@ -48,7 +48,8 @@ public sealed class InMemorySettlementStore : ISettlementStore
     }
 
     public Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
-        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct)
+        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct,
+        IReadOnlyCollection<string>? codStates = null)
     {
         // Snapshot the values up front (ConcurrentDictionary enumeration is safe
         // but we clone to keep the row immutable for the caller).
@@ -56,6 +57,7 @@ public sealed class InMemorySettlementStore : ISettlementStore
             .Where(s => string.Equals(s.JeeberId, jeeberId, StringComparison.Ordinal))
             .Where(s => (from is null || s.SettledAt >= from.Value)
                      && (to is null || s.SettledAt <= to.Value))
+            .Where(s => codStates is null || codStates.Count == 0 || codStates.Contains(s.CodState))
             .OrderBy(s => s.SettledAt)
             .Select(Clone)
             .ToList();
@@ -93,6 +95,50 @@ public sealed class InMemorySettlementStore : ISettlementStore
         }
     }
 
+    public Task<IReadOnlyList<Settlement>> ListRecordedInWindowAsync(
+        DateTimeOffset windowStart, DateTimeOffset windowEnd, int limit, CancellationToken ct)
+    {
+        var rows = _byId.Values
+            .Where(s => s.CodState == CodSettlementState.Recorded
+                     && s.SettledAt >= windowStart
+                     && s.SettledAt < windowEnd)
+            .Take(limit)
+            .Select(Clone)
+            .ToList();
+        return Task.FromResult<IReadOnlyList<Settlement>>(rows);
+    }
+
+    public Task MarkBatchedAsync(
+        IReadOnlyList<string> settlementIds, Guid batchId, DateTimeOffset at, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            foreach (var id in settlementIds)
+            {
+                if (_byId.TryGetValue(id, out var row) && row.CodState == CodSettlementState.Recorded)
+                {
+                    row.CodState = CodSettlementState.Batched;
+                    row.BatchId = batchId;
+                    row.BatchedAt = at;
+                }
+            }
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task MarkPaidByBatchAsync(Guid batchId, DateTimeOffset paidAt, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            foreach (var row in _byId.Values.Where(s => s.BatchId == batchId && s.CodState == CodSettlementState.Batched))
+            {
+                row.CodState = CodSettlementState.Paid;
+                row.PaidAt = paidAt;
+            }
+        }
+        return Task.CompletedTask;
+    }
+
     private static Settlement Clone(Settlement s) => new()
     {
         Id = s.Id,
@@ -113,5 +159,9 @@ public sealed class InMemorySettlementStore : ISettlementStore
         SettledAt = s.SettledAt,
         ReceiptGeneratedAt = s.ReceiptGeneratedAt,
         LedgerEntryId = s.LedgerEntryId,
+        BatchId = s.BatchId,
+        BatchedAt = s.BatchedAt,
+        PaidAt = s.PaidAt,
+        CodState = s.CodState,
     };
 }

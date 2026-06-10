@@ -730,7 +730,18 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 // Track per-controller migrations against GATEWAY-REMEDIATION-PLAN.md.
 // ===========================================================================
 
-// Cash settlement + receipt API (T-backend-016 / JEEB-34).
+// JEB-56: JeebPricingOptions — makes commission rates and floor config-overridable.
+// Defaults match CommissionCalculator constants (Standard=15%, Express=20%, etc.).
+builder.Services.Configure<JeebPricingOptions>(
+    builder.Configuration.GetSection(JeebPricingOptions.SectionName));
+
+// Cash settlement + receipt API (T-backend-016 / JEEB-34 → JEB-56).
+//
+// JEB-56: PostgresSettlementStore replaces InMemorySettlementStore when
+// GatewayPostgres:ConnectionString is configured. The store is the durable
+// COD settlement ledger (settlements table, migration 0015). When the
+// connection string is absent (local dev / CI without Postgres), the in-memory
+// fallback keeps the vertical exercisable.
 //
 // SettlementService re-computes the Jeeb fee (commission % per tier +
 // 2% insurance, min 1000 LBP) from the row's tier and posts a single
@@ -740,7 +751,17 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 // slim ledger contract in the Financials module — it does NOT ride on the
 // wallet integration, which now mirrors the salehly-gateway sibling's
 // upstream wallet API byte-for-byte (WalletController + ServiceWalletClient).
-builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
+var gatewayPostgresCs = builder.Configuration["GatewayPostgres:ConnectionString"];
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.Infrastructure.INpgsqlConnectionFactory>(
+        _ => new JeebGateway.Infrastructure.NpgsqlConnectionFactory(gatewayPostgresCs));
+    builder.Services.AddSingleton<ISettlementStore, PostgresSettlementStore>();
+}
+else
+{
+    builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
+}
 builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
 
@@ -1405,11 +1426,27 @@ builder.Services.AddSingleton<IDeliveryParticipantResolver, DeliveryParticipantR
 // gateway one.
 
 // Wave 2-3 backend services.
-// T-backend-017: Weekly settlement batch processing.
+// T-backend-017 / JEB-57: Weekly settlement batch processing.
+// InMemorySettlementBatchStore DELETED (G2 gate). Replaced by PostgresSettlementBatchStore
+// (when GatewayPostgres:ConnectionString is set) or InMemoryFallbackSettlementBatchStore (dev/CI).
 builder.Services.Configure<JeebGateway.Financials.WeeklySettlementOptions>(
     builder.Configuration.GetSection(JeebGateway.Financials.WeeklySettlementOptions.SectionName));
-builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore, JeebGateway.Financials.InMemorySettlementBatchStore>();
-builder.Services.AddHostedService<JeebGateway.Financials.WeeklySettlementBatch>();
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore,
+        JeebGateway.Financials.PostgresSettlementBatchStore>();
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore>(sp =>
+        new JeebGateway.Financials.InMemoryFallbackSettlementBatchStore(
+            sp.GetRequiredService<JeebGateway.Financials.ISettlementStore>()));
+}
+// Register WeeklySettlementBatch as a singleton so the WS-D job registry can resolve it
+// by concrete type. AddHostedService uses the same singleton instance.
+builder.Services.AddSingleton<JeebGateway.Financials.WeeklySettlementBatch>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Financials.WeeklySettlementBatch>());
 
 // T-backend-018: Earnings aggregation API.
 builder.Services.AddSingleton<JeebGateway.Financials.IEarningsAggregationService, JeebGateway.Financials.EarningsAggregationService>();
@@ -1772,6 +1809,21 @@ app.MapHealthChecks("/health/aggregate", new HealthCheckOptions
     Predicate = _ => true,
     ResponseWriter = AggregateHealthResponseWriter.WriteAsync,
 }).AllowAnonymous();
+
+// JEB-57: TODO — register WeeklySettlementBatch in WS-D test-control-plane job registry
+// (JEB-1502, fix/JEB-1502).  When that branch is merged, add:
+//
+//   var registry = app.Services.GetService<JeebGateway.TestControlPlane.ITestJobRegistry>();
+//   if (registry is not null)
+//   {
+//       var batch = app.Services.GetRequiredService<JeebGateway.Financials.WeeklySettlementBatch>();
+//       registry.Register(new JeebGateway.TestControlPlane.RegisteredJob
+//       {
+//           Name        = "settlement-batch",
+//           Description = "Weekly COD settlement batch (durable Postgres, JEB-57 Wave-2 impl).",
+//           RunAsync    = ct => batch.RunBatchAsync(ct),
+//       });
+//   }
 
 app.Run();
 
