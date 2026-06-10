@@ -24,6 +24,21 @@ public interface ISettlementStore
     /// <summary>Looks up a settlement by its delivery id.</summary>
     Task<Settlement?> GetByDeliveryAsync(string deliveryId, CancellationToken ct);
 
+    /// <summary>
+    /// Returns every settlement recorded for <paramref name="jeeberId"/> whose
+    /// <see cref="Settlement.SettledAt"/> falls in the inclusive
+    /// <paramref name="from"/>..<paramref name="to"/> window, ordered oldest
+    /// first. Feeds the earnings aggregation (T-backend-018): the gateway sums
+    /// the verbatim per-settlement gross/commission/net — zero re-arithmetic on
+    /// the wallet copy (BR-16). A null window bound means unbounded on that side
+    /// (lifetime read).
+    /// </summary>
+    Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
+        string jeeberId,
+        DateTimeOffset? from,
+        DateTimeOffset? to,
+        CancellationToken ct);
+
     /// <summary>Looks up a settlement by its own primary key.</summary>
     Task<Settlement?> GetByIdAsync(string settlementId, CancellationToken ct);
 

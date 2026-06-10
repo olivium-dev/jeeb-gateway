@@ -101,22 +101,6 @@ public sealed class GatewayDbProbeController : ControllerBase
             "db-probe-geolocation", "Services:Geolocation:BaseUrl",
             $"locations/user/{Uri.EscapeDataString(userId)}", ct);
 
-    // ── unified_payment_gateway (PG read, READ-ONLY) ───────────────────────
-    /// <summary>
-    /// GET /api/v1/payments/cod_jeeb/by-delivery/{deliveryId} — proxies the
-    /// unified_payment_gateway COD lookup (same path, host port 10066) [PG read].
-    /// READ-ONLY: no write/settlement route is exposed here. All payment writes
-    /// remain owned by unified_payment_gateway.
-    /// </summary>
-    [HttpGet("api/v1/payments/cod_jeeb/by-delivery/{deliveryId}")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
-    public Task<IActionResult> GetCodPaymentByDelivery(string deliveryId, CancellationToken ct)
-        => ProxyGetAsync(
-            "db-probe-unified-payment", "Services:UnifiedPayment:BaseUrl",
-            $"api/v1/payments/cod_jeeb/by-delivery/{Uri.EscapeDataString(deliveryId)}", ct);
-
     // ── realtime-comunication-service (PG read) ────────────────────────────
     /// <summary>
     /// GET /realtime/admin/topics — proxies realtime-comunication-service
