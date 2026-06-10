@@ -57,6 +57,7 @@ public class DeliveriesController : ControllerBase
     private readonly ICancellationService _cancellations;
     private readonly IAdminEscalationStore _escalations;
     private readonly IOptions<OtpHandoverOptions> _otpOptions;
+    private readonly IOptions<JeebGateway.Auth.OtpSignIn.OtpSignInOptions> _otpSignInOptions;
     private readonly IServiceOTPClient _otpClient;
     private readonly IDeliveryServiceClient _deliveryClient;
     private readonly IDistributedCache _cache;
@@ -74,12 +75,37 @@ public class DeliveriesController : ControllerBase
     private static string AttemptsCacheKey(string deliveryId) => $"otp:attempts:{deliveryId}";
     private static string LockoutCacheKey(string deliveryId)  => $"otp:lockout:{deliveryId}";
 
+    /// <summary>
+    /// Per-delivery trace/log label for the handover OTP. NON-GUID by design —
+    /// used ONLY for observability (span tags + structured logs), never sent to
+    /// the shared one-time-password service. See <see cref="ResolveOtpApplicationId"/>.
+    /// </summary>
+    private static string HandoverOtpTrace(string deliveryId) => $"delivery_handover_{deliveryId}";
+
+    /// <summary>
+    /// JEB-1516: resolve the <c>applicationId</c> forwarded to the shared
+    /// one-time-password service on SendOTP / ValidateOTP. The shared service
+    /// keys its <c>Phone</c> rows by a tenant GUID and does
+    /// <c>new Guid(applicationId)</c> internally; the legacy handover code passed
+    /// the human-readable <c>delivery_handover_{id}</c> label, which is NOT a
+    /// GUID, so the upstream threw a 400 ("Guid should contain 32 digits with 4
+    /// dashes") that the gateway surfaced as a 502 — breaking S09 at-door OTP
+    /// issue/verify. Coerce to the configured Jeeb tenant GUID
+    /// (<c>Auth:Otp:ApplicationId</c>), exactly like
+    /// <see cref="JeebGateway.Auth.OtpSignIn.AuthOtpController"/> and
+    /// <see cref="OtpController"/>. The <c>delivery_handover_{id}</c> value is
+    /// retained for traces/logs only (<see cref="HandoverOtpTrace"/>).
+    /// </summary>
+    private string ResolveOtpApplicationId()
+        => _otpSignInOptions.Value.ApplicationId;
+
     public DeliveriesController(
         IRequestsStore store,
         IPushNotificationService push,
         ICancellationService cancellations,
         IAdminEscalationStore escalations,
         IOptions<OtpHandoverOptions> otpOptions,
+        IOptions<JeebGateway.Auth.OtpSignIn.OtpSignInOptions> otpSignInOptions,
         IServiceOTPClient otpClient,
         IDeliveryServiceClient deliveryClient,
         IDistributedCache cache,
@@ -92,6 +118,7 @@ public class DeliveriesController : ControllerBase
         _cancellations = cancellations;
         _escalations = escalations;
         _otpOptions = otpOptions;
+        _otpSignInOptions = otpSignInOptions;
         _otpClient = otpClient;
         _deliveryClient = deliveryClient;
         _cache = cache;
@@ -840,7 +867,10 @@ public class DeliveriesController : ControllerBase
     /// GET /v1/deliveries/{id}/otp (T-BE-019 / JEB-55).
     ///
     /// Issues a 4-digit handover OTP via the external one-time-password service.
-    /// ApplicationId pattern: <c>delivery_handover_{deliveryId}</c>.
+    /// The upstream <c>applicationId</c> is the configured Jeeb tenant GUID
+    /// (<c>Auth:Otp:ApplicationId</c>, see <see cref="ResolveOtpApplicationId"/>);
+    /// the per-delivery <c>delivery_handover_{deliveryId}</c> token is a
+    /// trace/log label only (JEB-1516).
     /// Only valid when delivery status = <see cref="RequestStatus.AtDoor"/> —
     /// the Jeeber must have physically arrived at the drop-off before an
     /// OTP is dispatched (PR review B1; per AC1).
@@ -914,7 +944,9 @@ public class DeliveriesController : ControllerBase
         }
 
         var recipientPhone = delivery.RecipientPhone;
-        var applicationId  = $"delivery_handover_{deliveryId}";
+        // JEB-1516: GUID sent upstream; delivery_handover_{id} kept for traces only.
+        var applicationId  = ResolveOtpApplicationId();
+        var handoverTrace  = HandoverOtpTrace(deliveryId);
 
         try
         {
@@ -927,11 +959,11 @@ public class DeliveriesController : ControllerBase
             // PR review B5: never log the upstream message body — it may
             // echo OTP-adjacent data. Log only safe metadata.
             _log.LogInformation(
-                "Handover OTP triggered for delivery {DeliveryId} with applicationId {ApplicationId}, correlationId {CorrelationId}",
-                deliveryId, applicationId, correlationId);
+                "Handover OTP triggered for delivery {DeliveryId} with handover {HandoverTrace}, correlationId {CorrelationId}",
+                deliveryId, handoverTrace, correlationId);
 
             activity?.SetTag("otp.triggered", "true");
-            activity?.SetTag("otp.application_id", applicationId);
+            activity?.SetTag("otp.application_id", handoverTrace);
 
             return Ok(new OtpTriggerResponse
             {
@@ -1077,7 +1109,9 @@ public class DeliveriesController : ControllerBase
         }
 
         var attemptCount = await ReadAttemptCountAsync(deliveryId, ct);
-        var applicationId = $"delivery_handover_{deliveryId}";
+        // JEB-1516: forward the configured tenant GUID, not the non-GUID
+        // delivery_handover_{id} label (which made the upstream Guid.Parse throw → 502).
+        var applicationId = ResolveOtpApplicationId();
 
         bool verified;
         int upstreamStatus = 0;
@@ -1306,7 +1340,9 @@ public class DeliveriesController : ControllerBase
         // 2) SMS round-trip — gateway↔one-time-password hop. Reuse the same
         //    one-time-password client + applicationId convention as the legacy
         //    path so the SMS template is identical.
-        var applicationId = $"delivery_handover_{deliveryId}";
+        // JEB-1516: GUID sent upstream; delivery_handover_{id} kept for traces only.
+        var applicationId = ResolveOtpApplicationId();
+        var handoverTrace = HandoverOtpTrace(deliveryId);
         try
         {
             await _otpClient.SendOTPAsync(new SendOTPRequestUserID
@@ -1328,12 +1364,12 @@ public class DeliveriesController : ControllerBase
         }
 
         _log.LogInformation(
-            "Handover OTP issued (upstream path) for delivery {DeliveryId} with applicationId {ApplicationId}, correlationId {CorrelationId}",
-            deliveryId, applicationId, correlationId);
+            "Handover OTP issued (upstream path) for delivery {DeliveryId} with handover {HandoverTrace}, correlationId {CorrelationId}",
+            deliveryId, handoverTrace, correlationId);
 
         activity?.SetTag("otp.triggered", "true");
         activity?.SetTag("otp.path", "upstream");
-        activity?.SetTag("otp.application_id", applicationId);
+        activity?.SetTag("otp.application_id", handoverTrace);
 
         return Ok(new OtpTriggerResponse
         {
@@ -1372,7 +1408,9 @@ public class DeliveriesController : ControllerBase
             });
         }
 
-        var applicationId = $"delivery_handover_{deliveryId}";
+        // JEB-1516: forward the configured tenant GUID, not the non-GUID
+        // delivery_handover_{id} label (which made the upstream Guid.Parse throw → 502).
+        var applicationId = ResolveOtpApplicationId();
 
         // 1) Code-validation hop. one-time-password returns 2xx for a correct
         //    code; the NSwag client throws ApiException for a wrong/expired

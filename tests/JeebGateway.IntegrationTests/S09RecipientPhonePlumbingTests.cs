@@ -41,6 +41,11 @@ public class S09RecipientPhonePlumbingTests : IClassFixture<WebApplicationFactor
 {
     private const string RecipientPhone = "+962799123456";
 
+    // JEB-1516: the configured Jeeb tenant application GUID the gateway forwards
+    // to the shared one-time-password service. In production this is injected via
+    // Auth__Otp__ApplicationId; the factory below binds it for the OTP tests.
+    private const string TenantApplicationId = "17f6f47f-4047-4f1e-bac2-632a5eaa9a46";
+
     private readonly WebApplicationFactory<Program> _factory;
 
     public S09RecipientPhonePlumbingTests(WebApplicationFactory<Program> factory)
@@ -138,7 +143,64 @@ public class S09RecipientPhonePlumbingTests : IClassFixture<WebApplicationFactor
         // The phone dispatched to one-time-password is the one supplied at create.
         otp.SendOtpCalls.Should().ContainSingle();
         otp.SendOtpCalls[0].PhoneNumber.Should().Be(RecipientPhone);
-        otp.SendOtpCalls[0].ApplicationId.Should().Be($"delivery_handover_{deliveryId}");
+        // JEB-1516: the upstream applicationId MUST be the configured tenant GUID,
+        // NOT the non-GUID delivery_handover_{id} label (which made the shared
+        // service's new Guid(applicationId) throw 400 → gateway 502). The factory
+        // binds Auth:Otp:ApplicationId to TenantApplicationId below.
+        otp.SendOtpCalls[0].ApplicationId.Should().Be(TenantApplicationId,
+            "the handover OTP must forward the configured tenant GUID so the upstream Guid.Parse succeeds");
+        Guid.TryParse(otp.SendOtpCalls[0].ApplicationId, out _).Should().BeTrue(
+            "a non-GUID applicationId is exactly the JEB-1516 bug that yielded a 502");
+    }
+
+    /// <summary>
+    /// JEB-1516 regression guard. The legacy code built the upstream
+    /// <c>applicationId</c> as <c>delivery_handover_{deliveryId}</c>. That label
+    /// is NEVER a GUID — the <c>delivery_handover_</c> prefix alone guarantees it
+    /// fails <c>new Guid(applicationId)</c> regardless of the delivery id's own
+    /// format — so the shared one-time-password service threw 400 → the gateway
+    /// surfaced 502, breaking S09 H6/A5. This test pins the bug shape (the legacy
+    /// label is not a GUID) and asserts the gateway now forwards the configured
+    /// tenant GUID instead, which parses cleanly upstream.
+    /// </summary>
+    [Fact]
+    public async Task AtDoor_Otp_Coerces_NonGuid_DeliveryId_To_Configured_Tenant_Guid()
+    {
+        var otp = new RecordingOtpClient();
+        await using var factory = FactoryWithFakeOtp(otp);
+
+        var clientId = $"s09-jeb1516-{Guid.NewGuid()}";
+        var jeeberId = $"s09-jeb1516-jeeber-{Guid.NewGuid()}";
+
+        var customer = ClientFor(factory, clientId, role: "customer");
+        var create = await customer.PostAsJsonAsync("/requests", CreatePayload(RecipientPhone));
+        create.StatusCode.Should().Be(HttpStatusCode.Created);
+        var deliveryId = (await create.Content.ReadFromJsonAsync<CreatedRequestDto>())!.Id;
+
+        // Precondition that pins the bug shape: the LEGACY applicationId label
+        // (delivery_handover_{id}) is not a GUID — the prefix alone makes the
+        // upstream new Guid(applicationId) throw, whatever the delivery id format.
+        var legacyApplicationId = $"delivery_handover_{deliveryId}";
+        Guid.TryParse(legacyApplicationId, out _).Should().BeFalse(
+            "the legacy delivery_handover_{id} label could never parse as a GUID — the source of the JEB-1516 502");
+
+        var store = factory.Services.GetRequiredService<IRequestsStore>();
+        (await store.TryAcceptByJeeberAsync(
+            deliveryId, jeeberId, limit: int.MaxValue, at: DateTimeOffset.UtcNow, ct: default))
+            .Should().NotBeNull();
+        (await store.SetStatusAsync(deliveryId, RequestStatus.AtDoor, default)).Should().BeTrue();
+
+        var jeeber = ClientFor(factory, jeeberId, role: "driver");
+        var resp = await jeeber.GetAsync($"/deliveries/{deliveryId}/otp");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        otp.SendOtpCalls.Should().ContainSingle();
+        // The applicationId forwarded upstream is a well-formed GUID — never the
+        // delivery_handover_{id} label.
+        otp.SendOtpCalls[0].ApplicationId.Should().Be(TenantApplicationId);
+        otp.SendOtpCalls[0].ApplicationId.Should().NotStartWith("delivery_handover_");
+        Guid.TryParse(otp.SendOtpCalls[0].ApplicationId, out _).Should().BeTrue(
+            "the coerced applicationId must satisfy the upstream new Guid(applicationId)");
     }
 
     /// <summary>
@@ -213,6 +275,8 @@ public class S09RecipientPhonePlumbingTests : IClassFixture<WebApplicationFactor
         => _factory.WithWebHostBuilder(builder =>
         {
             builder.UseSetting("FeatureFlags:UseUpstream:Delivery", "false");
+            // JEB-1516: bind the tenant GUID the gateway forwards as applicationId.
+            builder.UseSetting("Auth:Otp:ApplicationId", TenantApplicationId);
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<IServiceOTPClient>();
