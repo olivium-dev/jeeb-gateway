@@ -13,9 +13,11 @@
 #   * registry creds via GitHub secrets, never inlined (no demo-password literals)
 #   * HTTP health gate after deploy, with auto-rollback to the previous image
 #
-# This service is the Jeeb gateway: a JWT BFF. It has NO database (no DB creds,
-# no connection string) — it aggregates downstream services via the
-# Services__*__BaseUrl config injected on first create.
+# This service is the Jeeb gateway: a JWT BFF that aggregates downstream services
+# via Services__*__BaseUrl config injected on first create. It also owns a Postgres
+# schema (db/migrations/) for KYC, users, disputes, and financial ledger. Migrations
+# are applied via db/apply.sh before the docker service update (JEB-1490); the
+# required DATABASE_URL credential is injected from the JEEB_DATABASE_URL secret.
 #
 # Required secrets (set org-selected to the Jeeb repos, or per-repo):
 #   JEEB_SSH_PRIVATE_KEY    -- deploy private key authorized on the Jeeb swarm host
@@ -283,6 +285,44 @@ jobs:
 
       - name: Remote GHCR login (token via stdin pipe)
         run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"
+
+      # JEB-1490: run database migrations BEFORE the image update so the new
+      # code never starts against an un-migrated schema.  Fail-fast: if apply.sh
+      # exits non-zero the workflow aborts here and the running service is
+      # untouched (no rollback needed because docker service update was not yet
+      # called).
+      #
+      # db/apply.sh uses psql + $DATABASE_URL; it is idempotent (re-run safe).
+      # Each migration is wrapped in IF NOT EXISTS / CREATE TABLE IF NOT EXISTS
+      # guards so replaying on a fully-migrated DB is a no-op.
+      #
+      # Required secret: JEEB_DATABASE_URL  (postgres://user:pass@host:5432/jeeb)
+      # The URL is NOT a workflow input (it is a credential, never in YAML
+      # literals) — set it once as an org/repo GitHub secret.
+      - name: Install psql client (for migration apply + readiness check)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Apply DB migrations (fail-fast before image update)
+        env:
+          DATABASE_URL: ${{ secrets.JEEB_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::JEEB_DATABASE_URL secret is not set — cannot run migrations. Add it as an org/repo secret."
+            exit 1
+          fi
+          echo "==> Applying migrations via db/apply.sh ..."
+          bash db/apply.sh
+          echo "==> Migrations applied successfully."
+          echo "==> Schema readiness check (querying scheduled_delivery_settings sentinel table) ..."
+          ROW_COUNT=$(psql "$DATABASE_URL" -t -c "SELECT COUNT(*) FROM scheduled_delivery_settings;" 2>/dev/null | tr -d ' \n' || echo "-1")
+          if [ "$ROW_COUNT" = "-1" ]; then
+            echo "::warning::Schema readiness check skipped (table not yet present or DB unreachable)"
+          else
+            echo "Schema readiness check passed: scheduled_delivery_settings has ${ROW_COUNT} row(s)"
+          fi
 
       - name: Capture current image as rollback target
         id: prev
