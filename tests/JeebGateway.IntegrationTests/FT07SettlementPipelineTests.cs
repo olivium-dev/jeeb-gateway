@@ -1,3 +1,4 @@
+using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Financials;
 using JeebGateway.Requests;
@@ -42,13 +43,13 @@ public class FT07SettlementPipelineTests : IClassFixture<WebApplicationFactory<P
             TierId      = "standard",
         }, limit: 10, ct: default);
 
-        await store.TryTransitionAsync(delivery.Id, RequestStatus.Matched,    null, default);
-        await store.TryTransitionAsync(delivery.Id, RequestStatus.Accepted,   null, default);
-        await store.TryTransitionAsync(delivery.Id, RequestStatus.PickedUp,   null, default);
-        await store.TryTransitionAsync(delivery.Id, RequestStatus.HeadingOff, null, default);
-
-        // Seed an OTP so TryVerifyOtpAsync succeeds.
-        await store.SetOtpAsync(delivery.Id, "123456", default);
+        await store.TryTransitionAsync(delivery.Id, RequestStatus.Matched, null, default);
+        // Accept via TryAcceptByJeeberAsync so the OTP is minted onto the row.
+        var accepted = await store.TryAcceptByJeeberAsync(
+            delivery.Id, $"jeeber-ft07-{Guid.NewGuid()}", int.MaxValue, DateTimeOffset.UtcNow, default);
+        var otpCode = accepted!.DeliveryOtp!;
+        await store.SetStatusAsync(delivery.Id, RequestStatus.PickedUp,   default);
+        await store.SetStatusAsync(delivery.Id, RequestStatus.HeadingOff, default);
 
         var http = _factory.CreateClient();
         http.DefaultRequestHeaders.Add("X-User-Id",    delivery.ClientId);
@@ -56,7 +57,7 @@ public class FT07SettlementPipelineTests : IClassFixture<WebApplicationFactory<P
 
         var resp = await http.PostAsJsonAsync(
             $"/deliveries/{delivery.Id}/verify-otp",
-            new { OtpCode = "123456" });
+            new { OtpCode = otpCode });
 
         resp.IsSuccessStatusCode.Should().BeTrue(
             $"OTP verify should succeed; got {resp.StatusCode}");
