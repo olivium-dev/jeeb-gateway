@@ -107,17 +107,20 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
     }
 
     /// <summary>
-    /// Voice-on-create (JEB-1431). Forwards the audio to the upstream's canonical
-    /// multipart route <c>POST /v1/transcribe</c> (the single stable contract route
-    /// pinned by JEB-1483, returning <c>{transcript, confidence, language,
-    /// duration_ms}</c>, backed by the owning service's real Whisper or its
-    /// config-gated mock seam). The legacy <c>/v1/voice/transcribe</c> alias is now
-    /// deprecated upstream (JEB-1482), so the gateway consumes the canonical path
-    /// only. The gateway requestId is mapped to the generic <c>Idempotency-Key</c>
-    /// header so a retried draft replays the cached transcript. Size (413) / format
-    /// (415) gates are validated at the gateway BEFORE this call (so no Whisper runs
-    /// on reject); this method also surfaces any upstream 413/415 onto a typed
-    /// exception.
+    /// Voice-on-create (JEB-1431). Forwards the audio to the upstream's CANONICAL
+    /// multipart route <c>POST /v1/transcribe</c> (the pinned, schemathesis-gated
+    /// contract returning <c>{transcript, confidence, language, duration_ms}</c>,
+    /// backed by the owning service's real Whisper or its config-gated mock seam).
+    /// JEB-1483 correction 7: this consumes the canonical path, NOT the deprecated
+    /// <c>/v1/voice/transcribe</c> alias.
+    ///
+    /// Jeeb policy lives HERE, not in the shared service: the gateway supplies the
+    /// language (Lebanese-Arabic, see <see cref="JeebGateway.Controllers.RequestVoiceController"/>)
+    /// as the generic <c>language_hint</c> form field, and maps the client requestId
+    /// onto the generic opaque <c>Idempotency-Key</c> header so a retried draft
+    /// replays the cached transcript. Size (413) / format (415) gates are validated
+    /// at the gateway BEFORE this call (so no Whisper runs on reject); this method
+    /// also surfaces any upstream 413/415 onto a typed exception.
     /// </summary>
     public async Task<TranscriptionResult> TranscribeVoiceAsync(
         WhisperAudio audio, string language, string? idempotencyKey, CancellationToken ct)
@@ -130,6 +133,8 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
         form.Add(fileContent, "audio", audio.FileName);
         form.Add(new StringContent(language), "language_hint");
 
+        // Canonical, pinned contract route (JEB-1483 C7) — the deprecated
+        // /v1/voice/transcribe alias is NOT used.
         using var request = new HttpRequestMessage(HttpMethod.Post, "v1/transcribe")
         {
             Content = form
