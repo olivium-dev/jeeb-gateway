@@ -1,31 +1,208 @@
-name: Deploy to Staging
+# Deploy to Staging Gateway — full env-complete deploy for staging-gateway service.
+#
+# Resolves ESC-P3-006: staging-gateway was crashing (exit 139, misleading — actually
+# a StartupConfigurationException) because the service spec only had 3 env vars
+# (ASPNETCORE_ENVIRONMENT, Payments flags) and was missing all downstream service
+# BaseUrls required by BffStartupValidator. This workflow does a complete, spec-clean
+# deploy that overwrites the DIRTY manual-SSH spec with a GHA-sourced one.
+#
+# This workflow deploys to staging-gateway (port 10080) — NOT to the production
+# jeeb-gateway service (port 10000). Payments/PaymentsMock flags are ON by default
+# for staging (Door 2b / JEB-56 non-prod validation per D1). Prod Payments flag
+# stays ABSENT=OFF (P9 guardrail: this workflow never touches jeeb-gateway).
+#
+# Required secrets (same as deploy-to-jeeb.yml; all must be set on the gateway repo):
+#   JEEB_SSH_PRIVATE_KEY    -- deploy private key authorized on the Jeeb swarm host
+#   JEEB_JWT_SIGNING_KEY    -- gateway JWT signing key
+#   JEEB_JWT_PHONE_PEPPER   -- gateway phone-pepper secret
+#   JEEB_TOKEN_MINT_KEY     -- privileged-caller token-mint key
+#   UMJWT_SIGNING_KEY       -- H-B5 UM-issued token verification key (gateway UmJwt scheme)
+
+name: Deploy to Staging Gateway
 
 on:
-  workflow_call:
-    inputs:
-      image_tag:
-        description: "Image tag to deploy"
-        required: true
-        type: string
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: "Image tag to deploy (defaults to latest)"
+      payments_enabled:
+        description: 'FeatureFlags__UseUpstream__Payments (true for Door 2b staging validation; false to disable)'
         required: false
-        type: string
-        default: "latest"
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      payments_mock_enabled:
+        description: 'FeatureFlags__UseUpstream__PaymentsMock (mock upstream, non-prod only; true = UPG mock DI active)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      whisper_fake:
+        description: 'Whisper__FakeTranscribe. true (default) = deterministic fake STT; false = real OpenAI Whisper.'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      test_plane_enabled:
+        description: 'TestControlPlane__Enabled. false (default) = all /__test/* → 404.'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 concurrency:
-  group: deploy-staging
+  group: deploy-staging-gateway
   cancel-in-progress: false
 
 jobs:
   deploy:
-    uses: olivium-dev/jeeb-infrastructure/.github/workflows/swarm-deploy.yml@main
-    with:
-      service_name: jeeb-gateway
-      image_tag: ${{ inputs.image_tag || 'latest' }}
-      environment: staging
-      published_port: "10000"
-      target_port: "8080"
-    secrets: inherit
+    runs-on: ubuntu-22.04
+    env:
+      REGISTRY: ghcr.io
+      IMAGE: ghcr.io/olivium-dev/jeeb-gateway
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR (password via stdin)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push staging image (git-SHA tag)
+        id: build
+        run: |
+          TAG="${IMAGE}:sha-${GITHUB_SHA::12}"
+          docker build -t "$TAG" .
+          docker push "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Install cloudflared + write deploy key
+        run: |
+          set -euo pipefail
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb || sudo apt-get install -f -y
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          KEY_MATERIAL="${{ secrets.JEEB_SSH_PRIVATE_KEY }}"
+          if printf '%s' "$KEY_MATERIAL" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$KEY_MATERIAL" > ~/.ssh/id_ed25519
+          else
+            printf '%s' "$KEY_MATERIAL" | base64 -d > ~/.ssh/id_ed25519
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+          cat > ~/.ssh/config <<EOF
+          Host jeeb
+            HostName jeeb-ssh.fds-1.com
+            User ec2-user
+            IdentityFile ~/.ssh/id_ed25519
+            ProxyCommand cloudflared access ssh --hostname %h
+            StrictHostKeyChecking accept-new
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Remote GHCR login (token via stdin pipe)
+        run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"
+
+      - name: Zero-downtime deploy to staging-gateway (update if exists, else create)
+        run: |
+          TAG="${{ steps.build.outputs.tag }}"
+          # update-order stop-first: staging-gateway published in host mode (mode=host),
+          # so old task must release port 10080 before new task can bind it.
+          ssh jeeb bash -se <<EOF
+          set -euo pipefail
+          SVC='staging-gateway'
+          docker pull '$TAG'
+          if docker service ls --format '{{.Name}}' | grep -wq "\$SVC"; then
+            docker service update --image '$TAG' --with-registry-auth \
+              --update-order stop-first --update-failure-action rollback \
+              --rollback-order stop-first --update-monitor 20s \
+              --env-add ASPNETCORE_ENVIRONMENT='Staging' \
+              --env-add DOTNET_EnableWriteXorExecute='0' \
+              --env-add JeebJwt__SigningKey='${{ secrets.JEEB_JWT_SIGNING_KEY }}' \
+              --env-add JeebJwt__PhonePepper='${{ secrets.JEEB_JWT_PHONE_PEPPER }}' \
+              --env-add JeebJwt__Issuer='https://jeeb.fds-1.com' \
+              --env-add JeebJwt__Audience='jeeb-mobile' \
+              --env-add Security__TokenMint__Enabled='true' \
+              --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
+              --env-add UmJwt__SigningKey='${{ secrets.UMJWT_SIGNING_KEY }}' \
+              --env-add UmJwt__Issuer='user-management' \
+              --env-add UmJwt__Audience='user-management' \
+              --env-add Services__UserManagement__BaseUrl='http://192.168.2.50:10001' \
+              --env-add UserManagementApi__BaseUrl='http://192.168.2.50:10001' \
+              --env-add Services__Wallet__BaseUrl='http://192.168.2.50:10014' \
+              --env-add Services__Matching__BaseUrl='http://192.168.2.50:10025' \
+              --env-add Services__Notification__BaseUrl='http://192.168.2.50:10026' \
+              --env-add Services__Chat__BaseUrl='http://192.168.2.50:10028' \
+              --env-add ServiceOTPApi__BaseUrl='http://192.168.2.50:10037' \
+              --env-add Services__PushNotification__BaseUrl='http://192.168.2.50:10040' \
+              --env-add Services__Delivery__BaseUrl='http://192.168.2.50:10055' \
+              --env-add Services__Cdn__BaseUrl='http://192.168.2.50:10072' \
+              --env-add Services__Kyc__BaseUrl='http://192.168.2.50:10074' \
+              --env-add Auth__Otp__ApplicationId='0d51afe1-499f-4a29-a55a-36d2dd223b05' \
+              --env-add Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
+              --env-add FeatureFlags__DurableRequests__Enabled='false' \
+              --env-add FeatureFlags__UseUpstream__Offer='true' \
+              --env-add FeatureFlags__UseUpstream__Delivery='true' \
+              --env-add FeatureFlags__UseUpstream__Chat='true' \
+              --env-add FeatureFlags__UseUpstream__Payments='${{ inputs.payments_enabled }}' \
+              --env-add FeatureFlags__UseUpstream__PaymentsMock='${{ inputs.payments_mock_enabled }}' \
+              --env-add TestControlPlane__Enabled='${{ inputs.test_plane_enabled }}' \
+              "\$SVC"
+          else
+            docker service create --name "\$SVC" --replicas 1 \
+              --publish published=10080,target=8080,mode=host \
+              --with-registry-auth \
+              --env ASPNETCORE_ENVIRONMENT='Staging' \
+              --env DOTNET_EnableWriteXorExecute='0' \
+              --env JeebJwt__SigningKey='${{ secrets.JEEB_JWT_SIGNING_KEY }}' \
+              --env JeebJwt__PhonePepper='${{ secrets.JEEB_JWT_PHONE_PEPPER }}' \
+              --env JeebJwt__Issuer='https://jeeb.fds-1.com' \
+              --env JeebJwt__Audience='jeeb-mobile' \
+              --env Security__TokenMint__Enabled='true' \
+              --env Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
+              --env UmJwt__SigningKey='${{ secrets.UMJWT_SIGNING_KEY }}' \
+              --env UmJwt__Issuer='user-management' \
+              --env UmJwt__Audience='user-management' \
+              --env Services__UserManagement__BaseUrl='http://192.168.2.50:10001' \
+              --env UserManagementApi__BaseUrl='http://192.168.2.50:10001' \
+              --env Services__Wallet__BaseUrl='http://192.168.2.50:10014' \
+              --env Services__Matching__BaseUrl='http://192.168.2.50:10025' \
+              --env Services__Notification__BaseUrl='http://192.168.2.50:10026' \
+              --env Services__Chat__BaseUrl='http://192.168.2.50:10028' \
+              --env ServiceOTPApi__BaseUrl='http://192.168.2.50:10037' \
+              --env Services__PushNotification__BaseUrl='http://192.168.2.50:10040' \
+              --env Services__Delivery__BaseUrl='http://192.168.2.50:10055' \
+              --env Services__Cdn__BaseUrl='http://192.168.2.50:10072' \
+              --env Services__Kyc__BaseUrl='http://192.168.2.50:10074' \
+              --env Auth__Otp__ApplicationId='0d51afe1-499f-4a29-a55a-36d2dd223b05' \
+              --env Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
+              --env FeatureFlags__DurableRequests__Enabled='false' \
+              --env FeatureFlags__UseUpstream__Offer='true' \
+              --env FeatureFlags__UseUpstream__Delivery='true' \
+              --env FeatureFlags__UseUpstream__Chat='true' \
+              --env FeatureFlags__UseUpstream__Payments='${{ inputs.payments_enabled }}' \
+              --env FeatureFlags__UseUpstream__PaymentsMock='${{ inputs.payments_mock_enabled }}' \
+              --env TestControlPlane__Enabled='${{ inputs.test_plane_enabled }}' \
+              --reserve-memory 256M \
+              '$TAG'
+          fi
+          EOF
+
+      - name: Health gate (poll :10080; rollback on failure)
+        run: |
+          ok=false
+          for i in $(seq 1 30); do
+            if ssh jeeb "curl -fsS -m 5 http://\$(hostname -I | awk '{print \$1}'):10080/api/health >/dev/null 2>&1"; then ok=true; break; fi
+            echo "health attempt $i ..."; sleep 4
+          done
+          ssh jeeb "docker service ps --no-trunc 'staging-gateway' | head -6" || true
+          if [ "$ok" != true ]; then
+            echo "Health gate RED — rolling back"
+            ssh jeeb "docker service rollback 'staging-gateway'" || true
+            exit 1
+          fi
+          echo "Health OK on :10080/api/health"
