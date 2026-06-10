@@ -28,8 +28,9 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
 
     public async Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct)
     {
+        // JEB-1487 Rule 1: canonical route is now /api/v1/ — no alias.
         using var resp = await _http.PostAsJsonAsync(
-            "api/users/phone-identity/find-or-create",
+            "api/v1/users/phone-identity/find-or-create",
             new PhoneFindOrCreateBody { Phone = phone },
             Json, ct);
 
@@ -44,16 +45,13 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         var dto = await resp.Content.ReadFromJsonAsync<PhoneFindOrCreateBodyResponse>(Json, ct)
             ?? throw new UserManagementCallException("phone/find-or-create", (int)HttpStatusCode.BadGateway);
 
-        // JEB-1480 (GR2): the shared user-management phone-identity endpoint is now
-        // IDENTITY-ONLY ({ userId, isNew, phone }) and performs NO role/claim shaping.
-        // The DEFAULT role ("customer") and all role/claim shaping live HERE, in the
-        // gateway, at JWT-mint time. A freshly resolved phone identity is decorated
-        // with the gateway's default opaque role; a user's elevated roles (e.g. driver)
-        // are granted via the KYC approve path and re-issued through the UM-signed
-        // role-switch flow (reflected on GET /v1/users/me), never invented by UM here.
+        // JEB-1480/JEB-1487 (GR2): the shared UM phone-identity endpoint is IDENTITY-ONLY
+        // — { userId, isNew, phoneHashRef }. No roles, no raw phone, no Jeeb vocabulary.
+        // Default role decoration and all claim shaping live HERE in the gateway.
         return new PhoneFindOrCreateResult(
             dto.UserId ?? string.Empty,
             dto.IsNew,
+            dto.PhoneHashRef ?? string.Empty,
             new[] { Roles.Client },
             Roles.Client);
     }
@@ -141,12 +139,13 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         [JsonPropertyName("phone")] public string Phone { get; set; } = string.Empty;
     }
 
-    // JEB-1480 (GR2): mirrors the de-leaked shared contract — IDENTITY ONLY. The
-    // shared service no longer emits available_roles/active_role on this surface.
+    // JEB-1487 (GR2): mirrors the de-leaked shared contract — IDENTITY ONLY.
+    // { userId, isNew, phoneHashRef } — raw phone removed, no roles, no Jeeb vocab.
     private sealed class PhoneFindOrCreateBodyResponse
     {
         [JsonPropertyName("userId")] public string? UserId { get; set; }
         [JsonPropertyName("isNew")] public bool IsNew { get; set; }
+        [JsonPropertyName("phoneHashRef")] public string? PhoneHashRef { get; set; }
     }
 
     private sealed class RoleSwitchBody
