@@ -1440,7 +1440,6 @@ builder.Services.AddSingleton<IDeliveryParticipantResolver, DeliveryParticipantR
 // fan-out is a chat-service / realtime-communication-service concern, not a
 // gateway one.
 
-<<<<<<< HEAD
 // Wave 2-3 backend services.
 // T-backend-017 / JEB-57: Weekly settlement batch processing.
 // InMemorySettlementBatchStore DELETED (G2 gate). Replaced by PostgresSettlementBatchStore
@@ -1460,13 +1459,6 @@ else
 }
 // Register WeeklySettlementBatch as a singleton so the WS-D job registry can resolve it
 // by concrete type. AddHostedService uses the same singleton instance.
-=======
-// T-backend-017: Weekly settlement batch processing.
-// JEB-1502: registered as singleton so ITestJobRegistry can force-run RunBatchAsync.
-builder.Services.Configure<JeebGateway.Financials.WeeklySettlementOptions>(
-    builder.Configuration.GetSection(JeebGateway.Financials.WeeklySettlementOptions.SectionName));
-builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore, JeebGateway.Financials.InMemorySettlementBatchStore>();
->>>>>>> fix/JEB-1502
 builder.Services.AddSingleton<JeebGateway.Financials.WeeklySettlementBatch>();
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<JeebGateway.Financials.WeeklySettlementBatch>());

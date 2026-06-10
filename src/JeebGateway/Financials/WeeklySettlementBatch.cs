@@ -54,7 +54,6 @@ public interface ISettlementBatchStore
     Task<SettlementBatch> MarkPaidAsync(Guid batchId, string adminUserId, DateTimeOffset paidAt, CancellationToken ct);
 }
 
-<<<<<<< HEAD
 // ── Batch DTO ─────────────────────────────────────────────────────────────────
 
 public sealed class SettlementBatch
@@ -367,14 +366,6 @@ internal sealed class InMemoryFallbackSettlementBatchStore : ISettlementBatchSto
 /// - Calls jeeb-state-service idempotency guard to prevent double-execution
 /// - Groups settlements by jeeberId and creates one batch per jeeber per window
 /// - Exposes <see cref="RunBatchAsync"/> for WS-D test-console forced execution
-=======
-/// <summary>
-/// T-backend-017: Weekly settlement batch.
-///
-/// JEB-1502: <see cref="RunBatchAsync"/> is the extracted batch body, shared
-/// between the background loop and the test control-plane force-runner. It does
-/// NOT enforce the <c>SettlementDay</c> check — force-runs may run on any day.
->>>>>>> fix/JEB-1502
 /// </summary>
 public sealed class WeeklySettlementBatch : BackgroundService
 {
@@ -418,7 +409,6 @@ public sealed class WeeklySettlementBatch : BackgroundService
     }
 
     /// <summary>
-<<<<<<< HEAD
     /// Force-runnable entry point (used by WS-D test-console job registry).
     /// Contains the idempotency guard so it is safe to call multiple times.
     /// </summary>
@@ -515,43 +505,4 @@ public sealed class WeeklySettlementBatch : BackgroundService
             "Weekly settlement batch [{Key}] complete: {BatchCount} batches created from {SettlementCount} settlements",
             windowKey, batchCount, pending.Count);
     }
-=======
-    /// Execute one settlement batch run. Called by the background loop AND by
-    /// the JEB-1502 test control-plane force-runner (no test-only logic forks).
-    /// The day-of-week check is intentionally omitted here — force-run may run
-    /// any day.
-    /// </summary>
-    public async Task RunBatchAsync(CancellationToken ct)
-    {
-        var now = _clock.GetUtcNow();
-        await using var scope = _scopes.CreateAsyncScope();
-        var store = scope.ServiceProvider.GetRequiredService<ISettlementBatchStore>();
-
-        var pending = await store.ListUnsettledAsync(_opts.Value.MaxBatchSize, ct);
-        if (pending.Count == 0)
-        {
-            _log.LogInformation("Weekly settlement batch: no unsettled items");
-            return;
-        }
-
-        var ids = pending.Select(s => s.Id).ToList();
-        await store.MarkBatchProcessedAsync(ids, now, ct);
-
-        _log.LogInformation(
-            "Weekly settlement batch processed {Count} settlements", ids.Count);
-    }
-}
-
-public sealed class InMemorySettlementBatchStore : ISettlementBatchStore
-{
-    private readonly ISettlementStore _inner;
-
-    public InMemorySettlementBatchStore(ISettlementStore inner) => _inner = inner;
-
-    public Task<IReadOnlyList<Settlement>> ListUnsettledAsync(int limit, CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
-
-    public Task MarkBatchProcessedAsync(IReadOnlyList<string> settlementIds, DateTimeOffset at, CancellationToken ct)
-        => Task.CompletedTask;
->>>>>>> fix/JEB-1502
 }
