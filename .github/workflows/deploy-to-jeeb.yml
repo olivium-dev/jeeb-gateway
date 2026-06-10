@@ -227,6 +227,22 @@ on:
           - 'preserve'
           - 'true'
           - 'false'
+      # Test Control-Plane (P6 two-key ceremony — D6 / JEB-1502).
+      # The controller is already deployed on integration/plan2. This input is the
+      # ONLY supported way to set TestControlPlane__Enabled on the running gateway.
+      # The shared secret (JEEB_TESTPLANE_SECRET) is ALWAYS injected from the GitHub
+      # secret — ORCH sets the secret value out-of-band before the enabling deploy.
+      # P3: the secret value NEVER appears in any artifact — reference by name only.
+      #   'false' (DEFAULT) => TestControlPlane__Enabled=false  (all /__test/* → 404)
+      #   'true'            => TestControlPlane__Enabled=true   (P6 two-key required before dispatching)
+      test_plane_enabled:
+        description: 'TestControlPlane__Enabled. false (default) = 404 on all /__test/*; true = enable (requires P6 two-key ceremony: ORCH key-grant + SE-1 co-sign BEFORE dispatch). JEEB_TESTPLANE_SECRET must be pre-set by ORCH.'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   contents: read
@@ -411,6 +427,8 @@ jobs:
               --env-add FeatureFlags__UseUpstream__Offer='true' \
               --env-add FeatureFlags__UseUpstream__Delivery='true' \
               --env-add FeatureFlags__UseUpstream__Chat='true' \
+              --env-add TestControlPlane__Enabled='${{ inputs.test_plane_enabled }}' \
+              --env-add TestControlPlane__SharedSecret='${{ secrets.JEEB_TESTPLANE_SECRET }}' \
               $FEATURE_FLAG_ARGS \
               $DEV_FLAG_ARG \
               $SWAGGER_FLAG_ARG \
@@ -449,6 +467,8 @@ jobs:
               --env FeatureFlags__UseUpstream__Offer='true' \
               --env FeatureFlags__UseUpstream__Delivery='true' \
               --env FeatureFlags__UseUpstream__Chat='true' \
+              --env TestControlPlane__Enabled='${{ inputs.test_plane_enabled }}' \
+              --env TestControlPlane__SharedSecret='${{ secrets.JEEB_TESTPLANE_SECRET }}' \
               $FEATURE_FLAG_CREATE_ARGS \
               --reserve-memory 256M \
               '$TAG'
