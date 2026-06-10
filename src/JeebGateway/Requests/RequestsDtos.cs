@@ -376,6 +376,19 @@ public class CreateRequestBody
     public string? DropoffAddress { get; set; }
 
     /// <summary>
+    /// T-BE-019 (JEB-55): E.164 phone number of the person receiving the
+    /// parcel at drop-off. The handover OTP is dispatched to THIS number,
+    /// which may differ from the requester (e.g. a gift). Threaded through
+    /// <see cref="CreateRequestInput"/> → store → <c>DeliveryRequest.RecipientPhone</c>
+    /// so the at-door OTP trigger
+    /// (<c>POST /deliveries/{id}/otp</c>) has a phone to send to. Optional and
+    /// nullable — absent means the OTP trigger returns 400
+    /// <c>recipient-phone-missing</c>, never a hardcoded placeholder. Additive:
+    /// existing callers that omit it keep today's behaviour (null).
+    /// </summary>
+    public string? RecipientPhone { get; set; }
+
+    /// <summary>
     /// Optional. When set, the delivery is scheduled for the given moment;
     /// matching only starts at <c>ScheduledAt - MatchingBuffer</c>. Must be
     /// in the future. Absent / null means an immediate delivery (existing
@@ -411,6 +424,15 @@ public class DeliveryRequestDto
     public GeoPoint? DropoffLocation { get; init; }
     public string? PickupAddress { get; init; }
     public string? DropoffAddress { get; init; }
+
+    /// <summary>
+    /// T-BE-019 (JEB-55): the E.164 recipient phone the handover OTP is
+    /// dispatched to. Surfaced on the read DTO so a client can confirm the
+    /// number it supplied at creation round-tripped (and the at-door OTP will
+    /// reach the right person). Nullable — null when never supplied.
+    /// </summary>
+    public string? RecipientPhone { get; init; }
+
     public required DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset? ScheduledAt { get; init; }
     public string? JeeberId { get; init; }
