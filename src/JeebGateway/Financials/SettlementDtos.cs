@@ -111,6 +111,43 @@ public sealed class ReceiptResponse
 public sealed record ReceiptLine(string Label, decimal Amount);
 
 /// <summary>
+/// GET /v1/deliveries/{id}/settlement response (S09 H8 / JEB-54).
+///
+/// The settlement-intent READ surface. S09 asserts only that a single
+/// settlement intent exists for the delivery — the commission window opened
+/// at handover (Done) — and that it is idempotent on <see cref="DeliveryId"/>.
+/// The fee math + ledger posting are the S10 concern, exposed by the
+/// POST /deliveries/{id}/settle action; this read never mutates and never
+/// double-creates. <see cref="State"/> is:
+/// <list type="bullet">
+///   <item><c>pending_settlement</c> — Done reached, no cash recorded yet
+///         (the open window the Jeeber will settle against).</item>
+///   <item><c>settled</c> / <c>receipt_generated</c> — the Jeeber has already
+///         recorded the cash (reflects the persisted row verbatim).</item>
+/// </list>
+/// </summary>
+public sealed class SettlementIntentResponse
+{
+    public required string DeliveryId { get; init; }
+    public required string State { get; init; }
+
+    /// <summary>
+    /// True once the delivery has reached the settle-able terminal state and
+    /// the commission intent is open. S09 asserts the enqueue exists; this is
+    /// the machine-readable form of "settlement queued / window open".
+    /// </summary>
+    public required bool Created { get; init; }
+
+    /// <summary>Persisted settlement id once the Jeeber has settled; null while pending.</summary>
+    public string? SettlementId { get; init; }
+
+    /// <summary>The fee total once settled; null while the intent is still pending.</summary>
+    public decimal? Total { get; init; }
+
+    public string? Currency { get; init; }
+}
+
+/// <summary>
 /// Outcome shape returned by <see cref="ISettlementService"/>. Mirrors
 /// the cancellation / OTP pattern used elsewhere in the gateway —
 /// controllers translate each enum value to a ProblemDetails or 200.

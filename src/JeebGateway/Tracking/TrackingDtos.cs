@@ -35,6 +35,31 @@ public class GpsPointDto
 public class LocationUpdateRequest
 {
     public List<GpsPointDto>? Points { get; set; }
+
+    /// <summary>
+    /// S09 (JEB-54): optional delivery scope. When present, the gateway
+    /// resolves the delivery's parties via delivery-service and applies a
+    /// participant gate (non-party Jeeber → 403, N2) plus a lifecycle gate
+    /// (delivery not in the en-route phase → 409, N5) BEFORE the GPS point
+    /// is recorded or any geolocation surface is touched. Absent on the
+    /// legacy batch shape (<c>{points:[...]}</c>), which stays unchanged.
+    /// </summary>
+    public string? DeliveryId { get; set; }
+
+    /// <summary>
+    /// S09 single-point convenience shape: <c>{deliveryId, lat, lng}</c>.
+    /// The delivery-scoped tracking client posts one fix at a time rather
+    /// than a batch; when <see cref="Points"/> is empty and <see cref="Lat"/>/
+    /// <see cref="Lng"/> are set, the gateway synthesises a single-point batch
+    /// stamped with the server clock.
+    /// </summary>
+    public double? Lat { get; set; }
+
+    /// <summary>See <see cref="Lat"/>.</summary>
+    public double? Lng { get; set; }
+
+    /// <summary>Optional horizontal accuracy (m) for the single-point shape.</summary>
+    public double? Accuracy { get; set; }
 }
 
 /// <summary>
@@ -88,6 +113,41 @@ public class TrackingFrameDto
     /// has been recorded yet.
     /// </summary>
     public double? SecondsSinceUpdate { get; init; }
+
+    public required DateTimeOffset ServerTimestamp { get; init; }
+}
+
+/// <summary>
+/// JSON body of <c>GET /deliveries/{id}/tracking</c> when the caller does NOT
+/// request <c>Accept: text/event-stream</c> (S09 H4/A3, JEB-54 AC3). This is
+/// the polyline-replay view: a one-shot snapshot of the trip route the client
+/// can render without holding an SSE connection open. The polyline is the same
+/// MVP straight-line route the SSE <c>position</c> frame carries; <see cref="Etag"/>
+/// lets a repeat call within the geolocation cache window be conditional.
+/// </summary>
+public class TrackingPolylineDto
+{
+    public required string DeliveryId { get; init; }
+    public required string JeeberId { get; init; }
+
+    /// <summary>
+    /// Ordered [lat, lng] pairs from the latest Jeeber fix to the dropoff.
+    /// Empty when either endpoint is unknown (no fix yet / no dropoff).
+    /// </summary>
+    public IReadOnlyList<double[]> Polyline { get; init; } = Array.Empty<double[]>();
+
+    /// <summary>
+    /// The most recent position recorded for the Jeeber, or null when the
+    /// store has nothing yet.
+    /// </summary>
+    public GpsPointDto? Position { get; init; }
+
+    /// <summary>
+    /// Stable hash of the polyline geometry. A repeat read whose route has
+    /// not changed returns the same etag, so the client can skip a re-render
+    /// and the geolocation Directions interface is not re-hit (JEB-54 AC3).
+    /// </summary>
+    public required string Etag { get; init; }
 
     public required DateTimeOffset ServerTimestamp { get; init; }
 }

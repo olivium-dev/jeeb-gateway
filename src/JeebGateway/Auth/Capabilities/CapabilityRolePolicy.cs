@@ -28,6 +28,13 @@ public static class CapabilityRolePolicy
     private static string[] JeeberOnly => new[] { JeebRoleTranslator.ContractJeeber };
     private static string[] AdminOnly => new[] { Roles.Admin };
     private static string[] Participant => new[] { JeebRoleTranslator.ContractClient, JeebRoleTranslator.ContractJeeber };
+    // S09 (JEB-54) BR-TRK-1: the live-track READ surface is held by both delivery
+    // parties + admin (admin live-ops needs a participant-equivalent map view for
+    // ops triage). WHICH party may read a given row stays STATE in the action
+    // (LocationController re-checks party membership / IsAdmin); this L2 set just
+    // lets admin past the coarse capability gate so the in-action admin exemption
+    // is reachable.
+    private static string[] TrackReaders => new[] { JeebRoleTranslator.ContractClient, JeebRoleTranslator.ContractJeeber, Roles.Admin };
     private static string[] AnyAuthenticated => new[] { JeebRoleTranslator.ContractClient, JeebRoleTranslator.ContractJeeber, Roles.Admin };
 
     /// <summary>
@@ -52,7 +59,9 @@ public static class CapabilityRolePolicy
             [Capabilities.RequestEditOwn] = ClientOnly,         // STATE
             [Capabilities.RequestCancelOwn] = ClientOnly,       // STATE
             [Capabilities.RequestVoiceCreate] = ClientOnly,
-            [Capabilities.DeliveryTrackOwn] = ClientOnly,       // STATE
+            // S09 BR-TRK-1: {client, jeeber, admin} read the live track; party/admin
+            // membership for a given row is STATE, re-checked in LocationController.
+            [Capabilities.DeliveryTrackOwn] = TrackReaders,     // STATE (party + admin)
             [Capabilities.MatchingRun] = ClientOnly,
             // S07 (fix/s07-gateway-accept-client-actor): offer.accept repointed {jeeber}->{client}.
             // In the Jeeb auction, JEEBERS SUBMIT offers (bids) on a CLIENT's delivery request; the
