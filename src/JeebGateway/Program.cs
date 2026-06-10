@@ -473,6 +473,56 @@ builder.Services.AddScoped<JeebGateway.service.ServiceNotification.ServiceNotifi
     return new JeebGateway.service.ServiceNotification.ServiceNotificationClient(baseUrl, client);
 });
 
+// JEB-1486 cutover step (2) — keep the deprecated jeeb.* localization ALIVE.
+// The de-leak relocated the Jeeb notification taxonomy into the gateway
+// (JeebNotificationCatalog) and emptied notification-service's locale catalog, so
+// the running shared service no longer localizes any jeeb.* topic on its own.
+// JeebNotificationCatalogSeeder re-registers every catalog entry (8 jeeb.* keys,
+// EN+AR) into the live notification-service via its GENERIC, opaque-key
+// POST /templates/register endpoint at boot — restoring the deprecated jeeb.*
+// alias during the deprecation window without putting any Jeeb literal back into
+// the shared service (GR2). Idempotent (upstream upserts on key; safe on every
+// deploy/restart) and resilient (seeds on a background task with bounded
+// exponential-backoff retry; never blocks or crashes boot).
+//
+// Dedicated named client so the seeder carries the standard outbound pipeline:
+// bearer-forwarding (a no-op at boot — there is no inbound request) + the
+// X-Service-Auth caller signature. Bound to the same ServiceNotificationClient
+// base the passthrough client uses, so both agree on the upstream host.
+//
+// Gated: only registers when the Notification upstream is in use
+// (FeatureFlags:UseUpstream:Notification=true, i.e. production) AND the seeder is
+// not explicitly disabled (FeatureFlags:NotificationCatalogSeeder:Enabled=false).
+// This keeps pure-dev/test boots (no upstream configured) free of seed traffic.
+var notificationUpstreamEnabled =
+    bool.TryParse(builder.Configuration["FeatureFlags:UseUpstream:Notification"], out var nUp) && nUp;
+var notificationSeederEnabled =
+    !bool.TryParse(builder.Configuration["FeatureFlags:NotificationCatalogSeeder:Enabled"], out var nSeed)
+    || nSeed;
+if (notificationUpstreamEnabled && notificationSeederEnabled)
+{
+    var seederClient = builder.Services.AddHttpClient(
+        JeebGateway.Notifications.JeebNotificationCatalogSeeder.HttpClientName,
+        client =>
+        {
+            var apiUrl = builder.Configuration["ServiceNotificationClient:BaseUrl"];
+            if (!string.IsNullOrWhiteSpace(apiUrl))
+            {
+                // Trailing slash so the relative "templates/register" resolves
+                // under the host rather than replacing the path.
+                client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
+            }
+
+            client.Timeout = TimeSpan.FromSeconds(30);
+        });
+    // Standard outbound auth chain (transient handlers registered in
+    // AddDownstreamClients): forward any caller bearer + sign X-Service-Auth.
+    seederClient.AddHttpMessageHandler<JeebGateway.Services.Bff.BearerForwardingHandler>();
+    seederClient.AddHttpMessageHandler<JeebGateway.Services.Bff.ServiceAuthSigningHandler>();
+
+    builder.Services.AddHostedService<JeebGateway.Notifications.JeebNotificationCatalogSeeder>();
+}
+
 // PushNotification (ServicePushNotificationClient) — salehly sibling mirror.
 // The NSwag-generated ServicePushNotificationClient
 // (Services/ServicePushNotificationClient.cs, namespace
