@@ -44,12 +44,18 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         var dto = await resp.Content.ReadFromJsonAsync<PhoneFindOrCreateBodyResponse>(Json, ct)
             ?? throw new UserManagementCallException("phone/find-or-create", (int)HttpStatusCode.BadGateway);
 
-        var roles = dto.AvailableRoles is { Length: > 0 }
-            ? dto.AvailableRoles
-            : new[] { Roles.Client };
-        var active = string.IsNullOrWhiteSpace(dto.ActiveRole) ? Roles.Client : dto.ActiveRole!;
-
-        return new PhoneFindOrCreateResult(dto.UserId ?? string.Empty, dto.IsNew, roles, active);
+        // JEB-1480 (GR2): the shared user-management phone-identity endpoint is now
+        // IDENTITY-ONLY ({ userId, isNew, phone }) and performs NO role/claim shaping.
+        // The DEFAULT role ("customer") and all role/claim shaping live HERE, in the
+        // gateway, at JWT-mint time. A freshly resolved phone identity is decorated
+        // with the gateway's default opaque role; a user's elevated roles (e.g. driver)
+        // are granted via the KYC approve path and re-issued through the UM-signed
+        // role-switch flow (reflected on GET /v1/users/me), never invented by UM here.
+        return new PhoneFindOrCreateResult(
+            dto.UserId ?? string.Empty,
+            dto.IsNew,
+            new[] { Roles.Client },
+            Roles.Client);
     }
 
     public async Task<RoleSwitchReissueResult> RoleSwitchAsync(string userId, string opaqueRole, CancellationToken ct)
@@ -135,12 +141,12 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         [JsonPropertyName("phone")] public string Phone { get; set; } = string.Empty;
     }
 
+    // JEB-1480 (GR2): mirrors the de-leaked shared contract — IDENTITY ONLY. The
+    // shared service no longer emits available_roles/active_role on this surface.
     private sealed class PhoneFindOrCreateBodyResponse
     {
         [JsonPropertyName("userId")] public string? UserId { get; set; }
         [JsonPropertyName("isNew")] public bool IsNew { get; set; }
-        [JsonPropertyName("available_roles")] public string[]? AvailableRoles { get; set; }
-        [JsonPropertyName("active_role")] public string? ActiveRole { get; set; }
     }
 
     private sealed class RoleSwitchBody
