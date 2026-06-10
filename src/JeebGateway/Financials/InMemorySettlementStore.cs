@@ -47,6 +47,21 @@ public sealed class InMemorySettlementStore : ISettlementStore
         return Task.FromResult(_byId.TryGetValue(settlementId, out var s) ? Clone(s) : null);
     }
 
+    public Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
+        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct)
+    {
+        // Snapshot the values up front (ConcurrentDictionary enumeration is safe
+        // but we clone to keep the row immutable for the caller).
+        var rows = _byId.Values
+            .Where(s => string.Equals(s.JeeberId, jeeberId, StringComparison.Ordinal))
+            .Where(s => (from is null || s.SettledAt >= from.Value)
+                     && (to is null || s.SettledAt <= to.Value))
+            .OrderBy(s => s.SettledAt)
+            .Select(Clone)
+            .ToList();
+        return Task.FromResult<IReadOnlyList<Settlement>>(rows);
+    }
+
     public Task<bool> SetLedgerEntryAsync(string settlementId, string ledgerEntryId, CancellationToken ct)
     {
         lock (_writeLock)

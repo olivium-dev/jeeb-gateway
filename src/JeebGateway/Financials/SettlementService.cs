@@ -68,11 +68,20 @@ public sealed class SettlementService : ISettlementService
                 "Only the assigned Jeeber can settle this delivery.");
         }
 
-        if (!string.Equals(delivery.Status, RequestStatus.Delivered, StringComparison.Ordinal)
-            && !string.Equals(delivery.Status, RequestStatus.Rated, StringComparison.Ordinal))
+        // Settle-ability keys off the CANONICAL handover-complete state, NOT the
+        // legacy literals. OTP handover (S09) advances a real delivery to the
+        // canonical `Done` token (DeliveryStatusAlias §3: "delivered => Done;
+        // settlement keys off Done"); the legacy `delivered`/`rated` aliases also
+        // resolve to `Done`. Gating on the legacy literals alone 409'd every real
+        // Done delivery (S10 keystone). Dual-read via DeliveryStatusAlias so all
+        // three spellings (Done / delivered / rated) settle, and nothing else does.
+        if (!string.Equals(
+                DeliveryStatusAlias.ToCanonical(delivery.Status),
+                CanonicalDeliveryStatus.Done,
+                StringComparison.Ordinal))
         {
             return new SettlementResult(SettlementOutcome.NotDelivered, null,
-                $"Delivery is in '{delivery.Status}'; settlement requires '{RequestStatus.Delivered}'.");
+                $"Delivery is in '{delivery.Status}'; settlement requires the handover-complete state '{CanonicalDeliveryStatus.Done}'.");
         }
 
         var existing = await _store.GetByDeliveryAsync(deliveryId, ct);

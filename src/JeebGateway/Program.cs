@@ -1149,6 +1149,31 @@ else
         sp.GetRequiredService<InMemoryPaymentRefundClient>());
 }
 
+// S10 COD-compose: unified_payment_gateway COD + admin-batch client (JEB-56/57/62).
+// Payments-only-via-UPG: the gateway RECORDS an intent / READS / FRONTS the admin
+// mark-paid against UPG's live routes — it never touches a provider. Credentials
+// (UPG :api X-Api-Key + AdminAuthPlug bearer) are env-injected, never committed.
+// Live HttpClient when Services:UnifiedPayment:BaseUrl is set; in-memory fallback
+// (idempotent on delivery id) keeps the compose surface exercisable in dev/test.
+builder.Services.Configure<JeebGateway.Financials.Cod.UnifiedPaymentCodOptions>(
+    builder.Configuration.GetSection(JeebGateway.Financials.Cod.UnifiedPaymentCodOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Financials.Cod.InMemoryUnifiedPaymentCodClient>();
+if (!string.IsNullOrWhiteSpace(paymentBaseUrl))
+{
+    builder.Services
+        .AddHttpClient<JeebGateway.Financials.Cod.IUnifiedPaymentCodClient,
+                       JeebGateway.Financials.Cod.HttpUnifiedPaymentCodClient>(http =>
+        {
+            http.BaseAddress = new Uri(paymentBaseUrl!.TrimEnd('/') + "/");
+            http.Timeout = TimeSpan.FromSeconds(10);
+        });
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.Financials.Cod.IUnifiedPaymentCodClient>(sp =>
+        sp.GetRequiredService<JeebGateway.Financials.Cod.InMemoryUnifiedPaymentCodClient>());
+}
+
 // Jeeber KYC submission pipeline (T-backend-004 / JEEB-22).
 //
 // S03 / ADR-0004 — the thin KYC BFF seam onto the KYC DOMAIN. Routes the JSON
@@ -1379,8 +1404,11 @@ builder.Services.AddHostedService<JeebGateway.Financials.WeeklySettlementBatch>(
 // T-backend-018: Earnings aggregation API.
 builder.Services.AddSingleton<JeebGateway.Financials.IEarningsAggregationService, JeebGateway.Financials.EarningsAggregationService>();
 
-// T-backend-019: Earnings PDF statement generation.
-builder.Services.AddSingleton<JeebGateway.Financials.IEarningsPdfGenerator, JeebGateway.Financials.SimpleEarningsPdfGenerator>();
+// T-backend-019 / S10 H6 (JEB-59): Earnings PDF statement generation.
+// Real application/pdf via QuestPDF (Community license set below), bilingual
+// en/ar — replaces the legacy text/plain stub.
+QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
+builder.Services.AddSingleton<JeebGateway.Financials.IEarningsPdfGenerator, JeebGateway.Financials.QuestPdfEarningsStatementGenerator>();
 
 // T-backend-033: Admin finance dashboard API.
 builder.Services.AddSingleton<JeebGateway.Financials.IAdminFinanceDashboardService, JeebGateway.Financials.AdminFinanceDashboardService>();
