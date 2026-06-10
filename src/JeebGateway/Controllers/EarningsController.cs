@@ -4,6 +4,7 @@ using System.Text;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Financials;
 using JeebGateway.Users;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Net.Http.Headers;
 
@@ -128,8 +129,7 @@ public sealed class EarningsController : ControllerBase
     /// the signed token IS the authorization for this endpoint.
     /// </summary>
     [HttpGet("statement/download")]
-    // No [RequireCapability] — the signed token IS the authorization for this endpoint.
-    // Standard [Authorize] not required; the token carries jeeberId + expiry + HMAC.
+    [AllowAnonymous] // JEB-59: signed token IS the auth; opt out of FallbackPolicy so no-Bearer requests reach the action
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> DownloadStatementViaToken(
