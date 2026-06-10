@@ -126,6 +126,9 @@ public static class Capabilities
     // ── M. Legacy UserController — admin/internal ──────────────────────────────────────
     public const string UsersAdminManage = "users.admin.manage";      // DeleteByEmails, payment-auth-token
 
+    // ── N. Notification dispatch (JEB-1494) — operator-triggered outbound notification ──
+    public const string NotificationDispatch = "notification.dispatch"; // {admin}
+
     /// <summary>
     /// The ASP.NET Core policy name for a capability. One named policy is registered per
     /// capability at startup (see Program.cs); <see cref="RequireCapabilityAttribute"/> sets

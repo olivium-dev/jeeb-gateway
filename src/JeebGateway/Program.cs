@@ -781,10 +781,21 @@ builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient
     return new JeebGateway.service.ServiceWallet.ServiceWalletClient(baseUrl, client);
 });
 
-// Notification preferences (T-backend-031).
-// In-memory implementation for MVP; swap for an NSwag-generated notification-service
-// client once the downstream preferences endpoints land.
-builder.Services.AddSingleton<INotificationPreferencesStore, InMemoryNotificationPreferencesStore>();
+// Notification preferences (T-backend-031 / JEB-1498).
+// Wired to the generic remote-user-preferences service (Rust, :10067) so preferences
+// survive restarts. Preferences are stored as an opaque JSON blob under key
+// "jeeb.notification_prefs" — the shared service learns nothing about Jeeb topics (GR2).
+// InMemoryNotificationPreferencesStore is kept as a fallback for local dev without the
+// remote service (UseUpstream:RemoteUserPreferences=false).
+if (builder.Configuration.GetValue("FeatureFlags:UseUpstream:RemoteUserPreferences", true))
+{
+    builder.Services.AddSingleton<INotificationPreferencesStore,
+        RemoteUserPreferencesNotificationPreferencesStore>();
+}
+else
+{
+    builder.Services.AddSingleton<INotificationPreferencesStore, InMemoryNotificationPreferencesStore>();
+}
 
 // Push notification pipeline (T-backend-022).
 //
@@ -1401,8 +1412,22 @@ builder.Services.Configure<JeebGateway.Financials.WeeklySettlementOptions>(
 builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore, JeebGateway.Financials.InMemorySettlementBatchStore>();
 builder.Services.AddHostedService<JeebGateway.Financials.WeeklySettlementBatch>();
 
-// T-backend-018: Earnings aggregation API.
-builder.Services.AddSingleton<JeebGateway.Financials.IEarningsAggregationService, JeebGateway.Financials.EarningsAggregationService>();
+// T-backend-018 / JEB-1434 / JEB-1465: Earnings aggregation API.
+// When FeatureFlags:UseUpstream:Earnings=true the scoped
+// WalletEarningsAggregationService reads live gross revenue from the shared
+// wallet-service (Transaction/holder/{holderId}/credit-revenue) instead of
+// summing the in-memory settlement rows (which are always zero on a cold start).
+// Default-OFF: flip to true in Production once wallet-service is confirmed healthy.
+if (banFlags.Earnings)
+{
+    builder.Services.AddScoped<JeebGateway.Financials.IEarningsAggregationService,
+        JeebGateway.Financials.WalletEarningsAggregationService>();
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.Financials.IEarningsAggregationService,
+        JeebGateway.Financials.EarningsAggregationService>();
+}
 
 // T-backend-019 / S10 H6 (JEB-59): Earnings PDF statement generation.
 // Real application/pdf via QuestPDF (Community license set below), bilingual
