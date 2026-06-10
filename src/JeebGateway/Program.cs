@@ -770,7 +770,60 @@ else
 {
     builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
 }
-builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
+// ── Settlement ledger client gate (JEB-56/57, Plan-3 D1, GR3) ──────────────
+//
+// Three-way DI gate over the cash-settlement ledger post:
+//
+//   Payments=ON  + PaymentsMock=ON   → UpgSettlementLedgerClient backed by
+//                                      MockUpgSettlementClient (P9-gated mock;
+//                                      validation surface ONLY — see the mock's
+//                                      class docs and plan3/01-CTO-DECISIONS.md D1)
+//   Payments=ON  + PaymentsMock=OFF  → UpgSettlementLedgerClient backed by the
+//                                      real UpgSettlementClient transport
+//                                      (owner-gated prod path; REQUIRES
+//                                      Services:UnifiedPayment:BaseUrl — startup
+//                                      fails fast if absent so the mock can never
+//                                      be silently substituted on a real path)
+//   Payments=OFF (default, prod)     → InMemorySettlementLedgerClient
+//                                      (unchanged in-process ledger; the durable
+//                                      system of record stays the settlement store)
+//
+// Production sets NEITHER flag: FeatureFlags__UseUpstream__Payments stays OFF
+// until the UPG owner signs upg#8/#9/#10 (tracked tech-debt per D1).
+if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Payments"))
+{
+    if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:PaymentsMock"))
+    {
+        builder.Services.AddSingleton<MockUpgSettlementClient>();
+        builder.Services.AddSingleton<IUpgSettlementClient>(sp =>
+            sp.GetRequiredService<MockUpgSettlementClient>());
+    }
+    else
+    {
+        // Real upstream cutover path. The standard bearer/X-Service-Auth/resilience
+        // pipeline attachment (ServiceClientExtensions) rides in with the real UPG
+        // cutover (owner-gated, tracked tech-debt); until then a misconfigured
+        // flag-ON boot must fail loudly rather than run half-wired (P9/T4).
+        var upgBaseUrl = builder.Configuration["Services:UnifiedPayment:BaseUrl"];
+        if (string.IsNullOrWhiteSpace(upgBaseUrl))
+        {
+            throw new InvalidOperationException(
+                "FeatureFlags:UseUpstream:Payments is ON with PaymentsMock OFF, but " +
+                "Services:UnifiedPayment:BaseUrl is not configured. Refusing to start: " +
+                "the real UPG transport cannot be wired, and the mock is never used " +
+                "implicitly on the real path (Plan-3 D1 / P9).");
+        }
+
+        builder.Services.AddHttpClient<IUpgSettlementClient, UpgSettlementClient>(http =>
+            http.BaseAddress = new Uri(upgBaseUrl.EndsWith('/') ? upgBaseUrl : upgBaseUrl + "/"));
+    }
+
+    builder.Services.AddSingleton<ISettlementLedgerClient, UpgSettlementLedgerClient>();
+}
+else
+{
+    builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
+}
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
 
 // ===========================================================================

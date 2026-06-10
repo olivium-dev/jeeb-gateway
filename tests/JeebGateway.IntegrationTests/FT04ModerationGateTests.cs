@@ -94,7 +94,7 @@ file sealed class EmptyProhibitedItemsStore : IProhibitedItemsStore
         => Task.FromResult<IReadOnlyList<ProhibitedItem>>(Array.Empty<ProhibitedItem>());
 
     public Task<ProhibitedItemsPage> ListAllAsync(int page, int pageSize, CancellationToken ct)
-        => Task.FromResult(new ProhibitedItemsPage(Array.Empty<ProhibitedItem>(), 0, page, pageSize));
+        => Task.FromResult(new ProhibitedItemsPage { Items = Array.Empty<ProhibitedItem>(), Total = 0 });
 
     public Task<ProhibitedItem?> GetAsync(string id, CancellationToken ct)
         => Task.FromResult<ProhibitedItem?>(null);
