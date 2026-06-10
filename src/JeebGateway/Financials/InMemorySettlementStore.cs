@@ -93,6 +93,29 @@ public sealed class InMemorySettlementStore : ISettlementStore
         }
     }
 
+    public Task<bool> ReplacePendingAsync(string deliveryId, Settlement settled, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_deliveryIndex.TryGetValue(deliveryId, out var existingId)
+                || !_byId.TryGetValue(existingId, out var existing))
+            {
+                return Task.FromResult(false);
+            }
+
+            if (!string.Equals(existing.State, SettlementState.PendingSettlement, StringComparison.Ordinal))
+            {
+                return Task.FromResult(false);
+            }
+
+            // Remove the old placeholder keyed under its old id, insert the real row.
+            _byId.TryRemove(existingId, out _);
+            _byId[settled.Id] = settled;
+            _deliveryIndex[deliveryId] = settled.Id;
+            return Task.FromResult(true);
+        }
+    }
+
     private static Settlement Clone(Settlement s) => new()
     {
         Id = s.Id,

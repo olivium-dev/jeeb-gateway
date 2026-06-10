@@ -55,4 +55,14 @@ public interface ISettlementStore
     /// read. Idempotent — repeat calls do not advance the timestamp.
     /// </summary>
     Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, DateTimeOffset at, CancellationToken ct);
+
+    /// <summary>
+    /// FT-07: atomically replaces an existing <see cref="SettlementState.PendingSettlement"/>
+    /// placeholder row with the supplied fully-computed <paramref name="settled"/> row. Returns
+    /// <c>true</c> when the pending row was found and replaced; <c>false</c> when no pending row
+    /// exists for the delivery (the caller should fall through to
+    /// <see cref="TryInsertAsync"/>). Idempotent on <see cref="Settlement.DeliveryId"/> so a
+    /// retry of the replace never double-posts the ledger entry.
+    /// </summary>
+    Task<bool> ReplacePendingAsync(string deliveryId, Settlement settled, CancellationToken ct);
 }

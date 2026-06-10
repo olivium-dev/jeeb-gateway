@@ -85,7 +85,8 @@ public sealed class SettlementService : ISettlementService
         }
 
         var existing = await _store.GetByDeliveryAsync(deliveryId, ct);
-        if (existing is not null)
+        if (existing is not null
+            && !string.Equals(existing.State, SettlementState.PendingSettlement, StringComparison.Ordinal))
         {
             // Idempotent re-submission: the original numbers stand. We do
             // not re-post the ledger entry — the wallet client itself is
@@ -117,7 +118,22 @@ public sealed class SettlementService : ISettlementService
             SettledAt = _clock.GetUtcNow(),
         };
 
-        var (row, inserted) = await _store.TryInsertAsync(settlement, ct);
+        // FT-07: if a pending-settlement placeholder was created at OTP-verify time,
+        // replace it atomically instead of inserting a duplicate. Falls through to
+        // TryInsertAsync when no pending row exists (first-time settle path).
+        bool inserted;
+        Settlement row;
+        var replaced = await _store.ReplacePendingAsync(deliveryId, settlement, ct);
+        if (replaced)
+        {
+            row = settlement;
+            inserted = true;
+        }
+        else
+        {
+            (row, inserted) = await _store.TryInsertAsync(settlement, ct);
+        }
+
         if (!inserted)
         {
             return new SettlementResult(SettlementOutcome.AlreadySettled, row, null);
