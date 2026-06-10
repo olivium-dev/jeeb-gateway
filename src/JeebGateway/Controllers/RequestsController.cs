@@ -68,6 +68,7 @@ public class RequestsController : ControllerBase
     private readonly IProhibitedItemScanner _scanner;
     private readonly IProhibitedItemsStore _prohibited;
     private readonly CreateModerationOptions _moderation;
+    private readonly ILogger<RequestsController> _logger;
 
     public RequestsController(
         IRequestsStore store,
@@ -76,7 +77,8 @@ public class RequestsController : ControllerBase
         IOptions<ScheduledDeliveryOptions> scheduledOptions,
         IProhibitedItemScanner scanner,
         IProhibitedItemsStore prohibited,
-        IOptions<CreateModerationOptions> moderation)
+        IOptions<CreateModerationOptions> moderation,
+        ILogger<RequestsController> logger)
     {
         _store = store;
         _tiers = tiers;
@@ -85,6 +87,7 @@ public class RequestsController : ControllerBase
         _scanner = scanner;
         _prohibited = prohibited;
         _moderation = moderation.Value;
+        _logger = logger;
     }
 
     /// <summary>
@@ -516,6 +519,39 @@ public class RequestsController : ControllerBase
     private async Task<IActionResult?> EvaluateModerationAsync(string clientId, string description, CancellationToken ct)
     {
         if (!_moderation.Enabled) return null;
+
+        // JEB-1504 fail-closed gate: if the lexicon cannot be loaded (0 active
+        // items) we must NOT allow the request through silently. A 503 is
+        // surfaced so callers know the moderation service is temporarily
+        // unavailable and can retry. This guards against seeder failures,
+        // store outages, or a fresh startup race before the lexicon is seeded.
+        IReadOnlyList<ProhibitedItem> activeItems;
+        try
+        {
+            activeItems = await _prohibited.ListActiveAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Prohibited-items store threw while loading lexicon; failing closed with 503.");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new Microsoft.AspNetCore.Mvc.ProblemDetails
+            {
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Title = "Moderation service temporarily unavailable",
+                Detail = "Prohibited items lexicon could not be loaded."
+            });
+        }
+
+        if (activeItems.Count == 0)
+        {
+            _logger.LogError(
+                "Prohibited-items lexicon is empty while moderation gate is enabled; failing closed with 503.");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new Microsoft.AspNetCore.Mvc.ProblemDetails
+            {
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Title = "Moderation service temporarily unavailable",
+                Detail = "Prohibited items lexicon could not be loaded."
+            });
+        }
 
         var scan = await _scanner.ScanAsync(description, ct);
         var severity = scan.GatingSeverity;
