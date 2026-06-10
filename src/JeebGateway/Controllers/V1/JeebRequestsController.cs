@@ -86,6 +86,11 @@ public sealed class JeebRequestsController : ControllerBase
     /// <c>Location</c> header pointing at <c>GET /v1/requests/{id}</c>.
     /// </summary>
     [HttpPost("v1/requests")]
+    // Explicit [Consumes] disambiguates this JSON action from the existing
+    // RequestVoiceController's multipart/form-data [FromForm] path on the same
+    // route. ASP.NET Core selects the more-specific [Consumes("application/json")]
+    // action for JSON requests and falls back to the voice controller for multipart.
+    [Consumes("application/json")]
     [RequireCapability(Capabilities.RequestCreate)]
     [RequireActiveUser]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status201Created)]
