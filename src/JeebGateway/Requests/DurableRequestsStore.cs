@@ -231,8 +231,68 @@ public sealed class DurableRequestsStore : IRequestsStore
     public Task<bool> SetStatusAsync(string requestId, string status, CancellationToken ct)
         => _inner.SetStatusAsync(requestId, status, ct);
 
-    public Task<IReadOnlyList<DeliveryRequest>> ListPendingCreatedAtOrBeforeAsync(DateTimeOffset cutoff, CancellationToken ct)
-        => _inner.ListPendingCreatedAtOrBeforeAsync(cutoff, ct);
+    /// <summary>
+    /// FT-08: durable expiry-sweep read. When the durable path is active the
+    /// canonical delivery-service row (seeded on create) is the source of truth
+    /// for Ordered/pending deliveries. This override queries delivery-service for
+    /// Ordered shipments and merges them with the in-memory mirror so the sweep
+    /// survives a gateway restart (the inner store is empty after a restart, but
+    /// the canonical rows live in delivery-service).
+    /// </summary>
+    public async Task<IReadOnlyList<DeliveryRequest>> ListPendingCreatedAtOrBeforeAsync(DateTimeOffset cutoff, CancellationToken ct)
+    {
+        IReadOnlyList<DeliveryRequest> innerCandidates;
+        try
+        {
+            innerCandidates = await _inner.ListPendingCreatedAtOrBeforeAsync(cutoff, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FT-08: inner-store sweep read failed; falling back to delivery-service only");
+            innerCandidates = Array.Empty<DeliveryRequest>();
+        }
+
+        // Fetch Ordered shipments from delivery-service and overlay any that
+        // are not yet in the in-memory mirror (post-restart scenario).
+        List<DeliveryRequest> merged = new(innerCandidates);
+        var knownIds = new HashSet<string>(innerCandidates.Select(r => r.Id), StringComparer.Ordinal);
+
+        try
+        {
+            var shipments = await _delivery.ListShipmentsAsync(orderId: null, stage: "Ordered", limit: null, ct);
+            foreach (var s in shipments.Shipments)
+            {
+                if (s.CreatedAt > cutoff) continue;
+                if (knownIds.Contains(s.Id)) continue;
+
+                // Row exists in delivery-service but not in local mirror (post-restart).
+                // Build a minimal DeliveryRequest from the canonical data so the sweeper
+                // can expire it. Fields not available from the shipment are left empty —
+                // TryExpireAsync only needs the Id and the sweeper only checks Status/CreatedAt.
+                merged.Add(new DeliveryRequest
+                {
+                    Id          = s.Id,
+                    ClientId    = string.Empty,
+                    Status      = RequestStatus.Pending,
+                    Description = string.Empty,
+                    CreatedAt   = s.CreatedAt,
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            // Delivery-service unreachable: log and return in-memory results.
+            // The sweep will process whatever the mirror has; rows that only
+            // live in delivery-service will be swept on the next cycle once
+            // the service is reachable again.
+            _logger.LogWarning(ex,
+                "FT-08: delivery-service sweep read failed; using in-memory mirror only " +
+                "({Count} candidates). Rows that survived a restart may miss this sweep cycle.",
+                innerCandidates.Count);
+        }
+
+        return merged;
+    }
 
     public Task<bool> MarkNudgedAsync(string requestId, DateTimeOffset at, CancellationToken ct)
         => _inner.MarkNudgedAsync(requestId, at, ct);
