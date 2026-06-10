@@ -66,6 +66,8 @@ public class DeliveriesController : ControllerBase
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly TimeProvider _clock;
     private readonly ILogger<DeliveriesController> _log;
+    // JEB-56: settlement store for COD platform records (recorded→batched→paid).
+    private readonly ISettlementStore _settlementStore;
 
     // T-BE-019 (JEB-55): external-OTP attempt + lockout TTLs. 15 min on
     // both: long enough to cover the handover window, short enough that
@@ -114,7 +116,8 @@ public class DeliveriesController : ControllerBase
         IDistributedCache cache,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         TimeProvider clock,
-        ILogger<DeliveriesController> log)
+        ILogger<DeliveriesController> log,
+        ISettlementStore settlementStore)
     {
         _store = store;
         _settlementStore = settlementStore;
@@ -129,6 +132,7 @@ public class DeliveriesController : ControllerBase
         _flags = flags;
         _clock = clock;
         _log = log;
+        _settlementStore = settlementStore;
     }
 
     /// <summary>
@@ -1238,6 +1242,18 @@ public class DeliveriesController : ControllerBase
             activity?.SetTag("otp.verified", "true");
             activity?.SetTag("delivery.status_transition", "at_door_to_delivered");
 
+            // JEB-56: gateway-side COD settlement enqueue (idempotent on deliveryId).
+            // Creates the COD platform settlement intent (cod_state=recorded) immediately
+            // after the handover is verified, before the Jeeber declares the cash via
+            // POST /deliveries/{id}/settle. GoodsCost=0 here (declared at settle time);
+            // the settle endpoint updates commission math in place.
+            //
+            // TODO(FT-07): when FT-07 (settlement pipeline fix) is closed, replace this
+            // intent-only enqueue with the full delivery-service integration trigger so
+            // the settled goodsCost is available here from the durable delivery record.
+            await EnqueueCodSettlementIntentAsync(deliveryId, delivery.JeeberId ?? string.Empty,
+                delivery.ClientId, delivery.TierId, now, ct);
+
             return Ok(new OtpHandoverVerificationResponse
             {
                 DeliveryId = deliveryId,
@@ -1846,4 +1862,66 @@ public class DeliveriesController : ControllerBase
         ClientUnreachableAt = r.ClientUnreachableAt,
         OtpEscalationId = r.OtpEscalationId
     };
+
+    // JEB-56: COD settlement intent enqueue, called on OTP verify success.
+    // Creates a minimal settlement record (cod_state=recorded, goodsCost=0) so
+    // the COD batch cron can work idempotently even before the Jeeber declares
+    // the cash via POST /deliveries/{id}/settle. Errors are logged but never
+    // propagate — the OTP verify 200 must not fail due to settlement write issues.
+    private async Task EnqueueCodSettlementIntentAsync(
+        string deliveryId,
+        string jeeberId,
+        string clientId,
+        string? tierId,
+        DateTimeOffset now,
+        CancellationToken ct)
+    {
+        try
+        {
+            var existing = await _settlementStore.GetByDeliveryAsync(deliveryId, ct);
+            if (existing is not null)
+            {
+                _log.LogDebug(
+                    "COD settlement intent already exists for deliveryId={DeliveryId}; skipping enqueue",
+                    deliveryId);
+                return;
+            }
+
+            var intent = new Settlement
+            {
+                Id              = Guid.NewGuid().ToString(),
+                DeliveryId      = deliveryId,
+                JeeberId        = jeeberId,
+                ClientId        = clientId,
+                TierId          = tierId ?? string.Empty,
+                GoodsCost       = 0m,
+                CommissionTier  = CommissionCalculator.ResolveTier(tierId),
+                CommissionRate  = 0m,
+                Commission      = 0m,
+                Insurance       = 0m,
+                Total           = 0m,
+                MinimumFeeApplied = false,
+                Currency        = SettlementService.CurrencyLbp,
+                PaymentMethod   = SettlementService.PaymentMethodCash,
+                State           = SettlementState.PendingSettlement,
+                CodState        = CodSettlementState.Recorded,
+                SettledAt       = now,
+            };
+
+            var (_, inserted) = await _settlementStore.TryInsertAsync(intent, ct);
+            if (inserted)
+            {
+                _log.LogInformation(
+                    "COD settlement intent created deliveryId={DeliveryId} jeeberId={JeeberId}",
+                    deliveryId, jeeberId);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Settlement enqueue is best-effort; OTP verify 200 is canonical.
+            _log.LogError(ex,
+                "COD settlement intent enqueue failed for deliveryId={DeliveryId}; will be retried at settle time",
+                deliveryId);
+        }
+    }
 }

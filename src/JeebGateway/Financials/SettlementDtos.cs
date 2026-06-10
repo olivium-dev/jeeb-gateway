@@ -44,6 +44,14 @@ public sealed class Settlement
     public required DateTimeOffset SettledAt { get; init; }
     public DateTimeOffset? ReceiptGeneratedAt { get; set; }
     public string? LedgerEntryId { get; set; }
+
+    // JEB-56/57: COD platform batch lifecycle (additive fields — null until batched).
+    public Guid? BatchId { get; set; }
+    public DateTimeOffset? BatchedAt { get; set; }
+    public DateTimeOffset? PaidAt { get; set; }
+
+    /// <summary>Platform state in the COD settlement lifecycle (recorded|batched|paid).</summary>
+    public string CodState { get; set; } = CodSettlementState.Recorded;
 }
 
 /// <summary>
