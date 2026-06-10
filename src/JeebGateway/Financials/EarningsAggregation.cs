@@ -97,6 +97,17 @@ public interface IEarningsAggregationService
 
     /// <summary>Canonical lifetime projection (unbounded window).</summary>
     Task<EarningsProjection> GetLifetimeProjectionAsync(string jeeberId, CancellationToken ct);
+
+    /// <summary>
+    /// JEB-58: canonical projection filtered by COD state (e.g. ["batched","paid"]).
+    /// Excludes "recorded" settlements which are pending batch and not yet earnings.
+    /// </summary>
+    Task<EarningsProjection> GetProjectionWithStatesAsync(
+        string jeeberId,
+        DateTimeOffset from,
+        DateTimeOffset to,
+        IReadOnlyCollection<string> codStates,
+        CancellationToken ct);
 }
 
 /// <summary>
@@ -197,5 +208,41 @@ public sealed class EarningsAggregationService : IEarningsAggregationService
         return new EarningsSummary(
             jeeberId, p.Totals.Gross, p.Totals.Commission, p.Totals.Net,
             p.DeliveryCount, p.PeriodStart, p.PeriodEnd);
+    }
+
+    public async Task<EarningsProjection> GetProjectionWithStatesAsync(
+        string jeeberId,
+        DateTimeOffset from,
+        DateTimeOffset to,
+        IReadOnlyCollection<string> codStates,
+        CancellationToken ct)
+    {
+        var rows = await _store.ListByJeeberAsync(jeeberId, from, to, ct, codStates);
+
+        var entries = new List<EarningsEntry>(rows.Count);
+        decimal gross = 0m, commission = 0m, net = 0m;
+        foreach (var s in rows)
+        {
+            var entryNet = s.GoodsCost - s.Commission;
+            entries.Add(new EarningsEntry(
+                DeliveryId:   s.DeliveryId,
+                SettlementId: s.Id,
+                Gross:        s.GoodsCost,
+                Commission:   s.Commission,
+                Net:          entryNet,
+                Currency:     s.Currency,
+                SettledAt:    s.SettledAt));
+            gross      += s.GoodsCost;
+            commission += s.Commission;
+            net        += entryNet;
+        }
+
+        return new EarningsProjection(
+            JeeberId:      jeeberId,
+            Totals:        new EarningsTotals(net, gross, commission, SettlementService.CurrencyLbp),
+            Entries:       entries,
+            DeliveryCount: rows.Count,
+            PeriodStart:   from,
+            PeriodEnd:     to);
     }
 }

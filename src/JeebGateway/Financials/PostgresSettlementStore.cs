@@ -95,22 +95,36 @@ public sealed class PostgresSettlementStore : ISettlementStore
     }
 
     public async Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
-        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct)
+        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct,
+        IReadOnlyCollection<string>? codStates = null)
     {
         await using var conn = await _db.OpenAsync(ct);
 
-        var sql = """
-            SELECT * FROM settlements
-            WHERE jeeber_id = @JeeberId
-              AND (@From IS NULL OR settled_at >= @From)
-              AND (@To   IS NULL OR settled_at <= @To)
-            ORDER BY settled_at ASC
-            """;
+        // JEB-58: earnings query uses idx_settlements_jeeber_state_settled.
+        // When codStates is specified, use ANY(@CodStates) to stay on the index.
+        var sql = codStates is { Count: > 0 }
+            ? """
+              SELECT * FROM settlements
+              WHERE jeeber_id = @JeeberId
+                AND cod_state = ANY(@CodStates)
+                AND (@From IS NULL OR settled_at >= @From)
+                AND (@To   IS NULL OR settled_at <= @To)
+              ORDER BY settled_at ASC
+              """
+            : """
+              SELECT * FROM settlements
+              WHERE jeeber_id = @JeeberId
+                AND (@From IS NULL OR settled_at >= @From)
+                AND (@To   IS NULL OR settled_at <= @To)
+              ORDER BY settled_at ASC
+              """;
 
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("JeeberId", jeeberId);
         cmd.Parameters.AddWithValue("From", (object?)from ?? DBNull.Value);
         cmd.Parameters.AddWithValue("To", (object?)to ?? DBNull.Value);
+        if (codStates is { Count: > 0 })
+            cmd.Parameters.AddWithValue("CodStates", codStates.ToArray());
 
         return await ReadListAsync(cmd, ct);
     }

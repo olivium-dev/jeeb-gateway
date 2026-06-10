@@ -32,12 +32,18 @@ public interface ISettlementStore
     /// the verbatim per-settlement gross/commission/net — zero re-arithmetic on
     /// the wallet copy (BR-16). A null window bound means unbounded on that side
     /// (lifetime read).
+    ///
+    /// <para>JEB-58: pass <paramref name="codStates"/> to restrict by COD lifecycle state.
+    /// Null/empty = no cod_state filter (returns all). Earnings endpoints pass
+    /// <c>["batched","paid"]</c> — <c>recorded</c> rows are pending batch and excluded
+    /// from earnings per TL-PIN-JEB-510 §3.</para>
     /// </summary>
     Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
         string jeeberId,
         DateTimeOffset? from,
         DateTimeOffset? to,
-        CancellationToken ct);
+        CancellationToken ct,
+        IReadOnlyCollection<string>? codStates = null);
 
     /// <summary>Looks up a settlement by its own primary key.</summary>
     Task<Settlement?> GetByIdAsync(string settlementId, CancellationToken ct);
