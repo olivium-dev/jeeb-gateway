@@ -730,7 +730,18 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 // Track per-controller migrations against GATEWAY-REMEDIATION-PLAN.md.
 // ===========================================================================
 
-// Cash settlement + receipt API (T-backend-016 / JEEB-34).
+// JEB-56: JeebPricingOptions — makes commission rates and floor config-overridable.
+// Defaults match CommissionCalculator constants (Standard=15%, Express=20%, etc.).
+builder.Services.Configure<JeebPricingOptions>(
+    builder.Configuration.GetSection(JeebPricingOptions.SectionName));
+
+// Cash settlement + receipt API (T-backend-016 / JEEB-34 → JEB-56).
+//
+// JEB-56: PostgresSettlementStore replaces InMemorySettlementStore when
+// GatewayPostgres:ConnectionString is configured. The store is the durable
+// COD settlement ledger (settlements table, migration 0015). When the
+// connection string is absent (local dev / CI without Postgres), the in-memory
+// fallback keeps the vertical exercisable.
 //
 // SettlementService re-computes the Jeeb fee (commission % per tier +
 // 2% insurance, min 1000 LBP) from the row's tier and posts a single
@@ -740,7 +751,17 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 // slim ledger contract in the Financials module — it does NOT ride on the
 // wallet integration, which now mirrors the salehly-gateway sibling's
 // upstream wallet API byte-for-byte (WalletController + ServiceWalletClient).
-builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
+var gatewayPostgresCs = builder.Configuration["GatewayPostgres:ConnectionString"];
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.Infrastructure.INpgsqlConnectionFactory>(
+        _ => new JeebGateway.Infrastructure.NpgsqlConnectionFactory(gatewayPostgresCs));
+    builder.Services.AddSingleton<ISettlementStore, PostgresSettlementStore>();
+}
+else
+{
+    builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
+}
 builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
 
