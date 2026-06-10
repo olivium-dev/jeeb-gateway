@@ -506,6 +506,11 @@ public class RequestsController : ControllerBase
     ///   <list type="bullet">
     ///     <item>null — allowed (gate off, no review-grade match, or warn already
     ///       acknowledged): the create proceeds.</item>
+    ///     <item>503 <c>moderation_unavailable</c> — lexicon empty or unloadable
+    ///       (FT-04 fail-closed: an empty lexicon means the gate cannot screen,
+    ///       so the safe action is to block the create until the lexicon is
+    ///       restored). JEB-1504 claimed 503 was already returned — this is the
+    ///       fix that makes it true.</item>
     ///     <item>409 <c>prohibited_item_blocked</c> — a block-severity match;
     ///       an ack does NOT override it (AC7).</item>
     ///     <item>409 <c>prohibited_item_requires_ack</c> — a warn-severity match
@@ -516,6 +521,20 @@ public class RequestsController : ControllerBase
     private async Task<IActionResult?> EvaluateModerationAsync(string clientId, string description, CancellationToken ct)
     {
         if (!_moderation.Enabled) return null;
+
+        // FT-04 fail-closed: an empty or unloadable lexicon must NOT let traffic
+        // through unscreened. Returning 503 forces the caller to retry later
+        // rather than silently bypassing the moderation gate.
+        var lexiconItems = await _prohibited.ListActiveAsync(ct);
+        if (lexiconItems.Count == 0)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                error = "moderation_unavailable",
+                detail = "The prohibited-items lexicon is empty or could not be loaded. " +
+                         "The request cannot be screened and has been rejected to fail safely."
+            });
+        }
 
         var scan = await _scanner.ScanAsync(description, ct);
         var severity = scan.GatingSeverity;
@@ -542,8 +561,8 @@ public class RequestsController : ControllerBase
         // CURRENT lexicon version. Re-using the same version semantics as
         // GET /prohibited-items + POST /prohibited-items/acknowledge so the ack
         // the mobile ack-dialog records is the one that clears this gate.
-        var active = await _prohibited.ListActiveAsync(ct);
-        var currentVersion = ComputeLexiconVersion(active);
+        // (lexiconItems already loaded above — no second round-trip needed.)
+        var currentVersion = ComputeLexiconVersion(lexiconItems);
         var ack = await _prohibited.GetAcknowledgmentAsync(clientId, ct);
         var acknowledged = ack is not null && string.Equals(ack.Version, currentVersion, StringComparison.Ordinal);
 
