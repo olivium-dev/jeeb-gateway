@@ -70,12 +70,15 @@ public sealed record RoleGrantResult(
 
 /// <summary>
 /// Result of <see cref="IUserManagementDualRoleClient.PhoneFindOrCreateAsync"/>. The id is
-/// UM-canonical; the role decoration is GATEWAY-OWNED (JEB-1480 / GR2) — UM no longer
-/// supplies roles on the phone-identity surface. OPAQUE role strings ({customer,driver}).
+/// UM-canonical; role decoration is GATEWAY-OWNED (JEB-1480/JEB-1487 / GR2) — UM returns
+/// IDENTITY ONLY. <see cref="PhoneHashRef"/> is the opaque HMAC-SHA256 lookup key emitted
+/// by UM (non-reversible); callers may store it for audit/dedup without holding a raw phone.
+/// OPAQUE role strings ({customer,driver}).
 /// </summary>
 public sealed record PhoneFindOrCreateResult(
     string UserId,
     bool IsNew,
+    string PhoneHashRef,
     IReadOnlyList<string> AvailableRoles,
     string ActiveRole);
 
