@@ -413,6 +413,8 @@ jobs:
               --env-add Security__TokenMint__Enabled='true' \
               --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
               --env-add Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
+              --env-add JeebJwt__SigningKey='${{ secrets.JEEB_JWT_SIGNING_KEY }}' \
+              --env-add Jwt__SigningKey='${{ secrets.JEEB_JWT_SIGNING_KEY }}' \
               --env-add UmJwt__SigningKey='${{ secrets.UMJWT_SIGNING_KEY }}' \
               --env-add UmJwt__Issuer='user-management' \
               --env-add UmJwt__Audience='user-management' \
