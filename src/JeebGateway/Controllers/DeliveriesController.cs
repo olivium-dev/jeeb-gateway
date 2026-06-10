@@ -1468,6 +1468,30 @@ public class DeliveriesController : ControllerBase
         }
         catch (DeliveryHandoverException dhx)
         {
+            // S09 A7 / E9 / BR-OTP-6 (JEB-55) — idempotent re-verify after success.
+            // delivery-service's at_door gate (handover/service.go FSM step 3) fires
+            // BEFORE the success/runDone path, so a SECOND verify on an already-`Done`
+            // delivery is collapsed into the SAME 409 { reason:"not_at_door" } as a
+            // genuinely never-at-door delivery — the gateway cannot tell them apart
+            // from the 409 alone. The scenario contract (CP-H / N11 / row A7) requires
+            // the duplicate verify to SHORT-CIRCUIT on already-`done` and return the
+            // REPLAYED 200 { verified:true, status:"Done" } with NO second settlement.
+            //
+            // So on a 409 we do ONE canonical state read-through: if the delivery is
+            // terminally `Done`, this is the A7 replay — return the prior terminal
+            // success. We do NOT re-validate the OTP (already discarded above) and we
+            // do NOT re-run the SM transition (we never call verify again), so the
+            // OTP-used-once law and exactly-once settlement are preserved. Any other
+            // 409 (or non-Done state) keeps the existing not_at_door mapping.
+            if (dhx.StatusCode == StatusCodes.Status409Conflict)
+            {
+                var replay = await TryReplayAlreadyDoneHandoverAsync(deliveryId, correlationId, activity, ct);
+                if (replay is not null)
+                {
+                    return replay;
+                }
+            }
+
             return MapHandoverException(dhx, deliveryId, correlationId, activity);
         }
         catch (System.Text.Json.JsonException jx)
@@ -1513,6 +1537,70 @@ public class DeliveriesController : ControllerBase
             Verified   = true,
             Status     = result.Status ?? RequestStatus.Delivered,
             Message    = "OTP verified successfully. Delivery completed."
+        });
+    }
+
+    /// <summary>
+    /// S09 A7 / E9 / BR-OTP-6 (JEB-55) idempotent-replay probe. Called only after
+    /// delivery-service returns a 409 from the verify hop. Reads the canonical
+    /// delivery state once; when it is terminally <c>Done</c> this 409 is the
+    /// duplicate-verify-after-success case (delivery-service collapses already-`Done`
+    /// into the same <c>not_at_door</c> 409 as a never-at-door row, so the gateway
+    /// must disambiguate via this read), and we return the REPLAYED 200
+    /// <c>{ verified:true, status:"Done" }</c> — the prior terminal success. This is
+    /// an idempotent replay, NOT an OTP reuse: the code was already validated +
+    /// discarded on the first verify, and no SM transition or settlement is re-run.
+    /// Returns <c>null</c> when the delivery is not <c>Done</c> (a genuine 409 the
+    /// caller must surface via <see cref="MapHandoverException"/>) or when the
+    /// canonical read is unavailable (fail safe to the existing 409 mapping).
+    /// </summary>
+    private async Task<IActionResult?> TryReplayAlreadyDoneHandoverAsync(
+        string deliveryId,
+        string correlationId,
+        Activity? activity,
+        CancellationToken ct)
+    {
+        DeliveryReadUpstream? canonical;
+        try
+        {
+            canonical = await _deliveryClient.GetCanonicalDeliveryAsync(deliveryId, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // The canonical state read failed (network/contract). Do NOT invent a
+            // replay — fall back to the existing 409 mapping so behaviour is
+            // unchanged when we cannot prove the delivery is Done.
+            _log.LogWarning(
+                "handover.verify_replay_probe_failed deliveryId={DeliveryId} correlationId={CorrelationId} exceptionType={ExceptionType}",
+                deliveryId, correlationId, ex.GetType().Name);
+            return null;
+        }
+
+        if (canonical is null ||
+            !string.Equals(canonical.Status, CanonicalDeliveryStatus.Done, StringComparison.Ordinal))
+        {
+            // Not terminal Done → a genuine not_at_door 409. Let the normal mapping run.
+            return null;
+        }
+
+        // Already-Done → A7 idempotent 200 replay. No OTP re-validation, no SM
+        // re-transition, no second settlement (BR-OTP-6).
+        _log.LogInformation(
+            "handover.verify_idempotent_replay deliveryId={DeliveryId} correlationId={CorrelationId} status={Status}",
+            deliveryId, correlationId, CanonicalDeliveryStatus.Done);
+        activity?.SetTag("otp.idempotent_replay", "true");
+        activity?.SetTag("otp.verified", "true");
+
+        return Ok(new OtpHandoverVerificationResponse
+        {
+            DeliveryId = deliveryId,
+            Verified   = true,
+            Status     = CanonicalDeliveryStatus.Done,
+            Message    = "OTP already verified. Delivery already completed."
         });
     }
 
