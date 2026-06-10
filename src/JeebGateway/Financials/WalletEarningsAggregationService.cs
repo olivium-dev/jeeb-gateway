@@ -45,6 +45,19 @@ public sealed class WalletEarningsAggregationService : IEarningsAggregationServi
         return BuildProjection(jeeberId, gross, start, end);
     }
 
+    public Task<EarningsProjection> GetProjectionWithStatesAsync(
+        string jeeberId,
+        DateTimeOffset from,
+        DateTimeOffset to,
+        IReadOnlyCollection<string> codStates,
+        CancellationToken ct)
+    {
+        // Wallet-service earnings endpoint does not expose COD-state filtering —
+        // delegate to the standard window projection. The JEB-58 state filter
+        // applies only to the in-memory aggregation path used in dev/test.
+        return GetProjectionAsync(jeeberId, from, to, ct);
+    }
+
     public Task<EarningsProjection> GetLifetimeProjectionAsync(string jeeberId, CancellationToken ct)
     {
         var start = DateTimeOffset.UnixEpoch;

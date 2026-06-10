@@ -280,4 +280,40 @@ public sealed class PostgresSettlementStore : ISettlementStore
                 : r.GetFieldValue<DateTimeOffset>(r.GetOrdinal("paid_at")),
         };
     }
+
+    public async Task<bool> ReplacePendingAsync(string deliveryId, Settlement settled, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE settlements
+               SET id            = @NewId,
+                   goods_cost    = @GoodsCost,
+                   commission    = @Commission,
+                   commission_rate = @CommissionRate,
+                   insurance     = @Insurance,
+                   total         = @Total,
+                   min_fee_applied = @MinimumFeeApplied,
+                   payment_method = @PaymentMethod,
+                   state         = @State,
+                   cod_state     = @CodState,
+                   settled_at    = @SettledAt
+             WHERE delivery_id = @DeliveryId
+               AND state = 'pending_settlement'
+            """;
+        cmd.Parameters.AddWithValue("NewId", Guid.Parse(settled.Id));
+        cmd.Parameters.AddWithValue("DeliveryId", deliveryId);
+        cmd.Parameters.AddWithValue("GoodsCost", settled.GoodsCost);
+        cmd.Parameters.AddWithValue("Commission", settled.Commission);
+        cmd.Parameters.AddWithValue("CommissionRate", settled.CommissionRate);
+        cmd.Parameters.AddWithValue("Insurance", settled.Insurance);
+        cmd.Parameters.AddWithValue("Total", settled.Total);
+        cmd.Parameters.AddWithValue("MinimumFeeApplied", settled.MinimumFeeApplied);
+        cmd.Parameters.AddWithValue("PaymentMethod", settled.PaymentMethod);
+        cmd.Parameters.AddWithValue("State", settled.State);
+        cmd.Parameters.AddWithValue("CodState", settled.CodState);
+        cmd.Parameters.AddWithValue("SettledAt", settled.SettledAt);
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        return rows > 0;
+    }
 }
