@@ -28,6 +28,12 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 {
+    // JEB-1516: the Jeeb tenant application GUID the gateway forwards to the
+    // shared one-time-password service as applicationId (config Auth:Otp:ApplicationId,
+    // injected via Auth__Otp__ApplicationId at deploy). The handover OTP must send
+    // THIS, not the non-GUID delivery_handover_{id} label.
+    private const string TenantApplicationId = "17f6f47f-4047-4f1e-bac2-632a5eaa9a46";
+
     private readonly WebApplicationFactory<Program> _factory;
 
     public DeliveriesEndpointTests(WebApplicationFactory<Program> factory)
@@ -370,6 +376,9 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
                 "FeatureFlags:UseUpstream:Delivery",
                 deliveryUpstream ? "true" : "false");
 
+            // JEB-1516: bind the tenant GUID the handover OTP must forward upstream.
+            builder.UseSetting("Auth:Otp:ApplicationId", TenantApplicationId);
+
             builder.ConfigureServices(services =>
             {
                 // Replace the NSwag-generated OTP client with a fake we control
@@ -411,7 +420,10 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         // B6: the OTP service was hit with the row's RecipientPhone, not a placeholder
         otp.SendOtpCalls.Should().ContainSingle();
         otp.SendOtpCalls[0].PhoneNumber.Should().Be("+962799123456");
-        otp.SendOtpCalls[0].ApplicationId.Should().Be($"delivery_handover_{seed.Id}");
+        // JEB-1516: applicationId is the configured tenant GUID — NOT the non-GUID
+        // delivery_handover_{id} label that made the upstream Guid.Parse throw → 502.
+        otp.SendOtpCalls[0].ApplicationId.Should().Be(TenantApplicationId);
+        Guid.TryParse(otp.SendOtpCalls[0].ApplicationId, out _).Should().BeTrue();
     }
 
     [Fact]
@@ -697,7 +709,9 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         // SMS dispatched to the row phone with the canonical applicationId.
         otp.SendOtpCalls.Should().ContainSingle();
         otp.SendOtpCalls[0].PhoneNumber.Should().Be("+962799123456");
-        otp.SendOtpCalls[0].ApplicationId.Should().Be($"delivery_handover_{seed.Id}");
+        // JEB-1516: applicationId is the configured tenant GUID (upstream path).
+        otp.SendOtpCalls[0].ApplicationId.Should().Be(TenantApplicationId);
+        Guid.TryParse(otp.SendOtpCalls[0].ApplicationId, out _).Should().BeTrue();
     }
 
     [Fact]
