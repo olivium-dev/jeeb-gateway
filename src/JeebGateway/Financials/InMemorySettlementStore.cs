@@ -48,7 +48,8 @@ public sealed class InMemorySettlementStore : ISettlementStore
     }
 
     public Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
-        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct)
+        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct,
+        IReadOnlyCollection<string>? codStates = null)
     {
         // Snapshot the values up front (ConcurrentDictionary enumeration is safe
         // but we clone to keep the row immutable for the caller).
@@ -56,6 +57,7 @@ public sealed class InMemorySettlementStore : ISettlementStore
             .Where(s => string.Equals(s.JeeberId, jeeberId, StringComparison.Ordinal))
             .Where(s => (from is null || s.SettledAt >= from.Value)
                      && (to is null || s.SettledAt <= to.Value))
+            .Where(s => codStates is null || codStates.Count == 0 || codStates.Contains(s.CodState))
             .OrderBy(s => s.SettledAt)
             .Select(Clone)
             .ToList();
