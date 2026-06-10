@@ -8,6 +8,8 @@ namespace JeebGateway.IntegrationTests;
 
 public class NotificationPreferencesEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 {
+    private const string BaseRoute = "/api/users/me/notification-preferences";
+
     private readonly WebApplicationFactory<Program> _factory;
 
     public NotificationPreferencesEndpointTests(WebApplicationFactory<Program> factory)
@@ -20,9 +22,9 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "user-get-1");
-        client.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client");
 
-        var resp = await client.GetAsync("/users/me/notification-preferences");
+        var resp = await client.GetAsync(BaseRoute);
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<PrefsResponse>();
@@ -32,16 +34,16 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
         body.Preferences.Chat.Should().BeTrue();
         body.Preferences.StatusChanges.Should().BeTrue();
         body.Preferences.RatingReminders.Should().BeTrue();
-        body.AlwaysOn.Should().Contain(new[] { "otp", "system_critical" });
+        body.Preferences.Promotions.Should().BeTrue();
+        body.Preferences.Settlements.Should().BeTrue();
+        body.AlwaysOn.Should().Contain(new[] { "otp", "system_critical", "kyc", "disputes" });
     }
 
     [Fact]
     public async Task Get_Without_Identity_Returns_401()
     {
         var client = _factory.CreateClient();
-
-        var resp = await client.GetAsync("/users/me/notification-preferences");
-
+        var resp = await client.GetAsync(BaseRoute);
         resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
@@ -49,12 +51,10 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     public async Task Patch_Updates_Only_Provided_Fields_And_Persists()
     {
         var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-1");
-        client.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
+        client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-2");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client");
 
-        var patch = await client.PatchAsJsonAsync(
-            "/users/me/notification-preferences",
-            new { offers = false, chat = false });
+        var patch = await client.PatchAsJsonAsync(BaseRoute, new { offers = false, chat = false });
 
         patch.StatusCode.Should().Be(HttpStatusCode.OK);
         var afterPatch = await patch.Content.ReadFromJsonAsync<PrefsResponse>();
@@ -62,11 +62,27 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
         afterPatch.Preferences.Chat.Should().BeFalse();
         afterPatch.Preferences.StatusChanges.Should().BeTrue();
         afterPatch.Preferences.RatingReminders.Should().BeTrue();
+        afterPatch.Preferences.Settlements.Should().BeTrue();
 
-        var get = await client.GetAsync("/users/me/notification-preferences");
+        var get = await client.GetAsync(BaseRoute);
         var afterGet = await get.Content.ReadFromJsonAsync<PrefsResponse>();
         afterGet!.Preferences.Offers.Should().BeFalse();
         afterGet.Preferences.Chat.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Patch_Updates_Settlements_Toggle()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-settle");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client");
+
+        var patch = await client.PatchAsJsonAsync(BaseRoute, new { settlements = false });
+
+        patch.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await patch.Content.ReadFromJsonAsync<PrefsResponse>();
+        body!.Preferences.Settlements.Should().BeFalse();
+        body.Preferences.Offers.Should().BeTrue();
     }
 
     [Fact]
@@ -74,12 +90,9 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-otp");
-        client.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client");
 
-        var resp = await client.PatchAsJsonAsync(
-            "/users/me/notification-preferences",
-            new { otp = false });
-
+        var resp = await client.PatchAsJsonAsync(BaseRoute, new { otp = false });
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 
@@ -88,12 +101,31 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-crit");
-        client.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client");
 
-        var resp = await client.PatchAsJsonAsync(
-            "/users/me/notification-preferences",
-            new { systemCritical = false });
+        var resp = await client.PatchAsJsonAsync(BaseRoute, new { systemCritical = false });
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
 
+    [Fact]
+    public async Task Patch_Rejects_Attempt_To_Disable_Kyc()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-kyc");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client");
+
+        var resp = await client.PatchAsJsonAsync(BaseRoute, new { kyc = false });
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task Patch_Rejects_Attempt_To_Disable_Disputes()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-disputes");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client");
+
+        var resp = await client.PatchAsJsonAsync(BaseRoute, new { disputes = false });
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 
@@ -102,11 +134,9 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     {
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "user-patch-otp-true");
-        client.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
+        client.DefaultRequestHeaders.Add("X-User-Roles", "client");
 
-        var resp = await client.PatchAsJsonAsync(
-            "/users/me/notification-preferences",
-            new { otp = true, ratingReminders = false });
+        var resp = await client.PatchAsJsonAsync(BaseRoute, new { otp = true, ratingReminders = false });
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<PrefsResponse>();
@@ -118,17 +148,15 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
     public async Task Preferences_Are_Isolated_Per_User()
     {
         var clientA = _factory.CreateClient();
-        clientA.DefaultRequestHeaders.Add("X-User-Id", "user-iso-a");
-        clientA.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
+        clientA.DefaultRequestHeaders.Add("X-User-Id", "user-iso-c");
+        clientA.DefaultRequestHeaders.Add("X-User-Roles", "client");
         var clientB = _factory.CreateClient();
-        clientB.DefaultRequestHeaders.Add("X-User-Id", "user-iso-b");
-        clientB.DefaultRequestHeaders.Add("X-User-Roles", "client"); // ADR-005 §B notification.prefs.self
+        clientB.DefaultRequestHeaders.Add("X-User-Id", "user-iso-d");
+        clientB.DefaultRequestHeaders.Add("X-User-Roles", "client");
 
-        await clientA.PatchAsJsonAsync(
-            "/users/me/notification-preferences",
-            new { offers = false });
+        await clientA.PatchAsJsonAsync(BaseRoute, new { offers = false });
 
-        var bResp = await clientB.GetAsync("/users/me/notification-preferences");
+        var bResp = await clientB.GetAsync(BaseRoute);
         var b = await bResp.Content.ReadFromJsonAsync<PrefsResponse>();
         b!.Preferences.Offers.Should().BeTrue();
     }
@@ -139,5 +167,11 @@ public class NotificationPreferencesEndpointTests : IClassFixture<WebApplication
         string[] AlwaysOn,
         DateTimeOffset UpdatedAt);
 
-    private sealed record Toggles(bool Offers, bool Chat, bool StatusChanges, bool RatingReminders);
+    private sealed record Toggles(
+        bool Offers,
+        bool Chat,
+        bool StatusChanges,
+        bool RatingReminders,
+        bool Promotions,
+        bool Settlements);
 }
