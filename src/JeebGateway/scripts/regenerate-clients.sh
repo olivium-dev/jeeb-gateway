@@ -52,13 +52,6 @@ SERVICES=(
   "geolocation-service|GeolocationServiceClient|JeebGateway.Services.Generated.GeolocationService|http://localhost:8085/openapi.json|GEOLOCATION_SERVICE_OPENAPI_URL"
   "push-notification|PushNotificationClient|JeebGateway.Services.Generated.PushNotification|http://localhost:8080/openapi.json|PUSH_NOTIFICATION_OPENAPI_URL"
   "delivery-service|DeliveryServiceClient|JeebGateway.Services.Generated.DeliveryService|http://localhost:8081/swagger/v1/swagger.json|DELIVERY_SERVICE_OPENAPI_URL"
-  # unified_payment_gateway (UPG) — shared, product-agnostic payments service (Elixir/Phoenix, OpenApiSpex at /api/v1/openapi).
-  # JEB-1484 de-leaked the COD settlement surface into the generic
-  # `/api/v1/payments/settlements/*` primitive (committed-real spec, v1.1.0). The
-  # typed ServiceUnifiedPaymentGatewayClient + GR3 settlement routing through UPG
-  # are DEFERRED until the owner-gated UPG PR is deployed (the generic endpoint is
-  # not yet live in prod). Spec committed now so client-freshness can be tracked.
-  "unified-payment-gateway|ServiceUnifiedPaymentGatewayClient|JeebGateway.Services.Generated.UnifiedPaymentGateway|http://localhost:4000/api/v1/openapi|UNIFIED_PAYMENT_GATEWAY_OPENAPI_URL"
   # thin-BFF fan-out upstreams (offer / ban / feedback / voice). Default URLs use the
   # service host port from the ticket + the conventional Swashbuckle spec path; the
   # per-service agent owns confirming the real spec path and wiring the client/flag.
