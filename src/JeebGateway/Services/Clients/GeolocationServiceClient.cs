@@ -52,4 +52,17 @@ public sealed class GeolocationServiceClient : IGeolocationServiceClient
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStreamAsync(ct);
     }
+
+    public async Task<IReadOnlyList<double[]>> GetRoutePolylineAsync(string deliveryId, CancellationToken ct)
+    {
+        var path = $"locations/{Uri.EscapeDataString(deliveryId)}/route";
+        using var response = await _http.GetAsync(path, ct);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return Array.Empty<double[]>();
+        }
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<IReadOnlyList<double[]>>(JsonOptions, ct);
+        return result ?? Array.Empty<double[]>();
+    }
 }
