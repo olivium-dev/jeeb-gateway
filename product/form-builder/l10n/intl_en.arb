@@ -1,0 +1,15 @@
+{
+  "@@locale": "en",
+  "@@x-purpose": "Jeeb KYC v1 (jeeb_jeeber_v1) — ARB keys for form-builder-service flavors/jeeb_jeeber_v1/*.json. Convention: kyc.jeeb.v1.<field_id>.<slot> (LEAD 14763 §4).",
+  "kyc.jeeb.v1.id_document_front_url.label": "ID document (front)",
+  "kyc.jeeb.v1.id_document_back_url.label": "ID document (back)",
+  "kyc.jeeb.v1.id_type.label": "ID type",
+  "kyc.jeeb.v1.id_number.label": "ID number",
+  "kyc.jeeb.v1.driver_license_number.label": "Driver license number",
+  "kyc.jeeb.v1.driver_license_expiry.label": "Driver license expiry date",
+  "kyc.jeeb.v1.vehicle_registration_url.label": "Vehicle registration document",
+  "kyc.jeeb.v1.vehicle_plate_number.label": "Vehicle plate number",
+  "kyc.jeeb.v1.vehicle_year_make_model.label": "Vehicle year, make and model",
+  "kyc.jeeb.v1.selfie_with_liveness_url.label": "Selfie with liveness check",
+  "kyc.jeeb.v1.tos_accepted_version.label": "Terms of Service"
+}

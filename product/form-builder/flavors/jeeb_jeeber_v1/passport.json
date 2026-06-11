@@ -1,0 +1,117 @@
+{
+  "template_id": "jeeb_jeeber_v1",
+  "template_version": "1.0.0",
+  "id_type_variant": "passport",
+  "fields": [
+    {
+      "id": "id_document_front_url",
+      "type": "file_upload",
+      "i18n_label_key": "kyc.jeeb.v1.id_document_front_url.label",
+      "validations": [
+        { "rule": "required" },
+        { "rule": "maxFileSizeMB", "value": 8 },
+        { "rule": "mimeType", "values": ["image/jpeg", "image/png", "application/pdf"] }
+      ]
+    },
+    {
+      "id": "id_document_back_url",
+      "type": "file_upload",
+      "i18n_label_key": "kyc.jeeb.v1.id_document_back_url.label",
+      "validations": [
+        { "rule": "required" },
+        { "rule": "maxFileSizeMB", "value": 8 },
+        { "rule": "mimeType", "values": ["image/jpeg", "image/png", "application/pdf"] }
+      ]
+    },
+    {
+      "id": "id_type",
+      "type": "enum",
+      "i18n_label_key": "kyc.jeeb.v1.id_type.label",
+      "default": "passport",
+      "validations": [
+        { "rule": "required" },
+        { "rule": "enum", "values": ["national_id", "passport", "residency"] }
+      ]
+    },
+    {
+      "id": "id_number",
+      "type": "text",
+      "i18n_label_key": "kyc.jeeb.v1.id_number.label",
+      "dependsOn": "id_type",
+      "validations": [
+        { "rule": "required" },
+        { "rule": "pattern", "value": "^[A-Z0-9]{6,9}$" },
+        { "rule": "minLength", "value": 4 },
+        { "rule": "maxLength", "value": 24 }
+      ]
+    },
+    {
+      "id": "driver_license_number",
+      "type": "text",
+      "i18n_label_key": "kyc.jeeb.v1.driver_license_number.label",
+      "validations": [
+        { "rule": "required" },
+        { "rule": "minLength", "value": 4 },
+        { "rule": "maxLength", "value": 24 }
+      ]
+    },
+    {
+      "id": "driver_license_expiry",
+      "type": "date",
+      "i18n_label_key": "kyc.jeeb.v1.driver_license_expiry.label",
+      "validations": [
+        { "rule": "required" },
+        { "rule": "minDate", "value": "today+30d" }
+      ]
+    },
+    {
+      "id": "vehicle_registration_url",
+      "type": "file_upload",
+      "i18n_label_key": "kyc.jeeb.v1.vehicle_registration_url.label",
+      "validations": [
+        { "rule": "required" },
+        { "rule": "maxFileSizeMB", "value": 8 },
+        { "rule": "mimeType", "values": ["image/jpeg", "image/png", "application/pdf"] }
+      ]
+    },
+    {
+      "id": "vehicle_plate_number",
+      "type": "text",
+      "i18n_label_key": "kyc.jeeb.v1.vehicle_plate_number.label",
+      "validations": [
+        { "rule": "required" },
+        { "rule": "pattern", "value": "^[A-Z0-9\\u0600-\\u06FF\\-/ ]{2,12}$" }
+      ]
+    },
+    {
+      "id": "vehicle_year_make_model",
+      "type": "text",
+      "i18n_label_key": "kyc.jeeb.v1.vehicle_year_make_model.label",
+      "validations": [
+        { "rule": "required" },
+        { "rule": "minLength", "value": 3 },
+        { "rule": "maxLength", "value": 80 }
+      ]
+    },
+    {
+      "id": "selfie_with_liveness_url",
+      "type": "file_upload",
+      "i18n_label_key": "kyc.jeeb.v1.selfie_with_liveness_url.label",
+      "meta": { "livenessProof": "required" },
+      "validations": [
+        { "rule": "required" },
+        { "rule": "maxFileSizeMB", "value": 10 },
+        { "rule": "mimeType", "values": ["image/jpeg", "image/png"] }
+      ]
+    },
+    {
+      "id": "tos_accepted_version",
+      "type": "text",
+      "i18n_label_key": "kyc.jeeb.v1.tos_accepted_version.label",
+      "validations": [
+        { "rule": "required" },
+        { "rule": "equals", "value": "jeeb_tos_v1" }
+      ]
+    }
+  ]
+}
