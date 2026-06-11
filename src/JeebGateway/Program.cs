@@ -791,7 +791,24 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 // wallet integration, which now mirrors the salehly-gateway sibling's
 // upstream wallet API byte-for-byte (WalletController + ServiceWalletClient).
 builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
-builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
+
+// GR3 (JEB-1484) — the cash-settlement ledger post runs THROUGH UPG via the
+// generic external-settlement endpoint (UpgSettlementLedgerClient ->
+// IUpgSettlementClient) when FeatureFlags:UseUpstream:Payments is true. The flag
+// defaults OFF, keeping today's in-process ledger (InMemorySettlementLedgerClient)
+// as the instant rollback target. SettlementService treats the post as
+// best-effort and is idempotent on the settlement id, so this swap is additive
+// and non-breaking. Flip via FeatureFlags__UseUpstream__Payments=true once UPG's
+// JEB-1484 PR is owner-approved + deployed (Services:UnifiedPayment:BaseUrl set).
+if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Payments"))
+{
+    builder.Services.AddSingleton<ISettlementLedgerClient, UpgSettlementLedgerClient>();
+}
+else
+{
+    builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
+}
+
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
 
 // ===========================================================================
