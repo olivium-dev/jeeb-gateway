@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.DTOs.PushNotification;
+using JeebGateway.Push;
 using JeebGateway.service.ServicePushNotification;
 using PushNotificationApiException = JeebGateway.service.ServicePushNotification.ApiException;
 
@@ -101,6 +102,22 @@ namespace JeebGateway.Controllers
                     Fcm_token = request.FcmToken,
                     Device_id = request.DeviceId
                 };
+
+                // JEB-1486: the Jeeb active_role -> FCM topic decision lives HERE in the
+                // gateway, not in the now-generic push-notification relay. We resolve the
+                // OPAQUE topic for the caller's active role and pass it explicitly via the
+                // generic `topics` field (additive, serialized through JsonExtensionData),
+                // while still forwarding the deprecated `active_role` for the cutover window.
+                var activeRole = User.FindFirst("active_role")?.Value;
+                if (!string.IsNullOrWhiteSpace(activeRole))
+                {
+                    serviceRequest.AdditionalProperties["active_role"] = activeRole;
+                    var topic = JeebPushTopicMap.TopicForRole(activeRole);
+                    if (!string.IsNullOrWhiteSpace(topic))
+                    {
+                        serviceRequest.AdditionalProperties["topics"] = new[] { topic };
+                    }
+                }
 
                 var response = await _servicePushNotificationClient.Register_deviceAsync(serviceRequest);
                 return StatusCode(StatusCodes.Status201Created, response);
