@@ -651,6 +651,14 @@ builder.Services.Configure<JeebGateway.Services.DeliveryClientOptions>(
 builder.Services.Configure<JeebGateway.Availability.HeartbeatFeatureOptions>(
     builder.Configuration.GetSection(JeebGateway.Availability.HeartbeatFeatureOptions.SectionName));
 
+// JEB-1502: test control-plane options + job registry.
+// The plane is fail-closed (Enabled=false) by default in every environment.
+// The shared-secret header requirement provides a second gate when Enabled is true.
+builder.Services.Configure<JeebGateway.TestControlPlane.TestControlPlaneOptions>(
+    builder.Configuration.GetSection(JeebGateway.TestControlPlane.TestControlPlaneOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.TestControlPlane.ITestJobRegistry,
+                              JeebGateway.TestControlPlane.TestJobRegistry>();
+
 // Dev / test-harness endpoints flag (Features:DevEndpoints) — additive,
 // fail-closed to 404. Bound here so the [DevOnly] action filter can resolve it
 // via IOptionsMonitor. Defaults false and is committed false in EVERY
@@ -780,7 +788,18 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 // Track per-controller migrations against GATEWAY-REMEDIATION-PLAN.md.
 // ===========================================================================
 
-// Cash settlement + receipt API (T-backend-016 / JEEB-34).
+// JEB-56: JeebPricingOptions — makes commission rates and floor config-overridable.
+// Defaults match CommissionCalculator constants (Standard=15%, Express=20%, etc.).
+builder.Services.Configure<JeebPricingOptions>(
+    builder.Configuration.GetSection(JeebPricingOptions.SectionName));
+
+// Cash settlement + receipt API (T-backend-016 / JEEB-34 → JEB-56).
+//
+// JEB-56: PostgresSettlementStore replaces InMemorySettlementStore when
+// GatewayPostgres:ConnectionString is configured. The store is the durable
+// COD settlement ledger (settlements table, migration 0015). When the
+// connection string is absent (local dev / CI without Postgres), the in-memory
+// fallback keeps the vertical exercisable.
 //
 // SettlementService re-computes the Jeeb fee (commission % per tier +
 // 2% insurance, min 1000 LBP) from the row's tier and posts a single
@@ -1343,9 +1362,16 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DataExportProcesso
 // implementation lands with the follow-up migration.
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
 builder.Services.Configure<UmJwtOptions>(builder.Configuration.GetSection(UmJwtOptions.SectionName));
-// AddAuthorization() / AddRateLimiter() already TryAdd TimeProvider.System — use
-// TryAdd here so the existing test fixtures that assert Single<TimeProvider> still hold.
-builder.Services.TryAddSingleton(TimeProvider.System);
+// JEB-1502: register FakeTimeProvider as the singleton TimeProvider so the test
+// control-plane can shift the clock for ALL time-dependent background jobs without
+// any per-job patching. At zero offset this is behaviourally identical to
+// TimeProvider.System — no observable difference in production.
+// AddSingleton (not TryAdd) so our registration wins over any earlier internal
+// TryAdd from AddRateLimiter/AddAuthorization.
+builder.Services.AddSingleton<JeebGateway.TestControlPlane.FakeTimeProvider>(
+    _ => new JeebGateway.TestControlPlane.FakeTimeProvider(TimeProvider.System));
+builder.Services.AddSingleton<TimeProvider>(
+    sp => sp.GetRequiredService<JeebGateway.TestControlPlane.FakeTimeProvider>());
 builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
 builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
@@ -1495,11 +1521,27 @@ builder.Services.AddSingleton<IDeliveryParticipantResolver, DeliveryParticipantR
 // gateway one.
 
 // Wave 2-3 backend services.
-// T-backend-017: Weekly settlement batch processing.
+// T-backend-017 / JEB-57: Weekly settlement batch processing.
+// InMemorySettlementBatchStore DELETED (G2 gate). Replaced by PostgresSettlementBatchStore
+// (when GatewayPostgres:ConnectionString is set) or InMemoryFallbackSettlementBatchStore (dev/CI).
 builder.Services.Configure<JeebGateway.Financials.WeeklySettlementOptions>(
     builder.Configuration.GetSection(JeebGateway.Financials.WeeklySettlementOptions.SectionName));
-builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore, JeebGateway.Financials.InMemorySettlementBatchStore>();
-builder.Services.AddHostedService<JeebGateway.Financials.WeeklySettlementBatch>();
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore,
+        JeebGateway.Financials.PostgresSettlementBatchStore>();
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore>(sp =>
+        new JeebGateway.Financials.InMemoryFallbackSettlementBatchStore(
+            sp.GetRequiredService<JeebGateway.Financials.ISettlementStore>()));
+}
+// Register WeeklySettlementBatch as a singleton so the WS-D job registry can resolve it
+// by concrete type. AddHostedService uses the same singleton instance.
+builder.Services.AddSingleton<JeebGateway.Financials.WeeklySettlementBatch>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Financials.WeeklySettlementBatch>());
 
 // T-backend-018 / JEB-1434 / JEB-1465: Earnings aggregation API.
 // When FeatureFlags:UseUpstream:Earnings=true the scoped
@@ -1520,17 +1562,45 @@ else
 
 // T-backend-019 / S10 H6 (JEB-59): Earnings PDF statement generation.
 // Real application/pdf via QuestPDF (Community license set below), bilingual
+// JEB-59: EarningsStatement config (signed URL TTL + HMAC key)
+builder.Services.Configure<JeebGateway.Financials.EarningsStatementOptions>(
+    builder.Configuration.GetSection(JeebGateway.Financials.EarningsStatementOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Financials.EarningsStatementTokenService>();
 // en/ar — replaces the legacy text/plain stub.
 QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
-builder.Services.AddSingleton<JeebGateway.Financials.IEarningsPdfGenerator, JeebGateway.Financials.QuestPdfEarningsStatementGenerator>();
+
+// JEB-59: register NotoSansArabic font for correct Arabic glyph shaping in Docker/CI.
+// QuestPDF.Drawing.FontManager is the correct namespace (QuestPDF.Infrastructure.FontManager
+// was renamed in 2022.8+).
+{
+    var fontPath = System.IO.Path.Combine(
+        System.AppContext.BaseDirectory, "assets", "fonts", "NotoSansArabic-Regular.ttf");
+    if (System.IO.File.Exists(fontPath))
+    {
+        using var stream = System.IO.File.OpenRead(fontPath);
+        QuestPDF.Drawing.FontManager.RegisterFont(stream);
+    }
+}
+
+// JEB-59: cached PDF generator (inner = QuestPdf, outer = IMemoryCache decorator)
+builder.Services.AddSingleton<JeebGateway.Financials.QuestPdfEarningsStatementGenerator>();
+builder.Services.AddSingleton<JeebGateway.Financials.IEarningsPdfGenerator>(sp =>
+    new JeebGateway.Financials.CachedEarningsPdfGenerator(
+        sp.GetRequiredService<JeebGateway.Financials.QuestPdfEarningsStatementGenerator>(),
+        sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
+        sp.GetRequiredService<TimeProvider>()));
 
 // T-backend-033: Admin finance dashboard API.
 builder.Services.AddSingleton<JeebGateway.Financials.IAdminFinanceDashboardService, JeebGateway.Financials.AdminFinanceDashboardService>();
 
 // T-backend-021: 7-day rating reveal cron job.
+// JEB-1502: registered as singleton first so ITestJobRegistry can resolve it and call
+// SweepOnceAsync (the same code path the background loop uses).
 builder.Services.Configure<JeebGateway.Ratings.RatingRevealOptions>(
     builder.Configuration.GetSection(JeebGateway.Ratings.RatingRevealOptions.SectionName));
-builder.Services.AddHostedService<JeebGateway.Ratings.RatingRevealJob>();
+builder.Services.AddSingleton<JeebGateway.Ratings.RatingRevealJob>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Ratings.RatingRevealJob>());
 
 // T-backend-040: Low-rating auto-flag and admin notification.
 builder.Services.Configure<JeebGateway.Ratings.LowRatingFlagOptions>(
@@ -1683,6 +1753,35 @@ builder.Services.AddExceptionHandler<JeebGateway.Infrastructure.UpstreamExceptio
 // ---------------------------------------------------------------------------
 
 var app = builder.Build();
+
+// JEB-1502: populate the test job registry. Each entry delegates to the job's
+// own sweep method — the SAME code path the background scheduler calls. No
+// test-only forks. settlement-batch is registered here as a placeholder;
+// WS-A will wire in the real RunBatchAsync after implementing durable settlement.
+var testJobRegistry = app.Services.GetRequiredService<JeebGateway.TestControlPlane.ITestJobRegistry>();
+var ratingRevealJob = app.Services.GetRequiredService<JeebGateway.Ratings.RatingRevealJob>();
+var requestExpirySweeper = app.Services.GetRequiredService<RequestExpirySweeper>();
+var weeklyBatch = app.Services.GetRequiredService<JeebGateway.Financials.WeeklySettlementBatch>();
+
+testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
+{
+    Name = "rating-reveal",
+    Description = "Reveal ratings past the 7-day blind window (RatingRevealJob.SweepOnceAsync).",
+    RunAsync = ct => ratingRevealJob.SweepOnceAsync(ct)
+});
+testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
+{
+    Name = "request-expiry-sweep",
+    Description = "Expire overdue requests and send nudges (RequestExpirySweeper.SweepOnceAsync).",
+    RunAsync = ct => requestExpirySweeper.SweepOnceAsync(ct)
+});
+// settlement-batch: placeholder; WS-A registers the real delegate during Wave 2.
+testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
+{
+    Name = "settlement-batch",
+    Description = "Weekly settlement batch (WeeklySettlementBatch.RunBatchAsync). Placeholder — WS-A wires durable impl.",
+    RunAsync = ct => weeklyBatch.RunBatchAsync(ct)
+});
 
 // Must be registered early in the pipeline so it wraps the whole request.
 app.UseExceptionHandler();
@@ -1883,6 +1982,21 @@ app.MapHealthChecks("/health/aggregate", new HealthCheckOptions
     Predicate = _ => true,
     ResponseWriter = AggregateHealthResponseWriter.WriteAsync,
 }).AllowAnonymous();
+
+// JEB-57: TODO — register WeeklySettlementBatch in WS-D test-control-plane job registry
+// (JEB-1502, fix/JEB-1502).  When that branch is merged, add:
+//
+//   var registry = app.Services.GetService<JeebGateway.TestControlPlane.ITestJobRegistry>();
+//   if (registry is not null)
+//   {
+//       var batch = app.Services.GetRequiredService<JeebGateway.Financials.WeeklySettlementBatch>();
+//       registry.Register(new JeebGateway.TestControlPlane.RegisteredJob
+//       {
+//           Name        = "settlement-batch",
+//           Description = "Weekly COD settlement batch (durable Postgres, JEB-57 Wave-2 impl).",
+//           RunAsync    = ct => batch.RunBatchAsync(ct),
+//       });
+//   }
 
 app.Run();
 

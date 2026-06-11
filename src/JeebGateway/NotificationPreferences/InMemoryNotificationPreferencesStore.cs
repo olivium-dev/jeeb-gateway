@@ -32,6 +32,7 @@ public class InMemoryNotificationPreferencesStore : INotificationPreferencesStor
         if (patch.StatusChanges is { } status) prefs.StatusChanges = status;
         if (patch.RatingReminders is { } rating) prefs.RatingReminders = rating;
         if (patch.Promotions is { } promotions) prefs.Promotions = promotions;
+        if (patch.Settlements is { } settlements) prefs.Settlements = settlements;
         prefs.UpdatedAt = DateTimeOffset.UtcNow;
         return prefs;
     }
@@ -44,6 +45,7 @@ public class InMemoryNotificationPreferencesStore : INotificationPreferencesStor
         StatusChanges = prefs.StatusChanges,
         RatingReminders = prefs.RatingReminders,
         Promotions = prefs.Promotions,
+        Settlements = prefs.Settlements,
         UpdatedAt = prefs.UpdatedAt
     };
 }

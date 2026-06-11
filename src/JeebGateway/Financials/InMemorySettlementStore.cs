@@ -48,7 +48,8 @@ public sealed class InMemorySettlementStore : ISettlementStore
     }
 
     public Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
-        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct)
+        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct,
+        IReadOnlyCollection<string>? codStates = null)
     {
         // Snapshot the values up front (ConcurrentDictionary enumeration is safe
         // but we clone to keep the row immutable for the caller).
@@ -56,6 +57,7 @@ public sealed class InMemorySettlementStore : ISettlementStore
             .Where(s => string.Equals(s.JeeberId, jeeberId, StringComparison.Ordinal))
             .Where(s => (from is null || s.SettledAt >= from.Value)
                      && (to is null || s.SettledAt <= to.Value))
+            .Where(s => codStates is null || codStates.Count == 0 || codStates.Contains(s.CodState))
             .OrderBy(s => s.SettledAt)
             .Select(Clone)
             .ToList();
@@ -93,6 +95,29 @@ public sealed class InMemorySettlementStore : ISettlementStore
         }
     }
 
+    public Task<bool> ReplacePendingAsync(string deliveryId, Settlement settled, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_deliveryIndex.TryGetValue(deliveryId, out var existingId)
+                || !_byId.TryGetValue(existingId, out var existing))
+            {
+                return Task.FromResult(false);
+            }
+
+            if (!string.Equals(existing.State, SettlementState.PendingSettlement, StringComparison.Ordinal))
+            {
+                return Task.FromResult(false);
+            }
+
+            // Remove the old placeholder keyed under its old id, insert the real row.
+            _byId.TryRemove(existingId, out _);
+            _byId[settled.Id] = settled;
+            _deliveryIndex[deliveryId] = settled.Id;
+            return Task.FromResult(true);
+        }
+    }
+
     private static Settlement Clone(Settlement s) => new()
     {
         Id = s.Id,
@@ -113,5 +138,9 @@ public sealed class InMemorySettlementStore : ISettlementStore
         SettledAt = s.SettledAt,
         ReceiptGeneratedAt = s.ReceiptGeneratedAt,
         LedgerEntryId = s.LedgerEntryId,
+        BatchId = s.BatchId,
+        BatchedAt = s.BatchedAt,
+        PaidAt = s.PaidAt,
+        CodState = s.CodState,
     };
 }

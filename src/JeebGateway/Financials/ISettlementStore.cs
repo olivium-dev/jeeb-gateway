@@ -32,12 +32,18 @@ public interface ISettlementStore
     /// the verbatim per-settlement gross/commission/net — zero re-arithmetic on
     /// the wallet copy (BR-16). A null window bound means unbounded on that side
     /// (lifetime read).
+    ///
+    /// <para>JEB-58: pass <paramref name="codStates"/> to restrict by COD lifecycle state.
+    /// Null/empty = no cod_state filter (returns all). Earnings endpoints pass
+    /// <c>["batched","paid"]</c> — <c>recorded</c> rows are pending batch and excluded
+    /// from earnings per TL-PIN-JEB-510 §3.</para>
     /// </summary>
     Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
         string jeeberId,
         DateTimeOffset? from,
         DateTimeOffset? to,
-        CancellationToken ct);
+        CancellationToken ct,
+        IReadOnlyCollection<string>? codStates = null);
 
     /// <summary>Looks up a settlement by its own primary key.</summary>
     Task<Settlement?> GetByIdAsync(string settlementId, CancellationToken ct);
@@ -55,4 +61,14 @@ public interface ISettlementStore
     /// read. Idempotent — repeat calls do not advance the timestamp.
     /// </summary>
     Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, DateTimeOffset at, CancellationToken ct);
+
+    /// <summary>
+    /// FT-07: atomically replaces an existing <see cref="SettlementState.PendingSettlement"/>
+    /// placeholder row with the supplied fully-computed <paramref name="settled"/> row. Returns
+    /// <c>true</c> when the pending row was found and replaced; <c>false</c> when no pending row
+    /// exists for the delivery (the caller should fall through to
+    /// <see cref="TryInsertAsync"/>). Idempotent on <see cref="Settlement.DeliveryId"/> so a
+    /// retry of the replace never double-posts the ledger entry.
+    /// </summary>
+    Task<bool> ReplacePendingAsync(string deliveryId, Settlement settled, CancellationToken ct);
 }

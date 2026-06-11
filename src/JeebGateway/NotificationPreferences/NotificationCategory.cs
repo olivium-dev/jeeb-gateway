@@ -1,9 +1,8 @@
 namespace JeebGateway.NotificationPreferences;
 
 /// <summary>
-/// Categories the user can toggle. Critical channels (OTP, system_critical) are
-/// intentionally not part of this enum — they are always-on and live in
-/// <see cref="NotificationPreferencesDefaults.AlwaysOnChannels"/>.
+/// Categories the user can toggle. Critical channels (OTP, system_critical, kyc, disputes)
+/// are intentionally not toggleable — they are always-on per AlwaysOnChannels.
 /// </summary>
 public enum NotificationCategory
 {
@@ -11,5 +10,7 @@ public enum NotificationCategory
     Chat,
     StatusChanges,
     RatingReminders,
-    Promotions
+    Promotions,
+    /// <summary>Settlement/payment notifications (jeeb.settlement_paid, JEB-1498).</summary>
+    Settlements
 }

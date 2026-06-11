@@ -1,10 +1,9 @@
 namespace JeebGateway.Push;
 
 /// <summary>
-/// The set of in-product events that fan out to push (T-backend-022, AC line 1).
+/// The set of in-product events that fan out to push (T-backend-022).
 /// Each trigger maps to exactly one category for preference filtering via
-/// <see cref="PushTriggerCategoryMap"/>. Always-on triggers (KYC, OTP) bypass
-/// the per-user preferences check.
+/// <see cref="PushTriggerCategoryMap"/>. Always-on triggers bypass preferences.
 /// </summary>
 public enum NotificationTrigger
 {

@@ -50,6 +50,8 @@ public static class CapabilityRolePolicy
             [Capabilities.ProfileWriteSelf] = AnyAuthenticated,
             [Capabilities.DataExportSelf] = AnyAuthenticated,
             [Capabilities.NotificationPrefsSelf] = AnyAuthenticated,
+            // FT-06: admin or internal service token required for batch dispatch (WS-A JEB-57)
+            [Capabilities.NotificationDispatch] = AdminOnly,
             [Capabilities.NotificationsReadSelf] = AnyAuthenticated,
             [Capabilities.AuthLogoutSelf] = AnyAuthenticated,
 

@@ -509,6 +509,11 @@ public class RequestsController : ControllerBase
     ///   <list type="bullet">
     ///     <item>null — allowed (gate off, no review-grade match, or warn already
     ///       acknowledged): the create proceeds.</item>
+    ///     <item>503 <c>moderation_unavailable</c> — lexicon empty or unloadable
+    ///       (FT-04 fail-closed: an empty lexicon means the gate cannot screen,
+    ///       so the safe action is to block the create until the lexicon is
+    ///       restored). JEB-1504 claimed 503 was already returned — this is the
+    ///       fix that makes it true.</item>
     ///     <item>409 <c>prohibited_item_blocked</c> — a block-severity match;
     ///       an ack does NOT override it (AC7).</item>
     ///     <item>409 <c>prohibited_item_requires_ack</c> — a warn-severity match
@@ -578,8 +583,8 @@ public class RequestsController : ControllerBase
         // CURRENT lexicon version. Re-using the same version semantics as
         // GET /prohibited-items + POST /prohibited-items/acknowledge so the ack
         // the mobile ack-dialog records is the one that clears this gate.
-        var active = await _prohibited.ListActiveAsync(ct);
-        var currentVersion = ComputeLexiconVersion(active);
+        // (lexiconItems already loaded above — no second round-trip needed.)
+        var currentVersion = ComputeLexiconVersion(lexiconItems);
         var ack = await _prohibited.GetAcknowledgmentAsync(clientId, ct);
         var acknowledged = ack is not null && string.Equals(ack.Version, currentVersion, StringComparison.Ordinal);
 
