@@ -23,7 +23,8 @@ namespace JeebGateway.IntegrationTests;
 ///     <c>POST /api/v1/deliveries/{id}/transition</c>, returning the canonical
 ///     status (Ordered/Picked/InTransit/AtDoor/Done) verbatim — NOT the legacy
 ///     snake_case literal;</item>
-///   <item>bypass the legacy-enum <see cref="DeliveryStateMachine"/> guard;</item>
+///   <item>forward without any in-gateway legacy-enum guard (the linear
+///     state machine was retired in JEB-1479);</item>
 ///   <item>surface a delivery-service 422 (illegal edge) as the gateway's 422 with
 ///     the typed from/to/trigger extension fields;</item>
 ///   <item>read-through GET /deliveries/{id} so <c>$.status</c> is canonical;</item>

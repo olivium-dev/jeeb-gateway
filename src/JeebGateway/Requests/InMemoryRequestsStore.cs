@@ -248,77 +248,16 @@ public class InMemoryRequestsStore : IRequestsStore
         }
     }
 
-    /// <summary>
-    /// T-backend-013 state-machine transition. The whole guard — status
-    /// read, machine validation, OTP check, GPS flip — runs under the
-    /// write lock so two PATCH calls racing at the same step cannot both
-    /// commit.
-    /// </summary>
-    public Task<DeliveryTransitionResult> TryTransitionAsync(
-        string requestId,
-        string toStatus,
-        string? otp,
-        CancellationToken ct)
-    {
-        lock (_writeLock)
-        {
-            if (!_requests.TryGetValue(requestId, out var existing))
-            {
-                return Task.FromResult(new DeliveryTransitionResult(
-                    DeliveryTransitionOutcome.NotFound, null, null, null));
-            }
-
-            var from = existing.Status;
-            var validation = DeliveryStateMachine.ValidateTransition(from, toStatus);
-            if (!validation.IsValid)
-            {
-                return Task.FromResult(new DeliveryTransitionResult(
-                    DeliveryTransitionOutcome.InvalidTransition,
-                    existing,
-                    from,
-                    validation.Reason));
-            }
-
-            if (DeliveryStateMachine.RequiresOtp(from, toStatus))
-            {
-                if (string.IsNullOrWhiteSpace(otp))
-                {
-                    return Task.FromResult(new DeliveryTransitionResult(
-                        DeliveryTransitionOutcome.OtpRequired,
-                        existing,
-                        from,
-                        "OTP is required to mark the delivery as delivered."));
-                }
-                if (!string.Equals(otp, existing.DeliveryOtp, StringComparison.Ordinal))
-                {
-                    return Task.FromResult(new DeliveryTransitionResult(
-                        DeliveryTransitionOutcome.OtpMismatch,
-                        existing,
-                        from,
-                        "Supplied OTP does not match."));
-                }
-            }
-
-            existing.Status = toStatus;
-
-            if (DeliveryStateMachine.ActivatesGpsTracking(from, toStatus))
-            {
-                existing.GpsTrackingActive = true;
-            }
-
-            return Task.FromResult(new DeliveryTransitionResult(
-                DeliveryTransitionOutcome.Committed,
-                existing,
-                from,
-                null));
-        }
-    }
+    // JEB-1479 cut-over: TryTransitionAsync (the legacy single-step transition
+    // backed by the retired linear state-machine guard) was removed.
+    // delivery-service owns the canonical state machine; the gateway forwards
+    // the PATCH to its transition endpoint. The store no longer participates in
+    // the delivery-transition write path.
 
     /// <summary>
-    /// T-backend-015 dedicated OTP verification. Distinct from
-    /// <see cref="TryTransitionAsync"/> because it owns the
-    /// attempt-counter, lockout, and (via the caller) escalation
-    /// semantics that the plain state-machine PATCH does not carry.
+    /// T-backend-015 dedicated OTP verification. Owns the attempt-counter,
+    /// lockout, and (via the caller) escalation semantics; distinct from the
+    /// (now retired) plain state-machine PATCH path.
     /// </summary>
     public Task<OtpVerificationResult> TryVerifyOtpAsync(
         string requestId,
