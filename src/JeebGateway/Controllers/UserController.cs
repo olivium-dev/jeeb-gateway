@@ -31,6 +31,13 @@ namespace JeebGateway.Controllers
             _logger = logger;
         }
 
+        private ActionResult HandleUpstreamException(UserManagementApiException ex)
+        {
+            if (ex.StatusCode == 404)
+                return Problem(statusCode: 404, detail: ex.Message, title: "Not Found");
+            return StatusCode(ex.StatusCode, ex.Message);
+        }
+
         private ActionResult<(string userId, bool isValid)> ValidateUserAndServices()
         {
             var userId = User.FindFirst(ClaimTypes.Sid)?.Value;
@@ -75,7 +82,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -108,7 +115,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -146,7 +153,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -186,7 +193,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -226,7 +233,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -255,7 +262,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -296,7 +303,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -334,7 +341,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -374,7 +381,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -411,7 +418,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -448,7 +455,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -472,7 +479,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -514,7 +521,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -553,7 +560,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -581,7 +588,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -624,7 +631,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -661,7 +668,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -698,7 +705,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -736,7 +743,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -773,7 +780,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -810,7 +817,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -847,7 +854,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
@@ -886,7 +893,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return HandleUpstreamException(ex);
             }
             catch (Exception ex)
             {
