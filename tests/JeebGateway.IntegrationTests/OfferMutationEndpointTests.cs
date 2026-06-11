@@ -82,6 +82,9 @@ public class OfferMutationEndpointTests
         // A partial edit (fee only) left eta/note unsent (null).
         fake.LastEditEtaMinutes.Should().BeNull();
         fake.LastEditNote.Should().BeNull();
+        // JEB-1474: the gateway supplies the Jeeb edit cap (2) — the shared
+        // service no longer hardcodes it.
+        fake.LastEditMaxEdits.Should().Be(2);
     }
 
     [Fact]
@@ -342,6 +345,7 @@ public class OfferMutationEndpointTests
         public long? LastEditFeeCents { get; private set; }
         public int? LastEditEtaMinutes { get; private set; }
         public string? LastEditNote { get; private set; }
+        public int? LastEditMaxEdits { get; private set; }
 
         public int RejectCallCount { get; private set; }
         public string? LastRejectActor { get; private set; }
@@ -349,7 +353,7 @@ public class OfferMutationEndpointTests
 
         public Task<OfferMutationResult> EditAsync(
             string actingUserId, string requestId, string offerId,
-            long? feeCents, int? etaMinutes, string? note, CancellationToken ct)
+            long? feeCents, int? etaMinutes, string? note, int? maxEdits, CancellationToken ct)
         {
             EditCallCount++;
             LastEditActor = actingUserId;
@@ -358,6 +362,7 @@ public class OfferMutationEndpointTests
             LastEditFeeCents = feeCents;
             LastEditEtaMinutes = etaMinutes;
             LastEditNote = note;
+            LastEditMaxEdits = maxEdits;
             return Task.FromResult(EditResult!);
         }
 
