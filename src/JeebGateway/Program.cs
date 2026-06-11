@@ -1040,6 +1040,13 @@ builder.Services.AddScoped<JeebGateway.Matching.IDeliveryRowMirror,
 // from JeebGateway.Tiers.ITiersStore (the admin/catalog surface).
 builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.InMemoryTiersStore>();
 
+// JEB-1507: CancellationPolicy thresholds (WeeklyThreshold, StrikeThreshold,
+// RestrictionDurationHours) are configurable via appsettings so they can be
+// adjusted per environment without a redeploy.
+builder.Services.Configure<JeebGateway.Requests.Cancellation.CancellationPolicyOptions>(
+    builder.Configuration.GetSection(
+        JeebGateway.Requests.Cancellation.CancellationPolicyOptions.SectionName));
+
 // Delivery cancellation pipeline (T-backend-024 / JEEB-42).
 //
 // thin-BFF wire (T-thin-bff-ban): the Jeeber restriction record-of-truth is

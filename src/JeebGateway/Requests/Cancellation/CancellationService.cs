@@ -1,12 +1,18 @@
+using Microsoft.Extensions.Options;
+
 namespace JeebGateway.Requests.Cancellation;
 
 /// <summary>
 /// T-backend-024 (JEEB-42) — see <see cref="ICancellationService"/>.
+/// JEB-1507: thresholds are now configurable via <see cref="CancellationPolicyOptions"/>
+/// (appsettings <c>CancellationPolicy</c> section) instead of hardcoded constants.
 /// </summary>
 public sealed class CancellationService : ICancellationService
 {
-    /// <summary>BR for Jeeber abuse-control: 3+ cancellations in 7 days
-    /// triggers a 24-hour restriction.</summary>
+    /// <summary>
+    /// Fallback constants kept for tests that reference the old names.
+    /// Production code reads from the injected <see cref="CancellationPolicyOptions"/>.
+    /// </summary>
     internal const int JeeberCancellationThreshold = 3;
     internal static readonly TimeSpan JeeberCancellationWindow = TimeSpan.FromDays(7);
     internal static readonly TimeSpan JeeberRestrictionDuration = TimeSpan.FromHours(24);
@@ -48,15 +54,18 @@ public sealed class CancellationService : ICancellationService
     private readonly IRequestsStore _store;
     private readonly IJeeberRestrictionStore _restrictions;
     private readonly TimeProvider _clock;
+    private readonly CancellationPolicyOptions _policy;
 
     public CancellationService(
         IRequestsStore store,
         IJeeberRestrictionStore restrictions,
-        TimeProvider clock)
+        TimeProvider clock,
+        IOptions<CancellationPolicyOptions> policy)
     {
         _store = store;
         _restrictions = restrictions;
         _clock = clock;
+        _policy = policy.Value;
     }
 
     public async Task<CancellationResult> CancelAsync(
@@ -124,18 +133,20 @@ public sealed class CancellationService : ICancellationService
                     null, false, null, null);
             }
 
-            // 3+/7d threshold. Counted AFTER the commit so the cancel we
-            // just landed counts toward the trigger — without that, the
-            // 3rd cancel in 7 days would only ever trip the 4th time.
+            // WeeklyThreshold+/rolling-window threshold. Counted AFTER the
+            // commit so the cancel we just landed counts toward the trigger —
+            // without that, the Nth cancel in the window would only ever trip
+            // the (N+1)th time.
             var jeeberId = storeResult.Request.JeeberId!;
             var rolling = await GetJeeberCancellationCountLast7DaysAsync(jeeberId, now, ct);
 
             var triggered = false;
             DateTimeOffset? expiresAt = null;
-            if (rolling >= JeeberCancellationThreshold)
+            var restrictionDuration = TimeSpan.FromHours(_policy.RestrictionDurationHours);
+            if (rolling >= _policy.WeeklyThreshold)
             {
-                await _restrictions.ApplyAsync(jeeberId, now, JeeberRestrictionDuration, ct);
-                expiresAt = now + JeeberRestrictionDuration;
+                await _restrictions.ApplyAsync(jeeberId, now, restrictionDuration, ct);
+                expiresAt = now + restrictionDuration;
                 triggered = true;
             }
 
@@ -283,7 +294,8 @@ public sealed class CancellationService : ICancellationService
     public async Task<int> GetJeeberCancellationCountLast7DaysAsync(
         string jeeberId, DateTimeOffset at, CancellationToken ct)
     {
-        var since = at - JeeberCancellationWindow;
+        var window = TimeSpan.FromDays(_policy.WeeklyWindowDays);
+        var since = at - window;
         var rows = await _store.ListJeeberCancelledAsync(jeeberId, ct);
         var count = 0;
         foreach (var r in rows)
