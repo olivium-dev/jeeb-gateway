@@ -79,7 +79,7 @@ paths:
               $ref: "#/components/schemas/OtpVerifyRequest"
       responses:
         "200":
-          description: OTP verified; JWT pair issued (HS512; access 1h / refresh 30d)
+          description: OTP verified; JWT pair issued (HS256; access 1h / refresh 30d)
           content:
             application/json:
               schema:
@@ -136,10 +136,10 @@ components:
       properties:
         accessToken:
           type: string
-          description: JWT, HS512, exp = 1h
+          description: JWT access token, HS256 (reconciled with the live TokenService, JEB-1480), exp = 1h
         refreshToken:
           type: string
-          description: JWT, HS512, exp = 30d, family-rotated
+          description: Opaque rotated refresh token, exp = 30d, family-rotated
         user:
           $ref: "#/components/schemas/User"
     User:
