@@ -6,6 +6,7 @@ using JeebGateway.Requests.OtpHandover;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Xunit;
 
@@ -348,8 +349,7 @@ public class OtpHandoverEndpointTests
         {
             builder.ConfigureServices(services =>
             {
-                var existing = services.Single(d => d.ServiceType == typeof(TimeProvider));
-                services.Remove(existing);
+                services.RemoveAll<TimeProvider>();
                 services.AddSingleton<TimeProvider>(theClock);
             });
         });

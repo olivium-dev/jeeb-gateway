@@ -66,6 +66,12 @@ public sealed class RequestVoiceController : ControllerBase
     /// <c>requestId</c> (text, idempotency anchor), <c>tier</c> (text).
     /// </summary>
     [HttpPost]
+    // Explicit [Consumes("multipart/form-data")] disambiguates this voice action from
+    // JeebRequestsController.Create's [Consumes("application/json")] on the SAME
+    // POST v1/requests route. Without it Swashbuckle's swagger-gen sees two actions on
+    // one method+path and throws SwaggerGeneratorException ("Conflicting method/path
+    // combination"); at runtime ASP.NET Core already selects by content-type via [FromForm].
+    [Consumes("multipart/form-data")]
     // ADR-005 L2 §C client-only voice create: replaces [RequireRole(Roles.Client)]. BR-9 stays STATE.
     [RequireCapability(Capabilities.RequestVoiceCreate)]
     [RequireActiveUser]

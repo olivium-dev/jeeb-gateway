@@ -130,6 +130,10 @@ public sealed class EarningsController : ControllerBase
     [HttpGet("statement/download")]
     // No [RequireCapability] — the signed token IS the authorization for this endpoint.
     // Standard [Authorize] not required; the token carries jeeberId + expiry + HMAC.
+    // [PublicEndpoint] is the EXPLICIT ADR-005 default-deny opt-out so the L2
+    // CapabilityCoverageGuard records this action as intentionally uncovered rather
+    // than flagging it as an unmapped (forgotten) capability.
+    [PublicEndpoint]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> DownloadStatementViaToken(
