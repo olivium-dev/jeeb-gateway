@@ -198,7 +198,14 @@ public sealed class JeebRequestsController : ControllerBase
     /// and GPS-tracking state. 404 when the id is unknown; 403 when the caller
     /// is not the request owner.
     /// </summary>
-    [HttpGet("v1/requests/{id}")]
+    // Order = 1 deprioritises this V1 read so it yields to RequestVoiceController.GetById
+    // (default Order 0) which ALSO maps GET /v1/requests/{id}. The two actions cannot be
+    // disambiguated by content-type (GET has no request body), so without an explicit
+    // precedence ASP.NET Core throws AmbiguousMatchException → 500. The voice read-back
+    // (S04 H2, a locked cross-surface contract) owns this exact route and echoes the
+    // transcript/confidence/language fields that DeliveryRequestDto does not carry; this
+    // V1 action remains the registered fallback. See JEB-1431 / #177 disambiguation note.
+    [HttpGet("v1/requests/{id}", Order = 1)]
     [RequireCapability(Capabilities.RequestReadOwn)]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

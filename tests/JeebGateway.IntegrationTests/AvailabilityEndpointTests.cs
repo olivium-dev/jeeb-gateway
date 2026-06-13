@@ -302,8 +302,7 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
             {
                 builder.ConfigureServices(services =>
                 {
-                    var clock = services.Single(d => d.ServiceType == typeof(TimeProvider));
-                    services.Remove(clock);
+                    services.RemoveAll<TimeProvider>();
                     services.AddSingleton<TimeProvider>(new FakeClock(new DateTimeOffset(2026, 5, 15, 12, 0, 0, TimeSpan.Zero)));
 
                     // Swap the production push-backed notifier for the in-memory
@@ -332,8 +331,7 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
             {
                 builder.ConfigureServices(services =>
                 {
-                    var clock = services.Single(d => d.ServiceType == typeof(TimeProvider));
-                    services.Remove(clock);
+                    services.RemoveAll<TimeProvider>();
                     services.AddSingleton<TimeProvider>(new FakeClock(new DateTimeOffset(2026, 5, 15, 12, 0, 0, TimeSpan.Zero)));
 
                     UseFakeDeliveryPresence(services);

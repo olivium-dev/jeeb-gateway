@@ -421,6 +421,104 @@ public sealed class WeeklySettlementBatch : BackgroundService
     }
 
     /// <summary>
+    /// Force-runnable entry point (used by WS-D test-console job registry).
+    /// Contains the idempotency guard so it is safe to call multiple times.
+    /// </summary>
+    public async Task RunBatchAsync(CancellationToken ct)
+    {
+        await using var scope = _scopes.CreateAsyncScope();
+        var batchStore = scope.ServiceProvider.GetRequiredService<ISettlementBatchStore>();
+        var stateService = scope.ServiceProvider.GetService<IJeebStateServiceClient>();
+
+        var now = _clock.GetUtcNow();
+        var periodEnd   = DateOnly.FromDateTime(now.Date).AddDays(-1);    // yesterday
+        var periodStart = periodEnd.AddDays(-6);                           // 7-day window
+
+        var windowKey = $"settlement-batch:{periodStart:yyyy-MM-dd}";
+
+        // Idempotency guard: use jeeb-state-service when available.
+        // GET the window key first; if it exists, the window has already been processed.
+        // If not found, UPSERT the key to record execution, then proceed.
+        // The DB settlement_batches UNIQUE(jeeber_id, period_start) is the hard guard.
+        if (stateService is not null)
+        {
+            try
+            {
+                bool alreadyExecuted = false;
+                try
+                {
+                    await stateService.GetIdempotencyKeyAsync(windowKey, ct);
+                    alreadyExecuted = true;
+                }
+                catch (JeebGateway.Services.Clients.JeebStateServiceApiException apiEx) when (apiEx.StatusCode == 404)
+                {
+                    // Key not found → first execution for this window. Record it then proceed.
+                    await stateService.UpsertIdempotencyKeyAsync(
+                        new JeebGateway.Services.Clients.IdempotencyPutRequest
+                        {
+                            Key        = windowKey,
+                            StatusCode = 200,
+                            TtlSeconds = 60 * 60 * 24 * 8, // 8 days — outlasts the weekly window
+                        }, ct);
+                }
+
+                if (alreadyExecuted)
+                {
+                    _log.LogInformation(
+                        "Settlement batch for window {Key} already executed; skipping.", windowKey);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Guard failure → degrade gracefully; the DB UNIQUE constraint is the hard guard.
+                _log.LogWarning(ex,
+                    "State-service idempotency guard failed for key {Key}; proceeding (DB UNIQUE is backup).",
+                    windowKey);
+            }
+        }
+
+        var pending = await batchStore.ListUnsettledAsync(_opts.Value.MaxBatchSize, ct);
+        if (pending.Count == 0)
+        {
+            _log.LogInformation("Weekly settlement batch [{Key}]: no unsettled items", windowKey);
+            return;
+        }
+
+        // Group by jeeberId → one batch per jeeber per week.
+        var byJeeber = pending.GroupBy(s => s.JeeberId);
+        int batchCount = 0;
+
+        foreach (var group in byJeeber)
+        {
+            var jeeberId   = group.Key;
+            var settlements = group.ToList();
+
+            try
+            {
+                var batch = await batchStore.CreateOrGetBatchAsync(
+                    jeeberId, periodStart, periodEnd, settlements, ct);
+
+                _log.LogInformation(
+                    "Settlement batch {BatchId} created for jeeber {JeeberId}: {Count} settlements, net {NetLbp} LBP",
+                    batch.Id, jeeberId, settlements.Count, batch.TotalNetLbp);
+
+                batchCount++;
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex,
+                    "Failed to create batch for jeeber {JeeberId} in window {Key}",
+                    jeeberId, windowKey);
+            }
+        }
+
+        _log.LogInformation(
+            "Weekly settlement batch [{Key}] complete: {BatchCount} batches created from {SettlementCount} settlements",
+            windowKey, batchCount, pending.Count);
+    }
+
+    /// <summary>
     /// Converts a UTC instant into the configured settlement timezone
     /// (default Asia/Beirut). Falls back to the original instant if the host
     /// does not know the timezone id, so the batch never crashes on a missing
@@ -443,17 +541,4 @@ public sealed class WeeklySettlementBatch : BackgroundService
             return utcNow;
         }
     }
-}
-
-public sealed class InMemorySettlementBatchStore : ISettlementBatchStore
-{
-    private readonly ISettlementStore _inner;
-
-    public InMemorySettlementBatchStore(ISettlementStore inner) => _inner = inner;
-
-    public Task<IReadOnlyList<Settlement>> ListUnsettledAsync(int limit, CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
-
-    public Task MarkBatchProcessedAsync(IReadOnlyList<string> settlementIds, DateTimeOffset at, CancellationToken ct)
-        => Task.CompletedTask;
 }

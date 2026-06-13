@@ -7,6 +7,7 @@ using JeebGateway.Push;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Xunit;
 
@@ -442,8 +443,7 @@ public class PushNotificationServiceTests
         {
             builder.ConfigureServices(services =>
             {
-                var existing = services.Single(d => d.ServiceType == typeof(TimeProvider));
-                services.Remove(existing);
+                services.RemoveAll<TimeProvider>();
                 services.AddSingleton<TimeProvider>(theClock);
             });
         });

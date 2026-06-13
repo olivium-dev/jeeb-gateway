@@ -257,4 +257,13 @@ public sealed class UpstreamFeatureFlags
     /// feedback-service blind-rating primitive is deployed.
     /// </summary>
     public bool Ratings { get; set; }
+
+    /// <summary>
+    /// JEB-1434 / JEB-1465: when true, the earnings aggregation reads live gross
+    /// revenue from the shared wallet-service (Transaction/holder/{id}/credit-revenue)
+    /// via <c>WalletEarningsAggregationService</c> instead of summing the in-memory
+    /// settlement rows (which are zero on a cold start). DEFAULTS OFF — flip to true
+    /// in Production once wallet-service is confirmed healthy.
+    /// </summary>
+    public bool Earnings { get; set; }
 }

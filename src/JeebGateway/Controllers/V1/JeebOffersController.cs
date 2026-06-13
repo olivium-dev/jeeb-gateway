@@ -161,7 +161,6 @@ public sealed class JeebOffersController : ControllerBase
             requestId,
             acceptedOfferId = result.Envelope?.AcceptedOfferId,
             jeeberId = result.Envelope?.JeeberId,
-            chatThreadId = result.Envelope?.ChatThreadId,
             status = "accepted"
         });
     }

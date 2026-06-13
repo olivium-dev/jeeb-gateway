@@ -71,4 +71,35 @@ public interface ISettlementStore
     /// retry of the replace never double-posts the ledger entry.
     /// </summary>
     Task<bool> ReplacePendingAsync(string deliveryId, Settlement settled, CancellationToken ct);
+
+    // ── JEB-56/57 batch lifecycle ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns all settlement rows in the <c>recorded</c> COD state whose
+    /// <see cref="Settlement.SettledAt"/> falls within the given window.
+    /// Used by the weekly batch cron to gather settlements for the closing window.
+    /// </summary>
+    Task<IReadOnlyList<Settlement>> ListRecordedInWindowAsync(
+        DateTimeOffset windowStart,
+        DateTimeOffset windowEnd,
+        int limit,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Atomically transitions a batch of settlement rows from <c>recorded</c> to
+    /// <c>batched</c>, setting <c>batch_id</c> and <c>batched_at</c>. Rows already
+    /// in a later state are skipped (idempotent).
+    /// </summary>
+    Task MarkBatchedAsync(
+        IReadOnlyList<string> settlementIds,
+        Guid batchId,
+        DateTimeOffset at,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Atomically transitions all settlements linked to <paramref name="batchId"/>
+    /// from <c>batched</c> to <c>paid</c>, setting <c>paid_at</c>. Rows already in
+    /// <c>paid</c> state are skipped (idempotent).
+    /// </summary>
+    Task MarkPaidByBatchAsync(Guid batchId, DateTimeOffset paidAt, CancellationToken ct);
 }
