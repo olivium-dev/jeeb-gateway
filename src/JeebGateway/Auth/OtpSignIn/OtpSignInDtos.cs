@@ -194,3 +194,59 @@ public sealed class OtpSignInOptions
     /// </summary>
     public int TtlSeconds { get; set; } = 300;
 }
+
+/// <summary>
+/// Additive, default-off hardening for the OTP sign-in identity-resolution read
+/// path (<c>POST /v1/auth/otp/verify</c>). Bound from <c>Security:Auth</c>.
+///
+/// <para><b>Why this exists.</b> When <c>FeatureFlags:UseUpstream:UserManagement</c>
+/// is ON, the gateway resolves the canonical identity (and the user's available
+/// roles) from user-management's phone find-or-create. The legacy behavior
+/// (<see cref="FailClosedIdentityResolve"/> = <c>false</c>) DEGRADES on a UM fault
+/// by silently falling back to the in-memory store, which mints a DIFFERENT user
+/// id and a stale single <c>client</c> role. That is correct for keeping a live
+/// login working through a transient UM blip, but it is WRONG for any flow that
+/// depends on UM being the authority for <c>available_roles</c> (e.g. the
+/// post-KYC <c>jeeber</c> grant): the fallback row never carries the granted role,
+/// so the user can never switch to it. Lease evidence
+/// <c>jeeb-20260613002036-8874</c> reproduced exactly this at S02/H-B2 on a virgin
+/// env: KYC approve grants <c>jeeber</c>, but OTP re-login read
+/// <c>available_roles=["client"]</c>.</para>
+///
+/// <para><b>Behavior when ON.</b> A UM find-or-create fault on the verify read path
+/// fails CLOSED — the gateway returns <b>503</b> <c>otp_unavailable</c>
+/// ProblemDetails instead of downgrading to the stale in-memory identity. The OTP
+/// code was still consumed upstream, so the client simply re-requests; it never
+/// receives a half-resolved session with the wrong roles. Default stays
+/// <c>false</c> so existing environments and fixtures are unchanged until an
+/// operator opts in (additive/default-off per the org options pattern).</para>
+/// </summary>
+public sealed class FailClosedIdentityResolveOptions
+{
+    public const string SectionName = "Security:Auth";
+
+    /// <summary>
+    /// When <c>true</c> AND <c>UseUpstream:UserManagement</c> is on, a UM
+    /// find-or-create fault on the OTP verify read path returns 503
+    /// <c>otp_unavailable</c> rather than falling back to the stale in-memory
+    /// identity. Defaults to <c>false</c> (legacy degrade-to-in-memory behavior).
+    /// </summary>
+    public bool FailClosedIdentityResolve { get; set; }
+}
+
+/// <summary>
+/// Raised by the OTP verify identity-resolution read path when
+/// <see cref="FailClosedIdentityResolveOptions.FailClosedIdentityResolve"/> is on
+/// and the user-management find-or-create faulted. The controller maps this to a
+/// 503 <c>otp_unavailable</c> ProblemDetails (fail-closed) instead of degrading to
+/// the in-memory identity. Carries the upstream status purely for the structured
+/// log; the value is never echoed to the caller.
+/// </summary>
+public sealed class OtpIdentityUnavailableException : Exception
+{
+    public int UpstreamStatus { get; }
+
+    public OtpIdentityUnavailableException(int upstreamStatus)
+        : base($"Identity resolution failed closed (user-management status {upstreamStatus}).")
+        => UpstreamStatus = upstreamStatus;
+}
