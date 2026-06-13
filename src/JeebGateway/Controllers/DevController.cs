@@ -268,7 +268,7 @@ public sealed class DevController : ControllerBase
         {
             var upstream = await _userManagement.AllAsync(skip, limit, null, ct);
 
-            var users = (upstream.Users ?? new List<UserProfileResponse>())
+            var users = (upstream.Users ?? new List<JeebGateway.service.ServiceUserManagement.UserProfileResponse>())
                 .Select(u => new DevUserView
                 {
                     UserId = u.UserId,
