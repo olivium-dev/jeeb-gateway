@@ -223,6 +223,118 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         otp.SendOtpCalls.Should().BeEmpty();
     }
 
+    // -------- Regression: canonical-vocab projection sync (fix/jeb-delivery-otp-projection-sync) --
+    //
+    // Real lease jeeb-20260613042555-0933, deliveryId 7dbd007c…: a delivery was
+    // walked Ordered→Picked→InTransit→AtDoor through the canonical PATCH path,
+    // which best-effort mirrors the UPSTREAM canonical status verbatim into the
+    // local store (PatchStatusViaDeliveryServiceAsync → _store.SetStatusAsync).
+    // delivery-service emits the canonical SM-1 token "AtDoor"
+    // (CanonicalDeliveryStatus.AtDoor), so the mirror row ends up carrying "AtDoor",
+    // NOT the gateway legacy "at_door" (RequestStatus.AtDoor). The handover-OTP
+    // gate's raw `delivery.Status != RequestStatus.AtDoor` equality therefore
+    // spuriously 400'd ("Current status: AtDoor") even though GET /deliveries/{id}
+    // (canonical read-through) reported 200 / AtDoor.
+    //
+    // These tests seed the row with the CANONICAL token to reproduce the exact
+    // post-PATCH-mirror state and prove the gate now passes (200) and the OTP is
+    // dispatched to the preserved recipient phone.
+
+    [Fact]
+    public async Task TriggerOtp_CanonicalAtDoorVocab_Returns200_AndPreservesRecipientPhone()
+    {
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
+
+        // Seed the mirror with the CANONICAL "AtDoor" token — exactly what the
+        // canonical PATCH-status path writes via _store.SetStatusAsync(upstream.Status).
+        // Before the fix this returned 400 invalid-otp-trigger-state ("Current status: AtDoor").
+        var seed = await SeedAsync(
+            factory, CanonicalDeliveryStatus.AtDoor, recipientPhone: "+962799123456");
+        var http = AuthClient(factory, seed.JeeberId);
+
+        var resp = await http.GetAsync($"/deliveries/{seed.Id}/otp");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "a row synced from the canonical PATCH path carries 'AtDoor' and is the AtDoor handover state");
+        var body = await resp.Content.ReadFromJsonAsync<OtpTriggerResponseDto>();
+        body!.DeliveryId.Should().Be(seed.Id);
+        body.Triggered.Should().BeTrue();
+
+        // recipientPhone is preserved across the canonical-vocab status transition
+        // (SetStatusAsync never clears it) — the OTP ships to the real number.
+        otp.SendOtpCalls.Should().ContainSingle();
+        otp.SendOtpCalls[0].PhoneNumber.Should().Be("+962799123456");
+    }
+
+    [Fact]
+    public async Task VerifyOtp_CanonicalAtDoorVocab_Returns200()
+    {
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
+
+        // Same canonical-vocab mirror state on the verify gate.
+        var seed = await SeedAsync(
+            factory, CanonicalDeliveryStatus.AtDoor, recipientPhone: "+962700555666");
+        var http = AuthClient(factory, seed.JeeberId);
+
+        var resp = await http.PostAsJsonAsync(
+            $"/deliveries/{seed.Id}/otp/verify",
+            new { code = "1234" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "verify must accept the canonical 'AtDoor' mirror vocab, not only legacy 'at_door'");
+        var body = await resp.Content.ReadFromJsonAsync<OtpVerificationResponseDto>();
+        body!.Verified.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task TriggerOtp_LegacyAtDoorVocab_StillReturns200_NoRegression()
+    {
+        // The legacy snake_case "at_door" path must keep working unchanged — the
+        // fix WIDENS what the gate accepts, it does not relax or replace it.
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
+
+        var seed = await SeedAsync(
+            factory, RequestStatus.AtDoor, recipientPhone: "+962700112233");
+        var http = AuthClient(factory, seed.JeeberId);
+
+        var resp = await http.GetAsync($"/deliveries/{seed.Id}/otp");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        otp.SendOtpCalls.Should().ContainSingle();
+        otp.SendOtpCalls[0].PhoneNumber.Should().Be("+962700112233");
+    }
+
+    [Fact]
+    public async Task TriggerOtp_CanonicalInTransitVocab_Still400_GateNotRelaxed()
+    {
+        // Guard against over-widening: a non-AtDoor canonical state (InTransit)
+        // must STILL be rejected — the gate precondition is preserved.
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
+
+        var seed = await SeedAsync(
+            factory, CanonicalDeliveryStatus.InTransit, recipientPhone: "+962700445566");
+        var http = AuthClient(factory, seed.JeeberId);
+
+        var resp = await http.GetAsync($"/deliveries/{seed.Id}/otp");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/invalid-otp-trigger-state");
+        otp.SendOtpCalls.Should().BeEmpty();
+    }
+
     [Fact]
     public async Task TriggerOtp_WithUnknownDelivery_Returns404()
     {
