@@ -50,6 +50,7 @@ public sealed class AuthOtpController : ControllerBase
     private readonly IServiceOTPClient _otpClient;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IOptions<OtpSignInOptions> _options;
+    private readonly IOptionsMonitor<FailClosedIdentityResolveOptions> _identityOptions;
     private readonly IUsersStore _users;
     private readonly ITokenService _tokens;
     private readonly IPhonePolicy _phonePolicy;
@@ -61,6 +62,7 @@ public sealed class AuthOtpController : ControllerBase
         IServiceOTPClient otpClient,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         IOptions<OtpSignInOptions> options,
+        IOptionsMonitor<FailClosedIdentityResolveOptions> identityOptions,
         IUsersStore users,
         ITokenService tokens,
         IPhonePolicy phonePolicy,
@@ -71,6 +73,7 @@ public sealed class AuthOtpController : ControllerBase
         _otpClient = otpClient;
         _flags = flags;
         _options = options;
+        _identityOptions = identityOptions;
         _users = users;
         _tokens = tokens;
         _phonePolicy = phonePolicy;
@@ -232,7 +235,25 @@ public sealed class AuthOtpController : ControllerBase
         // mint is orchestration and stays in the gateway — N11 split-signer: only the
         // role-switch path is UM-signed).
         var key = (body.Phone ?? string.Empty).Trim();
-        var (userId, opaqueRoles, opaqueActiveRole) = await ResolveIdentityAsync(key, ct);
+        string userId;
+        IReadOnlyList<string> opaqueRoles;
+        string opaqueActiveRole;
+        try
+        {
+            (userId, opaqueRoles, opaqueActiveRole) = await ResolveIdentityAsync(key, ct);
+        }
+        catch (OtpIdentityUnavailableException ex)
+        {
+            // Fail-closed (Security:Auth:FailClosedIdentityResolve = true): the
+            // identity authority faulted, so we DO NOT mint a half-resolved session
+            // with the stale in-memory identity/roles. Return 503 otp_unavailable;
+            // the validated code is already consumed upstream, so the client simply
+            // re-requests. The upstream status is logged, never echoed.
+            _log.LogWarning(
+                "auth.otp.verify identity resolution failed closed (UM status {Status}); returning 503 otp_unavailable",
+                ex.UpstreamStatus);
+            return IdentityUnavailable();
+        }
 
         // Project the UM-resolved identity locally so the gateway-minted JWT embeds the
         // SAME active_role/roles claims UM persisted (TokenService reads active_role from
@@ -296,7 +317,19 @@ public sealed class AuthOtpController : ControllerBase
             }
             catch (UserManagementCallException ex)
             {
-                // Fail-safe: never block a successful OTP validate on a UM blip.
+                // ADDITIVE, default-off hardening (Security:Auth:FailClosedIdentityResolve).
+                // When ON, a UM fault on the read path FAILS CLOSED — we surface a typed
+                // exception the controller maps to 503 otp_unavailable — rather than
+                // silently degrading to the in-memory store, which mints a DIFFERENT user
+                // id and a stale single 'client' role (lease jeeb-20260613002036-8874: the
+                // post-KYC 'jeeber' grant is then unreachable). Default OFF preserves the
+                // legacy fail-safe degrade so live logins survive a transient UM blip.
+                if (_identityOptions.CurrentValue.FailClosedIdentityResolve)
+                {
+                    throw new OtpIdentityUnavailableException(ex.StatusCode);
+                }
+
+                // Fail-safe (legacy default): never block a successful OTP validate on a UM blip.
                 _log.LogWarning(
                     "auth.otp.verify UM find-or-create failed (status {Status}); falling back to in-memory identity",
                     ex.StatusCode);
@@ -319,6 +352,20 @@ public sealed class AuthOtpController : ControllerBase
         "OTP service not enabled",
         "The one-time-password upstream is not enabled in this environment "
         + "(FeatureFlags:UseUpstream:Otp is false).");
+
+    /// <summary>
+    /// 503 ProblemDetails when fail-closed identity resolution is enabled
+    /// (Security:Auth:FailClosedIdentityResolve) and the user-management identity
+    /// authority faulted on the verify read path. Same frozen <c>otp_unavailable</c>
+    /// shape as <see cref="UpstreamDisabled"/> — the client re-requests an OTP. The
+    /// validated code was consumed upstream; no half-resolved session is minted, so
+    /// the user never receives a token bearing the wrong (stale) roles.
+    /// </summary>
+    private ObjectResult IdentityUnavailable() => OtpSignInProblems.Problem(
+        this, StatusCodes.Status503ServiceUnavailable, "otp_unavailable",
+        "Sign-in temporarily unavailable",
+        "The identity service is temporarily unavailable. Please request a new "
+        + "code and try again.");
 
     /// <summary>
     /// Maps an upstream one-time-password <b>429</b> to a gateway 429
