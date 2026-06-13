@@ -45,18 +45,23 @@ public class FT04ModerationGateTests : IClassFixture<WebApplicationFactory<Progr
 
         var http = factory.CreateClient();
         http.DefaultRequestHeaders.Add("X-User-Id",    $"client-{Guid.NewGuid()}");
-        http.DefaultRequestHeaders.Add("X-User-Roles", "client");
+        http.DefaultRequestHeaders.Add("X-User-Roles", "customer");
 
+        // Send a COMPLETE, valid body so request validation does not short-circuit
+        // with a 400 before the moderation gate runs — the gate is what we assert.
         var resp = await http.PostAsJsonAsync("/requests", new
         {
-            Description = "some item that should be screened"
+            description     = "some item that should be screened",
+            tierId          = "flash",
+            pickupLocation  = new { lat = 33.88, lng = 35.50 },
+            dropoffLocation = new { lat = 33.89, lng = 35.51 }
         });
 
         resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable,
             "an empty lexicon must fail closed with 503, not let traffic through");
 
         var body = await resp.Content.ReadAsStringAsync();
-        body.Should().Contain("moderation_unavailable",
+        body.Should().Contain("Moderation service temporarily unavailable",
             "503 body must name the reason so callers can distinguish this from a generic 503");
     }
 
@@ -68,11 +73,14 @@ public class FT04ModerationGateTests : IClassFixture<WebApplicationFactory<Progr
         // Default factory has the seeded lexicon; benign description passes.
         var http = _factory.CreateClient();
         http.DefaultRequestHeaders.Add("X-User-Id",    $"client-{Guid.NewGuid()}");
-        http.DefaultRequestHeaders.Add("X-User-Roles", "client");
+        http.DefaultRequestHeaders.Add("X-User-Roles", "customer");
 
         var resp = await http.PostAsJsonAsync("/requests", new
         {
-            Description = "a bouquet of flowers"
+            description     = "a bouquet of flowers",
+            tierId          = "flash",
+            pickupLocation  = new { lat = 33.88, lng = 35.50 },
+            dropoffLocation = new { lat = 33.89, lng = 35.51 }
         });
 
         // 200/201/400/422 are all acceptable (auth or validation may fire before moderation);
@@ -85,8 +93,20 @@ public class FT04ModerationGateTests : IClassFixture<WebApplicationFactory<Progr
 }
 
 /// <summary>
-/// Test double: an <see cref="IProhibitedItemsStore"/> that always returns an
-/// empty active set to simulate an unloadable or not-yet-seeded lexicon.
+/// Test double: an <see cref="IProhibitedItemsStore"/> whose <see cref="ListActiveAsync"/>
+/// always returns an EMPTY active set — simulating an unloadable / not-yet-loaded
+/// lexicon at request time. This is the precise condition the fail-closed gate
+/// must catch (an empty lexicon must 503, not let traffic through).
+///
+/// <para>NOTE: writes (<see cref="CreateAsync"/> / <see cref="AcknowledgeAsync"/>)
+/// are accepted as harmless no-ops rather than throwing. The gateway registers
+/// <c>DefaultLexiconSeeder</c> (an <see cref="Microsoft.Extensions.Hosting.IHostedService"/>)
+/// which runs at host startup and calls <c>CreateAsync</c> for each default term.
+/// If the double threw, the host would fail to start and the test could never
+/// reach the request under assertion. Because <c>ListActiveAsync</c> still returns
+/// empty regardless of what was "created", the double faithfully models a lexicon
+/// whose writes appear to succeed but whose active set never materialises — exactly
+/// the unloadable-lexicon fail-closed scenario.</para>
 /// </summary>
 file sealed class EmptyProhibitedItemsStore : IProhibitedItemsStore
 {
@@ -94,13 +114,24 @@ file sealed class EmptyProhibitedItemsStore : IProhibitedItemsStore
         => Task.FromResult<IReadOnlyList<ProhibitedItem>>(Array.Empty<ProhibitedItem>());
 
     public Task<ProhibitedItemsPage> ListAllAsync(int page, int pageSize, CancellationToken ct)
-        => Task.FromResult(new ProhibitedItemsPage(Array.Empty<ProhibitedItem>(), 0, page, pageSize));
+        => Task.FromResult(new ProhibitedItemsPage { Items = Array.Empty<ProhibitedItem>(), Total = 0 });
 
     public Task<ProhibitedItem?> GetAsync(string id, CancellationToken ct)
         => Task.FromResult<ProhibitedItem?>(null);
 
     public Task<ProhibitedItem> CreateAsync(ProhibitedItemCreate input, string adminUserId, CancellationToken ct)
-        => throw new NotSupportedException("read-only test double");
+        => Task.FromResult(new ProhibitedItem
+        {
+            Id        = Guid.NewGuid().ToString(),
+            Name      = input.Name,
+            Category  = input.Category,
+            Severity  = input.Severity,
+            Active    = true,
+            CreatedBy = adminUserId,
+            UpdatedBy = adminUserId,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        });
 
     public Task<ProhibitedItem?> UpdateAsync(string id, ProhibitedItemPatch patch, string adminUserId, CancellationToken ct)
         => Task.FromResult<ProhibitedItem?>(null);
@@ -109,5 +140,10 @@ file sealed class EmptyProhibitedItemsStore : IProhibitedItemsStore
         => Task.FromResult<UserAcknowledgment?>(null);
 
     public Task<UserAcknowledgment> AcknowledgeAsync(string userId, string version, CancellationToken ct)
-        => throw new NotSupportedException("read-only test double");
+        => Task.FromResult(new UserAcknowledgment
+        {
+            UserId         = userId,
+            Version        = version,
+            AcknowledgedAt = DateTimeOffset.UtcNow,
+        });
 }

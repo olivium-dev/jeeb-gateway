@@ -319,6 +319,15 @@ builder.Services.AddSwaggerGen(options =>
     // /swagger/v1/swagger.json document the moment the admin-gated Swagger
     // surface is enabled. See MultipartFormFileOperationFilter.
     options.OperationFilter<JeebGateway.Security.MultipartFormFileOperationFilter>();
+    // POST /v1/requests is intentionally served by TWO actions disambiguated at
+    // runtime by content-type: JeebRequestsController.Create ([Consumes(application/json)])
+    // and RequestVoiceController.SubmitVoice ([Consumes(multipart/form-data)]). Swashbuckle's
+    // swagger-gen groups purely by method+path and throws SwaggerGeneratorException
+    // ("Conflicting method/path combination") for such a pair, which 500s the
+    // /swagger/v1/swagger.json document under the admin-gated Swagger surface. Resolve
+    // by emitting the first action for the shared path — the runtime selection is
+    // unaffected (content-type negotiation still routes each request correctly).
+    options.ResolveConflictingActions(apiDescriptions => apiDescriptions.First());
 });
 
 // Health checks — the live probe ("self") returns 200 if the process is up;
@@ -809,7 +818,17 @@ builder.Services.Configure<JeebPricingOptions>(
 // slim ledger contract in the Financials module — it does NOT ride on the
 // wallet integration, which now mirrors the salehly-gateway sibling's
 // upstream wallet API byte-for-byte (WalletController + ServiceWalletClient).
-builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
+var gatewayPostgresCs = builder.Configuration["GatewayPostgres:ConnectionString"];
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.Infrastructure.INpgsqlConnectionFactory>(
+        _ => new JeebGateway.Infrastructure.NpgsqlConnectionFactory(gatewayPostgresCs));
+    builder.Services.AddSingleton<ISettlementStore, PostgresSettlementStore>();
+}
+else
+{
+    builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
+}
 
 // GR3 (JEB-1484) — the cash-settlement ledger post runs THROUGH UPG via the
 // generic external-settlement endpoint (UpgSettlementLedgerClient ->

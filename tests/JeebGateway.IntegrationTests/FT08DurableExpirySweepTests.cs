@@ -132,7 +132,8 @@ public class FT08DurableExpirySweepTests
         public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct) => Task.FromResult<IReadOnlyList<DeliveryRequest>>(Array.Empty<DeliveryRequest>());
         public Task<int> CountActiveForJeeberAsync(string jeeberId, CancellationToken ct) => Task.FromResult(0);
         public Task<DeliveryRequest?> TryAcceptByJeeberAsync(string requestId, string jeeberId, int limit, DateTimeOffset at, CancellationToken ct) => Task.FromResult<DeliveryRequest?>(null);
-        public Task<DeliveryTransitionResult> TryTransitionAsync(string requestId, string toStatus, string? otp, CancellationToken ct) => throw new NotImplementedException();
+        // JEB-1479: TryTransitionAsync (the legacy linear delivery-transition method)
+        // was retired from IRequestsStore by #151. The stub no longer implements it.
         public Task<CancellationStoreResult?> TryCancelAsync(string requestId, IReadOnlySet<string> allowedFromStates, string targetStatus, string cancelledBy, string? reason, DateTimeOffset at, CancellationToken ct) => throw new NotImplementedException();
         public Task<CancellationStoreResult?> TryDecideCancellationAsync(string requestId, bool approve, DateTimeOffset at, CancellationToken ct) => throw new NotImplementedException();
         public Task<(IReadOnlyList<DeliveryRequest> Items, int Total)> ListPendingCancellationsAsync(int page, int pageSize, CancellationToken ct) => Task.FromResult<(IReadOnlyList<DeliveryRequest>, int)>((Array.Empty<DeliveryRequest>(), 0));
