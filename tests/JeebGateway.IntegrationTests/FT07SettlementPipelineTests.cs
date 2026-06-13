@@ -1,81 +1,39 @@
 using FluentAssertions;
 using JeebGateway.Financials;
-using JeebGateway.Requests;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// FT-07: verify that the settlement pipeline is wired after a successful
-/// handover-OTP verification.
+/// FT-07: verify the idempotent settlement-store contract that backs the
+/// settlement pipeline.
 ///
 /// Key assertions:
-///   A1. After OTP verify, a <see cref="SettlementState.PendingSettlement"/> row
-///       is created in <see cref="ISettlementStore"/> keyed on deliveryId.
-///   A2. A second OTP verify (A7 idempotent replay) does NOT create a second
-///       settlement row — the store returns the original placeholder.
-///   A3. Calling POST /deliveries/{id}/settle upgrades the pending row to
-///       <see cref="SettlementState.Settled"/> (ReplacePendingAsync path).
+///   A2. A second insert for the same deliveryId (idempotent replay) does NOT
+///       create a second settlement row — the store returns the original placeholder.
+///   A3. <see cref="ISettlementStore.ReplacePendingAsync"/> upgrades the pending
+///       row to <see cref="SettlementState.Settled"/> without duplicating it.
+///
+/// NOTE (JEB-1479 / #151): the original A1 test drove a delivery through the
+/// gateway's linear state machine (TryTransitionAsync) and a SetOtpAsync seam,
+/// then POSTed /deliveries/{id}/verify-otp to assert the OTP-verify→settlement
+/// enqueue. That linear state-machine path was RETIRED from the gateway by #151
+/// (DeliveryStateMachineRetiredGuardTests enforces zero TryTransitionAsync call
+/// sites in src), and the OTP-verify→settlement wiring now lives in
+/// delivery-service — not the gateway IRequestsStore. The methods A1 depended on
+/// (IRequestsStore.TryTransitionAsync, IRequestsStore.SetOtpAsync) no longer exist
+/// in source, so A1 cannot be reconciled against the current API and was removed.
+/// A2/A3 below exercise the still-canonical ISettlementStore idempotency +
+/// ReplacePendingAsync contract directly, with no dependency on the retired path.
 /// </summary>
-public class FT07SettlementPipelineTests : IClassFixture<WebApplicationFactory<Program>>
+public class FT07SettlementPipelineTests
 {
-    private readonly WebApplicationFactory<Program> _factory;
-
-    public FT07SettlementPipelineTests(WebApplicationFactory<Program> factory)
-    {
-        _factory = factory;
-    }
-
-    // ---- A1: pending-settlement row created at OTP verify time ---------------
-
-    [Fact]
-    public async Task AfterOtpVerify_PendingSettlementRow_IsCreated()
-    {
-        // Seed a delivery at heading_off (the legacy OTP gate state).
-        var store = _factory.Services.GetRequiredService<IRequestsStore>();
-        var delivery = await store.TryCreateWithLimitAsync(new CreateRequestInput
-        {
-            ClientId    = $"client-{Guid.NewGuid()}",
-            Description = "Test delivery FT-07",
-            TierId      = "standard",
-        }, limit: 10, ct: default);
-
-        await store.TryTransitionAsync(delivery.Id, RequestStatus.Matched,    null, default);
-        await store.TryTransitionAsync(delivery.Id, RequestStatus.Accepted,   null, default);
-        await store.TryTransitionAsync(delivery.Id, RequestStatus.PickedUp,   null, default);
-        await store.TryTransitionAsync(delivery.Id, RequestStatus.HeadingOff, null, default);
-
-        // Seed an OTP so TryVerifyOtpAsync succeeds.
-        await store.SetOtpAsync(delivery.Id, "123456", default);
-
-        var http = _factory.CreateClient();
-        http.DefaultRequestHeaders.Add("X-User-Id",    delivery.ClientId);
-        http.DefaultRequestHeaders.Add("X-User-Roles", "client");
-
-        var resp = await http.PostAsJsonAsync(
-            $"/deliveries/{delivery.Id}/verify-otp",
-            new { OtpCode = "123456" });
-
-        resp.IsSuccessStatusCode.Should().BeTrue(
-            $"OTP verify should succeed; got {resp.StatusCode}");
-
-        // The settlement store must now contain a pending_settlement row.
-        var settlementStore = _factory.Services.GetRequiredService<ISettlementStore>();
-        var row = await settlementStore.GetByDeliveryAsync(delivery.Id, default);
-
-        row.Should().NotBeNull("a pending_settlement row must be enqueued at OTP verify");
-        row!.State.Should().Be(SettlementState.PendingSettlement);
-        row.DeliveryId.Should().Be(delivery.Id);
-    }
-
-    // ---- A2: second OTP verify → same one row (idempotency) ------------------
+    // ---- A2: second insert for same deliveryId → same one row (idempotency) ---
 
     [Fact]
     public async Task SameDeliveryId_TwiceInSettlementStore_YieldsOneRow()
     {
-        var settlementStore = _factory.Services.GetRequiredService<ISettlementStore>();
+        var settlementStore = new InMemorySettlementStore();
 
         var deliveryId = $"delivery-{Guid.NewGuid()}";
 
@@ -101,7 +59,7 @@ public class FT07SettlementPipelineTests : IClassFixture<WebApplicationFactory<P
     [Fact]
     public async Task ReplacePending_UpgradesPendingToSettled_WithoutDuplicate()
     {
-        var settlementStore = _factory.Services.GetRequiredService<ISettlementStore>();
+        var settlementStore = new InMemorySettlementStore();
         var deliveryId = $"delivery-{Guid.NewGuid()}";
 
         // 1. Create placeholder.

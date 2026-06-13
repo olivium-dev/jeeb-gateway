@@ -35,11 +35,6 @@ public static class Capabilities
     public const string DataExportSelf = "data.export.self";
     public const string NotificationPrefsSelf = "notification.prefs.self";
     public const string NotificationsReadSelf = "notifications.read.self";
-    /// <summary>
-    /// FT-06: service-to-service or admin capability authorising callers to
-    /// POST /v1/notifications/dispatch (WS-A JEB-57 weekly batch dependency).
-    /// </summary>
-    public const string NotificationDispatch = "notifications.dispatch";
     public const string AuthLogoutSelf = "auth.logout.self";
 
     // ── C. Client-only {client} ───────────────────────────────────────────────────────

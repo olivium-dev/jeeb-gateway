@@ -95,24 +95,74 @@ public sealed class PostgresSettlementStore : ISettlementStore
     }
 
     public async Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
-        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct)
+        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct,
+        IReadOnlyCollection<string>? codStates = null)
     {
         await using var conn = await _db.OpenAsync(ct);
 
-        var sql = """
-            SELECT * FROM settlements
-            WHERE jeeber_id = @JeeberId
-              AND (@From IS NULL OR settled_at >= @From)
-              AND (@To   IS NULL OR settled_at <= @To)
-            ORDER BY settled_at ASC
-            """;
+        // JEB-58: earnings query uses idx_settlements_jeeber_state_settled.
+        // When codStates is specified, use ANY(@CodStates) to stay on the index.
+        var sql = codStates is { Count: > 0 }
+            ? """
+              SELECT * FROM settlements
+              WHERE jeeber_id = @JeeberId
+                AND cod_state = ANY(@CodStates)
+                AND (@From IS NULL OR settled_at >= @From)
+                AND (@To   IS NULL OR settled_at <= @To)
+              ORDER BY settled_at ASC
+              """
+            : """
+              SELECT * FROM settlements
+              WHERE jeeber_id = @JeeberId
+                AND (@From IS NULL OR settled_at >= @From)
+                AND (@To   IS NULL OR settled_at <= @To)
+              ORDER BY settled_at ASC
+              """;
 
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("JeeberId", jeeberId);
         cmd.Parameters.AddWithValue("From", (object?)from ?? DBNull.Value);
         cmd.Parameters.AddWithValue("To", (object?)to ?? DBNull.Value);
+        if (codStates is { Count: > 0 })
+            cmd.Parameters.AddWithValue("CodStates", codStates.ToArray());
 
         return await ReadListAsync(cmd, ct);
+    }
+
+    public async Task<bool> ReplacePendingAsync(string deliveryId, Settlement settled, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE settlements
+               SET id            = @NewId,
+                   goods_cost    = @GoodsCost,
+                   commission    = @Commission,
+                   commission_rate = @CommissionRate,
+                   insurance     = @Insurance,
+                   total         = @Total,
+                   min_fee_applied = @MinimumFeeApplied,
+                   payment_method = @PaymentMethod,
+                   state         = @State,
+                   cod_state     = @CodState,
+                   settled_at    = @SettledAt
+             WHERE delivery_id = @DeliveryId
+               AND state = 'pending_settlement'
+            """;
+        cmd.Parameters.AddWithValue("NewId", Guid.Parse(settled.Id));
+        cmd.Parameters.AddWithValue("DeliveryId", deliveryId);
+        cmd.Parameters.AddWithValue("GoodsCost", settled.GoodsCost);
+        cmd.Parameters.AddWithValue("Commission", settled.Commission);
+        cmd.Parameters.AddWithValue("CommissionRate", settled.CommissionRate);
+        cmd.Parameters.AddWithValue("Insurance", settled.Insurance);
+        cmd.Parameters.AddWithValue("Total", settled.Total);
+        cmd.Parameters.AddWithValue("MinimumFeeApplied", settled.MinimumFeeApplied);
+        cmd.Parameters.AddWithValue("PaymentMethod", settled.PaymentMethod);
+        cmd.Parameters.AddWithValue("State", settled.State);
+        cmd.Parameters.AddWithValue("CodState", settled.CodState);
+        cmd.Parameters.AddWithValue("SettledAt", settled.SettledAt);
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        return rows > 0;
     }
 
     public async Task<bool> SetLedgerEntryAsync(string settlementId, string ledgerEntryId, CancellationToken ct)

@@ -583,8 +583,8 @@ public class RequestsController : ControllerBase
         // CURRENT lexicon version. Re-using the same version semantics as
         // GET /prohibited-items + POST /prohibited-items/acknowledge so the ack
         // the mobile ack-dialog records is the one that clears this gate.
-        // (lexiconItems already loaded above — no second round-trip needed.)
-        var currentVersion = ComputeLexiconVersion(lexiconItems);
+        // (activeItems already loaded above — no second round-trip needed.)
+        var currentVersion = ComputeLexiconVersion(activeItems);
         var ack = await _prohibited.GetAcknowledgmentAsync(clientId, ct);
         var acknowledged = ack is not null && string.Equals(ack.Version, currentVersion, StringComparison.Ordinal);
 
