@@ -2,8 +2,11 @@ using System.Security.Cryptography;
 using System.Text;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Security;
+using JeebGateway.Services;
+using JeebGateway.Users;
 using JeebGateway.service.ServiceUserManagement;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using UserManagementApiException = JeebGateway.service.ServiceUserManagement.ApiException;
 // JEB-1472: the regenerated UserManagement NSwag client now emits a ProblemDetails
 // DTO (the bumped UM 1.1.0 contract documents RFC 7807 error bodies). Alias the bare
@@ -58,13 +61,19 @@ namespace JeebGateway.Controllers;
 public sealed class DevController : ControllerBase
 {
     private readonly ServiceUserManagementClient _userManagement;
+    private readonly IUserManagementDualRoleClient _phoneIdentity;
+    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly ILogger<DevController> _logger;
 
     public DevController(
         ServiceUserManagementClient userManagement,
+        IUserManagementDualRoleClient phoneIdentity,
+        IOptionsMonitor<UpstreamFeatureFlags> flags,
         ILogger<DevController> logger)
     {
         _userManagement = userManagement;
+        _phoneIdentity = phoneIdentity;
+        _flags = flags;
         _logger = logger;
     }
 
@@ -150,6 +159,44 @@ public sealed class DevController : ControllerBase
         {
             var created = await _userManagement.RegisterAsync(registerRequest, ct);
 
+            // --- Phone-identity convergence (the S02/H-B2 root fix) ---------------
+            // The generic register surface keys identity by email/username and NEVER
+            // writes a PhoneHash. The OTP sign-in path, by contrast, resolves identity
+            // via user-management's phone-identity find-or-create (keyed by phone_hash).
+            // On a virgin env that means a seeded user and the SAME phone's OTP login
+            // mint DIFFERENT user ids — so a KYC role grant applied to the seeded id is
+            // invisible to the OTP-resolved id (lease jeeb-20260613002036-8874: re-login
+            // reads available_roles=["client"] missing "jeeber").
+            //
+            // Fix: when the UM upstream is enabled, establish the CANONICAL phone-keyed
+            // identity through the SAME find-or-create the OTP path uses, and return
+            // THAT user id from the seed. Now seed and OTP converge on one row, so a
+            // later KYC grant lands on the id OTP re-login resolves. Idempotent and
+            // additive; when UM is off we keep the legacy register-only id (unchanged).
+            var canonicalUserId = created.UserId;
+            if (_flags.CurrentValue.UserManagement)
+            {
+                try
+                {
+                    var identity = await _phoneIdentity.PhoneFindOrCreateAsync(request.Phone!.Trim(), ct);
+                    if (!string.IsNullOrWhiteSpace(identity.UserId))
+                    {
+                        canonicalUserId = identity.UserId;
+                    }
+                }
+                catch (UserManagementCallException ex)
+                {
+                    // Non-fatal: the user IS registered. Surface the seed with the
+                    // register id and warn — the harness can still proceed, but flag
+                    // that phone convergence did not complete (so a later grant/login
+                    // mismatch is diagnosable). Never echo phone/password.
+                    _logger.LogWarning(
+                        "Dev seed phone-identity convergence failed (UM status {Status}); "
+                        + "returning register id — seed and OTP login may diverge.",
+                        ex.StatusCode);
+                }
+            }
+
             // Structured log — role/runId/username/email only. NEVER the password
             // or the phone (the phone is PII; only the derived handle is logged).
             _logger.LogInformation(
@@ -158,7 +205,7 @@ public sealed class DevController : ControllerBase
 
             var response = new DevSeedUserResponse
             {
-                UserId = created.UserId,
+                UserId = canonicalUserId,
                 Role = role,
                 Phone = request.Phone,
                 DisplayName = request.DisplayName,
@@ -221,7 +268,7 @@ public sealed class DevController : ControllerBase
         {
             var upstream = await _userManagement.AllAsync(skip, limit, null, ct);
 
-            var users = (upstream.Users ?? new List<UserProfileResponse>())
+            var users = (upstream.Users ?? new List<JeebGateway.service.ServiceUserManagement.UserProfileResponse>())
                 .Select(u => new DevUserView
                 {
                     UserId = u.UserId,

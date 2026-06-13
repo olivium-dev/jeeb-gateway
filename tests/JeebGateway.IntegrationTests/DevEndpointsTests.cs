@@ -453,4 +453,158 @@ public class DevEndpointsTests
         public string? Email { get; set; }
         public string? Status { get; set; }
     }
+
+    // =====================================================================
+    // Phone-identity convergence (the S02/H-B2 root fix, lease
+    // jeeb-20260613002036-8874). When UseUpstream:UserManagement is ON, the
+    // seed must reconcile the freshly-registered (email-keyed) user to the
+    // CANONICAL phone-keyed identity that OTP sign-in resolves, and return
+    // THAT user id — so a later KYC role grant lands on the id the OTP
+    // re-login reads back.
+    // =====================================================================
+
+    [Fact]
+    public async Task SeedUser_UmFlagOn_Returns_PhoneCanonical_UserId_Not_RegisterId()
+    {
+        // The register upstream returns an email-keyed id; the phone-identity
+        // authority returns a DIFFERENT, phone-keyed id (the divergence the bug
+        // is about). The seed must return the phone-canonical id.
+        var registerStub = new StubHttpMessageHandler(_ => JsonResponse("""
+            { "userId": "REGISTER-EMAIL-KEYED-ID", "username": "sami", "email": "seed-sami@jeeb.test", "status": "created" }
+            """));
+        var phoneIdentity = new FakePhoneIdentityClient("PHONE-CANONICAL-ID");
+
+        using var factory = NewFactoryWithPhoneIdentity(
+            enabled: true, userManagementEnabled: true,
+            upstreamHandler: registerStub, phoneIdentity: phoneIdentity);
+        var client = factory.CreateClient();
+
+        var resp = await client.PostAsync("/dev/seed/user", JsonBody("""
+            { "role": "jeeber", "phone": "+96139120009", "displayName": "Sami" }
+            """));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<SeedUserResponseDto>();
+        body!.UserId.Should().Be("PHONE-CANONICAL-ID",
+            "the seed must converge on the phone-keyed identity OTP sign-in resolves, "
+            + "not the divergent email-keyed register id");
+        phoneIdentity.Calls.Should().Be(1, "convergence must dial the phone find-or-create");
+        phoneIdentity.LastPhone.Should().Be("+96139120009");
+    }
+
+    [Fact]
+    public async Task SeedUser_UmFlagOff_KeepsLegacy_RegisterId_Unchanged()
+    {
+        // Default-off: behavior is exactly the legacy register-only path.
+        var registerStub = new StubHttpMessageHandler(_ => JsonResponse("""
+            { "userId": "REGISTER-EMAIL-KEYED-ID", "username": "sami", "email": "seed-sami@jeeb.test", "status": "created" }
+            """));
+        var phoneIdentity = new FakePhoneIdentityClient("PHONE-CANONICAL-ID");
+
+        using var factory = NewFactoryWithPhoneIdentity(
+            enabled: true, userManagementEnabled: false,
+            upstreamHandler: registerStub, phoneIdentity: phoneIdentity);
+        var client = factory.CreateClient();
+
+        var resp = await client.PostAsync("/dev/seed/user", JsonBody("""
+            { "role": "client", "phone": "+96139120010", "displayName": "Sami" }
+            """));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<SeedUserResponseDto>();
+        body!.UserId.Should().Be("REGISTER-EMAIL-KEYED-ID",
+            "with the UM flag OFF the seed returns the legacy register id unchanged");
+        phoneIdentity.Calls.Should().Be(0, "convergence must NOT run when the UM upstream is off");
+    }
+
+    [Fact]
+    public async Task SeedUser_UmFlagOn_PhoneIdentityFault_FallsBack_To_RegisterId_NonFatal()
+    {
+        // A phone-identity fault must NOT fail the seed (the user IS registered);
+        // it returns the register id and warns so a later mismatch is diagnosable.
+        var registerStub = new StubHttpMessageHandler(_ => JsonResponse("""
+            { "userId": "REGISTER-EMAIL-KEYED-ID", "username": "sami", "email": "seed-sami@jeeb.test", "status": "created" }
+            """));
+        var phoneIdentity = new FakePhoneIdentityClient(faultStatus: 502);
+
+        using var factory = NewFactoryWithPhoneIdentity(
+            enabled: true, userManagementEnabled: true,
+            upstreamHandler: registerStub, phoneIdentity: phoneIdentity);
+        var client = factory.CreateClient();
+
+        var resp = await client.PostAsync("/dev/seed/user", JsonBody("""
+            { "role": "jeeber", "phone": "+96139120011", "displayName": "Sami" }
+            """));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "a phone-identity blip must not fail the seed — the user is already registered");
+        var body = await resp.Content.ReadFromJsonAsync<SeedUserResponseDto>();
+        body!.UserId.Should().Be("REGISTER-EMAIL-KEYED-ID",
+            "on a convergence fault the seed degrades to the register id");
+    }
+
+    private static WebApplicationFactory<Program> NewFactoryWithPhoneIdentity(
+        bool enabled,
+        bool userManagementEnabled,
+        HttpMessageHandler upstreamHandler,
+        JeebGateway.Users.IUserManagementDualRoleClient phoneIdentity)
+    {
+        return new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.UseSetting("Features:DevEndpoints:Enabled", enabled ? "true" : "false");
+
+                builder.ConfigureTestServices(services =>
+                {
+                    services.RemoveAll<ServiceUserManagementClient>();
+                    services.AddScoped(_ =>
+                    {
+                        var http = new HttpClient(upstreamHandler) { BaseAddress = new Uri("http://um.test/") };
+                        return new ServiceUserManagementClient("http://um.test/", http);
+                    });
+
+                    services.RemoveAll<JeebGateway.Users.IUserManagementDualRoleClient>();
+                    services.AddSingleton(phoneIdentity);
+
+                    services.Configure<JeebGateway.Services.UpstreamFeatureFlags>(
+                        f => f.UserManagement = userManagementEnabled);
+                });
+            });
+    }
+
+    /// <summary>
+    /// Fake <see cref="JeebGateway.Users.IUserManagementDualRoleClient"/> that
+    /// returns a controllable phone-canonical id (or faults) for the convergence tests.
+    /// </summary>
+    private sealed class FakePhoneIdentityClient : JeebGateway.Users.IUserManagementDualRoleClient
+    {
+        private readonly string? _canonicalId;
+        private readonly int? _faultStatus;
+
+        public int Calls { get; private set; }
+        public string? LastPhone { get; private set; }
+
+        public FakePhoneIdentityClient(string canonicalId) => _canonicalId = canonicalId;
+        public FakePhoneIdentityClient(int faultStatus) => _faultStatus = faultStatus;
+
+        public Task<JeebGateway.Users.PhoneFindOrCreateResult> PhoneFindOrCreateAsync(
+            string phone, CancellationToken ct)
+        {
+            Calls++;
+            LastPhone = phone;
+            if (_faultStatus is int s)
+                throw new JeebGateway.Users.UserManagementCallException("phone/find-or-create", s);
+            return Task.FromResult(new JeebGateway.Users.PhoneFindOrCreateResult(
+                _canonicalId!, IsNew: true,
+                new[] { "customer" }, "customer"));
+        }
+
+        public Task<JeebGateway.Users.RoleSwitchReissueResult> RoleSwitchAsync(
+            string userId, string opaqueRole, CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public Task<JeebGateway.Users.RoleGrantResult> AppendAvailableRoleAsync(
+            string userId, string opaqueRole, CancellationToken ct)
+            => throw new NotSupportedException();
+    }
 }
