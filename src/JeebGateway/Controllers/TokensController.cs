@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Push;
 using JeebGateway.Security;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
@@ -33,6 +34,7 @@ public class TokensController : ControllerBase
     private readonly IUsersStore _users;
     private readonly IOptionsMonitor<SecurityOptions> _security;
     private readonly IOptionsMonitor<JwtOptions> _jwt;
+    private readonly IOptionsMonitor<NotificationTestSeamOptions> _seam;
     private readonly ILogger<TokensController> _logger;
 
     public TokensController(
@@ -40,12 +42,14 @@ public class TokensController : ControllerBase
         IUsersStore users,
         IOptionsMonitor<SecurityOptions> security,
         IOptionsMonitor<JwtOptions> jwt,
+        IOptionsMonitor<NotificationTestSeamOptions> seam,
         ILogger<TokensController> logger)
     {
         _tokens = tokens;
         _users = users;
         _security = security;
         _jwt = jwt;
+        _seam = seam;
         _logger = logger;
     }
 
@@ -79,6 +83,52 @@ public class TokensController : ControllerBase
 
         // Make sure a profile shell exists so subsequent /users/me works.
         var profile = await _users.GetOrCreateAsync(body.UserId, ct);
+
+        // N2 PER-REQUEST role-less mint (additive, NO global flag, test-only opt-in).
+        //
+        // The negative case S12.N2 needs a genuinely role-less, active_role-less
+        // token so the shared ADR-005 Layer-2 capability guard rejects the role-less
+        // caller (403) BEFORE the device-register action runs. Owner decision
+        // (cto-s12, ADR-005): a role-less authenticated caller's correct status is
+        // 403 (capability), NOT 400.
+        //
+        // The opt-in is the SHAPE OF THE REQUEST ITSELF: an EXPLICIT empty roles
+        // array (roles: []) is treated as "mint with no roles". This is distinct
+        // from an ABSENT/null roles field, which keeps the historical
+        // profile-default fallback untouched. The console mint proxy forwards an
+        // explicit roles:[] faithfully (an empty array is truthy in JS at
+        // server/api/run.post.ts), so NO console-proxy edit and NO :3040 restart is
+        // needed.
+        //
+        // Why per-request and not the global seam flag: the prior global flag
+        // (NotificationTestSeam:HonorExplicitEmptyRoles) collapsed null OR empty
+        // into role-less intent, which broke S01 — S01 mints with an ABSENT roles
+        // field and MUST fall back to its profile default. Distinguishing
+        // explicit-empty (this request) from absent (S01) makes the opt-in
+        // self-scoping: ONLY a caller that literally sends roles:[] (sole occurrence
+        // fleet-wide = S12 SETUP-4) gets a role-less token. The global flag stays
+        // OFF; this path does not read it, so S01's absent-roles mint is unaffected.
+        var explicitEmptyRoles = body.Roles is { Count: 0 };
+        if (explicitEmptyRoles)
+        {
+            // Persist a role-less projection so IssueAsync reads active_role="" too.
+            await _users.UpsertProjectionAsync(new UserProfile
+            {
+                Id = profile.Id,
+                Phone = profile.Phone,
+                Name = profile.Name,
+                Roles = new List<string>(),
+                ActiveRole = string.Empty,
+                CreatedAt = profile.CreatedAt,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            }, ct);
+
+            var roleless = await _tokens.IssueAsync(body.UserId, Array.Empty<string>(), ct);
+            _logger.LogInformation(
+                "auth.tokens N2 per-request: minted role-less token for userId={UserId} (explicit roles:[])", body.UserId);
+            return Ok(ToResponse(roleless));
+        }
+
         var roles = body.Roles is { Count: > 0 } ? body.Roles : profile.Roles;
 
         var pair = await _tokens.IssueAsync(body.UserId, roles, ct);
