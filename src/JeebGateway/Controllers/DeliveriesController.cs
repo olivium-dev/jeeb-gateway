@@ -66,8 +66,6 @@ public class DeliveriesController : ControllerBase
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly TimeProvider _clock;
     private readonly ILogger<DeliveriesController> _log;
-    // JEB-56: settlement store for COD platform records (recorded→batched→paid).
-    private readonly ISettlementStore _settlementStore;
 
     // T-BE-019 (JEB-55): external-OTP attempt + lockout TTLs. 15 min on
     // both: long enough to cover the handover window, short enough that
@@ -116,8 +114,7 @@ public class DeliveriesController : ControllerBase
         IDistributedCache cache,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         TimeProvider clock,
-        ILogger<DeliveriesController> log,
-        ISettlementStore settlementStore)
+        ILogger<DeliveriesController> log)
     {
         _store = store;
         _settlementStore = settlementStore;
@@ -132,7 +129,6 @@ public class DeliveriesController : ControllerBase
         _flags = flags;
         _clock = clock;
         _log = log;
-        _settlementStore = settlementStore;
     }
 
     /// <summary>
