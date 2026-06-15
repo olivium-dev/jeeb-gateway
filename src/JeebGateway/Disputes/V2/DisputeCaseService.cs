@@ -202,18 +202,29 @@ public sealed class DisputeCaseService : IDisputeCaseService
 
         // JEB-64: claim is legal only from open → under_review. Re-claiming an
         // already-under_review or resolved case is an invalid transition (N6c).
+        // This is a fast-path early-out only; the AUTHORITATIVE legality check
+        // is the compare-and-set inside ApplyReviewAsync (under the store lock),
+        // so a transition that becomes illegal between this read and the write
+        // is still rejected — no last-writer-wins race (TOCTOU fix).
         if (!DisputeCaseState.CanTransition(existing.State, DisputeCaseState.UnderReview))
         {
             return new ReviewResult(ReviewOutcome.InvalidTransition, existing);
         }
 
-        var updated = await _store.ApplyReviewAsync(
+        var result = await _store.ApplyReviewAsync(
             existing.Id, input.AdminUserId, _clock.GetUtcNow(), ct).ConfigureAwait(false);
-        if (updated is null)
+
+        switch (result.Outcome)
         {
-            return new ReviewResult(ReviewOutcome.NotFound, null);
+            case DisputeMutationOutcome.NotFound:
+                return new ReviewResult(ReviewOutcome.NotFound, null);
+            case DisputeMutationOutcome.InvalidTransition:
+                // Lost the compare-and-set race: another actor moved the case
+                // out of `open` after our pre-check. Surface 409, not a clobber.
+                return new ReviewResult(ReviewOutcome.InvalidTransition, result.Case);
         }
 
+        var updated = result.Case!;
         _log.LogInformation(
             "event={Event} case_id={CaseId} delivery_id={DeliveryId} reviewed_by={ReviewedBy}",
             "dispute.reviewed", updated.Id, updated.DeliveryId, input.AdminUserId);
@@ -233,17 +244,25 @@ public sealed class DisputeCaseService : IDisputeCaseService
 
         // JEB-64: close is legal only from resolved_* → closed. Closing an open
         // or under_review case is an invalid transition (N6a, 409 invalid-transition).
+        // Fast-path early-out only — the authoritative check is the
+        // compare-and-set inside ApplyCloseAsync under the store lock (TOCTOU fix).
         if (!DisputeCaseState.CanTransition(existing.State, DisputeCaseState.Closed))
         {
             return new CloseResult(CloseOutcome.InvalidTransition, existing);
         }
 
-        var updated = await _store.ApplyCloseAsync(existing.Id, _clock.GetUtcNow(), ct).ConfigureAwait(false);
-        if (updated is null)
+        var result = await _store.ApplyCloseAsync(existing.Id, _clock.GetUtcNow(), ct).ConfigureAwait(false);
+
+        switch (result.Outcome)
         {
-            return new CloseResult(CloseOutcome.NotFound, null);
+            case DisputeMutationOutcome.NotFound:
+                return new CloseResult(CloseOutcome.NotFound, null);
+            case DisputeMutationOutcome.InvalidTransition:
+                // Lost the compare-and-set race (e.g. a concurrent second close).
+                return new CloseResult(CloseOutcome.InvalidTransition, result.Case);
         }
 
+        var updated = result.Case!;
         _log.LogInformation(
             "event={Event} case_id={CaseId} delivery_id={DeliveryId} closed_by={ClosedBy}",
             "dispute.closed", updated.Id, updated.DeliveryId, input.AdminUserId);

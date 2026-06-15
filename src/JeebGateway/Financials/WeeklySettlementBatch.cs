@@ -445,15 +445,11 @@ public sealed class WeeklySettlementBatch : BackgroundService
     }
 }
 
-public sealed class InMemorySettlementBatchStore : ISettlementBatchStore
-{
-    private readonly ISettlementStore _inner;
-
-    public InMemorySettlementBatchStore(ISettlementStore inner) => _inner = inner;
-
-    public Task<IReadOnlyList<Settlement>> ListUnsettledAsync(int limit, CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
-
-    public Task MarkBatchProcessedAsync(IReadOnlyList<string> settlementIds, DateTimeOffset at, CancellationToken ct)
-        => Task.CompletedTask;
-}
+// NOTE: the stale `InMemorySettlementBatchStore` (a 2-method stub left over from
+// the JEB-57/TL-PIN-JEB-498 durable-batch fold) was DELETED here. It implemented
+// only the pre-fold ISettlementBatchStore surface, so once the interface grew the
+// CreateOrGetBatchAsync / GetByIdAsync / ListByStatusAsync / MarkPaidAsync members
+// it no longer compiled (CS0535) — and nothing referenced it: Program.cs wires the
+// durable PostgresSettlementBatchStore (when GatewayPostgres:ConnectionString is
+// set) or the InMemoryFallbackSettlementBatchStore (dev/CI default) above. Removing
+// the orphan is behavior-preserving — it was unreachable dead code.

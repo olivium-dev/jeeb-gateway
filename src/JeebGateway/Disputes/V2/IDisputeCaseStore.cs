@@ -37,18 +37,27 @@ public interface IDisputeCaseStore
 
     /// <summary>
     /// JEB-64 state machine: claims an <c>open</c> case for triage
-    /// (<c>open → under_review</c>). Runs under the store's lock so a
-    /// concurrent review/resolve cannot observe a stale state. Returns the
-    /// updated row, or null when the id is unknown.
+    /// (<c>open → under_review</c>). The <c>open → under_review</c> legality
+    /// check is performed as a compare-and-set INSIDE the store's lock, so a
+    /// racing review/close/resolve on the same case cannot both pass an
+    /// out-of-lock pre-check and then both apply (last-writer-wins). Returns
+    /// <see cref="DisputeMutationOutcome.Updated"/> with the new row,
+    /// <see cref="DisputeMutationOutcome.NotFound"/> when the id is unknown,
+    /// or <see cref="DisputeMutationOutcome.InvalidTransition"/> when the case
+    /// is no longer <c>open</c> at the moment the lock is taken.
     /// </summary>
-    Task<DisputeCase?> ApplyReviewAsync(string caseId, string reviewedByAdminId, DateTimeOffset reviewedAt, CancellationToken ct);
+    Task<DisputeMutationResult> ApplyReviewAsync(string caseId, string reviewedByAdminId, DateTimeOffset reviewedAt, CancellationToken ct);
 
     /// <summary>
     /// JEB-64 terminal seal: closes a resolved case
-    /// (<c>resolved_* → closed</c>). Runs under the store's lock. Returns
-    /// the updated row, or null when the id is unknown.
+    /// (<c>resolved_* → closed</c>). The <c>resolved_* → closed</c> legality
+    /// check is a compare-and-set INSIDE the store's lock (same atomicity
+    /// guarantee as <see cref="ApplyReviewAsync"/>). Returns
+    /// <see cref="DisputeMutationOutcome.Updated"/> /
+    /// <see cref="DisputeMutationOutcome.NotFound"/> /
+    /// <see cref="DisputeMutationOutcome.InvalidTransition"/>.
     /// </summary>
-    Task<DisputeCase?> ApplyCloseAsync(string caseId, DateTimeOffset closedAt, CancellationToken ct);
+    Task<DisputeMutationResult> ApplyCloseAsync(string caseId, DateTimeOffset closedAt, CancellationToken ct);
 
     /// <summary>
     /// Persists a resolution. Returns the updated row, or null when
@@ -63,6 +72,45 @@ public interface IDisputeCaseStore
     /// the admin queue refresh hook.
     /// </summary>
     Task<DisputeCase?> ReplaceEvidenceAsync(string caseId, DisputeEvidence evidence, CancellationToken ct);
+}
+
+/// <summary>
+/// Outcome of an atomic dispute-case lifecycle mutation
+/// (<see cref="IDisputeCaseStore.ApplyReviewAsync"/> /
+/// <see cref="IDisputeCaseStore.ApplyCloseAsync"/>). Distinguishes the three
+/// terminal states of a compare-and-set under the store lock so the service
+/// can map them to the correct HTTP status without ever conflating
+/// "unknown id" (404) with "illegal concurrent move" (409).
+/// </summary>
+public enum DisputeMutationOutcome
+{
+    /// <summary>The transition was legal and applied; <see cref="DisputeMutationResult.Case"/> is the updated row.</summary>
+    Updated,
+
+    /// <summary>No case exists for the supplied id.</summary>
+    NotFound,
+
+    /// <summary>
+    /// The case exists but the transition was not legal from its CURRENT state
+    /// (re-validated under the lock). This is the compare-and-set "lost the
+    /// race" signal — the service surfaces it as 409 invalid-transition.
+    /// <see cref="DisputeMutationResult.Case"/> carries the current row so the
+    /// caller can report the actual state it found.
+    /// </summary>
+    InvalidTransition
+}
+
+/// <summary>
+/// Result of an atomic lifecycle mutation. <see cref="Case"/> is non-null for
+/// <see cref="DisputeMutationOutcome.Updated"/> (the new row) and
+/// <see cref="DisputeMutationOutcome.InvalidTransition"/> (the conflicting
+/// current row); null for <see cref="DisputeMutationOutcome.NotFound"/>.
+/// </summary>
+public readonly record struct DisputeMutationResult(DisputeMutationOutcome Outcome, DisputeCase? Case)
+{
+    public static DisputeMutationResult Updated(DisputeCase @case) => new(DisputeMutationOutcome.Updated, @case);
+    public static DisputeMutationResult NotFound() => new(DisputeMutationOutcome.NotFound, null);
+    public static DisputeMutationResult InvalidTransition(DisputeCase current) => new(DisputeMutationOutcome.InvalidTransition, current);
 }
 
 public sealed class DisputeCaseResolutionPatch

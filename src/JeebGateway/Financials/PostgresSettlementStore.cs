@@ -95,15 +95,20 @@ public sealed class PostgresSettlementStore : ISettlementStore
     }
 
     public async Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
-        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct)
+        string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct,
+        IReadOnlyCollection<string>? codStates = null)
     {
         await using var conn = await _db.OpenAsync(ct);
 
+        // JEB-58: optional cod_state filter (earnings passes ["batched","paid"];
+        // null/empty = no filter, parity with InMemorySettlementStore). @CodStates
+        // IS NULL short-circuits the ANY() so an empty array does not exclude rows.
         var sql = """
             SELECT * FROM settlements
             WHERE jeeber_id = @JeeberId
               AND (@From IS NULL OR settled_at >= @From)
               AND (@To   IS NULL OR settled_at <= @To)
+              AND (@CodStates IS NULL OR cod_state = ANY(@CodStates))
             ORDER BY settled_at ASC
             """;
 
@@ -111,8 +116,48 @@ public sealed class PostgresSettlementStore : ISettlementStore
         cmd.Parameters.AddWithValue("JeeberId", jeeberId);
         cmd.Parameters.AddWithValue("From", (object?)from ?? DBNull.Value);
         cmd.Parameters.AddWithValue("To", (object?)to ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("CodStates",
+            codStates is { Count: > 0 } ? codStates.ToArray() : (object)DBNull.Value);
 
         return await ReadListAsync(cmd, ct);
+    }
+
+    public async Task<bool> ReplacePendingAsync(string deliveryId, Settlement settled, CancellationToken ct)
+    {
+        // FT-07: atomically replace a pending_settlement placeholder with the
+        // fully-computed row. Idempotent on delivery_id — the UPDATE only fires
+        // when a pending row exists, so a retry after the row has already been
+        // settled is a no-op (returns false → caller falls through to TryInsert).
+        await using var conn = await _db.OpenAsync(ct);
+        const string sql = """
+            UPDATE settlements SET
+                id = @Id, jeeber_id = @JeeberId, client_id = @ClientId, tier_id = @TierId,
+                goods_cost = @GoodsCost, commission_rate = @CommissionRate, commission = @Commission,
+                insurance = @Insurance, total = @Total, min_fee_applied = @MinFeeApplied,
+                currency = @Currency, payment_method = @PaymentMethod,
+                state = @State, cod_state = @CodState, settled_at = @SettledAt, updated_at = now()
+            WHERE delivery_id = @DeliveryId AND state = @PendingState
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("Id", Guid.Parse(settled.Id));
+        cmd.Parameters.AddWithValue("DeliveryId", deliveryId);
+        cmd.Parameters.AddWithValue("JeeberId", settled.JeeberId);
+        cmd.Parameters.AddWithValue("ClientId", settled.ClientId);
+        cmd.Parameters.AddWithValue("TierId", settled.TierId);
+        cmd.Parameters.AddWithValue("GoodsCost", settled.GoodsCost);
+        cmd.Parameters.AddWithValue("CommissionRate", settled.CommissionRate);
+        cmd.Parameters.AddWithValue("Commission", settled.Commission);
+        cmd.Parameters.AddWithValue("Insurance", settled.Insurance);
+        cmd.Parameters.AddWithValue("Total", settled.Total);
+        cmd.Parameters.AddWithValue("MinFeeApplied", settled.MinimumFeeApplied);
+        cmd.Parameters.AddWithValue("Currency", settled.Currency);
+        cmd.Parameters.AddWithValue("PaymentMethod", settled.PaymentMethod);
+        cmd.Parameters.AddWithValue("State", settled.State);
+        cmd.Parameters.AddWithValue("CodState", settled.CodState);
+        cmd.Parameters.AddWithValue("SettledAt", settled.SettledAt);
+        cmd.Parameters.AddWithValue("PendingState", SettlementState.PendingSettlement);
+
+        return await cmd.ExecuteNonQueryAsync(ct) > 0;
     }
 
     public async Task<bool> SetLedgerEntryAsync(string settlementId, string ledgerEntryId, CancellationToken ct)
