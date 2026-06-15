@@ -95,6 +95,15 @@ public sealed class DisputeCasesController : ControllerBase
                         Status = StatusCodes.Status404NotFound
                     });
 
+                case EscalateOutcome.NotAParty:
+                    return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
+                    {
+                        Title = "not-a-party",
+                        Detail = "Only a party to the delivery (its client or assigned jeeber) may escalate it.",
+                        Status = StatusCodes.Status403Forbidden,
+                        Type = "https://jeeb.dev/errors/dispute-not-a-party"
+                    });
+
                 case EscalateOutcome.AlreadyEscalated:
                     return Conflict(new ProblemDetails
                     {
@@ -194,6 +203,141 @@ public sealed class DisputeCasesController : ControllerBase
         }
 
         return Ok(DisputeCaseResponse.From(@case));
+    }
+
+    // -----------------------------------------------------------------
+    // S14 / JEB-64 admin queue (T-CMS-004): cross-user dispute queue read.
+    // Admin-only via [RequireCapability(dispute.read.queue)] (AdminOnly L2).
+    // Optional ?state= filter (open | under_review | resolved-refund |
+    // resolved-no-action | closed; hyphen or underscore both accepted).
+    // -----------------------------------------------------------------
+    [HttpGet("admin/v1/disputes")]
+    [RequireCapability(Capabilities.DisputeReadQueue)]
+    [ProducesResponseType(typeof(DisputeCaseListResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> AdminQueue([FromQuery] string? state, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized))
+        {
+            return unauthorized;
+        }
+
+        var items = await _service.ListAllAsync(state, ct);
+        return Ok(new DisputeCaseListResponse
+        {
+            Items = items.Select(DisputeCaseResponse.From).ToList(),
+            Total = items.Count
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // S14 / JEB-64 state machine: admin claims a case for triage
+    // (open → under_review). Admin-only via [RequireCapability(dispute.resolve)]
+    // (the admin write capability). SM legality stays STATE in the service:
+    // claiming a non-open case → 409 invalid-transition.
+    // -----------------------------------------------------------------
+    [HttpPost("admin/v1/disputes/{id}/review")]
+    [RequireCapability(Capabilities.DisputeResolve)]
+    [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Review(string id, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var unauthorized))
+        {
+            return unauthorized;
+        }
+
+        var result = await _service.ReviewAsync(new ReviewCaseInput
+        {
+            CaseId = id,
+            AdminUserId = adminId
+        }, ct);
+
+        switch (result.Outcome)
+        {
+            case ReviewOutcome.NotFound:
+                return NotFound();
+
+            case ReviewOutcome.InvalidTransition:
+                return Conflict(new ProblemDetails
+                {
+                    Title = "invalid-transition",
+                    Detail = $"Case {id} cannot be claimed from state '{result.Case!.State}' (must be open).",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/dispute-invalid-transition"
+                });
+
+            case ReviewOutcome.Reviewed:
+            default:
+                await _auditLog.AppendAsync(new AdminAuditAppend
+                {
+                    AdminUserId = adminId,
+                    Action = "review_case",
+                    EntityType = EntityType,
+                    EntityId = id,
+                    AfterState = Snapshot(result.Case!),
+                    RequestId = HttpContext.TraceIdentifier
+                }, ct);
+                return Ok(DisputeCaseResponse.From(result.Case!));
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // S14 / JEB-64 terminal seal: admin closes a resolved case
+    // (resolved_* → closed). Admin-only. SM legality stays STATE:
+    // closing a non-resolved case → 409 invalid-transition (N6a).
+    // -----------------------------------------------------------------
+    [HttpPost("admin/v1/disputes/{id}/close")]
+    [RequireCapability(Capabilities.DisputeResolve)]
+    [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Close(string id, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var unauthorized))
+        {
+            return unauthorized;
+        }
+
+        var result = await _service.CloseAsync(new CloseCaseInput
+        {
+            CaseId = id,
+            AdminUserId = adminId
+        }, ct);
+
+        switch (result.Outcome)
+        {
+            case CloseOutcome.NotFound:
+                return NotFound();
+
+            case CloseOutcome.InvalidTransition:
+                return Conflict(new ProblemDetails
+                {
+                    Title = "invalid-transition",
+                    Detail = $"Case {id} cannot be closed from state '{result.Case!.State}' (must be resolved first).",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/dispute-invalid-transition"
+                });
+
+            case CloseOutcome.Closed:
+            default:
+                await _auditLog.AppendAsync(new AdminAuditAppend
+                {
+                    AdminUserId = adminId,
+                    Action = "close_case",
+                    EntityType = EntityType,
+                    EntityId = id,
+                    AfterState = Snapshot(result.Case!),
+                    RequestId = HttpContext.TraceIdentifier
+                }, ct);
+                return Ok(DisputeCaseResponse.From(result.Case!));
+        }
     }
 
     // -----------------------------------------------------------------

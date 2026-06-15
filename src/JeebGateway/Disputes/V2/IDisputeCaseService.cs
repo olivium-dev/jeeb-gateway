@@ -29,8 +29,59 @@ public interface IDisputeCaseService
 
     Task<IReadOnlyList<DisputeCase>> ListForUserAsync(string userId, CancellationToken ct);
 
+    /// <summary>
+    /// JEB-64 admin queue (T-CMS-004): returns every case, optionally
+    /// filtered to one <paramref name="state"/> (null = full queue).
+    /// Admin-scoped at the controller (dispute.read.queue, AdminOnly).
+    /// </summary>
+    Task<IReadOnlyList<DisputeCase>> ListAllAsync(string? state, CancellationToken ct);
+
+    /// <summary>
+    /// JEB-64 state machine: an admin claims an <c>open</c> case for triage
+    /// (<c>open → under_review</c>). NotFound when unknown; InvalidTransition
+    /// when the case is not <c>open</c> (already under_review / resolved).
+    /// </summary>
+    Task<ReviewResult> ReviewAsync(ReviewCaseInput input, CancellationToken ct);
+
+    /// <summary>
+    /// JEB-64 terminal seal: an admin closes a resolved case
+    /// (<c>resolved_* → closed</c>). NotFound when unknown; InvalidTransition
+    /// when the case is not in a resolved-* state (e.g. closing an open case).
+    /// </summary>
+    Task<CloseResult> CloseAsync(CloseCaseInput input, CancellationToken ct);
+
     Task<ResolveResult> ResolveAsync(ResolveCaseInput input, CancellationToken ct);
 }
+
+public sealed class ReviewCaseInput
+{
+    public required string CaseId { get; init; }
+    public required string AdminUserId { get; init; }
+}
+
+public enum ReviewOutcome
+{
+    Reviewed,
+    NotFound,
+    InvalidTransition
+}
+
+public sealed record ReviewResult(ReviewOutcome Outcome, DisputeCase? Case);
+
+public sealed class CloseCaseInput
+{
+    public required string CaseId { get; init; }
+    public required string AdminUserId { get; init; }
+}
+
+public enum CloseOutcome
+{
+    Closed,
+    NotFound,
+    InvalidTransition
+}
+
+public sealed record CloseResult(CloseOutcome Outcome, DisputeCase? Case);
 
 public sealed class EscalateInput
 {
@@ -47,7 +98,15 @@ public enum EscalateOutcome
     Created,
     Replayed,
     DeliveryNotFound,
-    AlreadyEscalated
+    AlreadyEscalated,
+
+    /// <summary>
+    /// JEB-64 / S14 N2: the opener is neither the client nor the assigned
+    /// jeeber of the delivery. Only a party to a delivery may escalate it
+    /// → 403 not-a-party. (Admin-on-behalf escalation is a separate, not
+    /// yet built, surface.)
+    /// </summary>
+    NotAParty
 }
 
 public sealed record EscalateResult(EscalateOutcome Outcome, DisputeCase? Case);

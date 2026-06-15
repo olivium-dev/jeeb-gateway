@@ -63,6 +63,45 @@ public sealed class InMemoryDisputeCaseStore : IDisputeCaseStore
         return Task.FromResult<IReadOnlyList<DisputeCase>>(items);
     }
 
+    public Task<IReadOnlyList<DisputeCase>> ListAllAsync(string? state, CancellationToken ct)
+    {
+        var items = _byId.Values
+            .Where(c => string.IsNullOrWhiteSpace(state)
+                        || string.Equals(c.State, state, StringComparison.Ordinal))
+            .OrderByDescending(c => c.OpenedAt)
+            .ToList();
+        return Task.FromResult<IReadOnlyList<DisputeCase>>(items);
+    }
+
+    public Task<DisputeCase?> ApplyReviewAsync(string caseId, string reviewedByAdminId, DateTimeOffset reviewedAt, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (!_byId.TryGetValue(caseId, out var existing))
+            {
+                return Task.FromResult<DisputeCase?>(null);
+            }
+            existing.State = DisputeCaseState.UnderReview;
+            existing.ReviewedByAdminId = reviewedByAdminId;
+            existing.ReviewedAt = reviewedAt;
+            return Task.FromResult<DisputeCase?>(existing);
+        }
+    }
+
+    public Task<DisputeCase?> ApplyCloseAsync(string caseId, DateTimeOffset closedAt, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (!_byId.TryGetValue(caseId, out var existing))
+            {
+                return Task.FromResult<DisputeCase?>(null);
+            }
+            existing.State = DisputeCaseState.Closed;
+            existing.ClosedAt = closedAt;
+            return Task.FromResult<DisputeCase?>(existing);
+        }
+    }
+
     public Task<DisputeCase?> ApplyResolutionAsync(string caseId, DisputeCaseResolutionPatch patch, CancellationToken ct)
     {
         lock (_gate)

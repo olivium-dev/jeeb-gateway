@@ -28,6 +28,29 @@ public interface IDisputeCaseStore
     Task<IReadOnlyList<DisputeCase>> ListForUserAsync(string userId, CancellationToken ct);
 
     /// <summary>
+    /// JEB-64 admin queue (T-CMS-004): returns every case, optionally
+    /// filtered to a single <paramref name="state"/>. Admin-scoped — the
+    /// caller-side capability gate (dispute.read.queue, AdminOnly) ensures
+    /// only admins reach this. <paramref name="state"/> null = full queue.
+    /// </summary>
+    Task<IReadOnlyList<DisputeCase>> ListAllAsync(string? state, CancellationToken ct);
+
+    /// <summary>
+    /// JEB-64 state machine: claims an <c>open</c> case for triage
+    /// (<c>open → under_review</c>). Runs under the store's lock so a
+    /// concurrent review/resolve cannot observe a stale state. Returns the
+    /// updated row, or null when the id is unknown.
+    /// </summary>
+    Task<DisputeCase?> ApplyReviewAsync(string caseId, string reviewedByAdminId, DateTimeOffset reviewedAt, CancellationToken ct);
+
+    /// <summary>
+    /// JEB-64 terminal seal: closes a resolved case
+    /// (<c>resolved_* → closed</c>). Runs under the store's lock. Returns
+    /// the updated row, or null when the id is unknown.
+    /// </summary>
+    Task<DisputeCase?> ApplyCloseAsync(string caseId, DateTimeOffset closedAt, CancellationToken ct);
+
+    /// <summary>
     /// Persists a resolution. Returns the updated row, or null when
     /// the id is unknown. The update runs under the store's lock so a
     /// concurrent second-resolver cannot observe a stale state.
