@@ -99,6 +99,16 @@ public sealed class DisputeCaseService : IDisputeCaseService
             return new EscalateResult(EscalateOutcome.DeliveryNotFound, null);
         }
 
+        // JEB-64 / S14 N2: only a party to the delivery (its client or its
+        // assigned jeeber) may escalate it. A non-party → 403 not-a-party.
+        // This runs BEFORE the already-escalated check so a stranger naming
+        // a real (even already-disputed) delivery never leaks its dispute
+        // state — they are rejected as not-a-party first.
+        if (!IsParty(delivery, input.OpenedByUserId))
+        {
+            return new EscalateResult(EscalateOutcome.NotAParty, null);
+        }
+
         // One active case per delivery — the admin queue cannot
         // accumulate duplicates from a frustrated user mashing escalate.
         var active = await _store.GetActiveForDeliveryAsync(input.DeliveryId, ct).ConfigureAwait(false);
@@ -176,6 +186,87 @@ public sealed class DisputeCaseService : IDisputeCaseService
 
     public Task<IReadOnlyList<DisputeCase>> ListForUserAsync(string userId, CancellationToken ct)
         => _store.ListForUserAsync(userId, ct);
+
+    public Task<IReadOnlyList<DisputeCase>> ListAllAsync(string? state, CancellationToken ct)
+        => _store.ListAllAsync(NormalizeState(state), ct);
+
+    public async Task<ReviewResult> ReviewAsync(ReviewCaseInput input, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        var existing = await _store.GetByIdAsync(input.CaseId, ct).ConfigureAwait(false);
+        if (existing is null)
+        {
+            return new ReviewResult(ReviewOutcome.NotFound, null);
+        }
+
+        // JEB-64: claim is legal only from open → under_review. Re-claiming an
+        // already-under_review or resolved case is an invalid transition (N6c).
+        if (!DisputeCaseState.CanTransition(existing.State, DisputeCaseState.UnderReview))
+        {
+            return new ReviewResult(ReviewOutcome.InvalidTransition, existing);
+        }
+
+        var updated = await _store.ApplyReviewAsync(
+            existing.Id, input.AdminUserId, _clock.GetUtcNow(), ct).ConfigureAwait(false);
+        if (updated is null)
+        {
+            return new ReviewResult(ReviewOutcome.NotFound, null);
+        }
+
+        _log.LogInformation(
+            "event={Event} case_id={CaseId} delivery_id={DeliveryId} reviewed_by={ReviewedBy}",
+            "dispute.reviewed", updated.Id, updated.DeliveryId, input.AdminUserId);
+
+        return new ReviewResult(ReviewOutcome.Reviewed, updated);
+    }
+
+    public async Task<CloseResult> CloseAsync(CloseCaseInput input, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        var existing = await _store.GetByIdAsync(input.CaseId, ct).ConfigureAwait(false);
+        if (existing is null)
+        {
+            return new CloseResult(CloseOutcome.NotFound, null);
+        }
+
+        // JEB-64: close is legal only from resolved_* → closed. Closing an open
+        // or under_review case is an invalid transition (N6a, 409 invalid-transition).
+        if (!DisputeCaseState.CanTransition(existing.State, DisputeCaseState.Closed))
+        {
+            return new CloseResult(CloseOutcome.InvalidTransition, existing);
+        }
+
+        var updated = await _store.ApplyCloseAsync(existing.Id, _clock.GetUtcNow(), ct).ConfigureAwait(false);
+        if (updated is null)
+        {
+            return new CloseResult(CloseOutcome.NotFound, null);
+        }
+
+        _log.LogInformation(
+            "event={Event} case_id={CaseId} delivery_id={DeliveryId} closed_by={ClosedBy}",
+            "dispute.closed", updated.Id, updated.DeliveryId, input.AdminUserId);
+
+        return new CloseResult(CloseOutcome.Closed, updated);
+    }
+
+    // Map the scenario/admin vocabulary (hyphenated resolved-refund / resolved-no-action)
+    // onto the canonical underscore state tokens used by the store, so the admin queue
+    // ?state= filter accepts both spellings. Unknown/blank → null (full queue).
+    private static string? NormalizeState(string? state)
+    {
+        if (string.IsNullOrWhiteSpace(state)) return null;
+        return state.Trim().ToLowerInvariant().Replace('-', '_') switch
+        {
+            "open" => DisputeCaseState.Open,
+            "under_review" => DisputeCaseState.UnderReview,
+            "resolved_refund" => DisputeCaseState.ResolvedRefund,
+            "resolved_no_action" => DisputeCaseState.ResolvedNoAction,
+            "closed" => DisputeCaseState.Closed,
+            _ => state.Trim()
+        };
+    }
 
     public async Task<ResolveResult> ResolveAsync(ResolveCaseInput input, CancellationToken ct)
     {
@@ -353,6 +444,16 @@ public sealed class DisputeCaseService : IDisputeCaseService
     // -------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------
+
+    /// <summary>
+    /// JEB-64 / S14 N2: true iff <paramref name="userId"/> is the client or
+    /// the assigned jeeber of the delivery. Gatekeeps escalate (only a
+    /// party may open a dispute on a delivery).
+    /// </summary>
+    private static bool IsParty(DeliveryRequest delivery, string userId)
+        => string.Equals(delivery.ClientId, userId, StringComparison.Ordinal)
+           || (!string.IsNullOrEmpty(delivery.JeeberId)
+               && string.Equals(delivery.JeeberId, userId, StringComparison.Ordinal));
 
     private static string? DetermineCounterparty(DeliveryRequest delivery, string openedBy)
     {

@@ -28,6 +28,10 @@ public static class CapabilityRolePolicy
     private static string[] JeeberOnly => new[] { JeebRoleTranslator.ContractJeeber };
     private static string[] AdminOnly => new[] { Roles.Admin };
     private static string[] Participant => new[] { JeebRoleTranslator.ContractClient, JeebRoleTranslator.ContractJeeber };
+    // S15 A3.1: delivery SM participate set + admin, so an admin force-resolve
+    // (admin_resolve trigger) clears the coarse L2 gate; the admin party-authz
+    // bypass + admin-resolve legality remain STATE in delivery-service.
+    private static string[] ParticipantOrAdmin => new[] { JeebRoleTranslator.ContractClient, JeebRoleTranslator.ContractJeeber, Roles.Admin };
     // S09 (JEB-54) BR-TRK-1: the live-track READ surface is held by both delivery
     // parties + admin (admin live-ops needs a participant-equivalent map view for
     // ops triage). WHICH party may read a given row stays STATE in the action
@@ -88,8 +92,16 @@ public static class CapabilityRolePolicy
             [Capabilities.EarningsReadOwn] = JeeberOnly,        // STATE: ownership
             [Capabilities.EarningsPdfOwn] = JeeberOnly,         // STATE: ownership
 
-            // E. Delivery SM / dual-party — coarse CLAIM, party+SM-legality = STATE
-            [Capabilities.DeliveryParticipate] = Participant,
+            // E. Delivery SM / dual-party — coarse CLAIM, party+SM-legality = STATE.
+            // S15 A3.1 (JEB-45 AC4 / S14 dispute path): admin force-resolves a
+            // FailedNeedsEscalation delivery via PATCH .../status {trigger:admin_resolve}.
+            // The coarse capability set admits {client, jeeber, admin} so the admin
+            // reaches the controller; the party-authz BYPASS for admin (admin_resolve
+            // forwards party-source=admin to delivery-service, which owns the
+            // admin-resolve legality) stays STATE downstream — identical to the
+            // DeliveryTrackOwn/DisputeReadMine/ChatModerate precedent above where admin
+            // is admitted at L2 and the per-row STATE check runs in the action/service.
+            [Capabilities.DeliveryParticipate] = ParticipantOrAdmin,
             [Capabilities.HandoverOtpRead] = Participant,       // STATE: party/SM
             [Capabilities.RatingSubmit] = Participant,          // STATE: party
 
@@ -107,6 +119,8 @@ public static class CapabilityRolePolicy
             // contradicting the ADR §G "admins read any row" and the tested product contract. The
             // claim/state split is preserved: L2 grants the read by type, the service scopes the rows.
             [Capabilities.DisputeReadMine] = AnyAuthenticated,  // party/own-vs-admin = STATE
+            // S14 / JEB-64 admin queue: cross-user queue read is admin-only.
+            [Capabilities.DisputeReadQueue] = AdminOnly,
             [Capabilities.DisputeResolve] = AdminOnly,
 
             // H–J. Misc participant caps {client, jeeber}
@@ -142,8 +156,10 @@ public static class CapabilityRolePolicy
             // M. Legacy UserController admin/internal
             [Capabilities.UsersAdminManage] = AdminOnly,
 
-            // N. Notification dispatch (JEB-1494): render + push a notification to a user — admin only.
-            [Capabilities.NotificationDispatch] = AdminOnly,
+            // N. Notification dispatch (JEB-1494): duplicate map entry removed in the same
+            // pre-existing bad-merge repair. NotificationDispatch is already mapped to AdminOnly
+            // above (FT-06, line ~54). A second entry with the same key throws ArgumentException
+            // in the static dictionary initializer at startup.
         };
 
     /// <summary>All capability names in the map — drives the startup policy-registration loop.</summary>

@@ -53,9 +53,56 @@ public static class DisputeCaseState
 
     public static bool IsResolved(string state) => ResolvedStates.Contains(state);
 
+    /// <summary>
+    /// T-BE-028 wire contract: the two resolved states serialize hyphenated
+    /// (<c>resolved-refund</c> / <c>resolved-no-action</c>) on the API
+    /// surface, while the internal enum + state machine + state-service
+    /// stay underscore-cased. <c>open</c>, <c>under_review</c> and
+    /// <c>closed</c> are unchanged. Presentation-only — never feed a wire
+    /// value back into <see cref="CanTransition"/> or the store.
+    /// </summary>
+    public static string ToWire(string state) => state switch
+    {
+        ResolvedRefund => "resolved-refund",
+        ResolvedNoAction => "resolved-no-action",
+        _ => state
+    };
+
+    /// <summary>
+    /// JEB-64 wire contract: the admin verdict implied by a terminal
+    /// state. <c>resolved_refund → refund</c>, <c>resolved_no_action →
+    /// no-action</c>; null while still open / under_review (no verdict
+    /// yet). <c>closed</c> retains whatever resolution preceded the seal,
+    /// so a closed case has no standalone decision projection here.
+    /// </summary>
+    public static string? DecisionForState(string state) => state switch
+    {
+        ResolvedRefund => "refund",
+        ResolvedNoAction => "no-action",
+        _ => null
+    };
+
+    /// <summary>
+    /// A case in a terminal-resolved state (<c>resolved_refund</c> /
+    /// <c>resolved_no_action</c>) can still be sealed via the close
+    /// transition; <c>closed</c> itself is fully terminal.
+    /// </summary>
+    private static bool IsCloseable(string state) =>
+        string.Equals(state, ResolvedRefund, StringComparison.Ordinal)
+        || string.Equals(state, ResolvedNoAction, StringComparison.Ordinal);
+
     public static bool CanTransition(string from, string to)
     {
         if (string.Equals(from, to, StringComparison.Ordinal)) return false;
+
+        // resolved_* → closed is the only legal transition out of a
+        // resolved state (the terminal seal). All other moves out of a
+        // resolved state are illegal (already_resolved / invalid-transition).
+        if (string.Equals(to, Closed, StringComparison.Ordinal))
+        {
+            return IsCloseable(from);
+        }
+
         if (IsResolved(from)) return false;
 
         return to switch

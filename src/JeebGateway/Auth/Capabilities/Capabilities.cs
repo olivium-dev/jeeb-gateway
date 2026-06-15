@@ -82,6 +82,10 @@ public static class Capabilities
     // ── G. Disputes ───────────────────────────────────────────────────────────────────
     public const string DisputeFile = "dispute.file";                 // {client, jeeber}
     public const string DisputeReadMine = "dispute.read.mine";        // {client, jeeber, admin}; own-vs-any = STATE
+    // S14 / JEB-64 admin queue (T-CMS-004): the cross-user dispute queue read
+    // (GET /admin/v1/disputes[?state=]) is an admin-only surface, distinct from
+    // dispute.read.mine (which is party/own-scoped). Admin-only at L2.
+    public const string DisputeReadQueue = "dispute.read.queue";      // {admin}
     public const string DisputeResolve = "dispute.resolve";           // {admin}
 
     // ── H–J. Misc participant caps {client, jeeber} ───────────────────────────────────
@@ -127,7 +131,13 @@ public static class Capabilities
     public const string UsersAdminManage = "users.admin.manage";      // DeleteByEmails, payment-auth-token
 
     // ── N. Notification dispatch (JEB-1494) — operator-triggered outbound notification ──
-    public const string NotificationDispatch = "notification.dispatch"; // {admin}
+    // Pre-existing bad-merge repair (independent of the DB removal): the duplicate
+    // `NotificationDispatch` const was removed here. It is already defined once at line ~42
+    // as "notifications.dispatch" (the original FT-06 value). The JEB-1494 merge re-declared
+    // the same symbol with a divergent value "notification.dispatch", which is a CS0102
+    // compile error (and made every caller a CS0229 ambiguity). All callers reference the
+    // symbol, and CapabilityRolePolicy already maps it to AdminOnly, so the single original
+    // declaration is the correct survivor.
 
     /// <summary>
     /// The ASP.NET Core policy name for a capability. One named policy is registered per

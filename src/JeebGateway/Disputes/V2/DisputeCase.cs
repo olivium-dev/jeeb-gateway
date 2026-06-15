@@ -49,6 +49,23 @@ public sealed class DisputeCase
     /// <summary>Captured at escalate time per AC1.</summary>
     public DisputeEvidence Evidence { get; set; } = DisputeEvidence.Empty;
 
+    /// <summary>
+    /// JEB-64 state machine: admin who claimed the case for triage
+    /// (<c>open → under_review</c> via POST /admin/v1/disputes/{id}/review).
+    /// Null until an admin claims the case.
+    /// </summary>
+    public string? ReviewedByAdminId { get; set; }
+
+    /// <summary>When an admin claimed the case (open → under_review).</summary>
+    public DateTimeOffset? ReviewedAt { get; set; }
+
+    /// <summary>
+    /// JEB-64 terminal seal: when the case was closed
+    /// (<c>resolved_* → closed</c> via POST /admin/v1/disputes/{id}/close).
+    /// Null until the case is closed.
+    /// </summary>
+    public DateTimeOffset? ClosedAt { get; set; }
+
     public DateTimeOffset? ResolvedAt { get; set; }
     public string? ResolverAdminId { get; set; }
     public string? ResolutionNotes { get; set; }

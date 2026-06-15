@@ -96,6 +96,13 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 // ---------------------------------------------------------------------------
 builder.Services.Configure<SecurityOptions>(builder.Configuration.GetSection(SecurityOptions.SectionName));
 
+// S12 / JEB-62 notification test seam (DEFAULT-OFF). Bound so TokensController can
+// read IOptionsMonitor<NotificationTestSeamOptions>; the role-less mint it powers is
+// per-request (explicit roles:[]) and does NOT read the Enabled/HonorExplicitEmptyRoles
+// flags, which stay false in every appsettings — production behaviour is unchanged.
+builder.Services.Configure<JeebGateway.Push.NotificationTestSeamOptions>(
+    builder.Configuration.GetSection(JeebGateway.Push.NotificationTestSeamOptions.SectionName));
+
 // JWT bearer auth (H-B5 / S02 ADR-001-rev3 token-authority): the gateway accepts
 // AND fully validates two issuers, each pinned to its own named scheme keyed on
 // the token's `iss` claim — NOT a widened ValidIssuers/multi-key single scheme.
