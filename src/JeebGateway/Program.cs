@@ -1736,6 +1736,11 @@ if (stateServiceWired)
     builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,
         JeebGateway.StateService.Idempotency.StateServiceIdempotencyStore>();
 
+    // JM-063 — Jeeb support tickets, backed by jeeb-state-service per ADR-0005 (the opaque
+    // KV above). The gateway stays stateless: a ticket is an opaque support-ticket:{id} row.
+    builder.Services.AddSingleton<JeebGateway.JeebSupport.IJeebSupportTicketStore,
+        JeebGateway.JeebSupport.StateServiceSupportTicketStore>();
+
     // S08 (A3/N9) — DURABLE offer→request routing. Re-point IOfferRequestIndex at the
     // write-through decorator so the offerId → (requestId, jeeberId) pairing survives a
     // gateway bounce and is shared across replicas (mirrored into the R1 idempotency KV,
@@ -1780,6 +1785,17 @@ if (stateServiceWired)
             name: "jeeb-state-service",
             failureStatus: Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Degraded,
             tags: new[] { "ready", "downstream" });
+}
+else
+{
+    // local/CI fallback (no live jeeb-state-service): the support store still needs an
+    // opaque KV to resolve, so back it with the in-process idempotency KV — the SAME
+    // degrade-to-in-memory contract the other durable stores use when unwired. Production
+    // (state-service wired) NEVER takes this path; the support row lives in jeeb-state-service.
+    builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,
+        JeebGateway.StateService.Idempotency.InMemoryIdempotencyStore>();
+    builder.Services.AddSingleton<JeebGateway.JeebSupport.IJeebSupportTicketStore,
+        JeebGateway.JeebSupport.StateServiceSupportTicketStore>();
 }
 
 // Global RFC 7807 ProblemDetails + last-line exception handler. Guarantees an
