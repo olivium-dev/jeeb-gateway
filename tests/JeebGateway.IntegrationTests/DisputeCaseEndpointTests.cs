@@ -466,6 +466,128 @@ public class DisputeCaseEndpointTests
         second.StatusCode.Should().Be(HttpStatusCode.Conflict);
     }
 
+    // ----------------------------------------------------------------
+    // DIS-02 — the full status machine open → under_review → resolved is
+    // reachable through the API. Before this WS the under_review state was
+    // dead (no endpoint moved a case into it). An admin triages the case,
+    // both parties can read the under_review status, then resolution lands.
+    // ----------------------------------------------------------------
+    [Fact]
+    public async Task MarkUnderReview_Moves_Open_To_UnderReview_Then_Resolvable()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        const string client = "c-ur";
+        const string jeeber = "j-ur";
+
+        var deliveryId = await SeedDeliveryWithJeeberAsync(factory, client, jeeber);
+
+        var http = ClientFor(factory, client);
+        var fileResp = await http.PostAsJsonAsync($"/v1/deliveries/{deliveryId}/escalate", new EscalateDeliveryRequest
+        {
+            Reason = "damaged_goods"
+        });
+        fileResp.EnsureSuccessStatusCode();
+        var @case = await fileResp.Content.ReadFromJsonAsync<DisputeCaseResponse>();
+        @case!.State.Should().Be(DisputeCaseState.Open);
+
+        var admin = AdminClientFor(factory, "admin-ur");
+        var reviewResp = await admin.PostAsync($"/admin/v1/disputes/{@case.Id}/review", null);
+        reviewResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var reviewed = await reviewResp.Content.ReadFromJsonAsync<DisputeCaseResponse>();
+        reviewed!.State.Should().Be(DisputeCaseState.UnderReview);
+
+        // The customer sees under_review on their timeline (DIS-02).
+        var fromClient = await http.GetFromJsonAsync<DisputeCaseResponse>($"/v1/disputes/{@case.Id}");
+        fromClient!.State.Should().Be(DisputeCaseState.UnderReview);
+
+        // under_review → resolved_refund is a valid onward transition.
+        var resolveResp = await admin.PostAsJsonAsync($"/admin/v1/disputes/{@case.Id}/resolve", new ResolveCaseRequest
+        {
+            Decision = "no_action",
+            Notes = "reviewed and closed"
+        });
+        resolveResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var resolved = await resolveResp.Content.ReadFromJsonAsync<DisputeCaseResponse>();
+        resolved!.State.Should().Be(DisputeCaseState.ResolvedNoAction);
+    }
+
+    [Fact]
+    public async Task MarkUnderReview_Is_Idempotent_NoOp_On_Second_Call()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var deliveryId = await SeedDeliveryWithJeeberAsync(factory, "c-ur-idem", "j-ur-idem");
+
+        var http = ClientFor(factory, "c-ur-idem");
+        var fileResp = await http.PostAsJsonAsync($"/v1/deliveries/{deliveryId}/escalate", new EscalateDeliveryRequest
+        {
+            Reason = "damaged_goods"
+        });
+        var @case = await fileResp.Content.ReadFromJsonAsync<DisputeCaseResponse>();
+
+        var admin = AdminClientFor(factory, "admin-ur-idem");
+        (await admin.PostAsync($"/admin/v1/disputes/{@case!.Id}/review", null)).EnsureSuccessStatusCode();
+
+        // Second pickup (e.g. two admins on the queue) is a no-op 200, not a 409.
+        var second = await admin.PostAsync($"/admin/v1/disputes/{@case.Id}/review", null);
+        second.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await second.Content.ReadFromJsonAsync<DisputeCaseResponse>();
+        body!.State.Should().Be(DisputeCaseState.UnderReview);
+    }
+
+    [Fact]
+    public async Task MarkUnderReview_On_Resolved_Case_Returns_409_Already_Resolved()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var deliveryId = await SeedDeliveryWithJeeberAsync(factory, "c-ur-res", "j-ur-res");
+
+        var http = ClientFor(factory, "c-ur-res");
+        var fileResp = await http.PostAsJsonAsync($"/v1/deliveries/{deliveryId}/escalate", new EscalateDeliveryRequest
+        {
+            Reason = "damaged_goods"
+        });
+        var @case = await fileResp.Content.ReadFromJsonAsync<DisputeCaseResponse>();
+
+        var admin = AdminClientFor(factory, "admin-ur-res");
+        (await admin.PostAsJsonAsync($"/admin/v1/disputes/{@case!.Id}/resolve", new ResolveCaseRequest
+        {
+            Decision = "no_action"
+        })).EnsureSuccessStatusCode();
+
+        // Cannot re-open a terminal case to under_review.
+        var review = await admin.PostAsync($"/admin/v1/disputes/{@case.Id}/review", null);
+        review.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var problem = await review.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("title").GetString().Should().Be("already_resolved");
+    }
+
+    [Fact]
+    public async Task MarkUnderReview_As_Non_Admin_Returns_403()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var deliveryId = await SeedDeliveryWithJeeberAsync(factory, "c-ur-na", "j-ur-na");
+
+        var http = ClientFor(factory, "c-ur-na");
+        var fileResp = await http.PostAsJsonAsync($"/v1/deliveries/{deliveryId}/escalate", new EscalateDeliveryRequest
+        {
+            Reason = "damaged_goods"
+        });
+        var @case = await fileResp.Content.ReadFromJsonAsync<DisputeCaseResponse>();
+
+        // A regular user cannot triage their own case.
+        var resp = await http.PostAsync($"/admin/v1/disputes/{@case!.Id}/review", null);
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+    }
+
+    [Fact]
+    public async Task MarkUnderReview_On_Unknown_Case_Returns_404()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var admin = AdminClientFor(factory, "admin-ur-404");
+
+        var resp = await admin.PostAsync("/admin/v1/disputes/case_does_not_exist/review", null);
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
     [Fact]
     public async Task Resolve_Refund_Without_Amount_Returns_400()
     {
@@ -549,5 +671,45 @@ public class DisputeCaseEndpointTests
                 Timestamp = DateTimeOffset.UtcNow
             }
         });
+    }
+}
+
+/// <summary>
+/// DIS-02 — pins the dispute-case transition matrix as a pure unit. The
+/// <c>under_review</c> column was dead before this WS (no endpoint reached
+/// it); these theories guard the documented machine
+/// <c>open → under_review → resolved_*</c> + the terminal seals.
+/// </summary>
+public class DisputeCaseStateMachineTests
+{
+    [Theory]
+    // open is the only legal source for under_review
+    [InlineData(DisputeCaseState.Open, DisputeCaseState.UnderReview, true)]
+    [InlineData(DisputeCaseState.UnderReview, DisputeCaseState.UnderReview, false)]   // no self-loop
+    [InlineData(DisputeCaseState.ResolvedRefund, DisputeCaseState.UnderReview, false)] // terminal → review blocked
+    [InlineData(DisputeCaseState.ResolvedNoAction, DisputeCaseState.UnderReview, false)]
+    [InlineData(DisputeCaseState.Closed, DisputeCaseState.UnderReview, false)]
+    // resolve is legal from both open and under_review
+    [InlineData(DisputeCaseState.Open, DisputeCaseState.ResolvedRefund, true)]
+    [InlineData(DisputeCaseState.UnderReview, DisputeCaseState.ResolvedRefund, true)]
+    [InlineData(DisputeCaseState.Open, DisputeCaseState.ResolvedNoAction, true)]
+    [InlineData(DisputeCaseState.UnderReview, DisputeCaseState.ResolvedNoAction, true)]
+    // resolved is terminal — no onward resolve
+    [InlineData(DisputeCaseState.ResolvedRefund, DisputeCaseState.ResolvedNoAction, false)]
+    [InlineData(DisputeCaseState.ResolvedNoAction, DisputeCaseState.ResolvedRefund, false)]
+    public void CanTransition_Matches_Documented_Machine(string from, string to, bool expected)
+    {
+        DisputeCaseState.CanTransition(from, to).Should().Be(expected);
+    }
+
+    [Theory]
+    [InlineData(DisputeCaseState.Open, false)]
+    [InlineData(DisputeCaseState.UnderReview, false)]
+    [InlineData(DisputeCaseState.ResolvedRefund, true)]
+    [InlineData(DisputeCaseState.ResolvedNoAction, true)]
+    [InlineData(DisputeCaseState.Closed, true)]
+    public void IsResolved_Classifies_Terminal_States(string state, bool expected)
+    {
+        DisputeCaseState.IsResolved(state).Should().Be(expected);
     }
 }

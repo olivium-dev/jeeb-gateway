@@ -40,6 +40,18 @@ public interface IDisputeCaseStore
     /// the admin queue refresh hook.
     /// </summary>
     Task<DisputeCase?> ReplaceEvidenceAsync(string caseId, DisputeEvidence evidence, CancellationToken ct);
+
+    /// <summary>
+    /// Atomically transitions a case from <c>open</c> to
+    /// <c>under_review</c> (DIS-02 triage). Runs the
+    /// <see cref="DisputeCaseState.CanTransition"/> guard under the store
+    /// lock so a concurrent resolver cannot move a case past
+    /// <c>under_review</c> between the read and the write.
+    /// Returns the updated row, or null when the id is unknown OR the
+    /// transition is not valid from the current state (the caller maps the
+    /// latter to a no-op / already-resolved outcome via the row's state).
+    /// </summary>
+    Task<DisputeCase?> ApplyUnderReviewAsync(string caseId, CancellationToken ct);
 }
 
 public sealed class DisputeCaseResolutionPatch
