@@ -1,4 +1,5 @@
 using JeebGateway.Push;
+using JeebGateway.StateService.Durable;
 using Microsoft.Extensions.Logging;
 
 namespace JeebGateway.Disputes;
@@ -12,17 +13,20 @@ public class DisputeService : IDisputeService
     private static readonly string[] AllowedPhotoSchemes = { "https://", "http://", "s3://" };
 
     private readonly IDisputeStore _store;
+    private readonly IStateDisputeWriter? _durableWriter;
     private readonly IPushNotificationService _push;
     private readonly TimeProvider _clock;
     private readonly ILogger<DisputeService> _log;
 
     public DisputeService(
         IDisputeStore store,
+        IStateDisputeWriter? durableWriter,
         IPushNotificationService push,
         TimeProvider clock,
         ILogger<DisputeService> log)
     {
         _store = store;
+        _durableWriter = durableWriter;
         _push = push;
         _clock = clock;
         _log = log;
@@ -74,6 +78,22 @@ public class DisputeService : IDisputeService
         };
 
         var saved = await _store.AddAsync(dispute, ct);
+
+        // Durable write-through: mirror the Open event to jeeb-state-service so the
+        // row survives a gateway bounce (ADR-0001 durability, P1). Best-effort —
+        // the in-memory store is the authoritative fast-read index; a state-service
+        // outage must not block the user's dispute filing.
+        if (_durableWriter is not null)
+        {
+            try
+            {
+                await _durableWriter.OpenAsync(saved.DeliveryId, saved.FiledByUserId, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Durable dispute write failed for {DisputeId}; in-memory write succeeded", saved.Id);
+            }
+        }
 
         // Best-effort notify the filer so they know the case is in the
         // queue. Admin notification piggy-backs on the same trigger with

@@ -53,6 +53,49 @@ public static class JeebReviewsProjection
     }
 
     /// <summary>
+    /// Project the generic <see cref="GetCommentsResponse"/> from feedback-service into the
+    /// mobile-shaped per-jeeber reviews page. The <c>Tag</c> query parameter sent upstream is
+    /// the jeeberId; <c>commenterId</c> identifies the reviewer (first-name resolution is
+    /// deferred — the mobile tolerates an empty name and falls back to a generic label).
+    /// D59: <c>coldStart</c> when &lt; 5 total reviews; <c>averageScore</c> is null while cold.
+    /// </summary>
+    public static JeebReviewsPageResponse ProjectReviewsPage(
+        string jeeberId,
+        GetCommentsResponse upstream,
+        int page,
+        int pageSize)
+    {
+        var items = (upstream.Comments ?? Enumerable.Empty<CommentResponse>())
+            .Select(c => new JeebReviewItemResponse
+            {
+                Id = c.Id.ToString(),
+                ReviewerFirstName = string.Empty,
+                Score = c.Rating,
+                Body = string.IsNullOrWhiteSpace(c.Text) ? null : c.Text.Trim(),
+                CreatedAt = c.Date.ToString("O"),
+                Reportable = true,
+            })
+            .ToList();
+
+        var total = upstream.TotalReviewCount;
+        var totalPages = total <= 0 ? 1 : (int)Math.Ceiling((double)total / pageSize);
+        var coldStart = total < 5;
+
+        return new JeebReviewsPageResponse
+        {
+            JeeberId = jeeberId,
+            Items = items,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = total,
+            TotalPages = totalPages,
+            ColdStart = coldStart,
+            ReviewCount = total,
+            AverageScore = coldStart ? null : (upstream.AverageRating == 0 ? null : upstream.AverageRating),
+        };
+    }
+
+    /// <summary>
     /// Build the correctly-shaped EMPTY, cold-start reviews page for a jeeber. This
     /// is the mobile-tolerated fallback used while the generic feedback-service has
     /// no per-jeeber reviews LIST read (see class remarks). D59: <c>coldStart</c> is

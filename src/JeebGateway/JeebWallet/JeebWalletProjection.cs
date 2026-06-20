@@ -58,17 +58,25 @@ public static class JeebWalletProjection
             ReservedNow = 0,
             GiftCredit = 0,
             Currency = currency,
-            AffordabilityState = ResolveAffordability(available),
+            AffordabilityState = ResolveAffordability(available, hasActiveWallet: active.Count > 0),
         };
     }
 
     /// <summary>
-    /// Derive the mobile affordability bucket from the available balance. This is a
-    /// presentation derivation (which copy/CTA the hub shows), not a state mutation.
+    /// Derive the mobile affordability bucket from the available balance and whether
+    /// the holder has any active wallets. Distinguishes S-10 edge cases:
+    /// <list type="bullet">
+    ///   <item><c>empty</c> — no active wallets (never topped up).</item>
+    ///   <item><c>all_reserved</c> — wallet exists but net balance is zero or negative
+    ///     (all funds are tied up in pending transactions).</item>
+    ///   <item><c>low</c> — positive balance below the top-up nudge threshold.</item>
+    ///   <item><c>enough</c> — positive balance above threshold.</item>
+    /// </list>
     /// </summary>
-    private static string ResolveAffordability(double available)
+    private static string ResolveAffordability(double available, bool hasActiveWallet)
     {
-        if (available <= 0) return Affordability.Empty;
+        if (available <= 0 && !hasActiveWallet) return Affordability.Empty;
+        if (available <= 0) return Affordability.AllReserved;
         if (available < LowBalanceThreshold) return Affordability.Low;
         return Affordability.Enough;
     }
