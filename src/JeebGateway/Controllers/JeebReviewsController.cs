@@ -4,10 +4,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.JeebReviews;
+using JeebGateway.Ratings;
 using JeebGateway.Ratings.Jeeb;
 using JeebGateway.Requests;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using JeebGateway.service.ServiceFeedback;
 using FeedbackApiException = JeebGateway.service.ServiceFeedback.ApiException;
 
@@ -60,13 +62,24 @@ public sealed class JeebReviewsController : ControllerBase
     private const int MinStars = 1;
     private const int MaxStars = 5;
 
+    /// <summary>180-day TTL on a durable review-report row (seconds).</summary>
+    private const int ReportTtlSeconds = 180 * 24 * 60 * 60;
+
     private readonly ServiceFeedbackClient _feedback;
     private readonly IRequestsStore _requests;
+    private readonly JeebGateway.StateService.Idempotency.IIdempotencyStore _reports;
+    private readonly ILogger<JeebReviewsController> _log;
 
-    public JeebReviewsController(ServiceFeedbackClient feedback, IRequestsStore requests)
+    public JeebReviewsController(
+        ServiceFeedbackClient feedback,
+        IRequestsStore requests,
+        JeebGateway.StateService.Idempotency.IIdempotencyStore reports,
+        ILogger<JeebReviewsController> log)
     {
         _feedback = feedback;
         _requests = requests;
+        _reports = reports;
+        _log = log;
     }
 
     /// <summary>
@@ -80,10 +93,11 @@ public sealed class JeebReviewsController : ControllerBase
     [ProducesResponseType(typeof(JeebReviewsPageResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public IActionResult ListReviews(
+    public async Task<IActionResult> ListReviews(
         [FromQuery] string? jeeberId,
         [FromQuery] int page = 1,
-        [FromQuery] int pageSize = 20)
+        [FromQuery] int pageSize = 20,
+        CancellationToken ct = default)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
 
@@ -92,28 +106,76 @@ public sealed class JeebReviewsController : ControllerBase
             return BadRequest(Problem400("jeeberId query parameter is required."));
         }
 
-        return Ok(JeebReviewsProjection.EmptyReviewsPage(jeeberId.Trim(), page, pageSize));
+        var id = jeeberId.Trim();
+        var safePage = page < 1 ? 1 : page;
+        var safeSize = pageSize < 1 ? 20 : pageSize;
+        var offset = (safePage - 1) * safeSize;
+
+        // Map the Jeeb user id to the SAME opaque rateeId the rating SUBMIT path stamps
+        // (FeedbackServiceRatingStore.StableGuid), then read the jeeber's revealed reviews
+        // from the SHARED feedback-service list-by-ratee surface (the ratings
+        // record-of-truth; score-taking-service is DECOMMISSIONED). The Jeeb presentation
+        // shaping stays here (ADR-0001 thin BFF / GR2); the upstream is opaque.
+        var rateeId = FeedbackServiceRatingStore.StableGuid(id);
+
+        try
+        {
+            var upstream = await _feedback.RatingsByRateeAsync(rateeId, safeSize, offset, ct);
+            return Ok(JeebReviewsProjection.ProjectReviewsPage(id, upstream, safePage, safeSize));
+        }
+        catch (FeedbackApiException ex)
+        {
+            // Graceful degrade (ADR-0001): a transient upstream fault returns the
+            // mobile-tolerated cold-start empty page rather than a 5xx — the reviews
+            // surface is non-critical and the mobile DioReviewsRepository tolerates it.
+            _log.LogWarning(
+                "reviews list for jeeber {JeeberId} degraded to empty: upstream status {Status}",
+                id, ex.StatusCode);
+            return Ok(JeebReviewsProjection.EmptyReviewsPage(id, safePage, safeSize));
+        }
     }
 
     /// <summary>
     /// POST /v1/ratings/jeeb/reviews/{reviewId}/report — report a review for
-    /// moderation (D27). See class remarks: the generic feedback-service has no
-    /// review-report endpoint, so the gateway accepts the request (202) rather than
-    /// fabricating moderation state (ADR-0001). The mobile repo only awaits a
-    /// non-error response.
+    /// moderation (D27). The generic feedback-service has no review-moderation
+    /// endpoint, so rather than a pure no-op the gateway DURABLY records the report
+    /// intent as an opaque row in jeeb-state-service (idempotent per
+    /// (reviewId, reporter)) so a moderation worker can drain the queue later, then
+    /// returns 202 Accepted. ADR-0001 preserved: the gateway holds no moderation
+    /// state in-process; the row lives downstream and survives a bounce. The mobile
+    /// repo only awaits a non-error response.
     /// </summary>
     [HttpPost("reviews/{reviewId}/report")]
     [RequireCapability(Capabilities.DeliveryParticipate)]
     [ProducesResponseType(StatusCodes.Status202Accepted)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public IActionResult ReportReview(string reviewId)
+    public async Task<IActionResult> ReportReview(string reviewId, CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var reporterId, out var unauthorized)) return unauthorized;
 
         if (string.IsNullOrWhiteSpace(reviewId))
         {
             return BadRequest(Problem400("reviewId is required."));
+        }
+
+        // Durably record the report intent (opaque, idempotent) so it is not lost on a
+        // gateway bounce — a moderation worker can drain "review-report:*" later. A
+        // state-service blip never blocks the user: the report is best-effort.
+        try
+        {
+            var key = $"review-report:{reviewId.Trim()}:{reporterId}";
+            var body = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                reviewId = reviewId.Trim(),
+                reporterId,
+                reportedAt = DateTimeOffset.UtcNow,
+            });
+            await _reports.PutOrGetAsync(key, statusCode: 202, body, ReportTtlSeconds, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "review-report durable record failed for review {ReviewId}; accepting anyway", reviewId);
         }
 
         // No generic moderation endpoint exists; the request is accepted for later

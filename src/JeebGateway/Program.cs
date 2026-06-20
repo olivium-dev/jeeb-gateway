@@ -1818,6 +1818,15 @@ if (stateServiceWired)
     builder.Services.AddSingleton<JeebGateway.StateService.Durable.IStateDisputeWriter,
         JeebGateway.StateService.Durable.StateServiceDisputeWriter>();
 
+    // ADR-0001 remediation (run #1 follow-up): the dispute STORE itself is now durable.
+    // Re-points IDisputeStore from the in-memory MVP store (rows lost on every gateway
+    // bounce / replica move — the flagged ADR-0001 violation) to the state-service-backed
+    // store, which persists the full Jeeb dispute row as an opaque KV body + owner/delivery
+    // prefix indexes (the PR #206 support-ticket pattern). Overrides the InMemoryDisputeStore
+    // registered earlier (last-wins DI); a state-service blip is absorbed by the typed
+    // client's circuit-breaker rather than failing the file/list path.
+    builder.Services.AddSingleton<IDisputeStore, StateServiceDisputeStore>();
+
     // Add jeeb-state-service to the aggregate-health roster (now 18 checks).
     builder.Services.AddHealthChecks()
         .AddUrlGroup(
