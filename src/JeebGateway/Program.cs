@@ -1113,10 +1113,19 @@ builder.Services.AddSingleton<ICancellationService, CancellationService>();
 // Reveal logic is pure (BlindRevealPolicy): both parties' ratings stay
 // blind until both sides submit OR the 7-day window closes (after which
 // the row is locked as no-rating, with whatever exists already visible).
-// The canonical rating row is captured by score-taking-service via the
-// typed IScoreServiceClient registered in ServiceClientExtensions.
+// The mutual-blind pairing store is the record-of-truth. Default is in-memory;
+// when FeatureFlags:UseUpstream:Ratings is ON the store is swapped for
+// FeedbackServiceRatingStore (persists/reads via the NSwag ServiceFeedbackClient).
+// score-taking-service was removed entirely (owner directive). BanService precedent.
 builder.Services.Configure<RatingOptions>(builder.Configuration.GetSection(RatingOptions.SectionName));
-builder.Services.AddSingleton<IRatingStore, InMemoryRatingStore>();
+if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
+{
+    builder.Services.AddSingleton<IRatingStore, JeebGateway.Ratings.FeedbackServiceRatingStore>();
+}
+else
+{
+    builder.Services.AddSingleton<IRatingStore, InMemoryRatingStore>();
+}
 builder.Services.AddSingleton<IRatingService, RatingService>();
 
 // OTP handover verification + admin escalation (T-backend-015 / JEEB-33).
@@ -1524,7 +1533,18 @@ builder.Services.AddHostedService<AutoOfflineSweeper>();
 // stale threshold (default 2 min), and ends the stream when the delivery
 // row reaches a terminal status.
 builder.Services.Configure<TrackingOptions>(builder.Configuration.GetSection(TrackingOptions.SectionName));
-builder.Services.AddSingleton<ILocationStore, InMemoryLocationStore>();
+// Gap 1 flag-gated store swap (BanService precedent): when
+// FeatureFlags:UseUpstream:Geolocation is ON, the record-of-truth is the shared
+// geolocation-service via GeoServiceLocationStore (NSwag client); default OFF keeps
+// the in-memory store so neither the controller nor the SSE loop branch on the flag.
+if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Geolocation"))
+{
+    builder.Services.AddSingleton<ILocationStore, JeebGateway.Tracking.GeoServiceLocationStore>();
+}
+else
+{
+    builder.Services.AddSingleton<ILocationStore, InMemoryLocationStore>();
+}
 // S09 (JEB-54): shared delivery-participant resolver backing the live-tracking
 // SSE alias, the delivery-scoped location ingest authz, and the settlement-intent
 // read. Stateless BFF composition over IRequestsStore + IDeliveryServiceClient —

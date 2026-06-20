@@ -114,10 +114,10 @@ public static class ServiceClientExtensions
         //             (currently IRequestsStore + InMemoryRequestsStore)
         AddNamedDownstreamClient(services, config, "delivery", "Services:Delivery:BaseUrl");
 
-        // T-backend-020 (JEEB-38): score-taking-service captures the canonical
-        // per-party rating once the gateway's mutual-blind state machine
-        // accepts it. Reveal logic remains in JeebGateway.Ratings.
-        AddNamedDownstreamClient(services, config, "score-taking", "Services:ScoreTaking:BaseUrl");
+        // score-taking-service — DELETED (owner directive: remove completely, never use).
+        // Jeeb ratings are owned by the in-gateway mutual-blind state machine with the
+        // optional feedback-service store swap (FeatureFlags:UseUpstream:Ratings). The
+        // named + typed score-taking client registrations and their config keys are gone.
 
         // T-BE-019 (JEB-55): one-time-password service for delivery handover OTP
         // ApplicationId pattern: delivery_handover_{deliveryId}
@@ -169,17 +169,44 @@ public static class ServiceClientExtensions
         // "ServiceNotificationClient" (ServiceNotificationClient:BaseUrl) and consumed
         // directly by NotificationController, exactly as salehly-gateway wires it.
 
-        // T-backend-020 (JEEB-38): typed client over score-taking-service.
-        // Carries its own bearer/ServiceAuth/resilience chain via
-        // AttachStandardPipeline (BFF aggregation pattern).
-        //
-        // NOTE: score-taking-service is STALE (no appsettings entry in any
-        // environment; not in the deployed fleet). This typed registration is
-        // retained only so the typed-client pipeline test keeps a registration to
-        // assert against; IRatingService no longer routes its record-of-truth here.
+        // score-taking-service typed client — DELETED (owner directive). See note above.
+
+        // Gap 3 (JEB compliment BFF): NSwag-generated typed client over the shared
+        // compliment-service, with its own bearer/ServiceAuth/resilience chain via
+        // AttachStandardPipeline. Gated by FeatureFlags:UseUpstream:Compliment (default
+        // OFF → ComplimentsController returns 503). BaseUrl is optional / no-fail-closed:
+        // BindBaseAddress leaves BaseAddress null for an unset/placeholder host so the
+        // client constructs even while the kill switch is off.
+        // The NSwag-generated ComplimentServiceClient ctor is (string baseUrl, HttpClient http),
+        // so — exactly like the ServiceOTP registration below — the baseUrl must be supplied via
+        // AddTypedClient; a bare AddHttpClient<I,Impl> would have ActivatorUtilities try (and fail)
+        // to resolve `string baseUrl` from DI at controller-activation time. BindBaseAddress still
+        // sets HttpClient.BaseAddress for the resilience pipeline; the ctor baseUrl mirrors it
+        // (empty/placeholder when the kill switch is off, which is safe — the controller 503s first).
         AttachStandardPipeline(
-            services.AddHttpClient<IScoreServiceClient, ScoreServiceClient>(http =>
-                BindBaseAddress(http, config, "Services:ScoreTaking")));
+            services.AddHttpClient<
+                JeebGateway.Services.Generated.ComplimentService.IComplimentServiceClient,
+                JeebGateway.Services.Generated.ComplimentService.ComplimentServiceClient>(http =>
+                BindBaseAddress(http, config, "ComplimentServiceApi"))
+            .AddTypedClient<JeebGateway.Services.Generated.ComplimentService.IComplimentServiceClient>((http, sp) =>
+            {
+                var baseUrl = config["ComplimentServiceApi:BaseUrl"]
+                    ?? config["ComplimentServiceApi"]
+                    ?? string.Empty;
+                return new JeebGateway.Services.Generated.ComplimentService.ComplimentServiceClient(baseUrl, http);
+            }));
+
+        // Gap 1 (geolocation): NSwag-shaped typed client over the shared
+        // geolocation-service, consumed by GeoServiceLocationStore when
+        // FeatureFlags:UseUpstream:Geolocation is ON (flag-gated store swap in Program.cs).
+        // Distinct from the legacy hand-coded Services.Clients.GeolocationServiceClient
+        // above (kept for the existing typed-client pipeline assertion); this is the
+        // generated client the store binds to.
+        AttachStandardPipeline(
+            services.AddHttpClient<
+                JeebGateway.Services.Generated.GeolocationService.IGeolocationServiceClient,
+                JeebGateway.Services.Generated.GeolocationService.GeolocationServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Geolocation")));
 
         // feedback-service: the gateway now mirrors salehly-gateway's
         // ServiceFeedbackClient + FeedbackController exactly (named + scoped NSwag

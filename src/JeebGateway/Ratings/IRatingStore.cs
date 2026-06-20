@@ -17,11 +17,10 @@ public sealed class RatingPair
 /// <summary>
 /// Storage abstraction for the gateway's mutual-blind rating state.
 ///
-/// MVP wiring is an in-memory <see cref="InMemoryRatingStore"/>. Production
-/// wiring will hit Postgres directly (one row per delivery, two nullable
-/// jsonb columns for the two sides) and the
-/// <see cref="JeebGateway.Services.Clients.IScoreServiceClient"/> remains
-/// authoritative for the canonical rating storage.
+/// MVP wiring is an in-memory <see cref="InMemoryRatingStore"/>. The optional
+/// feedback-service-backed store (behind <c>FeatureFlags:UseUpstream:Ratings</c>)
+/// is the upstream persistence path. The former score-taking-service client was
+/// removed entirely (owner directive) and is no longer referenced.
 /// </summary>
 public interface IRatingStore
 {

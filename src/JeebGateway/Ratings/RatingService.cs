@@ -29,11 +29,11 @@ namespace JeebGateway.Ratings;
 /// </para>
 ///
 /// <para>
-/// The previously-wired <see cref="IScoreServiceClient"/> targeted a STALE
-/// <c>score-taking-service</c> (no appsettings entry anywhere; not in the
-/// deployed fleet) and is no longer the record-of-truth. It is retained as a
-/// constructor dependency only for backward-compatible DI/test construction;
-/// it is never invoked.
+/// SCORE-TAKING REMOVED. A previously-wired score-taking-service client was deleted
+/// completely (owner directive: never use score-taking). It was never the
+/// record-of-truth and was never invoked. The mutual-blind pairing store
+/// (<see cref="IRatingStore"/>) — optionally backed by feedback-service behind
+/// <c>FeatureFlags:UseUpstream:Ratings</c> — is the only persistence path.
 /// </para>
 /// </summary>
 public sealed class RatingService : IRatingService
@@ -43,7 +43,6 @@ public sealed class RatingService : IRatingService
 
     private readonly IRequestsStore _requests;
     private readonly IRatingStore _ratings;
-    private readonly IScoreServiceClient _scoreClient;
     private readonly TimeProvider _clock;
     private readonly RatingOptions _options;
     private readonly ILogger<RatingService> _log;
@@ -51,14 +50,12 @@ public sealed class RatingService : IRatingService
     public RatingService(
         IRequestsStore requests,
         IRatingStore ratings,
-        IScoreServiceClient scoreClient,
         TimeProvider clock,
         IOptions<RatingOptions> options,
         ILogger<RatingService> log)
     {
         _requests = requests;
         _ratings = ratings;
-        _scoreClient = scoreClient;
         _clock = clock;
         _options = options.Value;
         _log = log;

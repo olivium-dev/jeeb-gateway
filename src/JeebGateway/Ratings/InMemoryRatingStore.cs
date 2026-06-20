@@ -4,8 +4,8 @@ namespace JeebGateway.Ratings;
 
 /// <summary>
 /// MVP in-memory implementation of <see cref="IRatingStore"/>. Backs the
-/// mutual-blind state machine until the Postgres-backed implementation
-/// lands alongside the downstream score-taking-service migration.
+/// mutual-blind state machine; the optional feedback-service-backed store
+/// (behind <c>FeatureFlags:UseUpstream:Ratings</c>) is the upstream swap.
 /// </summary>
 public sealed class InMemoryRatingStore : IRatingStore
 {

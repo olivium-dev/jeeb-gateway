@@ -5,10 +5,11 @@ namespace JeebGateway.Ratings;
 /// (caller-is-a-party, status-is-delivered, window-still-open) and emits the
 /// caller-specific view via <see cref="BlindRevealPolicy"/>.
 ///
-/// The service calls into <see cref="JeebGateway.Services.Clients.IScoreServiceClient"/>
-/// to persist the rating in the canonical score-taking-service before
-/// updating its own state, so a failed downstream write does not leave a
-/// half-recorded row in the gateway.
+/// Persistence is the gateway's own <see cref="IRatingStore"/> (in-memory by
+/// default; optionally feedback-service-backed behind
+/// <c>FeatureFlags:UseUpstream:Ratings</c>). The former score-taking-service
+/// client was removed entirely (owner directive) and was never the
+/// record-of-truth.
 /// </summary>
 public interface IRatingService
 {
