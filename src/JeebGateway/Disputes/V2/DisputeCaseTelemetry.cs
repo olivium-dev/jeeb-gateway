@@ -40,6 +40,10 @@ public static class DisputeCaseTelemetry
         Meter.CreateCounter<long>("jeeb.dispute.case.resolved",
             description: "Number of dispute cases resolved via /admin/v1/disputes/{id}/resolve (AC5).");
 
+    public static readonly Counter<long> UnderReview =
+        Meter.CreateCounter<long>("jeeb.dispute.case.under_review",
+            description: "Cases moved open → under_review via /admin/v1/disputes/{id}/review (DIS-02).");
+
     public static readonly Counter<long> EvidenceDegraded =
         Meter.CreateCounter<long>("jeeb.dispute.case.evidence_degraded",
             description: "Cases opened with a degraded evidence bundle (chat or gps timeout).");

@@ -95,4 +95,24 @@ public sealed class InMemoryDisputeCaseStore : IDisputeCaseStore
             return Task.FromResult<DisputeCase?>(existing);
         }
     }
+
+    public Task<DisputeCase?> ApplyUnderReviewAsync(string caseId, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (!_byId.TryGetValue(caseId, out var existing))
+            {
+                return Task.FromResult<DisputeCase?>(null);
+            }
+            // The CanTransition guard runs inside the lock so a racing
+            // resolve cannot move the row to a resolved state between the
+            // service's read and this write.
+            if (!DisputeCaseState.CanTransition(existing.State, DisputeCaseState.UnderReview))
+            {
+                return Task.FromResult<DisputeCase?>(null);
+            }
+            existing.State = DisputeCaseState.UnderReview;
+            return Task.FromResult<DisputeCase?>(existing);
+        }
+    }
 }

@@ -177,6 +177,58 @@ public sealed class DisputeCaseService : IDisputeCaseService
     public Task<IReadOnlyList<DisputeCase>> ListForUserAsync(string userId, CancellationToken ct)
         => _store.ListForUserAsync(userId, ct);
 
+    public async Task<TransitionResult> MarkUnderReviewAsync(MarkUnderReviewInput input, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        if (string.IsNullOrWhiteSpace(input.AdminUserId))
+        {
+            throw new DisputeCaseValidationException("adminUserId is required.");
+        }
+
+        var existing = await _store.GetByIdAsync(input.CaseId, ct).ConfigureAwait(false);
+        if (existing is null)
+        {
+            return new TransitionResult(TransitionOutcome.NotFound, null);
+        }
+
+        // Terminal cases cannot be re-reviewed (DIS-02): the admin queue
+        // must not re-open a resolved/closed case.
+        if (DisputeCaseState.IsResolved(existing.State))
+        {
+            return new TransitionResult(TransitionOutcome.AlreadyResolved, existing);
+        }
+
+        // Idempotent: an already-under_review case is a no-op so a double
+        // queue-pickup (two admins opening the same case) is safe.
+        if (string.Equals(existing.State, DisputeCaseState.UnderReview, StringComparison.Ordinal))
+        {
+            return new TransitionResult(TransitionOutcome.NoOp, existing);
+        }
+
+        using var span = DisputeCaseTelemetry.ActivitySource.StartActivity("dispute.case.under_review", ActivityKind.Internal);
+        span?.SetTag("case.id", existing.Id);
+
+        var updated = await _store.ApplyUnderReviewAsync(existing.Id, ct).ConfigureAwait(false);
+        if (updated is null)
+        {
+            // The state moved under us (a concurrent resolve landed between
+            // our read and the locked write). Re-read and surface the
+            // terminal state so the admin sees the truth.
+            var refreshed = await _store.GetByIdAsync(input.CaseId, ct).ConfigureAwait(false);
+            return refreshed is not null && DisputeCaseState.IsResolved(refreshed.State)
+                ? new TransitionResult(TransitionOutcome.AlreadyResolved, refreshed)
+                : new TransitionResult(TransitionOutcome.NotFound, refreshed);
+        }
+
+        DisputeCaseTelemetry.UnderReview.Add(1);
+        _log.LogInformation(
+            "event={Event} case_id={CaseId} delivery_id={DeliveryId} admin_id={AdminId}",
+            "dispute.under_review", updated.Id, updated.DeliveryId, input.AdminUserId);
+
+        return new TransitionResult(TransitionOutcome.Transitioned, updated);
+    }
+
     public async Task<ResolveResult> ResolveAsync(ResolveCaseInput input, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(input);

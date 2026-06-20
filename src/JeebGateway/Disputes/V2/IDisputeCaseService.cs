@@ -29,8 +29,45 @@ public interface IDisputeCaseService
 
     Task<IReadOnlyList<DisputeCase>> ListForUserAsync(string userId, CancellationToken ct);
 
+    /// <summary>
+    /// Admin moves an <c>open</c> case to <c>under_review</c> (DIS-02). This
+    /// is the triage verb that was missing from the v2 surface — without it
+    /// the <see cref="DisputeCaseState.UnderReview"/> state was unreachable
+    /// through the API even though the customer/Jeeber timeline (DIS-02) is
+    /// contracted to surface <c>open / under_review / resolved</c>.
+    ///
+    /// Idempotent: marking an already-<c>under_review</c> case returns the
+    /// existing row with <see cref="TransitionOutcome.NoOp"/>. Marking a
+    /// terminal (resolved/closed) case returns
+    /// <see cref="TransitionOutcome.AlreadyResolved"/>.
+    /// </summary>
+    Task<TransitionResult> MarkUnderReviewAsync(MarkUnderReviewInput input, CancellationToken ct);
+
     Task<ResolveResult> ResolveAsync(ResolveCaseInput input, CancellationToken ct);
 }
+
+public sealed class MarkUnderReviewInput
+{
+    public required string CaseId { get; init; }
+    public required string AdminUserId { get; init; }
+}
+
+public enum TransitionOutcome
+{
+    /// <summary>The case moved open → under_review.</summary>
+    Transitioned,
+
+    /// <summary>The case was already under_review; the call was a no-op.</summary>
+    NoOp,
+
+    /// <summary>No case with the given id.</summary>
+    NotFound,
+
+    /// <summary>The case is in a terminal state and cannot be re-reviewed.</summary>
+    AlreadyResolved
+}
+
+public sealed record TransitionResult(TransitionOutcome Outcome, DisputeCase? Case);
 
 public sealed class EscalateInput
 {
