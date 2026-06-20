@@ -1124,6 +1124,32 @@ builder.Services.AddSingleton<ICancellationService, CancellationService>();
 builder.Services.Configure<RatingOptions>(builder.Configuration.GetSection(RatingOptions.SectionName));
 if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
 {
+    // Fail-fast wiring guard (JEB E2E 5.6/5.7). When the Ratings flag is ON the
+    // delivery-ratings record-of-truth IS feedback-service: every POST
+    // /api/deliveries/{id}/rate round-trips to FeedbackServiceApi:BaseUrl via the
+    // ServiceFeedbackClient blind-rating surface (POST /ratings). The committed
+    // appsettings default for that key is a 5000-series DEV PLACEHOLDER
+    // (http://localhost:5011) that no service ever binds — every environment is
+    // expected to override it (e.g. FeedbackServiceApi__BaseUrl=http://localhost:10064
+    // locally, the swarm host in prod). If the flag is flipped ON but the override
+    // is dropped, the client dials the dead placeholder, the connection is refused,
+    // and EVERY rating surfaces as an opaque 502 — indistinguishable from a real
+    // upstream/contract fault and exactly the misconfiguration that broke E2E
+    // 5.6/5.7. Refuse to start in that state so the misconfig is loud at boot
+    // instead of silent at request time.
+    var feedbackBaseUrl = builder.Configuration["FeedbackServiceApi:BaseUrl"];
+    if (string.IsNullOrWhiteSpace(feedbackBaseUrl)
+        || feedbackBaseUrl.Contains("localhost:5011", StringComparison.OrdinalIgnoreCase))
+    {
+        throw new InvalidOperationException(
+            "FeatureFlags:UseUpstream:Ratings is ON, which makes feedback-service the delivery-ratings " +
+            "record-of-truth, but FeedbackServiceApi:BaseUrl is unset or still the dead dev placeholder " +
+            $"('{feedbackBaseUrl ?? "<null>"}'). Set FeedbackServiceApi__BaseUrl to the reachable " +
+            "feedback-service URL (e.g. http://localhost:10064 locally) or turn the flag OFF to use the " +
+            "in-memory rating store. Left unset, every POST /api/deliveries/{id}/rate would 502 on a " +
+            "refused connection to the placeholder host.");
+    }
+
     builder.Services.AddSingleton<IRatingStore, JeebGateway.Ratings.FeedbackServiceRatingStore>();
 }
 else
