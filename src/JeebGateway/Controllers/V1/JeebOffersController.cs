@@ -190,6 +190,20 @@ public sealed class JeebOffersController : ControllerBase
 
         if (offer.Status != PendingOfferStatus.Pending)
         {
+            // SM-2 / ACC-02 re-accept → 409 already_accepted with the winner.
+            var supersedeOutcome = await _offers.AcceptWithSupersedeAsync(offerId, DateTimeOffset.UtcNow, ct);
+            if (supersedeOutcome.Status == AcceptOfferStatus.AlreadyAccepted)
+            {
+                return Conflict(new ProblemDetails
+                {
+                    Title = "Offer already accepted.",
+                    Detail = $"The auction for this request is closed; the winning Jeeber is {supersedeOutcome.WinnerJeeberId}.",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/already-accepted",
+                    Extensions = { ["winnerJeeberId"] = supersedeOutcome.WinnerJeeberId }
+                });
+            }
+
             return Conflict(new ProblemDetails
             {
                 Title = $"Offer is no longer pending (current={offer.Status}).",
@@ -231,7 +245,8 @@ public sealed class JeebOffersController : ControllerBase
         if (accepted is null)
             return NotFound();
 
-        await _offers.AcceptAsync(offerId, DateTimeOffset.UtcNow, ct);
+        // ACC-02: supersede every competing bid on the same request.
+        await _offers.AcceptWithSupersedeAsync(offerId, DateTimeOffset.UtcNow, ct);
 
         return Ok(ToRequestDto(accepted));
     }

@@ -111,6 +111,132 @@ public class InMemoryPendingOffersStore : IPendingOffersStore
         }
     }
 
+    public Task<AcceptOfferOutcome> AcceptWithSupersedeAsync(
+        string offerId, DateTimeOffset at, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_offers.TryGetValue(offerId, out var offer))
+            {
+                return Task.FromResult(AcceptOfferOutcome.NotFound);
+            }
+
+            // Re-accept / already-closed auction. SM-2: re-accepting (or accepting
+            // a competing bid after a winner exists) returns 409 already_accepted
+            // and surfaces the WINNER. Resolve the winner from the request's
+            // accepted offer so the controller can return its jeeberId regardless
+            // of whether THIS offer is the winner or a superseded loser.
+            if (offer.Status != PendingOfferStatus.Pending)
+            {
+                var winner = FindAcceptedForRequest(offer.RequestId);
+                if (winner is not null)
+                {
+                    return Task.FromResult(AcceptOfferOutcome.AlreadyAccepted(winner.JeeberId));
+                }
+
+                // No accepted winner on the request, yet this offer is non-pending
+                // (the Jeeber withdrew it). That is a plain "no longer acceptable",
+                // not an already_accepted close.
+                return Task.FromResult(AcceptOfferOutcome.NotPending);
+            }
+
+            // Defensive: another offer on this request may already be accepted even
+            // though THIS offer is still pending (a superseded-sweep gap on a prior
+            // partial accept). Treat the request as closed and do not double-accept.
+            var existingWinner = FindAcceptedForRequest(offer.RequestId);
+            if (existingWinner is not null && !ReferenceEquals(existingWinner, offer))
+            {
+                offer.Status = PendingOfferStatus.Superseded;
+                offer.UpdatedAt = at;
+                return Task.FromResult(AcceptOfferOutcome.AlreadyAccepted(existingWinner.JeeberId));
+            }
+
+            offer.Status = PendingOfferStatus.Accepted;
+            offer.UpdatedAt = at;
+
+            // ACC-02 — the auction closes around this single winner. Every OTHER
+            // pending offer on the SAME request (any Jeeber) is superseded in the
+            // same critical section, so a concurrent accept of a competing bid on
+            // another connection cannot also win.
+            var supersededCount = 0;
+            foreach (var sibling in _offers.Values)
+            {
+                if (ReferenceEquals(sibling, offer)) continue;
+                if (!string.Equals(sibling.RequestId, offer.RequestId, StringComparison.Ordinal)) continue;
+                if (sibling.Status != PendingOfferStatus.Pending) continue;
+                sibling.Status = PendingOfferStatus.Superseded;
+                sibling.UpdatedAt = at;
+                supersededCount++;
+            }
+
+            return Task.FromResult(AcceptOfferOutcome.Accepted(offer.JeeberId, supersededCount));
+        }
+    }
+
+    /// <summary>
+    /// Returns the accepted offer on <paramref name="requestId"/> (the auction
+    /// winner) or null when the auction is still open. Caller holds the write lock.
+    /// </summary>
+    private PendingOffer? FindAcceptedForRequest(string requestId)
+    {
+        foreach (var candidate in _offers.Values)
+        {
+            if (!string.Equals(candidate.RequestId, requestId, StringComparison.Ordinal)) continue;
+            if (candidate.Status == PendingOfferStatus.Accepted) return candidate;
+        }
+        return null;
+    }
+
+    public Task<EditOfferOutcome> TryEditAsync(
+        string offerId,
+        string requestId,
+        string jeeberId,
+        decimal? fee,
+        int? etaMinutes,
+        string? note,
+        int maxEdits,
+        DateTimeOffset at,
+        CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_offers.TryGetValue(offerId, out var offer))
+            {
+                return Task.FromResult(EditOfferOutcome.NotFound);
+            }
+            // Id collides with an offer on a different request — surface as 404,
+            // mirroring TryWithdrawAsync's request-scoping.
+            if (!string.Equals(offer.RequestId, requestId, StringComparison.Ordinal))
+            {
+                return Task.FromResult(EditOfferOutcome.NotFound);
+            }
+            if (!string.Equals(offer.JeeberId, jeeberId, StringComparison.Ordinal))
+            {
+                return Task.FromResult(EditOfferOutcome.NotOwned);
+            }
+            if (offer.Status != PendingOfferStatus.Pending)
+            {
+                return Task.FromResult(EditOfferOutcome.NotPending);
+            }
+
+            // SM-2 / JEB-1474 2-edit cap. The check + the increment happen under the
+            // same lock so two concurrent edits cannot both pass the cap. The cap is
+            // evaluated BEFORE mutating, so a rejected 3rd edit leaves the bid intact.
+            if (offer.EditCount >= maxEdits)
+            {
+                return Task.FromResult(EditOfferOutcome.EditLimitReached);
+            }
+
+            if (fee is decimal f) offer.Fee = f;
+            if (etaMinutes is int e) offer.EtaMinutes = e;
+            if (note is not null) offer.Note = note;
+            offer.EditCount++;
+            offer.UpdatedAt = at;
+
+            return Task.FromResult(EditOfferOutcome.Edited(offer));
+        }
+    }
+
     public Task<PendingOffer> TrySubmitAsync(
         string requestId,
         string jeeberId,

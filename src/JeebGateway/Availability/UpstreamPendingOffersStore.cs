@@ -166,6 +166,27 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
             "accept path until OffersController is migrated to IOfferServiceClient.AcceptAsync (tracked fast-follow).");
     }
 
+    public Task<AcceptOfferOutcome> AcceptWithSupersedeAsync(
+        string offerId, DateTimeOffset at, CancellationToken ct)
+        => throw new NotSupportedException(
+            "offer-service owns the accept-and-supersede auction-close (SELECT FOR UPDATE single-winner + " +
+            "sibling rejection) via OffersController's upstream orchestration (IOfferServiceClient.AcceptWithStatusAsync), " +
+            "NOT the IPendingOffersStore seam. The supersede-aware in-memory accept is the flag-OFF path only.");
+
+    public Task<EditOfferOutcome> TryEditAsync(
+        string offerId,
+        string requestId,
+        string jeeberId,
+        decimal? fee,
+        int? etaMinutes,
+        string? note,
+        int maxEdits,
+        DateTimeOffset at,
+        CancellationToken ct)
+        => throw new NotSupportedException(
+            "offer-service owns the edit rule + the 2-edit cap via OffersController's upstream forward " +
+            "(IOfferServiceClient.EditAsync with max_edits); the in-memory TryEditAsync is the flag-OFF path only.");
+
     public Task<PendingOffer?> GetAsync(string offerId, CancellationToken ct)
         => throw new NotSupportedException(
             "offer-service exposes no get-offer-by-id route; the offer-accept lookup path stays on the " +
