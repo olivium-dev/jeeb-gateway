@@ -304,6 +304,59 @@ public class AuthOtpControllerTests
     }
 
     // -----------------------------------------------------------------
+    // G10 — FAIL-CLOSED identity resolution (Security:Auth:FailClosedIdentityResolve).
+    //   Repro of lease jeeb-20260613002036-8874 (S02/H-B2): UseUpstream:UserManagement
+    //   ON + UM phone find-or-create faults. With the flag ON the verify read path MUST
+    //   fail closed (503 otp_unavailable) instead of silently minting the stale in-memory
+    //   identity with a single 'client' role.
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task G10_Verify_FailClosedOn_UmFault_Returns503_OtpUnavailable_NoToken()
+    {
+        var stub = new StubServiceOtpClient(); // validate succeeds (code accepted upstream)
+        var um = new ThrowingDualRoleClient((int)HttpStatusCode.BadGateway);
+        using var factory = MakeFactory(stub, otpEnabled: true,
+            userManagementEnabled: true, failClosedIdentityResolve: true, dualRoleClient: um);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsync("/v1/auth/otp/verify",
+            JsonBody("""{ "phone": "+9613000010", "code": "1234" }"""));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable,
+            "fail-closed: a UM identity fault MUST NOT downgrade to the stale in-memory identity");
+        um.PhoneCalls.Should().Be(1, "the verify read path must have dialed UM before failing closed");
+
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().Contain("otp_unavailable", "the frozen fail-closed machine code");
+        raw.Should().Contain("https://problems.jeeb.lb/auth/otp_unavailable");
+        raw.ToLowerInvariant().Should().NotContain("accesstoken",
+            "no half-resolved session may be minted when identity resolution fails closed");
+    }
+
+    [Fact]
+    public async Task G11_Verify_FailClosedOff_UmFault_Falls_Back_And_Returns200_LegacyDegrade()
+    {
+        // Default-off preserves the legacy fail-SAFE degrade: a UM blip still yields a
+        // live session from the in-memory store (the historical behavior).
+        var stub = new StubServiceOtpClient();
+        var um = new ThrowingDualRoleClient((int)HttpStatusCode.BadGateway);
+        using var factory = MakeFactory(stub, otpEnabled: true,
+            userManagementEnabled: true, failClosedIdentityResolve: false, dualRoleClient: um);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsync("/v1/auth/otp/verify",
+            JsonBody("""{ "phone": "+9613000011", "code": "1234" }"""));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "with the flag OFF a UM blip must NOT hard-break a live login (legacy fail-safe)");
+        um.PhoneCalls.Should().Be(1, "UM is still dialed first; only the fallback differs");
+
+        var body = await resp.Content.ReadFromJsonAsync<OtpVerifyResponseDto>();
+        body!.AccessToken.Should().NotBeNullOrWhiteSpace("the in-memory fallback still mints a session");
+    }
+
+    // -----------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------
 
@@ -330,8 +383,70 @@ public class AuthOtpControllerTests
             });
         });
 
+    private static WebApplicationFactory<Program> MakeFactory(
+        IServiceOTPClient stub,
+        bool otpEnabled,
+        bool userManagementEnabled,
+        bool failClosedIdentityResolve,
+        JeebGateway.Users.IUserManagementDualRoleClient dualRoleClient) =>
+        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IServiceOTPClient>();
+                services.AddSingleton(stub);
+
+                // Swap the real HTTP dual-role client for a controllable fake so we can
+                // simulate a user-management fault on the verify read path.
+                services.RemoveAll<JeebGateway.Users.IUserManagementDualRoleClient>();
+                services.AddSingleton(dualRoleClient);
+
+                services.Configure<UpstreamFeatureFlags>(f =>
+                {
+                    f.Otp = otpEnabled;
+                    f.UserManagement = userManagementEnabled;
+                });
+                services.Configure<FailClosedIdentityResolveOptions>(
+                    o => o.FailClosedIdentityResolve = failClosedIdentityResolve);
+                services.Configure<OtpSignInOptions>(o =>
+                {
+                    o.ApplicationId = AppId;
+                    o.TtlSeconds = 300;
+                });
+            });
+        });
+
     private static StringContent JsonBody(string json)
         => new(json, Encoding.UTF8, "application/json");
+
+    /// <summary>
+    /// Test double for <see cref="JeebGateway.Users.IUserManagementDualRoleClient"/>
+    /// whose phone find-or-create always throws a <see cref="UserManagementCallException"/>
+    /// with the given upstream status — exercising the fail-closed vs fail-safe branch
+    /// in <c>AuthOtpController.ResolveIdentityAsync</c>.
+    /// </summary>
+    private sealed class ThrowingDualRoleClient : JeebGateway.Users.IUserManagementDualRoleClient
+    {
+        private readonly int _status;
+        public int PhoneCalls { get; private set; }
+
+        public ThrowingDualRoleClient(int status) => _status = status;
+
+        public Task<JeebGateway.Users.PhoneFindOrCreateResult> PhoneFindOrCreateAsync(
+            string phone, CancellationToken ct)
+        {
+            PhoneCalls++;
+            throw new JeebGateway.Users.UserManagementCallException("phone/find-or-create", _status);
+        }
+
+        public Task<JeebGateway.Users.RoleSwitchReissueResult> RoleSwitchAsync(
+            string userId, string opaqueRole, CancellationToken ct)
+            => throw new NotSupportedException("not exercised by the fail-closed identity tests");
+
+        public Task<JeebGateway.Users.RoleGrantResult> AppendAvailableRoleAsync(
+            string userId, string opaqueRole, CancellationToken ct)
+            => throw new NotSupportedException("not exercised by the fail-closed identity tests");
+    }
 
     private sealed class StubServiceOtpClient : IServiceOTPClient
     {

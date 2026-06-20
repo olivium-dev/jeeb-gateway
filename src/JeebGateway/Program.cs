@@ -698,6 +698,14 @@ builder.Services.Configure<JeebGateway.Security.SwaggerOptions>(
 builder.Services.Configure<JeebGateway.Auth.OtpSignIn.OtpSignInOptions>(
     builder.Configuration.GetSection(JeebGateway.Auth.OtpSignIn.OtpSignInOptions.SectionName));
 
+// ADDITIVE, default-off (Security:Auth:FailClosedIdentityResolve = false). When ON,
+// the OTP verify identity-resolution read path fails CLOSED on a user-management
+// fault (503 otp_unavailable) instead of degrading to the stale in-memory identity
+// that mints a different user id + a single 'client' role. Default OFF keeps the
+// legacy degrade-to-in-memory behavior so existing environments are unchanged.
+builder.Services.Configure<JeebGateway.Auth.OtpSignIn.FailClosedIdentityResolveOptions>(
+    builder.Configuration.GetSection(JeebGateway.Auth.OtpSignIn.FailClosedIdentityResolveOptions.SectionName));
+
 // F-E (S02, JEB-37 / JEB-1422) — gateway-local phone admission policy + OTP-request
 // burst guard, both evaluated in AuthOtpController BEFORE the one-time-password
 // upstream is dialed (no upstream change). Region gate (LB-only -> invalid_country),
