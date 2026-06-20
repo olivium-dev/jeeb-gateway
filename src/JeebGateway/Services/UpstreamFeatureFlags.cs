@@ -266,4 +266,19 @@ public sealed class UpstreamFeatureFlags
     /// in Production once wallet-service is confirmed healthy.
     /// </summary>
     public bool Earnings { get; set; }
+
+    /// <summary>
+    /// Gap 3 (JEB compliment BFF) — when true, the thin compliment surface
+    /// (<see cref="JeebGateway.Controllers.ComplimentsController"/>, <c>/api/compliments/*</c>)
+    /// proxies the shared <c>compliment-service</c> (the same upstream rahmah-gateway
+    /// consumes) via the NSwag-generated
+    /// <see cref="JeebGateway.Services.Generated.ComplimentService.IComplimentServiceClient"/>.
+    ///
+    /// DEFAULTS OFF in EVERY environment. This is a NET-NEW path (the gateway never
+    /// held a compliment store), so the flag is a runtime kill switch, NOT a fallback
+    /// to local state: while off the endpoints return 503. Flip on once compliment-service
+    /// is on the Jeeb swarm and <c>ComplimentServiceApi:BaseUrl</c> is a real host.
+    /// Mirrors the cdn-service / contract-signing-service net-new kill-switch shape exactly.
+    /// </summary>
+    public bool Compliment { get; set; }
 }

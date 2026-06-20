@@ -33,7 +33,8 @@ public class TypedClientPipelineTests
         new object[] { "IDeliveryServiceClient" },
         new object[] { "IMatchingServiceClient" },
         new object[] { "IGeolocationServiceClient" },
-        new object[] { "IScoreServiceClient" },
+        // IScoreServiceClient — REMOVED. score-taking-service was deleted completely
+        // (owner directive: never use). Its typed + named registrations are gone.
         // IFeedbackServiceClient — REMOVED. The hand-coded feedback BFF was
         // replaced by the salehly-mirrored NSwag ServiceFeedbackClient, registered
         // in Program.cs as the named client "ServiceFeedbackClient" (no
@@ -96,7 +97,6 @@ public class TypedClientPipelineTests
                 ["Services:Delivery"] = "http://delivery.test",
                 ["Services:Matching"] = "http://matching.test",
                 ["Services:Geolocation"] = "http://geo.test",
-                ["Services:ScoreTaking:BaseUrl"] = "http://score.test",
                 ["Services:Cdn:BaseUrl"] = "http://cdn.test",
                 ["Services:ServiceOTP:BaseUrl"] = "http://otp.test",
                 ["Services:FormBuilder:BaseUrl"] = "http://form-builder.test",
