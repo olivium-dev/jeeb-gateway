@@ -21,12 +21,17 @@
 # Usage:
 #   ./scripts/test-super-login.sh [GW_BASE_URL] [PASSCODE] [USER_ID] [MINT_KEY]
 #
+#   PASSCODE may also be supplied via the SUPER_LOGIN_PASSCODE env var.
+#   If neither arg 2 nor SUPER_LOGIN_PASSCODE is set the script exits with an error.
+#
 # Examples:
-#   # Local dev (TokenMint.Enabled=false, gate open):
-#   ./scripts/test-super-login.sh http://localhost:10090 123768 <userId>
+#   # Local dev (TokenMint.Enabled=false, gate open -- passcode via env var):
+#   SUPER_LOGIN_PASSCODE=<passcode> ./scripts/test-super-login.sh http://localhost:10090 '' <userId>
+#   # or pass the passcode directly as arg 2:
+#   ./scripts/test-super-login.sh http://localhost:10090 <passcode> <userId>
 #
 #   # Live/staging (TokenMint.Enabled=true, key required):
-#   ./scripts/test-super-login.sh http://192.168.2.7:10090 123768 <userId> <mint-key>
+#   SUPER_LOGIN_PASSCODE=<passcode> ./scripts/test-super-login.sh http://192.168.2.7:10090 '' <userId> <mint-key>
 #
 # Prerequisites: curl, python3
 # =============================================================================
@@ -34,7 +39,11 @@
 set -euo pipefail
 
 GW="${1:-http://localhost:10090}"
-PASSCODE="${2:-123768}"
+PASSCODE="${2:-${SUPER_LOGIN_PASSCODE:-}}"
+if [[ -z "$PASSCODE" ]]; then
+  echo "Error: Passcode required. Set SUPER_LOGIN_PASSCODE env var or pass as arg 2." >&2
+  exit 1
+fi
 USER_ID="${3:-}"
 MINT_KEY="${4:-}"
 
