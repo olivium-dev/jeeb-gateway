@@ -255,11 +255,45 @@ public sealed class UsersMeController : ControllerBase
     // helpers
     // -----------------------------------------------------------------
 
-    /// <summary>Available roles for the response: prefer the local projection, fall back to the session claims.</summary>
+    /// <summary>
+    /// Available roles for the response: the user's FULL persisted role set.
+    ///
+    /// <para>REALAPP fix — the AUTHORITATIVE source is user-management's
+    /// <c>GET /api/User/{userId}/roles</c>
+    /// (<see cref="IUserManagementDualRoleClient.GetUserRolesAsync"/>), which returns
+    /// the user's complete OPAQUE <c>available_roles</c> set (e.g.
+    /// <c>{customer,driver}</c>). The former order — local <see cref="IUsersStore"/>
+    /// projection first — under-reported a dual-role user as only <c>["client"]</c>
+    /// when the local projection lagged the UM row (a role-switch re-issues a token
+    /// carrying only the now-active role, so the projection/claims are NOT the full
+    /// set), and the mobile in-app role-switch was therefore never offered. THIN /
+    /// ADR-0001 preserved: the gateway only READS + TRANSLATES the role set UM owns;
+    /// it invents nothing.</para>
+    ///
+    /// <para>Fallback chain (each step used only when the prior yields nothing, so a
+    /// UM blip never hard-breaks the read): authoritative UM roles -> local
+    /// projection -> the validated session claims.</para>
+    /// </summary>
     private async Task<IReadOnlyList<string>> ResolveAvailableRolesAsync(string userId, CancellationToken ct)
     {
+        // 1) AUTHORITATIVE — the persisted role set user-management owns.
+        try
+        {
+            var um = await _dualRole.GetUserRolesAsync(userId, ct);
+            if (um is { AvailableRoles.Count: > 0 }) return um.AvailableRoles;
+        }
+        catch (Exception ex)
+        {
+            // A UM roles-read blip is non-fatal: fall through to the local projection /
+            // session claims rather than failing the whole /me read.
+            _log.LogWarning(ex, "v1/users/me UM roles read failed; falling back to local projection/claims");
+        }
+
+        // 2) Local UM projection (the source the OTP-mint / role-switch paths upsert).
         var profile = await _users.GetByIdAsync(userId, ct);
         if (profile is { Roles.Count: > 0 }) return profile.Roles;
+
+        // 3) Last resort — the roles claim on the validated session token.
         return UserIdentity.GetRoles(HttpContext);
     }
 
