@@ -901,6 +901,26 @@ builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient
     return new JeebGateway.service.ServiceWallet.ServiceWalletClient(baseUrl, client);
 });
 
+// REALAPP fix — GET /v1/jeeb/wallet/ledger reads the holder's OWN transactions
+// directly from the wallet DB (transactionheader + transactiondetails, joined via
+// wallets.holderid), because the generic wallet-service exposes no ledger LIST
+// endpoint. When WalletPostgres:ConnectionString is configured, use the Postgres
+// reader; otherwise fall back to the empty-page reader (dev/CI/tests, no regression).
+// Mirrors the GatewayPostgres direct-Postgres seam already used for COD settlements.
+var walletPostgresCs = builder.Configuration["WalletPostgres:ConnectionString"];
+if (!string.IsNullOrWhiteSpace(walletPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader>(sp =>
+        new JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader(
+            walletPostgresCs!,
+            sp.GetRequiredService<ILogger<JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader>>()));
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader,
+        JeebGateway.JeebWallet.NullJeebWalletLedgerReader>();
+}
+
 // Notification preferences (T-backend-031 / JEB-1498).
 // Wired to the generic remote-user-preferences service (Rust, :10067) so preferences
 // survive restarts. Preferences are stored as an opaque JSON blob under key
