@@ -10,22 +10,25 @@ namespace JeebGateway.Services.Clients;
 /// <summary>
 /// Thin HTTP proxy over voice-transcription-service <c>POST /v1/transcribe</c>.
 ///
-/// The upstream OpenAPI (<c>/openapi.json</c>) declares the route with an empty
-/// requestBody and an <c>object</c> response whose values are strings
-/// (<c>additionalProperties: { "type": "string" }</c>). At wiring time the route
-/// is a placeholder returning <c>501 {"detail":"T-BE-007 not yet implemented"}</c>.
-/// This client therefore:
-///   * posts a forward-compatible JSON envelope (base64 audio + metadata),
-///   * binds any <c>{ "text": ..., "language": ... }</c> 200 body into
-///     <see cref="TranscriptionResult"/> with outcome <c>Transcribed</c>,
-///   * maps the upstream's <c>501 Not Implemented</c> placeholder onto outcome
-///     <c>QueuedForRetry</c> (degraded-but-not-error: the gateway accepted the
-///     audio, the upstream simply cannot transcribe yet), and
+/// The upstream's canonical contract route is <c>multipart/form-data</c>
+/// (a FastAPI <c>UploadFile</c> field <c>audio</c> + a <c>Form</c> field
+/// <c>language_hint</c>), returning
+/// <c>{ transcript, confidence, language, duration_ms }</c>. Posting a JSON
+/// envelope is rejected by FastAPI with <c>422</c> (missing required form field
+/// <c>audio</c>), which the gateway then surfaces as a <c>502</c> — this was
+/// E2E gap 2.3. Both <see cref="TranscribeAsync"/> and
+/// <see cref="TranscribeVoiceAsync"/> therefore post the audio as multipart.
+/// This client:
+///   * binds the canonical 200 body into <see cref="TranscriptionResult"/> with
+///     outcome <c>Transcribed</c>,
+///   * maps an upstream <c>422 unprocessable_audio</c> (supported format but
+///     empty/silent/too-short/corrupt audio) onto outcome <c>QueuedForRetry</c>
+///     (a client-side degrade, NOT an outage — never a 502), and
 ///   * lets transport faults / 5xx surface through the resilience pipeline
 ///     (retry → circuit breaker) attached in
 ///     <see cref="JeebGateway.Extensions.ServiceClientExtensions"/>; a final
 ///     transport failure throws <see cref="WhisperUnavailableException"/>.
-/// The wire field names are snake_case to match the FastAPI convention used
+/// Response binding stays snake_case to match the FastAPI convention used
 /// across the fleet's Python services.
 /// </summary>
 public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
@@ -50,16 +53,29 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
 
     public async Task<TranscriptionResult> TranscribeAsync(WhisperAudio audio, string language, CancellationToken ct)
     {
-        var payload = new TranscribeUpstreamRequest(
-            AudioBase64: Convert.ToBase64String(audio.Content),
-            FileName: audio.FileName,
-            ContentType: audio.ContentType,
-            Language: language);
+        // The upstream's canonical contract route POST /v1/transcribe is
+        // multipart/form-data (FastAPI UploadFile `audio` + Form `language_hint`),
+        // returning {transcript, confidence, language, duration_ms}. A JSON
+        // envelope is rejected with 422 (missing required form field `audio`),
+        // which the gateway then surfaces as a 502 (gap 2.3). We post the audio
+        // as multipart to match the live contract.
+        using var form = new MultipartFormDataContent();
+        var fileContent = new ByteArrayContent(audio.Content);
+        fileContent.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue(
+                string.IsNullOrWhiteSpace(audio.ContentType) ? "application/octet-stream" : audio.ContentType);
+        form.Add(fileContent, "audio", string.IsNullOrWhiteSpace(audio.FileName) ? "audio.bin" : audio.FileName);
+        form.Add(new StringContent(language), "language_hint");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "v1/transcribe")
+        {
+            Content = form
+        };
 
         HttpResponseMessage response;
         try
         {
-            response = await _http.PostAsJsonAsync("v1/transcribe", payload, Json, ct);
+            response = await _http.SendAsync(request, ct);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -72,22 +88,24 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
 
         using var _ = response;
 
-        // The upstream placeholder: T-BE-007 not yet implemented. Treat as a
-        // degraded outcome (audio accepted, transcription deferred) rather than
-        // a hard failure — this keeps the mobile contract stable until the
-        // upstream lands real transcription.
-        if (response.StatusCode == HttpStatusCode.NotImplemented)
+        // 422 unprocessable_audio is a CLIENT outcome (supported format but
+        // empty/silent/too-short/corrupt audio). It is NOT an upstream outage,
+        // so do NOT throw (which the controller maps to a 502). Degrade to the
+        // same queued shape used for other non-transcribed outcomes — the
+        // gateway accepted the audio, it simply could not be transcribed.
+        if (response.StatusCode == HttpStatusCode.UnprocessableEntity)
         {
             _log.LogInformation(
-                "voice-transcription-service returned 501 (not yet implemented); deferring transcription");
+                "voice-transcription-service returned 422 (unprocessable audio); deferring transcription");
             return new TranscriptionResult(
                 AudioId: Guid.NewGuid().ToString("n"),
                 Outcome: TranscriptionOutcome.QueuedForRetry,
                 Transcription: null,
-                Reason: "upstream_not_implemented");
+                Reason: "unprocessable_audio");
         }
 
-        if ((int)response.StatusCode >= 500 || response.StatusCode == HttpStatusCode.TooManyRequests)
+        if ((int)response.StatusCode >= 500 || response.StatusCode == HttpStatusCode.TooManyRequests
+            || response.StatusCode == HttpStatusCode.ServiceUnavailable)
         {
             // Let the controller-level decision treat this as unavailable; the
             // resilience pipeline already retried transient statuses.
@@ -97,12 +115,12 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
 
         response.EnsureSuccessStatusCode();
 
-        var body = await response.Content.ReadFromJsonAsync<TranscribeUpstreamResponse>(Json, ct);
-        var text = body?.Text ?? string.Empty;
+        var body = await response.Content.ReadFromJsonAsync<V1VoiceUpstreamResponse>(Json, ct);
+        var text = body?.Transcript ?? string.Empty;
         return new TranscriptionResult(
             AudioId: Guid.NewGuid().ToString("n"),
             Outcome: TranscriptionOutcome.Transcribed,
-            Transcription: new WhisperTranscription(text, body?.Language ?? language),
+            Transcription: new WhisperTranscription(text, body?.Language ?? language, body?.Confidence),
             Reason: null);
     }
 
@@ -180,16 +198,6 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
             Transcription: new WhisperTranscription(text, body?.Language ?? language, body?.Confidence),
             Reason: null);
     }
-
-    private sealed record TranscribeUpstreamRequest(
-        [property: JsonPropertyName("audio_base64")] string AudioBase64,
-        [property: JsonPropertyName("file_name")] string FileName,
-        [property: JsonPropertyName("content_type")] string ContentType,
-        [property: JsonPropertyName("language")] string Language);
-
-    private sealed record TranscribeUpstreamResponse(
-        [property: JsonPropertyName("text")] string? Text,
-        [property: JsonPropertyName("language")] string? Language);
 
     // Canonical /v1/transcribe response: {transcript, confidence, language, duration_ms}.
     private sealed record V1VoiceUpstreamResponse(

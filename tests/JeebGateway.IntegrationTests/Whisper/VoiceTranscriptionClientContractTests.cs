@@ -17,10 +17,10 @@ namespace JeebGateway.IntegrationTests.Whisper;
 /// Two layers:
 ///   * SEAM tests (always run, no network): drive the REAL client against a fake
 ///     <see cref="HttpMessageHandler"/> returning the LITERAL upstream bodies —
-///     the current <c>501 {"detail":"T-BE-007 not yet implemented"}</c> placeholder
-///     and a hypothetical real <c>200 {"text":...,"language":...}</c> — locking the
-///     mapping onto the gateway's <see cref="TranscriptionResult"/> contract and
-///     the snake_case request body the FastAPI upstream will consume.
+///     the canonical <c>200 {transcript,confidence,language,duration_ms}</c> and a
+///     client-side <c>422 unprocessable_audio</c> — locking the mapping onto the
+///     gateway's <see cref="TranscriptionResult"/> contract and asserting the
+///     request is posted as multipart/form-data (the FastAPI UploadFile contract).
 ///   * LIVE contract test against <c>http://192.168.2.50:10062</c>: proves the real
 ///     submit path (POST /v1/transcribe) plus /healthz + /readyz reachability. It
 ///     is reachability-guarded: when the host is unreachable (e.g. CI without the
@@ -31,29 +31,29 @@ public class VoiceTranscriptionClientContractTests
 {
     private const string LiveBaseUrl = "http://192.168.2.50:10062/";
 
-    // ---- SEAM: upstream placeholder (501) maps to QueuedForRetry ----
+    // ---- SEAM: upstream 422 unprocessable_audio maps to QueuedForRetry (not a 502) ----
     [Fact]
-    public async Task Maps_Upstream_501_Placeholder_To_QueuedForRetry()
+    public async Task Maps_Upstream_422_Unprocessable_To_QueuedForRetry()
     {
         var client = ClientReturning(
-            HttpStatusCode.NotImplemented,
-            """{"detail":"T-BE-007 not yet implemented"}""");
+            HttpStatusCode.UnprocessableEntity,
+            """{"reason":"unprocessable_audio","status":422}""");
 
         var result = await client.TranscribeAsync(SampleAudio(), "ar", CancellationToken.None);
 
         result.Outcome.Should().Be(TranscriptionOutcome.QueuedForRetry);
         result.Transcription.Should().BeNull();
-        result.Reason.Should().Be("upstream_not_implemented");
+        result.Reason.Should().Be("unprocessable_audio");
         result.AudioId.Should().NotBeNullOrWhiteSpace();
     }
 
-    // ---- SEAM: a real 200 transcription binds to Transcribed ----
+    // ---- SEAM: a real 200 transcription binds to Transcribed (canonical body) ----
     [Fact]
     public async Task Maps_Upstream_200_Body_To_Transcribed()
     {
         var client = ClientReturning(
             HttpStatusCode.OK,
-            """{"text":"مرحبا","language":"ar"}""");
+            """{"transcript":"مرحبا","confidence":0.85,"language":"ar","duration_ms":42}""");
 
         var result = await client.TranscribeAsync(SampleAudio(), "ar", CancellationToken.None);
 
@@ -74,28 +74,38 @@ public class VoiceTranscriptionClientContractTests
         await act.Should().ThrowAsync<WhisperUnavailableException>();
     }
 
-    // ---- SEAM: request body is snake_case + base64 (FastAPI convention) ----
+    // ---- SEAM: request is multipart/form-data to the canonical /v1/transcribe ----
+    // (gap 2.3: a JSON body is rejected by FastAPI with 422 → gateway 502).
     [Fact]
-    public async Task Sends_SnakeCase_Base64_Request_Body()
+    public async Task Sends_Multipart_Form_To_Canonical_V1_Transcribe()
     {
+        HttpRequestMessage? sent = null;
         string? sentBody = null;
-        var handler = new CapturingHandler(
-            HttpStatusCode.NotImplemented,
-            """{"detail":"T-BE-007 not yet implemented"}""",
-            body => sentBody = body);
+        var handler = new RequestCapturingHandler(
+            HttpStatusCode.OK,
+            """{"transcript":"x","confidence":0.9,"language":"ar","duration_ms":1}""",
+            (req, body) => { sent = req; sentBody = body; });
         var http = new HttpClient(handler) { BaseAddress = new Uri("http://voice.test/") };
         var client = new VoiceTranscriptionClient(http, NullLogger<VoiceTranscriptionClient>.Instance);
 
         await client.TranscribeAsync(SampleAudio(), "ar", CancellationToken.None);
 
+        sent.Should().NotBeNull();
+        sent!.Method.Method.Should().Be("POST");
+        sent.RequestUri?.AbsolutePath.Should().Be("/v1/transcribe");
+        sent.Content!.Headers.ContentType!.MediaType.Should().Be("multipart/form-data");
+
         sentBody.Should().NotBeNull();
-        using var doc = JsonDocument.Parse(sentBody!);
-        var root = doc.RootElement;
-        root.GetProperty("audio_base64").GetString().Should().Be(
-            Convert.ToBase64String(Encoding.UTF8.GetBytes("hello-audio")));
-        root.GetProperty("file_name").GetString().Should().Be("clip.wav");
-        root.GetProperty("content_type").GetString().Should().Be("audio/wav");
-        root.GetProperty("language").GetString().Should().Be("ar");
+        // multipart parts: the audio file field and the language hint field.
+        // (Content-Disposition may render the field name quoted or unquoted
+        // depending on the runtime, so match on the field token only.)
+        sentBody!.Should().Contain("name=audio");
+        sentBody.Should().Contain("filename=clip.wav");
+        sentBody.Should().Contain("hello-audio");
+        sentBody.Should().Contain("name=language_hint");
+        sentBody.Should().Contain("ar");
+        // must NOT carry the old JSON envelope fields.
+        sentBody.Should().NotContain("audio_base64");
     }
 
     // ---- SEAM: the NEW voice-on-create path maps {transcript,confidence,language} ----
@@ -265,13 +275,14 @@ public class VoiceTranscriptionClientContractTests
             });
     }
 
-    private sealed class CapturingHandler : HttpMessageHandler
+    private sealed class RequestCapturingHandler : HttpMessageHandler
     {
         private readonly HttpStatusCode _status;
         private readonly string _body;
-        private readonly Action<string> _capture;
+        private readonly Action<HttpRequestMessage, string?> _capture;
 
-        public CapturingHandler(HttpStatusCode status, string body, Action<string> capture)
+        public RequestCapturingHandler(
+            HttpStatusCode status, string body, Action<HttpRequestMessage, string?> capture)
         {
             _status = status;
             _body = body;
@@ -281,10 +292,11 @@ public class VoiceTranscriptionClientContractTests
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            if (request.Content is not null)
-            {
-                _capture(await request.Content.ReadAsStringAsync(cancellationToken));
-            }
+            // Read the (multipart) body BEFORE the client disposes the content.
+            string? body = request.Content is not null
+                ? await request.Content.ReadAsStringAsync(cancellationToken)
+                : null;
+            _capture(request, body);
             return new HttpResponseMessage(_status)
             {
                 Content = new StringContent(_body, Encoding.UTF8, "application/json")
