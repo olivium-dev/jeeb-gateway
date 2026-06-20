@@ -24,6 +24,13 @@ public interface IIdempotencyStore
 
     /// <summary>Reads a stored response, or null when the key was never seen.</summary>
     Task<IdempotencyOutcome?> GetAsync(string key, CancellationToken ct);
+
+    /// <summary>
+    /// Lists non-expired entries whose key starts with <paramref name="prefix"/>,
+    /// newest-first. Used by owner-scoped listing (e.g. support tickets keyed as
+    /// "support-ticket-owner:{userId}:{ticketId}").
+    /// </summary>
+    Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(string prefix, CancellationToken ct);
 }
 
 /// <summary>Result of an idempotency check.</summary>
