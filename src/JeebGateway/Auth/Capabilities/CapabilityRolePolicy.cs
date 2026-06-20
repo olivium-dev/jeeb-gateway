@@ -118,6 +118,7 @@ public static class CapabilityRolePolicy
             // H–J. Misc participant caps {client, jeeber}
             [Capabilities.ProhibitedAck] = Participant,
             [Capabilities.ProhibitedScan] = Participant,
+            [Capabilities.ProhibitedReport] = Participant,
             [Capabilities.WalletReadOwn] = Participant,         // STATE: scoping (OPEN-2)
             [Capabilities.FeedbackSubmit] = Participant,
             [Capabilities.TranscriptionRequest] = Participant,

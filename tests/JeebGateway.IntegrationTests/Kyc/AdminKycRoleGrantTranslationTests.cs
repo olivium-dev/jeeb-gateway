@@ -178,6 +178,9 @@ public sealed class AdminKycRoleGrantTranslationTests
 
         public Task<RoleSwitchReissueResult> RoleSwitchAsync(string userId, string opaqueRole, CancellationToken ct)
             => Task.FromResult(new RoleSwitchReissueResult(userId, "a", "r", opaqueRole));
+
+        public Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct)
+            => Task.FromResult<UserRolesResult?>(new UserRolesResult(userId, new[] { Roles.Client }, Roles.Client));
     }
 
     private sealed class StubKycSeam : IKycBffSeam

@@ -24,8 +24,20 @@ public sealed class CallsController : ControllerBase
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var problem))
             return problem;
 
+        if (request is null || string.IsNullOrWhiteSpace(request.DeliveryId))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "deliveryId is required.",
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
+
         var session = await _calls.CreateSessionAsync(
-            request.DeliveryId, userId, request.CalleeUserId, ct);
+            request.DeliveryId.Trim(),
+            userId,
+            request.CalleeUserId?.Trim() ?? string.Empty,
+            ct);
 
         if (session is null)
             return NotFound(new { error = "Masked calls are not enabled" });
@@ -44,5 +56,5 @@ public sealed class CallsController : ControllerBase
 public sealed class CreateCallSessionRequest
 {
     public required string DeliveryId { get; set; }
-    public required string CalleeUserId { get; set; }
+    public string? CalleeUserId { get; set; }
 }
