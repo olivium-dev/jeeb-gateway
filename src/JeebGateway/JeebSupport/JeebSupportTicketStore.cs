@@ -68,14 +68,25 @@ public sealed class StateServiceSupportTicketStore : IJeebSupportTicketStore
         _logger = logger;
     }
 
+    // Secondary-index key prefix: "support-ticket-owner:{ownerId}:{ticketId}".
+    // Written alongside the primary "support-ticket:{id}" key so list-by-owner can
+    // do a prefix scan without a full-table scan. The prefix scan uses
+    // GET /v1/state/idempotency/by-prefix?prefix=support-ticket-owner:{ownerId}:
+    // backed by the PK B-tree in jeeb-state-service (LIKE 'prefix%').
+    internal const string OwnerKeyPrefix = "support-ticket-owner:";
+
     public async Task<SupportTicketRow> CreateAsync(SupportTicketRow row, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(row);
 
         var body = JsonSerializer.Serialize(row, Json);
-        // Insert-once on the key; a fresh server-minted GUID id is always a new row.
-        // statusCode is carried only so the KV row is well-formed (the routing reuses status).
+        // Primary key: used by GetAsync (by ticket id, no owner knowledge required).
         await _kv.PutOrGetAsync(TicketKeyPrefix + row.Id, statusCode: 201, body, TtlSeconds, ct);
+        // Owner-index key: used by ListByOwnerAsync via prefix scan.
+        // owner_id and ticket_id are both non-empty (server-minted); the colon separator
+        // makes the prefix "support-ticket-owner:{ownerId}:" unambiguous.
+        if (!string.IsNullOrWhiteSpace(row.UserId))
+            await _kv.PutOrGetAsync(OwnerKeyPrefix + row.UserId + ":" + row.Id, statusCode: 201, body, TtlSeconds, ct);
         return row;
     }
 
@@ -87,16 +98,18 @@ public sealed class StateServiceSupportTicketStore : IJeebSupportTicketStore
         return Deserialize<SupportTicketRow>(outcome?.ResponseBodyJson);
     }
 
-    public Task<IReadOnlyList<SupportTicketRow>> ListByOwnerAsync(string ownerId, CancellationToken ct)
+    public async Task<IReadOnlyList<SupportTicketRow>> ListByOwnerAsync(string ownerId, CancellationToken ct)
     {
-        // BLOCKED-ESCALATE: no upstream list-by-owner / prefix-scan primitive exists on
-        // jeeb-state-service (the KV is GET-by-key only, insert-once). Returning the empty
-        // set — the projection renders the cold-start empty page mobile tolerates — rather
-        // than fabricating an in-gateway index (ADR-0001/0005). Re-point to the generic
-        // primitive once jeeb-state-service ships "list state rows by owner".
-        // See docs/adr/0006-gateway-in-memory-store-migration-to-state-service.md — this is
-        // migration step 1 (the smallest re-point) once GET /state/rows?owner&prefix lands.
-        return Task.FromResult<IReadOnlyList<SupportTicketRow>>(Array.Empty<SupportTicketRow>());
+        if (string.IsNullOrWhiteSpace(ownerId)) return Array.Empty<SupportTicketRow>();
+
+        // Prefix scan over the owner-index keys written by CreateAsync.
+        // jeeb-state-service ships GET /v1/state/idempotency/by-prefix (PR #7) which
+        // does WHERE key LIKE @prefix || '%' backed by the PK B-tree — no full-table scan.
+        var outcomes = await _kv.FindByPrefixAsync(OwnerKeyPrefix + ownerId + ":", ct);
+        return outcomes
+            .Select(o => Deserialize<SupportTicketRow>(o.ResponseBodyJson))
+            .OfType<SupportTicketRow>()
+            .ToList();
     }
 
     private static T? Deserialize<T>(string? json) where T : class

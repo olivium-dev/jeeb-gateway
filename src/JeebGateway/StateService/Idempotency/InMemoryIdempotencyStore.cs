@@ -70,6 +70,22 @@ public sealed class InMemoryIdempotencyStore : IIdempotencyStore
         return Task.FromResult<IdempotencyOutcome?>(null);
     }
 
+    public Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(string prefix, CancellationToken ct)
+    {
+        var now = _clock.GetUtcNow();
+        var results = _store
+            .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.Ordinal) && kvp.Value.ExpiresAt > now)
+            .OrderByDescending(kvp => kvp.Value.ExpiresAt)
+            .Select(kvp => new IdempotencyOutcome
+            {
+                Inserted = false,
+                StatusCode = kvp.Value.StatusCode,
+                ResponseBodyJson = kvp.Value.ResponseBodyJson,
+            })
+            .ToList();
+        return Task.FromResult<IReadOnlyList<IdempotencyOutcome>>(results);
+    }
+
     private void EvictIfExpired(string key)
     {
         if (_store.TryGetValue(key, out var entry) && entry.ExpiresAt <= _clock.GetUtcNow())
