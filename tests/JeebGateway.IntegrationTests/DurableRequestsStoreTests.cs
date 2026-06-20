@@ -419,5 +419,6 @@ public sealed class DurableRequestsStoreTests
         public Task<JeeberAvailabilityUpstream?> GetAvailabilityAsync(string jeeberId, CancellationToken ct) => throw new NotImplementedException();
         public Task<JeeberAvailabilityUpstream> HeartbeatAsync(string jeeberId, double lat, double lng, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct) => throw new NotImplementedException();
+        public Task<JeeberFeedResult> GetJeeberFeedAsync(string jeeberId, int? limit, CancellationToken ct) => throw new NotImplementedException();
     }
 }

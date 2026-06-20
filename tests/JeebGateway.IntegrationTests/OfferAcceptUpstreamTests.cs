@@ -662,5 +662,7 @@ public class OfferAcceptUpstreamTests
             => throw new NotSupportedException();
         public Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct)
             => throw new NotSupportedException();
+        public Task<JeeberFeedResult> GetJeeberFeedAsync(string jeeberId, int? limit, CancellationToken ct)
+            => throw new NotSupportedException();
     }
 }

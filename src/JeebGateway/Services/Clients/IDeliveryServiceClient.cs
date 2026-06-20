@@ -233,6 +233,78 @@ public interface IDeliveryServiceClient
     /// otherwise-valid accept; the offer-service Conflict remains the backstop.
     /// </exception>
     Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct);
+
+    /// <summary>
+    /// Jeeber pull feed (the inverse of <see cref="RunMatchingAsync"/>). Reads the
+    /// open-delivery feed for the given jeeber from the canonical delivery-service
+    /// route <c>GET /api/v1/jeebers/{id}/feed?limit=N</c> — the SAME presence +
+    /// tier + restriction collaborators the matching run uses, inverted to answer
+    /// "which open deliveries should this jeeber see?". delivery-service owns the
+    /// GPS resolution, tier-radius cut, restriction filter, and ordering; the
+    /// gateway is a thin BFF passthrough holding NO feed state of its own.
+    ///
+    /// Response is <b>snake_case</b> (Go); the DTOs carry explicit
+    /// <see cref="System.Text.Json.Serialization.JsonPropertyName"/> attributes so
+    /// the shared web-default (camelCase) options bind without changing the global
+    /// naming policy other client methods depend on. A 404 (or empty upstream)
+    /// maps to an empty feed so a never-online jeeber gets <c>[]</c>, never a 500.
+    /// </summary>
+    /// <param name="limit">
+    /// Optional page size forwarded to delivery-service (default 20, max 100 —
+    /// clamped upstream). Null omits the query parameter.
+    /// </param>
+    Task<JeeberFeedResult> GetJeeberFeedAsync(string jeeberId, int? limit, CancellationToken ct);
+}
+
+/// <summary>
+/// 200 body of delivery-service <c>GET /api/v1/jeebers/{id}/feed</c> —
+/// <c>{ jeeber_id, items:[{ request_id, tier_id, tier_code, pickup_lat,
+/// pickup_lng, distance_km, created_at }], count }</c>. The inverse-of-matching
+/// feed (delivery-service <c>FeedOutcome</c>, feed.go).
+///
+/// delivery-service (Go) emits <b>snake_case</b>; the explicit
+/// <see cref="System.Text.Json.Serialization.JsonPropertyName"/> attributes bind
+/// it under the shared <c>JsonSerializerDefaults.Web</c> options without mutating
+/// the global naming policy — mirroring <see cref="DeliveryMatchingRunResult"/>.
+/// </summary>
+public sealed class JeeberFeedResult
+{
+    [System.Text.Json.Serialization.JsonPropertyName("jeeber_id")]
+    public string? JeeberId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("items")]
+    public IReadOnlyList<JeeberFeedItem> Items { get; init; } = Array.Empty<JeeberFeedItem>();
+
+    [System.Text.Json.Serialization.JsonPropertyName("count")]
+    public int Count { get; init; }
+}
+
+/// <summary>
+/// One element of the <c>items</c> array in <see cref="JeeberFeedResult"/>.
+/// snake_case (Go).
+/// </summary>
+public sealed class JeeberFeedItem
+{
+    [System.Text.Json.Serialization.JsonPropertyName("request_id")]
+    public required string RequestId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
+    public string? TierId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_code")]
+    public string? TierCode { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup_lat")]
+    public double PickupLat { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup_lng")]
+    public double PickupLng { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("distance_km")]
+    public double DistanceKm { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("created_at")]
+    public DateTimeOffset CreatedAt { get; init; }
 }
 
 /// <summary>

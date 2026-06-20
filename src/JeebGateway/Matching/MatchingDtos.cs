@@ -56,6 +56,38 @@ public sealed class MatchedJeeberDto
     public required double Rating { get; init; }
 }
 
+/// <summary>
+/// Public (gateway-facing) shape of the jeeber pull feed — the inverse of
+/// <see cref="MatchingRunResponse"/>. Returned by <c>GET /jeebers/me/feed</c>
+/// (JeeberFeedController). camelCase under the shared web-default policy; mapped
+/// from the snake_case delivery-service <c>JeeberFeedResult</c>.
+/// </summary>
+public sealed class JeeberFeedResponse
+{
+    public required string JeeberId { get; init; }
+    public required IReadOnlyList<JeeberFeedItemDto> Items { get; init; }
+    public required int Count { get; init; }
+}
+
+/// <summary>
+/// One element of <see cref="JeeberFeedResponse.Items"/> — an open delivery the
+/// jeeber may claim, with its resolved tier + pickup + distance.
+/// </summary>
+public sealed class JeeberFeedItemDto
+{
+    public required string RequestId { get; init; }
+
+    /// <summary>The human-readable tier code (flash/standard/express) when the
+    /// upstream supplies it, falling back to the tier UUID so the field is never
+    /// empty — mirrors MatchingController's <c>$.tierId</c> resolution.</summary>
+    public required string TierId { get; init; }
+
+    public required double PickupLat { get; init; }
+    public required double PickupLng { get; init; }
+    public required double DistanceKm { get; init; }
+    public required DateTimeOffset CreatedAt { get; init; }
+}
+
 // ---------------------------------------------------------------------------
 // DTOs for the real matching-service FastAPI endpoints
 // (GET /api/v1/matches/{user_id} — app/api/endpoints/matches.py)
