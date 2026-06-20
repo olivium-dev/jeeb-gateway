@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Security.Claims;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -8,6 +7,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.DTOs.Notification;
+using JeebGateway.Notifications;
+using JeebGateway.Users;
 using JeebGateway.service.ServiceNotification;
 using NotificationApiException = JeebGateway.service.ServiceNotification.ApiException;
 
@@ -34,18 +35,13 @@ namespace JeebGateway.Controllers
 
         private ActionResult<(string userId, bool isValid)> ValidateUserAndServices()
         {
-            var userId = User.FindFirst(ClaimTypes.Sid)?.Value;
-            if (string.IsNullOrEmpty(userId))
+            // NOT-02 fix: resolve identity via the gateway-canonical UserIdentity helper so the
+            // inbox is reachable on BOTH the bearer path (sid/sub claims) AND the trusted edge
+            // X-User-Id header path. The previous claim-only lookup made the inbox return 401 for
+            // every edge-injected caller — the exact path the mobile client takes through the edge.
+            if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out _))
             {
-                userId = User.FindFirst("sid")?.Value;
-            }
-            if (string.IsNullOrEmpty(userId))
-            {
-                userId = User.FindFirst("sub")?.Value;
-            }
-            if (string.IsNullOrEmpty(userId))
-            {
-                throw new NotificationApiException("Unauthorized: User ID not found in token", 401, "Unauthorized", new Dictionary<string, IEnumerable<string>>(), null);
+                throw new NotificationApiException("Unauthorized: User ID not found in token or X-User-Id header", 401, "Unauthorized", new Dictionary<string, IEnumerable<string>>(), null);
             }
 
             if (_serviceNotificationClient == null)
@@ -118,6 +114,76 @@ namespace JeebGateway.Controllers
                 _logger.LogError(ex, "Unexpected error retrieving messages for current user");
                 throw new NotificationApiException(
                     $"Error retrieving messages: {ex.Message}, Stack trace: {ex.StackTrace}",
+                    500,
+                    "Internal Server Error",
+                    new Dictionary<string, IEnumerable<string>>(),
+                    null);
+            }
+        }
+
+        /// <summary>
+        /// Unread notification count for the authenticated user (bell-badge surface — NOT-02).
+        /// </summary>
+        /// <remarks>
+        /// Returns the number of unread notifications for the current user. The count is capped
+        /// at a display ceiling so the badge never has to render an unbounded integer; when the
+        /// true count exceeds the ceiling, <c>capped=true</c> and the client renders e.g. "99+".
+        /// </remarks>
+        /// <response code="200">Unread count retrieved successfully</response>
+        /// <response code="401">Unauthorized</response>
+        /// <response code="500">Internal server error</response>
+        [HttpGet("messages/unread-count")]
+        [Authorize]
+        [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B self / any-auth
+        [ProducesResponseType(typeof(UnreadNotificationCountResponseDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<UnreadNotificationCountResponseDto>> GetUnreadCountForCurrentUser()
+        {
+            // Display ceiling for the badge. The notification-service receiver list exposes a
+            // `total` for the filtered (unread) query, so we read page 1 with a ceiling-sized
+            // page and derive the count + capped flag without iterating every page.
+            const int BadgeCeiling = 99;
+
+            try
+            {
+                var validationResult = ValidateUserAndServices();
+                if (validationResult.Result != null)
+                {
+                    return validationResult.Result;
+                }
+
+                var userId = validationResult.Value.userId;
+
+                var response = await _serviceNotificationClient
+                    .Get_messages_by_receiver_messages_receiver__receiver_id__getAsync(
+                        userId,
+                        page: 1,
+                        page_size: BadgeCeiling + 1,
+                        read_status: "unread",
+                        notification_type: null,
+                        sender: null,
+                        created_after: null,
+                        created_before: null);
+
+                var (count, capped) = ResolveUnreadCount(response, BadgeCeiling);
+
+                return Ok(new UnreadNotificationCountResponseDto
+                {
+                    UnreadCount = count,
+                    Capped = capped
+                });
+            }
+            catch (NotificationApiException ex)
+            {
+                _logger.LogError(ex, "Error retrieving unread count for current user");
+                return StatusCode(ex.StatusCode, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error retrieving unread count for current user");
+                throw new NotificationApiException(
+                    $"Error retrieving unread count: {ex.Message}, Stack trace: {ex.StackTrace}",
                     500,
                     "Internal Server Error",
                     new Dictionary<string, IEnumerable<string>>(),
@@ -426,6 +492,17 @@ namespace JeebGateway.Controllers
                             try { notificationDto.NotificationType = (string)(item.notification_type ?? item.Notification_type ?? string.Empty); } catch { }
                             try { notificationDto.Deactivated = (bool)(item.deactivated ?? item.Deactivated ?? false); } catch { }
 
+                            // NOT-02 — primary entity id used to build the deep-link, if the
+                            // upstream payload carries one under any of the common field names.
+                            try
+                            {
+                                notificationDto.EntityId = (string)(
+                                    item.entity_id ?? item.Entity_id ??
+                                    item.reference_id ?? item.Reference_id ??
+                                    item.target_id ?? item.Target_id ?? string.Empty);
+                            }
+                            catch { }
+
                             try
                             {
                                 // Treat status == "read" (case-insensitive) as read
@@ -446,6 +523,12 @@ namespace JeebGateway.Controllers
                                 notificationDto.CreatedAt = DateTimeOffset.MinValue;
                             }
 
+                            // NOT-02 — resolve the client deep-link from the (opaque) type +
+                            // optional entity id. Pure, total mapping; never throws.
+                            notificationDto.DeepLink = NotificationDeepLinkResolver.Resolve(
+                                notificationDto.NotificationType,
+                                notificationDto.EntityId);
+
                             dto.Items.Add(notificationDto);
                         }
                     }
@@ -457,6 +540,61 @@ namespace JeebGateway.Controllers
             }
 
             return dto;
+        }
+
+        /// <summary>
+        /// Derive the unread badge count from the (unread-filtered) receiver response.
+        /// Prefers the upstream <c>total</c>; falls back to counting returned <c>items</c>.
+        /// Caps at <paramref name="ceiling"/> and reports whether the count was capped.
+        /// </summary>
+        private static (int count, bool capped) ResolveUnreadCount(object? serviceResponse, int ceiling)
+        {
+            if (serviceResponse is null)
+            {
+                return (0, false);
+            }
+
+            int total = 0;
+            try
+            {
+                dynamic dyn = serviceResponse;
+
+                bool gotTotal = false;
+                try
+                {
+                    total = (int)(dyn.total ?? dyn.Total);
+                    gotTotal = true;
+                }
+                catch
+                {
+                    gotTotal = false;
+                }
+
+                if (!gotTotal)
+                {
+                    // No total field — count the items we were given (page sized to ceiling+1).
+                    try
+                    {
+                        var items = dyn.items;
+                        if (items != null)
+                        {
+                            foreach (var _ in items) total++;
+                        }
+                    }
+                    catch
+                    {
+                        total = 0;
+                    }
+                }
+            }
+            catch
+            {
+                total = 0;
+            }
+
+            if (total < 0) total = 0;
+
+            return total > ceiling ? (ceiling, true) : (total, false);
         }
 
         #endregion
