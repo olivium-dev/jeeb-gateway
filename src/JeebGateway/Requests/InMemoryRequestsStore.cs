@@ -284,10 +284,18 @@ public class InMemoryRequestsStore : IRequestsStore
                     OtpVerificationOutcome.Locked, existing, 0, JustLockedOut: false));
             }
 
-            // OTP verification is only valid at the documented handover
-            // step. A caller racing the state machine (or hitting the
-            // endpoint at the wrong moment) gets a deterministic 400.
-            if (!string.Equals(existing.Status, RequestStatus.HeadingOff, StringComparison.Ordinal))
+            // OTP verification is only valid at the documented handover step.
+            // Normalize the stored status so BOTH the legacy vocab ("heading_off")
+            // and the canonical SM literal ("InTransit") are accepted — the canonical
+            // state machine writes "InTransit" (DeliveryStatusAlias: heading_off ⇒
+            // InTransit), so gating on the legacy literal alone made verify-otp
+            // unreachable after a canonical heading-off transition (blocking the
+            // settle/rate/receipt tail). A caller racing the state machine (or hitting
+            // the endpoint at the wrong moment) still gets a deterministic 400.
+            var inHandoverState =
+                CanonicalDeliveryVocab.TryNormalizeState(existing.Status, out var canonicalHandoverStatus)
+                && string.Equals(canonicalHandoverStatus, CanonicalDeliveryVocab.InTransit, StringComparison.Ordinal);
+            if (!inHandoverState)
             {
                 return Task.FromResult(new OtpVerificationResult(
                     OtpVerificationOutcome.NotInHandoverState,
