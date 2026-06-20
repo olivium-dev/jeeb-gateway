@@ -359,6 +359,7 @@ builder.Services.AddHealthChecks()
 // silently skip — local dev does not have to spin up every backend.
 // ---------------------------------------------------------------------------
 builder.Services.AddBffAggregation(builder.Configuration);
+builder.Services.AddCmsAuthoringPlane(); // WS-01: gateway-owned CMS authoring plane (W4/W7a)
 // AddDownstreamClients also registers the typed IContractSigningServiceClient
 // (contract-signing-service / immutable contract templates + per-party
 // signatures; consumed by ContractSigningController, gated by
