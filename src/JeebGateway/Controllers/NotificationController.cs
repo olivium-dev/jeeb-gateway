@@ -10,6 +10,7 @@ using JeebGateway.DTOs.Notification;
 using JeebGateway.Notifications;
 using JeebGateway.Users;
 using JeebGateway.service.ServiceNotification;
+using Newtonsoft.Json.Linq;
 using NotificationApiException = JeebGateway.service.ServiceNotification.ApiException;
 
 namespace JeebGateway.Controllers
@@ -69,7 +70,6 @@ namespace JeebGateway.Controllers
         /// <response code="422">Validation error</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("messages")]
-        [Authorize]
         [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B self / any-auth
         [ProducesResponseType(typeof(PagedNotificationMessagesResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
@@ -133,7 +133,6 @@ namespace JeebGateway.Controllers
         /// <response code="401">Unauthorized</response>
         /// <response code="500">Internal server error</response>
         [HttpGet("messages/unread-count")]
-        [Authorize]
         [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B self / any-auth
         [ProducesResponseType(typeof(UnreadNotificationCountResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
@@ -201,7 +200,6 @@ namespace JeebGateway.Controllers
         /// <response code="404">Notification not found</response>
         /// <response code="500">Internal server error</response>
         [HttpPatch("notifications/{notificationId}/read")]
-        [Authorize]
         [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B (STATE: ownership in-action)
         [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
@@ -254,7 +252,6 @@ namespace JeebGateway.Controllers
         /// <response code="404">Notification not found</response>
         /// <response code="500">Internal server error</response>
         [HttpPatch("notifications/{notificationId}/unread")]
-        [Authorize]
         [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B (STATE: ownership in-action)
         [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
@@ -306,7 +303,6 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
         [HttpPatch("notifications/bulk/read")]
-        [Authorize]
         [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B (STATE: ownership in-action)
         [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
@@ -362,7 +358,6 @@ namespace JeebGateway.Controllers
         /// <response code="400">Bad request</response>
         /// <response code="500">Internal server error</response>
         [HttpPatch("notifications/bulk/unread")]
-        [Authorize]
         [RequireCapability(Capabilities.NotificationsReadSelf)] // ADR-005 §B (STATE: ownership in-action)
         [ProducesResponseType(typeof(NotificationStatusResponseDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
@@ -557,33 +552,35 @@ namespace JeebGateway.Controllers
             int total = 0;
             try
             {
-                dynamic dyn = serviceResponse;
+                // Normalize via JObject so the count math works for both the real
+                // NSwag client (which returns a Newtonsoft JObject from its HTTP path)
+                // AND any stub/test double that returns a C# anonymous type (which
+                // cannot be accessed via dynamic across assembly boundaries).
+                JObject jo;
+                if (serviceResponse is JObject directJo)
+                {
+                    jo = directJo;
+                }
+                else
+                {
+                    jo = JObject.FromObject(serviceResponse);
+                }
 
                 bool gotTotal = false;
-                try
+                var totalToken = jo["total"] ?? jo["Total"];
+                if (totalToken != null)
                 {
-                    total = (int)(dyn.total ?? dyn.Total);
+                    total = totalToken.Value<int>();
                     gotTotal = true;
-                }
-                catch
-                {
-                    gotTotal = false;
                 }
 
                 if (!gotTotal)
                 {
                     // No total field — count the items we were given (page sized to ceiling+1).
-                    try
+                    var itemsToken = jo["items"] ?? jo["Items"];
+                    if (itemsToken is JArray arr)
                     {
-                        var items = dyn.items;
-                        if (items != null)
-                        {
-                            foreach (var _ in items) total++;
-                        }
-                    }
-                    catch
-                    {
-                        total = 0;
+                        total = arr.Count;
                     }
                 }
             }

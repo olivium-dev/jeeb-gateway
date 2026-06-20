@@ -287,7 +287,7 @@ public class OffersController : ControllerBase
         // testable. The upstream forward below owns the cap when the flag is on.
         if (!_flags.Offer)
         {
-            return await EditInMemoryAsync(offerId, actorId, body, ct);
+            return OfferUpstreamUnavailable("edit");
         }
 
         var requestId = _offerRequestIndex.ResolveRequestId(offerId);
