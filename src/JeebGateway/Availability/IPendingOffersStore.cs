@@ -40,6 +40,49 @@ public interface IPendingOffersStore
     Task<bool> AcceptAsync(string offerId, DateTimeOffset at, CancellationToken ct);
 
     /// <summary>
+    /// SM-2 / ACC-02 accept-and-supersede (in-memory auction-close authority).
+    /// Marks <paramref name="offerId"/> accepted and, in the SAME critical
+    /// section, marks every OTHER pending offer on the SAME request
+    /// <see cref="PendingOfferStatus.Superseded"/> (the competing bids that lost
+    /// the auction). This is the request-scoped close — distinct from
+    /// <see cref="AcceptAsync"/>, which only retracts the winning Jeeber's own
+    /// siblings. Idempotency / re-accept: when the offer is already accepted, the
+    /// outcome is <see cref="AcceptOfferStatus.AlreadyAccepted"/> carrying the
+    /// winning offer's Jeeber id (the controller maps this to <c>409
+    /// already_accepted</c> with the winner). When a DIFFERENT offer on the
+    /// request already won, this offer reads <see cref="PendingOfferStatus.Superseded"/>
+    /// and the outcome is likewise <see cref="AcceptOfferStatus.AlreadyAccepted"/>
+    /// with the request's winner. Returns <see cref="AcceptOfferStatus.NotFound"/>
+    /// for an unknown offer and <see cref="AcceptOfferStatus.NotPending"/> for a
+    /// withdrawn one.
+    /// </summary>
+    Task<AcceptOfferOutcome> AcceptWithSupersedeAsync(
+        string offerId, DateTimeOffset at, CancellationToken ct);
+
+    /// <summary>
+    /// SM-2 / JEB-1474 in-memory offer edit with the 2-edit cap. Applies the
+    /// supplied non-null fields (<paramref name="fee"/> / <paramref name="etaMinutes"/>
+    /// / <paramref name="note"/>) to a pending offer owned by
+    /// <paramref name="jeeberId"/>, incrementing the edit counter under the write
+    /// lock. The 3rd edit attempt (count already at <paramref name="maxEdits"/>)
+    /// is rejected with <see cref="EditOfferStatus.EditLimitReached"/> (controller
+    /// → <c>422 edit_limit_reached</c>) WITHOUT mutating the offer. Other
+    /// outcomes: <see cref="EditOfferStatus.NotFound"/> (unknown id / wrong
+    /// request), <see cref="EditOfferStatus.NotOwned"/> (a different Jeeber),
+    /// <see cref="EditOfferStatus.NotPending"/> (accepted/withdrawn/superseded).
+    /// </summary>
+    Task<EditOfferOutcome> TryEditAsync(
+        string offerId,
+        string requestId,
+        string jeeberId,
+        decimal? fee,
+        int? etaMinutes,
+        string? note,
+        int maxEdits,
+        DateTimeOffset at,
+        CancellationToken ct);
+
+    /// <summary>
     /// Atomic submit (T-backend-010). Under the store's write lock the
     /// store checks:
     /// <list type="bullet">
@@ -111,6 +154,94 @@ public enum WithdrawOfferOutcome
     NotFound,
     NotOwned,
     NotPending
+}
+
+/// <summary>
+/// SM-2 accept terminal classification for
+/// <see cref="IPendingOffersStore.AcceptWithSupersedeAsync"/>.
+/// </summary>
+public enum AcceptOfferStatus
+{
+    /// <summary>This offer won; all competing offers were superseded.</summary>
+    Accepted,
+
+    /// <summary>
+    /// The request's auction is already closed (this or another offer won). The
+    /// controller maps this to <c>409 already_accepted</c> and surfaces the
+    /// winning Jeeber id (<see cref="AcceptOfferOutcome.WinnerJeeberId"/>).
+    /// </summary>
+    AlreadyAccepted,
+
+    /// <summary>Unknown offer id.</summary>
+    NotFound,
+
+    /// <summary>
+    /// The offer itself is no longer pending for a reason other than an accepted
+    /// winner on the request (e.g. the Jeeber withdrew it). Controller → 409.
+    /// </summary>
+    NotPending
+}
+
+/// <summary>
+/// Result of <see cref="IPendingOffersStore.AcceptWithSupersedeAsync"/>. Carries
+/// the winning Jeeber id so the controller can return it on re-accept (the SM-2
+/// contract: re-accept → <c>409 already_accepted</c> returning the winner).
+/// </summary>
+public readonly record struct AcceptOfferOutcome(
+    AcceptOfferStatus Status,
+    string? WinnerJeeberId,
+    int SupersededCount)
+{
+    public static AcceptOfferOutcome Accepted(string winnerJeeberId, int supersededCount)
+        => new(AcceptOfferStatus.Accepted, winnerJeeberId, supersededCount);
+
+    public static AcceptOfferOutcome AlreadyAccepted(string? winnerJeeberId)
+        => new(AcceptOfferStatus.AlreadyAccepted, winnerJeeberId, 0);
+
+    public static readonly AcceptOfferOutcome NotFound =
+        new(AcceptOfferStatus.NotFound, null, 0);
+
+    public static readonly AcceptOfferOutcome NotPending =
+        new(AcceptOfferStatus.NotPending, null, 0);
+}
+
+/// <summary>
+/// SM-2 edit terminal classification for
+/// <see cref="IPendingOffersStore.TryEditAsync"/>.
+/// </summary>
+public enum EditOfferStatus
+{
+    Edited,
+
+    /// <summary>The 2-edit cap was already reached. Controller → 422 edit_limit_reached.</summary>
+    EditLimitReached,
+
+    NotFound,
+    NotOwned,
+    NotPending
+}
+
+/// <summary>
+/// Result of <see cref="IPendingOffersStore.TryEditAsync"/>. On
+/// <see cref="EditOfferStatus.Edited"/> the mutated <see cref="Offer"/> is
+/// returned for the controller's 200 projection; every negative leaves it null.
+/// </summary>
+public readonly record struct EditOfferOutcome(EditOfferStatus Status, PendingOffer? Offer)
+{
+    public static EditOfferOutcome Edited(PendingOffer offer)
+        => new(EditOfferStatus.Edited, offer);
+
+    public static readonly EditOfferOutcome EditLimitReached =
+        new(EditOfferStatus.EditLimitReached, null);
+
+    public static readonly EditOfferOutcome NotFound =
+        new(EditOfferStatus.NotFound, null);
+
+    public static readonly EditOfferOutcome NotOwned =
+        new(EditOfferStatus.NotOwned, null);
+
+    public static readonly EditOfferOutcome NotPending =
+        new(EditOfferStatus.NotPending, null);
 }
 
 /// <summary>
