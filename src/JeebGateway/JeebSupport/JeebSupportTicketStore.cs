@@ -94,6 +94,8 @@ public sealed class StateServiceSupportTicketStore : IJeebSupportTicketStore
         // set — the projection renders the cold-start empty page mobile tolerates — rather
         // than fabricating an in-gateway index (ADR-0001/0005). Re-point to the generic
         // primitive once jeeb-state-service ships "list state rows by owner".
+        // See docs/adr/0006-gateway-in-memory-store-migration-to-state-service.md — this is
+        // migration step 1 (the smallest re-point) once GET /state/rows?owner&prefix lands.
         return Task.FromResult<IReadOnlyList<SupportTicketRow>>(Array.Empty<SupportTicketRow>());
     }
 
