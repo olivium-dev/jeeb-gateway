@@ -269,6 +269,7 @@ public class S09HandoverIdempotentReverifyTests
         public Task<JeeberAvailabilityUpstream?> GetAvailabilityAsync(string jeeberId, CancellationToken ct) => throw new NotSupportedException();
         public Task<JeeberAvailabilityUpstream> HeartbeatAsync(string jeeberId, double lat, double lng, CancellationToken ct) => throw new NotSupportedException();
         public Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct) => throw new NotSupportedException();
+        public Task<JeeberFeedResult> GetJeeberFeedAsync(string jeeberId, int? limit, CancellationToken ct) => throw new NotSupportedException();
     }
 
     /// <summary>In-process <see cref="IServiceOTPClient"/> that records dispatches and validates as success.</summary>

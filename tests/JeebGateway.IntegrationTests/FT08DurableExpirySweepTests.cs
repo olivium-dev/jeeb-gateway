@@ -163,6 +163,7 @@ public class FT08DurableExpirySweepTests
         public Task<JeeberAvailabilityUpstream> HeartbeatAsync(string jeeberId, double lat, double lng, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct) => throw new NotImplementedException();
         public Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct) => Task.FromResult(0);
+        public Task<JeeberFeedResult> GetJeeberFeedAsync(string jeeberId, int? limit, CancellationToken ct) => throw new NotImplementedException();
     }
 
     private sealed class StubDeliveryClient : BaseStubDeliveryClient
