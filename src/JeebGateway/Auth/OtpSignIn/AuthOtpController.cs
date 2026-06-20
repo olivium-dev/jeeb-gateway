@@ -290,8 +290,34 @@ public sealed class AuthOtpController : ControllerBase
             try
             {
                 var um = await _userManagement.PhoneFindOrCreateAsync(phone, ct);
-                var roles = um.AvailableRoles is { Count: > 0 } ? um.AvailableRoles : new[] { Roles.Client };
+
+                // JEEBER-SPINE Defect 1 — the phone find-or-create surface is IDENTITY-ONLY
+                // (JEB-1480), so it returns only the canonical id + the gateway's default
+                // 'customer' decoration. Hydrate the user's REAL persisted role set
+                // (available_roles + active_role, e.g. a granted/active driver) from UM's
+                // role-read so the gateway-minted JWT (roles + active_role claims) reflects
+                // the driver capability instead of always projecting customer. Best-effort:
+                // a 404/blip leaves the safe default and never blocks the login.
+                IReadOnlyList<string> roles = um.AvailableRoles is { Count: > 0 }
+                    ? um.AvailableRoles
+                    : new[] { Roles.Client };
                 var active = string.IsNullOrWhiteSpace(um.ActiveRole) ? Roles.Client : um.ActiveRole;
+
+                var persisted = await SafeGetUserRolesAsync(um.UserId, ct);
+                if (persisted is not null)
+                {
+                    if (persisted.AvailableRoles is { Count: > 0 })
+                        roles = persisted.AvailableRoles;
+                    if (!string.IsNullOrWhiteSpace(persisted.ActiveRole))
+                        active = persisted.ActiveRole!;
+                }
+
+                // Never emit an active_role the user does not hold (token integrity / BR-1).
+                if (!roles.Contains(active, StringComparer.OrdinalIgnoreCase))
+                {
+                    active = roles.Count > 0 ? roles[0] : Roles.Client;
+                }
+
                 return (um.UserId, roles, active);
             }
             catch (UserManagementCallException ex)
@@ -306,6 +332,27 @@ public sealed class AuthOtpController : ControllerBase
         var profile = await _users.GetOrCreateAsync(phone, ct);
         var fallbackActive = string.IsNullOrWhiteSpace(profile.ActiveRole) ? Roles.Client : profile.ActiveRole;
         return (profile.Id, profile.Roles.ToList(), fallbackActive);
+    }
+
+    /// <summary>
+    /// JEEBER-SPINE Defect 1 — best-effort read of the user's persisted UM role set. Swallows
+    /// a UM call fault (returns null) so the OTP login proceeds on the safe default; the
+    /// caller decides the role decoration. Never throws into the verify happy path.
+    /// </summary>
+    private async Task<UserRolesResult?> SafeGetUserRolesAsync(string userId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(userId)) return null;
+        try
+        {
+            return await _userManagement.GetUserRolesAsync(userId, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "auth.otp.verify UM get-roles read failed for userId={UserId}; using default role decoration",
+                userId);
+            return null;
+        }
     }
 
     /// <summary>

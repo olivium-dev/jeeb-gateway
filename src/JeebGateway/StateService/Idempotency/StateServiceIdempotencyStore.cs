@@ -57,6 +57,12 @@ public sealed class StateServiceIdempotencyStore : IIdempotencyStore
         }
     }
 
+    public async Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(string prefix, CancellationToken ct)
+    {
+        var records = await _client.FindIdempotencyKeysByPrefixAsync(prefix, ct);
+        return records.Select(ToOutcome).ToList();
+    }
+
     private static IdempotencyOutcome ToOutcome(IdempotencyRecord record) => new()
     {
         Inserted = record.Inserted ?? false,

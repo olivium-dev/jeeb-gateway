@@ -18,6 +18,11 @@ namespace JeebGateway.StateService.Durable;
 // REBUILD its in-memory index from the state-service after a bounce for these
 // four domains. R1 (idempotency, GET by key) and R8 (locks/rate-limit, keyed
 // by lockKey/bucket) are unaffected and fully bounce-survivable.
+//
+// FIX TRACKED: docs/adr/0006-gateway-in-memory-store-migration-to-state-service.md
+// proposes the single generic primitive that closes this gap —
+// GET /state/rows?owner&prefix (list by owner/prefix) — after which the R2–R5
+// read-indexes can be rebuilt from the state-service instead of held in-memory.
 // ---------------------------------------------------------------------------
 
 /// <summary>R2: durable mirror of refresh-family create + rotate (reuse-detect
