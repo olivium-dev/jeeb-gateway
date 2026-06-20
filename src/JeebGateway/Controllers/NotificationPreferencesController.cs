@@ -6,7 +6,14 @@ using Microsoft.AspNetCore.Mvc;
 namespace JeebGateway.Controllers;
 
 [ApiController]
+// Canonical surface (kept for back-compat with existing callers)...
 [Route("api/users/me/notification-preferences")]
+// ...plus the path the mobile app actually calls (JM notif-prefs). The mobile
+// DioNotificationsRepository dials GET/PATCH /v1/notifications/preferences; the
+// gateway previously only exposed the api/users/me/... shape, so the mobile call
+// 404'd. Both routes map to the SAME actions (GET + PATCH) — a pure alias, no
+// behaviour change, ADR-0001 (stateless thin BFF) preserved.
+[Route("v1/notifications/preferences")]
 [RequireCapability(Capabilities.NotificationPrefsSelf)]
 public class NotificationPreferencesController : ControllerBase
 {
