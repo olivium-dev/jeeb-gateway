@@ -52,6 +52,7 @@ public sealed class UsersMeController : ControllerBase
     private readonly IUsersStore _users;
     private readonly IMemoryCache _cache;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
+    private readonly IUserManagementDualRoleClient _dualRole;
     private readonly ILogger<UsersMeController> _log;
 
     public UsersMeController(
@@ -59,12 +60,14 @@ public sealed class UsersMeController : ControllerBase
         IUsersStore users,
         IMemoryCache cache,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
+        IUserManagementDualRoleClient dualRole,
         ILogger<UsersMeController> log)
     {
         _umProfile = umProfile;
         _users = users;
         _cache = cache;
         _flags = flags;
+        _dualRole = dualRole;
         _log = log;
     }
 
@@ -148,6 +151,104 @@ public sealed class UsersMeController : ControllerBase
             Email = display?.Email,
             AvatarUrl = display?.AvatarUrl,
         });
+    }
+
+    // -----------------------------------------------------------------
+    // F-A — POST /v1/users/me/role/switch  (JEEBER-SPINE Defect 2)
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// POST /v1/users/me/role/switch — switch the CURRENT (active) role of the caller's
+    /// dual-role account. Body: <c>{ "role": "client" | "jeeber" }</c> (frozen Jeeb contract
+    /// vocabulary). The gateway is a thin BFF: it validates the inbound contract role
+    /// (<c>invalid_role</c> 400 BEFORE any UM call — N6), translates it to the OPAQUE role
+    /// user-management understands, asks UM to PERSIST the active_role + RE-ISSUE the token
+    /// pair (UM is the token authority on this path — N11 split-signer / CP-C), updates the
+    /// local projection so the next gateway read reflects the switch, invalidates the /me
+    /// profile cache, and relays UM's tokens verbatim. A UM 403 (the user does not hold the
+    /// requested role — e.g. not yet KYC-approved as jeeber) maps straight to 403 (N5).
+    ///
+    /// <para>Re-introduces the route the mobile <c>DioRoleSwitchRepository</c> calls
+    /// (<c>POST /v1/users/me/role/switch</c>): the ADR-004 "upgrade-not-switch" removal left
+    /// the route absent, so the in-app driver switch hit 404. The KYC grant path
+    /// (<see cref="IUserManagementDualRoleClient.AppendAvailableRoleAsync"/>) still owns
+    /// granting the jeeber role; this action just flips which granted role is active.</para>
+    /// </summary>
+    [HttpPost("role/switch")]
+    [RequireCapability(Caps.ProfileReadSelf)]
+    [ProducesResponseType(typeof(RoleSwitchResponseDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> SwitchRole([FromBody] RoleSwitchRequestDto? body, CancellationToken ct)
+    {
+        if (!_flags.CurrentValue.UserManagement)
+            return UpstreamDisabled();
+
+        // I4 — identity ALWAYS from the bearer, never the body.
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauth))
+            return unauth;
+
+        // N6 — validate the inbound Jeeb contract role and translate to OPAQUE BEFORE any UM
+        // call. Anything outside {client, jeeber} is invalid_role 400 (no upstream dialed).
+        var opaque = JeebRoleTranslator.ToOpaque(body?.Role);
+        if (opaque is null)
+        {
+            return Problem(StatusCodes.Status400BadRequest, "invalid_role", "Invalid role",
+                $"Role '{body?.Role}' is not a recognised Jeeb role. Allowed: client, jeeber.");
+        }
+
+        try
+        {
+            // UM persists the active_role and re-issues the token pair; the gateway signs nothing.
+            var result = await _dualRole.RoleSwitchAsync(userId, opaque, ct);
+
+            // Project the switch locally so the next gateway-minted/read path reflects it, and
+            // invalidate the 30s /me profile cache so GET /v1/users/me is not stale (G3).
+            await _users.SwitchRoleAsync(userId, result.ActiveRole, ct);
+            _cache.Remove(ProfileCacheKey(userId));
+
+            // Resolve the user's FULL available-role set for the response body (the re-issued
+            // UM token carries only the now-active role; available_roles must be the full set).
+            var opaqueAvailable = await ResolveAvailableRolesAsync(userId, ct);
+            var contractAvailable = JeebRoleTranslator.ToContract(opaqueAvailable);
+            if (contractAvailable.Length == 0)
+                contractAvailable = new[] { JeebRoleTranslator.ContractClient };
+
+            var contractActive = JeebRoleTranslator.ToContract(result.ActiveRole);
+            if (string.IsNullOrWhiteSpace(contractActive))
+                contractActive = JeebRoleTranslator.ContractClient;
+
+            return Ok(new RoleSwitchResponseDto
+            {
+                UserId = result.UserId,
+                AccessToken = result.AccessToken,
+                RefreshToken = result.RefreshToken,
+                ActiveRole = contractActive,
+                AvailableRoles = contractAvailable,
+                User = new RoleSwitchUserBlock
+                {
+                    UserId = result.UserId,
+                    ActiveRole = contractActive,
+                    AvailableRoles = contractAvailable,
+                },
+            });
+        }
+        catch (UserManagementRoleNotAvailableException)
+        {
+            // N5 / ALT-1 — UM's role_not_available 403 (the user does not hold the requested
+            // role, e.g. not KYC-approved as jeeber). The mobile client maps 403 → kycGated.
+            return Problem(StatusCodes.Status403Forbidden, "role_not_available", "Role not available",
+                $"You do not currently hold the '{body!.Role}' role. Complete the required onboarding first.");
+        }
+        catch (UserManagementCallException ex)
+        {
+            _log.LogWarning("v1/users/me/role/switch UM call failed (status {Status})", ex.StatusCode);
+            return Problem(StatusCodes.Status502BadGateway, "upstream_fault", "Role switch upstream failure",
+                "The user-management service returned an unexpected status while switching the active role.");
+        }
     }
 
     // -----------------------------------------------------------------

@@ -879,6 +879,20 @@ void ConfigureNamedClient(string name, string configKey)
 
 ConfigureNamedClient("ServiceWalletClient", "WalletServiceApi");
 
+// JEEBER-SPINE Defect 3 — dedicated named HttpClient for the Jeeb earnings BFF
+// (JeebEarningsBffController). Bound to the SAME WalletServiceApi:BaseUrl as the generated
+// wallet client; the BaseAddress is normalised with a trailing slash so the controller's
+// relative "v1/wallet/jeeb/earnings" path resolves correctly. The caller's bearer is
+// forwarded per-request inside the controller (own-scoped read).
+builder.Services.AddHttpClient(JeebGateway.Controllers.JeebEarningsBffController.WalletHttpClientName, client =>
+{
+    var apiUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
+    }
+});
+
 builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
