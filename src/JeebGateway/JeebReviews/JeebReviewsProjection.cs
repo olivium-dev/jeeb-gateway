@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using JeebGateway.service.ServiceFeedback;
 
 namespace JeebGateway.JeebReviews;
@@ -73,6 +74,65 @@ public static class JeebReviewsProjection
             ColdStart = true,
             ReviewCount = 0,
             AverageScore = null,
+        };
+    }
+
+    /// <summary>
+    /// D59 cold-start threshold: a jeeber with fewer than this many revealed reviews is
+    /// "new" — the mobile parser hides the aggregate score and shows the "New" badge.
+    /// </summary>
+    public const int ColdStartReviewThreshold = 5;
+
+    /// <summary>
+    /// Project the generic, opaque per-ratee reviews page (the SHARED feedback-service
+    /// list-by-ratee read) into the Jeeb-facing R1m page the mobile
+    /// <c>DioReviewsRepository._parse</c> consumes. Pure shaping — no state, no HTTP.
+    ///
+    /// <para>The upstream is product-agnostic: opaque rater/ratee ids + score + comment.
+    /// The reviewer's name is NOT stored downstream (the shared service must not know Jeeb
+    /// identities — Golden Rule 2), so the row's <c>reviewerFirstName</c> is left empty;
+    /// the mobile parser renders an anonymous reviewer when it is blank (D58 — never a full
+    /// name). Score + comment + timestamp + the aggregate count/average are real, DB-backed
+    /// values from the revealed blind ratings. D59: while the jeeber has &lt;
+    /// <see cref="ColdStartReviewThreshold"/> reviews the aggregate <c>averageScore</c> is
+    /// suppressed (null) and <c>coldStart</c> is true.</para>
+    /// </summary>
+    public static JeebReviewsPageResponse ProjectReviewsPage(
+        string jeeberId, RateeReviewsResponse upstream, int page, int pageSize)
+    {
+        if (upstream is null) return EmptyReviewsPage(jeeberId, page, pageSize);
+
+        var safePage = page < 1 ? 1 : page;
+        var safeSize = pageSize < 1 ? 20 : pageSize;
+
+        var items = (upstream.Reviews ?? new List<RateeReviewItem>())
+            .Select(r => new JeebReviewItemResponse
+            {
+                Id = r.Id.ToString(),
+                ReviewerFirstName = string.Empty, // opaque upstream — no identity (D58)
+                Score = r.Score,
+                Body = string.IsNullOrWhiteSpace(r.Comment) ? null : r.Comment,
+                CreatedAt = (r.RevealedAt ?? r.CreatedAt).ToString("o"),
+                Reportable = true, // D27
+            })
+            .ToList();
+
+        var total = upstream.TotalReviewCount;
+        var coldStart = total < ColdStartReviewThreshold;
+        var totalPages = total <= 0 ? 1 : (int)Math.Ceiling(total / (double)safeSize);
+
+        return new JeebReviewsPageResponse
+        {
+            JeeberId = jeeberId ?? string.Empty,
+            Items = items,
+            Page = safePage,
+            PageSize = safeSize,
+            TotalCount = total,
+            TotalPages = totalPages < 1 ? 1 : totalPages,
+            ColdStart = coldStart,
+            ReviewCount = total,
+            // D59 — suppress the aggregate until past the cold-start threshold.
+            AverageScore = coldStart ? null : Math.Round(upstream.AverageRating, 2),
         };
     }
 
