@@ -17,14 +17,18 @@ title = "jeeb-gateway gitleaks config"
 useDefault = true
 
 [allowlist]
-description = "jeeb-gateway non-secret test fixtures and decommissioned values"
+description = "jeeb-gateway non-secret identifiers, test fixtures, and decommissioned values"
 
-# The exact historical commits that introduced the two synthetic test literals
-# flagged by the generic-api-key rule. Pinning by commit keeps the allowlist
-# from broadening beyond these precise occurrences.
+# The exact historical commits whose lines the generic-api-key rule flags. The
+# org-repo full-history CI scan reaches commits a shallow clone does not, so the
+# live findings are the OTP ApplicationId in an OLD deploy-staging.yml; pinning by
+# commit keeps the allowlist from broadening beyond these precise occurrences.
+#   8089dbd — .github/workflows/deploy-staging.yml (lines 145,181)
+#             Auth__Otp__ApplicationId = 0d51afe1-499f-4a29-a55a-36d2dd223b05
 #   edb2119 — tests/.../TestControlPlaneTests.cs   ValidSecret = "test-plane-secret-abc123"
 #   758becb — tests/.../ApiKeyAuthenticationTests.cs ValidApiKey  = "test-api-key-12345"
 commits = [
+  "8089dbd94f65a4d70f52f217b0299cb559540038",
   "edb2119415d5dc955b8dbe22e369b3e8b8079691",
   "758becb85275904857e8fd16a3682d7ca0f25902",
 ]
@@ -35,13 +39,18 @@ paths = [
   '''tests/JeebGateway\.IntegrationTests/.*''',
 ]
 
-# Exact synthetic test constants flagged by the generic-api-key rule, plus the
-# decommissioned super-login TEST passcode 123768. 123768 was a test passcode that
-# has been decommissioned and rotated; it is no longer valid on any live system,
-# and the live passcode lives only in the UM service env (never committed). It is
-# NOT present in the current tree — allowlisted defensively against historical
-# full-history scans.
+# Exact non-secret values that the generic-api-key heuristic flags:
+#  - 0d51afe1-...: the Jeeb OTP ApplicationId / tenant GUID. This is a non-secret
+#    public identifier (it ships openly as a default in deploy-to-jeeb.yml and as a
+#    test constant), NOT a credential — flagged only by the entropy heuristic.
+#  - test-plane-secret-abc123 / test-api-key-12345: synthetic dummy constants used
+#    only inside integration-test assertions, never referenced from src/.
+#  - 123768: the decommissioned/rotated super-login TEST passcode. It is no longer
+#    valid on any live system; the live passcode lives only in the UM service env
+#    (never committed). NOT present in this repo's tree or history — allowlisted
+#    defensively against future historical-diff scans.
 regexes = [
+  '''0d51afe1-499f-4a29-a55a-36d2dd223b05''',
   '''test-plane-secret-abc123''',
   '''test-api-key-12345''',
   '''123768''',
