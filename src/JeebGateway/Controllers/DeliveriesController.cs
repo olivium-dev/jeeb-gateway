@@ -102,6 +102,39 @@ public class DeliveriesController : ControllerBase
     private string ResolveOtpApplicationId()
         => _otpSignInOptions.Value.ApplicationId;
 
+    /// <summary>
+    /// True when the in-memory mirror row is at the canonical <c>AtDoor</c>
+    /// handover state, regardless of which delivery-status vocabulary the row
+    /// currently carries.
+    ///
+    /// Root cause (real lease jeeb-20260613042555-0933, deliveryId 7dbd007c…):
+    /// the canonical PATCH-status path (<see cref="PatchStatusViaDeliveryServiceAsync"/>)
+    /// best-effort mirrors the UPSTREAM canonical status verbatim into the local
+    /// store via <c>_store.SetStatusAsync(upstream.Status)</c>. delivery-service
+    /// emits the canonical SM-1 token <c>"AtDoor"</c>
+    /// (<see cref="CanonicalDeliveryStatus.AtDoor"/>), so after a handover walk the
+    /// mirror row carries <c>"AtDoor"</c> — NOT the gateway's legacy snake_case
+    /// <c>"at_door"</c> (<see cref="RequestStatus.AtDoor"/>). A raw
+    /// <c>delivery.Status != RequestStatus.AtDoor</c> equality check therefore
+    /// spuriously rejected the handover-OTP trigger/verify with a 400
+    /// <c>invalid-otp-trigger-state</c> ("Current status: AtDoor") even though the
+    /// canonical read-through <c>GET /deliveries/{id}</c> reported 200 / AtDoor.
+    ///
+    /// The fix routes the stored token through the existing idempotent dual-read
+    /// translation layer (<see cref="DeliveryStatusAlias.ToCanonical"/>, ADR-002
+    /// §3), which accepts BOTH the legacy <c>"at_door"</c> alias and the canonical
+    /// <c>"AtDoor"</c> token and normalizes to the canonical form, then compares
+    /// against <see cref="CanonicalDeliveryStatus.AtDoor"/>. This does NOT relax
+    /// the gate — only the AtDoor handover state passes; the legacy snake_case
+    /// path is preserved unchanged. The flag-on (delivery-service) path is
+    /// unaffected: it owns its own durable at_door gate.
+    /// </summary>
+    private static bool IsCanonicallyAtDoor(string? status)
+        => string.Equals(
+            DeliveryStatusAlias.ToCanonical(status),
+            CanonicalDeliveryStatus.AtDoor,
+            StringComparison.Ordinal);
+
     public DeliveriesController(
         IRequestsStore store,
         ISettlementStore settlementStore,
@@ -856,7 +889,12 @@ public class DeliveriesController : ControllerBase
         // PR review B1 (JEB-628): AC1 requires status `at_door` (the
         // handover step), not `heading_off` (the en-route step). Issuing
         // an OTP before the courier has arrived is the wrong UX.
-        if (delivery.Status != RequestStatus.AtDoor)
+        //
+        // The gate is vocabulary-agnostic (see IsCanonicallyAtDoor): a mirror row
+        // synced from the canonical PATCH path carries "AtDoor", a legacy row
+        // carries "at_door"; both are the AtDoor handover state and both pass.
+        // The gate itself is NOT relaxed — only AtDoor passes.
+        if (!IsCanonicallyAtDoor(delivery.Status))
         {
             return BadRequest(new ProblemDetails
             {
@@ -1012,8 +1050,10 @@ public class DeliveriesController : ControllerBase
                 deliveryId, delivery, body.Code!, callerId, actorRole, correlationId, activity, ct);
         }
 
-        // PR review B1: handover OTP applies at the `at_door` step.
-        if (delivery.Status != RequestStatus.AtDoor)
+        // PR review B1: handover OTP applies at the `at_door` step. Vocabulary-
+        // agnostic (see IsCanonicallyAtDoor) so a mirror row synced from the
+        // canonical PATCH path ("AtDoor") and a legacy row ("at_door") both pass.
+        if (!IsCanonicallyAtDoor(delivery.Status))
         {
             return BadRequest(new ProblemDetails
             {
