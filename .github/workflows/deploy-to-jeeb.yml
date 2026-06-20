@@ -255,9 +255,8 @@ jobs:
         id: build
         run: |
           TAG="${IMAGE}:sha-${GITHUB_SHA::12}"
-          docker build -t "$TAG" -t "${IMAGE}:latest" .
+          docker build -t "$TAG" .
           docker push "$TAG"
-          docker push "${IMAGE}:latest"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Install cloudflared + write deploy key
