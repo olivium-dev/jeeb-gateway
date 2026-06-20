@@ -902,6 +902,9 @@ else
     builder.Services.AddSingleton<INotificationPreferencesStore, InMemoryNotificationPreferencesStore>();
 }
 
+// WS-02 — Saved Locations BFF (ACCT-04 / REQ-02). Net-new, gateway-thin, in-memory store.
+builder.Services.AddSavedLocations();
+
 // Push notification pipeline (T-backend-022).
 //
 // One unified outbound surface for every push-eligible trigger: new offers,
