@@ -46,12 +46,22 @@ public class BffStartupValidatorTests
 
         var act = () => validator.Validate();
 
+        // CONFIG-KEY ALIGNMENT: UserManagement is validated against the canonical
+        // top-level UserManagementServiceApi:BaseUrl key (the one the live
+        // ServiceUserManagementClient in Program.cs + the readiness probe dial),
+        // NOT a phantom Services:UserManagement:BaseUrl. Geolocation/Delivery
+        // remain nested Services:* downstreams.
         act.Should().Throw<StartupConfigurationException>()
             .Which.Message.Should().ContainAll(
-                "Services:UserManagement:BaseUrl",
+                "UserManagementServiceApi:BaseUrl",
                 "Services:Geolocation:BaseUrl",
                 "Services:Delivery:BaseUrl",
                 "environment 'Production'");
+
+        // It must NOT name the old phantom key (the drift that forced the
+        // dual-key env workaround).
+        act.Should().Throw<StartupConfigurationException>()
+            .Which.Message.Should().NotContain("Services:UserManagement:BaseUrl");
 
         // Chat is intentionally NOT a required Services:* key anymore (salehly
         // mirror moved it to the top-level ChatServiceApi key), so even with the
@@ -105,7 +115,9 @@ public class BffStartupValidatorTests
         var config = BuildConfig(new Dictionary<string, string?>
         {
             ["Services:Auth:BaseUrl"] = "http://auth.test",
-            ["Services:UserManagement:BaseUrl"] = "http://user-management.test",
+            // CONFIG-KEY ALIGNMENT: UserManagement validates the canonical
+            // top-level key, mirroring appsettings + Program.cs.
+            ["UserManagementServiceApi:BaseUrl"] = "http://user-management.test",
             ["Services:Matching:BaseUrl"] = "http://matching.test",
             ["Services:Geolocation:BaseUrl"] = "http://geo.test",
             ["Services:Delivery:BaseUrl"] = "http://delivery.test",
@@ -127,7 +139,8 @@ public class BffStartupValidatorTests
         var config = BuildConfig(new Dictionary<string, string?>
         {
             ["Services:Auth"] = "http://auth.test",
-            ["Services:UserManagement"] = "http://user-management.test",
+            // Bare form of the canonical UserManagement key (key minus :BaseUrl).
+            ["UserManagementServiceApi"] = "http://user-management.test",
             ["Services:Matching"] = "http://matching.test",
             ["Services:Geolocation"] = "http://geo.test",
             ["Services:Delivery"] = "http://delivery.test",
@@ -139,6 +152,31 @@ public class BffStartupValidatorTests
             new HostEnv("Production"));
 
         validator.Validate(); // does not throw
+    }
+
+    [Fact]
+    public void UserManagement_Resolves_The_Canonical_Top_Level_Key()
+    {
+        // Regression for the config-key-drift fix: with ONLY the canonical
+        // UserManagementServiceApi:BaseUrl set (and the phantom
+        // Services:UserManagement:BaseUrl absent), UserManagement counts as
+        // configured. The other nested Services:* downstreams are supplied so the
+        // validator's only verdict under test is the UserManagement key resolution.
+        var config = BuildConfig(new Dictionary<string, string?>
+        {
+            ["Services:Auth:BaseUrl"] = "http://auth.test",
+            ["UserManagementServiceApi:BaseUrl"] = "http://user-management.test",
+            ["Services:Matching:BaseUrl"] = "http://matching.test",
+            ["Services:Geolocation:BaseUrl"] = "http://geo.test",
+            ["Services:Delivery:BaseUrl"] = "http://delivery.test",
+        });
+
+        var validator = new BffStartupValidator(
+            Options.Create(new DownstreamServicesOptions()),
+            config,
+            new HostEnv("Production"));
+
+        validator.Validate(); // does not throw — phantom Services:UserManagement key not needed
     }
 
     private static IConfiguration BuildConfig(IDictionary<string, string?> values)
