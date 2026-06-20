@@ -84,6 +84,13 @@ public static class Capabilities
     public const string DisputeReadMine = "dispute.read.mine";        // {client, jeeber, admin}; own-vs-any = STATE
     public const string DisputeResolve = "dispute.resolve";           // {admin}
 
+    // ── G2. Support (contact-us / help tickets, JM-063) ───────────────────────────────
+    // Any authenticated Jeeb user (client/jeeber/admin) may file & read their own tickets;
+    // WHICH rows a caller may read is STATE (owner-scoped in the action), mirroring
+    // dispute.read.mine. Static categories share the read cap (gateway-owned catalog).
+    public const string SupportCreateSelf = "support.create.self";    // {client, jeeber, admin}
+    public const string SupportReadOwn = "support.read.own";          // {client, jeeber, admin}; own-vs-any = STATE
+
     // ── H–J. Misc participant caps {client, jeeber} ───────────────────────────────────
     public const string ProhibitedAck = "prohibited.ack";
     public const string ProhibitedScan = "prohibited.scan";

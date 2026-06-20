@@ -109,6 +109,12 @@ public static class CapabilityRolePolicy
             [Capabilities.DisputeReadMine] = AnyAuthenticated,  // party/own-vs-admin = STATE
             [Capabilities.DisputeResolve] = AdminOnly,
 
+            // G2. Support tickets (JM-063): any authenticated Jeeb user files & reads
+            // their OWN tickets (owner-scoping is STATE, enforced in the action). The
+            // static categories catalog shares the read cap.
+            [Capabilities.SupportCreateSelf] = AnyAuthenticated,
+            [Capabilities.SupportReadOwn] = AnyAuthenticated,   // own-vs-any = STATE
+
             // H–J. Misc participant caps {client, jeeber}
             [Capabilities.ProhibitedAck] = Participant,
             [Capabilities.ProhibitedScan] = Participant,

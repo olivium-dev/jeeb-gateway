@@ -149,9 +149,14 @@ public static class ServiceClientExtensions
         AttachStandardPipeline(
             services.AddHttpClient<IMatchingServiceClient, MatchingServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Matching")));
-        AttachStandardPipeline(
-            services.AddHttpClient<IGeolocationServiceClient, GeolocationServiceClient>(http =>
-                BindBaseAddress(http, config, "Services:Geolocation")));
+
+        // geolocation typed client — the SINGLE registration is the NSwag-generated
+        // Services.Generated.GeolocationService.IGeolocationServiceClient below.
+        // The legacy hand-coded Services.Clients.IGeolocationServiceClient /
+        // GeolocationServiceClient was removed (dead code — never injected anywhere):
+        // registering BOTH crashed boot because IHttpClientFactory keys typed clients
+        // by the SHORT type name (both were "IGeolocationServiceClient"), throwing an
+        // InvalidOperationException unconditionally at startup (process exit 139).
 
         // chat-service — REMOVED from this set. The jeeb 1:1 conversation BFF
         // (ChatServiceClient) + Redis topology map (RedisChatTopologyMap /
@@ -199,9 +204,9 @@ public static class ServiceClientExtensions
         // Gap 1 (geolocation): NSwag-shaped typed client over the shared
         // geolocation-service, consumed by GeoServiceLocationStore when
         // FeatureFlags:UseUpstream:Geolocation is ON (flag-gated store swap in Program.cs).
-        // Distinct from the legacy hand-coded Services.Clients.GeolocationServiceClient
-        // above (kept for the existing typed-client pipeline assertion); this is the
-        // generated client the store binds to.
+        // This is the ONLY IGeolocationServiceClient registration (the legacy
+        // Services.Clients one was removed — see note above); it is the live client
+        // the store binds to and the one the typed-client pipeline assertion covers.
         AttachStandardPipeline(
             services.AddHttpClient<
                 JeebGateway.Services.Generated.GeolocationService.IGeolocationServiceClient,
