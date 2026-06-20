@@ -202,7 +202,16 @@ public sealed class UsersMeController : ControllerBase
 
         try
         {
-            // UM persists the active_role and re-issues the token pair; the gateway signs nothing.
+            // UM persists the active_role and re-issues a token PAIR; the gateway signs nothing.
+            // DEFECT-1 FIX (iter5): UM's re-issued token carries iss/aud=user-management, but every
+            // /v1/* route is [Authorize]'d to the GatewayBearerScheme (aud=jeeb-clients). Relaying
+            // UM's token verbatim (as the prior `AccessToken = result.AccessToken` did) handed the
+            // caller a token that 401s on the NEXT /v1/* call — a role switch broke the live session.
+            // ADR-cleanest fix (ADR-004 "single session token carries the full role set"): return NO
+            // replacement token. The active_role is ALREADY persisted by UM + projected locally
+            // below, and the caller's existing aud=jeeb-clients session stays valid across the switch
+            // (a stale active_role claim self-corrects on the next gateway-minted token via refresh /
+            // re-login; available_roles/active_role in THIS body are authoritative immediately).
             var result = await _dualRole.RoleSwitchAsync(userId, opaque, ct);
 
             // Project the switch locally so the next gateway-minted/read path reflects it, and
@@ -224,8 +233,11 @@ public sealed class UsersMeController : ControllerBase
             return Ok(new RoleSwitchResponseDto
             {
                 UserId = result.UserId,
-                AccessToken = result.AccessToken,
-                RefreshToken = result.RefreshToken,
+                // DEFECT-1: deliberately DO NOT relay UM's aud=user-management token pair — emit
+                // empty strings so the caller keeps its valid aud=jeeb-clients session. (A
+                // coordinated mobile fix also stops adopting any token from this response.)
+                AccessToken = string.Empty,
+                RefreshToken = string.Empty,
                 ActiveRole = contractActive,
                 AvailableRoles = contractAvailable,
                 User = new RoleSwitchUserBlock

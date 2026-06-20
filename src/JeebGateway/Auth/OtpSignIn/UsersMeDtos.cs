@@ -43,10 +43,16 @@ public sealed class RoleSwitchRequestDto
 }
 
 /// <summary>
-/// Response for <c>POST /v1/users/me/role/switch</c>. <see cref="AccessToken"/> /
-/// <see cref="RefreshToken"/> are the UM-RE-ISSUED tokens, returned VERBATIM — the
-/// gateway signs nothing on this path (CP-C / N11). <see cref="ActiveRole"/> and
+/// Response for <c>POST /v1/users/me/role/switch</c>. <see cref="ActiveRole"/> and
 /// <see cref="AvailableRoles"/> are translated back to the snake_case contract.
+///
+/// <para>DEFECT-1 (iter5): <see cref="AccessToken"/> / <see cref="RefreshToken"/> are
+/// emitted EMPTY. UM re-issues a token pair on this path, but that pair carries
+/// iss/aud=user-management which 401s on the gateway's aud=jeeb-clients /v1/* routes —
+/// relaying it broke the live session. ADR-004 ("single session token carries the full
+/// role set"): the switch persists the active_role and the caller KEEPS its existing
+/// valid aud=jeeb-clients session, so no replacement token is handed back. The fields are
+/// retained (empty) for response-shape stability with existing consumers.</para>
 /// </summary>
 public sealed class RoleSwitchResponseDto
 {
