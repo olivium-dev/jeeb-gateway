@@ -144,6 +144,62 @@ public static class JeebReviewsProjection
     }
 
     /// <summary>
+    /// REALAPP fix — project the generic feedback-service per-tag REVIEW page
+    /// (<c>GET /Review/comment?Tag=&amp;Length=&amp;Offset=&amp;Filter=</c> →
+    /// <see cref="GetCommentsResponse"/>: <c>{ comments[], totalReviewCount,
+    /// averageRating }</c>) into the Jeeb-facing R1m page the mobile
+    /// <c>DioReviewsRepository._parse</c> consumes. Pure shaping — no state, no HTTP.
+    ///
+    /// <para>This is the read surface the jeeber-review WRITE side stamps with the
+    /// jeeber's id as the public review TAG, so the rows are real, DB-backed reviews.
+    /// Each <see cref="CommentResponse"/> carries the rating (score), free text, the
+    /// review date and an opaque <c>commenterId</c>; the reviewer's NAME is not stored
+    /// downstream (the shared service must not know Jeeb identities — GR2), so
+    /// <c>reviewerFirstName</c> is left empty and the mobile parser renders an
+    /// anonymous reviewer (D58 — never a full name). D59: while the jeeber has fewer
+    /// than <see cref="ColdStartReviewThreshold"/> reviews the aggregate
+    /// <c>averageScore</c> is suppressed (null) and <c>coldStart</c> is true.</para>
+    /// </summary>
+    public static JeebReviewsPageResponse ProjectCommentsPage(
+        string jeeberId, GetCommentsResponse upstream, int page, int pageSize)
+    {
+        if (upstream is null) return EmptyReviewsPage(jeeberId, page, pageSize);
+
+        var safePage = page < 1 ? 1 : page;
+        var safeSize = pageSize < 1 ? 20 : pageSize;
+
+        var items = (upstream.Comments ?? new List<CommentResponse>())
+            .Select(c => new JeebReviewItemResponse
+            {
+                Id = c.Id.ToString(),
+                ReviewerFirstName = string.Empty, // opaque upstream — no identity (D58)
+                Score = c.Rating,
+                Body = string.IsNullOrWhiteSpace(c.Text) ? null : c.Text,
+                CreatedAt = c.Date.ToString("o"),
+                Reportable = true, // D27
+            })
+            .ToList();
+
+        var total = upstream.TotalReviewCount;
+        var coldStart = total < ColdStartReviewThreshold;
+        var totalPages = total <= 0 ? 1 : (int)Math.Ceiling(total / (double)safeSize);
+
+        return new JeebReviewsPageResponse
+        {
+            JeeberId = jeeberId ?? string.Empty,
+            Items = items,
+            Page = safePage,
+            PageSize = safeSize,
+            TotalCount = total,
+            TotalPages = totalPages < 1 ? 1 : totalPages,
+            ColdStart = coldStart,
+            ReviewCount = total,
+            // D59 — suppress the aggregate until past the cold-start threshold.
+            AverageScore = coldStart ? null : Math.Round(upstream.AverageRating, 2),
+        };
+    }
+
+    /// <summary>
     /// Project the generic two-party reveal state into the mobile
     /// <c>{ deliveryId, state, ratings, ratedCount }</c> status envelope. The
     /// counterparty <c>ratings</c> row is only emitted once revealed (blind

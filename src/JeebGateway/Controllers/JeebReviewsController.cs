@@ -111,17 +111,22 @@ public sealed class JeebReviewsController : ControllerBase
         var safeSize = pageSize < 1 ? 20 : pageSize;
         var offset = (safePage - 1) * safeSize;
 
-        // Map the Jeeb user id to the SAME opaque rateeId the rating SUBMIT path stamps
-        // (FeedbackServiceRatingStore.StableGuid), then read the jeeber's revealed reviews
-        // from the SHARED feedback-service list-by-ratee surface (the ratings
-        // record-of-truth; score-taking-service is DECOMMISSIONED). The Jeeb presentation
-        // shaping stays here (ADR-0001 thin BFF / GR2); the upstream is opaque.
-        var rateeId = FeedbackServiceRatingStore.StableGuid(id);
+        // REALAPP fix — read the jeeber's reviews from the SHARED feedback-service
+        // per-tag REVIEW surface (GET /Review/comment?Tag=<jeeberId>&Length=&Offset=&Filter=).
+        // The jeeberId is the public review TAG the write side stamps on each review
+        // (a parallel agent fixes feedback-service's POST /Review/comment write path),
+        // so the read is keyed on the RAW jeeberId — not an opaque StableGuid (the prior
+        // GET /ratings/ratee/{guid}/reviews endpoint does not exist upstream and always
+        // 404'd → silent cold-start empty). Filter=0 = no rating-bucket filter; the
+        // generic upstream returns {comments[], totalReviewCount, averageRating}. The
+        // Jeeb presentation shaping stays HERE (ADR-0001 thin BFF / GR2); the upstream
+        // is product-agnostic.
+        const int NoRatingFilter = 0;
 
         try
         {
-            var upstream = await _feedback.RatingsByRateeAsync(rateeId, safeSize, offset, ct);
-            return Ok(JeebReviewsProjection.ProjectReviewsPage(id, upstream, safePage, safeSize));
+            var upstream = await _feedback.CommentGETAsync(id, safeSize, offset, NoRatingFilter, ct);
+            return Ok(JeebReviewsProjection.ProjectCommentsPage(id, upstream, safePage, safeSize));
         }
         catch (FeedbackApiException ex)
         {

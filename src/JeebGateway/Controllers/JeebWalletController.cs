@@ -48,10 +48,12 @@ namespace JeebGateway.Controllers;
 public sealed class JeebWalletController : ControllerBase
 {
     private readonly ServiceWalletClient _wallet;
+    private readonly IJeebWalletLedgerReader _ledger;
 
-    public JeebWalletController(ServiceWalletClient wallet)
+    public JeebWalletController(ServiceWalletClient wallet, IJeebWalletLedgerReader ledger)
     {
         _wallet = wallet;
+        _ledger = ledger;
     }
 
     /// <summary>
@@ -92,25 +94,36 @@ public sealed class JeebWalletController : ControllerBase
     [ProducesResponseType(typeof(JeebWalletLedgerPageResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
-    public Task<IActionResult> GetLedger(
+    public async Task<IActionResult> GetLedger(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
         CancellationToken ct = default)
     {
-        if (!TryResolveHolderId(out _, out var failure)) return Task.FromResult(failure);
+        if (!TryResolveHolderId(out var holderId, out var failure)) return failure;
 
         var safePage = page < 1 ? 1 : page;
+        var safeSize = pageSize is < 1 or > 200 ? 20 : pageSize;
 
-        // The generic wallet client has no Jeeb-shaped ledger LIST read yet; return
-        // the empty, correctly-shaped page the mobile ledger parser tolerates rather
-        // than synthesise ledger rows in the (stateless) gateway. See class remarks.
-        IActionResult ok = Ok(new JeebWalletLedgerPageResponse
+        // REALAPP fix — the wallet-service has no Jeeb-shaped ledger LIST endpoint, so
+        // read the holder's OWN transactions directly from the wallet DB
+        // (transactionheader + transactiondetails, joined via wallets.holderid) and
+        // project them into the mobile-facing ledger page. Read-only, request-scoped,
+        // no money moves (ADR-0001 spirit). A no-data holder / DB blip degrades to the
+        // empty, correctly-shaped page the mobile ledger parser tolerates (see
+        // PostgresJeebWalletLedgerReader) — never a 5xx.
+        var items = await _ledger.ReadLedgerAsync(holderId, safePage, safeSize, ct);
+
+        // The page-count is best-effort over the returned page: the mobile parser only
+        // needs items + a >=1 totalPages; a full COUNT(*) round-trip is unnecessary
+        // chatter for a non-critical surface. A full page implies more may follow.
+        var totalPages = items.Count >= safeSize ? safePage + 1 : safePage;
+
+        return Ok(new JeebWalletLedgerPageResponse
         {
-            Items = Array.Empty<JeebWalletLedgerEntry>(),
+            Items = items,
             Page = safePage,
-            TotalPages = 1,
+            TotalPages = totalPages < 1 ? 1 : totalPages,
         });
-        return Task.FromResult(ok);
     }
 
     /// <summary>
