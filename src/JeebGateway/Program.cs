@@ -879,20 +879,6 @@ void ConfigureNamedClient(string name, string configKey)
 
 ConfigureNamedClient("ServiceWalletClient", "WalletServiceApi");
 
-// JEEBER-SPINE Defect 3 — dedicated named HttpClient for the Jeeb earnings BFF
-// (JeebEarningsBffController). Bound to the SAME WalletServiceApi:BaseUrl as the generated
-// wallet client; the BaseAddress is normalised with a trailing slash so the controller's
-// relative "v1/wallet/jeeb/earnings" path resolves correctly. The caller's bearer is
-// forwarded per-request inside the controller (own-scoped read).
-builder.Services.AddHttpClient(JeebGateway.Controllers.JeebEarningsBffController.WalletHttpClientName, client =>
-{
-    var apiUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
-    if (!string.IsNullOrWhiteSpace(apiUrl))
-    {
-        client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
-    }
-});
-
 builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -1129,47 +1115,11 @@ builder.Services.AddSingleton<ICancellationService, CancellationService>();
 // Mutual-blind ratings (T-backend-020 / JEEB-38).
 //
 // Reveal logic is pure (BlindRevealPolicy): both parties' ratings stay
-// blind until both sides submit OR the 7-day window closes (after which
-// the row is locked as no-rating, with whatever exists already visible).
-// The mutual-blind pairing store is the record-of-truth. Default is in-memory;
-// when FeatureFlags:UseUpstream:Ratings is ON the store is swapped for
-// FeedbackServiceRatingStore (persists/reads via the NSwag ServiceFeedbackClient).
-// score-taking-service was removed entirely (owner directive). BanService precedent.
+// feedback-service is the record-of-truth for ratings (score-taking-service removed,
+// owner directive). FeedbackServiceRatingStore is always used; InMemoryRatingStore is
+// DECOMMISSIONED — the FeatureFlags:UseUpstream:Ratings flag gate is removed.
 builder.Services.Configure<RatingOptions>(builder.Configuration.GetSection(RatingOptions.SectionName));
-if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
-{
-    // Fail-fast wiring guard (JEB E2E 5.6/5.7). When the Ratings flag is ON the
-    // delivery-ratings record-of-truth IS feedback-service: every POST
-    // /api/deliveries/{id}/rate round-trips to FeedbackServiceApi:BaseUrl via the
-    // ServiceFeedbackClient blind-rating surface (POST /ratings). The committed
-    // appsettings default for that key is a 5000-series DEV PLACEHOLDER
-    // (http://localhost:5011) that no service ever binds — every environment is
-    // expected to override it (e.g. FeedbackServiceApi__BaseUrl=http://localhost:10064
-    // locally, the swarm host in prod). If the flag is flipped ON but the override
-    // is dropped, the client dials the dead placeholder, the connection is refused,
-    // and EVERY rating surfaces as an opaque 502 — indistinguishable from a real
-    // upstream/contract fault and exactly the misconfiguration that broke E2E
-    // 5.6/5.7. Refuse to start in that state so the misconfig is loud at boot
-    // instead of silent at request time.
-    var feedbackBaseUrl = builder.Configuration["FeedbackServiceApi:BaseUrl"];
-    if (string.IsNullOrWhiteSpace(feedbackBaseUrl)
-        || feedbackBaseUrl.Contains("localhost:5011", StringComparison.OrdinalIgnoreCase))
-    {
-        throw new InvalidOperationException(
-            "FeatureFlags:UseUpstream:Ratings is ON, which makes feedback-service the delivery-ratings " +
-            "record-of-truth, but FeedbackServiceApi:BaseUrl is unset or still the dead dev placeholder " +
-            $"('{feedbackBaseUrl ?? "<null>"}'). Set FeedbackServiceApi__BaseUrl to the reachable " +
-            "feedback-service URL (e.g. http://localhost:10064 locally) or turn the flag OFF to use the " +
-            "in-memory rating store. Left unset, every POST /api/deliveries/{id}/rate would 502 on a " +
-            "refused connection to the placeholder host.");
-    }
-
-    builder.Services.AddSingleton<IRatingStore, JeebGateway.Ratings.FeedbackServiceRatingStore>();
-}
-else
-{
-    builder.Services.AddSingleton<IRatingStore, InMemoryRatingStore>();
-}
+builder.Services.AddSingleton<IRatingStore, JeebGateway.Ratings.FeedbackServiceRatingStore>();
 builder.Services.AddSingleton<IRatingService, RatingService>();
 
 // OTP handover verification + admin escalation (T-backend-015 / JEEB-33).
@@ -1817,15 +1767,6 @@ if (stateServiceWired)
         JeebGateway.StateService.Durable.StateServiceRatingWriter>();
     builder.Services.AddSingleton<JeebGateway.StateService.Durable.IStateDisputeWriter,
         JeebGateway.StateService.Durable.StateServiceDisputeWriter>();
-
-    // ADR-0001 remediation (run #1 follow-up): the dispute STORE itself is now durable.
-    // Re-points IDisputeStore from the in-memory MVP store (rows lost on every gateway
-    // bounce / replica move — the flagged ADR-0001 violation) to the state-service-backed
-    // store, which persists the full Jeeb dispute row as an opaque KV body + owner/delivery
-    // prefix indexes (the PR #206 support-ticket pattern). Overrides the InMemoryDisputeStore
-    // registered earlier (last-wins DI); a state-service blip is absorbed by the typed
-    // client's circuit-breaker rather than failing the file/list path.
-    builder.Services.AddSingleton<IDisputeStore, StateServiceDisputeStore>();
 
     // Add jeeb-state-service to the aggregate-health roster (now 18 checks).
     builder.Services.AddHealthChecks()
