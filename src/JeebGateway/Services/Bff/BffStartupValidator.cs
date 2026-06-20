@@ -70,12 +70,22 @@ public sealed class BffStartupValidator : IHostedService
         var missing = new List<string>();
         foreach (var section in opts.Required)
         {
-            var key = $"Services:{section}:BaseUrl";
-            // Accept either Services:Foo:BaseUrl or Services:Foo as a bare
-            // URL (see ServiceClientExtensions.BindBaseAddress for the same
-            // tolerance). Both forms count as "configured".
+            // Resolve the canonical config key for this section. Most sections
+            // use the nested Services:{section}:BaseUrl shape, but a few (e.g.
+            // UserManagement) were migrated to a top-level
+            // {Service}ServiceApi:BaseUrl key and are dialed via an NSwag client
+            // registered directly in Program.cs — the validator must enforce the
+            // SAME key the app actually reads (config-key-drift fix). See
+            // DownstreamServicesOptions.ConfigKeyFor.
+            var key = opts.ConfigKeyFor(section);
+            // Accept either {key} or its bare-URL form ({key} minus a trailing
+            // ":BaseUrl") — see ServiceClientExtensions.BindBaseAddress for the
+            // same tolerance. Both forms count as "configured".
             var nested = _config[key];
-            var bare = _config[$"Services:{section}"];
+            var bareKey = key.EndsWith(":BaseUrl", StringComparison.OrdinalIgnoreCase)
+                ? key[..^":BaseUrl".Length]
+                : key;
+            var bare = _config[bareKey];
             if (string.IsNullOrWhiteSpace(nested) && string.IsNullOrWhiteSpace(bare))
             {
                 missing.Add(key);
