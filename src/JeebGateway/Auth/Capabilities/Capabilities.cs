@@ -94,6 +94,7 @@ public static class Capabilities
     // ── H–J. Misc participant caps {client, jeeber} ───────────────────────────────────
     public const string ProhibitedAck = "prohibited.ack";
     public const string ProhibitedScan = "prohibited.scan";
+    public const string ProhibitedReport = "prohibited.report";
     public const string WalletReadOwn = "wallet.read.own";            // STATE: scoping (OPEN-2)
     public const string FeedbackSubmit = "feedback.submit";
     public const string TranscriptionRequest = "transcription.request";

@@ -110,6 +110,20 @@ public sealed class StateServiceOfferRequestIndexTests
                 ? new IdempotencyOutcome { Inserted = false, StatusCode = 200, ResponseBodyJson = body }
                 : null);
 
+        public Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(string prefix, CancellationToken ct)
+        {
+            var rows = _kv
+                .Where(kv => kv.Key.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(kv => new IdempotencyOutcome
+                {
+                    Inserted = false,
+                    StatusCode = 200,
+                    ResponseBodyJson = kv.Value
+                })
+                .ToArray();
+            return Task.FromResult<IReadOnlyList<IdempotencyOutcome>>(rows);
+        }
+
         public string? Get(string key) => _kv.TryGetValue(key, out var v) ? v : null;
 
         /// <summary>Awaits the fire-and-forget mirror so the assertion is not racy.</summary>
@@ -129,6 +143,9 @@ public sealed class StateServiceOfferRequestIndexTests
             => throw new InvalidOperationException("state-service unavailable");
 
         public Task<IdempotencyOutcome?> GetAsync(string key, CancellationToken ct)
+            => throw new InvalidOperationException("state-service unavailable");
+
+        public Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(string prefix, CancellationToken ct)
             => throw new InvalidOperationException("state-service unavailable");
     }
 }

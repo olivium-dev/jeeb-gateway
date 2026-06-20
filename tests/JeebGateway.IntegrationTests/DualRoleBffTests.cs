@@ -338,5 +338,11 @@ public class DualRoleBffTests
 
         public Task<RoleGrantResult> AppendAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
             => Task.FromResult(new RoleGrantResult(userId, new[] { opaqueRole }, true));
+
+        public Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct)
+            => Task.FromResult<UserRolesResult?>(new UserRolesResult(
+                userId,
+                FindOrCreate.AvailableRoles,
+                FindOrCreate.ActiveRole));
     }
 }
