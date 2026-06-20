@@ -1,0 +1,48 @@
+# Gitleaks configuration for jeeb-gateway
+#
+# Extends the upstream default ruleset and adds a tightly-scoped allowlist for
+# values that gitleaks' generic heuristics flag but which are NOT live secrets.
+#
+# IMPORTANT: nothing here hides a real/live credential. Every allowlisted item is
+# either a synthetic test-only fixture (referenced exclusively from test code,
+# never from src/ runtime config) or a historically-committed, decommissioned
+# value that is no longer valid on any live system. Entries are keyed on specific
+# commit fingerprints, narrow path scopes, and exact-value regexes so they cannot
+# mask new secrets elsewhere.
+
+title = "jeeb-gateway gitleaks config"
+
+[extend]
+# Pull in the built-in gitleaks rules.
+useDefault = true
+
+[allowlist]
+description = "jeeb-gateway non-secret test fixtures and decommissioned values"
+
+# The exact historical commits that introduced the two synthetic test literals
+# flagged by the generic-api-key rule. Pinning by commit keeps the allowlist
+# from broadening beyond these precise occurrences.
+#   edb2119 — tests/.../TestControlPlaneTests.cs   ValidSecret = "test-plane-secret-abc123"
+#   758becb — tests/.../ApiKeyAuthenticationTests.cs ValidApiKey  = "test-api-key-12345"
+commits = [
+  "edb2119415d5dc955b8dbe22e369b3e8b8079691",
+  "758becb85275904857e8fd16a3682d7ca0f25902",
+]
+
+# Path-scoped to integration test source only. Dummy literals used to drive
+# auth-rejection tests live here; they are not live credentials.
+paths = [
+  '''tests/JeebGateway\.IntegrationTests/.*''',
+]
+
+# Exact synthetic test constants flagged by the generic-api-key rule, plus the
+# decommissioned super-login TEST passcode 123768. 123768 was a test passcode that
+# has been decommissioned and rotated; it is no longer valid on any live system,
+# and the live passcode lives only in the UM service env (never committed). It is
+# NOT present in the current tree — allowlisted defensively against historical
+# full-history scans.
+regexes = [
+  '''test-plane-secret-abc123''',
+  '''test-api-key-12345''',
+  '''123768''',
+]
