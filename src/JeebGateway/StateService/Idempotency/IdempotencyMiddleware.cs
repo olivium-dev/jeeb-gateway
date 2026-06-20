@@ -143,6 +143,7 @@ public sealed class IdempotencyMiddleware
         context.Response.StatusCode = outcome.StatusCode;
         context.Response.ContentType = "application/json";
         context.Response.Headers["Idempotency-Replayed"] = "true";
+        ReinstateLocation(context, outcome);
         await context.Response.WriteAsync(outcome.ResponseBodyJson, context.RequestAborted);
     }
 
@@ -153,6 +154,53 @@ public sealed class IdempotencyMiddleware
         context.Response.StatusCode = outcome.StatusCode;
         context.Response.ContentType = "application/json";
         context.Response.Headers["Idempotency-Replayed"] = "true";
+        ReinstateLocation(context, outcome);
         await context.Response.WriteAsync(outcome.ResponseBodyJson, context.RequestAborted);
+    }
+
+    /// <summary>
+    /// WS-08 hardening: the persisted idempotency record stores only status + body
+    /// (the state-service schema is a GATED contract — WS-13), so a <c>201 Created</c>
+    /// replay would otherwise drop its <c>Location</c> header and break a
+    /// create-then-locate client flow. We reconstruct <c>Location</c> for 201 replays
+    /// from the response body's <c>$.id</c> (the org's canonical create-response field
+    /// — see the offer/accept DTO contract). This is a pure replay-path concern; the
+    /// first execution already carries the controller's real <c>Location</c> verbatim.
+    /// </summary>
+    private static void ReinstateLocation(HttpContext context, IdempotencyOutcome outcome)
+    {
+        if (outcome.StatusCode != StatusCodes.Status201Created) return;
+        if (context.Response.Headers.ContainsKey("Location")) return;
+
+        var id = TryReadId(outcome.ResponseBodyJson);
+        if (string.IsNullOrEmpty(id)) return;
+
+        var path = context.Request.Path.Value?.TrimEnd('/') ?? string.Empty;
+        context.Response.Headers["Location"] = $"{path}/{id}";
+    }
+
+    private static string? TryReadId(string bodyJson)
+    {
+        if (string.IsNullOrWhiteSpace(bodyJson)) return null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(bodyJson);
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+            // Accept the canonical "id" plus a couple of historical aliases, so a
+            // create response shaped {id} | {orderId} | {requestId} all locate.
+            foreach (var name in new[] { "id", "orderId", "requestId" })
+            {
+                if (doc.RootElement.TryGetProperty(name, out var prop) &&
+                    prop.ValueKind is System.Text.Json.JsonValueKind.String or System.Text.Json.JsonValueKind.Number)
+                {
+                    return prop.ToString();
+                }
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // Non-JSON body — nothing to locate. Replay status+body unchanged.
+        }
+        return null;
     }
 }

@@ -77,6 +77,34 @@ public sealed class CreateIdempotencyReplayTests : IClassFixture<CreateIdempoten
         aDto!.Id.Should().NotBe(bDto!.Id);
     }
 
+    /// <summary>
+    /// WS-08 hardening: a 201 replay must reproduce the original <c>Location</c>
+    /// header so a create-then-locate client flow survives the idempotent retry.
+    /// The persisted record carries only status + body (the state-service schema is
+    /// a GATED contract), so the middleware reconstructs <c>Location</c> from the
+    /// replayed body's <c>$.id</c>. Both the live create and the replay must point
+    /// at the SAME <c>/requests/{id}</c> resource.
+    /// </summary>
+    [Fact]
+    public async Task Replay_Of_A_201_Create_Reinstates_The_Location_Header()
+    {
+        var client = ClientFor("s05-a4-location");
+        var key = Guid.NewGuid().ToString();
+
+        var first = await Post(client, key);
+        first.StatusCode.Should().Be(HttpStatusCode.Created);
+        var firstLocation = first.Headers.Location;
+        firstLocation.Should().NotBeNull("the live create returns Location: /requests/{id}");
+
+        var replay = await Post(client, key);
+        replay.StatusCode.Should().Be(HttpStatusCode.Created);
+        replay.Headers.Contains("Idempotency-Replayed").Should().BeTrue();
+        replay.Headers.Location.Should().NotBeNull("the replay must not drop Location");
+        replay.Headers.Location!.ToString()
+            .Should().Be(firstLocation!.ToString(),
+                "replay Location must point at the same resource as the original create");
+    }
+
     private HttpClient ClientFor(string userId)
     {
         var client = _factory.CreateClient();
