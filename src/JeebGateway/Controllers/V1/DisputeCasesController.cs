@@ -32,6 +32,7 @@ public sealed class DisputeCasesController : ControllerBase
 {
     private const string EntityType = "dispute_case";
     private const string ActionEscalate = "escalate_case";
+    private const string ActionReview = "review_case";
     private const string ActionResolve = "resolve_case";
 
     private readonly IDisputeCaseService _service;
@@ -194,6 +195,78 @@ public sealed class DisputeCasesController : ControllerBase
         }
 
         return Ok(DisputeCaseResponse.From(@case));
+    }
+
+    // -----------------------------------------------------------------
+    // Admin triage: move open → under_review (DIS-02). The customer/Jeeber
+    // timeline contracts to surface open / under_review / resolved; this is
+    // the verb that makes under_review reachable. Admin-only, reuses the
+    // dispute.resolve capability (no new coarse claim — the queue-pickup is
+    // part of the same admin resolution authority).
+    // -----------------------------------------------------------------
+    [HttpPost("admin/v1/disputes/{id}/review")]
+    [RequireCapability(Capabilities.DisputeResolve)]
+    [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> MarkUnderReview(string id, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var unauthorized))
+        {
+            return unauthorized;
+        }
+
+        TransitionResult result;
+        try
+        {
+            result = await _service.MarkUnderReviewAsync(new MarkUnderReviewInput
+            {
+                CaseId = id,
+                AdminUserId = adminId
+            }, ct);
+        }
+        catch (DisputeCaseValidationException ex)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = ex.Message,
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
+
+        switch (result.Outcome)
+        {
+            case TransitionOutcome.NotFound:
+                return NotFound();
+
+            case TransitionOutcome.AlreadyResolved:
+                return Conflict(new ProblemDetails
+                {
+                    Title = "already_resolved",
+                    Detail = $"Case {id} is in terminal state '{result.Case!.State}' and cannot be moved to under_review.",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/dispute-already-resolved"
+                });
+
+            case TransitionOutcome.Transitioned:
+                await _auditLog.AppendAsync(new AdminAuditAppend
+                {
+                    AdminUserId = adminId,
+                    Action = ActionReview,
+                    EntityType = EntityType,
+                    EntityId = id,
+                    AfterState = Snapshot(result.Case!),
+                    RequestId = HttpContext.TraceIdentifier
+                }, ct);
+                return Ok(DisputeCaseResponse.From(result.Case!));
+
+            case TransitionOutcome.NoOp:
+            default:
+                // Already under_review — idempotent 200, no duplicate audit row.
+                return Ok(DisputeCaseResponse.From(result.Case!));
+        }
     }
 
     // -----------------------------------------------------------------

@@ -43,6 +43,19 @@ namespace JeebGateway.DTOs.Notification
         public bool Deactivated { get; set; }
 
         /// <summary>
+        /// Optional primary entity id (e.g. deliveryId, offerId) carried by the upstream
+        /// payload and used to build the <see cref="DeepLink"/>. Empty when not applicable.
+        /// </summary>
+        public string EntityId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// NOT-02 — gateway-resolved client deep-link for this row (e.g.
+        /// <c>jeeb://deliveries/{id}/tracking</c>). Always populated; falls back to the
+        /// inbox root for types with no specific destination.
+        /// </summary>
+        public string DeepLink { get; set; } = string.Empty;
+
+        /// <summary>
         /// Creation timestamp
         /// </summary>
         public DateTimeOffset CreatedAt { get; set; }

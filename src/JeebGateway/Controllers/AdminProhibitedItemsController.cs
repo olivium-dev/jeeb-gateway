@@ -171,6 +171,117 @@ public class AdminProhibitedItemsController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// WS-06 (ADM-03): bulk-import prohibited items in one call. Each row is validated
+    /// independently; a bad or duplicate row is reported as a per-row outcome and does NOT
+    /// abort the batch (partial success is the expected admin ergonomics for a paste-in list).
+    /// Reuses <see cref="ValidateName"/>/<see cref="ValidateCategory"/>/<see cref="TryParseSeverity"/>
+    /// rules and the store's duplicate-name guard so semantics match single-item create exactly.
+    /// </summary>
+    [HttpPost("bulk-import")]
+    [ProducesResponseType(typeof(ProhibitedItemBulkImportResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> BulkImport([FromBody] ProhibitedItemBulkImportRequest body, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var problem)) return problem;
+
+        if (body?.Items is null || body.Items.Count == 0)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "items is required and must contain at least one row.",
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
+
+        var results = new List<ProhibitedItemBulkImportRowResult>(body.Items.Count);
+        var imported = 0;
+        var skipped = 0;
+
+        for (var i = 0; i < body.Items.Count; i++)
+        {
+            var row = body.Items[i];
+
+            var rowError = ValidateBulkRow(row);
+            if (rowError is not null)
+            {
+                skipped++;
+                results.Add(new ProhibitedItemBulkImportRowResult
+                {
+                    Index = i,
+                    Outcome = "invalid",
+                    Name = row?.Name,
+                    Error = rowError
+                });
+                continue;
+            }
+
+            // ValidateBulkRow guarantees Name/Category are non-null and severity parses.
+            TryParseSeverity(row!.Severity, ProhibitedSeverity.Block, out var severity, out _);
+
+            try
+            {
+                var created = await _store.CreateAsync(new ProhibitedItemCreate
+                {
+                    Name = row.Name!,
+                    Category = row.Category!,
+                    Description = row.Description,
+                    Severity = severity
+                }, adminId, ct);
+
+                imported++;
+                results.Add(new ProhibitedItemBulkImportRowResult
+                {
+                    Index = i,
+                    Outcome = "created",
+                    Id = created.Id,
+                    Name = created.Name
+                });
+            }
+            catch (DuplicateProhibitedItemNameException ex)
+            {
+                skipped++;
+                results.Add(new ProhibitedItemBulkImportRowResult
+                {
+                    Index = i,
+                    Outcome = "duplicate",
+                    Name = row.Name,
+                    Error = ex.Message
+                });
+            }
+        }
+
+        return Ok(new ProhibitedItemBulkImportResponse
+        {
+            Imported = imported,
+            Skipped = skipped,
+            Total = body.Items.Count,
+            Results = results
+        });
+    }
+
+    /// <summary>
+    /// Validates a single bulk-import row reusing the same rules as single-item create.
+    /// Returns null when valid, or a human-readable error string for the per-row outcome.
+    /// </summary>
+    private string? ValidateBulkRow(ProhibitedItemBulkImportRow? row)
+    {
+        if (row is null) return "row is null.";
+        if (string.IsNullOrWhiteSpace(row.Name)) return "name is required and cannot be blank.";
+        if (row.Name.Length > MaxNameLength) return $"name must be {MaxNameLength} characters or fewer.";
+        if (string.IsNullOrWhiteSpace(row.Category)) return "category is required.";
+        if (!CategoryFormat.IsMatch(row.Category)) return "category must match ^[a-z][a-z0-9_]{1,47}$ (lowercase slug, 2-48 chars).";
+        if (row.Description is { Length: > MaxDescriptionLength }) return $"description must be {MaxDescriptionLength} characters or fewer.";
+        if (!string.IsNullOrWhiteSpace(row.Severity))
+        {
+            var s = row.Severity.Trim().ToLowerInvariant();
+            if (s is not ("warn" or "block")) return "severity must be 'warn' or 'block'.";
+        }
+        return null;
+    }
+
     private bool ValidateName(string? name, out IActionResult? error)
     {
         if (string.IsNullOrWhiteSpace(name))

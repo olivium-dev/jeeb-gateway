@@ -525,44 +525,33 @@ public class RequestsController : ControllerBase
     {
         if (!_moderation.Enabled) return null;
 
-        // JEB-1504 fail-closed gate: if the lexicon cannot be loaded (0 active
-        // items) we must NOT allow the request through silently. A 503 is
-        // surfaced so callers know the moderation service is temporarily
-        // unavailable and can retry. This guards against seeder failures,
-        // store outages, or a fresh startup race before the lexicon is seeded.
-        IReadOnlyList<ProhibitedItem> activeItems;
+        // JEB-1504 / WS-06 fail-closed gate: if the lexicon cannot be loaded (0 active
+        // items) we must NOT allow the request through silently. A 503 is surfaced so
+        // callers know the moderation service is temporarily unavailable and can retry.
+        // This guards against seeder failures, store outages, or a fresh startup race
+        // before the lexicon is seeded. The load + fail-closed + scan + version logic is
+        // shared with the standalone POST /moderation/jeeb/check endpoint via ModerationGate
+        // so the two paths can never drift on what counts as "unavailable".
+        ModerationGateOutcome outcome;
         try
         {
-            activeItems = await _prohibited.ListActiveAsync(ct);
+            outcome = await new ModerationGate(_prohibited, _scanner).EvaluateAsync(description, ct);
         }
-        catch (Exception ex)
+        catch (LexiconUnavailableException ex)
         {
-            _logger.LogError(ex, "Prohibited-items store threw while loading lexicon; failing closed with 503.");
+            _logger.LogError(ex, "Prohibited-items lexicon unavailable while moderation gate is enabled; failing closed with 503.");
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new Microsoft.AspNetCore.Mvc.ProblemDetails
             {
                 Status = StatusCodes.Status503ServiceUnavailable,
                 Title = "Moderation service temporarily unavailable",
-                Detail = "Prohibited items lexicon could not be loaded."
+                Detail = ex.Message
             });
         }
 
-        if (activeItems.Count == 0)
-        {
-            _logger.LogError(
-                "Prohibited-items lexicon is empty while moderation gate is enabled; failing closed with 503.");
-            return StatusCode(StatusCodes.Status503ServiceUnavailable, new Microsoft.AspNetCore.Mvc.ProblemDetails
-            {
-                Status = StatusCodes.Status503ServiceUnavailable,
-                Title = "Moderation service temporarily unavailable",
-                Detail = "Prohibited items lexicon could not be loaded."
-            });
-        }
-
-        var scan = await _scanner.ScanAsync(description, ct);
-        var severity = scan.GatingSeverity;
+        var severity = outcome.GatingSeverity;
         if (severity is null) return null;
 
-        var matchDtos = scan.Matches
+        var matchDtos = outcome.Scan.Matches
             .Select(m => new ModerationMatchDto(m.ItemName, m.Category, m.Severity.ToString().ToLowerInvariant()))
             .ToList();
 
@@ -583,8 +572,8 @@ public class RequestsController : ControllerBase
         // CURRENT lexicon version. Re-using the same version semantics as
         // GET /prohibited-items + POST /prohibited-items/acknowledge so the ack
         // the mobile ack-dialog records is the one that clears this gate.
-        // (activeItems already loaded above — no second round-trip needed.)
-        var currentVersion = ComputeLexiconVersion(activeItems);
+        // (version computed by ModerationGate above — no second round-trip needed.)
+        var currentVersion = outcome.Version;
         var ack = await _prohibited.GetAcknowledgmentAsync(clientId, ct);
         var acknowledged = ack is not null && string.Equals(ack.Version, currentVersion, StringComparison.Ordinal);
 
@@ -598,17 +587,6 @@ public class RequestsController : ControllerBase
             Reason = "prohibited_item_requires_ack",
             Matches = matchDtos
         });
-    }
-
-    /// <summary>
-    /// Lexicon version = max UpdatedAt across the active set (or "empty"). MUST
-    /// match <c>ProhibitedItemsController.ComputeVersion</c> so the ack recorded
-    /// against the GET /prohibited-items version clears the create-time warn gate.
-    /// </summary>
-    private static string ComputeLexiconVersion(IReadOnlyList<ProhibitedItem> items)
-    {
-        if (items.Count == 0) return "empty";
-        return items.Max(i => i.UpdatedAt).ToUniversalTime().ToString("O");
     }
 
     private static DeliveryRequestDto ToDto(DeliveryRequest r) => new()
