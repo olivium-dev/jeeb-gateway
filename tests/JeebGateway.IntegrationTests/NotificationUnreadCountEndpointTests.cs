@@ -146,17 +146,29 @@ public class NotificationUnreadCountEndpointTests
             Created_before2 created_before,
             CancellationToken cancellationToken)
         {
-            var items = new List<object>();
+            // Return a Newtonsoft JObject — the EXACT shape the generated client produces
+            // (it deserializes the `object` body via JsonConvert.DeserializeObject<object>,
+            // which yields a JObject). The controller reads this via `dynamic`, and `dynamic`
+            // can bind JObject members across assemblies but CANNOT bind an anonymous type's
+            // internal members from the gateway assembly — an anonymous payload silently read
+            // back as 0, which is the bug these tests were catching.
+            var items = new Newtonsoft.Json.Linq.JArray();
             for (var i = 0; i < _itemCount; i++)
             {
-                items.Add(new { notification_id = $"n{i}", status = "unread" });
+                items.Add(new Newtonsoft.Json.Linq.JObject
+                {
+                    ["notification_id"] = $"n{i}",
+                    ["status"] = "unread",
+                });
             }
 
-            object payload = _total.HasValue
-                ? new { total = _total.Value, items }
-                : new { items };
+            var payload = new Newtonsoft.Json.Linq.JObject { ["items"] = items };
+            if (_total.HasValue)
+            {
+                payload["total"] = _total.Value;
+            }
 
-            return Task.FromResult(payload);
+            return Task.FromResult<object>(payload);
         }
     }
 }

@@ -338,5 +338,12 @@ public class DualRoleBffTests
 
         public Task<RoleGrantResult> AppendAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
             => Task.FromResult(new RoleGrantResult(userId, new[] { opaqueRole }, true));
+
+        // Null = this stub does not model the authoritative UM roles-read, so the
+        // /v1/users/me resolver falls through to its local-projection / session-claims
+        // fallback (the bearer's per-role claims these tests set up). Returning a fixed
+        // role set here would override that and is not what these tests exercise.
+        public Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct)
+            => Task.FromResult<UserRolesResult?>(null);
     }
 }

@@ -152,6 +152,16 @@ public class ModerationCheckFailClosedTests
                     services.Remove(descriptor);
 
                 services.AddSingleton<IProhibitedItemsStore, EmptyStore>();
+
+                // The DefaultLexiconSeeder IHostedService seeds the default lexicon on startup
+                // whenever the store is empty — which an always-empty store always is — so it
+                // would call EmptyStore.CreateAsync at boot and crash the host. This test's
+                // whole premise is an EMPTY lexicon (fail-closed), so the seeder must not run;
+                // drop it so the lexicon genuinely stays empty and the host can boot.
+                var seeder = services.SingleOrDefault(
+                    d => d.ImplementationType == typeof(JeebGateway.ProhibitedItems.DefaultLexiconSeeder));
+                if (seeder is not null)
+                    services.Remove(seeder);
             });
         }
     }
