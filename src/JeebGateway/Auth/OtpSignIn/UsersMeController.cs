@@ -53,6 +53,7 @@ public sealed class UsersMeController : ControllerBase
     private readonly IMemoryCache _cache;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IUserManagementDualRoleClient _dualRole;
+    private readonly ITokenService _tokens;
     private readonly ILogger<UsersMeController> _log;
 
     public UsersMeController(
@@ -61,6 +62,7 @@ public sealed class UsersMeController : ControllerBase
         IMemoryCache cache,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         IUserManagementDualRoleClient dualRole,
+        ITokenService tokens,
         ILogger<UsersMeController> log)
     {
         _umProfile = umProfile;
@@ -68,6 +70,7 @@ public sealed class UsersMeController : ControllerBase
         _cache = cache;
         _flags = flags;
         _dualRole = dualRole;
+        _tokens = tokens;
         _log = log;
     }
 
@@ -216,6 +219,8 @@ public sealed class UsersMeController : ControllerBase
 
             // Project the switch locally so the next gateway-minted/read path reflects it, and
             // invalidate the 30s /me profile cache so GET /v1/users/me is not stale (G3).
+            // TokenService.IssueAsync reads active_role from THIS store, so the switch MUST be
+            // persisted locally before the re-mint below for the new JWT to carry the new role.
             await _users.SwitchRoleAsync(userId, result.ActiveRole, ct);
             _cache.Remove(ProfileCacheKey(userId));
 
@@ -230,14 +235,35 @@ public sealed class UsersMeController : ControllerBase
             if (string.IsNullOrWhiteSpace(contractActive))
                 contractActive = JeebRoleTranslator.ContractClient;
 
+            // iter5 BATCHED-FIX B14 — re-issue a REAL gateway SESSION token whose claims reflect
+            // the switch (aud=jeeb-clients, sub=userId, roles=full set, active_role=the now-active
+            // role read from the store we just updated). The prior fix returned EMPTY tokens so the
+            // caller kept its old session, but that left the active_role claim stale until the next
+            // login — and a mobile build that DOES adopt this token would be handed an empty string
+            // and break. Minting a fresh gateway token here gives the app a usable session that
+            // immediately carries the new active_role, while NOT weakening auth (we still sign with
+            // the gateway key, the UM aud=user-management token is never relayed). Best-effort: if
+            // the mint faults we degrade to empty tokens (old session stays valid) rather than 500.
+            var accessToken = string.Empty;
+            var refreshToken = string.Empty;
+            try
+            {
+                var pair = await _tokens.IssueAsync(userId, opaqueAvailable, ct);
+                accessToken = pair.AccessToken;
+                refreshToken = pair.RefreshToken;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "v1/users/me/role/switch re-mint failed for {UserId}; returning empty tokens so the caller keeps its existing session.",
+                    userId);
+            }
+
             return Ok(new RoleSwitchResponseDto
             {
                 UserId = result.UserId,
-                // DEFECT-1: deliberately DO NOT relay UM's aud=user-management token pair — emit
-                // empty strings so the caller keeps its valid aud=jeeb-clients session. (A
-                // coordinated mobile fix also stops adopting any token from this response.)
-                AccessToken = string.Empty,
-                RefreshToken = string.Empty,
+                AccessToken = accessToken,
+                RefreshToken = refreshToken,
                 ActiveRole = contractActive,
                 AvailableRoles = contractAvailable,
                 User = new RoleSwitchUserBlock
