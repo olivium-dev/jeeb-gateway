@@ -83,20 +83,33 @@ public class AvailabilityController : ControllerBase
         // S06 / ADR-HB-001: when the heart-beat cutover flag is on, read presence
         // from heart-beat; otherwise (default) read from the canonical
         // delivery-service store. Both map onto the SAME public response shape.
+        //
+        // iter5 BATCHED-FIX B9 — GET availability is documented to "never 500": a
+        // never-online jeeber (upstream 404 → null) yields OfflineDefault. The typed
+        // clients only translate 404→null; ANY OTHER upstream fault (502/timeout/
+        // HeartBeatPresenceException — unhandled on the GET path) previously bubbled
+        // as a 5xx and dead-ended the jeeber home. Wrap the presence read so any
+        // upstream fault degrades to OfflineDefault 200, mirroring the 404 contract.
         AvailabilityResponse response;
-        if (_heartbeatOptions.Enabled)
+        try
         {
-            // A never-online jeeber (upstream 404 → null) yields an offline
-            // default — never a 500.
-            var presence = await _heartBeat.GetPresenceAsync(userId, ct);
-            response = presence is null ? OfflineDefault(userId) : ToResponse(presence, withdrawnOffers: 0);
+            if (_heartbeatOptions.Enabled)
+            {
+                var presence = await _heartBeat.GetPresenceAsync(userId, ct);
+                response = presence is null ? OfflineDefault(userId) : ToResponse(presence, withdrawnOffers: 0);
+            }
+            else
+            {
+                var upstream = await _delivery.GetAvailabilityAsync(userId, ct);
+                response = upstream is null ? OfflineDefault(userId) : ToResponse(upstream, withdrawnOffers: 0);
+            }
         }
-        else
+        catch (Exception ex)
         {
-            // Read presence from the canonical delivery-service store. A never-online
-            // jeeber (upstream 404 → null) yields an offline default — never a 500.
-            var upstream = await _delivery.GetAvailabilityAsync(userId, ct);
-            response = upstream is null ? OfflineDefault(userId) : ToResponse(upstream, withdrawnOffers: 0);
+            _logger.LogWarning(ex,
+                "Availability GET upstream presence read faulted for jeeber {JeeberId}; degrading to OfflineDefault 200 (GET never-500 contract).",
+                userId);
+            response = OfflineDefault(userId);
         }
 
         // Mirror the interaction watermark into the in-memory store so the
@@ -135,6 +148,55 @@ public class AvailabilityController : ControllerBase
         {
             return ForwardHeartBeatError(ex);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // iter5 BATCHED-FIX B8 — mobile availability aliases. The installed APK
+    // (cfc8920) calls a flat /v1/availability surface that did NOT exist on the
+    // gateway (404 EMPTY), so the jeeber-home availability toggle was fully dead:
+    //   GET  /v1/availability/{jeeberId}      → read the caller's presence
+    //   POST /v1/availability {userId,available} → toggle online/offline
+    // Both alias onto the SAME presence logic as jeebers/me/availability. Identity
+    // is ALWAYS the bearer (the {jeeberId}/userId in the path/body is informational
+    // and never trusted — N: no body-identity). The POST is a thin body adapter:
+    // it maps available→online and, when going online with no vehicle/zone supplied
+    // (the flat contract carries neither), DEFAULTS them so the upstream PATCH (which
+    // requires vehicleType+zone to go online) does not 400. Going offline needs no
+    // such defaults.
+    // -----------------------------------------------------------------------
+
+    [HttpGet("/v1/availability/{jeeberId}")]
+    [ProducesResponseType(typeof(AvailabilityResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    public Task<IActionResult> GetV1Alias(string jeeberId, CancellationToken ct) => Get(ct);
+
+    [HttpPost("/v1/availability")]
+    [ProducesResponseType(typeof(AvailabilityResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status429TooManyRequests)]
+    public Task<IActionResult> PostV1Alias([FromBody] AvailabilityFlatToggleRequest? body, CancellationToken ct)
+    {
+        // available→online; default vehicle/zone on go-online so PatchCore does not 400.
+        var online = body?.Available ?? body?.Online;
+        var adapted = new AvailabilityPatchRequest
+        {
+            Online = online,
+            VehicleType = string.IsNullOrWhiteSpace(body?.VehicleType)
+                ? (online is true ? VehicleType.Car.ToWire() : null)
+                : body!.VehicleType,
+            Zone = string.IsNullOrWhiteSpace(body?.Zone)
+                ? (online is true ? "default" : null)
+                : body!.Zone,
+            Longitude = body?.Longitude,
+            Latitude = body?.Latitude,
+        };
+
+        // Reuse the SAME wrapped Patch path so heart-beat 429 forwarding + B10
+        // never-500 offline degradation apply identically to the alias.
+        return Patch(adapted, ct);
     }
 
     private async Task<IActionResult> PatchCore(AvailabilityPatchRequest? body, CancellationToken ct)
@@ -242,26 +304,55 @@ public class AvailabilityController : ControllerBase
         // authoritative upstream write ALREADY committed — into a 500. On mirror
         // failure the withdrawn-offer count degrades to 0 (a count S06 does not
         // assert on); the toggle still returns 200.
+        // iter5 BATCHED-FIX B10 — go-offline must mirror Get's never-500 contract.
+        // The authoritative offline write (heart-beat / delivery-service) previously
+        // threw (e.g. the go-offline write into the presence store faulting) and
+        // surfaced as a raw 500, breaking the toggle. Best-effort the upstream offline
+        // write: on a fault we still return OfflineDefault 200 (the user's intent —
+        // go offline — is honoured at the gateway surface; the upstream re-converges
+        // on the next heartbeat/read). A 429 throttle is NOT swallowed here — it is a
+        // HeartBeatPresenceException that the Patch wrapper forwards verbatim (N14).
         AvailabilityResponse offlineResponse;
-        if (_heartbeatOptions.Enabled)
+        try
         {
-            var presence = await _heartBeat.SetPresenceAsync(new HeartBeatPresenceRequest
+            if (_heartbeatOptions.Enabled)
             {
-                UserId = userId,
-                Online = false,
-                RoleKey = _heartbeatOptions.RoleKey
-            }, ct);
-            var withdrawn = await TryGoOfflineMirrorAsync(userId);
-            offlineResponse = ToResponse(presence, withdrawnOffers: withdrawn);
+                var presence = await _heartBeat.SetPresenceAsync(new HeartBeatPresenceRequest
+                {
+                    UserId = userId,
+                    Online = false,
+                    RoleKey = _heartbeatOptions.RoleKey
+                }, ct);
+                var withdrawn = await TryGoOfflineMirrorAsync(userId);
+                offlineResponse = ToResponse(presence, withdrawnOffers: withdrawn);
+            }
+            else
+            {
+                var offlineUpstream = await _delivery.SetAvailabilityAsync(new JeeberAvailabilityUpstreamRequest
+                {
+                    Online = false
+                }, userId, ct);
+                var withdrawn = await TryGoOfflineMirrorAsync(userId);
+                offlineResponse = ToResponse(offlineUpstream, withdrawnOffers: withdrawn);
+            }
         }
-        else
+        catch (HeartBeatPresenceException)
         {
-            var offlineUpstream = await _delivery.SetAvailabilityAsync(new JeeberAvailabilityUpstreamRequest
-            {
-                Online = false
-            }, userId, ct);
-            var withdrawn = await TryGoOfflineMirrorAsync(userId);
-            offlineResponse = ToResponse(offlineUpstream, withdrawnOffers: withdrawn);
+            // Let the Patch wrapper forward an upstream 429/Retry-After verbatim (N14).
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // B10 never-500 contract: map an upstream offline-write fault to the
+            // documented OfflineDefault 200. This is ERROR MAPPING only — NO
+            // gateway-local fallback store is written on this fault path (the
+            // in-memory mirror is deliberately NOT invoked here), so the gateway
+            // stays a thin BFF and fabricates no presence state. The authoritative
+            // upstream re-converges on the next heartbeat/read.
+            _logger.LogWarning(ex,
+                "Go-offline upstream write faulted for jeeber {JeeberId}; degrading to OfflineDefault 200 (never-500 contract, no local fallback write).",
+                userId);
+            offlineResponse = OfflineDefault(userId);
         }
 
         return Ok(offlineResponse);
@@ -415,7 +506,7 @@ public class AvailabilityController : ControllerBase
     /// The never-online default returned when delivery-service has no presence
     /// row for the jeeber yet (upstream 404). Offline, no zone/location.
     /// </summary>
-    private AvailabilityResponse OfflineDefault(string userId) => new()
+    private AvailabilityResponse OfflineDefault(string userId, int withdrawnOffers = 0) => new()
     {
         UserId = userId,
         Online = false,
@@ -426,6 +517,6 @@ public class AvailabilityController : ControllerBase
         LastSeenAt = null,
         LastInteractionAt = null,
         UpdatedAt = _clock.GetUtcNow(),
-        WithdrawnOffers = 0
+        WithdrawnOffers = withdrawnOffers
     };
 }

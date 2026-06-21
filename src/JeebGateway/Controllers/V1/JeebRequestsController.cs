@@ -282,6 +282,69 @@ public sealed class JeebRequestsController : ControllerBase
         return Ok(dtos);
     }
 
+    /// <summary>
+    /// iter5 BATCHED-FIX B12 — flat offers-list alias. The installed APK's
+    /// bid-review (<c>DioOffersRepository</c>) calls <c>GET /v1/offers?requestId=&lt;id&gt;</c>,
+    /// but the gateway only exposed the nested <c>GET /v1/requests/{id}/offers</c>
+    /// (the flat route 404'd EMPTY). This alias reads the <c>requestId</c> query
+    /// param and delegates to the SAME ownership-gated listing logic, returning the
+    /// <c>{ items: [...] }</c> envelope the mobile repo parses. A missing
+    /// <c>requestId</c> is a 400 (the flat surface is request-scoped). Ownership /
+    /// 404-unknown / 403-not-owner are identical to the nested route.
+    /// </summary>
+    [HttpGet("v1/offers")]
+    [RequireCapability(Capabilities.RequestReadOwn)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListOffersFlat([FromQuery] string? requestId, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var clientId, out var problem))
+            return problem;
+
+        if (string.IsNullOrWhiteSpace(requestId))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Query parameter 'requestId' is required.",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/request-id-required"
+            });
+        }
+
+        var req = await _requests.GetAsync(requestId, ct);
+        if (req is null)
+            return NotFound();
+
+        if (!string.Equals(req.ClientId, clientId, StringComparison.Ordinal))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
+            {
+                Title = "Access denied — you do not own this request.",
+                Status = StatusCodes.Status403Forbidden,
+                Type = "https://jeeb.dev/errors/request-not-owned"
+            });
+        }
+
+        var offers = await _offers.ListForRequestAsync(requestId, ct);
+        var dtos = offers.Select(o => new OfferDto
+        {
+            Id = o.Id,
+            RequestId = o.RequestId,
+            JeeberId = o.JeeberId,
+            Status = o.Status,
+            Fee = o.Fee,
+            EtaMinutes = o.EtaMinutes,
+            Note = o.Note,
+            CreatedAt = o.CreatedAt,
+            UpdatedAt = o.UpdatedAt,
+        }).ToList();
+
+        return Ok(new { items = dtos });
+    }
+
     private static DeliveryRequestDto ToRequestDto(DeliveryRequest r) => new()
     {
         Id = r.Id,

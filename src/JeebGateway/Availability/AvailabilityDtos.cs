@@ -14,6 +14,23 @@ public class AvailabilityPatchRequest
     public double? Latitude { get; set; }
 }
 
+/// <summary>
+/// iter5 BATCHED-FIX B8 — the flat <c>POST /v1/availability</c> body the installed
+/// mobile APK sends: <c>{ userId, available }</c> (vehicleType/zone optional). The
+/// gateway adapter maps <c>available</c>→<c>online</c> and defaults vehicle/zone on
+/// go-online. <c>userId</c> is informational only — identity is the bearer.
+/// </summary>
+public class AvailabilityFlatToggleRequest
+{
+    public string? UserId { get; set; }
+    public bool? Available { get; set; }
+    public bool? Online { get; set; }
+    public string? VehicleType { get; set; }
+    public string? Zone { get; set; }
+    public double? Longitude { get; set; }
+    public double? Latitude { get; set; }
+}
+
 public class AvailabilityResponse
 {
     public required string UserId { get; init; }
