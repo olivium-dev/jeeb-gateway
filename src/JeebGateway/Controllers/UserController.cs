@@ -8,8 +8,10 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Auth.SuperLogin;
 using JeebGateway.service.ServiceUserManagement;
 using JeebGateway.Tokens;
+using Microsoft.Extensions.Options;
 using GwUsersStore = JeebGateway.Users.IUsersStore;
 using GwUserProfile = JeebGateway.Users.UserProfile;
 using GwDualRoleClient = JeebGateway.Users.IUserManagementDualRoleClient;
@@ -30,6 +32,7 @@ namespace JeebGateway.Controllers
         private readonly ITokenService _tokens;
         private readonly GwUsersStore _users;
         private readonly GwDualRoleClient _userManagement;
+        private readonly IOptions<DemoUsersOptions> _demoUsers;
         private readonly ILogger<UserController> _logger;
 
         public UserController(
@@ -37,13 +40,55 @@ namespace JeebGateway.Controllers
             ITokenService tokens,
             GwUsersStore users,
             GwDualRoleClient userManagement,
+            IOptions<DemoUsersOptions> demoUsers,
             ILogger<UserController> logger)
         {
             _serviceUserManagementClient = serviceUserManagementClient;
             _tokens = tokens;
             _users = users;
             _userManagement = userManagement;
+            _demoUsers = demoUsers;
             _logger = logger;
+        }
+
+        /// <summary>
+        /// iter5 BATCHED-FIX — GET /api/User/demo-users. The debug-only
+        /// Super-Login+ picker roster the mobile app
+        /// (<c>DefaultSuperLoginDemoUserService</c>) lists. Anonymous by design
+        /// (the picker precedes any session token), returns the frozen
+        /// <c>{ users: [ { userId, name, role, passcode } ] }</c> shape. The roster
+        /// + passcodes come ENTIRELY from configuration (<c>DemoUsers</c> section,
+        /// supplied via env at deploy) — never hardcoded in source. Each row's
+        /// passcode is the real SuperAdmin passcode the picker re-POSTs to
+        /// <c>/api/User/user-id-login</c>, which user-management validates (the
+        /// admin gate is unchanged — a wrong passcode still 401s there).
+        /// </summary>
+        [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+        [PublicEndpoint("Debug Super-Login+ picker roster — precedes any session token; ADR-005 §A public.")]
+        [HttpGet("demo-users")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public ActionResult DemoUsers()
+        {
+            var opts = _demoUsers.Value;
+            if (!opts.Enabled)
+            {
+                return NotFound();
+            }
+
+            var users = (opts.Users ?? new List<DemoUserRow>())
+                .Where(u => !string.IsNullOrWhiteSpace(u.UserId)
+                            && !string.IsNullOrWhiteSpace(u.Passcode))
+                .Select(u => new
+                {
+                    userId = u.UserId,
+                    name = string.IsNullOrWhiteSpace(u.Name) ? u.UserId : u.Name,
+                    role = string.IsNullOrWhiteSpace(u.Role) ? "client" : u.Role,
+                    passcode = u.Passcode,
+                })
+                .ToList();
+
+            return Ok(new { users });
         }
 
         private ActionResult HandleUpstreamException(UserManagementApiException ex)

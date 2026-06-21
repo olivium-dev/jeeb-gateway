@@ -709,6 +709,13 @@ builder.Services.Configure<JeebGateway.Auth.OtpSignIn.PhonePolicyOptions>(
     builder.Configuration.GetSection(JeebGateway.Auth.OtpSignIn.PhonePolicyOptions.SectionName));
 builder.Services.Configure<JeebGateway.Auth.OtpSignIn.OtpRequestRateLimitOptions>(
     builder.Configuration.GetSection(JeebGateway.Auth.OtpSignIn.OtpRequestRateLimitOptions.SectionName));
+
+// iter5 BATCHED-FIX — Super-Login+ demo roster for the debug picker
+// (GET /api/User/demo-users). Roster + passcodes are config-only (env
+// DemoUsers__Users__N__*), never hardcoded; the endpoint is anon by design
+// (the picker precedes any session). See Auth/SuperLogin/DemoUsersOptions.cs.
+builder.Services.Configure<JeebGateway.Auth.SuperLogin.DemoUsersOptions>(
+    builder.Configuration.GetSection(JeebGateway.Auth.SuperLogin.DemoUsersOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IPhonePolicy,
     JeebGateway.Auth.OtpSignIn.PhonePolicy>();
 builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IOtpRequestRateLimiter,
