@@ -434,6 +434,10 @@ public sealed class S08GatewayCloseoutTests
             string correlationKey, CancellationToken ct)
             => Task.FromResult(new JeebConversationResponse());
 
+        public Task<JeebConversationResponse> GetConversationByIdAsync(
+            string conversationId, CancellationToken ct)
+            => Task.FromResult(new JeebConversationResponse());
+
         public Task<JeebMessageResponse> AppendMessageAsync(
             string conversationId, AppendJeebMessageRequest request, CancellationToken ct)
             => Task.FromResult(new JeebMessageResponse());

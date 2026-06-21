@@ -599,6 +599,16 @@ public sealed class JeebConversationsBffTests
             });
         }
 
+        public Task<JeebConversationResponse> GetConversationByIdAsync(
+            string conversationId, CancellationToken ct)
+            => Task.FromResult(new JeebConversationResponse
+            {
+                ConversationId = conversationId,
+                CorrelationKey = conversationId,
+                Phase = "broadcasting",
+                Participants = new List<JeebConversationParticipant>(),
+            });
+
         public Task<JeebMessageResponse> AppendMessageAsync(
             string conversationId, AppendJeebMessageRequest request, CancellationToken ct)
         {

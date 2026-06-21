@@ -36,6 +36,18 @@ public interface IJeebConversationClient
         CancellationToken ct);
 
     /// <summary>
+    /// iter6 B6 — read the conversation projection by its <b>conversation_id</b>
+    /// (NOT correlation_key). chat-service exposes <c>GET /api/conversations/{id}</c>
+    /// returning { conversation_id, correlation_key, phase, participants[] }. The
+    /// mobile chat BFF (<see cref="JeebGateway.Controllers.JeebChatMessagesController"/>)
+    /// uses this for its phase read (the client holds the conversation_id, not the
+    /// request/correlation key).
+    /// </summary>
+    Task<JeebConversationResponse> GetConversationByIdAsync(
+        string conversationId,
+        CancellationToken ct);
+
+    /// <summary>
     /// Append a structured/text message. author_id is stamped by the gateway from
     /// the bearer (never the caller body) and forwarded; chat-service persists and
     /// echoes the message projection incl. message_id.
