@@ -716,6 +716,11 @@ builder.Services.Configure<JeebGateway.Auth.OtpSignIn.OtpRequestRateLimitOptions
 // (the picker precedes any session). See Auth/SuperLogin/DemoUsersOptions.cs.
 builder.Services.Configure<JeebGateway.Auth.SuperLogin.DemoUsersOptions>(
     builder.Configuration.GetSection(JeebGateway.Auth.SuperLogin.DemoUsersOptions.SectionName));
+// SECURITY-GATE — Super-Login+ prod-safety switch (SuperLogin:OpenMode). Default FALSE
+// = prod-safe (token mint service-key gated, demo-user picker disabled). The MSI demo
+// env sets SuperLogin__OpenMode=true to preserve the open demo behavior unchanged.
+builder.Services.Configure<JeebGateway.Auth.SuperLogin.SuperLoginOptions>(
+    builder.Configuration.GetSection(JeebGateway.Auth.SuperLogin.SuperLoginOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IPhonePolicy,
     JeebGateway.Auth.OtpSignIn.PhonePolicy>();
 builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IOtpRequestRateLimiter,

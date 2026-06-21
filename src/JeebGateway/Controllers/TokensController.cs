@@ -33,6 +33,7 @@ public class TokensController : ControllerBase
     private readonly IUsersStore _users;
     private readonly IOptionsMonitor<SecurityOptions> _security;
     private readonly IOptionsMonitor<JwtOptions> _jwt;
+    private readonly IOptionsMonitor<JeebGateway.Auth.SuperLogin.SuperLoginOptions> _superLogin;
     private readonly ILogger<TokensController> _logger;
 
     public TokensController(
@@ -40,12 +41,14 @@ public class TokensController : ControllerBase
         IUsersStore users,
         IOptionsMonitor<SecurityOptions> security,
         IOptionsMonitor<JwtOptions> jwt,
+        IOptionsMonitor<JeebGateway.Auth.SuperLogin.SuperLoginOptions> superLogin,
         ILogger<TokensController> logger)
     {
         _tokens = tokens;
         _users = users;
         _security = security;
         _jwt = jwt;
+        _superLogin = superLogin;
         _logger = logger;
     }
 
@@ -139,6 +142,15 @@ public class TokensController : ControllerBase
     /// </summary>
     private IActionResult? AuthorizeMint()
     {
+        // SECURITY-GATE (super-login+ prod-safety). The DEMO open mode short-circuits
+        // the service-key gate so the demo Super-Login+ flow can mint without a header.
+        // OpenMode defaults to FALSE (prod-safe), so a flag-unset deploy is gated out of
+        // the box; the MSI demo env sets SuperLogin__OpenMode=true to keep the demo open.
+        if (_superLogin.CurrentValue.OpenMode)
+        {
+            return null;
+        }
+
         var cfg = _security.CurrentValue.TokenMint;
         if (!cfg.Enabled)
         {
