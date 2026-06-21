@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Security.Claims;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
@@ -8,6 +9,11 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.service.ServiceUserManagement;
+using JeebGateway.Tokens;
+using GwUsersStore = JeebGateway.Users.IUsersStore;
+using GwUserProfile = JeebGateway.Users.UserProfile;
+using GwDualRoleClient = JeebGateway.Users.IUserManagementDualRoleClient;
+using GwRoles = JeebGateway.Users.Roles;
 using UserManagementApiException = JeebGateway.service.ServiceUserManagement.ApiException;
 
 namespace JeebGateway.Controllers
@@ -21,13 +27,22 @@ namespace JeebGateway.Controllers
     public class UserController : ControllerBase
     {
         private readonly ServiceUserManagementClient _serviceUserManagementClient;
+        private readonly ITokenService _tokens;
+        private readonly GwUsersStore _users;
+        private readonly GwDualRoleClient _userManagement;
         private readonly ILogger<UserController> _logger;
 
         public UserController(
             ServiceUserManagementClient serviceUserManagementClient,
+            ITokenService tokens,
+            GwUsersStore users,
+            GwDualRoleClient userManagement,
             ILogger<UserController> logger)
         {
             _serviceUserManagementClient = serviceUserManagementClient;
+            _tokens = tokens;
+            _users = users;
+            _userManagement = userManagement;
             _logger = logger;
         }
 
@@ -298,7 +313,47 @@ namespace JeebGateway.Controllers
                     return BadRequest("Request body cannot be null");
                 }
 
+                // GATE INTACT: user-management validates the SuperAdmin passcode. A wrong
+                // passcode (e.g. 123768) throws a 401 UserManagementApiException BEFORE we
+                // ever mint, so the privileged gate is unchanged and not weakened here.
                 var response = await _serviceUserManagementClient.UserIdLoginAsync(request);
+
+                // iter5 superlogin fix — UM returns a token with iss/aud=user-management,
+                // which the gateway /v1/* routes (aud=jeeb-clients) reject (401 "audience
+                // 'user-management' is invalid"). Re-mint a REAL gateway SESSION token using
+                // the SAME ITokenService.IssueAsync the OTP-verify path uses, so the issued
+                // accessToken is identical in kind to an OTP session (iss=jeeb-gateway,
+                // aud=jeeb-clients, sub=userId, roles + active_role, exp). UM stays the
+                // identity + admin-gate authority; the session JWT mint is gateway
+                // orchestration (same split as OTP verify and the /auth/tokens super-login+).
+                var userId = response?.UserId;
+                if (!string.IsNullOrWhiteSpace(userId))
+                {
+                    var (opaqueRoles, opaqueActiveRole) = await ResolveSuperLoginRolesAsync(userId!);
+
+                    // Project the UM-resolved identity locally so the gateway-minted JWT embeds
+                    // the SAME active_role/roles claims (TokenService reads active_role from the
+                    // store) — mirrors the OTP verify path's UpsertProjectionAsync.
+                    await _users.UpsertProjectionAsync(new GwUserProfile
+                    {
+                        Id = userId!,
+                        Phone = string.Empty,
+                        Name = string.Empty,
+                        Roles = opaqueRoles.ToList(),
+                        ActiveRole = opaqueActiveRole,
+                        CreatedAt = DateTimeOffset.UtcNow,
+                        UpdatedAt = DateTimeOffset.UtcNow,
+                    }, HttpContext.RequestAborted);
+
+                    var pair = await _tokens.IssueAsync(userId!, opaqueRoles, HttpContext.RequestAborted);
+
+                    // Swap UM's user-management-audience token for the gateway session token.
+                    response!.AuthToken = pair.AccessToken;
+                    response!.RefreshToken = pair.RefreshToken;
+
+                    _logger.LogInformation("user.user-id-login super-login re-minted gateway session userId={UserId}", userId);
+                }
+
                 return Ok(response);
             }
             catch (UserManagementApiException ex)
@@ -310,6 +365,44 @@ namespace JeebGateway.Controllers
                 _logger.LogError(ex, "Error during user ID login");
                 return StatusCode(500, $"Error during user ID login: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// iter5 super-login fix. Resolves the OPAQUE ({customer,driver}) role set + active
+        /// role for a super-login userId from user-management's persisted role read, mirroring
+        /// the OTP verify path's <c>SafeGetUserRolesAsync</c>. Best-effort: a UM 404/blip
+        /// degrades to the safe default ('customer') so super-login is never hard-broken by a
+        /// UM read failure (the session is still gateway-minted). Never emits an active_role the
+        /// user does not hold (token integrity).
+        /// </summary>
+        private async Task<(IReadOnlyList<string> roles, string activeRole)> ResolveSuperLoginRolesAsync(string userId)
+        {
+            IReadOnlyList<string> roles = new[] { GwRoles.Client };
+            var active = GwRoles.Client;
+            try
+            {
+                var persisted = await _userManagement.GetUserRolesAsync(userId, HttpContext.RequestAborted);
+                if (persisted is not null)
+                {
+                    if (persisted.AvailableRoles is { Count: > 0 })
+                        roles = persisted.AvailableRoles;
+                    if (!string.IsNullOrWhiteSpace(persisted.ActiveRole))
+                        active = persisted.ActiveRole!;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "user.user-id-login UM get-roles read failed for userId={UserId}; using default role decoration",
+                    userId);
+            }
+
+            if (!roles.Contains(active, StringComparer.OrdinalIgnoreCase))
+            {
+                active = roles.Count > 0 ? roles[0] : GwRoles.Client;
+            }
+
+            return (roles, active);
         }
 
         /// <summary>
