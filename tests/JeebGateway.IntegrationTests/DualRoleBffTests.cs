@@ -208,27 +208,52 @@ public class DualRoleBffTests
     }
 
     // -----------------------------------------------------------------
-    // ADR-004 (upgrade-not-switch): POST /v1/users/me/role/switch is REMOVED.
-    // The ceremony tests that asserted it (FA_Switch_*) are deleted — there is
-    // no switch endpoint; acting as jeeber is exercising a jeeber-scoped route
-    // with the single gateway-minted session token whose available_roles already
-    // carries jeeber after real S03 KYC approval. The removed-route behavior is
-    // asserted below (404), and the UM-audience 401 invariant lives in
-    // UmIssuerTokenTrustTests.
+    // POST /v1/users/me/role/switch — RE-INTRODUCED, returns 200 with NO
+    // replacement token.
+    //
+    // CONTRACT DRIFT — UPDATED (iter5). This test previously asserted the route was
+    // REMOVED (404) per ADR-004's "upgrade-not-switch". That removal was reverted:
+    // the mobile `DioRoleSwitchRepository` still calls POST /v1/users/me/role/switch,
+    // so the absent route 404'd and broke the in-app driver switch. The route is back
+    // (PR #226 / DEFECT-1 fix), but under ADR-004's "single session token carries the
+    // full role set" it returns NO replacement token — UM persists active_role + the
+    // gateway projects it locally, and the caller's existing aud=jeeb-clients session
+    // stays valid across the switch (verified live + on-device). So the new contract is:
+    // 200, empty access/refresh tokens, body reflects the switched active_role.
+    // (The UM-audience 401 invariant still lives in UmIssuerTokenTrustTests.)
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task RoleSwitch_Endpoint_Is_Removed_Returns_404()
+    public async Task RoleSwitch_Returns_200_With_No_Replacement_Token()
     {
-        using var factory = MakeFactory(new StubOtp(), new StubUm(), umEnabled: true);
+        // UM persists active_role=driver (opaque) and re-issues a token pair; the gateway
+        // deliberately drops that pair and translates the active role back to contract "jeeber".
+        var um = new StubUm
+        {
+            RoleSwitch = new RoleSwitchReissueResult("kamal-1", "um-access", "um-refresh", Roles.Jeeber),
+        };
+        using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
         var http = factory.CreateClient();
         http.DefaultRequestHeaders.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", MintGatewayBearer(factory, "kamal-1", Roles.Client, Roles.Jeeber));
 
         var resp = await http.PostAsync("/v1/users/me/role/switch", Json("""{ "role": "jeeber" }"""));
 
-        resp.StatusCode.Should().Be(HttpStatusCode.NotFound,
-            "ADR-004 removed the role-switch ceremony — the endpoint no longer exists");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "PR #226 re-introduced the role-switch route the mobile DioRoleSwitchRepository calls");
+
+        using var doc = System.Text.Json.JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var root = doc.RootElement;
+        // ADR-004: NO replacement token — UM's aud=user-management pair is dropped so the
+        // caller keeps its valid aud=jeeb-clients session across the switch (DEFECT-1 fix).
+        root.GetProperty("accessToken").GetString().Should().BeEmpty(
+            "ADR-004 returns no replacement token so the caller keeps its valid session");
+        root.GetProperty("refreshToken").GetString().Should().BeEmpty();
+        // The switch IS reflected in the body's active_role (Jeeb contract vocabulary).
+        root.GetProperty("active_role").GetString().Should().Be("jeeber");
+        // The gateway did forward the switch to UM (it is the token authority on this path).
+        um.RoleSwitchCalls.Should().Be(1);
+        um.LastRoleSwitchOpaqueRole.Should().Be(Roles.Jeeber);
     }
 
     // -----------------------------------------------------------------
