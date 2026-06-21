@@ -515,3 +515,40 @@ public class PatchStatusBody
     /// </summary>
     public string? To { get; set; }
 }
+
+/// <summary>
+/// B7 (iter6 orderflow): body for the versioned, body-keyed mobile transition
+/// route <c>POST /v1/delivery/status/transition</c>. The installed app sends
+/// <c>{ deliveryId, to, trigger, evidenceUrl? }</c> (dio_active_delivery and
+/// dio_delivery_receipt repositories). <c>deliveryId</c> is lifted out and the
+/// rest is mapped onto <see cref="PatchStatusBody"/> so the canonical SM-1
+/// forwarder is reused verbatim — delivery-service owns the state machine.
+/// </summary>
+public class DeliveryStatusTransitionBody
+{
+    /// <summary>The canonical delivery id the transition applies to (required).</summary>
+    public string? DeliveryId { get; set; }
+
+    /// <summary>
+    /// Explicit canonical target state — <c>Picked</c> / <c>InTransit</c> /
+    /// <c>AtDoor</c> / <c>Done</c>. Resolved by <c>CanonicalDeliveryVocab</c>
+    /// ahead of <see cref="Trigger"/> when both are present.
+    /// </summary>
+    public string? To { get; set; }
+
+    /// <summary>
+    /// Friendly trigger / party source word the app sends (e.g. <c>jeeber</c>,
+    /// <c>customer_confirmed_receipt</c>). Forwarded to the SM as an alias.
+    /// </summary>
+    public string? Trigger { get; set; }
+
+    /// <summary>Legacy snake_case status alias (e.g. <c>in_transit</c>), if sent.</summary>
+    public string? Status { get; set; }
+
+    /// <summary>
+    /// Optional proof-of-delivery evidence URL the app attaches on the final
+    /// transition. delivery-service owns persistence; the gateway forwards the
+    /// SM verdict and does not store it here.
+    /// </summary>
+    public string? EvidenceUrl { get; set; }
+}

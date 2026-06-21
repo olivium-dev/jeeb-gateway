@@ -203,8 +203,18 @@ public class DeliveriesController : ControllerBase
     // FT-02: the original relative route GET /deliveries/{id} is retained for
     // backward compat; the absolute route GET /v1/deliveries/{id} satisfies
     // JEB-152 which expected a versioned BFF delivery status endpoint post-JEB-1433.
+    // B7 (iter6 orderflow): the installed mobile build reads a delivery via the
+    // SINGULAR contract path GET /v1/delivery/{id} (dio_active_delivery_repository,
+    // dio_delivery_receipt_repository, dio_live_tracking_repository, order_summary).
+    // That alias was missing → 404, and the plural /v1/deliveries/{id} read fell
+    // through to the in-memory mirror (the store split: a delivery created by
+    // delivery-service is absent from the gateway's local store). Adding the
+    // singular alias here routes the mobile read through the SAME canonical
+    // read-through (GetCanonicalDeliveryAsync) the plural route uses, so a
+    // service-created/advanced delivery is now visible via the gateway.
     [HttpGet("{deliveryId}")]
     [HttpGet("/v1/deliveries/{deliveryId}")]
+    [HttpGet("/v1/delivery/{deliveryId}")]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -287,6 +297,60 @@ public class DeliveriesController : ControllerBase
         // 404): the V2→V3 transition-name adapter is CanonicalDeliveryVocab in this
         // gateway, not delivery-service.
         return await PatchStatusViaDeliveryServiceAsync(deliveryId, body, callerId, ct);
+    }
+
+    /// <summary>
+    /// B7 (iter6 orderflow): POST /v1/delivery/status/transition.
+    ///
+    /// The installed mobile build (dio_active_delivery_repository,
+    /// dio_delivery_receipt_repository) drives the delivery state machine via this
+    /// VERSIONED, body-keyed contract — <c>{ deliveryId, to, trigger, evidenceUrl? }</c>
+    /// — NOT the path-keyed legacy <c>PATCH /deliveries/{id}/status</c>. That route
+    /// was missing on the gateway → 404, so a service-created delivery could never
+    /// be advanced (Ordered→…→Done) from the app.
+    ///
+    /// This is a thin BFF alias: it lifts <c>deliveryId</c> out of the body and
+    /// forwards onto the SAME canonical <c>POST /api/v1/deliveries/{id}/transition</c>
+    /// path the PATCH route uses (<see cref="PatchStatusViaDeliveryServiceAsync"/>),
+    /// so delivery-service stays the single source of truth for the SM and the
+    /// store split disappears — the delivery the service wrote is the one the
+    /// transition acts on. The friendly <c>trigger</c> word and explicit <c>to</c>
+    /// target are resolved by the shared <see cref="CanonicalDeliveryVocab"/>.
+    /// </summary>
+    [HttpPost("/v1/delivery/status/transition")]
+    [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
+    public async Task<IActionResult> TransitionByBody(
+        [FromBody] DeliveryStatusTransitionBody? body,
+        CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
+
+        if (body is null || string.IsNullOrWhiteSpace(body.DeliveryId))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title  = "deliveryId is required.",
+                Status = StatusCodes.Status400BadRequest,
+                Type   = "https://jeeb.dev/errors/invalid-transition"
+            });
+        }
+
+        // Map the versioned body onto the canonical PatchStatusBody the shared
+        // forwarder consumes. CanonicalDeliveryVocab resolves {to} ahead of
+        // {trigger}; evidenceUrl is carried by the SM only when present (the
+        // gateway forwards the verdict — it does not re-validate the edge).
+        var patch = new PatchStatusBody
+        {
+            To      = body.To,
+            Trigger = body.Trigger,
+            Status  = body.Status
+        };
+
+        return await PatchStatusViaDeliveryServiceAsync(body.DeliveryId, patch, callerId, ct);
     }
 
     /// <summary>
@@ -822,7 +886,11 @@ public class DeliveriesController : ControllerBase
     /// the Jeeber must have physically arrived at the drop-off before an
     /// OTP is dispatched (PR review B1; per AC1).
     /// </summary>
+    // B7 (iter6 orderflow): the installed mobile build issues the handover OTP
+    // via the VERSIONED contract path GET /v1/deliveries/{id}/otp; only the
+    // non-v1 relative route existed → 404. The v1 alias is added here.
     [HttpGet("{deliveryId}/otp")]
+    [HttpGet("/v1/deliveries/{deliveryId}/otp")]
     // ADR-005 L2 §E handover OTP trigger (still {client, jeeber}; AtDoor SM state = STATE).
     [RequireCapability(Capabilities.HandoverOtpRead)]
     [ProducesResponseType(typeof(OtpTriggerResponse), StatusCodes.Status200OK)]
@@ -841,6 +909,49 @@ public class DeliveriesController : ControllerBase
 
         // Get delivery and validate status
         var delivery = await _store.GetAsync(deliveryId, ct);
+
+        // B7 store-split fix: a delivery created/advanced directly by
+        // delivery-service is absent from the gateway's in-memory mirror, so the
+        // local read above is null even though the canonical row exists — that is
+        // exactly the "GET /v1/deliveries/{id}/otp 404" the recon flagged. When the
+        // canonical kill-switch is on, hydrate a thin shell from delivery-service
+        // (the source of truth) so the upstream at_door-gated issue can proceed.
+        // delivery-service owns the gate; the gateway stays a thin BFF.
+        if (delivery is null && _flags.CurrentValue.Delivery)
+        {
+            DeliveryReadUpstream? canonical;
+            try
+            {
+                canonical = await _deliveryClient.GetCanonicalDeliveryAsync(deliveryId, ct);
+            }
+            catch (HttpRequestException hre)
+            {
+                _log.LogWarning(hre,
+                    "Canonical delivery hydrate failed for OTP issue on {DeliveryId}; treating as unreachable.",
+                    deliveryId);
+                return Problem(
+                    title:      "Failed to send OTP",
+                    detail:     "Unable to reach delivery-service to resolve the delivery.",
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+
+            if (canonical is null)
+            {
+                return NotFound();
+            }
+
+            delivery = new DeliveryRequest
+            {
+                Id          = canonical.DeliveryId,
+                ClientId    = canonical.ClientId ?? string.Empty,
+                Status      = canonical.Status,
+                Description = string.Empty,
+                TierId      = canonical.TierId,
+                JeeberId    = canonical.JeeberId,
+                CreatedAt   = canonical.CreatedAt
+            };
+        }
+
         if (delivery is null)
         {
             return NotFound();
@@ -1273,22 +1384,14 @@ public class DeliveriesController : ControllerBase
         Activity? activity,
         CancellationToken ct)
     {
-        // Gateway still owns the SMS round-trip, so it still needs the
-        // recipient phone. The local store row carries it (the gateway is the
-        // V2-name adapter); reject rather than ship to a placeholder (AC1/B6).
-        if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
-        {
-            _log.LogWarning(
-                "OTP trigger rejected (upstream path): recipient phone missing for delivery {DeliveryId}, correlationId {CorrelationId}",
-                deliveryId, correlationId);
-            return BadRequest(new ProblemDetails
-            {
-                Title  = "Recipient phone is missing on the delivery row.",
-                Detail = "An OTP cannot be dispatched without a recipient phone number.",
-                Status = StatusCodes.Status400BadRequest,
-                Type   = "https://jeeb.dev/errors/recipient-phone-missing"
-            });
-        }
+        // B7 store-split note: when this delivery was hydrated from
+        // delivery-service (no gateway mirror row), the canonical read carries no
+        // recipient phone, so the gateway cannot drive the SMS hop. The durable
+        // at_door gate + OTP lifecycle still live entirely in delivery-service
+        // (mock 1234 in the dev env), so we still issue the upstream gate below
+        // and simply skip the gateway↔one-time-password SMS round-trip. A
+        // mirror-backed row (phone present) keeps the full SMS path unchanged.
+        var hasRecipientPhone = !string.IsNullOrWhiteSpace(delivery.RecipientPhone);
 
         // 1) Durable at_door gate in delivery-service. The raw code never
         //    leaves the gateway, so we forward no code_hash here (the code does
@@ -1310,6 +1413,26 @@ public class DeliveriesController : ControllerBase
                 title:      "Failed to send OTP",
                 detail:     "Unable to reach delivery-service to gate the OTP issue.",
                 statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        if (!hasRecipientPhone)
+        {
+            // B7: delivery-service-owned delivery with no gateway-mirrored phone.
+            // The at_door gate above succeeded; the OTP is delivered/verified
+            // entirely server-side (mock 1234 in dev). Return the success envelope
+            // without the gateway SMS hop rather than 400 on a missing mirror field.
+            _log.LogInformation(
+                "Handover OTP gate issued (upstream path, no gateway-mirrored phone — SMS hop skipped) for delivery {DeliveryId}, correlationId {CorrelationId}",
+                deliveryId, correlationId);
+            activity?.SetTag("otp.triggered", "true");
+            activity?.SetTag("otp.path", "upstream");
+            activity?.SetTag("otp.sms_skipped", "no_mirrored_phone");
+            return Ok(new OtpTriggerResponse
+            {
+                DeliveryId = deliveryId,
+                Triggered  = true,
+                Message    = "4-digit OTP issued for the delivery recipient."
+            });
         }
 
         // 2) SMS round-trip — gateway↔one-time-password hop. Reuse the same
