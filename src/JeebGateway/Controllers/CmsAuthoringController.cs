@@ -1,3 +1,4 @@
+using JeebGateway.Auth.Capabilities;
 using JeebGateway.Cms;
 using Microsoft.AspNetCore.Mvc;
 
@@ -29,6 +30,7 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("gateway/admin/v1/cms")]
+[PublicEndpoint("CMS authoring plane: access is governed by the X-Cms-Capability header gate and step-up TOTP. ADR-005 L2 is intentionally not used here.")]
 public sealed class CmsAuthoringController : ControllerBase
 {
     private const string CapabilityHeaderName = "X-Cms-Capability";

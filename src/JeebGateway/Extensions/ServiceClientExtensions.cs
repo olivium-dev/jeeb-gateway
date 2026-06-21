@@ -75,7 +75,14 @@ public static class ServiceClientExtensions
         // TODO(T-backend-bff-user): user-management — wire NSwag-generated UserManagementClient
         //   contract: src/JeebGateway/contracts/user-management.openapi.json
         //   migrates: UsersController, AdminUsersController (currently InMemoryUsersStore)
-        AddNamedDownstreamClient(services, config, "user-management", "Services:UserManagement:BaseUrl");
+        // CONFIG-KEY ALIGNMENT: the live user-management seam is the scoped
+        // ServiceUserManagementClient registered in Program.cs against the
+        // top-level UserManagementServiceApi:BaseUrl key (and the readiness probe
+        // in HealthCheckExtensions uses the same key). This placeholder named
+        // client must read the SAME canonical key so it is correct the moment a
+        // future NSwag UserManagementClient is wired onto it — not a phantom
+        // Services:UserManagement:BaseUrl that nothing else reads.
+        AddNamedDownstreamClient(services, config, "user-management", "UserManagementServiceApi:BaseUrl");
 
         // wallet-service is wired in Program.cs as a salehly-mirrored named
         // IHttpClientFactory client ("ServiceWalletClient" bound to

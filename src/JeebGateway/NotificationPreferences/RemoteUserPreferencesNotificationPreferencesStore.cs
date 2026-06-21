@@ -1,5 +1,6 @@
 using System.Text.Json;
 using JeebGateway.Services.Generated.ServiceRemoteUserPreferences;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace JeebGateway.NotificationPreferences;
@@ -11,6 +12,16 @@ namespace JeebGateway.NotificationPreferences;
 /// shared service remains Jeeb-agnostic (GR2 / JEB-1498).
 /// Fail-open: any upstream error on GET falls back to defaults.
 /// </summary>
+/// <remarks>
+/// This store is registered as a singleton (it is consumed transitively by other
+/// singletons such as <c>PushAutoOfflineNotifier</c> via the push pipeline), but the
+/// underlying <see cref="ServiceRemoteUserPreferencesClient"/> is scoped (it wraps a
+/// pooled <c>IHttpClientFactory</c> client). To avoid a captive dependency we resolve
+/// the scoped client lazily inside a per-call <see cref="IServiceScope"/> via
+/// <see cref="IServiceScopeFactory"/> rather than constructor-injecting it. This keeps
+/// the gateway booting cleanly under DI scope validation (Development) while preserving
+/// the correct HttpClient lifetime.
+/// </remarks>
 public sealed class RemoteUserPreferencesNotificationPreferencesStore : INotificationPreferencesStore
 {
     private const string BlobKey = "jeeb.notification_prefs";
@@ -18,14 +29,14 @@ public sealed class RemoteUserPreferencesNotificationPreferencesStore : INotific
     private static readonly JsonSerializerOptions SerializerOptions =
         new(JsonSerializerDefaults.Web) { WriteIndented = false };
 
-    private readonly ServiceRemoteUserPreferencesClient _client;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<RemoteUserPreferencesNotificationPreferencesStore> _logger;
 
     public RemoteUserPreferencesNotificationPreferencesStore(
-        ServiceRemoteUserPreferencesClient client,
+        IServiceScopeFactory scopeFactory,
         ILogger<RemoteUserPreferencesNotificationPreferencesStore> logger)
     {
-        _client = client;
+        _scopeFactory = scopeFactory;
         _logger = logger;
     }
 
@@ -33,7 +44,9 @@ public sealed class RemoteUserPreferencesNotificationPreferencesStore : INotific
     {
         try
         {
-            var pref = await _client.Data_GetSinglePreferenceAsync(userId, BlobKey, ct);
+            using var scope = _scopeFactory.CreateScope();
+            var client = scope.ServiceProvider.GetRequiredService<ServiceRemoteUserPreferencesClient>();
+            var pref = await client.Data_GetSinglePreferenceAsync(userId, BlobKey, ct);
             if (pref?.Value is { } json)
             {
                 var blob = JsonSerializer.Deserialize<NotificationPreferencesBlob>(json, SerializerOptions);
@@ -61,13 +74,15 @@ public sealed class RemoteUserPreferencesNotificationPreferencesStore : INotific
         var current = await GetAsync(userId, ct);
         ApplyPatch(current, patch);
         var json = JsonSerializer.Serialize(ToBlob(current), SerializerOptions);
+        using var scope = _scopeFactory.CreateScope();
+        var client = scope.ServiceProvider.GetRequiredService<ServiceRemoteUserPreferencesClient>();
         try
         {
-            await _client.Data_UpdatePreferenceAsync(userId, BlobKey, new PreferenceValue { Value = json }, ct);
+            await client.Data_UpdatePreferenceAsync(userId, BlobKey, new PreferenceValue { Value = json }, ct);
         }
         catch (ApiException ex) when (ex.StatusCode == 404)
         {
-            await _client.Data_SetSinglePreferenceAsync(userId, BlobKey, new PreferenceValue { Value = json }, ct);
+            await client.Data_SetSinglePreferenceAsync(userId, BlobKey, new PreferenceValue { Value = json }, ct);
         }
         return current;
     }

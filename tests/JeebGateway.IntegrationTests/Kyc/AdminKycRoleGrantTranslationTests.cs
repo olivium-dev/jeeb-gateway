@@ -178,6 +178,11 @@ public sealed class AdminKycRoleGrantTranslationTests
 
         public Task<RoleSwitchReissueResult> RoleSwitchAsync(string userId, string opaqueRole, CancellationToken ct)
             => Task.FromResult(new RoleSwitchReissueResult(userId, "a", "r", opaqueRole));
+
+        // Null = this stub does not model the authoritative UM roles-read; the consumer
+        // falls back to its local projection / session claims (see UsersMeController).
+        public Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct)
+            => Task.FromResult<UserRolesResult?>(null);
     }
 
     private sealed class StubKycSeam : IKycBffSeam

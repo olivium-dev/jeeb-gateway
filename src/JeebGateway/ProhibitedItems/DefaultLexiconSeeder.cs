@@ -75,6 +75,12 @@ public sealed class DefaultLexiconSeeder : IHostedService
                 // Another concurrent seed or an admin entry already covers this
                 // name — idempotent, not an error.
             }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Failed to seed prohibited item '{Name}'; skipping entry.",
+                    name);
+            }
         }
 
         _logger.LogInformation(

@@ -255,6 +255,21 @@ internal sealed class FakeIdempotencyStore : IIdempotencyStore
         Task.FromResult(Records.TryGetValue(key, out var v)
             ? new IdempotencyOutcome { Inserted = false, StatusCode = v.StatusCode, ResponseBodyJson = v.ResponseBodyJson }
             : null);
+
+    public Task<System.Collections.Generic.IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(
+        string prefix, CancellationToken ct)
+    {
+        System.Collections.Generic.IReadOnlyList<IdempotencyOutcome> rows = System.Linq.Enumerable.ToList(
+            System.Linq.Enumerable.Select(
+                System.Linq.Enumerable.Where(Records, kvp => kvp.Key.StartsWith(prefix, System.StringComparison.Ordinal)),
+                kvp => new IdempotencyOutcome
+                {
+                    Inserted = false,
+                    StatusCode = kvp.Value.StatusCode,
+                    ResponseBodyJson = kvp.Value.ResponseBodyJson,
+                }));
+        return Task.FromResult(rows);
+    }
 }
 
 /// <summary>
@@ -289,6 +304,10 @@ internal sealed class FakeStateClient : IJeebStateServiceClient
     public Task<IdempotencyRecord> GetIdempotencyKeyAsync(string key) => GetIdempotencyKeyAsync(key, default);
     public Task<IdempotencyRecord> GetIdempotencyKeyAsync(string key, CancellationToken ct) =>
         Task.FromResult(new IdempotencyRecord());
+    public Task<System.Collections.Generic.IReadOnlyList<IdempotencyRecord>> FindIdempotencyKeysByPrefixAsync(
+        string prefix, CancellationToken ct) =>
+        Task.FromResult<System.Collections.Generic.IReadOnlyList<IdempotencyRecord>>(
+            System.Array.Empty<IdempotencyRecord>());
     public Task CreateRefreshFamilyAsync(FamilyCreateRequest body) => Task.CompletedTask;
     public Task CreateRefreshFamilyAsync(FamilyCreateRequest body, CancellationToken ct) => Task.CompletedTask;
     public Task IsRefreshFamilyRevokedAsync(Guid familyId) => Task.CompletedTask;

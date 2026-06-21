@@ -21,14 +21,17 @@ namespace JeebGateway.IntegrationTests;
 ///   <item><b>ACC-02 re-accept → 409 already_accepted.</b> Accepting an offer on a
 ///     request whose auction is already closed returns <c>409</c> with
 ///     <c>type=already-accepted</c> and surfaces the winning Jeeber id.</item>
-///   <item><b>OFF-04 edit (in-memory) + 2-edit cap → 422.</b> A Jeeber may edit
-///     their own pending bid up to <c>OfferEditCap</c> (2) times; the 3rd edit is
-///     rejected with <c>422 edit_limit_reached</c> and the bid is left intact.</item>
+///   <item><b>OFF-04 edit → 503 when the Offer kill-switch is OFF.</b> The gateway
+///     is not the offer record-of-truth when <c>FeatureFlags:UseUpstream:Offer ==
+///     false</c>, so EDIT short-circuits to <c>503</c> (the cap/owner/accepted rules
+///     are owned by offer-service on the flag-ON path). See the "CONTRACT DRIFT —
+///     UPDATED (iter5)" note above the edit tests below.</item>
 /// </list>
 ///
 /// Build-verify target per the WS-03 work breakdown: the in-memory auction-close
-/// authority, offline-testable. The live Offer :10063 swap (WS-09) owns these rules
-/// when the flag is on; this hardens the flag-OFF fallback.
+/// authority for ACCEPT, offline-testable. The live Offer :10063 swap (WS-09) owns
+/// the edit/reject rules when the flag is on; the flag-OFF edit/reject fallback is
+/// 503 (aligned with ADR-0006 in-memory-store retirement).
 ///
 /// Tests share a single WebApplicationFactory (and thus the same in-memory stores);
 /// each test scopes itself with unique requestIds / userIds to avoid cross-bleed.
@@ -143,11 +146,30 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
     }
 
     // -----------------------------------------------------------------
-    // OFF-04 — in-memory edit + 2-edit cap → 422 edit_limit_reached.
+    // OFF-04 — offer EDIT under the default (Offer kill-switch OFF) factory.
+    //
+    // CONTRACT DRIFT — UPDATED (iter5). These four tests originally asserted a
+    // gateway-owned IN-MEMORY edit path (cap→422, owner→403, accepted→409,
+    // applies-fields→200) on the flag-OFF fallback. That path was SUPERSEDED:
+    // `OffersController.Edit` now short-circuits to 503 when `FeatureFlags:
+    // UseUpstream:Offer == false` ("the gateway is not the offer record-of-truth
+    // when the kill-switch is off"), aligning EDIT with the existing REJECT rule
+    // and the thin-BFF / ADR-0006 (in-memory-store retirement) direction. The
+    // in-memory edit rule (`EditInMemoryAsync` / `InMemoryPendingOffersStore.
+    // TryEditAsync`) is now unreachable from the HTTP surface.
+    //
+    // The flag-OFF→503 contract is asserted (and PASSES) by
+    // `OfferMutationEndpointTests.A3_Edit_FlagOff_Returns_503` /
+    // `A5_Reject_FlagOff_Returns_503`. When the flag is ON the gateway forwards
+    // to offer-service, which owns the cap/owner/accepted rules — covered by the
+    // `OfferMutationEndpointTests.A3_Edit_*` forwarding tests. So these four are
+    // updated to assert the NEW flag-OFF contract (503, upstream never mutated),
+    // keeping each scenario meaningful (the auth/identity setup still runs and the
+    // in-memory store must stay untouched).
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task Edit_Twice_Succeeds_Then_Third_Edit_Returns_422_EditLimitReached()
+    public async Task Edit_FlagOff_Returns_503_And_Does_Not_Mutate_Store()
     {
         var clientId = $"client-{Guid.NewGuid()}";
         var jeeberId = $"jeeber-edit-{Guid.NewGuid()}";
@@ -157,31 +179,20 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
 
         var jeeber = JeeberClient(jeeberId);
 
-        // Edit #1 — OK.
+        // Flag-OFF: the gateway is not the offer record-of-truth → 503, no edit applied.
         var e1 = await jeeber.PutAsJsonAsync($"/v1/offers/{offerId}", new { fee = 11m });
-        e1.StatusCode.Should().Be(HttpStatusCode.OK);
+        e1.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
 
-        // Edit #2 — OK (cap is 2).
-        var e2 = await jeeber.PutAsJsonAsync($"/v1/offers/{offerId}", new { fee = 12m });
-        e2.StatusCode.Should().Be(HttpStatusCode.OK);
-
-        // Edit #3 — rejected with 422 edit_limit_reached.
-        var e3 = await jeeber.PutAsJsonAsync($"/v1/offers/{offerId}", new { fee = 13m });
-        e3.StatusCode.Should().Be(HttpStatusCode.UnprocessableEntity);
-
-        var problem = await e3.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/edit-limit-reached");
-        problem.Status.Should().Be((int)HttpStatusCode.UnprocessableEntity);
-
-        // The rejected 3rd edit left the bid at the 2nd-edit value ($12), intact.
+        // The bid is untouched — fee still at the submitted value, EditCount unchanged.
         var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
         var stored = await offers.GetAsync(offerId, default);
-        stored!.Fee.Should().Be(12m);
-        stored.EditCount.Should().Be(2);
+        stored!.Fee.Should().Be(10m);
+        stored.EditCount.Should().Be(0);
+        stored.Status.Should().Be(PendingOfferStatus.Pending);
     }
 
     [Fact]
-    public async Task Edit_Applies_Supplied_Fields_And_Bumps_Edit_Count()
+    public async Task Edit_FlagOff_With_All_Fields_Still_Returns_503_And_Applies_Nothing()
     {
         var clientId = $"client-{Guid.NewGuid()}";
         var jeeberId = $"jeeber-edit2-{Guid.NewGuid()}";
@@ -191,20 +202,23 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
 
         var resp = await JeeberClient(jeeberId).PutAsJsonAsync(
             $"/v1/offers/{offerId}", new { fee = 9.5m, etaMinutes = 40, note = "Updated route" });
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
 
+        // None of the supplied fields were applied — the store is the submitted bid.
         var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
         var stored = await offers.GetAsync(offerId, default);
-        stored!.Fee.Should().Be(9.5m);
-        stored.EtaMinutes.Should().Be(40);
-        stored.Note.Should().Be("Updated route");
-        stored.EditCount.Should().Be(1);
+        stored!.Fee.Should().Be(8m);
+        stored.EtaMinutes.Should().Be(25);
+        stored.EditCount.Should().Be(0);
         stored.Status.Should().Be(PendingOfferStatus.Pending);
     }
 
     [Fact]
-    public async Task Edit_By_Different_Jeeber_Returns_403()
+    public async Task Edit_FlagOff_By_Different_Jeeber_Still_Returns_503()
     {
+        // Flag-OFF short-circuits to 503 BEFORE any ownership rule runs (the gateway
+        // no longer owns the in-memory edit rule); the L2 capability gate (offer.edit.own,
+        // keyed {jeeber}) still admits any jeeber-role caller, so this is 503, not 403.
         var clientId = $"client-{Guid.NewGuid()}";
         var ownerJeeber = $"jeeber-owner-{Guid.NewGuid()}";
 
@@ -213,15 +227,17 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
 
         var intruder = JeeberClient($"jeeber-intruder-{Guid.NewGuid()}");
         var resp = await intruder.PutAsJsonAsync($"/v1/offers/{offerId}", new { fee = 99m });
-        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
 
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/offer-not-owned");
+        var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        (await offers.GetAsync(offerId, default))!.Fee.Should().Be(7m);
     }
 
     [Fact]
     public async Task Edit_Empty_Body_Returns_400()
     {
+        // The empty-body 400 guard runs BEFORE the flag check, so it is unaffected by
+        // the flag-OFF→503 contract drift and still asserts the original behaviour.
         var clientId = $"client-{Guid.NewGuid()}";
         var jeeberId = $"jeeber-empty-{Guid.NewGuid()}";
 
@@ -234,8 +250,10 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
     }
 
     [Fact]
-    public async Task Edit_Accepted_Offer_Returns_409()
+    public async Task Edit_FlagOff_Accepted_Offer_Still_Returns_503()
     {
+        // Even on an already-accepted (auction-closed) offer, flag-OFF edit is 503 —
+        // the not-pending guard lives upstream now, not in the gateway's flag-OFF path.
         var clientId = $"client-{Guid.NewGuid()}";
         var jeeberId = $"jeeber-acc-{Guid.NewGuid()}";
 
@@ -245,12 +263,8 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
         (await ClientActor(clientId).PostAsync($"/offers/{offerId}/accept", content: null))
             .StatusCode.Should().Be(HttpStatusCode.OK);
 
-        // The auction is closed; the winning bid can no longer be edited.
         var resp = await JeeberClient(jeeberId).PutAsJsonAsync($"/v1/offers/{offerId}", new { fee = 50m });
-        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
-
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/offer-not-pending");
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
     }
 
     // -----------------------------------------------------------------

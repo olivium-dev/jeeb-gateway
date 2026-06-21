@@ -36,6 +36,11 @@ public class RatingStoreSwapWiringTests
         using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("FeatureFlags:UseUpstream:Ratings", "true");
+            // Flipping the flag on makes feedback-service the rating record-of-truth, so
+            // Program.cs requires a reachable FeedbackServiceApi:BaseUrl (not the dead dev
+            // placeholder) or it fails fast at startup. This wiring test only asserts the DI
+            // store-type swap, so any non-placeholder URL satisfies the startup guard.
+            builder.UseSetting("FeedbackServiceApi:BaseUrl", "http://feedback-service.test");
         });
 
         var store = factory.Services.GetRequiredService<IRatingStore>();

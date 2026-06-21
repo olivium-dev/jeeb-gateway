@@ -59,4 +59,37 @@ public sealed class DownstreamServicesOptions
         "Geolocation",
         "Delivery",
     };
+
+    /// <summary>
+    /// Per-section overrides for the config key the validator probes. Most
+    /// downstreams live under the nested <c>Services:{Section}:BaseUrl</c> key,
+    /// but a few were migrated to a salehly-style TOP-LEVEL
+    /// <c>{Service}ServiceApi:BaseUrl</c> key and are consumed by an NSwag typed
+    /// client registered directly in <c>Program.cs</c> rather than via the
+    /// generic <c>Services:*</c> named-client helper.
+    ///
+    /// <para><b>UserManagement</b> is exactly that case (config-key drift fix):
+    /// the gateway dials user-management through the scoped
+    /// <c>ServiceUserManagementClient</c> bound to
+    /// <c>UserManagementServiceApi:BaseUrl</c> (Program.cs) and the readiness
+    /// probe (HealthCheckExtensions) uses the same key. The validator must
+    /// therefore enforce that SAME canonical key — not a phantom
+    /// <c>Services:UserManagement:BaseUrl</c> that nothing actually reads — so a
+    /// production boot validates what the app really uses and operators set ONE
+    /// key. See <see cref="ConfigKeyFor"/>.</para>
+    /// </summary>
+    public Dictionary<string, string> Keys { get; set; } = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["UserManagement"] = "UserManagementServiceApi:BaseUrl",
+    };
+
+    /// <summary>
+    /// Resolves the config key the validator probes for a required section:
+    /// the explicit <see cref="Keys"/> override if present, otherwise the
+    /// default nested <c>Services:{section}:BaseUrl</c> shape.
+    /// </summary>
+    public string ConfigKeyFor(string section) =>
+        Keys.TryGetValue(section, out var key) && !string.IsNullOrWhiteSpace(key)
+            ? key
+            : $"Services:{section}:BaseUrl";
 }
