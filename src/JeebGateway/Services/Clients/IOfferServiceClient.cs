@@ -97,6 +97,23 @@ public interface IOfferServiceClient
         CancellationToken ct);
 
     /// <summary>
+    /// GET /api/v1/requests/{requestId}/offers — list every offer on a request
+    /// for its owning Client (the accept-sheet / bid-review). offer-service is
+    /// owner-gated on the gateway-injected <c>x-user-id</c>, so
+    /// <paramref name="actingUserId"/> is the request owner the gateway has
+    /// already authorized. Returns the offers newest-first (possibly empty);
+    /// 404 (unknown request) → empty list, since the gateway controller has
+    /// already proven the request exists and is owned before calling here.
+    /// 403 (owner mismatch) and any other non-2xx throw via
+    /// <c>EnsureSuccessStatusCode()</c> so the global handler surfaces a
+    /// ProblemDetails rather than a silent mis-map.
+    /// </summary>
+    Task<IReadOnlyList<OfferWire>> ListForRequestAsync(
+        string actingUserId,
+        string requestId,
+        CancellationToken ct);
+
+    /// <summary>
     /// POST /api/v1/requests/{requestId}/offers/{offerId}/accept — atomic
     /// auction close. The <c>Idempotency-Key</c> header is mandatory upstream;
     /// callers supply <paramref name="idempotencyKey"/> (>= 8 chars). Returns

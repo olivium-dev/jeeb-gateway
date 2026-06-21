@@ -461,6 +461,12 @@ public sealed class S08GatewayCloseoutTests
     /// <summary>Canned offer-service accept double (mirrors OfferAcceptOrchestrationTests).</summary>
     private sealed class FakeOfferServiceClient : IOfferServiceClient
     {
+
+        // offerlist-fix: GET-offers list seam. These fakes exercise the
+        // accept/mutation paths, not listing — return empty.
+        public Task<IReadOnlyList<OfferWire>> ListForRequestAsync(
+            string actingUserId, string requestId, CancellationToken ct)
+            => Task.FromResult<IReadOnlyList<OfferWire>>(System.Array.Empty<OfferWire>());
         public required OfferAcceptResult Result { get; init; }
 
         public Task<OfferAcceptResult> AcceptWithStatusAsync(

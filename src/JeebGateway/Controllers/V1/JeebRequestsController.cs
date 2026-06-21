@@ -265,7 +265,7 @@ public sealed class JeebRequestsController : ControllerBase
             });
         }
 
-        var offers = await _offers.ListForRequestAsync(id, ct);
+        var offers = await _offers.ListForRequestAsync(id, ct, clientId);
         var dtos = offers.Select(o => new OfferDto
         {
             Id = o.Id,
@@ -328,7 +328,7 @@ public sealed class JeebRequestsController : ControllerBase
             });
         }
 
-        var offers = await _offers.ListForRequestAsync(requestId, ct);
+        var offers = await _offers.ListForRequestAsync(requestId, ct, clientId);
         var dtos = offers.Select(o => new OfferDto
         {
             Id = o.Id,

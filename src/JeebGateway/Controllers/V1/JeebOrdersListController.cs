@@ -113,7 +113,12 @@ public sealed class JeebOrdersListController : ControllerBase
             int offersCount = 0;
             try
             {
-                var offers = await _offers.ListForRequestAsync(r.Id, ct);
+                // offer-service's GET-offers is owner-gated; only the owning CLIENT
+                // may read a request's bids. Pass the owner id only in client scope
+                // (r.ClientId == userId there); in jeeber scope the caller is the
+                // assigned driver, not the owner, so the offers count stays 0.
+                var ownerForList = jeeberScope ? null : userId;
+                var offers = await _offers.ListForRequestAsync(r.Id, ct, ownerForList);
                 offersCount = offers.Count;
             }
             catch
