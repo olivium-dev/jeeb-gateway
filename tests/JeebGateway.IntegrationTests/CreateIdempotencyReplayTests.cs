@@ -168,5 +168,20 @@ public sealed class CreateIdempotencyReplayTests : IClassFixture<CreateIdempoten
                 ? null
                 : new IdempotencyOutcome { Inserted = false, StatusCode = row.StatusCode, ResponseBodyJson = row.ResponseBodyJson });
         }
+
+        public Task<System.Collections.Generic.IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(
+            string prefix, CancellationToken ct)
+        {
+            System.Collections.Generic.IReadOnlyList<IdempotencyOutcome> rows = System.Linq.Enumerable.ToList(
+                System.Linq.Enumerable.Select(
+                    System.Linq.Enumerable.Where(_rows, kvp => kvp.Key.StartsWith(prefix, StringComparison.Ordinal)),
+                    kvp => new IdempotencyOutcome
+                    {
+                        Inserted = false,
+                        StatusCode = kvp.Value.StatusCode,
+                        ResponseBodyJson = kvp.Value.ResponseBodyJson,
+                    }));
+            return Task.FromResult(rows);
+        }
     }
 }
