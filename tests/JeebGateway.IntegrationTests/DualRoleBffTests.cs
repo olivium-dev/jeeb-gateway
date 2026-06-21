@@ -208,26 +208,30 @@ public class DualRoleBffTests
     }
 
     // -----------------------------------------------------------------
-    // POST /v1/users/me/role/switch — RE-INTRODUCED, returns 200 with NO
-    // replacement token.
+    // POST /v1/users/me/role/switch — RE-INTRODUCED, returns 200 with a
+    // freshly-minted GATEWAY session token carrying the new active_role.
     //
-    // CONTRACT DRIFT — UPDATED (iter5). This test previously asserted the route was
-    // REMOVED (404) per ADR-004's "upgrade-not-switch". That removal was reverted:
-    // the mobile `DioRoleSwitchRepository` still calls POST /v1/users/me/role/switch,
-    // so the absent route 404'd and broke the in-app driver switch. The route is back
-    // (PR #226 / DEFECT-1 fix), but under ADR-004's "single session token carries the
-    // full role set" it returns NO replacement token — UM persists active_role + the
-    // gateway projects it locally, and the caller's existing aud=jeeb-clients session
-    // stays valid across the switch (verified live + on-device). So the new contract is:
-    // 200, empty access/refresh tokens, body reflects the switched active_role.
-    // (The UM-audience 401 invariant still lives in UmIssuerTokenTrustTests.)
+    // CONTRACT DRIFT — UPDATED (iter5 BATCHED-FIX B14). History of this route's token
+    // contract: (1) ADR-003 removed it (404); (2) PR #226 / DEFECT-1 brought it back but
+    // returned NO replacement token (empty access/refresh) so the caller kept its old
+    // aud=jeeb-clients session — but that left the active_role claim stale until the next
+    // login, and a mobile build that DOES adopt the returned token would be handed an
+    // empty string and break. (3) iter5 BATCHED-FIX B14 (LIVE on MSI, temp-overall-run-1)
+    // therefore re-mints a REAL gateway session token here: UM persists active_role + the
+    // gateway signs a fresh aud=jeeb-clients token (sub=userId, full role set, the now-active
+    // role read from the locally-updated store) so the app gets a usable session that
+    // immediately carries the switched role. The UM aud=user-management pair is STILL never
+    // relayed (that 401 invariant lives in UmIssuerTokenTrustTests); the gateway signs its
+    // own token. So the new contract is: 200, NON-EMPTY gateway-minted access/refresh
+    // tokens, body reflects the switched active_role. Verified live + on-device.
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task RoleSwitch_Returns_200_With_No_Replacement_Token()
+    public async Task RoleSwitch_Returns_200_With_Gateway_Minted_Token()
     {
         // UM persists active_role=driver (opaque) and re-issues a token pair; the gateway
-        // deliberately drops that pair and translates the active role back to contract "jeeber".
+        // DROPS that UM pair (never relayed) but signs its OWN fresh gateway session token,
+        // and translates the active role back to contract "jeeber".
         var um = new StubUm
         {
             RoleSwitch = new RoleSwitchReissueResult("kamal-1", "um-access", "um-refresh", Roles.Jeeber),
@@ -244,11 +248,14 @@ public class DualRoleBffTests
 
         using var doc = System.Text.Json.JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         var root = doc.RootElement;
-        // ADR-004: NO replacement token — UM's aud=user-management pair is dropped so the
-        // caller keeps its valid aud=jeeb-clients session across the switch (DEFECT-1 fix).
-        root.GetProperty("accessToken").GetString().Should().BeEmpty(
-            "ADR-004 returns no replacement token so the caller keeps its valid session");
-        root.GetProperty("refreshToken").GetString().Should().BeEmpty();
+        // B14: a REAL gateway-minted session token is returned (NOT empty, and NOT the UM
+        // aud=user-management pair) so the app gets a usable session carrying the new active_role.
+        var accessToken = root.GetProperty("accessToken").GetString();
+        accessToken.Should().NotBeNullOrEmpty(
+            "iter5 B14 re-mints a real gateway session token so the app immediately carries the switched role");
+        accessToken.Should().NotBe("um-access", "the UM aud=user-management token is never relayed; the gateway signs its own");
+        root.GetProperty("refreshToken").GetString().Should().NotBeNullOrEmpty();
+        root.GetProperty("refreshToken").GetString().Should().NotBe("um-refresh");
         // The switch IS reflected in the body's active_role (Jeeb contract vocabulary).
         root.GetProperty("active_role").GetString().Should().Be("jeeber");
         // The gateway did forward the switch to UM (it is the token authority on this path).
