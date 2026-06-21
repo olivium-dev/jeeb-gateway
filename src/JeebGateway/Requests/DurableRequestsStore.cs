@@ -309,8 +309,100 @@ public sealed class DurableRequestsStore : IRequestsStore
     public Task<bool> TryActivateScheduledAsync(string requestId, DateTimeOffset at, CancellationToken ct)
         => _inner.TryActivateScheduledAsync(requestId, at, ct);
 
-    public Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct)
-        => _inner.GetAsync(requestId, ct);
+    /// <summary>
+    /// B9 (iter6 request-store durability): durable single-row read. When the
+    /// durable path is active the canonical delivery-service row (seeded on
+    /// create, see <see cref="PersistSagaAsync"/>) is the source of truth for a
+    /// request's existence. The legacy in-memory inner store is the fast read
+    /// model, but it is EMPTY after a gateway restart — so a request that was
+    /// created before the restart (or seeded out-of-band) would 404 at the
+    /// controller's <c>_requests.GetAsync</c> ownership check even though its
+    /// canonical row still lives in delivery-service. That wiped the seed
+    /// request <c>606e520a</c> after a restart and hid its offers (iter6
+    /// offerlist evidence).
+    ///
+    /// This override mirrors the FT-08 sweep rehydration pattern in
+    /// <see cref="ListPendingCreatedAtOrBeforeAsync"/>: try the in-memory mirror
+    /// first (fast, unchanged for warm rows), and ONLY on a miss hydrate from
+    /// the canonical <c>GET /api/v1/deliveries/{id}</c> read-through so the row
+    /// survives a gateway restart. The hydrated row carries the fields the
+    /// canonical projection exposes (id, client_id, jeeber_id, status, tier_id,
+    /// created_at); fields the projection does not surface are left empty —
+    /// the controller's ownership check only needs <c>ClientId</c>/<c>Status</c>,
+    /// and the offer reads key off the id.
+    ///
+    /// DEGRADE-DON'T-FAIL: a delivery-service blip (or a genuine 404) returns
+    /// null exactly as the inner-store miss would — the read never converts a
+    /// transient upstream fault into a 5xx for the caller.
+    /// </summary>
+    public async Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct)
+    {
+        // 1) Warm path: the in-memory mirror answers for rows created since the
+        //    last restart. Unchanged behaviour for the common case.
+        var local = await _inner.GetAsync(requestId, ct);
+        if (local is not null)
+        {
+            return local;
+        }
+
+        // 2) Cold path (post-restart / out-of-band seed): the mirror is empty
+        //    but the canonical delivery row may still exist. Read it through.
+        DeliveryReadUpstream? canonical;
+        try
+        {
+            canonical = await _delivery.GetCanonicalDeliveryAsync(requestId, ct);
+        }
+        catch (Exception ex)
+        {
+            // Delivery-service unreachable: behave exactly like an in-memory
+            // miss (return null) rather than surfacing a 5xx. The next read
+            // rehydrates once the service is reachable again.
+            _logger.LogWarning(ex,
+                "B9: delivery-service read-through failed for {RequestId}; treating as not-found",
+                requestId);
+            return null;
+        }
+
+        // Genuine 404 upstream → the request truly does not exist anywhere.
+        if (canonical is null)
+        {
+            return null;
+        }
+
+        // 3) Reconstruct a minimal request from the canonical projection so the
+        //    controller ownership check + the offer reads resolve post-restart.
+        return new DeliveryRequest
+        {
+            Id          = string.IsNullOrWhiteSpace(canonical.DeliveryId) ? requestId : canonical.DeliveryId,
+            ClientId    = canonical.ClientId ?? string.Empty,
+            JeeberId    = canonical.JeeberId,
+            Status      = MapCanonicalToRequestStatus(canonical.Status),
+            TierId      = canonical.TierId,
+            Description = string.Empty,
+            CreatedAt   = canonical.CreatedAt,
+        };
+    }
+
+    /// <summary>
+    /// B9: maps the canonical SM-1 delivery status (Ordered/Picked/InTransit/
+    /// AtDoor/Done/Cancelled/FailedNeedsEscalation) back onto the gateway's
+    /// request-lifecycle vocabulary for a rehydrated row. Ordered collapses to
+    /// <see cref="RequestStatus.Pending"/> — the pre-acceptance request state the
+    /// ownership check and offer reads expect for a freshly-seeded row. Unknown
+    /// tokens fall back to <see cref="RequestStatus.Pending"/> so a hydrated row
+    /// is always readable rather than throwing on the required Status property.
+    /// </summary>
+    private static string MapCanonicalToRequestStatus(string? canonical) => canonical switch
+    {
+        CanonicalDeliveryStatus.Ordered               => RequestStatus.Pending,
+        CanonicalDeliveryStatus.Picked                => RequestStatus.PickedUp,
+        CanonicalDeliveryStatus.InTransit             => RequestStatus.HeadingOff,
+        CanonicalDeliveryStatus.AtDoor                => RequestStatus.AtDoor,
+        CanonicalDeliveryStatus.Done                  => RequestStatus.Delivered,
+        CanonicalDeliveryStatus.Cancelled             => RequestStatus.Cancelled,
+        CanonicalDeliveryStatus.FailedNeedsEscalation => RequestStatus.Disputed,
+        _                                             => RequestStatus.Pending,
+    };
 
     public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct)
         => _inner.ListForClientAsync(clientId, ct);

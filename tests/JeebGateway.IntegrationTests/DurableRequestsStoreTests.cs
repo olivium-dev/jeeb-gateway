@@ -324,12 +324,92 @@ public sealed class DurableRequestsStoreTests
         delivery.CreatedRows.Should().ContainSingle();
     }
 
+    // -- B9: request-store durability (rehydrate-on-miss) ---------------------
+
+    [Fact]
+    public async Task GetAsync_hydrates_from_delivery_service_on_in_memory_miss()
+    {
+        // B9: post-restart the in-memory mirror is empty, but the canonical
+        // delivery row still exists. GetAsync must rehydrate it through
+        // delivery-service so the request survives a gateway restart (the
+        // 606e520a evidence). The store was NOT used to create this row — it is
+        // ONLY known to delivery-service.
+        var store = Build(out _, out var delivery, out _);
+        delivery.CanonicalRow = new DeliveryReadUpstream
+        {
+            DeliveryId = "req-606e520a",
+            ClientId   = "client-kamal",
+            JeeberId   = "jeeber-karim",
+            Status     = "Ordered",
+            TierId     = "tier-standard",
+            CreatedAt  = DateTimeOffset.UtcNow.AddMinutes(-5),
+        };
+
+        var hydrated = await store.GetAsync("req-606e520a", CancellationToken.None);
+
+        hydrated.Should().NotBeNull("the canonical row survives a gateway restart");
+        hydrated!.Id.Should().Be("req-606e520a");
+        hydrated.ClientId.Should().Be("client-kamal", "ownership check keys off ClientId");
+        hydrated.JeeberId.Should().Be("jeeber-karim");
+        hydrated.TierId.Should().Be("tier-standard");
+        // Canonical 'Ordered' collapses to the pre-acceptance request state.
+        hydrated.Status.Should().Be(RequestStatus.Pending);
+        delivery.CanonicalReads.Should().ContainSingle().Which.Should().Be("req-606e520a");
+    }
+
+    [Fact]
+    public async Task GetAsync_prefers_in_memory_and_does_not_call_delivery_service()
+    {
+        // Warm path: a row created since the last restart is answered from the
+        // in-memory mirror with NO read-through (unchanged fast path).
+        var store = Build(out _, out var delivery, out _);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        var got = await store.GetAsync(created.Id, CancellationToken.None);
+
+        got.Should().NotBeNull();
+        got!.Id.Should().Be(created.Id);
+        delivery.CanonicalReads.Should().BeEmpty("the warm mirror answers without a read-through");
+    }
+
+    [Fact]
+    public async Task GetAsync_returns_null_when_unknown_to_both_stores()
+    {
+        // A genuine 404 upstream (CanonicalRow left null) → not-found, exactly
+        // like an in-memory miss.
+        var store = Build(out _, out var delivery, out _);
+
+        var got = await store.GetAsync("does-not-exist", CancellationToken.None);
+
+        got.Should().BeNull();
+        delivery.CanonicalReads.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task GetAsync_degrades_to_null_when_delivery_service_throws()
+    {
+        // DEGRADE-DON'T-FAIL: a delivery-service blip behaves like an in-memory
+        // miss (null) rather than surfacing a 5xx.
+        var store = Build(out _, out var delivery, out _);
+        delivery.ThrowOnCanonicalRead = true;
+
+        var got = await store.GetAsync("req-x", CancellationToken.None);
+
+        got.Should().BeNull();
+    }
+
     // -- fakes ---------------------------------------------------------------
 
     private sealed class RecordingDeliveryClient : NotImplementedDeliveryClient
     {
         public List<CreateDeliveryRowUpstream> CreatedRows { get; } = new();
         public string? EchoMismatchedId { get; init; }
+
+        // B9: the canonical row the read-through returns on an in-memory miss
+        // (null = upstream 404), and the ids GetAsync read through with.
+        public DeliveryReadUpstream? CanonicalRow { get; set; }
+        public bool ThrowOnCanonicalRead { get; set; }
+        public List<string> CanonicalReads { get; } = new();
 
         public override Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct)
         {
@@ -340,6 +420,16 @@ public sealed class DurableRequestsStoreTests
                 TenantId = body.TenantId,
                 Status = "Ordered",
             });
+        }
+
+        public override Task<DeliveryReadUpstream?> GetCanonicalDeliveryAsync(string deliveryId, CancellationToken ct)
+        {
+            CanonicalReads.Add(deliveryId);
+            if (ThrowOnCanonicalRead)
+            {
+                throw new InvalidOperationException("delivery-service unreachable");
+            }
+            return Task.FromResult(CanonicalRow);
         }
     }
 
@@ -411,7 +501,7 @@ public sealed class DurableRequestsStoreTests
         public Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryRequestUpstream> StatusTransitionAsync(string deliveryId, string status, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(string deliveryId, string to, string partySource, string actorId, string actorRole, CancellationToken ct) => throw new NotImplementedException();
-        public Task<DeliveryReadUpstream?> GetCanonicalDeliveryAsync(string deliveryId, CancellationToken ct) => throw new NotImplementedException();
+        public virtual Task<DeliveryReadUpstream?> GetCanonicalDeliveryAsync(string deliveryId, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryHandoverIssueResult> IssueHandoverOtpAsync(string deliveryId, string? codeHash, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(string deliveryId, bool success, string actorId, string actorRole, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryCancelResult> CancelDeliveryAsync(string deliveryId, DeliveryCancelUpstreamRequest body, CancellationToken ct) => throw new NotImplementedException();
