@@ -45,10 +45,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup .NET 9
+      # NSwag.ConsoleCore 14.2.0 is a net8.0 tool whose process runtime is Net80.
+      # The nswag-otp.json document therefore declares "runtime": "Net80" (matching
+      # the working nswag-state job); setup .NET 8 so the toolchain is consistent.
+      - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "9.0.x"
+          dotnet-version: "8.0.x"
       - name: Install NSwag CLI
         run: dotnet tool install -g NSwag.ConsoleCore --version 14.2.0
       - name: Regenerate OTP service client
@@ -99,9 +102,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Use the open-source gitleaks binary (Apache-2.0) instead of the
+      # gitleaks/gitleaks-action@v2 marketplace action: that action requires a
+      # paid GITLEAKS_LICENSE secret for organization repos and fails closed
+      # ("missing gitleaks license") before it ever scans. The binary runs the
+      # exact same engine, honours .gitleaks.toml, and needs no license.
+      - name: Install gitleaks
+        run: |
+          GL_VERSION=8.21.2
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VERSION}/gitleaks_${GL_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Run gitleaks (full history)
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --exit-code 1
 
   docker:
     runs-on: ubuntu-latest
