@@ -33,6 +33,7 @@ namespace JeebGateway.Controllers
         private readonly GwUsersStore _users;
         private readonly GwDualRoleClient _userManagement;
         private readonly IOptions<DemoUsersOptions> _demoUsers;
+        private readonly IOptions<SuperLoginOptions> _superLogin;
         private readonly ILogger<UserController> _logger;
 
         public UserController(
@@ -41,6 +42,7 @@ namespace JeebGateway.Controllers
             GwUsersStore users,
             GwDualRoleClient userManagement,
             IOptions<DemoUsersOptions> demoUsers,
+            IOptions<SuperLoginOptions> superLogin,
             ILogger<UserController> logger)
         {
             _serviceUserManagementClient = serviceUserManagementClient;
@@ -48,6 +50,7 @@ namespace JeebGateway.Controllers
             _users = users;
             _userManagement = userManagement;
             _demoUsers = demoUsers;
+            _superLogin = superLogin;
             _logger = logger;
         }
 
@@ -70,6 +73,15 @@ namespace JeebGateway.Controllers
         [ProducesResponseType(StatusCodes.Status404NotFound)]
         public ActionResult DemoUsers()
         {
+            // SECURITY-GATE: the anonymous demo-user picker (rows carry the real
+            // SuperAdmin passcode) is only served in DEMO open mode. Default
+            // (OpenMode=false) = prod-safe → 404, so a flag-unset deploy never
+            // exposes the roster anonymously. MSI demo env sets OpenMode=true.
+            if (!_superLogin.Value.OpenMode)
+            {
+                return NotFound();
+            }
+
             var opts = _demoUsers.Value;
             if (!opts.Enabled)
             {
