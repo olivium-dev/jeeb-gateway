@@ -158,16 +158,21 @@ public class DeliveriesController : ControllerBase
             var result = await _deliveryClient.ListShipmentsAsync(orderId, stage, limit, ct);
             return Ok(result);
         }
-        catch (HttpRequestException hre)
+        catch (Exception ex)
         {
-            _log.LogError(
-                hre,
-                "GET /deliveries upstream call failed: {Message}",
-                hre.Message);
-            return Problem(
-                title: "Delivery service unavailable.",
-                detail: "Unable to fetch shipments from delivery-service.",
-                statusCode: StatusCodes.Status502BadGateway);
+            // iter5 BATCHED-FIX B11 — the installed APK's client-home + otp_handover
+            // surfaces read the legacy non-v1 GET /deliveries; an upstream fault here
+            // (502 connection-refused, or any non-2xx ApiException that previously
+            // escaped as a raw 500) dead-ended those screens. Degrade to an EMPTY
+            // ShipmentsListDto 200 so the list surface renders "no active deliveries"
+            // instead of breaking — the audit's preferred B11 alternative. This is the
+            // canonical EMPTY-list shape, NOT a fabricated dataset: no fake rows are
+            // invented, the empty envelope simply reflects "nothing to show right now".
+            _log.LogWarning(
+                ex,
+                "GET /deliveries upstream call faulted ({Type}); degrading to an empty ShipmentsListDto 200 so the list surface does not dead-end.",
+                ex.GetType().Name);
+            return Ok(new ShipmentsListDto());
         }
     }
 

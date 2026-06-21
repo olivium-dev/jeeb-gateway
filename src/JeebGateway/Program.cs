@@ -709,6 +709,13 @@ builder.Services.Configure<JeebGateway.Auth.OtpSignIn.PhonePolicyOptions>(
     builder.Configuration.GetSection(JeebGateway.Auth.OtpSignIn.PhonePolicyOptions.SectionName));
 builder.Services.Configure<JeebGateway.Auth.OtpSignIn.OtpRequestRateLimitOptions>(
     builder.Configuration.GetSection(JeebGateway.Auth.OtpSignIn.OtpRequestRateLimitOptions.SectionName));
+
+// iter5 BATCHED-FIX — Super-Login+ demo roster for the debug picker
+// (GET /api/User/demo-users). Roster + passcodes are config-only (env
+// DemoUsers__Users__N__*), never hardcoded; the endpoint is anon by design
+// (the picker precedes any session). See Auth/SuperLogin/DemoUsersOptions.cs.
+builder.Services.Configure<JeebGateway.Auth.SuperLogin.DemoUsersOptions>(
+    builder.Configuration.GetSection(JeebGateway.Auth.SuperLogin.DemoUsersOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IPhonePolicy,
     JeebGateway.Auth.OtpSignIn.PhonePolicy>();
 builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IOtpRequestRateLimiter,
@@ -879,6 +886,20 @@ void ConfigureNamedClient(string name, string configKey)
 
 ConfigureNamedClient("ServiceWalletClient", "WalletServiceApi");
 
+// JEEBER-SPINE Defect 3 — dedicated named HttpClient for the Jeeb earnings BFF
+// (JeebEarningsBffController). Bound to the SAME WalletServiceApi:BaseUrl as the generated
+// wallet client; the BaseAddress is normalised with a trailing slash so the controller's
+// relative "v1/wallet/jeeb/earnings" path resolves correctly. The caller's bearer is
+// forwarded per-request inside the controller (own-scoped read).
+builder.Services.AddHttpClient(JeebGateway.Controllers.JeebEarningsBffController.WalletHttpClientName, client =>
+{
+    var apiUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl))
+    {
+        client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
+    }
+});
+
 builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -886,6 +907,26 @@ builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient
     var baseUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
     return new JeebGateway.service.ServiceWallet.ServiceWalletClient(baseUrl, client);
 });
+
+// REALAPP fix — GET /v1/jeeb/wallet/ledger reads the holder's OWN transactions
+// directly from the wallet DB (transactionheader + transactiondetails, joined via
+// wallets.holderid), because the generic wallet-service exposes no ledger LIST
+// endpoint. When WalletPostgres:ConnectionString is configured, use the Postgres
+// reader; otherwise fall back to the empty-page reader (dev/CI/tests, no regression).
+// Mirrors the GatewayPostgres direct-Postgres seam already used for COD settlements.
+var walletPostgresCs = builder.Configuration["WalletPostgres:ConnectionString"];
+if (!string.IsNullOrWhiteSpace(walletPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader>(sp =>
+        new JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader(
+            walletPostgresCs!,
+            sp.GetRequiredService<ILogger<JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader>>()));
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader,
+        JeebGateway.JeebWallet.NullJeebWalletLedgerReader>();
+}
 
 // Notification preferences (T-backend-031 / JEB-1498).
 // Wired to the generic remote-user-preferences service (Rust, :10067) so preferences
@@ -1803,6 +1844,15 @@ if (stateServiceWired)
         JeebGateway.StateService.Durable.StateServiceRatingWriter>();
     builder.Services.AddSingleton<JeebGateway.StateService.Durable.IStateDisputeWriter,
         JeebGateway.StateService.Durable.StateServiceDisputeWriter>();
+
+    // ADR-0001 remediation (run #1 follow-up): the dispute STORE itself is now durable.
+    // Re-points IDisputeStore from the in-memory MVP store (rows lost on every gateway
+    // bounce / replica move — the flagged ADR-0001 violation) to the state-service-backed
+    // store, which persists the full Jeeb dispute row as an opaque KV body + owner/delivery
+    // prefix indexes (the PR #206 support-ticket pattern). Overrides the InMemoryDisputeStore
+    // registered earlier (last-wins DI); a state-service blip is absorbed by the typed
+    // client's circuit-breaker rather than failing the file/list path.
+    builder.Services.AddSingleton<IDisputeStore, StateServiceDisputeStore>();
 
     // Add jeeb-state-service to the aggregate-health roster (now 18 checks).
     builder.Services.AddHealthChecks()

@@ -56,7 +56,28 @@ public interface IUserManagementDualRoleClient
     /// </summary>
     /// <exception cref="UserManagementCallException">Any non-success status.</exception>
     Task<RoleGrantResult> AppendAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct);
+
+    /// <summary>
+    /// JEEBER-SPINE Defect 1. READ <paramref name="userId"/>'s PERSISTED role set
+    /// (<c>GET /api/User/{userId}/roles</c> → <c>UserRolesResponse</c>: available_roles +
+    /// active_role) so a gateway-minted OTP session reflects an already-granted driver role
+    /// (and a DB-set active_role) WITHOUT inventing it — UM is the authority, the gateway only
+    /// reads + projects. Returns <c>null</c> when UM has no roles row for the user (404) or on
+    /// any non-success status, so the caller keeps the safe default ('customer') and a UM blip
+    /// never hard-breaks a live OTP login. OPAQUE role strings ({customer,driver}).
+    /// </summary>
+    Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct);
 }
+
+/// <summary>
+/// Result of <see cref="IUserManagementDualRoleClient.GetUserRolesAsync"/> — the user's
+/// PERSISTED role set as user-management owns it. OPAQUE role strings ({customer,driver}).
+/// <see cref="ActiveRole"/> is <c>null</c> when UM did not surface one.
+/// </summary>
+public sealed record UserRolesResult(
+    string UserId,
+    IReadOnlyList<string> AvailableRoles,
+    string? ActiveRole);
 
 /// <summary>
 /// Result of <see cref="IUserManagementDualRoleClient.AppendAvailableRoleAsync"/>.

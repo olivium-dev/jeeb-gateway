@@ -46,16 +46,49 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
 
         // JEB-1480 (GR2): the shared user-management phone-identity endpoint is now
         // IDENTITY-ONLY ({ userId, isNew, phone }) and performs NO role/claim shaping.
-        // The DEFAULT role ("customer") and all role/claim shaping live HERE, in the
-        // gateway, at JWT-mint time. A freshly resolved phone identity is decorated
-        // with the gateway's default opaque role; a user's elevated roles (e.g. driver)
-        // are granted via the KYC approve path and re-issued through the UM-signed
-        // role-switch flow (reflected on GET /v1/users/me), never invented by UM here.
+        // The DEFAULT role ("customer") is decorated HERE; the user's FULL persisted
+        // role set (available_roles + active_role) is read separately via
+        // GetUserRolesAsync (GET /api/User/{userId}/roles) so an OTP login reflects an
+        // already-granted driver role (JEEBER-SPINE Defect 1). A freshly resolved
+        // identity with no roles row defaults to the gateway's single 'customer' role.
         return new PhoneFindOrCreateResult(
             dto.UserId ?? string.Empty,
             dto.IsNew,
             new[] { Roles.Client },
             Roles.Client);
+    }
+
+    public async Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct)
+    {
+        // JEEBER-SPINE Defect 1 — read the user's PERSISTED role set so a gateway-minted
+        // OTP session reflects an already-granted driver role (and the DB-set active_role)
+        // WITHOUT inventing it. UM is the authority; the gateway only reads + projects.
+        // A 404 (no roles row yet) or any non-success is non-fatal: the caller keeps the
+        // safe default ('customer'), so a UM blip never hard-breaks an OTP login.
+        using var resp = await _http.GetAsync($"api/User/{Uri.EscapeDataString(userId)}/roles", ct);
+
+        if (resp.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            _log.LogWarning(
+                "user-management get-roles returned {Status} for userId={UserId}",
+                (int)resp.StatusCode, userId);
+            return null;
+        }
+
+        var dto = await resp.Content.ReadFromJsonAsync<UserRolesBodyResponse>(Json, ct);
+        if (dto is null)
+        {
+            return null;
+        }
+
+        var roles = dto.AvailableRoles is { Length: > 0 } ? dto.AvailableRoles : Array.Empty<string>();
+        var active = string.IsNullOrWhiteSpace(dto.ActiveRole) ? null : dto.ActiveRole;
+        return new UserRolesResult(dto.UserId ?? userId, roles, active);
     }
 
     public async Task<RoleSwitchReissueResult> RoleSwitchAsync(string userId, string opaqueRole, CancellationToken ct)
@@ -160,6 +193,18 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         [JsonPropertyName("userId")] public string? UserId { get; set; }
         [JsonPropertyName("accessToken")] public string? AccessToken { get; set; }
         [JsonPropertyName("refreshToken")] public string? RefreshToken { get; set; }
-        [JsonPropertyName("activeRole")] public string? ActiveRole { get; set; }
+        // UM's RoleSwitchReissueResponse emits snake_case active_role (verified against the
+        // live :10001 swagger). The prior camelCase mapping never bound, silently falling
+        // back to the requested role (JEEBER-SPINE Defect 2 hardening).
+        [JsonPropertyName("active_role")] public string? ActiveRole { get; set; }
+    }
+
+    // UM's UserRolesResponse (GET /api/User/{userId}/roles, PATCH active-role):
+    // { userId, available_roles[], active_role } — snake_case role fields.
+    private sealed class UserRolesBodyResponse
+    {
+        [JsonPropertyName("userId")] public string? UserId { get; set; }
+        [JsonPropertyName("available_roles")] public string[]? AvailableRoles { get; set; }
+        [JsonPropertyName("active_role")] public string? ActiveRole { get; set; }
     }
 }
