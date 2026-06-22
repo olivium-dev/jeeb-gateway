@@ -136,11 +136,17 @@ public interface IPendingOffersStore
 
     /// <summary>
     /// Returns every offer (any status) attached to <paramref name="requestId"/>,
-    /// newest-first. Used by integration tests and the future Client
-    /// "see all bids" listing endpoint.
+    /// newest-first. Used by integration tests and the Client "see all bids"
+    /// listing endpoint.
+    ///
+    /// <para><paramref name="actingUserId"/> is the request-owner identity the
+    /// upstream offer-service requires on its owner-gated GET-offers route
+    /// (forwarded as <c>x-user-id</c>). Optional/null for the in-memory store,
+    /// which ignores it; the controllers always pass the owning client id they
+    /// have already authorized.</para>
     /// </summary>
     Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(
-        string requestId, CancellationToken ct);
+        string requestId, CancellationToken ct, string? actingUserId = null);
 }
 
 /// <summary>

@@ -44,4 +44,26 @@ public sealed class MatchingServiceClient : IMatchingServiceClient
         }
         return payload;
     }
+
+    /// <inheritdoc />
+    public async Task<MatchingFindJeebersUpstreamResponse> FindJeebersAsync(
+        MatchingFindJeebersUpstreamRequest body, CancellationToken ct)
+    {
+        // Real matching-service route: POST /api/v1/matching/find-jeebers
+        // (matching/app/api/endpoints/tier_matching.py, prefix=/matching,
+        // mounted at /api/v1 in main.py). Tier-aware: returns online jeebers
+        // within tier.radius_km and (when broadcast=true) publishes the match
+        // event to the jeeb.requests.<tier> topic.
+        using var response = await _http.PostAsJsonAsync(
+            "api/v1/matching/find-jeebers", body, JsonOptions, ct);
+        response.EnsureSuccessStatusCode();
+        var payload = await response.Content
+            .ReadFromJsonAsync<MatchingFindJeebersUpstreamResponse>(JsonOptions, ct);
+        if (payload is null)
+        {
+            throw new HttpRequestException(
+                "matching-service returned an empty body for FindJeebers.");
+        }
+        return payload;
+    }
 }

@@ -334,8 +334,10 @@ public class InMemoryPendingOffersStore : IPendingOffersStore
     }
 
     public Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(
-        string requestId, CancellationToken ct)
+        string requestId, CancellationToken ct, string? actingUserId = null)
     {
+        // actingUserId is the upstream owner-gate identity; the in-memory store
+        // holds no per-user ownership and ignores it.
         var snapshot = _offers.Values
             .Where(o => string.Equals(o.RequestId, requestId, StringComparison.Ordinal))
             .OrderByDescending(o => o.CreatedAt)

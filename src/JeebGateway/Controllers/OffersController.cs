@@ -61,6 +61,7 @@ public class OffersController : ControllerBase
     private readonly IConversationProvisioner _conversations;
     private readonly IJeebConversationClient _conversationAggregate;
     private readonly IDeliveryServiceClient _deliveryService;
+    private readonly JeebGateway.Push.IEventPushNotifier _push;
     private readonly UpstreamFeatureFlags _flags;
     private readonly DeliveryClientOptions _deliveryOptions;
     private readonly ILogger<OffersController> _logger;
@@ -75,6 +76,7 @@ public class OffersController : ControllerBase
         IConversationProvisioner conversations,
         IJeebConversationClient conversationAggregate,
         IDeliveryServiceClient deliveryService,
+        JeebGateway.Push.IEventPushNotifier push,
         IOptions<UpstreamFeatureFlags> flags,
         IOptions<DeliveryClientOptions> deliveryOptions,
         ILogger<OffersController> logger)
@@ -88,6 +90,7 @@ public class OffersController : ControllerBase
         _conversations = conversations;
         _conversationAggregate = conversationAggregate;
         _deliveryService = deliveryService;
+        _push = push;
         _flags = flags.Value;
         _deliveryOptions = deliveryOptions.Value;
         _logger = logger;
@@ -624,6 +627,27 @@ public class OffersController : ControllerBase
                 // DEGRADE-DON'T-FAIL — a downstream blip must never turn a
                 // successful accept into a 5xx.
                 var conversationPhase = await OrchestrateAcceptedAsync(requestId, actorId, result.Envelope!, ct);
+
+                // SEND-ON-EVENT (iter6): push the JEEBER whose offer was accepted so
+                // a backgrounded jeeber finds out their bid won (and can open the
+                // accepted delivery). Recipient is the WINNING jeeber
+                // (envelope.JeeberId), NEVER the accepting client (actorId). The
+                // delivery id == requestId on this fleet (delivery seeded at create
+                // with deliveryId == requestId). Best-effort (the notifier swallows
+                // all faults) so a push hiccup never flips the 200.
+                await _push.NotifyUserAsync(
+                    result.Envelope!.JeeberId,
+                    "Offer accepted",
+                    "Your offer was accepted",
+                    new System.Collections.Generic.Dictionary<string, string>
+                    {
+                        ["type"] = "accept",
+                        ["requestId"] = requestId,
+                        ["deliveryId"] = requestId,
+                        ["offerId"] = offerId,
+                    },
+                    ct);
+
                 return Ok(BuildAcceptedDto(requestId, actorId, result.Envelope!, conversationPhase));
 
             case OfferAcceptStatus.NotOwner:
@@ -830,10 +854,20 @@ public class OffersController : ControllerBase
             return null;
         }
 
+        // FIX (iter6 GAP A2): chat-service ConversationService.AdvancePhaseAsync
+        // resolves the aggregate by CONVERSATION ID (GetConversationAsync(id)), NOT
+        // by correlation key. Passing the requestId (== correlation key) 404'd the
+        // advance (swallowed by degrade-don't-fail), so the conversation stayed in
+        // phase "broadcasting" forever. Use the conversation id resolved above
+        // (synced.ConversationId, falling back to the by-correlation read); only
+        // fall back to requestId when no conversation id is resolvable at all (the
+        // chat-service GetOrCreate keyed conversations by correlation==requestId, so
+        // requestId-as-id was never correct here).
+        var phaseTargetId = string.IsNullOrWhiteSpace(conversationId) ? requestId : conversationId;
         try
         {
             var advanced = await _conversationAggregate.AdvancePhaseAsync(
-                requestId,
+                phaseTargetId,
                 new AdvanceJeebPhaseRequest
                 {
                     Phase = "accepted",

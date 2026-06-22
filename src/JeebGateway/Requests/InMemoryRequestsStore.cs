@@ -554,6 +554,24 @@ public class InMemoryRequestsStore : IRequestsStore
     }
 
     /// <summary>
+    /// iter6: jeeber-scoped read — rows where this user is the ASSIGNED jeeber.
+    /// Mirrors <see cref="ListForClient"/> but filters on <c>JeeberId</c>.
+    /// Ordered newest-first so the jeeber's most recent accepted delivery is at
+    /// the top of their active-deliveries list.
+    /// </summary>
+    public IReadOnlyList<DeliveryRequest> ListForJeeber(string jeeberId)
+    {
+        if (string.IsNullOrEmpty(jeeberId)) return Array.Empty<DeliveryRequest>();
+        lock (_writeLock)
+        {
+            return _requests.Values
+                .Where(r => string.Equals(r.JeeberId, jeeberId, StringComparison.Ordinal))
+                .OrderByDescending(r => r.CreatedAt)
+                .ToArray();
+        }
+    }
+
+    /// <summary>
     /// Async owner-scoped list backing <c>GET /requests</c>. Delegates to
     /// the existing synchronous <see cref="ListForClient"/> so the
     /// snapshot semantics (write-lock, oldest-first) stay identical — this
@@ -561,6 +579,9 @@ public class InMemoryRequestsStore : IRequestsStore
     /// </summary>
     public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct)
         => Task.FromResult(ListForClient(clientId));
+
+    public Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct)
+        => Task.FromResult(ListForJeeber(jeeberId));
 
     public Task<int> AnonymizeForClientAsync(string userId, string anonymizedHash, CancellationToken ct)
     {

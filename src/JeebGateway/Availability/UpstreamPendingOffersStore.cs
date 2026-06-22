@@ -192,10 +192,22 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
             "offer-service exposes no get-offer-by-id route; the offer-accept lookup path stays on the " +
             "in-memory store until offer-service grows GET /api/v1/offers/{id} (tracked fast-follow).");
 
-    public Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(string requestId, CancellationToken ct)
-        => throw new NotSupportedException(
-            "offer-service exposes no list-offers-for-request route; the listing path stays on the in-memory " +
-            "store until offer-service grows GET /api/v1/requests/{id}/offers (tracked fast-follow).");
+    public async Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(
+        string requestId, CancellationToken ct, string? actingUserId = null)
+    {
+        // offer-service GET /api/v1/requests/{id}/offers is owner-gated on the
+        // gateway-injected x-user-id. The controller has already authorized the
+        // caller as the request owner, so actingUserId is that owner. If a caller
+        // ever reaches here without one (no upstream identity to assert), return
+        // empty rather than 403/throw — the in-memory fixtures pass null.
+        if (string.IsNullOrWhiteSpace(actingUserId))
+        {
+            return Array.Empty<PendingOffer>();
+        }
+
+        var wire = await _client.ListForRequestAsync(actingUserId, requestId, ct);
+        return wire.Select(ToPendingOffer).ToList();
+    }
 
     public Task<int> WithdrawForJeeberAsync(string jeeberId, CancellationToken ct)
         => throw new NotSupportedException(

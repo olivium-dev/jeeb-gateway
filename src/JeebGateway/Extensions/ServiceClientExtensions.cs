@@ -52,6 +52,13 @@ public static class ServiceClientExtensions
         services.AddHttpContextAccessor();
         services.AddTransient<BearerForwardingHandler>();
         services.AddTransient<ServiceAuthSigningHandler>();
+        // CHAT LIVE-PUSH AUTH — the realtime ingest publish authenticates with a
+        // live_comm publish token (NOT the forwarded mobile JWT, which the realtime
+        // ACL 401s). Attached ONLY to the typed realtime client below.
+        services.AddTransient<Services.Clients.RealtimePublishTokenHandler>();
+        // Bare client for the realtime token MINT (POST /api/auth/token) — no BFF
+        // handler chain, so the mint call never forwards the mobile bearer/HMAC.
+        services.AddHttpClient("realtime-token-mint");
 
         // S06 / ADR-HB-001 AUTH CONTRACT — the heart-beat-only static
         // X-Service-Auth-Key handler (attached to the heart-beat typed client
@@ -377,9 +384,17 @@ public static class ServiceClientExtensions
         // Services:Realtime[:BaseUrl] with a trailing slash so the relative
         // "api/ingest/{topic}/{stream}" resolves under the host.
         AddNamedDownstreamClient(services, config, "realtime", "Services:Realtime:BaseUrl");
-        AttachStandardPipeline(
-            services.AddHttpClient<IRealtimeCommunicationClient, RealtimeCommunicationClient>(http =>
-                BindBaseAddress(http, config, "Services:Realtime")));
+        // CHAT LIVE-PUSH: the realtime ingest publish must carry a live_comm PUBLISH
+        // token, NOT the forwarded mobile JWT (which the LiveComm ACL 401s — the exact
+        // blocker). So this typed client does NOT use AttachStandardPipeline's
+        // BearerForwardingHandler; instead it runs ServiceAuthSigning (benign, ignored
+        // by realtime) + RealtimePublishTokenHandler (strips the inherited bearer/HMAC
+        // and sets the minted live_comm publish token) + the standard resilience chain.
+        var realtimeBuilder = services.AddHttpClient<IRealtimeCommunicationClient, RealtimeCommunicationClient>(http =>
+            BindBaseAddress(http, config, "Services:Realtime"));
+        realtimeBuilder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
+        realtimeBuilder.AddHttpMessageHandler<Services.Clients.RealtimePublishTokenHandler>();
+        realtimeBuilder.AddResilienceHandler("standard", ConfigureStandardResilience);
 
         // thin-BFF wire — contract-signing-service (FastAPI, api_prefix /v1;
         // immutable contract templates + per-party signatures; olivium-shared).

@@ -563,6 +563,13 @@ builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePu
     return new JeebGateway.service.ServicePushNotification.ServicePushNotificationClient(baseUrl, client);
 });
 
+// SEND-ON-EVENT (iter6) — register the best-effort event push seam that auto-fires
+// an FCM push to the resolved RECIPIENT on real events (chat message, new offer,
+// offer accepted, delivery status change). Backed by the SAME proven
+// ServicePushNotificationClient (:10040, real jeeb-5a293 creds) the manual/admin
+// PushNotificationController endpoints use; every send is degrade-don't-fail.
+builder.Services.AddScoped<JeebGateway.Push.IEventPushNotifier, JeebGateway.Push.EventPushNotifier>();
+
 // Feedback (ServiceFeedbackClient) — salehly sibling mirror.
 // The NSwag-generated ServiceFeedbackClient
 // (Services/Clients/ServiceFeedbackClient.cs, namespace
@@ -1126,7 +1133,15 @@ builder.Services.AddScoped<JeebGateway.Matching.IDeliveryRowMirror,
 // Tier-existence probe consumed by RequestsController to enforce
 // T-backend-007's "validate tier exists" criterion. Distinct interface
 // from JeebGateway.Tiers.ITiersStore (the admin/catalog surface).
-builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.InMemoryTiersStore>();
+// iter6 B2 (tier-contract): reconcile the request-create tier namespace with
+// the catalog GET /v1/tiers serves. When FeatureFlags:UseUpstream:Delivery is
+// on, the catalog is keyed by UUID + name (mobile #64 sends the UUID as
+// tierId), which the slug-only InMemoryTiersStore rejected. UpstreamTiersStore
+// accepts the live catalog UUID/name/slug AND the legacy slug codes; it falls
+// back to the slug allowlist when the flag is off (tests/local) so fixtures
+// stay green. Scoped because it consumes the typed-HttpClient
+// IDeliveryServiceClient.
+builder.Services.AddScoped<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.UpstreamTiersStore>();
 
 // JEB-1507: CancellationPolicy thresholds (WeeklyThreshold, StrikeThreshold,
 // RestrictionDurationHours) are configurable via appsettings so they can be

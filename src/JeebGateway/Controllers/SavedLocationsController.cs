@@ -14,6 +14,13 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/users/me/saved-locations")]
+// JM-024 mobile-contract alias: the Flutter client calls
+// GET/POST /users/{userId}/saved-locations (no api/ prefix, path-scoped).
+// Identity is still resolved from the caller (claim / X-User-Id) in
+// TryGetUserId — the {userId} path segment is intentionally ignored and never
+// trusted (see class doc). This alias makes the live route match the mobile
+// contract so the create-request location step (canConfirm=loaded) unblocks.
+[Route("users/{userId}/saved-locations")]
 public class SavedLocationsController : ControllerBase
 {
     private readonly ISavedLocationStore _store;

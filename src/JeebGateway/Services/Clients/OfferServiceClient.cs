@@ -165,6 +165,53 @@ public sealed class OfferServiceClient : IOfferServiceClient
         };
     }
 
+    public async Task<IReadOnlyList<OfferWire>> ListForRequestAsync(
+        string actingUserId,
+        string requestId,
+        CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Get, $"api/v1/requests/{Uri.EscapeDataString(requestId)}/offers");
+        SetUser(request, actingUserId);
+
+        using var response = await _http.SendAsync(request, ct);
+
+        // The gateway controller has already verified the request exists and is
+        // owned by the caller before delegating here, so a 404 from offer-service
+        // means the request was never mirrored into the offer store (no offers
+        // possible) — degrade to an empty list rather than failing the read.
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return Array.Empty<OfferWire>();
+        }
+
+        // 403 (owner mismatch) and any other non-2xx are genuine faults — let
+        // EnsureSuccessStatusCode raise so the global handler emits a
+        // ProblemDetails rather than masquerading as an empty (successful) list.
+        response.EnsureSuccessStatusCode();
+
+        var envelope = await response.Content.ReadFromJsonAsync<OffersEnvelope>(JsonOptions, ct);
+        var wireOffers = envelope?.Offers ?? new List<WireOffer>();
+
+        return wireOffers
+            .Select(w => new OfferWire
+            {
+                Id = w.Id ?? string.Empty,
+                RequestId = w.RequestId ?? string.Empty,
+                // Prefer the canonical generic identity; fall back to the deprecated alias.
+                JeeberId = (!string.IsNullOrWhiteSpace(w.ActorId) ? w.ActorId : w.JeeberId) ?? string.Empty,
+                FeeCents = w.FeeCents,
+                EtaMinutes = w.EtaMinutes,
+                Note = w.Note,
+                Status = w.Status ?? string.Empty,
+                EditsCount = w.EditsCount,
+                CreatedAt = w.CreatedAt,
+                UpdatedAt = w.UpdatedAt,
+                WithdrawnAt = w.WithdrawnAt,
+            })
+            .ToList();
+    }
+
     public async Task<OfferAcceptWire> AcceptAsync(
         string actingUserId,
         string requestId,
@@ -468,6 +515,15 @@ public sealed class OfferServiceClient : IOfferServiceClient
         [JsonPropertyName("request_id")] public string RequestId { get; init; } = string.Empty;
         [JsonPropertyName("client_id")] public string ClientId { get; init; } = string.Empty;
         [JsonPropertyName("status")] public string Status { get; init; } = "open";
+    }
+
+    /// <summary>
+    /// GET-offers list envelope: offer-service serializes
+    /// <c>{ "offers": [ &lt;offer&gt;, ... ] }</c> (offer_controller.ex `index`).
+    /// </summary>
+    private sealed class OffersEnvelope
+    {
+        [JsonPropertyName("offers")] public List<WireOffer>? Offers { get; init; }
     }
 
     private sealed class WireOffer
