@@ -220,6 +220,16 @@ public sealed class JeebMessageResponse
     [JsonProperty("body")]
     [Stj.JsonPropertyName("body")]
     public string? Body { get; set; }
+
+    /// <summary>
+    /// iter6 B6 — the message creation timestamp chat-service stamps
+    /// (<c>created_at</c>). Surfaced so the mobile chat BFF can project it as the
+    /// client-expected <c>createdAt</c> field. Nullable: a legacy projection that
+    /// omits it leaves the client to fall back to "now".
+    /// </summary>
+    [JsonProperty("created_at")]
+    [Stj.JsonPropertyName("created_at")]
+    public System.DateTimeOffset? CreatedAt { get; set; }
 }
 
 /// <summary>

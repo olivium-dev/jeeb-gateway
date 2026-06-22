@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations.Client;
@@ -67,6 +68,7 @@ public class RequestOffersController : ControllerBase
     private readonly IRequestsStore _requests;
     private readonly IDualRoleService _dualRole;
     private readonly IOfferRealtimeNotifier _realtime;
+    private readonly JeebGateway.Push.IEventPushNotifier _push;
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly IJeebConversationClient _conversations;
     private readonly UpstreamFeatureFlags _flags;
@@ -78,6 +80,7 @@ public class RequestOffersController : ControllerBase
         IRequestsStore requests,
         IDualRoleService dualRole,
         IOfferRealtimeNotifier realtime,
+        JeebGateway.Push.IEventPushNotifier push,
         IOfferRequestIndex offerRequestIndex,
         IJeebConversationClient conversations,
         IOptions<UpstreamFeatureFlags> flags,
@@ -88,6 +91,7 @@ public class RequestOffersController : ControllerBase
         _requests = requests;
         _dualRole = dualRole;
         _realtime = realtime;
+        _push = push;
         _offerRequestIndex = offerRequestIndex;
         _conversations = conversations;
         _flags = flags.Value;
@@ -279,6 +283,24 @@ public class RequestOffersController : ControllerBase
                 "Failed to dispatch realtime new-offer event for request {RequestId}, offer {OfferId}",
                 requestId, created.Id);
         }
+
+        // SEND-ON-EVENT (iter6): push the CLIENT (request owner) that a new offer
+        // landed, so a backgrounded client finds out without polling. Recipient is
+        // the request owner (request.ClientId), NEVER the offering jeeber. The fee
+        // is formatted invariantly to keep the payload small + stable. Best-effort
+        // (the notifier swallows all faults) so a push hiccup never flips the 201.
+        await _push.NotifyUserAsync(
+            request.ClientId,
+            "New offer",
+            $"A jeeber offered ${created.Fee.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}",
+            new Dictionary<string, string>
+            {
+                ["type"] = "offer",
+                ["requestId"] = requestId,
+                ["offerId"] = created.Id,
+                ["jeeberId"] = created.JeeberId,
+            },
+            ct);
 
         return Created($"/requests/{requestId}/offers/{created.Id}", ToDto(created));
     }

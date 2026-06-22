@@ -23,4 +23,14 @@ public interface IMatchingServiceClient
     /// </summary>
     Task<MatchingServiceMatchesResponse> GetMatchesAsync(
         string userId, int skip, int limit, CancellationToken ct);
+
+    /// <summary>
+    /// iter6 B8: tier-aware find-jeebers via matching-service
+    /// <c>POST /api/v1/matching/find-jeebers</c>. When
+    /// <paramref name="broadcast"/> is true the matched Jeeber set is also
+    /// published to the tier topic (fire-and-forget on the service side).
+    /// Returns the candidate Jeeber list + count for the client coverage label.
+    /// </summary>
+    Task<MatchingFindJeebersUpstreamResponse> FindJeebersAsync(
+        MatchingFindJeebersUpstreamRequest body, CancellationToken ct);
 }

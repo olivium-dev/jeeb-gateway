@@ -89,3 +89,79 @@ public sealed class MatchingUsersResponse
     public required int Skip { get; init; }
     public required int Limit { get; init; }
 }
+
+// ---------------------------------------------------------------------------
+// iter6 B8: tier-aware find-jeebers + broadcast (matching-service FastAPI
+// POST /api/v1/matching/find-jeebers). The mobile waiting screen (JM-025/026,
+// DioOrderBroadcastService) calls the gateway BFF paths:
+//   POST /v1/matching/find-jeebers  -> { count, jeeberIds, ... } (coverage)
+//   POST /v1/matching/broadcast     -> 202 (fire-and-forget fan-out)
+// Without these the request never goes live and the client UI shows "Expired".
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// Wire shape posted to matching-service <c>POST /api/v1/matching/find-jeebers</c>.
+/// The service requires exactly one tier identifier (<c>tier_id</c> OR
+/// <c>tier_name</c>) plus an origin; <c>broadcast=true</c> publishes the matched
+/// Jeeber list to the tier topic, <c>false</c> returns the candidate set only.
+/// </summary>
+public sealed class MatchingFindJeebersUpstreamRequest
+{
+    [System.Text.Json.Serialization.JsonPropertyName("request_id")]
+    public string? RequestId { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_name")]
+    public string? TierName { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("origin_latitude")]
+    public double OriginLatitude { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("origin_longitude")]
+    public double OriginLongitude { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("broadcast")]
+    public bool Broadcast { get; set; }
+}
+
+/// <summary>
+/// Wire shape returned by matching-service <c>find-jeebers</c>
+/// (mirrors the Python <c>FindJeebersResponse</c> Pydantic model — snake_case).
+/// </summary>
+public sealed class MatchingFindJeebersUpstreamResponse
+{
+    [System.Text.Json.Serialization.JsonPropertyName("request_id")]
+    public string? RequestId { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_name")]
+    public string? TierName { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("radius_km")]
+    public double RadiusKm { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("jeeber_ids")]
+    public List<string> JeeberIds { get; set; } = [];
+
+    [System.Text.Json.Serialization.JsonPropertyName("match_count")]
+    public int MatchCount { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("broadcast_topic")]
+    public string? BroadcastTopic { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("broadcast_published")]
+    public bool BroadcastPublished { get; set; }
+}
+
+/// <summary>
+/// Gateway BFF result for <c>POST /v1/matching/find-jeebers</c>. The mobile
+/// client reads <see cref="Count"/> verbatim for the coverage label; the other
+/// fields drive the ops/no-coverage variants.
+/// </summary>
+public sealed class FindJeebersResponse
+{
+    public required int Count { get; init; }
+    public required IReadOnlyList<string> JeeberIds { get; init; }
+    public string? RequestId { get; init; }
+    public string? Tier { get; init; }
+    public double RadiusKm { get; init; }
+    public bool BroadcastPublished { get; init; }
+}

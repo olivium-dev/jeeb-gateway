@@ -135,6 +135,21 @@ public interface IRequestsStore
     Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct);
 
     /// <summary>
+    /// iter6 (jeeber active-delivery): jeeber-scoped read of every request
+    /// ASSIGNED to <paramref name="jeeberId"/> (i.e. <see cref="DeliveryRequest.JeeberId"/>
+    /// equals it), newest-relevant first. Backs the jeeber's accepted/active
+    /// deliveries surface — <c>GET /v1/deliveries?role=jeeber</c> and
+    /// <c>GET /v1/requests?role=jeeber</c> — which previously degraded to empty
+    /// because only <see cref="ListForClientAsync"/> (owner-scoped, WHERE
+    /// ClientId = ?) existed, so a jeeber (never the client of their assigned
+    /// jobs) saw nothing. Returns an empty list — never null — when the jeeber
+    /// has no assigned rows. The production Postgres store replaces this with a
+    /// "WHERE jeeber_id = ?" query; the BFF migration target implements the same
+    /// shape so the controller stays storage-agnostic.
+    /// </summary>
+    Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct);
+
+    /// <summary>
     /// BR-10 (T-backend-039): counts the requests where
     /// <see cref="DeliveryRequest.JeeberId"/> equals <paramref name="jeeberId"/>
     /// and the status is in <see cref="RequestStatus.JeeberActiveStates"/>

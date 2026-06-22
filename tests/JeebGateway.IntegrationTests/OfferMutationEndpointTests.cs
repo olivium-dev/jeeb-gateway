@@ -335,6 +335,12 @@ public class OfferMutationEndpointTests
     /// </summary>
     private sealed class FakeOfferMutationClient : IOfferServiceClient
     {
+
+        // offerlist-fix: GET-offers list seam. These fakes exercise the
+        // accept/mutation paths, not listing — return empty.
+        public Task<IReadOnlyList<OfferWire>> ListForRequestAsync(
+            string actingUserId, string requestId, CancellationToken ct)
+            => Task.FromResult<IReadOnlyList<OfferWire>>(System.Array.Empty<OfferWire>());
         public OfferMutationResult? EditResult { get; init; }
         public OfferMutationResult? RejectResult { get; init; }
 

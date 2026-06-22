@@ -215,6 +215,16 @@ public sealed class RequestOffersSeatTests
             });
         }
 
+        public Task<JeebConversationResponse> GetConversationByIdAsync(
+            string conversationId, CancellationToken ct)
+            => Task.FromResult(new JeebConversationResponse
+            {
+                ConversationId = conversationId,
+                CorrelationKey = conversationId,
+                Phase = "broadcasting",
+                Participants = new List<JeebConversationParticipant>(),
+            });
+
         public Task<JeebConversationParticipant> AddParticipantAsync(
             string conversationId, AddJeebParticipantRequest request, CancellationToken ct)
         {

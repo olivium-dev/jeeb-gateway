@@ -35,7 +35,8 @@ public sealed class IdempotencyMiddleware
 
     public async Task InvokeAsync(HttpContext context, IIdempotencyStore store)
     {
-        if (!ShouldApply(context, out var key))
+        var key = await ResolveKeyAsync(context);
+        if (key is null)
         {
             await _next(context);
             return;
@@ -108,24 +109,72 @@ public sealed class IdempotencyMiddleware
         await originalBody.WriteAsync(bodyBytes, context.RequestAborted);
     }
 
-    private static bool ShouldApply(HttpContext context, out string? key)
+    private static async Task<string?> ResolveKeyAsync(HttpContext context)
     {
-        key = null;
-        if (!MutatingMethods.Contains(context.Request.Method)) return false;
-        if (!context.Request.Headers.TryGetValue(HeaderName, out var values)) return false;
+        if (!MutatingMethods.Contains(context.Request.Method)) return null;
+        if (!context.Request.Headers.TryGetValue(HeaderName, out var values)) return null;
 
         var candidate = values.ToString();
-        if (string.IsNullOrWhiteSpace(candidate) || candidate.Length > MaxKeyLength) return false;
+        if (string.IsNullOrWhiteSpace(candidate) || candidate.Length > MaxKeyLength) return null;
 
-        // Scope the key by method+path so the same client key on two different
-        // endpoints cannot collide — but the persisted key must be SLASH-FREE
-        // because the state-service exposes GET /idempotency/{key} and a raw
-        // request path ("/prohibited-items/scan") would break path routing.
-        // We therefore hash the {method}:{path} scope into a compact, URL-safe
-        // prefix and append the client-supplied key.
-        var scope = ScopeHash($"{context.Request.Method}:{context.Request.Path}");
-        key = $"{scope}.{candidate}";
-        return true;
+        // Scope the key by method+path AND a hash of the request BODY so the same
+        // client key cannot collide across endpoints OR across DISTINCT payloads.
+        // The persisted key must be SLASH-FREE (the state-service exposes
+        // GET /idempotency/{key}), so we hash {method}:{path}:{sha256(body)} into a
+        // compact, URL-safe prefix and append the client-supplied key.
+        //
+        // WHY BODY-AWARE (iter6 chat burst-persistence fix): the mobile chat
+        // composer mints `Idempotency-Key: msg-<conversationId>-<counter>` where the
+        // counter is a PER-CUBIT-INSTANCE value that restarts at 0 on every chat
+        // (re)open / socket reconnect and is NOT namespaced by sender. So under
+        // rapid two-way sending the SAME client key recurs for DISTINCT messages
+        // (client #i vs jeeber #i on one conversation, or the same author after a
+        // reset). With a body-blind key this middleware replayed the FIRST message's
+        // cached 201 for the second DISTINCT send WITHOUT invoking the controller —
+        // the app saw an optimistic 201 but the message never persisted or fanned
+        // out (the intermittent 'accepted-but-not-durable' loss). Folding the body
+        // hash in makes a genuine double-tap (identical body + key) still collapse
+        // to exactly one effect, while a distinct payload always executes.
+        var bodyHash = await HashRequestBodyAsync(context);
+        var scope = ScopeHash($"{context.Request.Method}:{context.Request.Path}:{bodyHash}");
+        return $"{scope}.{candidate}";
+    }
+
+    /// <summary>
+    /// Compute a stable SHA-256 (hex) of the request body, leaving the body fully
+    /// re-readable by the endpoint. <see cref="HttpRequest.EnableBuffering"/> rewinds
+    /// the stream so MVC model-binding reads the same bytes afterwards. An empty or
+    /// unreadable body hashes to a fixed sentinel so body-less mutations (e.g. a
+    /// DELETE) keep their prior method+path scoping behaviour.
+    /// </summary>
+    private static async Task<string> HashRequestBodyAsync(HttpContext context)
+    {
+        try
+        {
+            context.Request.EnableBuffering();
+            var stream = context.Request.Body;
+            stream.Position = 0;
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            var buffer = new byte[8192];
+            int read;
+            var any = false;
+            while ((read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), context.RequestAborted)) > 0)
+            {
+                any = true;
+                sha.TransformBlock(buffer, 0, read, null, 0);
+            }
+            stream.Position = 0; // rewind so the endpoint re-reads the same body
+            if (!any) return "empty";
+            sha.TransformFinalBlock(System.Array.Empty<byte>(), 0, 0);
+            return System.Convert.ToHexString(sha.Hash!);
+        }
+        catch
+        {
+            // Never let body hashing break the request; fall back to a fixed token
+            // (degrades to the prior method+path-scoped behaviour for this request).
+            try { context.Request.Body.Position = 0; } catch { /* best-effort */ }
+            return "nohash";
+        }
     }
 
     private static string ScopeHash(string scope)

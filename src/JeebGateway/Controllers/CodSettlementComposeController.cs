@@ -4,6 +4,7 @@ using JeebGateway.Financials.Cod;
 using JeebGateway.Tracking;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 namespace JeebGateway.Controllers;
 
@@ -35,15 +36,185 @@ public sealed class CodSettlementComposeController : ControllerBase
     private readonly IUnifiedPaymentCodClient _upg;
     private readonly ISettlementService _settlements;
     private readonly IDeliveryParticipantResolver _participants;
+    private readonly ISettlementStore _settlementStore;
+    private readonly TimeProvider _clock;
+    private readonly ILogger<CodSettlementComposeController> _log;
 
     public CodSettlementComposeController(
         IUnifiedPaymentCodClient upg,
         ISettlementService settlements,
-        IDeliveryParticipantResolver participants)
+        IDeliveryParticipantResolver participants,
+        ISettlementStore settlementStore,
+        TimeProvider clock,
+        ILogger<CodSettlementComposeController> log)
     {
         _upg = upg;
         _settlements = settlements;
         _participants = participants;
+        _settlementStore = settlementStore;
+        _clock = clock;
+        _log = log;
+    }
+
+    /// <summary>
+    /// POST /v1/payments/cod_jeeb/record — the MOBILE post-delivery "Confirm
+    /// receipt" gate (DioDeliveryReceiptRepository.confirmReceipt). The mobile
+    /// client posts <c>{ deliveryId, jeeberId?, amount:{value,currency} }</c> and
+    /// only needs a 2xx to advance to the star-rating UI; it then transitions the
+    /// delivery to Done.
+    ///
+    /// DEGRADE-DON'T-FAIL / UPG-GATED (iter6 GAP B). The cash-settlement ledger
+    /// post THROUGH unified_payment_gateway (UPG) is OWNER-GATED and NOT deployed
+    /// (FeatureFlags:UseUpstream:Payments=false; Services:UnifiedPayment:ApiKey is
+    /// not injected; UPG's COD routes 401/404). UPG must NOT be modified. So this
+    /// route records the COD intent on the gateway's OWN settlement ledger
+    /// (idempotent on deliveryId, cod_state=recorded — identical to the post-OTP
+    /// EnqueueCodSettlementIntentAsync placeholder) and returns 200. A real user
+    /// can therefore rate after a completed delivery WITHOUT a hard 404 block. When
+    /// UPG's JEB-1484 PR ships + Payments flips on, the canonical
+    /// POST /api/v1/payments/cod/record route fronts UPG verbatim; this best-effort
+    /// recorder remains a safe, never-5xx fallback.
+    /// </summary>
+    [HttpPost("v1/payments/cod_jeeb/record")]
+    [RequireCapability(Capabilities.DeliveryParticipate)] // {client, jeeber}; party/admin is STATE in-action
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> RecordCodJeeb(
+        [FromBody] CodJeebRecordBody? body, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+        if (body is null || string.IsNullOrWhiteSpace(body.DeliveryId))
+            return BadRequest(Problem("cod-record-body-required", "deliveryId is required."));
+
+        var deliveryId = body.DeliveryId!;
+        var now = _clock.GetUtcNow();
+
+        // Idempotent replay: a COD intent already recorded for this delivery (e.g.
+        // the post-OTP enqueue, or a confirm-receipt retry) is a no-op 200.
+        Settlement? existing = null;
+        try
+        {
+            existing = await _settlementStore.GetByDeliveryAsync(deliveryId, ct);
+        }
+        catch (Exception ex)
+        {
+            // A store read blip must never hard-block the rating gate — log + treat
+            // as "not recorded yet" and try to insert below (still best-effort).
+            _log.LogWarning(ex,
+                "COD-record (mobile): settlement read for deliveryId={DeliveryId} failed; proceeding best-effort.",
+                deliveryId);
+        }
+
+        if (existing is not null)
+        {
+            // Authorize against the recorded parties; admin always allowed.
+            var isPartyExisting =
+                string.Equals(existing.JeeberId, userId, StringComparison.Ordinal)
+                || string.Equals(existing.ClientId, userId, StringComparison.Ordinal);
+            if (!isPartyExisting && !UserIdentity.IsAdmin(HttpContext))
+                return Forbidden();
+
+            return Ok(new
+            {
+                deliveryId = existing.DeliveryId,
+                jeeberId = existing.JeeberId,
+                clientId = existing.ClientId,
+                cod_state = existing.CodState,
+                currency = existing.Currency,
+                recorded = true,
+                replay = true,
+            });
+        }
+
+        // No row yet — resolve the delivery parties so we can (a) authorize the
+        // caller and (b) stamp the jeeber/client on the intent. The settlement row
+        // is the strongest source; fall back to the participant resolver.
+        string? clientId = null;
+        string? jeeberId = body.JeeberId;
+        try
+        {
+            var participants = await _participants.ResolveAsync(deliveryId, ct);
+            if (participants is not null)
+            {
+                clientId = participants.ClientId;
+                if (string.IsNullOrWhiteSpace(jeeberId)) jeeberId = participants.JeeberId;
+
+                if (!participants.IsParty(userId) && !UserIdentity.IsAdmin(HttpContext))
+                    return Forbidden();
+            }
+            // When the resolver can't resolve the delivery (transient / unknown to
+            // this instance) we do NOT 403 a legitimately authenticated participant
+            // out of the rating flow — we proceed and record what we know. Party
+            // authorization already passed the capability gate ({client,jeeber}).
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "COD-record (mobile): party resolve for deliveryId={DeliveryId} failed; recording intent best-effort.",
+                deliveryId);
+        }
+
+        // Record the COD intent on the gateway's OWN ledger (idempotent on
+        // deliveryId). Mirrors DeliveriesController.EnqueueCodSettlementIntentAsync:
+        // GoodsCost/commission are 0 here (declared at settle time); cod_state=recorded.
+        try
+        {
+            var intent = new Settlement
+            {
+                Id                = Guid.NewGuid().ToString(),
+                DeliveryId        = deliveryId,
+                JeeberId          = jeeberId ?? string.Empty,
+                ClientId          = clientId ?? string.Empty,
+                TierId            = string.Empty,
+                GoodsCost         = 0m,
+                CommissionTier    = CommissionCalculator.ResolveTier(null),
+                CommissionRate    = 0m,
+                Commission        = 0m,
+                Insurance         = 0m,
+                Total             = 0m,
+                MinimumFeeApplied = false,
+                Currency          = string.IsNullOrWhiteSpace(body.Amount?.Currency)
+                                        ? SettlementService.CurrencyLbp
+                                        : body.Amount!.Currency!,
+                PaymentMethod     = SettlementService.PaymentMethodCash,
+                State             = SettlementState.PendingSettlement,
+                CodState          = CodSettlementState.Recorded,
+                SettledAt         = now,
+            };
+
+            var (row, _) = await _settlementStore.TryInsertAsync(intent, ct);
+            _log.LogInformation(
+                "COD-record (mobile): recorded COD intent deliveryId={DeliveryId} jeeberId={JeeberId} (UPG owner-gated; gateway-ledger fallback).",
+                deliveryId, row.JeeberId);
+
+            return Ok(new
+            {
+                deliveryId = row.DeliveryId,
+                jeeberId = row.JeeberId,
+                clientId = row.ClientId,
+                cod_state = row.CodState,
+                currency = row.Currency,
+                recorded = true,
+                replay = false,
+            });
+        }
+        catch (Exception ex)
+        {
+            // Even a store-insert failure must NOT hard-block the rating UI. The
+            // customer has already received the goods; surface a soft 200 so the
+            // mobile proceeds to Done + rating (the intent reconciles at settle).
+            _log.LogError(ex,
+                "COD-record (mobile): intent insert for deliveryId={DeliveryId} failed; returning soft-200 so rating is not blocked.",
+                deliveryId);
+            return Ok(new
+            {
+                deliveryId,
+                recorded = false,
+                degraded = true,
+            });
+        }
     }
 
     /// <summary>
@@ -187,5 +358,24 @@ public sealed class CodSettlementComposeController : ControllerBase
     public sealed class CodRecordBody
     {
         public string? DeliveryId { get; set; }
+    }
+
+    /// <summary>
+    /// POST /v1/payments/cod_jeeb/record body (mobile confirm-receipt). The mobile
+    /// posts <c>{ deliveryId, jeeberId?, amount:{value,currency} }</c>; only
+    /// deliveryId is required, the rest is advisory metadata.
+    /// </summary>
+    public sealed class CodJeebRecordBody
+    {
+        public string? DeliveryId { get; set; }
+        public string? JeeberId { get; set; }
+        public CodJeebAmount? Amount { get; set; }
+    }
+
+    /// <summary>The mobile money object <c>{ value, currency }</c>.</summary>
+    public sealed class CodJeebAmount
+    {
+        public decimal? Value { get; set; }
+        public string? Currency { get; set; }
     }
 }
