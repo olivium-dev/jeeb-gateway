@@ -949,8 +949,10 @@ else
     builder.Services.AddSingleton<INotificationPreferencesStore, InMemoryNotificationPreferencesStore>();
 }
 
-// WS-02 — Saved Locations BFF (ACCT-04 / REQ-02). Net-new, gateway-thin, in-memory store.
-builder.Services.AddSavedLocations();
+// WS-02 — Saved Locations BFF (ACCT-04 / REQ-02). DURABLE when GatewayPostgres
+// is configured (PostgresSavedLocationStore, saved_locations table 0016) — saved
+// addresses survive a gateway restart; in-memory fallback for dev/CI.
+builder.Services.AddSavedLocations(gatewayPostgresCs);
 
 // Push notification pipeline (T-backend-022).
 //
