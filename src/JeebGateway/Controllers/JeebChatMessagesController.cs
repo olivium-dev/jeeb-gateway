@@ -270,12 +270,40 @@ public sealed class JeebChatMessagesController : ControllerBase
         // forward null (chat-service then skips de-dupe, prior behaviour).
         var idempotencyKey = DeriveDurableIdempotencyKey(authorId, kind, flatBody, clientIdempotencyKey);
 
+        // FIX (iter6 chat-link): post-accept the conversation is a 1:1 client↔winner
+        // channel, so BOTH parties must see EVERY message. chat-service's
+        // MessageVisibilityResolver puts a "restricted" participant (the jeeber, role
+        // jeeber_winner) in a private lane: it sees only its OWN message + explicit
+        // broadcasts (audience=="all") + system kinds. A plain client text message has
+        // no audience → the winner never sees it (one-sided chat). While the
+        // conversation is BROADCASTING (competitive bidding) that privacy is correct;
+        // once ACCEPTED it is wrong. So when the phase is "accepted" we stamp
+        // audience="all" on outbound messages — both the client and the seated winner
+        // then see them. DEGRADE-DON'T-FAIL: a phase-read blip leaves audience unset
+        // (pre-accept semantics), never blocking the send.
+        JsonElement? audience = null;
+        try
+        {
+            var phaseConvo = await _client.GetConversationByIdAsync(conversationId, ct);
+            if (string.Equals(phaseConvo?.Phase, "accepted", StringComparison.OrdinalIgnoreCase))
+            {
+                audience = JsonSerializer.SerializeToElement("all");
+            }
+        }
+        catch (Exception phaseEx)
+        {
+            _logger.LogWarning(phaseEx,
+                "Chat send: phase read for conversation {ConversationId} failed; sending without an explicit audience (pre-accept semantics).",
+                conversationId);
+        }
+
         try
         {
             var created = await _client.AppendMessageAsync(conversationId, new AppendJeebMessageRequest
             {
                 Kind = kind,
                 Body = flatBody,
+                Audience = audience,
                 // SECURITY: author is the bearer sub, NEVER the body senderId.
                 AuthorId = authorId,
                 IdempotencyKey = idempotencyKey,

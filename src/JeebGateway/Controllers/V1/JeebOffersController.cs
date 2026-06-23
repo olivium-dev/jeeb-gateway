@@ -371,12 +371,79 @@ public sealed class JeebOffersController : ControllerBase
         var mintReason = await TryMintDeliveryAsync(requestId, winningJeeberId, mintClientId, mintRow, ct);
         var minted = mintReason is null;
 
-        // (3) Advance the broadcasting conversation: add the winning jeeber, drop
-        // losers. The provisioner is the SOLE chat caller and degrades to null on any
-        // chat blip, so this never blocks the accept. DEGRADE-DON'T-FAIL (cosmetic to
-        // the order chain — the mint above is what the chain depends on).
+        // (3) Resolve — and if necessary CREATE — the aggregate conversation, then
+        // SEAT the winning jeeber into it. DEGRADE-DON'T-FAIL (cosmetic to the order
+        // chain — the mint above is what the chain depends on).
+        //
+        // FIX (iter6 chat-link): the conversation is created LAZILY by whichever party
+        // opens the chat first (POST /v1/chat/jeeb/conversations, owner=client). When a
+        // jeeber offers and the client accepts BEFORE the client has opened the chat,
+        // NO conversation exists yet, so SeatOfferingJeeberAsync (offer-submit) skipped
+        // seating AND this read-only resolve returned null — the jeeber was never a
+        // member and the phase never advanced. The client then lazily created a
+        // client-only conversation: the two shared the conversation_id (chat-service
+        // keys by correlation_key == requestId) but the jeeber read 403 not_in_membership
+        // and the phase stayed "broadcasting" → broken two-sided chat. Accept is the
+        // moment BOTH the request owner and the winning jeeber are known, so accept now
+        // create-or-gets the conversation (idempotent on correlation_key == requestId,
+        // INV-3 — a replay returns the SAME id, never a duplicate) and explicitly seats
+        // the winner. This makes accept self-sufficient regardless of who opened the
+        // chat first; re-seating an already-seated jeeber is a chat-service no-op.
         var conversationId = synced?.ConversationId
             ?? (await SafeGetConversationIdAsync(requestId, ct));
+
+        if (_flags.Chat && string.IsNullOrWhiteSpace(conversationId))
+        {
+            try
+            {
+                var convo = await _conversationAggregate.CreateConversationAsync(
+                    new CreateJeebConversationRequest
+                    {
+                        RequestId = requestId,            // == correlation_key (idempotency authority)
+                        ClientUserId = acceptingClientId, // the request-owning client seats as owner
+                    },
+                    ct);
+                conversationId = convo?.ConversationId;
+                _logger.LogInformation(
+                    "B5 post-accept for request {RequestId}: create-or-got the aggregate conversation {ConversationId} so the winning jeeber can be seated (no conversation existed at accept time).",
+                    requestId, conversationId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "B5 post-accept conversation create-or-get for request {RequestId} failed; the winning jeeber may need to re-resolve membership.",
+                    requestId);
+            }
+        }
+
+        // Seat the winning jeeber as a member of the (now-existing) aggregate
+        // conversation so it can READ (200, not 403 not_in_membership) and the
+        // two-sided chat works. Idempotent on the chat-service side (re-seating the
+        // same user is a no-op); the phase advance below promotes it to jeeber_winner.
+        if (_flags.Chat && !string.IsNullOrWhiteSpace(conversationId)
+            && !string.IsNullOrWhiteSpace(winningJeeberId))
+        {
+            try
+            {
+                await _conversationAggregate.AddParticipantAsync(
+                    conversationId,
+                    new AddJeebParticipantRequest
+                    {
+                        UserId = winningJeeberId,
+                        RoleInConvo = "jeeber_winner",
+                    },
+                    ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "B5 post-accept seat-winner {JeeberId} on conversation {ConversationId} (request {RequestId}) failed; the phase advance below may still seat/promote it.",
+                    winningJeeberId, conversationId, requestId);
+            }
+        }
+
+        // Legacy channels-store advance (separate store from the aggregate above; kept
+        // for the channels surface). DEGRADE-DON'T-FAIL.
         try
         {
             await _conversations.AdvanceToAcceptedAsync(
