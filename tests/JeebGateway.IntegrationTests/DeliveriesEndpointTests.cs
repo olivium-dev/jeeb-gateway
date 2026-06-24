@@ -863,6 +863,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         public Task<JeeberAvailabilityUpstream?> GetAvailabilityAsync(string jeeberId, CancellationToken ct) => throw new NotSupportedException();
         public Task<JeeberAvailabilityUpstream> HeartbeatAsync(string jeeberId, double lat, double lng, CancellationToken ct) => throw new NotSupportedException();
         public Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct) => throw new NotSupportedException();
+        public Task<JeeberFeedResult> GetJeeberFeedAsync(string jeeberId, int? limit, CancellationToken ct) => throw new NotSupportedException();
     }
 
     /// <summary>

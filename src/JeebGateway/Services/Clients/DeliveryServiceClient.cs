@@ -370,6 +370,33 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         return body.ActiveCount;
     }
 
+    /// <inheritdoc />
+    public async Task<JeeberFeedResult> GetJeeberFeedAsync(string jeeberId, int? limit, CancellationToken ct)
+    {
+        // Jeeber pull feed — the inverse of /matching/run. GET (read-only, never
+        // mutates) /api/v1/jeebers/{id}/feed?limit=N. snake_case response (Go)
+        // bound via the DTO's explicit [JsonPropertyName] under the shared
+        // web-default options (mirrors GetAvailabilityAsync + RunMatchingAsync).
+        var path = $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/feed";
+        if (limit is int n)
+        {
+            path += $"?limit={n}";
+        }
+
+        using var response = await _http.GetAsync(path, ct);
+
+        // A 404 (jeeber never went online / no presence row) maps to an empty feed
+        // so the controller surfaces [] rather than a 500 — same degrade posture as
+        // GetAvailabilityAsync's never-online default.
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return new JeeberFeedResult { JeeberId = jeeberId };
+        }
+
+        response.EnsureSuccessStatusCode();
+        return await DeserializeAsync<JeeberFeedResult>(response, ct);
+    }
+
     private static async Task<T> DeserializeAsync<T>(HttpResponseMessage response, CancellationToken ct)
     {
         var payload = await response.Content.ReadFromJsonAsync<T>(JsonOptions, ct);
