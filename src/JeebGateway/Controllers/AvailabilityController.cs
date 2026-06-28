@@ -44,6 +44,14 @@ namespace JeebGateway.Controllers;
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("jeebers/me/availability")]
+// GAP-1 (sprint-002, contract-freeze §2 / §2.5): ADDITIVE v1 alias so the mobile
+// app's PUT/GET /v1/jeebers/me/availability resolves. It previously 404'd because
+// the app calls the v1-prefixed path with PUT, while the gateway only registered
+// the un-prefixed path with PATCH. Both [Route]s + both verbs (PUT canonical,
+// PATCH back-compat) funnel into the SAME PatchCore — a non-breaking alias, not a
+// route move. The 13 existing AvailabilityEndpointTests on the un-prefixed path
+// stay green. PUT is the canonical frozen surface (contract-freeze §2.5).
+[Route("v1/jeebers/me/availability")]
 // ADR-005 L2 §D jeeber-only: class-level (both read + toggle of own availability are jeeber-typed).
 // Replaces class-level [RequireRole(Roles.Jeeber)].
 [RequireCapability(Capabilities.AvailabilityToggle)]
@@ -111,6 +119,9 @@ public class AvailabilityController : ControllerBase
         return Ok(response);
     }
 
+    // GAP-1 (sprint-002): the mobile app sends PUT; keep PATCH for any existing
+    // consumer. Both verbs map to the same PatchCore() — additive, no behaviour change.
+    [HttpPut]
     [HttpPatch]
     [ProducesResponseType(typeof(AvailabilityResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]

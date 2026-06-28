@@ -81,6 +81,8 @@ public static class CapabilityRolePolicy
 
             // D. Jeeber-only {jeeber}
             [Capabilities.AvailabilityToggle] = JeeberOnly,
+            // GAP-2 (sprint-002): the jeeber request-discovery feed is jeeber-only.
+            [Capabilities.JeeberFeedRead] = JeeberOnly,
             [Capabilities.OfferSubmit] = JeeberOnly,
             [Capabilities.OfferEditOwn] = JeeberOnly,           // STATE
             [Capabilities.OfferWithdraw] = JeeberOnly,          // STATE

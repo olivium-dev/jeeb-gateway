@@ -48,6 +48,12 @@ public static class Capabilities
 
     // ── D. Jeeber-only {jeeber} ───────────────────────────────────────────────────────
     public const string AvailabilityToggle = "availability.toggle";
+    // GAP-2 (sprint-002, contract-freeze §3): the jeeber's request-discovery feed
+    // (GET /v1/jeebers/me/feed). Jeeber-only — a client never reads the jeeber feed.
+    // Own-scoped: the feed surfaces pending requests an ONLINE jeeber can act on
+    // (online + status=pending + clientId != jeeberId); the row visibility is the
+    // §1 projection predicate, not an L2 STATE rule.
+    public const string JeeberFeedRead = "jeeber.feed.read";
     // Submitting an offer (bid) on a client's request is a JEEBER action; accepting is not
     // (see offer.accept in the client-only group below).
     public const string OfferSubmit = "offer.submit";

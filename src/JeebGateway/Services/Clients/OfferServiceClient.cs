@@ -375,6 +375,101 @@ public sealed class OfferServiceClient : IOfferServiceClient
         }
     }
 
+    public async Task<IReadOnlyList<JeeberFeedOffer>> ListOffersForJeeberAsync(
+        string jeeberId,
+        string? status,
+        CancellationToken ct)
+    {
+        // GAP-2 (contract-freeze §4): GET /api/v1/jeebers/{jeeberId}/offers — the jeeber's own
+        // offers, used by the feed ONLY to annotate myOffer. offer-service requires the
+        // x-user-id header to EQUAL the path :jeeber_id (else 403), so both are the jeeber's sub.
+        // The "api/v1/" prefix is REQUIRED (BaseAddress = Services:Offer:BaseUrl is host:port, no path).
+        try
+        {
+            var path = $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/offers";
+            if (!string.IsNullOrWhiteSpace(status))
+            {
+                path += $"?status={Uri.EscapeDataString(status!)}";
+            }
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, path);
+            SetUser(request, jeeberId); // x-user-id == path :jeeber_id
+
+            using var response = await _http.SendAsync(request, ct);
+
+            // DEGRADE-DON'T-FAIL (contract-freeze §3.6): any non-2xx (incl. 403 id-mismatch,
+            // 404, 5xx) yields an EMPTY annotation set so the feed still returns its pending
+            // requests with myOffer:null — a feed read must never 5xx on an offer-service blip.
+            if (!response.IsSuccessStatusCode)
+            {
+                return Array.Empty<JeeberFeedOffer>();
+            }
+
+            var wires = await ReadFeedOffersAsync(response, ct);
+            return wires
+                .Where(w => !string.IsNullOrEmpty(w.Id) && !string.IsNullOrEmpty(w.RequestId))
+                .Select(w => new JeeberFeedOffer
+                {
+                    OfferId = w.Id!,
+                    RequestId = w.RequestId!,
+                    Status = w.Status ?? string.Empty,
+                    FeeCents = w.FeeCents,
+                    EtaMinutes = w.EtaMinutes,
+                    Note = w.Note,
+                    CreatedAt = w.CreatedAt,
+                })
+                .ToList();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw; // a genuine caller cancellation propagates, not a degrade case
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or NotSupportedException or OperationCanceledException)
+        {
+            // Transport / decode / timeout blip → empty annotation (myOffer degrades to null).
+            return Array.Empty<JeeberFeedOffer>();
+        }
+    }
+
+    /// <summary>
+    /// Tolerant decode of the offer-service jeeber-offers response. Contract §4.2 is a BARE JSON
+    /// array; a <c>{data|offers|items:[...]}</c> envelope is also accepted additively so a future
+    /// upstream wrap does not silently empty the annotation. Snake_case fields map via
+    /// <see cref="JsonOptions"/>.
+    /// </summary>
+    private static async Task<IReadOnlyList<FeedOfferWire>> ReadFeedOffersAsync(
+        HttpResponseMessage response, CancellationToken ct)
+    {
+        var json = await response.Content.ReadAsStringAsync(ct);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return Array.Empty<FeedOfferWire>();
+        }
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        JsonElement array;
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            array = root;
+        }
+        else if (root.ValueKind == JsonValueKind.Object
+                 && (root.TryGetProperty("data", out array)
+                     || root.TryGetProperty("offers", out array)
+                     || root.TryGetProperty("items", out array))
+                 && array.ValueKind == JsonValueKind.Array)
+        {
+            // 'array' bound to the envelope's array property.
+        }
+        else
+        {
+            return Array.Empty<FeedOfferWire>();
+        }
+
+        return array.Deserialize<List<FeedOfferWire>>(JsonOptions) ?? new List<FeedOfferWire>();
+    }
+
     private static async Task<OfferMutationResult> MutationNegativeAsync(
         OfferMutationStatus status, HttpResponseMessage response, CancellationToken ct)
         => new() { Status = status, UpstreamCode = await ReadErrorCodeAsync(response, ct) };
@@ -468,6 +563,18 @@ public sealed class OfferServiceClient : IOfferServiceClient
         [JsonPropertyName("request_id")] public string RequestId { get; init; } = string.Empty;
         [JsonPropertyName("client_id")] public string ClientId { get; init; } = string.Empty;
         [JsonPropertyName("status")] public string Status { get; init; } = "open";
+    }
+
+    /// <summary>GAP-2 — the jeeber-offers feed serializer wire shape (contract-freeze §4.2).</summary>
+    private sealed class FeedOfferWire
+    {
+        [JsonPropertyName("id")] public string? Id { get; init; }
+        [JsonPropertyName("request_id")] public string? RequestId { get; init; }
+        [JsonPropertyName("fee_cents")] public long FeeCents { get; init; }
+        [JsonPropertyName("eta_minutes")] public int EtaMinutes { get; init; }
+        [JsonPropertyName("note")] public string? Note { get; init; }
+        [JsonPropertyName("status")] public string? Status { get; init; }
+        [JsonPropertyName("created_at")] public DateTimeOffset? CreatedAt { get; init; }
     }
 
     private sealed class WireOffer

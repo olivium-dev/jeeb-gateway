@@ -159,6 +159,76 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 
+    // ── GAP-1 (sprint-002, contract-freeze §2): the mobile app's canonical surface is
+    // PUT /v1/jeebers/me/availability. It previously 404'd (gateway only had un-prefixed
+    // PATCH). These pin the new route+verb so a regression re-breaks visibly.
+
+    [Fact]
+    public async Task Put_V1_Online_Toggles_Online_And_Returns_200()
+    {
+        var factory = _fixture.Factory();
+        var client = factory.CreateClient();
+        var userId = $"jeeber-{Guid.NewGuid()}";
+        client.DefaultRequestHeaders.Add("X-User-Id", userId);
+        client.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        var resp = await client.PutAsJsonAsync("/v1/jeebers/me/availability", new
+        {
+            online = true,
+            vehicleType = "car",
+            zone = "downtown"
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<AvailabilityBody>();
+        body!.Online.Should().BeTrue();
+        body.VehicleType.Should().Be("car");
+
+        var geo = factory.Services.GetRequiredService<IGeoIndex>();
+        (await geo.ContainsAsync(userId, default)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Put_V1_Offline_Toggles_Offline_And_Returns_200()
+    {
+        var factory = _fixture.Factory();
+        var client = factory.CreateClient();
+        var userId = $"jeeber-{Guid.NewGuid()}";
+        client.DefaultRequestHeaders.Add("X-User-Id", userId);
+        client.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        var goOnline = await client.PutAsJsonAsync("/v1/jeebers/me/availability", new
+        {
+            online = true,
+            vehicleType = "car",
+            zone = "downtown"
+        });
+        goOnline.EnsureSuccessStatusCode();
+
+        var goOffline = await client.PutAsJsonAsync("/v1/jeebers/me/availability", new { online = false });
+
+        goOffline.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await goOffline.Content.ReadFromJsonAsync<AvailabilityBody>();
+        body!.Online.Should().BeFalse();
+
+        var geo = factory.Services.GetRequiredService<IGeoIndex>();
+        (await geo.ContainsAsync(userId, default)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Get_V1_Prefixed_Availability_Returns_200()
+    {
+        var factory = _fixture.Factory();
+        var client = factory.CreateClient();
+        var userId = $"jeeber-{Guid.NewGuid()}";
+        client.DefaultRequestHeaders.Add("X-User-Id", userId);
+        client.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        var resp = await client.GetAsync("/v1/jeebers/me/availability");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
     [Fact]
     public async Task Sweeper_Auto_Offlines_After_30min_Inactivity_And_Sends_Push()
     {
