@@ -34,7 +34,9 @@ public sealed class JeebOffersController : ControllerBase
     private readonly IRequestsStore _requests;
     private readonly IOfferServiceClient _offerService;
     private readonly IOfferRequestIndex _offerRequestIndex;
+    private readonly IDeliveryServiceClient _deliveryService;
     private readonly UpstreamFeatureFlags _flags;
+    private readonly DeliveryClientOptions _deliveryOptions;
     private readonly ILogger<JeebOffersController> _logger;
 
     public JeebOffersController(
@@ -42,14 +44,18 @@ public sealed class JeebOffersController : ControllerBase
         IRequestsStore requests,
         IOfferServiceClient offerService,
         IOfferRequestIndex offerRequestIndex,
+        IDeliveryServiceClient deliveryService,
         IOptions<UpstreamFeatureFlags> flags,
+        IOptions<DeliveryClientOptions> deliveryOptions,
         ILogger<JeebOffersController> logger)
     {
         _offers = offers;
         _requests = requests;
         _offerService = offerService;
         _offerRequestIndex = offerRequestIndex;
+        _deliveryService = deliveryService;
         _flags = flags.Value;
+        _deliveryOptions = deliveryOptions.Value;
         _logger = logger;
     }
 
@@ -151,6 +157,19 @@ public sealed class JeebOffersController : ControllerBase
         CancellationToken ct)
     {
         var req = await _requests.GetAsync(requestId, ct);
+
+        // S07 N7 / BR-10 — DELIVERED-leg sync. The offer-service accept saga owns the
+        // single-winner transition but NOT the delivery row (org no-coupling law:
+        // offer/delivery/chat services never call each other), so the gateway BFF is
+        // the composer that assigns the winning jeeber onto the durable delivery row.
+        // The legacy (Obsolete) OffersController did this; this thin V1 slice (the
+        // route mobile actually calls) must do it too, or the accepted delivery never
+        // counts against the jeeber's active-delivery cap and the next accept of a 3rd
+        // offer is not short-circuited. Mirrors OffersController.OrchestrateAcceptedAsync
+        // (H6c). DEGRADE-DON'T-FAIL: the saga already committed upstream, so any
+        // delivery-service blip here is logged and swallowed — the accept stays 200.
+        await SyncDeliveryLegAsync(req, result.Envelope?.JeeberId, ct);
+
         if (req is not null)
             return Ok(ToRequestDto(req));
 
@@ -163,6 +182,80 @@ public sealed class JeebOffersController : ControllerBase
             jeeberId = result.Envelope?.JeeberId,
             status = "accepted"
         });
+    }
+
+    /// <summary>
+    /// S07 N7 / BR-10 — best-effort post-accept DELIVERED-leg assignment. After the
+    /// offer-service accept saga commits the single-winner transition, the gateway
+    /// (the SOLE cross-service composer) re-POSTs the durable delivery row carrying
+    /// <c>jeeber_id = winningJeeberId</c>. delivery-service upserts the jeeber ONLY
+    /// when the row is still unassigned (<c>WHERE jeeber_id IS NULL</c>, never steals),
+    /// so this is idempotent: it composes cleanly with the create-time matching mirror
+    /// and a retried accept. The row was seeded at request-create time
+    /// (<see cref="JeebGateway.Requests.DurableRequestsStore"/>) with
+    /// <c>deliveryId == requestId</c>, so the same id is reused here.
+    ///
+    /// DEGRADE-DON'T-FAIL: the saga already committed the canonical accept upstream, so
+    /// every failure path (winner unknown, request not locally synced, missing
+    /// tier/pickup, delivery-service fault, cancellation) is logged and swallowed — it
+    /// must NEVER convert a successful accept into a 5xx. No read-back is asserted; this
+    /// is a best-effort assignment mirror, exactly matching
+    /// <see cref="JeebGateway.Controllers.OffersController"/>'s H6c step.
+    /// </summary>
+    private async Task SyncDeliveryLegAsync(
+        DeliveryRequest? request, string? winningJeeberId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(winningJeeberId))
+        {
+            // The upstream envelope omitted the winning jeeber id — never write a blank
+            // jeeber onto the delivery row. Telemetry signal, not a user-facing error.
+            _logger.LogWarning(
+                "Post-accept delivery-leg sync: upstream accept envelope carried no jeeberId; "
+                + "skipping the delivery-row assignment (accept stays 200).");
+            return;
+        }
+
+        // The matching-resolve columns (tier + pickup) are required by the create-row
+        // contract; without a locally-synced request row carrying them there is nothing
+        // to seed. delivery-service remains the authority — the cap visibility is simply
+        // deferred until a path with the full row reconciles it.
+        if (request is null
+            || request.PickupLocation is null
+            || string.IsNullOrWhiteSpace(request.TierId)
+            || string.IsNullOrWhiteSpace(request.Id))
+        {
+            _logger.LogInformation(
+                "Post-accept delivery-leg sync for jeeber {JeeberId}: request row not locally "
+                + "available with tier/pickup; skipping the assignment mirror (accept stays 200).",
+                winningJeeberId);
+            return;
+        }
+
+        try
+        {
+            await _deliveryService.CreateDeliveryRowAsync(new CreateDeliveryRowUpstream
+            {
+                Id = request.Id,
+                TenantId = _deliveryOptions.TenantId,
+                ClientId = request.ClientId,
+                JeeberId = winningJeeberId,
+                TierId = request.TierId!,
+                PickupLat = request.PickupLocation.Lat,
+                PickupLng = request.PickupLocation.Lng,
+            }, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            // Caller cancelled — propagate nothing; the accept response is already shaped.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Post-accept delivery-leg sync for request {RequestId} (jeeber {JeeberId}) failed; "
+                + "accept stays 200 — the delivery will not count toward the jeeber's active-delivery "
+                + "cap until reconciled.",
+                request.Id, winningJeeberId);
+        }
     }
 
     // -----------------------------------------------------------------------
