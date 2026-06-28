@@ -5,6 +5,8 @@ using JeebGateway.Tokens;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using UmServiceClient = JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient;
+using UmApiException = JeebGateway.service.ServiceUserManagement.ApiException;
 
 namespace JeebGateway.Auth.OtpSignIn;
 
@@ -55,6 +57,7 @@ public sealed class AuthOtpController : ControllerBase
     private readonly IPhonePolicy _phonePolicy;
     private readonly IOtpRequestRateLimiter _rateLimiter;
     private readonly IUserManagementDualRoleClient _userManagement;
+    private readonly UmServiceClient _umProfile;
     private readonly ILogger<AuthOtpController> _log;
 
     public AuthOtpController(
@@ -66,6 +69,7 @@ public sealed class AuthOtpController : ControllerBase
         IPhonePolicy phonePolicy,
         IOtpRequestRateLimiter rateLimiter,
         IUserManagementDualRoleClient userManagement,
+        UmServiceClient umProfile,
         ILogger<AuthOtpController> log)
     {
         _otpClient = otpClient;
@@ -76,6 +80,7 @@ public sealed class AuthOtpController : ControllerBase
         _phonePolicy = phonePolicy;
         _rateLimiter = rateLimiter;
         _userManagement = userManagement;
+        _umProfile = umProfile;
         _log = log;
     }
 
@@ -292,6 +297,21 @@ public sealed class AuthOtpController : ControllerBase
                 var um = await _userManagement.PhoneFindOrCreateAsync(phone, ct);
                 var roles = um.AvailableRoles is { Count: > 0 } ? um.AvailableRoles : new[] { Roles.Client };
                 var active = string.IsNullOrWhiteSpace(um.ActiveRole) ? Roles.Client : um.ActiveRole;
+
+                // JEB driver→jeeber projection fix. The shared UM phone-identity endpoint is
+                // IDENTITY-ONLY (JEB-1480) and the role-switch reissue ceremony that used to
+                // inject elevated roles into a fresh session was removed (ADR-004
+                // upgrade-not-switch). Without this read, a user who already holds an elevated
+                // role in user-management (e.g. a Verified jeeber/driver) logs in via OTP and
+                // is minted a CUSTOMER-ONLY session — so GET /v1/users/me relays
+                // available_roles=[client] and the mobile app never routes them to the Jeeber
+                // shell. user-management is the role authority, so we read the user's
+                // AUTHORITATIVE available_roles/active_role from its profile here and bake them
+                // into the session bearer + local projection (the bearer-carries-full-role-set
+                // contract UsersMeController relays). DEGRADE-DON'T-FAIL: a profile blip keeps
+                // the find-or-create defaults so a live OTP login is never hard-broken.
+                (roles, active) = await EnrichRolesFromUmProfileAsync(um.UserId, roles, active, ct);
+
                 return (um.UserId, roles, active);
             }
             catch (UserManagementCallException ex)
@@ -306,6 +326,48 @@ public sealed class AuthOtpController : ControllerBase
         var profile = await _users.GetOrCreateAsync(phone, ct);
         var fallbackActive = string.IsNullOrWhiteSpace(profile.ActiveRole) ? Roles.Client : profile.ActiveRole;
         return (profile.Id, profile.Roles.ToList(), fallbackActive);
+    }
+
+    /// <summary>
+    /// Reads the user's AUTHORITATIVE OPAQUE role set ({customer,driver}) from the shared
+    /// user-management profile (<c>GET api/User/profile/{userId}</c>) and returns it so the
+    /// OTP-login mint embeds the user's FULL role membership in the session bearer + local
+    /// projection — not just the find-or-create default. user-management owns role membership;
+    /// the gateway only reads + (elsewhere) translates it.
+    ///
+    /// DEGRADE-DON'T-FAIL: any profile read failure (UM blip / timeout / 404 for a brand-new
+    /// identity / empty role set) returns the <paramref name="fallbackRoles"/> /
+    /// <paramref name="fallbackActive"/> unchanged. A successful OTP validate must NEVER be
+    /// turned into a 5xx by an enrichment read — the session is still gateway-minted either way.
+    /// </summary>
+    private async Task<(IReadOnlyList<string> roles, string active)> EnrichRolesFromUmProfileAsync(
+        string userId, IReadOnlyList<string> fallbackRoles, string fallbackActive, CancellationToken ct)
+    {
+        try
+        {
+            var profile = await _umProfile.ProfileAsync(userId, ct);
+            var roles = profile?.Available_roles is { Count: > 0 }
+                ? profile.Available_roles.ToList()
+                : fallbackRoles;
+            var active = string.IsNullOrWhiteSpace(profile?.Active_role)
+                ? fallbackActive
+                : profile!.Active_role!;
+            return (roles, active);
+        }
+        catch (UmApiException ex)
+        {
+            _log.LogWarning(
+                "auth.otp.verify UM profile role-enrichment failed (status {Status}) for userId={UserId}; "
+                + "minting session with find-or-create role defaults", ex.StatusCode, userId);
+            return (fallbackRoles, fallbackActive);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "auth.otp.verify UM profile role-enrichment errored for userId={UserId}; "
+                + "minting session with find-or-create role defaults", userId);
+            return (fallbackRoles, fallbackActive);
+        }
     }
 
     /// <summary>
