@@ -178,6 +178,18 @@ public sealed class JeebRequestsController : ControllerBase
                     {
                         RequestId = created.Id,
                         TenantId = _tenantId,
+                        // JEB-1517 / Sprint-003: forward the request pickup + tier
+                        // EXPLICITLY into matching/run. Previously only request_id
+                        // was sent, leaving delivery-service to resolve pickup from
+                        // the seeded row; when that resolve lags or the best-effort
+                        // row seed is absent, matching computed radius from (0,0)
+                        // and returned an empty candidate set. These DTO fields are
+                        // nullable and were null before — purely additive: a
+                        // delivery-service that resolves from the row ignores them,
+                        // one that reads the body now gets the real pickup point.
+                        PickupLat = created.PickupLocation?.Lat,
+                        PickupLng = created.PickupLocation?.Lng,
+                        TierId = created.TierId,
                     }, ct);
                 }
                 catch (Exception ex)

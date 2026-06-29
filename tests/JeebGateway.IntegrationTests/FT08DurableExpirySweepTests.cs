@@ -146,6 +146,10 @@ public class FT08DurableExpirySweepTests
 
     private abstract class BaseStubDeliveryClient : IDeliveryServiceClient
     {
+        // S03: jeeber available-requests feed is not exercised by these tests.
+        public Task<JeeberAvailableRequestsResult> GetAvailableRequestsAsync(string jeeberId, CancellationToken ct)
+            => Task.FromResult(new JeeberAvailableRequestsResult());
+
         public abstract Task<ShipmentsListDto> ListShipmentsAsync(string? orderId, string? stage, int? limit, CancellationToken ct);
         public Task<IReadOnlyList<JeebGateway.Tiers.DeliveryTierDto>> ListTiersAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<JeebGateway.Tiers.DeliveryTierDto>>(Array.Empty<JeebGateway.Tiers.DeliveryTierDto>());
         public Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct) => throw new NotImplementedException();

@@ -233,6 +233,74 @@ public interface IDeliveryServiceClient
     /// otherwise-valid accept; the offer-service Conflict remains the backstop.
     /// </exception>
     Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct);
+
+    /// <summary>
+    /// Jeeber discovery feed (open-broadcast bucket). Reads the geo-filtered set
+    /// of OPEN delivery requests a jeeber may accept from the canonical
+    /// delivery-service endpoint <c>GET /api/v1/jeebers/{id}/available-requests</c>.
+    /// delivery-service owns the bucket definition (status=Ordered + jeeber_id
+    /// NULL + tenant scope + Haversine ≤ 25km of the jeeber's last fix); the
+    /// gateway never re-derives it. Backs <c>GET /v1/requests?status=pending</c>
+    /// when the caller's active role is jeeber — the requester-scoped client path
+    /// is unchanged. Read-only; snake_case item fields (Go) bound via the DTO's
+    /// explicit <see cref="System.Text.Json.Serialization.JsonPropertyName"/>
+    /// attributes under the shared <c>JsonSerializerDefaults.Web</c> options.
+    /// </summary>
+    /// <returns>The open-broadcast envelope; an empty envelope when the jeeber has
+    /// no presence row yet (upstream 404) so a brand-new jeeber sees an empty feed
+    /// rather than a 500.</returns>
+    Task<JeeberAvailableRequestsResult> GetAvailableRequestsAsync(string jeeberId, CancellationToken ct);
+}
+
+/// <summary>
+/// 200 body of delivery-service <c>GET /api/v1/jeebers/{id}/available-requests</c>:
+/// <c>{ items:[{ request_id, pickup_lat, pickup_lng, tier_id, distance_km,
+/// created_at }], page, pageSize, totalCount }</c>. Item fields are
+/// <b>snake_case</b> (Go); the explicit
+/// <see cref="System.Text.Json.Serialization.JsonPropertyName"/> attributes scope
+/// the binding to these DTOs under the shared <c>JsonSerializerDefaults.Web</c>
+/// options without mutating the global naming policy other client methods depend on.
+/// </summary>
+public sealed class JeeberAvailableRequestsResult
+{
+    [System.Text.Json.Serialization.JsonPropertyName("items")]
+    public IReadOnlyList<JeeberAvailableRequestItem> Items { get; init; } = Array.Empty<JeeberAvailableRequestItem>();
+
+    [System.Text.Json.Serialization.JsonPropertyName("page")]
+    public int Page { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pageSize")]
+    public int PageSize { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("totalCount")]
+    public int TotalCount { get; init; }
+}
+
+/// <summary>
+/// One element of the <c>items</c> array in <see cref="JeeberAvailableRequestsResult"/>.
+/// snake_case (Go). Only the matching-resolve columns the feed exposes are bound;
+/// the rich client-facing fields (address, amount, title) are hydrated from the
+/// gateway's own request store in the controller.
+/// </summary>
+public sealed class JeeberAvailableRequestItem
+{
+    [System.Text.Json.Serialization.JsonPropertyName("request_id")]
+    public required string RequestId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup_lat")]
+    public double? PickupLat { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup_lng")]
+    public double? PickupLng { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
+    public string? TierId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("distance_km")]
+    public double? DistanceKm { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("created_at")]
+    public DateTimeOffset? CreatedAt { get; init; }
 }
 
 /// <summary>

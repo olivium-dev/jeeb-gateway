@@ -760,6 +760,10 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
     /// </summary>
     private sealed class FakeDeliveryServiceClient : IDeliveryServiceClient
     {
+        // S03: jeeber available-requests feed is not exercised by these delivery tests.
+        public Task<JeeberAvailableRequestsResult> GetAvailableRequestsAsync(string jeeberId, CancellationToken ct)
+            => Task.FromResult(new JeeberAvailableRequestsResult());
+
         public List<(string DeliveryId, string Status)> StatusTransitionCalls { get; } = new();
 
         // ---- T-BE-019 downstream compose path (flag-on) capture/config ----

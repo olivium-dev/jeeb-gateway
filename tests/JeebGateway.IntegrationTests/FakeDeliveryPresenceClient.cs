@@ -26,6 +26,10 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 internal sealed class FakeDeliveryPresenceClient : IDeliveryServiceClient
 {
+    // S03: jeeber available-requests feed is not exercised by these presence tests.
+    public Task<JeeberAvailableRequestsResult> GetAvailableRequestsAsync(string jeeberId, CancellationToken ct)
+        => Task.FromResult(new JeeberAvailableRequestsResult());
+
     private readonly ConcurrentDictionary<string, JeeberAvailabilityUpstream> _store = new();
 
     public Task<JeeberAvailabilityUpstream> SetAvailabilityAsync(JeeberAvailabilityUpstreamRequest body, string jeeberId, CancellationToken ct)

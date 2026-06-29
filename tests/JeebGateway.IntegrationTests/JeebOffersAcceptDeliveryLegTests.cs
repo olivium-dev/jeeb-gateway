@@ -212,6 +212,10 @@ public class JeebOffersAcceptDeliveryLegTests
     /// </summary>
     private sealed class RecordingDeliveryClient : IDeliveryServiceClient
     {
+        // S03: jeeber available-requests feed is not exercised by these accept tests.
+        public Task<JeeberAvailableRequestsResult> GetAvailableRequestsAsync(string jeeberId, CancellationToken ct)
+            => Task.FromResult(new JeeberAvailableRequestsResult());
+
         public ConcurrentQueue<CreateDeliveryRowUpstream> Calls { get; } = new();
         public bool ThrowOnJeeberAssignment { get; init; }
         public int JeeberAssignmentAttempts { get; private set; }

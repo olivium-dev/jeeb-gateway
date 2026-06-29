@@ -370,6 +370,30 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         return body.ActiveCount;
     }
 
+    /// <inheritdoc />
+    public async Task<JeeberAvailableRequestsResult> GetAvailableRequestsAsync(string jeeberId, CancellationToken ct)
+    {
+        // Jeeber discovery feed: the geo-filtered open-broadcast bucket. Canonical
+        // route GET /api/v1/jeebers/{id}/available-requests. delivery-service owns
+        // the bucket (status=Ordered + jeeber_id NULL + tenant + Haversine ≤ 25km
+        // of the jeeber's last fix); the gateway is a thin BFF. snake_case item
+        // fields (Go) bind via the DTO's explicit [JsonPropertyName] under the
+        // shared web-default options.
+        using var response = await _http.GetAsync(
+            $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/available-requests",
+            ct);
+
+        // A jeeber with no presence row yet has no feed — map the upstream 404 to
+        // an empty envelope so a brand-new jeeber sees an empty list, not a 500.
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return new JeeberAvailableRequestsResult();
+        }
+
+        response.EnsureSuccessStatusCode();
+        return await DeserializeAsync<JeeberAvailableRequestsResult>(response, ct);
+    }
+
     private static async Task<T> DeserializeAsync<T>(HttpResponseMessage response, CancellationToken ct)
     {
         var payload = await response.Content.ReadFromJsonAsync<T>(JsonOptions, ct);

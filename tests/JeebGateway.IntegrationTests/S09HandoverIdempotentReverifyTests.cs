@@ -214,6 +214,10 @@ public class S09HandoverIdempotentReverifyTests
     /// </summary>
     private sealed class ConfigurableDeliveryClient : IDeliveryServiceClient
     {
+        // S03: jeeber available-requests feed is not exercised by these handover tests.
+        public Task<JeeberAvailableRequestsResult> GetAvailableRequestsAsync(string jeeberId, CancellationToken ct)
+            => Task.FromResult(new JeeberAvailableRequestsResult());
+
         /// <summary>Verify-hop outcome: return a result (200) or throw a <see cref="DeliveryHandoverException"/>.</summary>
         public Func<bool, DeliveryHandoverVerifyResult> VerifyOutcome { get; init; }
             = _ => throw new DeliveryHandoverException((int)HttpStatusCode.Conflict, "not_at_door");

@@ -399,6 +399,10 @@ public sealed class DurableRequestsStoreTests
     /// </summary>
     private abstract class NotImplementedDeliveryClient : IDeliveryServiceClient
     {
+        // S03: jeeber available-requests feed is not exercised by these tests.
+        public virtual Task<JeeberAvailableRequestsResult> GetAvailableRequestsAsync(string jeeberId, CancellationToken ct)
+            => throw new NotImplementedException();
+
         public virtual Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct)
             => throw new NotImplementedException();
 

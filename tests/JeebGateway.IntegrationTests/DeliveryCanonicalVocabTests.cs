@@ -264,6 +264,10 @@ public class DeliveryCanonicalVocabTests : IClassFixture<WebApplicationFactory<P
 
     private sealed class RecordingDeliveryClient : IDeliveryServiceClient
     {
+        // S03: jeeber available-requests feed is not exercised by these tests.
+        public Task<JeeberAvailableRequestsResult> GetAvailableRequestsAsync(string jeeberId, CancellationToken ct)
+            => Task.FromResult(new JeeberAvailableRequestsResult());
+
         public List<(string DeliveryId, string To, string PartySource, string ActorId, string ActorRole)> TransitionCalls { get; } = new();
         public List<string> ReadCalls { get; } = new();
         public DeliveryTransitionException? TransitionThrows { get; set; }

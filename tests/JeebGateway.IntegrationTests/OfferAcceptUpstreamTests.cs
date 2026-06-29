@@ -607,6 +607,10 @@ public class OfferAcceptUpstreamTests
     /// </summary>
     private sealed class FakeDeliveryServiceClient : IDeliveryServiceClient
     {
+        // S03: jeeber available-requests feed is not exercised by these accept tests.
+        public Task<JeeberAvailableRequestsResult> GetAvailableRequestsAsync(string jeeberId, CancellationToken ct)
+            => Task.FromResult(new JeeberAvailableRequestsResult());
+
         public int ActiveCount { get; init; }
         public Exception? Fault { get; init; }
         public string? LastCountedJeeberId { get; private set; }
