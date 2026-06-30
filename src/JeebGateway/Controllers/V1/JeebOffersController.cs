@@ -34,7 +34,9 @@ public sealed class JeebOffersController : ControllerBase
     private readonly IRequestsStore _requests;
     private readonly IOfferServiceClient _offerService;
     private readonly IOfferRequestIndex _offerRequestIndex;
+    private readonly IDeliveryServiceClient _delivery;
     private readonly UpstreamFeatureFlags _flags;
+    private readonly DeliveryClientOptions _deliveryOptions;
     private readonly ILogger<JeebOffersController> _logger;
 
     public JeebOffersController(
@@ -42,14 +44,18 @@ public sealed class JeebOffersController : ControllerBase
         IRequestsStore requests,
         IOfferServiceClient offerService,
         IOfferRequestIndex offerRequestIndex,
+        IDeliveryServiceClient delivery,
         IOptions<UpstreamFeatureFlags> flags,
+        IOptions<DeliveryClientOptions> deliveryOptions,
         ILogger<JeebOffersController> logger)
     {
         _offers = offers;
         _requests = requests;
         _offerService = offerService;
         _offerRequestIndex = offerRequestIndex;
+        _delivery = delivery;
         _flags = flags.Value;
+        _deliveryOptions = deliveryOptions.Value;
         _logger = logger;
     }
 
@@ -151,6 +157,25 @@ public sealed class JeebOffersController : ControllerBase
         CancellationToken ct)
     {
         var req = await _requests.GetAsync(requestId, ct);
+
+        // BUG-5 (delivery-aggregate-not-created-on-accept): the offer-service accept
+        // saga commits the auction outcome (request -> accepted, winner assigned,
+        // siblings rejected) and the jeeber-side list projection reflects it — but
+        // NOTHING here ever materialised the canonical delivery aggregate. With
+        // UseUpstream:Delivery forced on, GET /v1/deliveries/{requestId} reads the
+        // delivery-service row via GetCanonicalDeliveryAsync and 404s, so the
+        // "Manage delivery" / "Live tracking" screens and the handover-OTP leg are
+        // unreachable. The legacy OffersController.OrchestrateAcceptedAsync already
+        // performs this delivery-row materialisation post-accept; the V1 surface
+        // (where all new work lands) never carried it over. We close the gap HERE,
+        // by idempotently upserting the delivery aggregate with the winning jeeber
+        // assigned, so the by-id read resolves immediately after accept.
+        //
+        // DEGRADE-DON'T-FAIL: the offer-service accept has already committed, so a
+        // delivery-service blip on this mirror must NEVER turn the 200 into a 5xx.
+        // Every failure is logged and swallowed.
+        await TryMaterializeDeliveryAggregateAsync(requestId, req, result, ct);
+
         if (req is not null)
             return Ok(ToRequestDto(req));
 
@@ -163,6 +188,86 @@ public sealed class JeebOffersController : ControllerBase
             jeeberId = result.Envelope?.JeeberId,
             status = "accepted"
         });
+    }
+
+    /// <summary>
+    /// BUG-5: materialise / assign the canonical delivery aggregate in
+    /// delivery-service immediately after the offer-service accept saga commits, so
+    /// <c>GET /v1/deliveries/{requestId}</c> (canonical read-through when
+    /// <c>UseUpstream:Delivery</c> is on) resolves a row instead of 404-ing.
+    ///
+    /// Re-POSTs the SAME id to the idempotent create-row endpoint
+    /// (<c>POST /api/v1/deliveries</c>, <c>ON CONFLICT (id) DO NOTHING</c>) carrying
+    /// the winning <c>jeeber_id</c>. delivery-service assigns the jeeber ONLY when
+    /// the row is still unassigned (<c>WHERE jeeber_id IS NULL</c>, never steals), so
+    /// this is safe whether the row was seeded at request-create time (then this is a
+    /// late winner-assignment) or never seeded (then this creates it). Mirrors the
+    /// proven H6c step of <see cref="JeebGateway.Controllers.OffersController"/>.
+    ///
+    /// The winner is taken from the upstream accept envelope (the authority); the
+    /// id/tier/pickup/client come from the gateway's own request row. When the row
+    /// is unknown locally or lacks tier/pickup we skip rather than seed a malformed
+    /// row — the offer-service remains the source of truth and the next read can be
+    /// reconciled. ALWAYS degrade-don't-fail: a fault here never fails the accept.
+    /// </summary>
+    private async Task TryMaterializeDeliveryAggregateAsync(
+        string requestId,
+        DeliveryRequest? req,
+        OfferAcceptResult result,
+        CancellationToken ct)
+    {
+        // The authoritative winner is the offer-service envelope's jeeber; fall back
+        // to the locally-recorded winner if the envelope omitted it.
+        var winnerJeeberId = result.Envelope?.JeeberId;
+        if (string.IsNullOrWhiteSpace(winnerJeeberId))
+            winnerJeeberId = req?.JeeberId;
+
+        if (string.IsNullOrWhiteSpace(winnerJeeberId))
+        {
+            _logger.LogWarning(
+                "BUG-5: accept for request {RequestId} committed but no winning jeeberId is known (envelope + ledger both empty); skipping delivery-aggregate materialisation. GET /v1/deliveries/{RequestId} may 404 until reconciled.",
+                requestId, requestId);
+            return;
+        }
+
+        // Need tier + pickup to seed/assign the canonical row; these live on the
+        // gateway's request row (seeded there at create). Without them we cannot
+        // supply the delivery-service create-row contract, so skip rather than POST
+        // a malformed aggregate. The offer-service accept still stands (200).
+        if (req is null || req.PickupLocation is null || string.IsNullOrWhiteSpace(req.TierId))
+        {
+            _logger.LogWarning(
+                "BUG-5: accept for request {RequestId} (jeeber {JeeberId}) committed but the local request row is unknown/missing tier or pickup; skipping delivery-aggregate materialisation (delivery-service remains SoT).",
+                requestId, winnerJeeberId);
+            return;
+        }
+
+        try
+        {
+            await _delivery.CreateDeliveryRowAsync(new CreateDeliveryRowUpstream
+            {
+                Id = req.Id,
+                TenantId = _deliveryOptions.TenantId,
+                ClientId = req.ClientId,
+                JeeberId = winnerJeeberId,
+                TierId = req.TierId!,
+                PickupLat = req.PickupLocation.Lat,
+                PickupLng = req.PickupLocation.Lng,
+            }, ct);
+
+            _logger.LogInformation(
+                "BUG-5: materialised delivery aggregate for request {RequestId} with winning jeeber {JeeberId} (idempotent upsert); GET /v1/deliveries/{RequestId} now resolves.",
+                requestId, winnerJeeberId, requestId);
+        }
+        catch (Exception ex)
+        {
+            // delivery-service unreachable / non-2xx (and non-idempotent-409): the
+            // accept already committed upstream, so we log and swallow. The delivery
+            // will not be readable by-id until reconciled, but the 200 is preserved.
+            _logger.LogWarning(ex,
+                "BUG-5: delivery-aggregate materialisation for request {RequestId} (jeeber {JeeberId}) failed; accept stays 200 — GET /v1/deliveries/{RequestId} may 404 until reconciled.",
+                requestId, winnerJeeberId, requestId);
+        }
     }
 
     // -----------------------------------------------------------------------
