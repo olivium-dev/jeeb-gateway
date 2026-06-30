@@ -563,6 +563,13 @@ builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePu
     return new JeebGateway.service.ServicePushNotification.ServicePushNotificationClient(baseUrl, client);
 });
 
+// BUILD-CHAT-PUSH — the chat-message → push-notification trigger. Best-effort fan-out
+// of an FCM push to the conversation's other delivery principal when a chat message is
+// appended (the only missing link for real A→B chat push). Scoped because it composes
+// the singleton IRequestsStore with the SCOPED ServicePushNotificationClient (:10040).
+builder.Services.AddScoped<JeebGateway.Notifications.IChatMessagePushNotifier,
+    JeebGateway.Notifications.ChatMessagePushNotifier>();
+
 // Feedback (ServiceFeedbackClient) — salehly sibling mirror.
 // The NSwag-generated ServiceFeedbackClient
 // (Services/Clients/ServiceFeedbackClient.cs, namespace

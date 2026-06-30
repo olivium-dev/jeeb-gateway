@@ -6,6 +6,8 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Notifications;
+using JeebGateway.Users;
 using JeebGateway.service.ServiceChat;
 using ChatApiException = JeebGateway.service.ServiceChat.ApiException;
 
@@ -20,13 +22,16 @@ namespace JeebGateway.Controllers
     public class ChatController : ControllerBase
     {
         private readonly ServiceChatClient _serviceChatClient;
+        private readonly IChatMessagePushNotifier _chatPush;
         private readonly ILogger<ChatController> _logger;
 
         public ChatController(
             ServiceChatClient serviceChatClient,
+            IChatMessagePushNotifier chatPush,
             ILogger<ChatController> logger)
         {
             _serviceChatClient = serviceChatClient;
+            _chatPush = chatPush;
             _logger = logger;
         }
 
@@ -430,6 +435,17 @@ namespace JeebGateway.Controllers
                 }
 
                 var response = await _serviceChatClient.MessagesPOSTAsync(channelId, request);
+
+                // BUILD-CHAT-PUSH — notify the conversation's other party (the only missing
+                // link for real A→B chat push). Best-effort/degrade-don't-fail; never affects
+                // this 201. NOTE: the legacy channels surface keys on channelId; recipient
+                // resolution succeeds only when channelId matches a delivery request's stamped
+                // ConversationId (else it no-ops). The live Jeeb chat path is /v1/conversations.
+                if (UserIdentity.TryGetUserId(HttpContext, out var authorId, out _))
+                {
+                    await _chatPush.NotifyNewMessageAsync(channelId, authorId, request?.Text, HttpContext.RequestAborted);
+                }
+
                 return StatusCode(StatusCodes.Status201Created, response);
             }
             catch (ChatApiException ex)

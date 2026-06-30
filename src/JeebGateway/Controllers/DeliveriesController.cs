@@ -261,6 +261,10 @@ public class DeliveriesController : ControllerBase
     }
 
     [HttpPatch("{deliveryId}/status")]
+    // S03 §5.4 contract alias: the mobile app calls the /v1-prefixed form. Additive
+    // second template (byte-compatible, no behavior change) so both the relative and
+    // the frozen-contract /v1 form resolve to this action instead of 404.
+    [HttpPatch("/v1/deliveries/{deliveryId}/status")]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -823,6 +827,9 @@ public class DeliveriesController : ControllerBase
     /// OTP is dispatched (PR review B1; per AC1).
     /// </summary>
     [HttpGet("{deliveryId}/otp")]
+    // S03 §5.4 contract alias: mobile calls /v1/deliveries/{id}/otp. Additive second
+    // template, byte-compatible — both forms resolve here instead of 404 on /v1.
+    [HttpGet("/v1/deliveries/{deliveryId}/otp")]
     // ADR-005 L2 §E handover OTP trigger (still {client, jeeber}; AtDoor SM state = STATE).
     [RequireCapability(Capabilities.HandoverOtpRead)]
     [ProducesResponseType(typeof(OtpTriggerResponse), StatusCodes.Status200OK)]
@@ -962,6 +969,10 @@ public class DeliveriesController : ControllerBase
     /// <see cref="IAdminEscalationStore"/> (PR review B7).
     /// </summary>
     [HttpPost("{deliveryId}/otp/verify")]
+    // S03 §5.4 contract alias: mobile calls /v1/deliveries/{id}/otp/verify (the real
+    // device deliver step). Additive second template, byte-compatible — both forms
+    // resolve here instead of 404 on the /v1-prefixed form.
+    [HttpPost("/v1/deliveries/{deliveryId}/otp/verify")]
     // ADR-005 L2 §E handover OTP verify (still {client, jeeber}; party/SM/lockout = STATE).
     [RequireCapability(Capabilities.HandoverOtpRead)]
     [ProducesResponseType(typeof(OtpHandoverVerificationResponse), StatusCodes.Status200OK)]
@@ -1496,6 +1507,29 @@ public class DeliveriesController : ControllerBase
         _log.LogInformation(
             "handover.verified deliveryId={DeliveryId} correlationId={CorrelationId} status={Status}",
             deliveryId, correlationId, result.Status ?? RequestStatus.Delivered);
+
+        // S03 — terminal read-model projection on the FLAG-ON upstream path.
+        // The canonical AtDoor→Done transition + settlement already committed in
+        // delivery-service above; this mirrors the terminal flip onto the gateway's
+        // local request read-model so the client-facing GET /v1/requests/{id} reads
+        // `delivered` (not the last PATCH-status value, e.g. AtDoor). deliveryId ==
+        // requestId, so this lands on the right request row. This is the same
+        // projection the legacy flag-OFF path performs (mirror of the
+        // _store.SetStatusAsync(..., Delivered) call in the in-memory branch).
+        // Degrade-don't-fail: a committed, verified handover must NEVER be turned
+        // into a 5xx by a best-effort local cache write — log and continue.
+        try
+        {
+            await _store.SetStatusAsync(deliveryId, RequestStatus.Delivered, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Post-verify terminal status projection for delivery {DeliveryId} failed; "
+                + "the handover stays verified (200), the request read-model may lag until "
+                + "reconciled. correlationId {CorrelationId}",
+                deliveryId, correlationId);
+        }
 
         activity?.SetTag("otp.verified", "true");
 

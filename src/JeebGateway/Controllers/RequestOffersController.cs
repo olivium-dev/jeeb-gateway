@@ -96,6 +96,15 @@ public class RequestOffersController : ControllerBase
     }
 
     [HttpPost("requests/{requestId}/offers")]
+    // S03 GAP-A (S002-BLOCK-OFFER-CREATE): the mobile app calls the /v1/-prefixed
+    // template, which previously bound GET only (JeebRequestsController.cs:255) — so
+    // POST /v1/requests/{requestId}/offers returned 405 (Allow: GET). ASP.NET allows
+    // multiple route templates on one action, so we register the /v1/ POST here and it
+    // serves byte-identically through the SAME Submit logic (validation, dual-role,
+    // mirror+retry, seat, offer-index, realtime). No logic is duplicated or rewritten;
+    // both the legacy un-prefixed route and the /v1/ route share this single code path
+    // and return 201 with the same OfferDto (offerId). See legacy-research.md §1.
+    [HttpPost("v1/requests/{requestId}/offers")]
     // ADR-005 L2 §D jeeber-only: replaces [RequireRole(Roles.Jeeber)]. Fee/cap/one-live-offer = STATE.
     [RequireCapability(Capabilities.OfferSubmit)]
     [RequireActiveUser]

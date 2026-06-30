@@ -123,6 +123,8 @@ public class FT08DurableExpirySweepTests
         public Task<DeliveryRequest> TryCreateWithLimitAsync(CreateRequestInput input, int clientLimit, CancellationToken ct) => throw new NotImplementedException();
         public Task<int> CountActiveForClientAsync(string clientId, CancellationToken ct) => Task.FromResult(0);
         public Task<bool> SetStatusAsync(string requestId, string status, CancellationToken ct) => Task.FromResult(true);
+        public Task<bool> SetJeeberIdAsync(string requestId, string jeeberId, CancellationToken ct) => Task.FromResult(true);
+        public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct) => Task.FromResult<DeliveryRequest?>(null);
         public Task<bool> MarkNudgedAsync(string requestId, DateTimeOffset at, CancellationToken ct) => Task.FromResult(true);
         public Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct) => Task.FromResult(false);
         public Task<int> AnonymizeForClientAsync(string userId, string anonymizedHash, CancellationToken ct) => Task.FromResult(0);
@@ -130,6 +132,7 @@ public class FT08DurableExpirySweepTests
         public Task<bool> TryActivateScheduledAsync(string requestId, DateTimeOffset at, CancellationToken ct) => Task.FromResult(false);
         public Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct) => Task.FromResult<DeliveryRequest?>(null);
         public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct) => Task.FromResult<IReadOnlyList<DeliveryRequest>>(Array.Empty<DeliveryRequest>());
+        public Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct) => Task.FromResult<IReadOnlyList<DeliveryRequest>>(Array.Empty<DeliveryRequest>());
         public Task<int> CountActiveForJeeberAsync(string jeeberId, CancellationToken ct) => Task.FromResult(0);
         public Task<DeliveryRequest?> TryAcceptByJeeberAsync(string requestId, string jeeberId, int limit, DateTimeOffset at, CancellationToken ct) => Task.FromResult<DeliveryRequest?>(null);
         // JEB-1479: TryTransitionAsync (the legacy linear delivery-transition method)

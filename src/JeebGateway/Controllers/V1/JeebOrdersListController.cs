@@ -77,19 +77,17 @@ public sealed class JeebOrdersListController : ControllerBase
         IReadOnlyList<DeliveryRequest> rows;
         try
         {
-            var all = await _requests.ListForClientAsync(userId, ct);
             if (jeeberScope)
             {
-                // Jeeber scope: requests where THIS user is the assigned jeeber. ListForClient only
-                // returns client-owned rows, so for the jeeber view we cannot reuse it — there is no
-                // ListForJeeber on the store. Degrade to empty rather than mis-scoping: the assigned-
-                // jobs surface for the driver is the PR #225 feed; this list stays client-accurate and
-                // never leaks another client's rows. (Empty-tolerant by contract.)
-                rows = all.Where(r => string.Equals(r.JeeberId, userId, StringComparison.Ordinal)).ToList();
+                // Jeeber scope: requests where THIS user is the assigned jeeber. P0 fix — sourced from
+                // ListForJeeberAsync (WHERE JeeberId == caller). ListForClientAsync only returns
+                // client-owned rows, so a jeeber's accepted deliveries (ClientId = the requesting
+                // client, not the jeeber) were never in that set and this branch was always empty.
+                rows = await _requests.ListForJeeberAsync(userId, ct);
             }
             else
             {
-                rows = all;
+                rows = await _requests.ListForClientAsync(userId, ct);
             }
         }
         catch (Exception ex)
@@ -150,10 +148,19 @@ public sealed class JeebOrdersListController : ControllerBase
             // is assigned to as jeeber are rows where JeeberId == caller; deliveries the user owns as
             // client are their own created rows that have reached a delivery stage. Union both so the
             // Jobs tab shows the caller's deliveries from whichever side they participate.
-            var own = await _requests.ListForClientAsync(userId, ct);
-            rows = own
-                .Where(r => string.Equals(r.JeeberId, userId, StringComparison.Ordinal)
-                            || string.Equals(r.ClientId, userId, StringComparison.Ordinal))
+            //
+            // P0 fix: the jeeber-assigned rows must come from ListForJeeberAsync (WHERE JeeberId ==
+            // caller). They CANNOT be recovered from ListForClientAsync — an accepted delivery's
+            // ClientId is the requesting client (e.g. Nour), never the jeeber (Karim), so the prior
+            // ListForClientAsync(caller) + JeeberId-filter returned nothing for a jeeber and the Jobs
+            // tab was always empty. Union the jeeber-assigned rows with the caller's own client rows
+            // and de-dupe by id (a user is never both parties on one row, but de-dupe is defensive).
+            var assigned = await _requests.ListForJeeberAsync(userId, ct);
+            var ownClient = await _requests.ListForClientAsync(userId, ct);
+            rows = assigned
+                .Concat(ownClient)
+                .GroupBy(r => r.Id, StringComparer.Ordinal)
+                .Select(g => g.First())
                 .ToList();
         }
         catch (Exception ex)

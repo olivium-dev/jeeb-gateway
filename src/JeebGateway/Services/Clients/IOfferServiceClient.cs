@@ -184,6 +184,50 @@ public interface IOfferServiceClient
         string actingUserId,
         string offerId,
         CancellationToken ct);
+
+    /// <summary>
+    /// GAP-2 (sprint-002, contract-freeze §4) — GET /api/v1/jeebers/{jeeberId}/offers — the
+    /// offers this jeeber has already submitted. Used by <c>GET /v1/jeebers/me/feed</c> ONLY to
+    /// annotate each pending request with this jeeber's existing offer (<c>myOffer</c>), matched by
+    /// <c>request_id</c>. This is the ANNOTATION source — NOT the feed's primary list (the primary
+    /// list is the gateway request store; see <c>JeebFeedController</c>). offer-service authorizes on
+    /// the gateway-injected <c>x-user-id</c> header AND requires the path <c>:jeeber_id</c> to EQUAL
+    /// that header (else 403) — so the caller MUST pass the jeeber's own JWT <c>sub</c> as
+    /// <paramref name="jeeberId"/>; the implementation sends it in both the header and the path.
+    ///
+    /// <para>DEGRADE-DON'T-FAIL (contract-freeze §3.6): a non-2xx, 403, empty body, or transport
+    /// blip returns an EMPTY list, never throws — a momentary offer-service hiccup degrades
+    /// <c>myOffer</c> to <c>null</c> rather than 5xx-ing the whole feed. The decode tolerates a bare
+    /// array or a <c>{data|offers|items:[...]}</c> envelope.</para>
+    ///
+    /// <para>NON-BREAKING EXTENSION: a default interface method so the existing
+    /// <see cref="IOfferServiceClient"/> fakes/implementers compile unchanged — they inherit the safe
+    /// empty default; the real <see cref="OfferServiceClient"/> overrides it with the upstream call.</para>
+    /// </summary>
+    Task<IReadOnlyList<JeeberFeedOffer>> ListOffersForJeeberAsync(
+        string jeeberId,
+        string? status,
+        CancellationToken ct)
+        => Task.FromResult<IReadOnlyList<JeeberFeedOffer>>(Array.Empty<JeeberFeedOffer>());
+}
+
+/// <summary>
+/// GAP-2 — one of the jeeber's own offers, decoded from offer-service
+/// <c>GET /api/v1/jeebers/:jeeber_id/offers</c> (Contract B-down §4.2; snake_case wire
+/// <c>{ id, request_id, fee_cents, eta_minutes, note, status, created_at }</c>). The gateway feed
+/// uses it purely to build the nullable <c>myOffer</c> on a feed item, matched by
+/// <see cref="RequestId"/>. <see cref="FeeCents"/> stays cents end-to-end (no decimal conversion in
+/// the feed — contract-freeze §4.3).
+/// </summary>
+public sealed class JeeberFeedOffer
+{
+    public required string OfferId { get; init; }
+    public required string RequestId { get; init; }
+    public required string Status { get; init; }
+    public long FeeCents { get; init; }
+    public int EtaMinutes { get; init; }
+    public string? Note { get; init; }
+    public DateTimeOffset? CreatedAt { get; init; }
 }
 
 /// <summary>

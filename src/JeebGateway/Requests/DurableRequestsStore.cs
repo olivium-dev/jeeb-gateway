@@ -231,6 +231,12 @@ public sealed class DurableRequestsStore : IRequestsStore
     public Task<bool> SetStatusAsync(string requestId, string status, CancellationToken ct)
         => _inner.SetStatusAsync(requestId, status, ct);
 
+    public Task<bool> SetJeeberIdAsync(string requestId, string jeeberId, CancellationToken ct)
+        => _inner.SetJeeberIdAsync(requestId, jeeberId, ct);
+
+    public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
+        => _inner.GetByConversationIdAsync(conversationId, ct);
+
     /// <summary>
     /// FT-08: durable expiry-sweep read. When the durable path is active the
     /// canonical delivery-service row (seeded on create) is the source of truth
@@ -314,6 +320,9 @@ public sealed class DurableRequestsStore : IRequestsStore
 
     public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct)
         => _inner.ListForClientAsync(clientId, ct);
+
+    public Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct)
+        => _inner.ListForJeeberAsync(jeeberId, ct);
 
     public Task<int> CountActiveForJeeberAsync(string jeeberId, CancellationToken ct)
         => _inner.CountActiveForJeeberAsync(jeeberId, ct);

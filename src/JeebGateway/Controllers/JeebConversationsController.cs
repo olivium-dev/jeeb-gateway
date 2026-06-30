@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Conversations.Client;
 using JeebGateway.Conversations.Realtime;
+using JeebGateway.Notifications;
 using JeebGateway.Services;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Authorization;
@@ -51,17 +52,20 @@ public sealed class JeebConversationsController : ControllerBase
 {
     private readonly IJeebConversationClient _client;
     private readonly IRealtimeTicketIssuer _ticketIssuer;
+    private readonly IChatMessagePushNotifier _chatPush;
     private readonly UpstreamFeatureFlags _flags;
     private readonly ILogger<JeebConversationsController> _logger;
 
     public JeebConversationsController(
         IJeebConversationClient client,
         IRealtimeTicketIssuer ticketIssuer,
+        IChatMessagePushNotifier chatPush,
         IOptions<UpstreamFeatureFlags> flags,
         ILogger<JeebConversationsController> logger)
     {
         _client = client;
         _ticketIssuer = ticketIssuer;
+        _chatPush = chatPush;
         _flags = flags.Value;
         _logger = logger;
     }
@@ -245,6 +249,11 @@ public sealed class JeebConversationsController : ControllerBase
                 AuthorId = authorId,
                 IdempotencyKey = idempotencyKey,
             }, ct);
+
+            // BUILD-CHAT-PUSH — the only missing link for real A→B chat push: notify the
+            // conversation's other party. Best-effort/degrade-don't-fail — the notifier
+            // never throws and is bounded by a short timeout, so it never affects this 201.
+            await _chatPush.NotifyNewMessageAsync(conversationId, authorId, body.Body, ct);
 
             return StatusCode(StatusCodes.Status201Created, result);
         }
