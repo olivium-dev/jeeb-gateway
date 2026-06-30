@@ -1,4 +1,6 @@
 using JeebGateway.Services.Clients;
+using JeebGateway.Users;
+using Microsoft.AspNetCore.Http;
 
 namespace JeebGateway.Availability;
 
@@ -54,10 +56,18 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
     private const long MinimumFeeCents = 100;
 
     private readonly IOfferServiceClient _client;
+    private readonly IHttpContextAccessor? _httpContext;
 
-    public UpstreamPendingOffersStore(IOfferServiceClient client)
+    /// <param name="httpContext">
+    /// Optional so the existing single-arg construction in the write/conflict unit tests compiles
+    /// unchanged (those paths never read the caller identity). The production DI factory in
+    /// <c>Program.cs</c> always injects the real accessor, which <see cref="ListForRequestAsync"/>
+    /// needs to forward the owner's <c>x-user-id</c> to offer-service.
+    /// </param>
+    public UpstreamPendingOffersStore(IOfferServiceClient client, IHttpContextAccessor? httpContext = null)
     {
         _client = client;
+        _httpContext = httpContext;
     }
 
     public async Task<PendingOffer> TrySubmitAsync(
@@ -192,10 +202,49 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
             "offer-service exposes no get-offer-by-id route; the offer-accept lookup path stays on the " +
             "in-memory store until offer-service grows GET /api/v1/offers/{id} (tracked fast-follow).");
 
-    public Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(string requestId, CancellationToken ct)
-        => throw new NotSupportedException(
-            "offer-service exposes no list-offers-for-request route; the listing path stays on the in-memory " +
-            "store until offer-service grows GET /api/v1/requests/{id}/offers (tracked fast-follow).");
+    /// <summary>
+    /// BUG-3 fix (customer offers-read 500). offer-service GREW
+    /// <c>GET /api/v1/requests/{id}/offers</c> after the original "tracked fast-follow" comment was
+    /// written, so the old unconditional <see cref="NotSupportedException"/> surfaced as a hard 500 on
+    /// the live upstream wire (<c>UseUpstream:Offer=true</c>) — the customer could never list/accept the
+    /// jeeber's offer (Core Flow step 4). We now proxy that owner-scoped route: offer-service authorizes
+    /// on <c>x-user-id == owner</c> (else 403), and the owner is the in-request authenticated caller
+    /// whose ownership the controller (<c>JeebRequestsController.ListOffers/ListOffersFlat</c> and
+    /// <c>JeebOrdersListController</c>) has ALREADY verified before reaching this store. Money (cents→
+    /// dollars) and the status vocabulary are mapped via <see cref="ToPendingOffer"/>; the
+    /// degrade-don't-fail (a blip → empty list, never a 500) lives in the client.
+    /// </summary>
+    public async Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(string requestId, CancellationToken ct)
+    {
+        var actingUserId = ResolveOwnerId();
+        if (string.IsNullOrWhiteSpace(actingUserId))
+        {
+            // No in-request identity to authorize the upstream read (not expected on the controller
+            // path, which is always authenticated). Return empty rather than 500 — the offers-read
+            // must never crash the customer's accept sheet.
+            return Array.Empty<PendingOffer>();
+        }
+
+        var wires = await _client.ListForRequestAsync(actingUserId!, requestId, ct);
+        return wires
+            .Where(w => !string.IsNullOrWhiteSpace(w.Id))
+            .Select(ToPendingOffer)
+            .ToList();
+    }
+
+    /// <summary>
+    /// The in-request authenticated caller's canonical id (JWT <c>sub</c>/<c>sid</c>, or the edge-
+    /// injected <c>X-User-Id</c>), resolved exactly as the controllers do via
+    /// <see cref="UserIdentity"/>. On every caller of <see cref="ListForRequestAsync"/> this is the
+    /// request owner (ownership is controller-verified first), which is the identity offer-service's
+    /// owner-scoped list route requires. <c>null</c> when there is no HTTP context / no identity.
+    /// </summary>
+    private string? ResolveOwnerId()
+    {
+        var ctx = _httpContext?.HttpContext;
+        if (ctx is null) return null;
+        return UserIdentity.TryGetUserId(ctx, out var userId, out _) ? userId : null;
+    }
 
     public Task<int> WithdrawForJeeberAsync(string jeeberId, CancellationToken ct)
         => throw new NotSupportedException(

@@ -432,6 +432,100 @@ public sealed class OfferServiceClient : IOfferServiceClient
     }
 
     /// <summary>
+    /// BUG-3 (customer offers-read 500) — GET /api/v1/requests/{requestId}/offers. offer-service grew
+    /// this owner-scoped list route after <see cref="UpstreamPendingOffersStore"/>'s stale comment was
+    /// written; the gateway proxies it for the client's accept sheet. <paramref name="actingUserId"/> is
+    /// sent as <c>x-user-id</c> and MUST equal the request owner (offer-service 403s otherwise).
+    /// DEGRADE-DON'T-FAIL: any non-2xx / empty / transport / decode blip yields an EMPTY list so the
+    /// offers-read never 5xxs (mirrors <see cref="ListOffersForJeeberAsync"/>).
+    /// </summary>
+    public async Task<IReadOnlyList<OfferWire>> ListForRequestAsync(
+        string actingUserId,
+        string requestId,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get, $"api/v1/requests/{Uri.EscapeDataString(requestId)}/offers");
+            SetUser(request, actingUserId); // x-user-id == request owner (else offer-service 403s)
+
+            using var response = await _http.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                return Array.Empty<OfferWire>();
+            }
+
+            return await ReadRequestOffersAsync(response, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw; // a genuine caller cancellation propagates, not a degrade case
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or NotSupportedException or OperationCanceledException)
+        {
+            return Array.Empty<OfferWire>();
+        }
+    }
+
+    /// <summary>
+    /// Tolerant decode of offer-service's request-offers response into the gateway <see cref="OfferWire"/>.
+    /// Accepts the contract <c>{ offers:[...] }</c> envelope, the <c>{ data|items:[...] }</c> alias, or a
+    /// bare array. Snake_case fields bind via <see cref="JsonOptions"/>; the canonical <c>actor_id</c> is
+    /// preferred over the deprecated <c>jeeber_id</c> alias, mirroring <see cref="DeserializeOfferAsync"/>.
+    /// </summary>
+    private static async Task<IReadOnlyList<OfferWire>> ReadRequestOffersAsync(
+        HttpResponseMessage response, CancellationToken ct)
+    {
+        var json = await response.Content.ReadAsStringAsync(ct);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return Array.Empty<OfferWire>();
+        }
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        JsonElement array;
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            array = root;
+        }
+        else if (root.ValueKind == JsonValueKind.Object
+                 && (root.TryGetProperty("offers", out array)
+                     || root.TryGetProperty("data", out array)
+                     || root.TryGetProperty("items", out array))
+                 && array.ValueKind == JsonValueKind.Array)
+        {
+            // 'array' bound to the envelope's array property.
+        }
+        else
+        {
+            return Array.Empty<OfferWire>();
+        }
+
+        var wires = array.Deserialize<List<WireOffer>>(JsonOptions) ?? new List<WireOffer>();
+        return wires
+            .Where(w => !string.IsNullOrWhiteSpace(w.Id))
+            .Select(w => new OfferWire
+            {
+                Id = w.Id ?? string.Empty,
+                RequestId = w.RequestId ?? string.Empty,
+                // Prefer the canonical generic identity; fall back to the deprecated alias.
+                JeeberId = (!string.IsNullOrWhiteSpace(w.ActorId) ? w.ActorId : w.JeeberId) ?? string.Empty,
+                FeeCents = w.FeeCents,
+                EtaMinutes = w.EtaMinutes,
+                Note = w.Note,
+                Status = w.Status ?? string.Empty,
+                EditsCount = w.EditsCount,
+                CreatedAt = w.CreatedAt,
+                UpdatedAt = w.UpdatedAt,
+                WithdrawnAt = w.WithdrawnAt,
+            })
+            .ToList();
+    }
+
+    /// <summary>
     /// Tolerant decode of the offer-service jeeber-offers response. Contract §4.2 is a BARE JSON
     /// array; a <c>{data|offers|items:[...]}</c> envelope is also accepted additively so a future
     /// upstream wrap does not silently empty the annotation. Snake_case fields map via

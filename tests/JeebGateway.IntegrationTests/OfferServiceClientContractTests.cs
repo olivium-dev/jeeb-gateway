@@ -251,6 +251,91 @@ public class OfferServiceClientContractTests
     }
 
     // -----------------------------------------------------------------------
+    // BUG-3: customer offers-read (GET /api/v1/requests/{id}/offers) — the live
+    // 500 was an unconditional NotSupportedException on the upstream wire. These
+    // pin the proxy: the client binds the {offers:[...]} envelope + forwards the
+    // OWNER's x-user-id, and the store maps money/status and NEVER 500s.
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public async Task ListForRequestAsync_Binds_OffersEnvelope_And_Forwards_OwnerXUserId()
+    {
+        HttpRequestMessage? captured = null;
+        var client = ClientCapturing(
+            HttpStatusCode.OK,
+            $$"""
+              {"offers":[
+                {"id":"{{OfferId}}","request_id":"{{RequestId}}","actor_id":"{{UserId}}","jeeber_id":"{{UserId}}",
+                 "fee_cents":3000,"eta_minutes":25,"note":"probe","status":"submitted",
+                 "edits_count":0,"created_at":"2026-06-01T10:00:00Z","updated_at":null,"withdrawn_at":null}
+              ]}
+              """,
+            (req, _) => captured = req);
+
+        var offers = await client.ListForRequestAsync(UserId, RequestId, CancellationToken.None);
+
+        offers.Should().ContainSingle();
+        offers[0].Id.Should().Be(OfferId);
+        offers[0].FeeCents.Should().Be(3000);
+        offers[0].EtaMinutes.Should().Be(25);
+        offers[0].Status.Should().Be("submitted");
+        offers[0].JeeberId.Should().Be(UserId);
+        captured!.Method.Should().Be(HttpMethod.Get);
+        captured.RequestUri!.AbsolutePath.Should().Be($"/api/v1/requests/{RequestId}/offers");
+        captured.Headers.GetValues("x-user-id").Should().ContainSingle().Which.Should().Be(UserId);
+    }
+
+    [Fact]
+    public async Task ListForRequestAsync_NonSuccess_Degrades_To_Empty_NeverThrows()
+    {
+        // A blip must degrade to an empty list, never re-introduce the 500.
+        var client = ClientReturning(HttpStatusCode.InternalServerError, """{"error":{"code":"boom"}}""");
+
+        var offers = await client.ListForRequestAsync(UserId, RequestId, CancellationToken.None);
+
+        offers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task UpstreamStore_ListForRequest_ProxiesOfferService_AsOwner_AndMapsMoneyAndStatus()
+    {
+        HttpRequestMessage? captured = null;
+        var client = ClientCapturing(
+            HttpStatusCode.OK,
+            $$"""
+              {"offers":[
+                {"id":"{{OfferId}}","request_id":"{{RequestId}}","actor_id":"{{UserId}}",
+                 "fee_cents":1550,"eta_minutes":30,"note":"hi","status":"submitted"}
+              ]}
+              """,
+            (req, _) => captured = req);
+        var store = new UpstreamPendingOffersStore(client, AccessorWithUser(UserId));
+
+        var offers = await store.ListForRequestAsync(RequestId, CancellationToken.None);
+
+        offers.Should().ContainSingle();
+        offers[0].Fee.Should().Be(15.50m);                        // 1550 cents → $15.50
+        offers[0].Status.Should().Be(PendingOfferStatus.Pending); // "submitted" collapses to pending
+        offers[0].JeeberId.Should().Be(UserId);
+        // The OWNER's id is forwarded as x-user-id, else offer-service 403s.
+        captured!.Headers.GetValues("x-user-id").Should().ContainSingle().Which.Should().Be(UserId);
+    }
+
+    [Fact]
+    public async Task UpstreamStore_ListForRequest_NoIdentity_ReturnsEmpty_DoesNotThrow()
+    {
+        // Regression guard for the EXACT live defect (unconditional NotSupportedException → 500):
+        // with no resolvable caller identity the store now degrades to empty rather than crashing.
+        var client = ClientReturning(HttpStatusCode.OK, """{"offers":[]}""");
+        var store = new UpstreamPendingOffersStore(client, httpContext: null);
+
+        // Must NOT throw (a throw fails the test); the old code threw NotSupportedException here.
+        var offers = await store.ListForRequestAsync(RequestId, CancellationToken.None);
+
+        offers.Should().BeEmpty();
+    }
+
+    // -----------------------------------------------------------------------
     // GW-1 / GW-2: request-mirror bridge + submit error mapping (S07 close-out)
     // -----------------------------------------------------------------------
 
@@ -463,6 +548,23 @@ public class OfferServiceClientContractTests
         {
             BaseAddress = new Uri("http://offer-service.test/")
         });
+
+    /// <summary>
+    /// A real <see cref="Microsoft.AspNetCore.Http.IHttpContextAccessor"/> whose current context carries
+    /// <paramref name="userId"/> as the JWT subject (<see cref="System.Security.Claims.ClaimTypes.NameIdentifier"/>),
+    /// so <see cref="UpstreamPendingOffersStore"/> resolves it via <c>UserIdentity</c> exactly as in-request.
+    /// </summary>
+    private static Microsoft.AspNetCore.Http.IHttpContextAccessor AccessorWithUser(string userId)
+    {
+        var ctx = new Microsoft.AspNetCore.Http.DefaultHttpContext
+        {
+            User = new System.Security.Claims.ClaimsPrincipal(
+                new System.Security.Claims.ClaimsIdentity(
+                    new[] { new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.NameIdentifier, userId) },
+                    authenticationType: "Test")),
+        };
+        return new Microsoft.AspNetCore.Http.HttpContextAccessor { HttpContext = ctx };
+    }
 
     private sealed class StubHandler : HttpMessageHandler
     {

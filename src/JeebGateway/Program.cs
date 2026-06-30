@@ -1573,7 +1573,8 @@ builder.Services.AddSingleton<IPendingOffersStore>(sp =>
     if (flags.Offer)
     {
         return new UpstreamPendingOffersStore(
-            sp.GetRequiredService<JeebGateway.Services.Clients.IOfferServiceClient>());
+            sp.GetRequiredService<JeebGateway.Services.Clients.IOfferServiceClient>(),
+            sp.GetRequiredService<Microsoft.AspNetCore.Http.IHttpContextAccessor>());
     }
 
     return sp.GetRequiredService<InMemoryPendingOffersStore>();

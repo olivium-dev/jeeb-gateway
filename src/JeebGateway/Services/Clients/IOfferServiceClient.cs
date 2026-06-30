@@ -209,6 +209,27 @@ public interface IOfferServiceClient
         string? status,
         CancellationToken ct)
         => Task.FromResult<IReadOnlyList<JeeberFeedOffer>>(Array.Empty<JeeberFeedOffer>());
+
+    /// <summary>
+    /// BUG-3 (customer offers-read 500) — GET /api/v1/requests/{requestId}/offers — the offers on a
+    /// request, for the request-OWNING client's accept sheet / bid review. offer-service authorizes on
+    /// <c>x-user-id == the request owner</c> (else 403), so <paramref name="actingUserId"/> MUST be the
+    /// owner's sub (the gateway controller has already verified ownership before calling). Returns the
+    /// <c>{ offers:[...] }</c> envelope mapped to the gateway <see cref="OfferWire"/> shape.
+    ///
+    /// <para>DEGRADE-DON'T-FAIL: a non-2xx / empty / transport / decode blip yields an EMPTY list, never
+    /// throws — the offers-read must never 5xx (the live defect was an unconditional throw on the
+    /// upstream wire). A healthy offer-service returns the real offers.</para>
+    ///
+    /// <para>NON-BREAKING EXTENSION: a default interface method so existing fakes/implementers compile
+    /// unchanged (they inherit the safe empty default); the real <see cref="OfferServiceClient"/>
+    /// overrides it with the upstream call.</para>
+    /// </summary>
+    Task<IReadOnlyList<OfferWire>> ListForRequestAsync(
+        string actingUserId,
+        string requestId,
+        CancellationToken ct)
+        => Task.FromResult<IReadOnlyList<OfferWire>>(Array.Empty<OfferWire>());
 }
 
 /// <summary>
