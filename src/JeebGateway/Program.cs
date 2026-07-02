@@ -560,7 +560,11 @@ builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePu
     var factory = sp.GetRequiredService<IHttpClientFactory>();
     var client = factory.CreateClient("ServicePushNotificationClient");
     var baseUrl = builder.Configuration["PushNotificationServiceApi:BaseUrl"];
-    return new JeebGateway.service.ServicePushNotification.ServicePushNotificationClient(baseUrl, client);
+    var pushClient = new JeebGateway.service.ServicePushNotification.ServicePushNotificationClient(baseUrl, client);
+    // BUILD-NEWREQ-PUSH — forward the optional internal API key to the hand-written
+    // topic seam (Send_notification_to_topicAsync sends X-Api-Key when non-empty).
+    pushClient.InternalApiKey = builder.Configuration["PushNotificationServiceApi:InternalApiKey"];
+    return pushClient;
 });
 
 // BUILD-CHAT-PUSH — the chat-message → push-notification trigger. Best-effort fan-out
@@ -575,6 +579,13 @@ builder.Services.AddScoped<JeebGateway.Notifications.IChatMessagePushNotifier,
 // link alongside chat). Scoped: composes the SCOPED ServicePushNotificationClient (:10040).
 builder.Services.AddScoped<JeebGateway.Notifications.IOfferPushNotifier,
     JeebGateway.Notifications.OfferPushNotifier>();
+
+// BUILD-NEWREQ-PUSH — the request-created → "finding jeebers" push trigger. Best-effort
+// FCM topic broadcast to the jeeb_jeebers topic when a customer creates a delivery
+// request (the third missing push link, after chat and offer). Scoped: composes the
+// SCOPED ServicePushNotificationClient (:10040) via its hand-written topic seam.
+builder.Services.AddScoped<JeebGateway.Notifications.INewRequestPushNotifier,
+    JeebGateway.Notifications.NewRequestPushNotifier>();
 
 // Feedback (ServiceFeedbackClient) — salehly sibling mirror.
 // The NSwag-generated ServiceFeedbackClient

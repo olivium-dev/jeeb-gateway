@@ -5,6 +5,7 @@ using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
@@ -48,17 +49,23 @@ public sealed class RequestVoiceController : ControllerBase
     private readonly ITiersStore _tiers;
     private readonly IVoiceTranscriptionClient _voice;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
+    private readonly Notifications.INewRequestPushNotifier _newRequestPush;
+    private readonly ILogger<RequestVoiceController> _logger;
 
     public RequestVoiceController(
         IRequestsStore store,
         ITiersStore tiers,
         IVoiceTranscriptionClient voice,
-        IOptionsMonitor<UpstreamFeatureFlags> flags)
+        IOptionsMonitor<UpstreamFeatureFlags> flags,
+        Notifications.INewRequestPushNotifier newRequestPush,
+        ILogger<RequestVoiceController> logger)
     {
         _store = store;
         _tiers = tiers;
         _voice = voice;
         _flags = flags;
+        _newRequestPush = newRequestPush;
+        _logger = logger;
     }
 
     /// <summary>
@@ -255,6 +262,24 @@ public sealed class RequestVoiceController : ControllerBase
                 Status = StatusCodes.Status409Conflict,
                 Type = "https://jeeb.dev/errors/too-many-active-requests"
             });
+        }
+
+        // BUILD-NEWREQ-PUSH — best-effort "finding jeebers" broadcast. Hooked ONLY here,
+        // at the genuinely-NEW-row signal: the idempotent re-submit path returns 200 OK
+        // earlier (see the (A1) block above) BEFORE reaching TryCreateWithLimitAsync, so a
+        // double-tap / network-retry collapsing onto an existing row never reaches this
+        // line and never double-notifies. Only a fresh create (this 201 path) fires the
+        // push. Belt-and-braces try/catch so the broadcast never flips the voice 201.
+        try
+        {
+            await _newRequestPush.NotifyNewRequestAsync(
+                created.Id, created.TierId, created.Description, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "New-request push hook (voice) for request {RequestId} failed; create stays 201.",
+                created.Id);
         }
 
         // Echo the S04 voice contract: {requestId, transcription, transcription_confidence, language}.

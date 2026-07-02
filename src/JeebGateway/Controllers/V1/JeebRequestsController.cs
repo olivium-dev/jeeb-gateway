@@ -1,5 +1,6 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
+using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -45,6 +46,7 @@ public sealed class JeebRequestsController : ControllerBase
     private readonly IDeliveryServiceClient _delivery;
     private readonly UpstreamFeatureFlags _flags;
     private readonly string _tenantId;
+    private readonly INewRequestPushNotifier _newRequestPush;
     private readonly ILogger<JeebRequestsController> _logger;
 
     public JeebRequestsController(
@@ -53,6 +55,7 @@ public sealed class JeebRequestsController : ControllerBase
         IDeliveryServiceClient delivery,
         IOptions<UpstreamFeatureFlags> flags,
         IConfiguration config,
+        INewRequestPushNotifier newRequestPush,
         ILogger<JeebRequestsController> logger)
     {
         _requests = requests;
@@ -60,6 +63,7 @@ public sealed class JeebRequestsController : ControllerBase
         _delivery = delivery;
         _flags = flags.Value;
         _tenantId = config["Services:Delivery:TenantId"] ?? DefaultTenantId;
+        _newRequestPush = newRequestPush;
         _logger = logger;
     }
 
@@ -187,6 +191,23 @@ public sealed class JeebRequestsController : ControllerBase
                         created.Id, created.Id);
                 }
             }
+        }
+
+        // BUILD-NEWREQ-PUSH — best-effort "finding jeebers" broadcast. Belt-and-braces
+        // try/catch (the notifier is already degrade-don't-fail internally, but the hook
+        // must NEVER flip the create 201 even on a DI/synchronous fault). This single hook
+        // covers BOTH mobile create paths: the standard compose screen and the chat-compose
+        // screen both POST /v1/requests as application/json and land in this action.
+        try
+        {
+            await _newRequestPush.NotifyNewRequestAsync(
+                created.Id, created.TierId, created.Description, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "New-request push hook for request {RequestId} failed; create stays 201.",
+                created.Id);
         }
 
         return CreatedAtAction(nameof(Get), new { id = created.Id }, ToRequestDto(created));
