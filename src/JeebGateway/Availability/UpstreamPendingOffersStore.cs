@@ -121,17 +121,23 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
         }
         catch (OfferUpstreamConflictException ex)
         {
-            // offer-service uses one 409 surface for both "you already offered"
-            // and "request not open". Map the duplicate case onto the gateway's
-            // DuplicateOfferException (controller → 409 offer-already-exists);
-            // anything else (request_not_open) re-surfaces as the cap exception
-            // so the controller still returns a 409 ProblemDetails rather than a
-            // raw 500. The exact upstream code drives the choice.
+            // offer-service reuses one 409 surface for three distinct conflicts:
+            //   (1) "you already offered"  -> DuplicateOfferException (409 offer-already-exists)
+            //   (2) "request not open"     -> RequestNotOpenForOffersException (409 request-not-open-for-offers)
+            //   (3) 20-offer cap reached   -> TooManyOffersForRequestException (409 offers-per-request-exceeded)
+            // The exact upstream error code drives the choice. sprint-009 Lane E: (2) used
+            // to be swept into (3), rendering the misleading "20-offer cap" banner for an
+            // already-closed auction; it now maps to its own ProblemDetails.
             if (IsDuplicateCode(ex.UpstreamCode))
             {
                 // The upstream owns the existing offer id; we do not have it
                 // here, so report the request-scoped duplicate without it.
                 throw new DuplicateOfferException(requestId, jeeberId, existingOfferId: "(upstream)");
+            }
+
+            if (IsRequestNotOpenCode(ex.UpstreamCode))
+            {
+                throw new RequestNotOpenForOffersException(requestId, ex.UpstreamCode);
             }
 
             throw new TooManyOffersForRequestException(
@@ -290,4 +296,14 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
            && (code.Contains("duplicate", StringComparison.OrdinalIgnoreCase)
                || code.Contains("already", StringComparison.OrdinalIgnoreCase)
                || code.Contains("offer_exists", StringComparison.OrdinalIgnoreCase));
+
+    // sprint-009 Lane E: offer-service returns `request_not_open` (see the class doc
+    // Contract-freeze note and IOfferServiceClient) when a bid is attempted on a request
+    // that is no longer open (accepted/expired/cancelled). Match it (and the looser
+    // `not_open` form) case-insensitively so a closed auction maps to its own 409, not the
+    // 20-offer-cap message.
+    private static bool IsRequestNotOpenCode(string? code)
+        => code is not null
+           && (code.Contains("request_not_open", StringComparison.OrdinalIgnoreCase)
+               || code.Contains("not_open", StringComparison.OrdinalIgnoreCase));
 }
