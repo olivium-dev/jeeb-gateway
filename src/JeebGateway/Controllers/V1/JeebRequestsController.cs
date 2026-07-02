@@ -43,6 +43,7 @@ public sealed class JeebRequestsController : ControllerBase
 
     private readonly IRequestsStore _requests;
     private readonly IPendingOffersStore _offers;
+    private readonly IOfferServiceClient _offerService;
     private readonly IDeliveryServiceClient _delivery;
     private readonly UpstreamFeatureFlags _flags;
     private readonly string _tenantId;
@@ -52,6 +53,7 @@ public sealed class JeebRequestsController : ControllerBase
     public JeebRequestsController(
         IRequestsStore requests,
         IPendingOffersStore offers,
+        IOfferServiceClient offerService,
         IDeliveryServiceClient delivery,
         IOptions<UpstreamFeatureFlags> flags,
         IConfiguration config,
@@ -60,6 +62,7 @@ public sealed class JeebRequestsController : ControllerBase
     {
         _requests = requests;
         _offers = offers;
+        _offerService = offerService;
         _delivery = delivery;
         _flags = flags.Value;
         _tenantId = config["Services:Delivery:TenantId"] ?? DefaultTenantId;
@@ -304,36 +307,88 @@ public sealed class JeebRequestsController : ControllerBase
     }
 
     /// <summary>
-    /// iter5 BATCHED-FIX B12 — flat offers-list alias. The installed APK's
-    /// bid-review (<c>DioOffersRepository</c>) calls <c>GET /v1/offers?requestId=&lt;id&gt;</c>,
-    /// but the gateway only exposed the nested <c>GET /v1/requests/{id}/offers</c>
-    /// (the flat route 404'd EMPTY). This alias reads the <c>requestId</c> query
-    /// param and delegates to the SAME ownership-gated listing logic, returning the
-    /// <c>{ items: [...] }</c> envelope the mobile repo parses. A missing
-    /// <c>requestId</c> is a 400 (the flat surface is request-scoped). Ownership /
-    /// 404-unknown / 403-not-owner are identical to the nested route.
+    /// iter5 BATCHED-FIX B12 — flat offers-list alias, now dual-scoped.
+    ///
+    /// <para><b>Client request-scoped</b> (<c>GET /v1/offers?requestId=&lt;id&gt;</c>): the
+    /// installed APK's bid-review (<c>DioOffersRepository</c>) lists all offers on a request
+    /// the caller OWNS, returning the <c>{ items: [...] }</c> envelope the mobile repo parses.
+    /// Ownership / 404-unknown / 403-not-owner are identical to the nested
+    /// <c>GET /v1/requests/{id}/offers</c> route.</para>
+    ///
+    /// <para><b>Jeeber self-scoped</b> (sprint-009 Lane E, <c>GET /v1/offers?jeeberId=&lt;me&gt;</c>):
+    /// the "my-offers" surface — a jeeber lists the offers THEY have submitted. Self-scoped:
+    /// the <c>jeeberId</c> MUST equal the caller's own id (else 403), so one jeeber can never
+    /// read another's bids. Delegates to the existing
+    /// <see cref="IOfferServiceClient.ListOffersForJeeberAsync"/> (the same seam the jeeber
+    /// feed's <c>myOffer</c> annotation uses). Takes precedence over <c>requestId</c> when
+    /// both are supplied.</para>
+    ///
+    /// <para>ADR-005: this action carries the coarse <c>offer.read.own</c> capability
+    /// (held by BOTH client and jeeber); the actor-appropriate STATE check — request
+    /// ownership for the client branch, self-scope for the jeeber branch — is enforced in
+    /// the body, exactly the CLAIM/STATE split the ADR prescribes.</para>
     /// </summary>
     [HttpGet("v1/offers")]
-    [RequireCapability(Capabilities.RequestReadOwn)]
+    [RequireCapability(Capabilities.OfferReadOwn)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> ListOffersFlat([FromQuery] string? requestId, CancellationToken ct)
+    public async Task<IActionResult> ListOffersFlat(
+        [FromQuery] string? requestId,
+        [FromQuery] string? jeeberId,
+        CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var clientId, out var problem))
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var problem))
             return problem;
+
+        // sprint-009 Lane E — jeeber "my-offers" branch (self-scoped). Takes precedence
+        // over requestId so a jeeber querying their own bids never falls into the
+        // client-ownership path.
+        if (!string.IsNullOrWhiteSpace(jeeberId))
+        {
+            if (!string.Equals(jeeberId, callerId, StringComparison.Ordinal))
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
+                {
+                    Title = "Access denied — you can only list your own offers.",
+                    Status = StatusCodes.Status403Forbidden,
+                    Type = "https://jeeb.dev/errors/offers-not-self-scoped"
+                });
+            }
+
+            // offer-service authorizes on x-user-id == path :jeeber_id; the client sends the
+            // caller's own id in both. A non-2xx / transport blip degrades to an EMPTY list
+            // (never a 5xx) — the contract of ListOffersForJeeberAsync.
+            var myOffers = await _offerService.ListOffersForJeeberAsync(jeeberId, status: null, ct);
+            var myDtos = myOffers.Select(o => new OfferDto
+            {
+                Id = o.OfferId,
+                RequestId = o.RequestId,
+                JeeberId = jeeberId,
+                Status = o.Status,
+                Fee = o.FeeCents / 100m,
+                EtaMinutes = o.EtaMinutes,
+                Note = o.Note,
+                CreatedAt = o.CreatedAt ?? default,
+                UpdatedAt = null,
+            }).ToList();
+
+            return Ok(new { items = myDtos });
+        }
 
         if (string.IsNullOrWhiteSpace(requestId))
         {
             return BadRequest(new ProblemDetails
             {
-                Title = "Query parameter 'requestId' is required.",
+                Title = "Query parameter 'requestId' or 'jeeberId' is required.",
                 Status = StatusCodes.Status400BadRequest,
                 Type = "https://jeeb.dev/errors/request-id-required"
             });
         }
+
+        var clientId = callerId;
 
         var req = await _requests.GetAsync(requestId, ct);
         if (req is null)

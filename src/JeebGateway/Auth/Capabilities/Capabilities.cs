@@ -71,6 +71,12 @@ public static class Capabilities
     public const string OfferReject = "offer.reject";                // CLAIM {client}; authz/status = STATE
     public const string OfferEditOwn = "offer.edit.own";              // STATE
     public const string OfferWithdraw = "offer.withdraw";            // STATE
+    // sprint-009 Lane E: reading one's OWN offers is a coarse CLAIM held by BOTH parties —
+    // a CLIENT reads the offers on a request they own (GET /v1/offers?requestId), a JEEBER
+    // reads the offers THEY submitted (GET /v1/offers?jeeberId=me). WHICH rows each may see
+    // is STATE (request-ownership vs self-scope), enforced in the action body, mirroring the
+    // dispute.read.mine / support.read.own CLAIM+STATE split.
+    public const string OfferReadOwn = "offer.read.own";              // {client, jeeber}; own-vs-self = STATE
     public const string DeliveryGpsStream = "delivery.gps.stream";
     public const string EarningsReadOwn = "earnings.read.own";        // STATE: ownership
     public const string EarningsPdfOwn = "earnings.pdf.own";          // STATE: ownership
