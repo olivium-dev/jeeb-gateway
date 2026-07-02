@@ -525,6 +525,19 @@ public class DeliveriesController : ControllerBase
             case CancellationOutcome.CancelledByJeeber:
             case CancellationOutcome.PendingAdminApproval:
                 await NotifyCancellationCounterpartyAsync(result.Request!, result.PreviousStatus!, result.Outcome, ct);
+
+                // PR-G2: when the gateway commit landed the row TERMINALLY cancelled
+                // (immediate client cancel / jeeber cancel), best-effort drive the
+                // canonical delivery-service row terminal too so the shipments /
+                // canonical projections stop showing the delivery as active. The admin-
+                // approval outcome is NOT terminal yet (the row parks on
+                // cancellation_requested), so it is deliberately excluded here — upstream
+                // propagation happens when the admin approves.
+                if (result.Outcome != CancellationOutcome.PendingAdminApproval)
+                {
+                    await TryPropagateCancellationUpstreamAsync(result.Request!, callerId, ct);
+                }
+
                 return Ok(new CancelDeliveryResponse
                 {
                     DeliveryId = result.Request!.Id,
@@ -541,6 +554,43 @@ public class DeliveriesController : ControllerBase
                 return Problem(
                     title: "Unhandled cancellation outcome.",
                     statusCode: StatusCodes.Status500InternalServerError);
+        }
+    }
+
+    /// <summary>
+    /// PR-G2: best-effort propagation of a committed terminal cancel to the canonical
+    /// delivery-service row via the existing SM-1 transition contract
+    /// (<see cref="IDeliveryServiceClient.CanonicalTransitionAsync"/>, to =
+    /// <see cref="CanonicalDeliveryStatus.Cancelled"/>). Gated on the delivery
+    /// kill-switch (<c>FeatureFlags:UseUpstream:Delivery</c>) — when the gateway is the
+    /// authoritative writer (flag off) there is no canonical row to reconcile. This is
+    /// STRICTLY best-effort: the gateway commit already succeeded and the client 200 is
+    /// authoritative, so any upstream fault (already-terminal 422, wrong-party 403,
+    /// network 502, …) is swallowed with a LogWarning and never turned into a 5xx. A
+    /// sweeper / admin reconcile remains the backstop for a missed propagation.
+    /// </summary>
+    private async Task TryPropagateCancellationUpstreamAsync(
+        DeliveryRequest req, string callerId, CancellationToken ct)
+    {
+        if (!_flags.CurrentValue.Delivery)
+        {
+            return;
+        }
+
+        try
+        {
+            var partySource = CanonicalDeliveryVocab.PartySourceFor(HttpContext);
+            var actorRole = CanonicalDeliveryVocab.ActorRoleFor(HttpContext);
+            await _deliveryClient.CanonicalTransitionAsync(
+                req.Id, CanonicalDeliveryStatus.Cancelled, partySource, callerId, actorRole, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Cancellation upstream propagation failed for delivery {DeliveryId}; the gateway "
+                + "commit is authoritative and the client cancel already succeeded. The canonical "
+                + "row may lag until reconciled.",
+                req.Id);
         }
     }
 
