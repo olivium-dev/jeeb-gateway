@@ -481,6 +481,30 @@ public class DeliveryRequestDto
     /// (T-backend-015).
     /// </summary>
     public string? OtpEscalationId { get; init; }
+
+    /// <summary>
+    /// PR-G3 (S09): gross fee (in the offer's currency units, LBP) of the ACCEPTED
+    /// offer for this delivery — the amount the client agreed to pay the jeeber.
+    /// Resolved on the single-read (<c>GET /v1/deliveries/{id}</c>) from the
+    /// pending-offers store's accepted offer. ADDITIVE and nullable: it is
+    /// omitted from the JSON entirely when unknown (no accepted offer resolvable),
+    /// so existing consumers are unaffected. Settable so the read handler can
+    /// enrich the projected DTO after building it.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public decimal? Amount { get; set; }
+
+    /// <summary>
+    /// PR-G3 (S09): display name of the assigned jeeber, when a cheap in-process
+    /// resolution seam exists. ADDITIVE and nullable — omitted from the JSON when
+    /// unresolved (the gateway does not add an upstream user-management round-trip to
+    /// the delivery read just to populate it). Settable so the read handler can enrich
+    /// the projected DTO after building it.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? JeeberName { get; set; }
 }
 
 /// <summary>
