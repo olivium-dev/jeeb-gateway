@@ -2,6 +2,7 @@ using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations;
 using JeebGateway.Conversations.Client;
+using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -61,6 +62,7 @@ public class OffersController : ControllerBase
     private readonly IConversationProvisioner _conversations;
     private readonly IJeebConversationClient _conversationAggregate;
     private readonly IDeliveryServiceClient _deliveryService;
+    private readonly IOfferPushNotifier _offerPush;
     private readonly UpstreamFeatureFlags _flags;
     private readonly DeliveryClientOptions _deliveryOptions;
     private readonly ILogger<OffersController> _logger;
@@ -75,6 +77,7 @@ public class OffersController : ControllerBase
         IConversationProvisioner conversations,
         IJeebConversationClient conversationAggregate,
         IDeliveryServiceClient deliveryService,
+        IOfferPushNotifier offerPush,
         IOptions<UpstreamFeatureFlags> flags,
         IOptions<DeliveryClientOptions> deliveryOptions,
         ILogger<OffersController> logger)
@@ -88,6 +91,7 @@ public class OffersController : ControllerBase
         _conversations = conversations;
         _conversationAggregate = conversationAggregate;
         _deliveryService = deliveryService;
+        _offerPush = offerPush;
         _flags = flags.Value;
         _deliveryOptions = deliveryOptions.Value;
         _logger = logger;
@@ -704,6 +708,15 @@ public class OffersController : ControllerBase
             return null;
         }
 
+        // sprint-009 Lane E — accept-lifecycle push fan-out. Push jeeb.offer_accepted to
+        // the winning jeeber and jeeb.offer_rejected to each losing bidder named in the
+        // envelope's RejectedOfferIds (bidder resolved from the offer routing index).
+        // DEGRADE-DON'T-FAIL: the saga already committed, so a push blip is logged and
+        // swallowed — it never turns a successful accept into a 5xx. Mirrors the V1
+        // JeebOffersController fan-out so both accept surfaces behave identically.
+        await DispatchAcceptLifecyclePushesAsync(
+            requestId, envelope.AcceptedOfferId, winningJeeberId, envelope.RejectedOfferIds, ct);
+
         var now = _clock.GetUtcNow();
 
         // (H6b) Sync the gateway's own request ledger. TryAcceptByJeeberAsync is the
@@ -851,6 +864,52 @@ public class OffersController : ControllerBase
                 + "accept stays 200, conversation_phase defaults to 'accepted'.",
                 requestId);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// sprint-009 Lane E — best-effort accept-lifecycle push fan-out. Sends one
+    /// <c>jeeb.offer_accepted</c> push to the winning jeeber and one
+    /// <c>jeeb.offer_rejected</c> push per rejected sibling (each losing bidder resolved
+    /// from the offer routing index via <see cref="IOfferRequestIndex.ResolveJeeberId"/>).
+    /// The notifier never throws; this extra try/catch is belt-and-braces so the committed
+    /// accept's 200 can never be flipped to a 5xx. Identical contract to the V1
+    /// <c>JeebOffersController</c> fan-out.
+    /// </summary>
+    private async Task DispatchAcceptLifecyclePushesAsync(
+        string requestId,
+        string acceptedOfferId,
+        string? winningJeeberId,
+        IReadOnlyList<string>? rejectedOfferIds,
+        CancellationToken ct)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(winningJeeberId))
+            {
+                await _offerPush.NotifyOfferAcceptedAsync(winningJeeberId, requestId, acceptedOfferId, ct);
+            }
+
+            if (rejectedOfferIds is not null)
+            {
+                foreach (var rejectedOfferId in rejectedOfferIds)
+                {
+                    if (string.IsNullOrWhiteSpace(rejectedOfferId))
+                        continue;
+
+                    var loserJeeberId = _offerRequestIndex.ResolveJeeberId(rejectedOfferId);
+                    if (string.IsNullOrWhiteSpace(loserJeeberId))
+                        continue;
+
+                    await _offerPush.NotifyOfferLostAsync(loserJeeberId, requestId, rejectedOfferId, ct);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Post-accept lifecycle push fan-out for request {RequestId} (offer {OfferId}) failed; "
+                + "accept stays 200.", requestId, acceptedOfferId);
         }
     }
 
