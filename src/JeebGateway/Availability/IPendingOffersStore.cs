@@ -284,3 +284,26 @@ public class DuplicateOfferException : Exception
         ExistingOfferId = existingOfferId;
     }
 }
+
+/// <summary>
+/// sprint-009 Lane E — the request is not open for new offers (offer-service
+/// <c>request_not_open</c>: the auction is already accepted, expired, or cancelled).
+/// This is DISTINCT from the 20-offer cap (<see cref="TooManyOffersForRequestException"/>):
+/// both surface as HTTP 409 upstream, but rendering the cap message for a closed auction
+/// is misleading. The controller maps this to its own <c>request-not-open-for-offers</c>
+/// ProblemDetails so the jeeber sees "the auction is closed", not "20-offer cap reached".
+/// </summary>
+public class RequestNotOpenForOffersException : Exception
+{
+    public string RequestId { get; }
+
+    /// <summary>The offer-service error <c>code</c> that drove the classification, when present.</summary>
+    public string? UpstreamCode { get; }
+
+    public RequestNotOpenForOffersException(string requestId, string? upstreamCode)
+        : base($"Request '{requestId}' is not open for new offers (upstream code '{upstreamCode ?? "request_not_open"}').")
+    {
+        RequestId = requestId;
+        UpstreamCode = upstreamCode;
+    }
+}

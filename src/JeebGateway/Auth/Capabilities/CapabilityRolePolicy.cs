@@ -86,6 +86,11 @@ public static class CapabilityRolePolicy
             [Capabilities.OfferSubmit] = JeeberOnly,
             [Capabilities.OfferEditOwn] = JeeberOnly,           // STATE
             [Capabilities.OfferWithdraw] = JeeberOnly,          // STATE
+            // sprint-009 Lane E: offer.read.own is the coarse read CLAIM held by BOTH
+            // parties (client lists offers on their own request; jeeber lists their own
+            // submitted offers). Row scoping (ownership vs self) is STATE in the action,
+            // mirroring DisputeReadMine / SupportReadOwn.
+            [Capabilities.OfferReadOwn] = Participant,          // {client, jeeber}; own-vs-self = STATE
             [Capabilities.DeliveryGpsStream] = JeeberOnly,
             [Capabilities.EarningsReadOwn] = JeeberOnly,        // STATE: ownership
             [Capabilities.EarningsPdfOwn] = JeeberOnly,         // STATE: ownership

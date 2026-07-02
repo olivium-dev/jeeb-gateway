@@ -49,6 +49,32 @@ public interface IOfferPushNotifier
         string offerId,
         decimal fee,
         CancellationToken ct);
+
+    /// <summary>
+    /// sprint-009 Lane E — best-effort: push the "your offer was accepted" notification
+    /// to the WINNING jeeber (<paramref name="winnerJeeberId"/>) after the client closes
+    /// the auction. Renders the existing <c>jeeb.offer_accepted</c> catalog template and
+    /// carries a <c>jeeb://offers/{offerId}</c> deep link. Never throws; a blank recipient
+    /// is a no-op.
+    /// </summary>
+    Task NotifyOfferAcceptedAsync(
+        string winnerJeeberId,
+        string requestId,
+        string offerId,
+        CancellationToken ct);
+
+    /// <summary>
+    /// sprint-009 Lane E — best-effort: push the "your offer wasn't selected" notification
+    /// to a LOSING bidder (<paramref name="loserJeeberId"/>) for their now-rejected offer
+    /// (<paramref name="offerId"/>). Renders the <c>jeeb.offer_rejected</c> catalog template
+    /// and carries a <c>jeeb://offers/{offerId}</c> deep link. Never throws; a blank
+    /// recipient is a no-op.
+    /// </summary>
+    Task NotifyOfferLostAsync(
+        string loserJeeberId,
+        string requestId,
+        string offerId,
+        CancellationToken ct);
 }
 
 /// <inheritdoc />
@@ -117,4 +143,67 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
         => fee > 0m
             ? $"You received a new offer for ${fee.ToString("0.##", CultureInfo.InvariantCulture)}. Tap to review."
             : "You received a new offer. Tap to review.";
+
+    // sprint-009 Lane E — the winner/loser accept-lifecycle pushes. Both mirror the
+    // NotifyNewOfferAsync contract exactly (2s CTS, flat top-level payload, never-throws)
+    // and differ only in recipient, template, and the `type` discriminator the mobile
+    // client routes on (offer_accepted vs offer_lost). The title/body come from the
+    // gateway-owned JeebNotificationCatalog (jeeb.offer_accepted / jeeb.offer_rejected)
+    // and a jeeb://offers/{offerId} deep link is carried flat so the client can navigate.
+    public Task NotifyOfferAcceptedAsync(
+        string winnerJeeberId, string requestId, string offerId, CancellationToken ct)
+        => SendLifecycleAsync(
+            winnerJeeberId, requestId, offerId,
+            templateKey: "jeeb.offer_accepted", type: "offer_accepted", ct);
+
+    public Task NotifyOfferLostAsync(
+        string loserJeeberId, string requestId, string offerId, CancellationToken ct)
+        => SendLifecycleAsync(
+            loserJeeberId, requestId, offerId,
+            templateKey: "jeeb.offer_rejected", type: "offer_lost", ct);
+
+    private async Task SendLifecycleAsync(
+        string recipientId, string requestId, string offerId, string templateKey, string type, CancellationToken ct)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(recipientId) || string.IsNullOrWhiteSpace(offerId))
+            {
+                return;
+            }
+
+            var template = JeebNotificationCatalog.Render(templateKey);
+            var deepLink = NotificationDeepLinkResolver.Resolve(templateKey, offerId);
+
+            var payload = new Dictionary<string, object?>
+            {
+                ["title"] = template.Title,
+                ["body"] = template.Body,
+                ["type"] = type,
+                ["category"] = "delivery",
+                // Both camel + snake variants — the mobile deep-link reads either.
+                ["requestId"] = requestId,
+                ["request_id"] = requestId,
+                ["offerId"] = offerId,
+                // Ready-to-navigate deep link (jeeb://offers/{offerId}); flat so the client
+                // needs no nested-JSON hoist. Mirrors the inbox deepLink contract.
+                ["deepLink"] = deepLink,
+            };
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(PushTimeout);
+
+            await _push.Send_notification_to_userAsync(
+                recipientId,
+                new SentPayloadToUserRequest { Payload = payload },
+                cts.Token);
+        }
+        catch (Exception ex)
+        {
+            // DEGRADE-DON'T-FAIL: the accept saga already committed and the 200 is emitted.
+            _logger.LogWarning(ex,
+                "Offer {Type} push for request {RequestId} (offer {OfferId}) to {RecipientId} failed; "
+                + "accept stays 200.", type, requestId, offerId, recipientId);
+        }
+    }
 }

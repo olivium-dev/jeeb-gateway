@@ -46,6 +46,16 @@ public static class JeebNotificationCatalog
                 ["en"] = new("Offer Accepted", "Your delivery offer has been accepted. Get ready to start the delivery process."),
                 ["ar"] = new("تم قبول العرض", "تم قبول عرض التوصيل الخاص بك. استعد لبدء عملية التوصيل."),
             },
+            // sprint-009 Lane E — the LOSER side of the multi-offer accept. When the
+            // client awards the delivery to one jeeber, every other bidder's offer is
+            // rejected by the offer-service accept saga; the gateway pushes this to each
+            // losing bidder so their offer list reconciles from "pending" to "lost"
+            // without a poll. Copy is deliberately soft/encouraging (they can keep bidding).
+            ["jeeb.offer_rejected"] = new Dictionary<string, NotificationTemplate>
+            {
+                ["en"] = new("Offer Not Selected", "Your offer wasn't selected this time. Keep an eye out for new delivery requests."),
+                ["ar"] = new("لم يتم اختيار عرضك", "لم يتم اختيار عرضك هذه المرة. تابع طلبات التوصيل الجديدة."),
+            },
             ["jeeb.delivery_status_updated"] = new Dictionary<string, NotificationTemplate>
             {
                 ["en"] = new("Delivery Update", "Your delivery status has been updated. Check the app for the latest information."),

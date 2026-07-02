@@ -1,6 +1,7 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations.Client;
+using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -37,6 +38,7 @@ public sealed class JeebOffersController : ControllerBase
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly IDeliveryServiceClient _deliveryService;
     private readonly IJeebConversationClient _conversations;
+    private readonly IOfferPushNotifier _offerPush;
     private readonly UpstreamFeatureFlags _flags;
     private readonly DeliveryClientOptions _deliveryOptions;
     private readonly ILogger<JeebOffersController> _logger;
@@ -48,6 +50,7 @@ public sealed class JeebOffersController : ControllerBase
         IOfferRequestIndex offerRequestIndex,
         IDeliveryServiceClient deliveryService,
         IJeebConversationClient conversations,
+        IOfferPushNotifier offerPush,
         IOptions<UpstreamFeatureFlags> flags,
         IOptions<DeliveryClientOptions> deliveryOptions,
         ILogger<JeebOffersController> logger)
@@ -58,6 +61,7 @@ public sealed class JeebOffersController : ControllerBase
         _offerRequestIndex = offerRequestIndex;
         _deliveryService = deliveryService;
         _conversations = conversations;
+        _offerPush = offerPush;
         _flags = flags.Value;
         _deliveryOptions = deliveryOptions.Value;
         _logger = logger;
@@ -244,6 +248,15 @@ public sealed class JeebOffersController : ControllerBase
         // id onto the local projection, THEN seats the jeeber (correct ordering).
         await EnsureConversationAndSeatWinnerAsync(req, winningJeeberId, ct);
 
+        // sprint-009 Lane E — the accept-lifecycle push fan-out. The offer-service accept
+        // saga closes the auction (single winner + sibling rejection) but owns NO Jeeb
+        // notification (org no-coupling law), so the gateway is the composer: it pushes
+        // (a) jeeb.offer_accepted to the WINNING jeeber and (b) jeeb.offer_rejected to each
+        // LOSING bidder named in the envelope's RejectedOfferIds. DEGRADE-DON'T-FAIL: the
+        // saga already committed and the 200 is emitted, so a push blip is logged and
+        // swallowed — it must never flip a successful accept into a 5xx.
+        await DispatchAcceptLifecyclePushesAsync(requestId, offerId, winningJeeberId, result.Envelope?.RejectedOfferIds, ct);
+
         if (req is not null)
             return Ok(ToRequestDto(req));
 
@@ -256,6 +269,55 @@ public sealed class JeebOffersController : ControllerBase
             jeeberId = result.Envelope?.JeeberId,
             status = "accepted"
         });
+    }
+
+    /// <summary>
+    /// sprint-009 Lane E — best-effort accept-lifecycle push fan-out. Sends exactly one
+    /// <c>jeeb.offer_accepted</c> push to the winning jeeber and one
+    /// <c>jeeb.offer_rejected</c> push per rejected sibling (resolving each losing bidder
+    /// from the offer routing index via <see cref="IOfferRequestIndex.ResolveJeeberId"/>).
+    /// The notifier itself never throws; this extra try/catch is belt-and-braces so even a
+    /// bug in the fan-out can NEVER flip the committed accept's 200 into a 5xx. Mirrors the
+    /// degrade-don't-fail contract of the offer-submit push seat.
+    /// </summary>
+    private async Task DispatchAcceptLifecyclePushesAsync(
+        string requestId,
+        string acceptedOfferId,
+        string? winningJeeberId,
+        IReadOnlyList<string>? rejectedOfferIds,
+        CancellationToken ct)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(winningJeeberId))
+            {
+                await _offerPush.NotifyOfferAcceptedAsync(winningJeeberId, requestId, acceptedOfferId, ct);
+            }
+
+            if (rejectedOfferIds is not null)
+            {
+                foreach (var rejectedOfferId in rejectedOfferIds)
+                {
+                    if (string.IsNullOrWhiteSpace(rejectedOfferId))
+                        continue;
+
+                    // Resolve the losing bidder from the routing index learned at submit
+                    // time. A null result (offer unknown to this instance / recorded without
+                    // a jeeber id) means we cannot address the push — skip it, never guess.
+                    var loserJeeberId = _offerRequestIndex.ResolveJeeberId(rejectedOfferId);
+                    if (string.IsNullOrWhiteSpace(loserJeeberId))
+                        continue;
+
+                    await _offerPush.NotifyOfferLostAsync(loserJeeberId, requestId, rejectedOfferId, ct);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Post-accept lifecycle push fan-out for request {RequestId} (offer {OfferId}) failed; "
+                + "accept stays 200.", requestId, acceptedOfferId);
+        }
     }
 
     /// <summary>

@@ -20,6 +20,8 @@ public class JeebNotificationCatalogTests
     {
         "jeeb.offer_received",
         "jeeb.offer_accepted",
+        // sprint-009 Lane E — the loser side of the multi-offer accept lifecycle.
+        "jeeb.offer_rejected",
         "jeeb.delivery_status_updated",
         "jeeb.settlement_paid",
         "jeeb.kyc_approved",
@@ -29,7 +31,7 @@ public class JeebNotificationCatalogTests
     };
 
     [Fact]
-    public void Catalog_Owns_The_Eight_Jeeb_Templates()
+    public void Catalog_Owns_The_Expected_Jeeb_Templates()
     {
         JeebNotificationCatalog.Keys.Should().BeEquivalentTo(ExpectedKeys);
     }

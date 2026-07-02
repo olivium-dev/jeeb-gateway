@@ -36,6 +36,10 @@ public static class NotificationDeepLinkResolver
             ["offer_received"]      = "jeeb://offers/{id}",
             ["jeeb.offer_accepted"] = "jeeb://offers/{id}",
             ["offer_accepted"]      = "jeeb://offers/{id}",
+            // sprint-009 Lane E — a rejected/losing bidder deep-links to the same offer
+            // detail so they land on the (now terminal) offer they lost.
+            ["jeeb.offer_rejected"] = "jeeb://offers/{id}",
+            ["offer_rejected"]      = "jeeb://offers/{id}",
 
             // KYC approve/reject -> KYC review screen
             ["jeeb.kyc_approved"] = "jeeb://kyc/status",
