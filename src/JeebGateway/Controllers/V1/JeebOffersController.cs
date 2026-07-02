@@ -347,6 +347,29 @@ public sealed class JeebOffersController : ControllerBase
                     RoleInConvo = "jeeber_winner",
                 },
                 ct);
+
+            // 4) Advance the conversation OUT of the auction/broadcasting phase into the
+            //    settled (accepted) 1:1: promote the winner's role and soft-remove the
+            //    losing bidders. This is the second half of the winner-blind-to-client
+            //    fix — chat-service only grants the winner visibility of the client's
+            //    messages in a CLEAN 1:1 (owner + single accepted counterpart), so this
+            //    transition is what makes that safe (no losing bidder is left seated to
+            //    ever see the client's private text). Idempotent on the chat side; the
+            //    winner_role_in_convo token ("jeeber_winner") is the one the winner is
+            //    seated with above, so the promotion recognises it.
+            //    DEGRADE-DON'T-FAIL: still inside the accept saga's post-commit best-effort
+            //    block — a chat blip is logged and swallowed (accept stays 200); the phase
+            //    reconciles on a later pass.
+            await _conversations.AdvancePhaseAsync(
+                conversationId,
+                new AdvanceJeebPhaseRequest
+                {
+                    Phase = "accepted",
+                    WinnerUserId = winningJeeberId,
+                    WinnerRoleInConvo = "jeeber_winner",
+                    RemoveOthers = true,
+                },
+                ct);
         }
         catch (Exception ex)
         {

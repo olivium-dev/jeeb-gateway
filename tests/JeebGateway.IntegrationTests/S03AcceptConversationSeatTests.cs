@@ -71,6 +71,17 @@ public class S03AcceptConversationSeatTests
         convo.Seats.Single().UserId.Should().Be(Winner);
         convo.Seats.Single().Role.Should().Be("jeeber_winner");
 
+        // The conversation was ADVANCED to the settled 1:1 (accepted) phase, promoting the
+        // winner and removing losing bidders — so chat-service can safely let the winner
+        // read the client's messages without any loser left seated. (winner-blind-to-client fix)
+        convo.PhaseAdvances.Should().ContainSingle();
+        var advance = convo.PhaseAdvances.Single();
+        advance.ConversationId.Should().Be(RecordingConversationClient.CreatedId);
+        advance.Phase.Should().Be("accepted");
+        advance.WinnerUserId.Should().Be(Winner);
+        advance.WinnerRoleInConvo.Should().Be("jeeber_winner");
+        advance.RemoveOthers.Should().BeTrue();
+
         // The resolved conversationId is LINKED onto the projection the client reads.
         var body = await resp.Content.ReadFromJsonAsync<AcceptBody>();
         body!.ConversationId.Should().Be(RecordingConversationClient.CreatedId);
@@ -201,6 +212,7 @@ public class S03AcceptConversationSeatTests
 
         public ConcurrentQueue<CreateJeebConversationRequest> CreateCalls { get; } = new();
         public ConcurrentQueue<SeatRecord> Seats { get; } = new();
+        public ConcurrentQueue<AdvanceRecord> PhaseAdvances { get; } = new();
         public int SeatAttempts { get; private set; }
 
         public Task<JeebConversationResponse> GetConversationByCorrelationAsync(string correlationKey, CancellationToken ct)
@@ -248,10 +260,21 @@ public class S03AcceptConversationSeatTests
         public Task<JeebConversationMembership> GetMembershipAsync(string conversationId, string viewerUserId, CancellationToken ct)
             => throw new NotSupportedException();
         public Task<JeebConversationResponse> AdvancePhaseAsync(string conversationId, AdvanceJeebPhaseRequest request, CancellationToken ct)
-            => throw new NotSupportedException();
+        {
+            PhaseAdvances.Enqueue(new AdvanceRecord(
+                conversationId, request.Phase, request.WinnerUserId, request.WinnerRoleInConvo, request.RemoveOthers));
+            return Task.FromResult(new JeebConversationResponse
+            {
+                ConversationId = conversationId,
+                Phase = request.Phase,
+            });
+        }
     }
 
     private sealed record SeatRecord(string ConversationId, string UserId, string Role);
+
+    private sealed record AdvanceRecord(
+        string ConversationId, string Phase, string? WinnerUserId, string WinnerRoleInConvo, bool RemoveOthers);
 
     /// <summary>Offer-service double: only the accept-with-status seam is used; returns an accepted
     /// envelope carrying the winning jeeber. Every other member throws.</summary>

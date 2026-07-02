@@ -52,6 +52,9 @@ public class ChatMessagePushNotifierTests
         payload.Should().NotContainKey("data", "routing fields must be flat, not nested under a 'data' object");
         payload["conversationId"].Should().Be(ConversationId);
         payload["requestId"].Should().Be(requestId);
+        // Snake variant carried too so the mobile chat deep-link (/chat/:requestId) resolves
+        // regardless of which id key it reads.
+        payload["request_id"].Should().Be(requestId);
         payload["type"].Should().Be("chat");
     }
 

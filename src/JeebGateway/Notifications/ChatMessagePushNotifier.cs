@@ -131,7 +131,12 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
                 ["title"] = "New message",
                 ["body"] = BuildPreview(messagePreview),
                 ["conversationId"] = conversationId,
+                // Emit BOTH camel and snake variants of the request id. The mobile
+                // chat deep-link (tap → /chat/:requestId) reads either; keeping both
+                // flat top-level keys matches the offer push (Task 1) and means the
+                // client needs no key-shape branching between the two notification types.
                 ["requestId"] = request.Id,
+                ["request_id"] = request.Id,
                 ["type"] = "chat",
             };
 

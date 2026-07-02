@@ -1,6 +1,7 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations.Client;
+using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -69,6 +70,7 @@ public class RequestOffersController : ControllerBase
     private readonly IOfferRealtimeNotifier _realtime;
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly IJeebConversationClient _conversations;
+    private readonly IOfferPushNotifier _offerPush;
     private readonly UpstreamFeatureFlags _flags;
     private readonly TimeProvider _clock;
     private readonly ILogger<RequestOffersController> _logger;
@@ -80,6 +82,7 @@ public class RequestOffersController : ControllerBase
         IOfferRealtimeNotifier realtime,
         IOfferRequestIndex offerRequestIndex,
         IJeebConversationClient conversations,
+        IOfferPushNotifier offerPush,
         IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         ILogger<RequestOffersController> logger)
@@ -90,6 +93,7 @@ public class RequestOffersController : ControllerBase
         _realtime = realtime;
         _offerRequestIndex = offerRequestIndex;
         _conversations = conversations;
+        _offerPush = offerPush;
         _flags = flags.Value;
         _clock = clock;
         _logger = logger;
@@ -286,6 +290,27 @@ public class RequestOffersController : ControllerBase
         {
             _logger.LogWarning(ex,
                 "Failed to dispatch realtime new-offer event for request {RequestId}, offer {OfferId}",
+                requestId, created.Id);
+        }
+
+        // BUILD-OFFER-PUSH — notify the request's CUSTOMER (the requester) that a new
+        // offer landed so they can open the auction and compare bids. clientId is read
+        // straight off the request row already loaded above — no extra fetch.
+        //
+        // DEGRADE-DON'T-FAIL: the offer is already durable and the 201 is committed. The
+        // notifier itself swallows every push-service failure; the extra try/catch here
+        // is belt-and-braces so even a bug in the notifier can NEVER flip the 201 into a
+        // 5xx or slow it materially (the FCM round-trip is timeout-bounded inside the
+        // notifier). Same contract as the realtime fan-out above and the AdvancePhase seat.
+        try
+        {
+            await _offerPush.NotifyNewOfferAsync(
+                request.ClientId, requestId, created.Id, created.Fee, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to dispatch offer push for request {RequestId}, offer {OfferId}; offer stays 201.",
                 requestId, created.Id);
         }
 

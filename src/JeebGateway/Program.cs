@@ -570,6 +570,12 @@ builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePu
 builder.Services.AddScoped<JeebGateway.Notifications.IChatMessagePushNotifier,
     JeebGateway.Notifications.ChatMessagePushNotifier>();
 
+// BUILD-OFFER-PUSH — the offer-submitted → push-notification trigger. Best-effort FCM
+// push to the request's CUSTOMER when a jeeber submits a bid (the second missing push
+// link alongside chat). Scoped: composes the SCOPED ServicePushNotificationClient (:10040).
+builder.Services.AddScoped<JeebGateway.Notifications.IOfferPushNotifier,
+    JeebGateway.Notifications.OfferPushNotifier>();
+
 // Feedback (ServiceFeedbackClient) — salehly sibling mirror.
 // The NSwag-generated ServiceFeedbackClient
 // (Services/Clients/ServiceFeedbackClient.cs, namespace
