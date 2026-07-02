@@ -1,4 +1,5 @@
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Availability;
 using JeebGateway.Financials;
 using JeebGateway.Push;
 using JeebGateway.Requests;
@@ -54,6 +55,9 @@ public class DeliveriesController : ControllerBase
 {
     private static readonly ActivitySource ActivitySource = new("JeebGateway.Deliveries");
     private readonly IRequestsStore _store;
+    // PR-G3: accepted-offer fee lookup (Amount enrich) + jeeber display-name seam.
+    private readonly IPendingOffersStore _offers;
+    private readonly IUsersStore _users;
     // JEB-56: settlement store for COD platform records (recorded→batched→paid).
     private readonly ISettlementStore _settlementStore;
     private readonly IPushNotificationService _push;
@@ -104,6 +108,8 @@ public class DeliveriesController : ControllerBase
 
     public DeliveriesController(
         IRequestsStore store,
+        IPendingOffersStore offers,
+        IUsersStore users,
         ISettlementStore settlementStore,
         IPushNotificationService push,
         ICancellationService cancellations,
@@ -118,6 +124,8 @@ public class DeliveriesController : ControllerBase
         ILogger<DeliveriesController> log)
     {
         _store = store;
+        _offers = offers;
+        _users = users;
         _settlementStore = settlementStore;
         _push = push;
         _cancellations = cancellations;
@@ -151,12 +159,30 @@ public class DeliveriesController : ControllerBase
         [FromQuery] int? limit,
         CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
 
         try
         {
             var result = await _deliveryClient.ListShipmentsAsync(orderId, stage, limit, ct);
-            return Ok(result);
+
+            // PR-G3: the upstream shipments feed is NOT caller-scoped — it returns rows
+            // across all orders. Intersect it with the caller's OWN order ids (the
+            // gateway's request store, keyed by request id == order id) so a caller only
+            // ever sees shipments for orders they created. A shipment whose orderId is
+            // absent from the caller's owned set — or whose orderId is null — is dropped
+            // (cannot prove ownership → fail closed). This is authorization scoping, not
+            // a fabricated dataset.
+            var ownedOrderIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var owned in await _store.ListForClientAsync(userId, ct))
+            {
+                ownedOrderIds.Add(owned.Id);
+            }
+
+            var scoped = result.Shipments
+                .Where(s => s.OrderId is { } oid && ownedOrderIds.Contains(oid))
+                .ToList();
+
+            return Ok(new ShipmentsListDto { Shipments = scoped, Count = scoped.Count });
         }
         catch (Exception ex)
         {
@@ -230,7 +256,7 @@ public class DeliveriesController : ControllerBase
                 {
                     return NotFound();
                 }
-                return Ok(new DeliveryRequestDto
+                var canonicalDto = new DeliveryRequestDto
                 {
                     Id = canonical.DeliveryId,
                     ClientId = canonical.ClientId ?? string.Empty,
@@ -239,7 +265,9 @@ public class DeliveriesController : ControllerBase
                     TierId = canonical.TierId,
                     JeeberId = canonical.JeeberId,
                     CreatedAt = canonical.CreatedAt
-                });
+                };
+                await EnrichWithOfferAndJeeberAsync(canonicalDto, deliveryId, canonical.JeeberId, ct);
+                return Ok(canonicalDto);
             }
             catch (HttpRequestException hre)
             {
@@ -257,7 +285,61 @@ public class DeliveriesController : ControllerBase
             return NotFound();
         }
 
-        return Ok(ToDto(delivery));
+        var dto = ToDto(delivery);
+        await EnrichWithOfferAndJeeberAsync(dto, deliveryId, delivery.JeeberId, ct);
+        return Ok(dto);
+    }
+
+    /// <summary>
+    /// PR-G3 (S09): best-effort enrichment of a single-read <see cref="DeliveryRequestDto"/>
+    /// with the accepted offer's fee (<see cref="DeliveryRequestDto.Amount"/>) and the
+    /// assigned jeeber's display name (<see cref="DeliveryRequestDto.JeeberName"/>).
+    /// Both are ADDITIVE and nullable — a resolution miss leaves the field null (omitted
+    /// from the JSON), and any store fault is swallowed so a read is NEVER turned into a
+    /// 5xx by the decoration. deliveryId == requestId, so the accepted offer is resolved
+    /// via the pending-offers store keyed by request id; the jeeber name is resolved via
+    /// the gateway's own users projection store (a cheap in-process seam, not an added
+    /// upstream user-management round-trip).
+    /// </summary>
+    private async Task EnrichWithOfferAndJeeberAsync(
+        DeliveryRequestDto dto, string deliveryId, string? jeeberId, CancellationToken ct)
+    {
+        try
+        {
+            var offers = await _offers.ListForRequestAsync(deliveryId, ct);
+            // The single accepted offer is the awarded bid; its Fee is the agreed amount.
+            var accepted = offers.FirstOrDefault(o =>
+                string.Equals(o.Status, PendingOfferStatus.Accepted, StringComparison.Ordinal));
+            if (accepted is not null)
+            {
+                dto.Amount = accepted.Fee;
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Accepted-offer amount enrich failed for delivery {DeliveryId}; returning without Amount.",
+                deliveryId);
+        }
+
+        if (!string.IsNullOrWhiteSpace(jeeberId))
+        {
+            try
+            {
+                var profile = await _users.GetByIdAsync(jeeberId, ct);
+                if (!string.IsNullOrWhiteSpace(profile?.Name))
+                {
+                    dto.JeeberName = profile.Name;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "Jeeber display-name enrich failed for delivery {DeliveryId} jeeber {JeeberId}; "
+                    + "returning without JeeberName.",
+                    deliveryId, jeeberId);
+            }
+        }
     }
 
     [HttpPatch("{deliveryId}/status")]
@@ -525,6 +607,19 @@ public class DeliveriesController : ControllerBase
             case CancellationOutcome.CancelledByJeeber:
             case CancellationOutcome.PendingAdminApproval:
                 await NotifyCancellationCounterpartyAsync(result.Request!, result.PreviousStatus!, result.Outcome, ct);
+
+                // PR-G2: when the gateway commit landed the row TERMINALLY cancelled
+                // (immediate client cancel / jeeber cancel), best-effort drive the
+                // canonical delivery-service row terminal too so the shipments /
+                // canonical projections stop showing the delivery as active. The admin-
+                // approval outcome is NOT terminal yet (the row parks on
+                // cancellation_requested), so it is deliberately excluded here — upstream
+                // propagation happens when the admin approves.
+                if (result.Outcome != CancellationOutcome.PendingAdminApproval)
+                {
+                    await TryPropagateCancellationUpstreamAsync(result.Request!, callerId, ct);
+                }
+
                 return Ok(new CancelDeliveryResponse
                 {
                     DeliveryId = result.Request!.Id,
@@ -541,6 +636,43 @@ public class DeliveriesController : ControllerBase
                 return Problem(
                     title: "Unhandled cancellation outcome.",
                     statusCode: StatusCodes.Status500InternalServerError);
+        }
+    }
+
+    /// <summary>
+    /// PR-G2: best-effort propagation of a committed terminal cancel to the canonical
+    /// delivery-service row via the existing SM-1 transition contract
+    /// (<see cref="IDeliveryServiceClient.CanonicalTransitionAsync"/>, to =
+    /// <see cref="CanonicalDeliveryStatus.Cancelled"/>). Gated on the delivery
+    /// kill-switch (<c>FeatureFlags:UseUpstream:Delivery</c>) — when the gateway is the
+    /// authoritative writer (flag off) there is no canonical row to reconcile. This is
+    /// STRICTLY best-effort: the gateway commit already succeeded and the client 200 is
+    /// authoritative, so any upstream fault (already-terminal 422, wrong-party 403,
+    /// network 502, …) is swallowed with a LogWarning and never turned into a 5xx. A
+    /// sweeper / admin reconcile remains the backstop for a missed propagation.
+    /// </summary>
+    private async Task TryPropagateCancellationUpstreamAsync(
+        DeliveryRequest req, string callerId, CancellationToken ct)
+    {
+        if (!_flags.CurrentValue.Delivery)
+        {
+            return;
+        }
+
+        try
+        {
+            var partySource = CanonicalDeliveryVocab.PartySourceFor(HttpContext);
+            var actorRole = CanonicalDeliveryVocab.ActorRoleFor(HttpContext);
+            await _deliveryClient.CanonicalTransitionAsync(
+                req.Id, CanonicalDeliveryStatus.Cancelled, partySource, callerId, actorRole, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Cancellation upstream propagation failed for delivery {DeliveryId}; the gateway "
+                + "commit is authoritative and the client cancel already succeeded. The canonical "
+                + "row may lag until reconciled.",
+                req.Id);
         }
     }
 

@@ -99,8 +99,90 @@ public class S03JeeberDeliveryListTests
     }
 
     // ---------------------------------------------------------------------
+    // PR-G1 — canonical status normalization + IsListableActive filter
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public async Task Deliveries_CanonicalNormalization_PickedRow_ListsAsPicked_NotPickedUp()
+    {
+        // A row persisted under the LEGACY vocabulary (picked_up) must surface on the
+        // list as the CANONICAL token 'Picked'.
+        using var factory = new WebApplicationFactory<Program>();
+        var requestId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        await SetStatusAsync(factory, requestId, RequestStatus.PickedUp); // legacy "picked_up"
+
+        var page = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries");
+
+        var item = page!.Items.Single(i => i.Id == requestId);
+        item.Status.Should().Be(CanonicalDeliveryStatus.Picked, "legacy picked_up dual-reads to canonical Picked");
+        item.Status.Should().NotBe(RequestStatus.PickedUp);
+    }
+
+    [Fact]
+    public async Task Deliveries_CanonicalNormalization_AlreadyCanonicalPickedRow_ListsAsPicked_Consistently()
+    {
+        // The inverse consistency: a row already stamped with the CANONICAL token
+        // 'Picked' must ALSO list as 'Picked' (idempotent dual-read), so both vocabularies
+        // converge on the same list value.
+        using var factory = new WebApplicationFactory<Program>();
+        var requestId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        await SetStatusAsync(factory, requestId, CanonicalDeliveryStatus.Picked); // canonical "Picked"
+
+        var page = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries");
+
+        page!.Items.Single(i => i.Id == requestId).Status.Should().Be(CanonicalDeliveryStatus.Picked);
+    }
+
+    [Fact]
+    public async Task Deliveries_ExcludesTerminalRow_But_ClientRequestsHistory_IncludesIt()
+    {
+        // A terminal (delivered → canonical Done) row drops OUT of the active Jobs/Deliveries
+        // surface but stays IN the client's /v1/requests history (canonical-status'd).
+        using var factory = new WebApplicationFactory<Program>();
+        var requestId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        await SetStatusAsync(factory, requestId, RequestStatus.Delivered); // legacy terminal → canonical Done
+
+        var deliveries = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries");
+        deliveries!.Items.Should().NotContain(i => i.Id == requestId,
+            "a terminal (Done) delivery must not occupy the active Jobs list");
+
+        // Client history is UNFILTERED — the terminal row is still present, canonical-status'd.
+        var history = await ClientActor(factory, Client)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/requests?role=client");
+        var historyItem = history!.Items.Single(i => i.Id == requestId);
+        historyItem.Status.Should().Be(CanonicalDeliveryStatus.Done,
+            "the client order history retains terminal rows, surfaced as the canonical Done token");
+    }
+
+    [Fact]
+    public async Task RequestsRoleJeeber_ExcludesTerminalRow()
+    {
+        // The role=jeeber branch of /v1/requests is the driver's active-jobs surface and
+        // is filtered like /v1/deliveries — a cancelled (terminal) row drops out.
+        using var factory = new WebApplicationFactory<Program>();
+        var requestId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        await SetStatusAsync(factory, requestId, RequestStatus.Cancelled);
+
+        var page = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/requests?role=jeeber");
+
+        page!.Items.Should().NotContain(i => i.Id == requestId);
+    }
+
+    // ---------------------------------------------------------------------
     // helpers
     // ---------------------------------------------------------------------
+
+    private static async Task SetStatusAsync(
+        WebApplicationFactory<Program> factory, string requestId, string status)
+    {
+        var store = factory.Services.GetRequiredService<IRequestsStore>();
+        (await store.SetStatusAsync(requestId, status, CancellationToken.None))
+            .Should().BeTrue($"setup: move seeded row to {status}");
+    }
 
     private static async Task<string> SeedAcceptedDeliveryAsync(
         WebApplicationFactory<Program> factory, string clientId, string jeeberId)
@@ -148,6 +230,7 @@ public class S03JeeberDeliveryListTests
     private sealed class Item
     {
         [JsonPropertyName("id")] public string Id { get; set; } = string.Empty;
+        [JsonPropertyName("status")] public string Status { get; set; } = string.Empty;
         [JsonPropertyName("jeeberId")] public string? JeeberId { get; set; }
         [JsonPropertyName("conversationId")] public string? ConversationId { get; set; }
     }

@@ -97,6 +97,15 @@ public sealed class JeebOrdersListController : ControllerBase
             rows = Array.Empty<DeliveryRequest>();
         }
 
+        // PR-G1: the jeeber Jobs surface shows only in-flight assigned jobs — terminal
+        // (Done/Cancelled) and Expired rows drop out. The client history surface
+        // (role=client) is intentionally UNFILTERED: it is order history and must show
+        // terminal rows too (they are still canonical-status'd via ToOrderItem).
+        if (jeeberScope)
+        {
+            rows = rows.Where(IsListableActive).ToList();
+        }
+
         var (pg, sz) = NormalizePaging(page, pageSize);
         var total = rows.Count;
         var window = rows
@@ -170,9 +179,14 @@ public sealed class JeebOrdersListController : ControllerBase
             rows = Array.Empty<DeliveryRequest>();
         }
 
+        // PR-G1: the Jobs tab lists only in-flight deliveries — canonical-terminal
+        // (Done/Cancelled) and Expired rows are excluded so a completed/cancelled job
+        // stops occupying the active list. totalCount reflects the filtered set.
+        var listable = rows.Where(IsListableActive).ToList();
+
         var (pg, sz) = NormalizePaging(page, pageSize);
-        var total = rows.Count;
-        var window = rows
+        var total = listable.Count;
+        var window = listable
             .OrderByDescending(r => r.CreatedAt)
             .Skip((pg - 1) * sz)
             .Take(sz)
@@ -189,12 +203,43 @@ public sealed class JeebOrdersListController : ControllerBase
         return (pg, sz);
     }
 
+    /// <summary>
+    /// PR-G1: a row is listable-active when its CANONICAL status is non-terminal and
+    /// not the request-lifecycle <c>Expired</c> terminal. Terminal canonical states
+    /// (<see cref="CanonicalDeliveryStatus.Done"/> / <see cref="CanonicalDeliveryStatus.Cancelled"/>)
+    /// and Expired drop out of the active list surfaces (deliveries / role=jeeber jobs);
+    /// <see cref="CanonicalDeliveryStatus.FailedNeedsEscalation"/> is deliberately
+    /// non-terminal (admin-resolvable) so it stays visible. Rows whose status has no
+    /// canonical delivery mapping (pre-acceptance <c>scheduled/pending/matched</c> and
+    /// the holding <c>cancellation_requested</c>) are still in flight, so they list
+    /// unless they are a legacy terminal token. The client /v1/requests history surface
+    /// is NOT filtered by this — it shows terminal rows too (canonicalized only).
+    /// </summary>
+    private static bool IsListableActive(DeliveryRequest r)
+    {
+        var canonical = DeliveryStatusAlias.ToCanonical(r.Status);
+        if (canonical is not null)
+        {
+            return !CanonicalDeliveryStatus.IsTerminal(canonical)
+                && !string.Equals(canonical, CanonicalDeliveryStatus.Expired, StringComparison.Ordinal);
+        }
+
+        // No canonical delivery mapping (scheduled/pending/matched/cancellation_requested):
+        // in flight unless the persisted legacy token is itself terminal.
+        return !RequestStatus.IsTerminal(r.Status);
+    }
+
     private static OrderListItem ToOrderItem(DeliveryRequest r, int offersCount) => new()
     {
         Id = r.Id,
         // No DisplayId on the row; mobile tolerates absence. Short, stable handle derived from the id.
         DisplayId = r.Id.Length > 8 ? r.Id[..8] : r.Id,
-        Status = r.Status,
+        // PR-G1: surface the CANONICAL SM-1 status token (Ordered/Picked/InTransit/AtDoor/
+        // Done/…). In-flight rows persisted under the legacy vocabulary (picked_up/
+        // heading_off/…) dual-read to canonical so the mobile Orders/Jobs list shows a
+        // 'Picked' row as Picked (never picked_up) and vice-versa, consistently. An
+        // entirely unknown token falls back to the raw value rather than dropping it.
+        Status = DeliveryStatusAlias.ToCanonical(r.Status) ?? r.Status,
         Title = r.Description,
         Tier = r.TierId,
         OffersCount = offersCount,

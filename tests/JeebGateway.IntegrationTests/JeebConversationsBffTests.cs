@@ -447,6 +447,83 @@ public sealed class JeebConversationsBffTests
     }
 
     // ---------------------------------------------------------------------
+    // PR-G3 — by-request alias (the route the mobile client calls today, which 404'd)
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public async Task ByRequest_Alias_Returns_Same_Body_As_CorrelationKey_Read()
+    {
+        var fake = new FakeJeebConversationClient();
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, _) = await MintSession(http, "+9613001840");
+
+        const string requestId = "req-alias-1";
+
+        // The mobile-facing alias.
+        var aliasMsg = new HttpRequestMessage(
+            HttpMethod.Get, $"/v1/chat/jeeb/conversations/by-request/{requestId}");
+        aliasMsg.Headers.Authorization = Bearer(token);
+        var aliasResp = await http.SendAsync(aliasMsg);
+
+        aliasResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var aliasJson = JObject.Parse(await aliasResp.Content.ReadAsStringAsync());
+
+        // The existing correlation-key read for the SAME request id.
+        var corrMsg = new HttpRequestMessage(
+            HttpMethod.Get, $"/v1/conversations?correlationKey={requestId}");
+        corrMsg.Headers.Authorization = Bearer(token);
+        var corrResp = await http.SendAsync(corrMsg);
+        var corrJson = JObject.Parse(await corrResp.Content.ReadAsStringAsync());
+
+        // Byte-equivalent body: same conversation, same phase, same correlation key.
+        aliasJson["conversation_id"]!.Value<string>()
+            .Should().Be(corrJson["conversation_id"]!.Value<string>());
+        aliasJson["phase"]!.Value<string>().Should().Be(corrJson["phase"]!.Value<string>());
+        aliasJson["correlation_key"]!.Value<string>().Should().Be(requestId);
+
+        // The gateway delegated to the SAME correlation-key read, forwarding requestId.
+        fake.LastCorrelationKey.Should().Be(requestId);
+    }
+
+    [Fact]
+    public async Task ByRequest_Alias_Unknown_Request_Forwards404_Verbatim()
+    {
+        var fake = new FakeJeebConversationClient
+        {
+            CorrelationThrows = new JeebConversationApiException(HttpStatusCode.NotFound, "conversation_not_found"),
+        };
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, _) = await MintSession(http, "+9613001841");
+
+        var msg = new HttpRequestMessage(
+            HttpMethod.Get, "/v1/chat/jeeb/conversations/by-request/req-unknown");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound,
+            "an unknown request's conversation 404s — the upstream status is forwarded verbatim");
+    }
+
+    [Fact]
+    public async Task ByRequest_Alias_FlagOff_Returns503_DoesNotDialChatService()
+    {
+        var fake = new FakeJeebConversationClient();
+        using var factory = MakeFactory(fake, chatEnabled: false); // flag OFF
+        var http = factory.CreateClient();
+        var (token, _) = await MintSession(http, "+9613001842");
+
+        var msg = new HttpRequestMessage(
+            HttpMethod.Get, "/v1/chat/jeeb/conversations/by-request/req-x");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        fake.LastCorrelationKey.Should().BeNull("flag off must not dial chat-service");
+    }
+
+    // ---------------------------------------------------------------------
     // flag-gate + auth
     // ---------------------------------------------------------------------
 
@@ -561,6 +638,10 @@ public sealed class JeebConversationsBffTests
         public int MembershipCalls { get; private set; }
 
         public JeebConversationApiException? ListThrows { get; init; }
+
+        /// <summary>PR-G3: when set, GetConversationByCorrelationAsync throws it (404-forward path).</summary>
+        public JeebConversationApiException? CorrelationThrows { get; init; }
+
         public JeebConversationMembership Membership { get; init; }
             = new() { IsMember = true, RoleInConvo = "client" };
 
@@ -590,6 +671,10 @@ public sealed class JeebConversationsBffTests
             string correlationKey, CancellationToken ct)
         {
             LastCorrelationKey = correlationKey;
+            if (CorrelationThrows is not null)
+            {
+                throw CorrelationThrows;
+            }
             return Task.FromResult(new JeebConversationResponse
             {
                 ConversationId = "conv-" + correlationKey,
