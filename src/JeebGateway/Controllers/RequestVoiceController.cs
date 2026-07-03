@@ -164,7 +164,8 @@ public sealed class RequestVoiceController : ControllerBase
                     Transcription = prior.Transcription,
                     TranscriptionConfidence = prior.TranscriptionConfidence,
                     Language = "ar",
-                    TierId = prior.TierId
+                    TierId = prior.TierId,
+                    Description = prior.Description
                 });
             }
         }
@@ -293,7 +294,8 @@ public sealed class RequestVoiceController : ControllerBase
             Transcription = transcript,
             TranscriptionConfidence = confidence,
             Language = language,
-            TierId = created.TierId
+            TierId = created.TierId,
+            Description = created.Description
         });
     }
 
@@ -326,7 +328,9 @@ public sealed class RequestVoiceController : ControllerBase
             Transcription = existing.Transcription,
             TranscriptionConfidence = existing.TranscriptionConfidence,
             Language = "ar",
-            TierId = existing.TierId
+            TierId = existing.TierId,
+            // run-24 CHECK A: echo the stored description on the by-id read.
+            Description = existing.Description
         });
     }
 }
@@ -368,4 +372,15 @@ public sealed class VoiceRequestResponse
     public required string Language { get; init; }
     [System.Text.Json.Serialization.JsonPropertyName("tierId")]
     public string? TierId { get; init; }
+
+    /// <summary>
+    /// run-24 CHECK A: the request description, echoed so the customer's own by-id read
+    /// (<c>GET /v1/requests/{id}</c>, which this controller serves at Order 0) returns
+    /// what they typed. The typed-text create sets it from the client's input; the voice
+    /// create seeds it from the transcript — either way the row always carries it, so the
+    /// read previously DROPPED a field that existed. ADDITIVE and nullable; the camelCase
+    /// <c>description</c> name matches the field the client sends on create.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("description")]
+    public string? Description { get; init; }
 }
