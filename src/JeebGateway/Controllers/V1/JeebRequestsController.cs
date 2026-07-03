@@ -45,6 +45,7 @@ public sealed class JeebRequestsController : ControllerBase
     private readonly IPendingOffersStore _offers;
     private readonly IOfferServiceClient _offerService;
     private readonly IDeliveryServiceClient _delivery;
+    private readonly ITiersStore _tiers;
     private readonly UpstreamFeatureFlags _flags;
     private readonly string _tenantId;
     private readonly INewRequestPushNotifier _newRequestPush;
@@ -55,6 +56,7 @@ public sealed class JeebRequestsController : ControllerBase
         IPendingOffersStore offers,
         IOfferServiceClient offerService,
         IDeliveryServiceClient delivery,
+        ITiersStore tiers,
         IOptions<UpstreamFeatureFlags> flags,
         IConfiguration config,
         INewRequestPushNotifier newRequestPush,
@@ -64,6 +66,7 @@ public sealed class JeebRequestsController : ControllerBase
         _offers = offers;
         _offerService = offerService;
         _delivery = delivery;
+        _tiers = tiers;
         _flags = flags.Value;
         _tenantId = config["Services:Delivery:TenantId"] ?? DefaultTenantId;
         _newRequestPush = newRequestPush;
@@ -116,6 +119,26 @@ public sealed class JeebRequestsController : ControllerBase
             {
                 Title = "description is required.",
                 Status = StatusCodes.Status400BadRequest
+            });
+        }
+
+        // feat/tier-unify-names: the V1 path previously accepted ANY tierId verbatim,
+        // which let unknown/divergent codes flow through to matching + push (where the
+        // display-name resolve silently failed). A SUPPLIED tierId must now resolve in
+        // the unified catalog — either a catalog id (urgent/same-day/…) or a mapped
+        // legacy code (flash/express/standard/on_the_way/eco). tierId stays OPTIONAL on
+        // this surface (a tier-less create is still allowed; it simply skips the
+        // delivery-row seed), so only a present-but-unknown id is rejected. Same 400
+        // envelope (tier-not-found type URI) as the legacy create surfaces.
+        if (!string.IsNullOrWhiteSpace(body.TierId)
+            && !await _tiers.ExistsAsync(body.TierId, ct))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "tierId does not match any active delivery tier.",
+                Detail = $"tierId={body.TierId}",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/tier-not-found"
             });
         }
 

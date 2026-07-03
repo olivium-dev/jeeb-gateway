@@ -272,34 +272,68 @@ public class DeliveryRequestCreationTests : IClassFixture<WebApplicationFactory<
 }
 
 /// <summary>
-/// Pure unit tests for the tier-catalog store — no host required.
-/// Covers the seeded codes from db/migrations/0011 and the
-/// case-sensitivity contract (tier codes are stable lowercase).
+/// Pure unit tests for the create-time tier-existence probe — no host required.
+/// feat/tier-unify-names: the probe is now catalog-backed
+/// (<see cref="CatalogBackedTiersStore"/> over <see cref="JeebGateway.Tiers.InMemoryTiersStore"/>),
+/// so it accepts BOTH the catalog ids (urgent/same-day/…) and the mapped
+/// legacy 0011 codes (flash/express/standard/on_the_way/eco). Lookups are
+/// case-insensitive, matching the catalog store's id semantics.
 /// </summary>
 public class InMemoryTiersStoreTests
 {
+    private static CatalogBackedTiersStore NewStore()
+        => new(new JeebGateway.Tiers.InMemoryTiersStore());
+
     [Theory]
+    // Legacy 0011 codes — accepted via the LegacyTierCodes alias table.
     [InlineData("flash")]
     [InlineData("express")]
     [InlineData("standard")]
     [InlineData("on_the_way")]
     [InlineData("eco")]
+    // Catalog ids — the single source of truth, accepted directly.
+    [InlineData("urgent")]
+    [InlineData("same-day")]
+    [InlineData("scheduled")]
+    [InlineData("economy")]
+    [InlineData("on-the-way")]
+    // Case-insensitive, matching the catalog store's id semantics.
+    [InlineData("FLASH")]
+    [InlineData("Urgent")]
     public async Task ExistsAsync_Returns_True_For_Seeded_Codes(string code)
     {
-        var store = new InMemoryTiersStore();
+        var store = NewStore();
         (await store.ExistsAsync(code, CancellationToken.None)).Should().BeTrue();
     }
 
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
-    [InlineData("FLASH")]                  // case-sensitive
     [InlineData("platinum_super_fast")]
     [InlineData("nope")]
     public async Task ExistsAsync_Returns_False_For_Unknown_Or_Blank(string code)
     {
-        var store = new InMemoryTiersStore();
+        var store = NewStore();
         (await store.ExistsAsync(code, CancellationToken.None)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Deleting_A_Catalog_Row_Retires_Its_Legacy_Aliases_Too()
+    {
+        // Single-source-of-truth proof: retiring "urgent" from the catalog must
+        // also retire the legacy codes that alias to it (flash, express).
+        var catalog = new JeebGateway.Tiers.InMemoryTiersStore();
+        var store = new CatalogBackedTiersStore(catalog);
+
+        (await store.ExistsAsync("flash", CancellationToken.None)).Should().BeTrue();
+
+        (await catalog.DeleteAsync("urgent", CancellationToken.None)).Should().BeTrue();
+
+        (await store.ExistsAsync("urgent", CancellationToken.None)).Should().BeFalse();
+        (await store.ExistsAsync("flash", CancellationToken.None)).Should().BeFalse();
+        (await store.ExistsAsync("express", CancellationToken.None)).Should().BeFalse();
+        // Tiers aliased to OTHER catalog rows are untouched.
+        (await store.ExistsAsync("standard", CancellationToken.None)).Should().BeTrue();
     }
 }
 
