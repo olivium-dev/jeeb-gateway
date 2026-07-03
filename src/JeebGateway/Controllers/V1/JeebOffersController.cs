@@ -3,6 +3,7 @@ using JeebGateway.Availability;
 using JeebGateway.Conversations.Client;
 using JeebGateway.Notifications;
 using JeebGateway.Requests;
+using JeebGateway.Requests.OtpHandover;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
@@ -39,6 +40,7 @@ public sealed class JeebOffersController : ControllerBase
     private readonly IDeliveryServiceClient _deliveryService;
     private readonly IJeebConversationClient _conversations;
     private readonly IOfferPushNotifier _offerPush;
+    private readonly IHandoverCodeStore _handoverCodes;
     private readonly UpstreamFeatureFlags _flags;
     private readonly DeliveryClientOptions _deliveryOptions;
     private readonly ILogger<JeebOffersController> _logger;
@@ -51,6 +53,7 @@ public sealed class JeebOffersController : ControllerBase
         IDeliveryServiceClient deliveryService,
         IJeebConversationClient conversations,
         IOfferPushNotifier offerPush,
+        IHandoverCodeStore handoverCodes,
         IOptions<UpstreamFeatureFlags> flags,
         IOptions<DeliveryClientOptions> deliveryOptions,
         ILogger<JeebOffersController> logger)
@@ -62,6 +65,7 @@ public sealed class JeebOffersController : ControllerBase
         _deliveryService = deliveryService;
         _conversations = conversations;
         _offerPush = offerPush;
+        _handoverCodes = handoverCodes;
         _flags = flags.Value;
         _deliveryOptions = deliveryOptions.Value;
         _logger = logger;
@@ -282,8 +286,18 @@ public sealed class JeebOffersController : ControllerBase
         // swallowed — it must never flip a successful accept into a 5xx.
         await DispatchAcceptLifecyclePushesAsync(requestId, offerId, winningJeeberId, result.Envelope?.RejectedOfferIds, ct);
 
+        // Gap G4 (run-24 CHECK C) — mint the CUSTOMER's in-app handover code at accept
+        // and ride it ONLY on this owner's accept response as `handoverCode`. The
+        // acceptor IS the request owner (offer-service returns NotOwner -> 403 before
+        // ever reaching Accepted here, and the in-memory path checks ClientId), so this
+        // is owner-scoped by construction — the code never reaches the jeeber or any
+        // non-owner. The gateway matches it at handover (verify-precedence in
+        // DeliveriesController). DEGRADE-DON'T-FAIL: a cache blip yields a null code
+        // (the SMS/one-time-password handover still works), never a 5xx.
+        var handoverCode = await IssueHandoverCodeSafeAsync(requestId, ct);
+
         if (req is not null)
-            return Ok(ToRequestDto(req));
+            return Ok(ToRequestDto(req, handoverCode));
 
         // Request not in local store (delivery-service is the SoT).
         // Return a minimal acknowledgement so the client knows acceptance succeeded.
@@ -292,8 +306,38 @@ public sealed class JeebOffersController : ControllerBase
             requestId,
             acceptedOfferId = result.Envelope?.AcceptedOfferId,
             jeeberId = result.Envelope?.JeeberId,
-            status = "accepted"
+            status = "accepted",
+            handoverCode
         });
+    }
+
+    /// <summary>
+    /// Gap G4 (run-24 CHECK C): mint (or return the already-issued) in-app handover
+    /// code for the just-accepted delivery. Owner-scoped by construction — this runs
+    /// only after an accept the caller was authorised to make, and the code rides ONLY
+    /// that owner's accept response. DEGRADE-DON'T-FAIL: a cache blip returns null (the
+    /// code is simply absent from the response; the SMS / one-time-password handover
+    /// path is unaffected), never a 5xx. The raw code is NEVER logged — only the
+    /// deliveryId and the exception type on the failure path.
+    /// </summary>
+    private async Task<string?> IssueHandoverCodeSafeAsync(string deliveryId, CancellationToken ct)
+    {
+        try
+        {
+            return await _handoverCodes.IssueAsync(deliveryId, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Post-accept handover-code issue for delivery {DeliveryId} failed; accept stays 200 "
+                + "— the customer's in-app code is omitted (the SMS handover code still works).",
+                deliveryId);
+            return null;
+        }
     }
 
     /// <summary>
@@ -645,10 +689,15 @@ public sealed class JeebOffersController : ControllerBase
             accepted = await _requests.GetAsync(accepted.Id, ct) ?? accepted;
         }
 
-        return Ok(ToRequestDto(accepted));
+        // Gap G4 (run-24 CHECK C) — mint the CUSTOMER's in-app handover code. This path
+        // has already enforced ClientId == actorId above, so it is owner-scoped; the
+        // code rides ONLY this owner's accept response as `handoverCode`.
+        var handoverCode = await IssueHandoverCodeSafeAsync(accepted.Id, ct);
+
+        return Ok(ToRequestDto(accepted, handoverCode));
     }
 
-    private static DeliveryRequestDto ToRequestDto(DeliveryRequest r) => new()
+    private static DeliveryRequestDto ToRequestDto(DeliveryRequest r, string? handoverCode = null) => new()
     {
         Id = r.Id,
         ClientId = r.ClientId,
@@ -673,5 +722,8 @@ public sealed class JeebOffersController : ControllerBase
         OtpLockedAt = r.OtpLockedAt,
         ClientUnreachableAt = r.ClientUnreachableAt,
         OtpEscalationId = r.OtpEscalationId,
+        // Gap G4: null on every projection EXCEPT the owner's accept response, where the
+        // handler passes the freshly-minted code. Omitted from JSON when null.
+        HandoverCode = handoverCode,
     };
 }
