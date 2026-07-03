@@ -1,0 +1,58 @@
+namespace JeebGateway.Requests;
+
+/// <summary>
+/// requests-durable: the gateway-Postgres owner-list mirror for the durable
+/// request/order lifecycle (<see cref="DurableRequestsStore"/>).
+///
+/// <para>delivery-service is the canonical row owner and the source of truth for
+/// a single read (<see cref="IRequestsStore.GetAsync"/> reads through to it), but
+/// it exposes NO client-scoped list endpoint. So the durable owner-list
+/// (<see cref="IRequestsStore.ListForClientAsync"/>, backing <c>GET /requests</c>)
+/// is served from the gateway's OWN Postgres <c>delivery_requests</c> table: the
+/// create path mirrors every new request here (idempotent upsert) and the list
+/// reads it back, filtered by client id. This keeps the owner-list alive across a
+/// gateway bounce — the in-memory model is empty after a restart.</para>
+///
+/// <para>This is a GATEWAY-Postgres fallback (not an upstream call): adding a
+/// client-scoped list to delivery-service is out of scope (the gateway must not
+/// change a reusable microservice), so the gateway owns this slim mirror.</para>
+///
+/// <para>Every operation is BEST-EFFORT from the decorator's point of view: the
+/// decorator wraps each call so a mirror fault never fails a create/cancel and
+/// never turns a read into a 5xx. The mirror is a durability backstop, not a hard
+/// dependency.</para>
+/// </summary>
+public interface IDurableRequestsMirror
+{
+    /// <summary>
+    /// Idempotently mirrors a freshly created request into the gateway
+    /// <c>delivery_requests</c> table (<c>ON CONFLICT (id) DO NOTHING</c>, so a
+    /// retried create collapses onto the same row). The row's native
+    /// <c>status</c> is written as the constant <c>'pending'</c> (constraint-safe
+    /// for every create) while the real gateway status is carried in
+    /// <c>gw_status</c>. No-op when the id / client id is not a UUID (the native
+    /// keys are UUID) — such rows simply never enter the durable mirror.
+    /// </summary>
+    Task UpsertOnCreateAsync(DeliveryRequest row, CancellationToken ct);
+
+    /// <summary>
+    /// Reflects a committed cancel onto the mirror by updating the gateway
+    /// columns only (<c>gw_status</c> + cancel audit) — the native enum/CHECK
+    /// columns are left untouched so no constraint can fire. Lets a post-bounce
+    /// owner-list surface the cancelled / cancellation_requested status.
+    /// </summary>
+    Task MarkCancelledAsync(
+        string requestId,
+        string gwStatus,
+        string? cancelledBy,
+        string? cancellationReason,
+        DateTimeOffset at,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Reads the durable owner-list for <paramref name="clientId"/> (mirror rows
+    /// only), oldest-first — the same ordering as the in-memory list. Returns an
+    /// empty list when the client id is not a UUID or has no mirrored rows.
+    /// </summary>
+    Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct);
+}

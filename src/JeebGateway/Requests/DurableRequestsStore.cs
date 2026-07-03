@@ -31,12 +31,23 @@ namespace JeebGateway.Requests;
 /// (delivery: <c>ON CONFLICT (id) DO NOTHING</c>; bundle: unique
 /// <c>(source, sourceId)</c>), so a retried create collapses cleanly.
 ///
-/// THIN ORCHESTRATION ONLY: this decorator composes existing typed clients. It
-/// holds no domain logic of its own (no DB connection, no status machine) — the
-/// in-memory inner store remains the gateway's fast read/query/sweeper model
-/// for the not-yet-relocated lifecycle reads, and EVERY non-create method
-/// delegates to it verbatim. The delivery row is the matching-resolve source of
-/// truth; the bundle is the durable saga/audit trail.
+/// THIN ORCHESTRATION: this decorator composes existing typed clients and a slim
+/// gateway-Postgres owner-list mirror. It owns no status machine — the in-memory
+/// inner store remains the gateway's fast read/query/sweeper model, and every
+/// method not listed below delegates to it verbatim. The delivery row is the
+/// matching-resolve source of truth; the bundle is the durable saga/audit trail.
+///
+/// requests-durable — DURABLE READS (strict superset of the in-memory behaviour):
+///  * <see cref="GetAsync"/> reads the in-memory mirror first (warm = byte-for-byte
+///    identical, all gateway-only fields intact) and, on a miss (a bounce /
+///    cross-replica read), reads THROUGH to delivery-service so the row survives
+///    a restart; a 404 / blip degrades to null (== today's unknown-id).
+///  * <see cref="ListForClientAsync"/> merges the in-memory list OVER the gateway
+///    Postgres mirror — delivery-service has no client-scoped list, so the durable
+///    owner-list is served from <c>delivery_requests</c> (create mirrors each row
+///    idempotently; a committed cancel updates its status).
+/// The mirror is OPTIONAL (registered only with <c>GatewayPostgres:ConnectionString</c>);
+/// absent, the reads degrade to the in-memory model — exactly today's behaviour.
 ///
 /// FLAG-GATED: registered ahead of the in-memory store only when
 /// <c>FeatureFlags:DurableRequests:Enabled=true</c>. Default OFF keeps today's
@@ -52,6 +63,15 @@ public sealed class DurableRequestsStore : IRequestsStore
     private readonly DurableRequestsOptions _options;
     private readonly ILogger<DurableRequestsStore> _logger;
 
+    /// <summary>
+    /// requests-durable: OPTIONAL gateway-Postgres owner-list mirror. Registered
+    /// only inside the <c>GatewayPostgres:ConnectionString</c> block, so it is
+    /// <see langword="null"/> when Postgres is not configured — in which case the
+    /// durable owner-list gracefully degrades to the in-memory snapshot (today's
+    /// behaviour) and the create/cancel mirror side-effects are skipped.
+    /// </summary>
+    private readonly IDurableRequestsMirror? _mirror;
+
     public DurableRequestsStore(
         IRequestsStore inner,
         IDeliveryServiceClient delivery,
@@ -59,7 +79,8 @@ public sealed class DurableRequestsStore : IRequestsStore
         IConversationProvisioner conversations,
         IBroadcastEventRecorder broadcasts,
         IOptions<DurableRequestsOptions> options,
-        ILogger<DurableRequestsStore> logger)
+        ILogger<DurableRequestsStore> logger,
+        IDurableRequestsMirror? mirror = null)
     {
         _inner = inner;
         _delivery = delivery;
@@ -68,6 +89,7 @@ public sealed class DurableRequestsStore : IRequestsStore
         _broadcasts = broadcasts;
         _options = options.Value;
         _logger = logger;
+        _mirror = mirror;
     }
 
     // -----------------------------------------------------------------------
@@ -199,6 +221,43 @@ public sealed class DurableRequestsStore : IRequestsStore
                 created_at = created.CreatedAt,
             },
             ct);
+
+        // (d) requests-durable: mirror the row into the gateway Postgres
+        // delivery_requests table so the owner-list (ListForClientAsync) survives
+        // a gateway bounce. delivery-service exposes no client-scoped list, so the
+        // gateway serves that read from its own Postgres. BEST-EFFORT: a mirror
+        // fault NEVER fails the create — the BR-9 cap + the delivery-row seed (the
+        // matching-resolve hard dependency) are already committed above, so this
+        // is a secondary durability side-effect, exactly like the saga bundle.
+        await MirrorCreateAsync(created, ct);
+    }
+
+    /// <summary>
+    /// requests-durable: idempotently mirrors a created request into the durable
+    /// owner-list store. No-op when no mirror is wired (Postgres absent) or the
+    /// row lacks a pickup/dropoff point (the mirror's geography columns are NOT
+    /// NULL). Never throws into the create path.
+    /// </summary>
+    private async Task MirrorCreateAsync(DeliveryRequest created, CancellationToken ct)
+    {
+        if (_mirror is null) return;
+        if (created.PickupLocation is null || created.DropoffLocation is null) return;
+
+        try
+        {
+            await _mirror.UpsertOnCreateAsync(created, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "requests-durable: owner-list mirror upsert failed for {RequestId}; the row is durable in " +
+                "delivery-service but absent from the gateway owner-list mirror until the next write.",
+                created.Id);
+        }
     }
 
     private static CreateRequestInput WithId(CreateRequestInput input, string id) => new()
@@ -220,9 +279,11 @@ public sealed class DurableRequestsStore : IRequestsStore
     };
 
     // -----------------------------------------------------------------------
-    // Everything below delegates verbatim to the inner store. The lifecycle
-    // reads/transitions/sweepers are not yet relocated; the gateway keeps the
-    // in-memory model for them so this PR stays surgical (create-only durable).
+    // The remaining methods delegate verbatim to the inner store, EXCEPT the
+    // requests-durable read/cancel trio (GetAsync, ListForClientAsync,
+    // TryCancelAsync — below) which are durability-aware. The other lifecycle
+    // transitions/sweepers are not yet relocated; the gateway keeps the
+    // in-memory model for them so this stays surgical.
     // -----------------------------------------------------------------------
 
     public Task<int> CountActiveForClientAsync(string clientId, CancellationToken ct)
@@ -318,11 +379,131 @@ public sealed class DurableRequestsStore : IRequestsStore
     public Task<bool> TryActivateScheduledAsync(string requestId, DateTimeOffset at, CancellationToken ct)
         => _inner.TryActivateScheduledAsync(requestId, at, ct);
 
-    public Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct)
-        => _inner.GetAsync(requestId, ct);
+    /// <summary>
+    /// requests-durable: durable single read. The fast in-memory mirror is
+    /// authoritative when warm — byte-for-byte identical to today, with every
+    /// gateway-only field (ConversationId / AcceptedFee / OTP state / …) intact.
+    /// On a MISS (gateway bounce / cross-replica read) the row is resolved
+    /// through delivery-service — the canonical owner — mapping
+    /// <see cref="DeliveryRequestUpstream"/> → <see cref="DeliveryRequest"/> so
+    /// the read survives a restart. DEGRADE-DON'T-FAIL: a 404 / transport fault
+    /// yields <see langword="null"/> — exactly today's unknown-id behaviour
+    /// (controllers map null → 404) — so this is a STRICT SUPERSET, never a new
+    /// failure mode on the hot path.
+    /// </summary>
+    public async Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct)
+    {
+        var local = await _inner.GetAsync(requestId, ct);
+        if (local is not null)
+        {
+            return local;
+        }
 
-    public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct)
-        => _inner.ListForClientAsync(clientId, ct);
+        try
+        {
+            var upstream = await _delivery.GetDeliveryAsync(requestId, ct);
+            return MapUpstream(upstream);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // GetDeliveryAsync throws on 404 (EnsureSuccessStatusCode) and on any
+            // transport fault; a miss/blip is an unknown-id → null (== today).
+            _logger.LogDebug(ex,
+                "requests-durable: delivery-service read-through miss for {RequestId}; returning null (unknown-id).",
+                requestId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// requests-durable: durable owner-list. delivery-service exposes NO
+    /// client-scoped list, so the durable rows come from the gateway Postgres
+    /// mirror (seeded on create). The in-memory list is MERGED OVER the mirror:
+    /// an in-memory row wins on id collision (it carries the live status + every
+    /// gateway-only field), while the mirror contributes rows the in-memory model
+    /// lost on a bounce. Oldest-first, matching the in-memory snapshot ordering.
+    /// STRICT SUPERSET: with no mirror wired (Postgres absent) this is exactly the
+    /// in-memory list; with a mirror it additionally survives a restart.
+    /// </summary>
+    public async Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct)
+    {
+        var localRows = await _inner.ListForClientAsync(clientId, ct);
+        if (_mirror is null)
+        {
+            return localRows;
+        }
+
+        IReadOnlyList<DeliveryRequest> durableRows;
+        try
+        {
+            durableRows = await _mirror.ListForClientAsync(clientId, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "requests-durable: owner-list mirror read failed for {ClientId}; returning in-memory rows only.",
+                clientId);
+            return localRows;
+        }
+
+        if (durableRows.Count == 0)
+        {
+            return localRows;
+        }
+
+        // Merge by id; the in-memory row wins (live status + full field set).
+        var byId = new Dictionary<string, DeliveryRequest>(StringComparer.Ordinal);
+        foreach (var row in durableRows)
+        {
+            byId[row.Id] = row;
+        }
+        foreach (var row in localRows)
+        {
+            byId[row.Id] = row;
+        }
+        return byId.Values.OrderBy(r => r.CreatedAt).ToArray();
+    }
+
+    /// <summary>
+    /// Maps a canonical delivery-service row (the gateway-vocab
+    /// <c>jeeb/deliveries/{id}</c> projection) onto a <see cref="DeliveryRequest"/>
+    /// for the durable read-through. Fields delivery-service does not carry
+    /// (ScheduledAt / ConversationId / AcceptedFee / DeliveryOtp / …) are left at
+    /// their defaults — acceptable on the cold path, which was an unresolvable
+    /// null before this read-through existed.
+    /// </summary>
+    private static DeliveryRequest MapUpstream(DeliveryRequestUpstream u) => new()
+    {
+        Id = u.Id,
+        ClientId = u.ClientId,
+        Status = u.Status,
+        Description = u.Description ?? string.Empty,
+        AudioUrl = u.AudioUrl,
+        Photos = u.Photos,
+        TierId = u.TierId,
+        PickupLocation = u.Pickup is null ? null : new GeoPoint { Lat = u.Pickup.Lat, Lng = u.Pickup.Lng },
+        DropoffLocation = u.Dropoff is null ? null : new GeoPoint { Lat = u.Dropoff.Lat, Lng = u.Dropoff.Lng },
+        PickupAddress = u.PickupAddress,
+        DropoffAddress = u.DropoffAddress,
+        RecipientPhone = u.RecipientPhone,
+        CreatedAt = u.CreatedAt,
+        JeeberId = u.JeeberId,
+        AcceptedAt = u.AcceptedAt,
+        GpsTrackingActive = u.GpsTrackingActive,
+        OtpAttemptCount = u.OtpAttemptCount,
+        OtpLockedAt = u.OtpLockedAt,
+        OtpEscalationId = u.OtpEscalationId,
+        CancelledBy = u.CancelledBy,
+        CancellationReason = u.CancellationReason,
+    };
 
     public Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct)
         => _inner.ListForJeeberAsync(jeeberId, ct);
@@ -333,8 +514,58 @@ public sealed class DurableRequestsStore : IRequestsStore
     public Task<DeliveryRequest?> TryAcceptByJeeberAsync(string requestId, string jeeberId, int limit, DateTimeOffset at, CancellationToken ct)
         => _inner.TryAcceptByJeeberAsync(requestId, jeeberId, limit, at, ct);
 
-    public Task<CancellationStoreResult?> TryCancelAsync(string requestId, IReadOnlySet<string> allowedFromStates, string targetStatus, string cancelledBy, string? reason, DateTimeOffset at, CancellationToken ct)
-        => _inner.TryCancelAsync(requestId, allowedFromStates, targetStatus, cancelledBy, reason, at, ct);
+    /// <summary>
+    /// requests-durable: cancel with a durable EFFECT. The in-memory model owns
+    /// the authoritative cancel state machine (the admin-approval queue →
+    /// <c>cancellation_requested</c>, the <c>PreviousStatus</c> revert, and the
+    /// under-lock re-check), so the mutation is delegated VERBATIM — every cancel
+    /// semantic is preserved exactly. On a committed cancel the resulting status
+    /// is reflected onto the durable owner-list mirror (best-effort) so a
+    /// post-bounce list shows the cancel.
+    ///
+    /// <para>The cancel MUTATION is deliberately NOT proxied to delivery-service
+    /// <c>CancelDeliveryAsync</c>: the store-level signature carries NO acting
+    /// user id (<paramref name="cancelledBy"/> is the ROLE literal
+    /// <c>client</c>/<c>jeeber</c>, and the upstream cancel body REQUIRES a
+    /// UserId), and delivery-service has no <c>cancellation_requested</c>
+    /// admin-queue state — so a proxy would drop the admin-approval semantics and
+    /// violate the strict-superset guarantee. The durable cancel is therefore the
+    /// gateway-Postgres mirror update, not an upstream call.</para>
+    /// </summary>
+    public async Task<CancellationStoreResult?> TryCancelAsync(
+        string requestId,
+        IReadOnlySet<string> allowedFromStates,
+        string targetStatus,
+        string cancelledBy,
+        string? reason,
+        DateTimeOffset at,
+        CancellationToken ct)
+    {
+        var result = await _inner.TryCancelAsync(
+            requestId, allowedFromStates, targetStatus, cancelledBy, reason, at, ct);
+
+        if (_mirror is not null && result is { Outcome: CancellationStoreOutcome.Committed })
+        {
+            try
+            {
+                await _mirror.MarkCancelledAsync(
+                    requestId, result.Request.Status, cancelledBy, reason, at, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "requests-durable: owner-list mirror cancel-status update failed for {RequestId}; " +
+                    "the list may show a stale status after a bounce.",
+                    requestId);
+            }
+        }
+
+        return result;
+    }
 
     public Task<CancellationStoreResult?> TryDecideCancellationAsync(string requestId, bool approve, DateTimeOffset at, CancellationToken ct)
         => _inner.TryDecideCancellationAsync(requestId, approve, at, ct);
