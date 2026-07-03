@@ -156,6 +156,54 @@ public class RequestExpirySweeperTests
         notifier.Nudges.Should().NotContain(n => n.RequestId == requestId);
     }
 
+    [Fact]
+    public async Task Thirty_Minute_Expiry_Closes_Live_Offers_On_The_Request()
+    {
+        var factory = NewFactory(out var clock);
+        var client = ClientFor(factory, "expiry-closes-offers-client");
+
+        var requestId = await CreateRequest(client, "Deliver a box");
+
+        // Seed a live (pending) bid on the request, as a jeeber would have submitted.
+        var offers = (JeebGateway.Availability.InMemoryPendingOffersStore)
+            factory.Services.GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
+        var seeded = offers.EnqueueForTest(jeeberId: "jeeber-1", requestId: requestId);
+        seeded.Status.Should().Be(JeebGateway.Availability.PendingOfferStatus.Pending);
+
+        // Past the 30-min hard window — the request expires and its live bids close.
+        clock.Advance(TimeSpan.FromMinutes(31));
+        await SweepOnce(factory);
+
+        var afterSweep = await offers.ListForRequestAsync(requestId, CancellationToken.None);
+        afterSweep.Should().ContainSingle()
+            .Which.Status.Should().Be(
+                JeebGateway.Availability.PendingOfferStatus.Superseded,
+                "an expired request's live bids are closed (not-selected) so no stale pending offer lingers");
+    }
+
+    [Fact]
+    public async Task Sweeper_Below_Expiry_Window_Leaves_Live_Offers_Pending()
+    {
+        var factory = NewFactory(out var clock);
+        var client = ClientFor(factory, "expiry-keeps-offers-client");
+
+        var requestId = await CreateRequest(client, "Still open");
+
+        var offers = (JeebGateway.Availability.InMemoryPendingOffersStore)
+            factory.Services.GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
+        offers.EnqueueForTest(jeeberId: "jeeber-2", requestId: requestId);
+
+        // Below the 30-min window — the request is still open, its bid stays live.
+        clock.Advance(TimeSpan.FromMinutes(25));
+        await SweepOnce(factory);
+
+        var afterSweep = await offers.ListForRequestAsync(requestId, CancellationToken.None);
+        afterSweep.Should().ContainSingle()
+            .Which.Status.Should().Be(
+                JeebGateway.Availability.PendingOfferStatus.Pending,
+                "a request that has not expired must not have its live bids closed");
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------

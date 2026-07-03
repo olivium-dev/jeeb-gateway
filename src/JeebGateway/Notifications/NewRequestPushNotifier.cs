@@ -72,13 +72,16 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     private const int BodyPreviewMaxLength = 80;
 
     private readonly ServicePushNotificationClient _push;
+    private readonly JeebGateway.Tiers.ITiersStore _tiers;
     private readonly ILogger<NewRequestPushNotifier> _logger;
 
     public NewRequestPushNotifier(
         ServicePushNotificationClient push,
+        JeebGateway.Tiers.ITiersStore tiers,
         ILogger<NewRequestPushNotifier> logger)
     {
         _push = push;
+        _tiers = tiers;
         _logger = logger;
     }
 
@@ -95,18 +98,39 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                 return;
             }
 
+            // Resolve the human tier LABEL for the body suffix from the gateway's
+            // in-process tier catalog (the same store served at GET /v1/tiers). This
+            // is a cheap in-memory lookup — no network hop on the create hot path.
+            // When the id does not resolve to a catalog row (an opaque UUID, or a
+            // code from a divergent taxonomy), the label is null and the suffix is
+            // DROPPED — a raw id/UUID is never shown to the jeeber. The raw tierId
+            // still travels as its own flat machine field below for client-side
+            // filtering, which is unaffected by display resolution.
+            var tierLabel = await ResolveTierLabelAsync(tierId, ct);
+
             var payload = new Dictionary<string, object?>
             {
                 ["title"] = "New delivery request",
-                ["body"] = BuildBody(description, tierId),
+                ["body"] = BuildBody(description, tierLabel),
                 ["type"] = "new_request",
                 ["category"] = "delivery",
+                // High-priority delivery hint. A new-request "finding jeebers" push is
+                // time-sensitive (the reverse auction is open only briefly), so it must
+                // wake the device rather than be batched. NOTE: this is a FLAT hint the
+                // relay copies into the FCM data map; the actual FCM `android.priority` /
+                // apns-priority elevation is owned by the push-notification-service
+                // (:10040) topic path, which must read this hint to honour it (issue-24 /
+                // SVC-6). Emitting it here is additive and forward-compatible — it never
+                // degrades delivery and lights up as soon as the relay consumes it.
+                ["priority"] = "high",
                 // Both camel + snake variants — the mobile deep-link reads either
                 // (routes /orders/:id from delivery_id/order_id/requestId fallback).
                 ["requestId"] = requestId,
                 ["request_id"] = requestId,
                 // tierId is carried flat too so the jeeber client can pre-filter/label
-                // without a second round-trip. Null when the request has no tier.
+                // without a second round-trip. Null when the request has no tier. This
+                // is the RAW id (machine field) — distinct from the resolved display
+                // label baked into the body above.
                 ["tierId"] = tierId,
             };
 
@@ -131,12 +155,40 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     }
 
     /// <summary>
-    /// Body = the description preview (trimmed to <see cref="BodyPreviewMaxLength"/>
-    /// chars) plus a " • {tier}" suffix when a tier is known. There is no cheap
-    /// tier-label lookup at this layer (mirroring <see cref="OfferPushNotifier"/>,
-    /// which resolves no labels), so the raw tier id is used as the tier text.
+    /// Best-effort resolve of a tier id to its human display name via the gateway's
+    /// in-process tier catalog. Returns null when the id is blank or does not match a
+    /// catalog row — the caller then DROPS the body suffix rather than render a raw
+    /// id/UUID. Never throws: a catalog hiccup degrades to "no suffix", never to a
+    /// failed push (the whole notify path is degrade-don't-fail).
     /// </summary>
-    private static string BuildBody(string? description, string? tierId)
+    private async Task<string?> ResolveTierLabelAsync(string? tierId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(tierId))
+        {
+            return null;
+        }
+
+        try
+        {
+            var tier = await _tiers.GetAsync(tierId.Trim(), ct);
+            return string.IsNullOrWhiteSpace(tier?.Name) ? null : tier!.Name.Trim();
+        }
+        catch (Exception ex)
+        {
+            // The catalog lookup must never break the push. Fall back to "no suffix".
+            _logger.LogDebug(ex,
+                "Tier-label resolve failed for tier {TierId}; dropping the body suffix.", tierId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Body = the description preview (trimmed to <see cref="BodyPreviewMaxLength"/>
+    /// chars) plus a " • {tier}" suffix ONLY when a human tier LABEL was resolved
+    /// (<see cref="ResolveTierLabelAsync"/>). When no label is available the suffix
+    /// is dropped — a raw tier id/UUID is never surfaced in the notification body.
+    /// </summary>
+    private static string BuildBody(string? description, string? tierLabel)
     {
         var preview = Trim(description);
         if (string.IsNullOrWhiteSpace(preview))
@@ -144,9 +196,9 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
             preview = "A customer needs a delivery. Tap to view and bid.";
         }
 
-        return string.IsNullOrWhiteSpace(tierId)
+        return string.IsNullOrWhiteSpace(tierLabel)
             ? preview
-            : $"{preview} • {tierId.Trim()}";
+            : $"{preview} • {tierLabel.Trim()}";
     }
 
     private static string Trim(string? text)

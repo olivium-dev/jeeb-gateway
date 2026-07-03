@@ -342,4 +342,25 @@ public class InMemoryPendingOffersStore : IPendingOffersStore
             .ToArray();
         return Task.FromResult<IReadOnlyList<PendingOffer>>(snapshot);
     }
+
+    public Task<int> ExpireForRequestAsync(string requestId, DateTimeOffset at, CancellationToken ct)
+    {
+        // Request expired with no winner: every still-pending bid on it is now stale.
+        // Supersede them under the write lock so the transition is atomic w.r.t. a
+        // concurrent submit/accept on the same request. Accepted / withdrawn / already
+        // superseded offers are left untouched (terminal).
+        lock (_writeLock)
+        {
+            var closed = 0;
+            foreach (var offer in _offers.Values)
+            {
+                if (!string.Equals(offer.RequestId, requestId, StringComparison.Ordinal)) continue;
+                if (offer.Status != PendingOfferStatus.Pending) continue;
+                offer.Status = PendingOfferStatus.Superseded;
+                offer.UpdatedAt = at;
+                closed++;
+            }
+            return Task.FromResult(closed);
+        }
+    }
 }

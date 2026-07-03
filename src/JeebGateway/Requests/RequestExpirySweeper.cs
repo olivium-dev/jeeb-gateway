@@ -69,6 +69,7 @@ public class RequestExpirySweeper : BackgroundService
         using var scope = _services.CreateScope();
         var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
         var notifier = scope.ServiceProvider.GetRequiredService<IRequestExpiryNotifier>();
+        var offers = scope.ServiceProvider.GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
         var opts = _options.Value;
 
         var now = _clock.GetUtcNow();
@@ -91,6 +92,28 @@ public class RequestExpirySweeper : BackgroundService
                 if (await store.TryExpireAsync(req.Id, now, ct))
                 {
                     await notifier.NotifyExpiredAsync(req.ClientId, req.Id, now, ct);
+
+                    // Best-effort: close any still-live bids on the now-terminal request
+                    // so jeebers don't hold a stale "pending" offer and a late accept
+                    // can't race a dead request. The request is already durably expired;
+                    // a hiccup here must never undo that, so it is swallowed.
+                    try
+                    {
+                        var closed = await offers.ExpireForRequestAsync(req.Id, now, ct);
+                        if (closed > 0)
+                        {
+                            _logger.LogInformation(
+                                "Request {RequestId} expiry closed {ClosedCount} live offer(s)",
+                                req.Id, closed);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Request {RequestId} expired but closing its live offers failed; "
+                            + "offers may linger as pending until next reconcile.", req.Id);
+                    }
+
                     _logger.LogInformation(
                         "Request {RequestId} expired after {WindowMinutes}m without accepted offer",
                         req.Id,

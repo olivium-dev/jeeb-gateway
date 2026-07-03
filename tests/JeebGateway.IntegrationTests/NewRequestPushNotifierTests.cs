@@ -38,7 +38,18 @@ namespace JeebGateway.IntegrationTests;
 public class NewRequestPushNotifierTests
 {
     private const string RequestId = "req-99";
-    private const string Tier = "flash";
+
+    // A tier id that EXISTS in the gateway's seeded in-process catalog
+    // (JeebGateway.Tiers.InMemoryTiersStore) so the notifier resolves it to a human
+    // display name for the body suffix. The raw id is still carried flat; the body
+    // shows the NAME.
+    private const string TierId = "urgent";
+    private const string TierName = "Urgent";
+
+    // Builds the notifier over the SAME seeded tier catalog the app serves at
+    // GET /v1/tiers, so "urgent" → "Urgent" resolves exactly as it does in prod.
+    private static NewRequestPushNotifier NewNotifier(RecordingTopicPushClient push)
+        => new(push, new JeebGateway.Tiers.InMemoryTiersStore(), NullLogger<NewRequestPushNotifier>.Instance);
 
     // ---------------------------------------------------------------------
     // Unit — the notifier in isolation against a recording topic client.
@@ -48,9 +59,9 @@ public class NewRequestPushNotifierTests
     public async Task NewRequest_BroadcastsToJeebersTopic_WithFlatPayload()
     {
         var push = new RecordingTopicPushClient();
-        var notifier = new NewRequestPushNotifier(push, NullLogger<NewRequestPushNotifier>.Instance);
+        var notifier = NewNotifier(push);
 
-        await notifier.NotifyNewRequestAsync(RequestId, Tier, "Pick up a package", CancellationToken.None);
+        await notifier.NotifyNewRequestAsync(RequestId, TierId, "Pick up a package", CancellationToken.None);
 
         push.Sends.Should().ContainSingle();
         var send = push.Sends.Single();
@@ -61,39 +72,63 @@ public class NewRequestPushNotifierTests
         payload["title"].Should().Be("New delivery request");
         payload["type"].Should().Be("new_request");
         payload["category"].Should().Be("delivery");
+        // Time-sensitive new-request push carries the flat high-priority hint.
+        payload["priority"].Should().Be("high");
         // Both id variants are carried flat so the mobile deep-link (routes /orders/:id from
         // delivery_id/order_id/requestId fallback) resolves regardless of which key it reads.
         payload["requestId"].Should().Be(RequestId);
         payload["request_id"].Should().Be(RequestId);
-        payload["tierId"].Should().Be(Tier);
+        // The RAW tier id is carried flat (machine field), unchanged by display resolution.
+        payload["tierId"].Should().Be(TierId);
         // Routing fields are flat top-level entries — no nested "data" object.
         payload.Should().NotContainKey("data");
         ((string)payload["body"]!).Should().Contain("Pick up a package");
-        ((string)payload["body"]!).Should().Contain(Tier);
+        // The body shows the resolved human tier NAME, never the raw id.
+        ((string)payload["body"]!).Should().Contain(TierName);
+        ((string)payload["body"]!).Should().NotContain(TierId);
     }
 
     [Fact]
     public async Task Body_IsTrimmedTo80Chars_ThenTierSuffixAppended()
     {
         var push = new RecordingTopicPushClient();
-        var notifier = new NewRequestPushNotifier(push, NullLogger<NewRequestPushNotifier>.Instance);
+        var notifier = NewNotifier(push);
 
         var longDescription = new string('x', 100);
-        await notifier.NotifyNewRequestAsync(RequestId, Tier, longDescription, CancellationToken.None);
+        await notifier.NotifyNewRequestAsync(RequestId, TierId, longDescription, CancellationToken.None);
 
         var payload = (IDictionary<string, object?>)push.Sends.Single().Payload;
         var body = (string)payload["body"]!;
 
         // The 80-char preview cap applies to the description ONLY; the " • {tier}" suffix
-        // is added after the trim, so it survives even when the description is over-length.
-        body.Should().Be(new string('x', 80) + " • " + Tier);
+        // (the resolved display NAME) is added after the trim, so it survives even when the
+        // description is over-length.
+        body.Should().Be(new string('x', 80) + " • " + TierName);
+    }
+
+    [Fact]
+    public async Task UnresolvableTierId_DropsSuffix_ButStillCarriesRawTierIdFlat()
+    {
+        var push = new RecordingTopicPushClient();
+        var notifier = NewNotifier(push);
+
+        // An opaque id not in the catalog (a raw UUID, or a code from a divergent
+        // taxonomy). The body suffix must be DROPPED — a raw id/UUID is never shown —
+        // yet the flat machine field still carries the id verbatim for client filtering.
+        var uuid = Guid.NewGuid().ToString();
+        await notifier.NotifyNewRequestAsync(RequestId, uuid, "Short desc", CancellationToken.None);
+
+        var payload = (IDictionary<string, object?>)push.Sends.Single().Payload;
+        ((string)payload["body"]!).Should().Be("Short desc", "an unresolvable tier id → no ' • {tier}' suffix");
+        ((string)payload["body"]!).Should().NotContain(uuid, "the raw id/UUID must never leak into the body");
+        payload["tierId"].Should().Be(uuid, "the raw id is still carried flat as a machine field");
     }
 
     [Fact]
     public async Task NoTier_OmitsTierSuffix_AndCarriesNullTierId()
     {
         var push = new RecordingTopicPushClient();
-        var notifier = new NewRequestPushNotifier(push, NullLogger<NewRequestPushNotifier>.Instance);
+        var notifier = NewNotifier(push);
 
         await notifier.NotifyNewRequestAsync(RequestId, tierId: null, "Short desc", CancellationToken.None);
 
@@ -106,10 +141,10 @@ public class NewRequestPushNotifierTests
     public async Task PushServiceFault_IsSwallowed_NeverThrows()
     {
         var push = new RecordingTopicPushClient { Throw = true };
-        var notifier = new NewRequestPushNotifier(push, NullLogger<NewRequestPushNotifier>.Instance);
+        var notifier = NewNotifier(push);
 
         // Degrade-don't-fail: a push blip must never surface to the create path.
-        var act = async () => await notifier.NotifyNewRequestAsync(RequestId, Tier, "desc", CancellationToken.None);
+        var act = async () => await notifier.NotifyNewRequestAsync(RequestId, TierId, "desc", CancellationToken.None);
         await act.Should().NotThrowAsync();
         push.Attempts.Should().BeGreaterThanOrEqualTo(1);
     }
@@ -118,9 +153,9 @@ public class NewRequestPushNotifierTests
     public async Task BlankRequestId_PushesNothing()
     {
         var push = new RecordingTopicPushClient();
-        var notifier = new NewRequestPushNotifier(push, NullLogger<NewRequestPushNotifier>.Instance);
+        var notifier = NewNotifier(push);
 
-        await notifier.NotifyNewRequestAsync(requestId: "  ", Tier, "desc", CancellationToken.None);
+        await notifier.NotifyNewRequestAsync(requestId: "  ", TierId, "desc", CancellationToken.None);
 
         push.Sends.Should().BeEmpty();
         push.Attempts.Should().Be(0);
@@ -148,9 +183,12 @@ public class NewRequestPushNotifierTests
 
         var payload = (IDictionary<string, object?>)send.Payload;
         payload["type"].Should().Be("new_request");
+        payload["priority"].Should().Be("high");
         payload["requestId"].Should().Be(dto.Id);
         payload["request_id"].Should().Be(dto.Id);
-        payload["tierId"].Should().Be(Tier);
+        payload["tierId"].Should().Be(TierId);
+        // End-to-end, the body carries the resolved display NAME (not the raw id).
+        ((string)payload["body"]!).Should().Contain(TierName);
         payload.Should().NotContainKey("data");
     }
 
@@ -234,7 +272,7 @@ public class NewRequestPushNotifierTests
     private static object ValidPayload(string description) => new
     {
         description,
-        tierId = Tier,
+        tierId = TierId,
         pickupLocation = new { lat = 33.88, lng = 35.50 },
         dropoffLocation = new { lat = 33.89, lng = 35.51 },
     };
