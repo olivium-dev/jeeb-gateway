@@ -1594,7 +1594,13 @@ builder.Services.AddSingleton<IPendingOffersStore>(sp =>
     {
         return new UpstreamPendingOffersStore(
             sp.GetRequiredService<JeebGateway.Services.Clients.IOfferServiceClient>(),
-            sp.GetRequiredService<Microsoft.AspNetCore.Http.IHttpContextAccessor>());
+            sp.GetRequiredService<Microsoft.AspNetCore.Http.IHttpContextAccessor>(),
+            // fix/offer-visibility (run-23 CHECK C): the submit-time routing index + the
+            // request read-model let ListForJeeberAsync recover the jeeber's own (incl.
+            // TERMINAL) offers through the owner-scoped request-list route — offer-service
+            // exposes no jeeber-scoped list route.
+            sp.GetRequiredService<IOfferRequestIndex>(),
+            sp.GetRequiredService<JeebGateway.Requests.IRequestsStore>());
     }
 
     return sp.GetRequiredService<InMemoryPendingOffersStore>();

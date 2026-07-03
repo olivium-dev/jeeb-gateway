@@ -59,6 +59,22 @@ public interface IOfferRequestIndex
     /// BR-1 self-offer decision to the offer-service, never as "not a self-offer".
     /// </summary>
     string? ResolveJeeberId(string offerId);
+
+    /// <summary>
+    /// fix/offer-visibility (run-23 CHECK C) — reverse lookup: every offer id this
+    /// gateway instance recorded for <paramref name="jeeberId"/> at submit time.
+    /// Still a pure STRUCTURAL routing fact (the immutable bidder identity captured
+    /// on submit) — no status, fee, or lifecycle. Used by the jeeber "my-offers"
+    /// composition to recover the jeeber's own offers (including TERMINAL ones)
+    /// when offer-service exposes no jeeber-scoped list route.
+    ///
+    /// <para>NON-BREAKING EXTENSION: default interface method so existing
+    /// implementers / fakes compile unchanged — they inherit the safe empty
+    /// result ("this instance learned no pairings for the jeeber"), which is
+    /// exactly the pre-existing behaviour for an unknown offer.</para>
+    /// </summary>
+    IReadOnlyList<string> ListOfferIdsForJeeber(string jeeberId)
+        => Array.Empty<string>();
 }
 
 /// <summary>
@@ -91,4 +107,20 @@ public sealed class InMemoryOfferRequestIndex : IOfferRequestIndex
 
     public string? ResolveJeeberId(string offerId)
         => _byOfferId.TryGetValue(offerId, out var pairing) ? pairing.JeeberId : null;
+
+    public IReadOnlyList<string> ListOfferIdsForJeeber(string jeeberId)
+    {
+        if (string.IsNullOrWhiteSpace(jeeberId))
+        {
+            return Array.Empty<string>();
+        }
+
+        // Snapshot scan over the concurrent dictionary — the index is bounded by
+        // the offers submitted through this instance, and the my-offers surface
+        // is not a hot loop.
+        return _byOfferId
+            .Where(kv => string.Equals(kv.Value.JeeberId, jeeberId, StringComparison.Ordinal))
+            .Select(kv => kv.Key)
+            .ToList();
+    }
 }

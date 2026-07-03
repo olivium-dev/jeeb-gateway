@@ -100,6 +100,16 @@ public sealed class StateServiceOfferRequestIndex : IOfferRequestIndex
     public string? ResolveJeeberId(string offerId)
         => Resolve(offerId)?.JeeberId;
 
+    /// <summary>
+    /// fix/offer-visibility — reverse (jeeber → offer ids) lookup. The durable KV is
+    /// keyed by offerId only (no secondary index), so this delegates to the in-memory
+    /// cache: within-instance completeness, same as the pre-durable behaviour. A
+    /// pairing learned on another replica / before a bounce is simply absent — the
+    /// my-offers composition treats that as "no locally-known offers", never a fault.
+    /// </summary>
+    public IReadOnlyList<string> ListOfferIdsForJeeber(string jeeberId)
+        => _local.ListOfferIdsForJeeber(jeeberId);
+
     // ------------------------------------------------------------------
     // internals
     // ------------------------------------------------------------------

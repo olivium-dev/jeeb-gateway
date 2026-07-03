@@ -143,6 +143,28 @@ public interface IPendingOffersStore
         string requestId, CancellationToken ct);
 
     /// <summary>
+    /// fix/offer-visibility (run-23 CHECK C) — every offer <paramref name="jeeberId"/>
+    /// has submitted, in ANY status (pending / accepted / superseded / withdrawn),
+    /// newest-first. This is the jeeber "my-offers" read: after the customer accepts a
+    /// competing bid, the losing jeeber's own offer MUST stay visible in its terminal
+    /// state — a list that silently drops terminal rows makes the jeeber's bid vanish
+    /// (the run-23 defect this fixes).
+    ///
+    /// <para>NON-BREAKING EXTENSION (same pattern as <see cref="ExpireForRequestAsync"/>):
+    /// a default interface method so existing implementers / fakes compile unchanged —
+    /// they inherit the safe empty list. The in-memory store overrides it with a full
+    /// any-status scan; the upstream (offer-service) store overrides it with the
+    /// routing-index + owner-scoped request-list composition (offer-service exposes no
+    /// jeeber-scoped list route).</para>
+    ///
+    /// <para>DEGRADE-DON'T-FAIL: an upstream blip yields the offers that could be
+    /// resolved (possibly none), never a 5xx.</para>
+    /// </summary>
+    Task<IReadOnlyList<PendingOffer>> ListForJeeberAsync(
+        string jeeberId, CancellationToken ct)
+        => Task.FromResult<IReadOnlyList<PendingOffer>>(Array.Empty<PendingOffer>());
+
+    /// <summary>
     /// T-backend-028 follow-up — close every still-live (<see cref="PendingOfferStatus.Pending"/>)
     /// offer on <paramref name="requestId"/> when the request itself reaches a terminal
     /// state (expiry). Once the request can no longer be accepted, its outstanding bids
