@@ -163,23 +163,42 @@ public class DeliveriesController : ControllerBase
 
         try
         {
-            var result = await _deliveryClient.ListShipmentsAsync(orderId, stage, limit, ct);
+            // fix/client-visibility (run-22 P0 hardening): the mobile client-home bucket
+            // calls this route with the BUCKET alias `stage=active`, which is NOT a
+            // canonical delivery stage (Ordered/Picked/InTransit/AtDoor/Done) — forwarded
+            // verbatim it matches nothing upstream and the client's active bucket goes
+            // permanently blind. Resolve the alias GATEWAY-SIDE: fetch without the stage
+            // filter and keep only in-flight rows (canonical non-terminal, mirroring
+            // JeebOrdersListController.IsListableActive semantics). Canonical/unknown
+            // stage tokens keep forwarding verbatim (no behavior change).
+            var activeBucket = string.Equals(stage, "active", StringComparison.OrdinalIgnoreCase);
+            var upstreamStage = activeBucket ? null : stage;
+
+            var result = await _deliveryClient.ListShipmentsAsync(orderId, upstreamStage, limit, ct);
 
             // PR-G3: the upstream shipments feed is NOT caller-scoped — it returns rows
             // across all orders. Intersect it with the caller's OWN order ids (the
             // gateway's request store, keyed by request id == order id) so a caller only
-            // ever sees shipments for orders they created. A shipment whose orderId is
-            // absent from the caller's owned set — or whose orderId is null — is dropped
-            // (cannot prove ownership → fail closed). This is authorization scoping, not
-            // a fabricated dataset.
+            // ever sees shipments for orders they participate in. fix/client-visibility:
+            // the owned set is the UNION of the rows the caller created (client side) and
+            // the rows the caller is the assigned jeeber on — symmetric with the
+            // /v1/deliveries list — so the assigned jeeber's active work is visible on
+            // this legacy surface too. A shipment whose orderId is absent from the set —
+            // or whose orderId is null — is dropped (cannot prove participation → fail
+            // closed). This is authorization scoping, not a fabricated dataset.
             var ownedOrderIds = new HashSet<string>(StringComparer.Ordinal);
             foreach (var owned in await _store.ListForClientAsync(userId, ct))
             {
                 ownedOrderIds.Add(owned.Id);
             }
+            foreach (var assigned in await _store.ListForJeeberAsync(userId, ct))
+            {
+                ownedOrderIds.Add(assigned.Id);
+            }
 
             var scoped = result.Shipments
                 .Where(s => s.OrderId is { } oid && ownedOrderIds.Contains(oid))
+                .Where(s => !activeBucket || IsActiveStage(s.CurrentStage))
                 .ToList();
 
             return Ok(new ShipmentsListDto { Shipments = scoped, Count = scoped.Count });
@@ -266,7 +285,14 @@ public class DeliveriesController : ControllerBase
                     JeeberId = canonical.JeeberId,
                     CreatedAt = canonical.CreatedAt
                 };
-                await EnrichWithOfferAndJeeberAsync(canonicalDto, deliveryId, canonical.JeeberId, ct);
+                // fix/client-visibility (run-22 P1): the local mirror row carries the
+                // accept-time fee snapshot the enrichment falls back to when the live
+                // offers lookup cannot resolve the accepted offer (jeeber-party reads,
+                // post-terminal offer-state collapse). Best-effort — a mirror miss just
+                // means no snapshot.
+                var mirror = await _store.GetAsync(deliveryId, ct);
+                await EnrichWithOfferAndJeeberAsync(
+                    canonicalDto, deliveryId, canonical.JeeberId, mirror?.AcceptedFee, ct);
                 return Ok(canonicalDto);
             }
             catch (HttpRequestException hre)
@@ -286,8 +312,32 @@ public class DeliveriesController : ControllerBase
         }
 
         var dto = ToDto(delivery);
-        await EnrichWithOfferAndJeeberAsync(dto, deliveryId, delivery.JeeberId, ct);
+        await EnrichWithOfferAndJeeberAsync(dto, deliveryId, delivery.JeeberId, delivery.AcceptedFee, ct);
         return Ok(dto);
+    }
+
+    /// <summary>
+    /// fix/client-visibility (run-22 P0 hardening): a shipment stage counts as ACTIVE
+    /// (in flight) when its canonical resolution is non-terminal and not Expired —
+    /// the exact IsListableActive predicate the /v1 Jobs list uses. A stage with no
+    /// canonical mapping (e.g. an upstream-internal token like <c>created</c>) is
+    /// treated as in flight rather than dropped, mirroring the /v1 semantics.
+    /// </summary>
+    private static bool IsActiveStage(string? stage)
+    {
+        if (string.IsNullOrWhiteSpace(stage))
+        {
+            return true;
+        }
+
+        var canonical = DeliveryStatusAlias.ToCanonical(stage);
+        if (canonical is null)
+        {
+            return !RequestStatus.IsTerminal(stage);
+        }
+
+        return !CanonicalDeliveryStatus.IsTerminal(canonical)
+            && !string.Equals(canonical, CanonicalDeliveryStatus.Expired, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -302,7 +352,7 @@ public class DeliveriesController : ControllerBase
     /// upstream user-management round-trip).
     /// </summary>
     private async Task EnrichWithOfferAndJeeberAsync(
-        DeliveryRequestDto dto, string deliveryId, string? jeeberId, CancellationToken ct)
+        DeliveryRequestDto dto, string deliveryId, string? jeeberId, decimal? snapshotFee, CancellationToken ct)
     {
         try
         {
@@ -310,6 +360,18 @@ public class DeliveriesController : ControllerBase
             // The single accepted offer is the awarded bid; its Fee is the agreed amount.
             var accepted = offers.FirstOrDefault(o =>
                 string.Equals(o.Status, PendingOfferStatus.Accepted, StringComparison.Ordinal));
+            // fix/client-visibility (run-22 P1): once the delivery completes, the
+            // upstream offer's terminal state can collapse out of "accepted" (the
+            // gateway's three-state mapping folds every non-accept terminal to
+            // withdrawn). The awarded bid is still identifiable as the assigned
+            // jeeber's offer — match on the winner before giving up.
+            if (accepted is null && !string.IsNullOrWhiteSpace(jeeberId))
+            {
+                accepted = offers
+                    .Where(o => string.Equals(o.JeeberId, jeeberId, StringComparison.Ordinal))
+                    .OrderByDescending(o => o.CreatedAt)
+                    .FirstOrDefault();
+            }
             if (accepted is not null)
             {
                 dto.Amount = accepted.Fee;
@@ -320,6 +382,16 @@ public class DeliveriesController : ControllerBase
             _log.LogWarning(ex,
                 "Accepted-offer amount enrich failed for delivery {DeliveryId}; returning without Amount.",
                 deliveryId);
+        }
+
+        // fix/client-visibility (run-22 P1): the live offers lookup is owner-scoped on
+        // the upstream wire (offer-service 403s any non-owner → empty list here), so a
+        // JEEBER reading their own delivery — and any post-completion receipt read that
+        // no longer matches an accepted-status offer — falls back to the fee snapshot
+        // stamped on the row at accept time. Additive and ignore-when-null preserved.
+        if (dto.Amount is null && snapshotFee is > 0m)
+        {
+            dto.Amount = snapshotFee;
         }
 
         if (!string.IsNullOrWhiteSpace(jeeberId))
