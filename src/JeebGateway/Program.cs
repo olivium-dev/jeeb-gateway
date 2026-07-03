@@ -1147,10 +1147,13 @@ builder.Services.Configure<JeebGateway.Matching.MatchingMirrorOptions>(
 builder.Services.AddScoped<JeebGateway.Matching.IDeliveryRowMirror,
                            JeebGateway.Matching.DeliveryRowMirror>();
 
-// Tier-existence probe consumed by RequestsController to enforce
-// T-backend-007's "validate tier exists" criterion. Distinct interface
-// from JeebGateway.Tiers.ITiersStore (the admin/catalog surface).
-builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.InMemoryTiersStore>();
+// Tier-existence probe consumed by the request-create surfaces to enforce
+// T-backend-007's "validate tier exists" criterion. feat/tier-unify-names:
+// now a thin view over the SINGLE tier source of truth (the catalog at
+// JeebGateway.Tiers.ITiersStore, registered below) — legacy codes
+// (flash/express/standard/on_the_way/eco) stay accepted via the
+// LegacyTierCodes alias table.
+builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.CatalogBackedTiersStore>();
 
 // JEB-1507: CancellationPolicy thresholds (WeeklyThreshold, StrikeThreshold,
 // RestrictionDurationHours) are configurable via appsettings so they can be

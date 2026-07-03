@@ -156,10 +156,14 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
     /// <summary>
     /// Best-effort resolve of a tier id to its human display name via the gateway's
-    /// in-process tier catalog. Returns null when the id is blank or does not match a
-    /// catalog row — the caller then DROPS the body suffix rather than render a raw
-    /// id/UUID. Never throws: a catalog hiccup degrades to "no suffix", never to a
-    /// failed push (the whole notify path is degrade-don't-fail).
+    /// in-process tier catalog. feat/tier-unify-names: the id is first canonicalized
+    /// through <see cref="JeebGateway.Tiers.LegacyTierCodes"/>, so legacy codes
+    /// (flash/express/standard/on_the_way/eco) resolve to their aliased catalog row's
+    /// display name instead of silently dropping the suffix. Returns null when the id
+    /// is blank or does not match a catalog row — the caller then DROPS the body
+    /// suffix rather than render a raw id/UUID. Never throws: a catalog hiccup
+    /// degrades to "no suffix", never to a failed push (the whole notify path is
+    /// degrade-don't-fail).
     /// </summary>
     private async Task<string?> ResolveTierLabelAsync(string? tierId, CancellationToken ct)
     {
@@ -170,7 +174,8 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
         try
         {
-            var tier = await _tiers.GetAsync(tierId.Trim(), ct);
+            var tier = await _tiers.GetAsync(
+                JeebGateway.Tiers.LegacyTierCodes.Canonicalize(tierId), ct);
             return string.IsNullOrWhiteSpace(tier?.Name) ? null : tier!.Name.Trim();
         }
         catch (Exception ex)
