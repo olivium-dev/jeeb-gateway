@@ -706,6 +706,11 @@ namespace JeebGateway.Controllers
                 }
 
                 var response = await _serviceUserManagementClient.UpdateAsync(request);
+
+                // jeeberName gap fix: mirror the updated display fields into the
+                // gateway's local users projection (best-effort, never fails the 200).
+                await MirrorProfileUpdateToLocalProjectionAsync(request, response);
+
                 return Ok(response);
             }
             catch (UserManagementApiException ex)
@@ -734,6 +739,10 @@ namespace JeebGateway.Controllers
                 }
 
                 var response = await _serviceUserManagementClient.UpdateAsync(request);
+
+                // jeeberName gap fix: same local-projection mirror as PUT /profile.
+                await MirrorProfileUpdateToLocalProjectionAsync(request, response);
+
                 return Ok(response);
             }
             catch (UserManagementApiException ex)
@@ -746,6 +755,65 @@ namespace JeebGateway.Controllers
                 return StatusCode(500, $"Error updating user profile: {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// jeeberName gap fix (feat/tier-unify-names lane). ROOT CAUSE: the deliveries
+        /// GetById jeeberName enrichment reads the gateway's LOCAL users projection
+        /// (<see cref="JeebGateway.Users.IUsersStore"/>), but NOTHING ever wrote a
+        /// display name into it — the OTP-verify projection upsert carries Name = ""
+        /// (user-management's phone find-or-create is identity-only), and this profile
+        /// proxy previously forwarded <c>username</c> to user-management WITHOUT
+        /// mirroring it locally. So real (OTP-minted) accounts always enriched to an
+        /// empty name.
+        ///
+        /// <para>This mirror lands the upstream-accepted display fields (username →
+        /// Name, profilePic → AvatarUrl, email → Email) in the local projection, keyed
+        /// by the upstream-confirmed user id (falling back to the request body's id,
+        /// then the caller's own claims). BEST-EFFORT: the upstream update already
+        /// succeeded, so a local mirror fault only logs — it never flips the 200.</para>
+        /// </summary>
+        private async Task MirrorProfileUpdateToLocalProjectionAsync(
+            UpdateUserProfileRequest request, UpdateUserProfileResponse? response)
+        {
+            try
+            {
+                var userId = response?.UserId;
+                if (string.IsNullOrWhiteSpace(userId)) userId = request.UserId;
+                if (string.IsNullOrWhiteSpace(userId))
+                {
+                    userId = User.FindFirst(ClaimTypes.Sid)?.Value
+                             ?? User.FindFirst("sid")?.Value
+                             ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                             ?? User.FindFirst("sub")?.Value;
+                }
+                if (string.IsNullOrWhiteSpace(userId)) return;
+
+                // Prefer the upstream-echoed values (what UM actually persisted) and
+                // fall back to the submitted ones. Null patch fields are left untouched
+                // by the store, so a partial update never blanks the other fields.
+                var name = FirstNonBlank(response?.Username, request.Username);
+                var avatar = FirstNonBlank(response?.ProfilePic, request.ProfilePic);
+                var email = FirstNonBlank(response?.Email, request.Email);
+                if (name is null && avatar is null && email is null) return;
+
+                await _users.UpdateProfileAsync(userId!, new JeebGateway.Users.ProfilePatch
+                {
+                    Name = name,
+                    AvatarUrl = avatar,
+                    Email = email,
+                }, HttpContext.RequestAborted);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "user.profile update local-projection mirror failed; upstream update already succeeded.");
+            }
+        }
+
+        private static string? FirstNonBlank(string? preferred, string? fallback)
+            => !string.IsNullOrWhiteSpace(preferred) ? preferred
+             : !string.IsNullOrWhiteSpace(fallback) ? fallback
+             : null;
 
         /// <summary>
         /// Delete user profile

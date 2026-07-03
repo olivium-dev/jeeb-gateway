@@ -32,10 +32,34 @@ public class InMemoryUsersStore : IUsersStore
     /// projection. Replaces the id row so the gateway-minted JWT embeds the OPAQUE
     /// roles/active_role user-management persisted. Preserves any existing saved
     /// addresses on the row by leaving the address store untouched.
+    ///
+    /// <para>feat/tier-unify-names (jeeberName gap): the OTP-verify / super-login
+    /// callers project IDENTITY fields only (id/phone/roles/active role) and carry
+    /// Name = "" — so a blind row replace WIPED any locally-known display fields on
+    /// every re-login, which is why the deliveries jeeberName enrichment emitted
+    /// nothing on real accounts. Locally-known DISPLAY fields (Name / Email /
+    /// AvatarUrl) now survive a projection upsert whose incoming values are blank;
+    /// an incoming NON-blank display value still wins (the upstream stays
+    /// authoritative when it actually supplies one).</para>
     /// </summary>
     public Task UpsertProjectionAsync(UserProfile profile, CancellationToken ct)
     {
-        _users[profile.Id] = Clone(profile);
+        lock (_writeLock)
+        {
+            var incoming = Clone(profile);
+            if (_users.TryGetValue(profile.Id, out var existing))
+            {
+                if (string.IsNullOrWhiteSpace(incoming.Name) && !string.IsNullOrWhiteSpace(existing.Name))
+                    incoming.Name = existing.Name;
+                if (string.IsNullOrWhiteSpace(incoming.Email) && !string.IsNullOrWhiteSpace(existing.Email))
+                    incoming.Email = existing.Email;
+                if (string.IsNullOrWhiteSpace(incoming.AvatarUrl) && !string.IsNullOrWhiteSpace(existing.AvatarUrl))
+                    incoming.AvatarUrl = existing.AvatarUrl;
+            }
+
+            _users[profile.Id] = incoming;
+        }
+
         return Task.CompletedTask;
     }
 
