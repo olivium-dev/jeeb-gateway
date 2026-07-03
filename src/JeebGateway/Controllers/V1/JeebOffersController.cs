@@ -214,6 +214,31 @@ public sealed class JeebOffersController : ControllerBase
                 + "the read-model may lag until reconciled.", requestId);
         }
 
+        // fix/client-visibility (run-22 P1) — SNAPSHOT the accepted offer's fee onto the
+        // local row. The delivery-read `amount` enrichment is otherwise re-resolved from
+        // the offers store on EVERY read, which (a) is owner-scoped on the upstream wire
+        // (offer-service 403s the assigned jeeber, who then never sees the agreed fee)
+        // and (b) can stop matching once the offer's upstream state collapses after
+        // completion — producing the $0.00 receipt. The acceptor here IS the request
+        // owner, so this list read is authorized; the receipt later reads the snapshot.
+        // DEGRADE-DON'T-FAIL: a fee-resolution miss is logged, never a 5xx.
+        try
+        {
+            var acceptedFee = await ResolveAcceptedFeeAsync(requestId, offerId, ct);
+            if (acceptedFee is > 0m
+                && await _requests.TrySetAcceptedFeeAsync(requestId, acceptedFee.Value, ct))
+            {
+                req = await _requests.GetAsync(requestId, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Post-accept fee snapshot for request {RequestId} (offer {OfferId}) failed; accept "
+                + "stays 200 — the receipt amount falls back to the live offers lookup.",
+                requestId, offerId);
+        }
+
         // P0 — stamp the WINNING jeeber onto the local read-model row. This is the WRITE
         // counterpart to ListForJeeberAsync: the upstream accept path projects only the
         // STATUS (above) and never wrote the assignee, so the jeeber's Jobs/Deliveries
@@ -520,6 +545,19 @@ public sealed class JeebOffersController : ControllerBase
     // In-memory accept path (legacy / test-only; flag off)
     // -----------------------------------------------------------------------
 
+    /// <summary>
+    /// fix/client-visibility (run-22 P1): resolves the accepted offer's fee for the
+    /// accept-time snapshot. The caller is the request OWNER at this point, so the
+    /// owner-scoped offers list read is authorized on both the in-memory and the
+    /// upstream (offer-service) stores. Matches the accepted offer by id; null when
+    /// the offer cannot be resolved (the snapshot is then skipped, never guessed).
+    /// </summary>
+    private async Task<decimal?> ResolveAcceptedFeeAsync(string requestId, string offerId, CancellationToken ct)
+    {
+        var offers = await _offers.ListForRequestAsync(requestId, ct);
+        return offers.FirstOrDefault(o => string.Equals(o.Id, offerId, StringComparison.Ordinal))?.Fee;
+    }
+
     private async Task<IActionResult> AcceptInMemoryAsync(string offerId, string actorId, CancellationToken ct)
     {
         var offer = await _offers.GetAsync(offerId, ct);
@@ -598,6 +636,14 @@ public sealed class JeebOffersController : ControllerBase
 
         // ACC-02: supersede every competing bid on the same request.
         await _offers.AcceptWithSupersedeAsync(offerId, DateTimeOffset.UtcNow, ct);
+
+        // fix/client-visibility (run-22 P1): accepted-fee snapshot — the in-memory
+        // offer carries the agreed fee directly. Never fails the accept.
+        if (offer.Fee > 0m
+            && await _requests.TrySetAcceptedFeeAsync(accepted.Id, offer.Fee, ct))
+        {
+            accepted = await _requests.GetAsync(accepted.Id, ct) ?? accepted;
+        }
 
         return Ok(ToRequestDto(accepted));
     }

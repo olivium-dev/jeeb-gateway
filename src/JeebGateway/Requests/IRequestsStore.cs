@@ -72,6 +72,19 @@ public interface IRequestsStore
     Task<bool> SetJeeberIdAsync(string requestId, string jeeberId, CancellationToken ct);
 
     /// <summary>
+    /// fix/client-visibility (run-22 P1): stamps the ACCEPTED offer's fee onto the
+    /// local request/delivery row at accept time (see
+    /// <see cref="DeliveryRequest.AcceptedFee"/>). Write counterpart of the
+    /// delivery-read <c>amount</c> enrichment: the receipt read (which happens
+    /// AFTER the delivery goes terminal, and possibly by the non-owner party)
+    /// falls back to this snapshot when the live offers-store lookup cannot
+    /// resolve the accepted offer. Returns false (row untouched) when the request
+    /// is unknown or <paramref name="fee"/> is not positive; idempotent —
+    /// re-stamping overwrites with the same accepted fee.
+    /// </summary>
+    Task<bool> TrySetAcceptedFeeAsync(string requestId, decimal fee, CancellationToken ct);
+
+    /// <summary>
     /// Returns every request whose creation timestamp is at or before
     /// <paramref name="cutoff"/> and whose status is still in the
     /// pre-acceptance set (<c>pending</c>, <c>matched</c>). The

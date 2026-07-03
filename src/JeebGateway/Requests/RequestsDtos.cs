@@ -231,6 +231,21 @@ public class DeliveryRequest
     public DateTimeOffset? AcceptedAt { get; set; }
 
     /// <summary>
+    /// fix/client-visibility (run-22 P1): SNAPSHOT of the accepted offer's fee,
+    /// stamped at accept time by the accept orchestration (both the in-memory and
+    /// the upstream offer-service paths). The delivery read enrichment
+    /// (<c>GET /deliveries/{id}</c> → <c>amount</c>) previously RE-RESOLVED the fee
+    /// from the offers store on every read; that lookup is owner-scoped on the
+    /// upstream wire (offer-service 403s any non-owner, so the assigned JEEBER
+    /// never saw the agreed amount) and can stop matching once the offer's
+    /// upstream state collapses to a terminal token after completion. The receipt
+    /// is read AFTER completion by definition, so the agreed fee must live on the
+    /// delivery row itself. Null until an offer is accepted; never cleared by a
+    /// status transition.
+    /// </summary>
+    public decimal? AcceptedFee { get; set; }
+
+    /// <summary>
     /// JEB-50 (S05 H7 / H9b): id of the broadcasting conversation auto-created
     /// for this order. Set ONCE by the gateway's stateless create orchestration
     /// (<c>DurableRequestsStore</c>) immediately after the delivery row is seeded

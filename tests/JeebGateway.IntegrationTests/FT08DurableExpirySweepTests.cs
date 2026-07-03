@@ -124,6 +124,7 @@ public class FT08DurableExpirySweepTests
         public Task<int> CountActiveForClientAsync(string clientId, CancellationToken ct) => Task.FromResult(0);
         public Task<bool> SetStatusAsync(string requestId, string status, CancellationToken ct) => Task.FromResult(true);
         public Task<bool> SetJeeberIdAsync(string requestId, string jeeberId, CancellationToken ct) => Task.FromResult(true);
+        public Task<bool> TrySetAcceptedFeeAsync(string requestId, decimal fee, CancellationToken ct) => Task.FromResult(true);
         public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct) => Task.FromResult<DeliveryRequest?>(null);
         public Task<bool> MarkNudgedAsync(string requestId, DateTimeOffset at, CancellationToken ct) => Task.FromResult(true);
         public Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct) => Task.FromResult(false);

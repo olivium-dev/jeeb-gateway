@@ -244,6 +244,14 @@ public class OffersController : ControllerBase
         // the two sides of the relationship consistent if the request flip threw.
         await _offers.AcceptWithSupersedeAsync(offerId, now, ct);
 
+        // fix/client-visibility (run-22 P1): accepted-fee snapshot for the receipt
+        // read (see DeliveryRequest.AcceptedFee). Never fails the accept.
+        if (offer.Fee > 0m
+            && await _requests.TrySetAcceptedFeeAsync(accepted.Id, offer.Fee, ct))
+        {
+            accepted = await _requests.GetAsync(accepted.Id, ct) ?? accepted;
+        }
+
         return Ok(ToDto(accepted));
     }
 
@@ -745,6 +753,30 @@ public class OffersController : ControllerBase
             _logger.LogWarning(ex,
                 "Post-accept request-sync for {RequestId} failed; accept stays 200, GET /requests/{{id}} may show the pre-accept state.",
                 requestId);
+        }
+
+        // fix/client-visibility (run-22 P1): accepted-fee snapshot. The acceptor is
+        // the request OWNER here, so the owner-scoped offers list read is authorized;
+        // match the accepted offer by the envelope's id and stamp its fee onto the
+        // local row so post-completion receipt reads (and jeeber-party reads, which
+        // the owner-scoped offers lookup 403s) still surface the agreed amount.
+        // DEGRADE-DON'T-FAIL: a miss is logged and swallowed.
+        try
+        {
+            var offersOnRequest = await _offers.ListForRequestAsync(requestId, ct);
+            var acceptedFee = offersOnRequest
+                .FirstOrDefault(o => string.Equals(o.Id, envelope.AcceptedOfferId, StringComparison.Ordinal))
+                ?.Fee;
+            if (acceptedFee is > 0m)
+            {
+                await _requests.TrySetAcceptedFeeAsync(requestId, acceptedFee.Value, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Post-accept fee snapshot for request {RequestId} (offer {OfferId}) failed; accept stays 200.",
+                requestId, envelope.AcceptedOfferId);
         }
 
         // (H6c) The durable delivery row already exists — it was seeded at create

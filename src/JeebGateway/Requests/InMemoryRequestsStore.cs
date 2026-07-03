@@ -140,6 +140,31 @@ public class InMemoryRequestsStore : IRequestsStore
         }
     }
 
+    /// <summary>
+    /// fix/client-visibility (run-22 P1): accepted-fee snapshot write. Mirrors the
+    /// <see cref="SetJeeberIdAsync"/> guards — unknown row or a non-positive fee is
+    /// a no-op false, so a failed upstream fee resolution can never blank or
+    /// corrupt an already-stamped snapshot.
+    /// </summary>
+    public Task<bool> TrySetAcceptedFeeAsync(string requestId, decimal fee, CancellationToken ct)
+    {
+        if (fee <= 0m)
+        {
+            return Task.FromResult(false);
+        }
+
+        lock (_writeLock)
+        {
+            if (!_requests.TryGetValue(requestId, out var existing))
+            {
+                return Task.FromResult(false);
+            }
+
+            existing.AcceptedFee = fee;
+            return Task.FromResult(true);
+        }
+    }
+
     public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(conversationId))
