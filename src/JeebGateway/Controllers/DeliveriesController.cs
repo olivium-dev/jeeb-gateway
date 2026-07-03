@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace JeebGateway.Controllers;
@@ -88,6 +89,88 @@ public class DeliveriesController : ControllerBase
     /// the shared one-time-password service. See <see cref="ResolveOtpApplicationId"/>.
     /// </summary>
     private static string HandoverOtpTrace(string deliveryId) => $"delivery_handover_{deliveryId}";
+
+    // ---- OWNER-ESCALATED AC5 REVISION (Jeeb G4): in-app customer handover code ----
+    // The owner revised AC5 so the raw 4-digit handover code may be returned ONCE,
+    // auth-scoped, to the delivery's OWN client (the customer) so they can read it
+    // IN-APP. The gateway mints the code, returns it only to that client, and
+    // persists ONLY its SHA-256 hash here (cross-replica-safe IDistributedCache, the
+    // same store the attempt/lockout markers use — GET mints on one replica, the
+    // later POST /otp/verify may land on another). The raw code is NEVER persisted
+    // or logged. On verify the gateway compares SHA-256(submitted) to this stored
+    // hash (constant-time); a match short-circuits the one-time-password round-trip,
+    // a miss falls through so the SMS-minted code keeps working (belt-and-suspenders).
+
+    /// <summary>
+    /// TTL for the gateway-minted handover code-hash. Matches the 15-min external-OTP
+    /// attempt/lockout window (<see cref="ExternalOtpAttemptsTtl"/>): long enough for
+    /// the handover, short enough that a stale hash self-heals after the courier moves on.
+    /// </summary>
+    private static readonly TimeSpan HandoverCodeHashTtl = TimeSpan.FromMinutes(15);
+
+    /// <summary>Cache key for the SHA-256 hash of the gateway-minted in-app handover code (AC5 revision).</summary>
+    private static string HandoverCodeHashCacheKey(string deliveryId) => $"otp:codehash:{deliveryId}";
+
+    /// <summary>
+    /// True when <paramref name="callerId"/> is the authenticated OWNER (client) of
+    /// <paramref name="delivery"/>. Only the delivery's own client may read the raw
+    /// handover code in-app (revised AC5); the match is by identity (id), independent
+    /// of the coarse capability role. Jeeber/other callers get today's body exactly.
+    /// </summary>
+    private static bool IsDeliveryClient(string callerId, DeliveryRequest delivery)
+        => !string.IsNullOrEmpty(callerId)
+           && string.Equals(callerId, delivery.ClientId, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Mints a cryptographically-random 4-digit handover code and its SHA-256 hex
+    /// hash. Uses <see cref="RandomNumberGenerator"/> (never <see cref="Random"/>) so
+    /// the code is not predictable. Returns both; the caller returns the raw code to
+    /// the client ONCE and persists only the hash. The raw code is never logged.
+    /// </summary>
+    private static (string Code, string Hash) MintHandoverCode()
+    {
+        var code = RandomNumberGenerator.GetInt32(0, 10_000).ToString("D4", CultureInfo.InvariantCulture);
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(code)));
+        return (code, hash);
+    }
+
+    /// <summary>
+    /// Persists the SHA-256 hash of the minted handover code under
+    /// <see cref="HandoverCodeHashCacheKey"/> with <see cref="HandoverCodeHashTtl"/>.
+    /// Cross-replica-safe (Redis in prod, in-memory in tests). Only the hash is stored
+    /// — never the raw code (revised AC5).
+    /// </summary>
+    private Task PersistHandoverCodeHashAsync(string deliveryId, string codeHashHex, CancellationToken ct)
+        => _cache.SetAsync(
+            HandoverCodeHashCacheKey(deliveryId),
+            Encoding.UTF8.GetBytes(codeHashHex),
+            new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = HandoverCodeHashTtl },
+            ct);
+
+    /// <summary>
+    /// Verify-precedence probe: returns true when a gateway-minted code-hash exists for
+    /// the delivery AND SHA-256(<paramref name="submittedCode"/>) matches it. Uses a
+    /// constant-time comparison (<see cref="CryptographicOperations.FixedTimeEquals"/>)
+    /// over the equal-length hex byte arrays to avoid a timing side-channel. Returns
+    /// false when no hash is stored OR on a mismatch — the caller then falls through to
+    /// the existing one-time-password validation so the SMS-minted code keeps working.
+    /// Never logs the submitted code or the hash preimage (revised AC5 / B5).
+    /// </summary>
+    private async Task<bool> TryMatchGatewayMintedCodeAsync(string deliveryId, string submittedCode, CancellationToken ct)
+    {
+        var stored = await _cache.GetAsync(HandoverCodeHashCacheKey(deliveryId), ct);
+        if (stored is null || stored.Length == 0)
+        {
+            return false;
+        }
+
+        var submittedHash = Encoding.UTF8.GetBytes(
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(submittedCode))));
+
+        // Equal-length (64-byte hex) arrays → FixedTimeEquals is a true constant-time
+        // compare; on a length mismatch it safely returns false without throwing.
+        return CryptographicOperations.FixedTimeEquals(stored, submittedHash);
+    }
 
     /// <summary>
     /// JEB-1516: resolve the <c>applicationId</c> forwarded to the shared
@@ -957,6 +1040,16 @@ public class DeliveriesController : ControllerBase
     /// Only valid when delivery status = <see cref="RequestStatus.AtDoor"/> —
     /// the Jeeber must have physically arrived at the drop-off before an
     /// OTP is dispatched (PR review B1; per AC1).
+    ///
+    /// OWNER-ESCALATED AC5 REVISION (Jeeb G4 follow-up — kill the OTP "half-and-half";
+    /// ADR follow-up: AC5 revision): when the authenticated caller id equals the
+    /// delivery's <c>ClientId</c> (the customer), the gateway ALSO mints a
+    /// cryptographically-random 4-digit code, persists ONLY its SHA-256 hash, STILL
+    /// dispatches the SMS (belt-and-suspenders), and returns the raw code in
+    /// <see cref="OtpTriggerResponse.Code"/> so the customer can read it IN-APP. The
+    /// code is returned ONLY to the delivery's own client — never to a jeeber/other
+    /// caller (their body is unchanged) — and is never logged. This supersedes the
+    /// original AC5 (raw code confined to the gateway↔one-time-password hop).
     /// </summary>
     [HttpGet("{deliveryId}/otp")]
     // S03 §5.4 contract alias: mobile calls /v1/deliveries/{id}/otp. Additive second
@@ -976,7 +1069,9 @@ public class DeliveriesController : ControllerBase
 
         var correlationId = Activity.Current?.Id ?? HttpContext.TraceIdentifier;
 
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        // Capture the authenticated caller id: revised AC5 (Jeeb G4) returns the raw
+        // in-app handover code ONLY when this id equals the delivery's ClientId.
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
 
         // Get delivery and validate status
         var delivery = await _store.GetAsync(deliveryId, ct);
@@ -994,7 +1089,7 @@ public class DeliveriesController : ControllerBase
         // intact as the documented rollback lever.
         if (_flags.CurrentValue.Delivery)
         {
-            return await TriggerOtpViaDeliveryServiceAsync(deliveryId, delivery, correlationId, activity, ct);
+            return await TriggerOtpViaDeliveryServiceAsync(deliveryId, delivery, callerId, correlationId, activity, ct);
         }
 
         // PR review B1 (JEB-628): AC1 requires status `at_door` (the
@@ -1051,11 +1146,26 @@ public class DeliveriesController : ControllerBase
             activity?.SetTag("otp.triggered", "true");
             activity?.SetTag("otp.application_id", handoverTrace);
 
+            // OWNER-ESCALATED AC5 REVISION (Jeeb G4): mint the in-app handover code
+            // for the delivery's OWN client (customer) AFTER the SMS dispatch
+            // succeeded, persist only its SHA-256 hash, and return the raw code once.
+            // Non-client callers (jeeber/other) get null → the `code` key is omitted,
+            // preserving the prior body byte-for-byte. The raw code is never logged.
+            string? customerCode = null;
+            if (IsDeliveryClient(callerId, delivery))
+            {
+                var minted = MintHandoverCode();
+                await PersistHandoverCodeHashAsync(deliveryId, minted.Hash, ct);
+                customerCode = minted.Code;
+                activity?.SetTag("otp.customer_code_issued", "true");
+            }
+
             return Ok(new OtpTriggerResponse
             {
                 DeliveryId = deliveryId,
                 Triggered  = true,
-                Message    = "4-digit OTP sent to the delivery recipient."
+                Message    = "4-digit OTP sent to the delivery recipient.",
+                Code       = customerCode
             });
         }
         catch (ApiException apiEx)
@@ -1099,6 +1209,15 @@ public class DeliveriesController : ControllerBase
     /// plain wrong code (PR review B2 / AC3) and 423 after the third failure,
     /// at which point a real admin-escalation row is created via
     /// <see cref="IAdminEscalationStore"/> (PR review B7).
+    ///
+    /// OWNER-ESCALATED AC5 REVISION (Jeeb G4) verify-precedence: when the customer
+    /// read the code IN-APP, the gateway holds its SHA-256 hash. The submitted code is
+    /// matched (constant-time) against that hash FIRST; a hit is treated as a valid
+    /// code INSTEAD OF the one-time-password round-trip. A miss (or no stored hash)
+    /// falls through to the existing one-time-password validation, so the SMS-minted
+    /// code keeps working unchanged. The downstream flow (delivery-service /otp/verify
+    /// on the flag-on path, or the status transition on the legacy path) is untouched;
+    /// wrong codes still 401 and lock after 3. The raw code is never logged.
     /// </summary>
     [HttpPost("{deliveryId}/otp/verify")]
     // S03 §5.4 contract alias: mobile calls /v1/deliveries/{id}/otp/verify (the real
@@ -1212,42 +1331,58 @@ public class DeliveriesController : ControllerBase
 
         bool verified;
         int upstreamStatus = 0;
-        try
+
+        // OWNER-ESCALATED AC5 REVISION (Jeeb G4): verify-precedence. If the customer
+        // read the code IN-APP, the gateway holds its SHA-256 hash — match it FIRST
+        // (constant-time) and, on a hit, treat as verified INSTEAD OF the
+        // one-time-password round-trip. On no-hash-or-mismatch, fall through to the
+        // existing SMS-code validation so the SMS-minted code keeps working. The raw
+        // code / hash-preimage is never logged (B5 / revised AC5).
+        if (await TryMatchGatewayMintedCodeAsync(deliveryId, body.Code!, ct))
         {
-            await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
-            {
-                PhoneNumber   = delivery.RecipientPhone,
-                Otp           = body.Code,
-                ApplicationId = applicationId
-            }, ct);
             verified = true;
+            activity?.SetTag("otp.match_source", "gateway_minted");
         }
-        catch (ApiException apiEx)
+        else
         {
-            // PR review B5: NEVER log apiEx / apiEx.Message — the NSwag
-            // ApiException embeds the upstream response body in Message,
-            // which may echo the submitted code or other OTP-adjacent data.
-            // Log only the upstream HTTP status.
-            verified       = false;
-            upstreamStatus = apiEx.StatusCode;
-        }
-        catch (OperationCanceledException)
-        {
-            // Request was cancelled (caller disconnect / shutdown). Surface
-            // 499-equivalent via the framework default by rethrowing.
-            throw;
-        }
-        catch (Exception ex)
-        {
-            // Network / timeout failure before reaching upstream — safe to
-            // log the exception type but NOT the message (defense in depth).
-            _log.LogWarning(
-                "Handover OTP verify pre-upstream failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
-                deliveryId, ex.GetType().Name, correlationId);
-            return Problem(
-                title:      "OTP verification failed",
-                detail:     "Unable to reach the one-time-password service.",
-                statusCode: StatusCodes.Status502BadGateway);
+            activity?.SetTag("otp.match_source", "one_time_password");
+            try
+            {
+                await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
+                {
+                    PhoneNumber   = delivery.RecipientPhone,
+                    Otp           = body.Code,
+                    ApplicationId = applicationId
+                }, ct);
+                verified = true;
+            }
+            catch (ApiException apiEx)
+            {
+                // PR review B5: NEVER log apiEx / apiEx.Message — the NSwag
+                // ApiException embeds the upstream response body in Message,
+                // which may echo the submitted code or other OTP-adjacent data.
+                // Log only the upstream HTTP status.
+                verified       = false;
+                upstreamStatus = apiEx.StatusCode;
+            }
+            catch (OperationCanceledException)
+            {
+                // Request was cancelled (caller disconnect / shutdown). Surface
+                // 499-equivalent via the framework default by rethrowing.
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Network / timeout failure before reaching upstream — safe to
+                // log the exception type but NOT the message (defense in depth).
+                _log.LogWarning(
+                    "Handover OTP verify pre-upstream failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
+                    deliveryId, ex.GetType().Name, correlationId);
+                return Problem(
+                    title:      "OTP verification failed",
+                    detail:     "Unable to reach the one-time-password service.",
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
         }
 
         if (verified)
@@ -1412,6 +1547,7 @@ public class DeliveriesController : ControllerBase
     private async Task<IActionResult> TriggerOtpViaDeliveryServiceAsync(
         string deliveryId,
         DeliveryRequest delivery,
+        string callerId,
         string correlationId,
         Activity? activity,
         CancellationToken ct)
@@ -1433,12 +1569,24 @@ public class DeliveriesController : ControllerBase
             });
         }
 
-        // 1) Durable at_door gate in delivery-service. The raw code never
-        //    leaves the gateway, so we forward no code_hash here (the code does
-        //    not exist yet — one-time-password mints it on send).
+        // OWNER-ESCALATED AC5 REVISION (Jeeb G4): mint the in-app handover code for
+        // the delivery's OWN client (customer) BEFORE the issue gate so its SHA-256
+        // hash can be forwarded as code_hash to delivery-service (frozen contract's
+        // optional support field) in the SAME issue call. Non-client callers
+        // (jeeber/other) keep codeHash null and receive no in-app code. Minting is a
+        // side-effect-free RNG draw; the gateway-side hash is persisted only after the
+        // full issue+SMS success below. The raw code is never logged.
+        (string Code, string Hash)? minted = IsDeliveryClient(callerId, delivery)
+            ? MintHandoverCode()
+            : null;
+
+        // 1) Durable at_door gate in delivery-service. On the customer path we now
+        //    forward the minted code's SHA-256 hash as code_hash (opaque to the
+        //    gateway's own verify precedence — that compares against the cache copy
+        //    persisted below); the raw code still never leaves the gateway.
         try
         {
-            await _deliveryClient.IssueHandoverOtpAsync(deliveryId, codeHash: null, ct);
+            await _deliveryClient.IssueHandoverOtpAsync(deliveryId, codeHash: minted?.Hash, ct);
         }
         catch (DeliveryHandoverException dhx)
         {
@@ -1489,11 +1637,21 @@ public class DeliveriesController : ControllerBase
         activity?.SetTag("otp.path", "upstream");
         activity?.SetTag("otp.application_id", handoverTrace);
 
+        // OWNER-ESCALATED AC5 REVISION (Jeeb G4): the issue gate + SMS both succeeded,
+        // so persist the gateway-side code-hash (the verify-precedence probe reads it)
+        // and return the raw code once to the customer. Only the hash is stored.
+        if (minted is { } m)
+        {
+            await PersistHandoverCodeHashAsync(deliveryId, m.Hash, ct);
+            activity?.SetTag("otp.customer_code_issued", "true");
+        }
+
         return Ok(new OtpTriggerResponse
         {
             DeliveryId = deliveryId,
             Triggered  = true,
-            Message    = "4-digit OTP sent to the delivery recipient."
+            Message    = "4-digit OTP sent to the delivery recipient.",
+            Code       = minted?.Code
         });
     }
 
@@ -1536,35 +1694,51 @@ public class DeliveriesController : ControllerBase
         //    code; the NSwag client throws ApiException for a wrong/expired
         //    code. We collapse that to a success boolean — the raw code is
         //    discarded here and NEVER forwarded to delivery-service (AC5).
+        // OWNER-ESCALATED AC5 REVISION (Jeeb G4): verify-precedence. If the customer
+        // read the code IN-APP, the gateway holds its SHA-256 hash — match it FIRST
+        // (constant-time) and, on a hit, treat as success INSTEAD OF the
+        // one-time-password round-trip. On no-hash-or-mismatch, fall through to the
+        // existing SMS-code validation so the SMS-minted code keeps working. Either
+        // way only the success boolean reaches delivery-service (AC5); the raw code
+        // never leaves the gateway and is never logged.
         bool success;
-        try
+        if (await TryMatchGatewayMintedCodeAsync(deliveryId, code, ct))
         {
-            await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
-            {
-                PhoneNumber   = delivery.RecipientPhone,
-                Otp           = code,
-                ApplicationId = applicationId
-            }, ct);
             success = true;
+            activity?.SetTag("otp.match_source", "gateway_minted");
         }
-        catch (ApiException)
+        else
         {
-            // Wrong/expired code. Do NOT log apiEx/Message (B5/AC5).
-            success = false;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(
-                "Handover OTP verify (upstream path) pre-validate failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
-                deliveryId, ex.GetType().Name, correlationId);
-            return Problem(
-                title:      "OTP verification failed",
-                detail:     "Unable to reach the one-time-password service.",
-                statusCode: StatusCodes.Status502BadGateway);
+            activity?.SetTag("otp.match_source", "one_time_password");
+            try
+            {
+                await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
+                {
+                    PhoneNumber   = delivery.RecipientPhone,
+                    Otp           = code,
+                    ApplicationId = applicationId
+                }, ct);
+                success = true;
+            }
+            catch (ApiException)
+            {
+                // Wrong/expired code. Do NOT log apiEx/Message (B5/AC5).
+                success = false;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(
+                    "Handover OTP verify (upstream path) pre-validate failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
+                    deliveryId, ex.GetType().Name, correlationId);
+                return Problem(
+                    title:      "OTP verification failed",
+                    detail:     "Unable to reach the one-time-password service.",
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
         }
 
         activity?.SetTag("otp.path", "upstream");

@@ -44,11 +44,37 @@ public class OtpLockedResponse
 /// Confirms that a 4-digit OTP has been triggered via the external
 /// one-time-password service with ApplicationId delivery_handover_{deliveryId}.
 /// </summary>
+/// <remarks>
+/// OWNER-ESCALATED AC5 REVISION (Jeeb G4 follow-up — kill the OTP "half-and-half";
+/// ADR follow-up: AC5 revision). The original AC5 (JEB-628) forbade the raw code
+/// from ever leaving the gateway↔one-time-password hop, which made an in-app code
+/// impossible. The owner has revised AC5 to: "the raw code is returned once,
+/// auth-scoped, ONLY to the authenticated client (owner) of the delivery; it must
+/// still never be logged." <see cref="Code"/> carries that in-app code and is
+/// present ONLY for the delivery's own client. It is omitted from the JSON entirely
+/// for a jeeber/other caller, so their response body is byte-for-byte the prior
+/// shape.
+/// </remarks>
 public class OtpTriggerResponse
 {
     public required string DeliveryId { get; init; }
     public required bool Triggered { get; init; }
     public required string Message { get; init; }
+
+    /// <summary>
+    /// OWNER-ESCALATED AC5 REVISION (Jeeb G4): the raw 4-digit handover code the
+    /// CUSTOMER reads IN-APP, returned ONLY when the authenticated caller id equals
+    /// this delivery's <c>ClientId</c> (the owner). For any other caller
+    /// (jeeber/other) this is <see langword="null"/> and, via
+    /// <see cref="System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull"/>,
+    /// is omitted from the serialized body entirely — preserving the prior
+    /// jeeber-facing contract exactly. The gateway mints this code, persists only
+    /// its SHA-256 hash, and STILL dispatches the SMS (belt-and-suspenders). The
+    /// revised AC5 still forbids logging the raw code anywhere.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Code { get; init; }
 }
 
 /// <summary>
