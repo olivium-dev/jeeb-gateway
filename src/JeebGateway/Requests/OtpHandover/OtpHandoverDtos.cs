@@ -49,6 +49,21 @@ public class OtpTriggerResponse
     public required string DeliveryId { get; init; }
     public required bool Triggered { get; init; }
     public required string Message { get; init; }
+
+    /// <summary>
+    /// Gap G4 (run-24 CHECK C) — store-miss fallback for the in-app handover code.
+    /// The code is primarily delivered on the offer-accept response (<c>handoverCode</c>)
+    /// and the client persists it store-first; this echoes the SAME accept-issued code
+    /// so a client whose local store was cleared (reinstall) can re-read it. Populated
+    /// ONLY when the authenticated caller is the delivery's OWN client (owner-scoped)
+    /// AND a code is still held; it is a READ, never a mint — a jeeber / non-owner, or
+    /// a delivery with no issued code, gets <see langword="null"/>, which
+    /// (<see cref="System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull"/>)
+    /// is omitted from the JSON entirely, preserving the prior body exactly. NEVER logged.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Code { get; init; }
 }
 
 /// <summary>

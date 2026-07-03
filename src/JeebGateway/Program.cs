@@ -1244,6 +1244,14 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper
 // replicas. The same IDistributedCache abstraction works for both.
 builder.Services.AddDistributedMemoryCache();
 
+// Gap G4 (run-24 CHECK C): in-app delivery handover code. Minted at offer-accept
+// and returned owner-scoped as `handoverCode`, held cross-replica-safe in the
+// IDistributedCache above (same abstraction as the OTP attempt/lockout markers),
+// and matched at handover via verify-precedence. Singleton (stateless over the
+// singleton cache). See IHandoverCodeStore.
+builder.Services.AddSingleton<JeebGateway.Requests.OtpHandover.IHandoverCodeStore,
+    JeebGateway.Requests.OtpHandover.DistributedCacheHandoverCodeStore>();
+
 // Geo-matching engine (T-backend-008) — RELOCATED to delivery-service.
 // The gateway's in-memory geo-matching engine (great-circle distance scan +
 // in-memory rating provider) was deleted; courier matching now lives in

@@ -520,6 +520,23 @@ public class DeliveryRequestDto
     [System.Text.Json.Serialization.JsonIgnore(
         Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? JeeberName { get; set; }
+
+    /// <summary>
+    /// Gap G4 (run-24 CHECK C): the 4-digit delivery handover code the CUSTOMER
+    /// reads IN-APP. Populated ONLY on the offer-accept response
+    /// (<c>POST /v1/offers/{offerId}/accept</c>) and returned ONLY to the accepting
+    /// owner — the gateway mints it at accept (owner-scoped by construction), and
+    /// the mobile client reads it as <c>handoverCode</c> (camelCase; it also accepts
+    /// the <c>handover_code</c> snake alias) and persists it store-first. ADDITIVE
+    /// and nullable: omitted from the JSON entirely (<see cref="System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull"/>)
+    /// on every OTHER surface that projects this DTO, so those bodies — and the
+    /// jeeber's reads — are byte-for-byte unchanged and never carry the code.
+    /// Settable so the accept handler enriches the projected DTO after building it.
+    /// NEVER logged.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? HandoverCode { get; set; }
 }
 
 /// <summary>

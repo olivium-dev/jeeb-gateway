@@ -68,6 +68,7 @@ public class DeliveriesController : ControllerBase
     private readonly IServiceOTPClient _otpClient;
     private readonly IDeliveryServiceClient _deliveryClient;
     private readonly IDistributedCache _cache;
+    private readonly IHandoverCodeStore _handoverCodes;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly TimeProvider _clock;
     private readonly ILogger<DeliveriesController> _log;
@@ -106,6 +107,25 @@ public class DeliveriesController : ControllerBase
     private string ResolveOtpApplicationId()
         => _otpSignInOptions.Value.ApplicationId;
 
+    /// <summary>
+    /// Gap G4 (run-24 CHECK C) store-miss fallback: the accept-issued in-app handover
+    /// code, echoed on <c>GET /otp</c> ONLY to the delivery's OWN client (owner-scoped
+    /// by an identity match against <see cref="DeliveryRequest.ClientId"/>) so a client
+    /// that lost its local copy can re-read it. A READ only — it never mints. Returns
+    /// null for a jeeber / non-owner caller and when no code is held. NEVER logs the code.
+    /// </summary>
+    private async Task<string?> ReadOwnerHandoverCodeAsync(
+        string callerId, DeliveryRequest delivery, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(callerId)
+            || !string.Equals(callerId, delivery.ClientId, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return await _handoverCodes.GetAsync(delivery.Id, ct);
+    }
+
     public DeliveriesController(
         IRequestsStore store,
         IPendingOffersStore offers,
@@ -119,6 +139,7 @@ public class DeliveriesController : ControllerBase
         IServiceOTPClient otpClient,
         IDeliveryServiceClient deliveryClient,
         IDistributedCache cache,
+        IHandoverCodeStore handoverCodes,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         ILogger<DeliveriesController> log)
@@ -135,6 +156,7 @@ public class DeliveriesController : ControllerBase
         _otpClient = otpClient;
         _deliveryClient = deliveryClient;
         _cache = cache;
+        _handoverCodes = handoverCodes;
         _flags = flags;
         _clock = clock;
         _log = log;
@@ -1071,7 +1093,10 @@ public class DeliveriesController : ControllerBase
 
         var correlationId = Activity.Current?.Id ?? HttpContext.TraceIdentifier;
 
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        // Gap G4 (run-24 CHECK C): capture the caller id — the accept-issued in-app
+        // handover code is echoed on this GET ONLY when the caller owns the delivery
+        // (owner-scoped store-miss fallback; see ReadOwnerHandoverCodeAsync).
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
 
         // Get delivery and validate status
         var delivery = await _store.GetAsync(deliveryId, ct);
@@ -1089,7 +1114,7 @@ public class DeliveriesController : ControllerBase
         // intact as the documented rollback lever.
         if (_flags.CurrentValue.Delivery)
         {
-            return await TriggerOtpViaDeliveryServiceAsync(deliveryId, delivery, correlationId, activity, ct);
+            return await TriggerOtpViaDeliveryServiceAsync(deliveryId, delivery, callerId, correlationId, activity, ct);
         }
 
         // PR review B1 (JEB-628): AC1 requires status `at_door` (the
@@ -1150,7 +1175,9 @@ public class DeliveriesController : ControllerBase
             {
                 DeliveryId = deliveryId,
                 Triggered  = true,
-                Message    = "4-digit OTP sent to the delivery recipient."
+                Message    = "4-digit OTP sent to the delivery recipient.",
+                // Gap G4 store-miss fallback: echo the accept-issued code to the OWNER only.
+                Code       = await ReadOwnerHandoverCodeAsync(callerId, delivery, ct)
             });
         }
         catch (ApiException apiEx)
@@ -1307,42 +1334,59 @@ public class DeliveriesController : ControllerBase
 
         bool verified;
         int upstreamStatus = 0;
-        try
+
+        // Gap G4 (run-24 CHECK C) verify-precedence: when the customer read the code
+        // IN-APP (minted at offer-accept), the gateway holds it — match it FIRST
+        // (constant-time). A hit is a valid handover code, short-circuiting the
+        // one-time-password round-trip; a miss (or no stored code) falls through to
+        // the existing SMS-code validation, so the SMS-minted code keeps working
+        // unchanged. The downstream transition/settlement below is untouched; a wrong
+        // code still 400s. The submitted code is never logged.
+        if (await _handoverCodes.TryMatchAsync(deliveryId, body.Code!, ct))
         {
-            await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
-            {
-                PhoneNumber   = delivery.RecipientPhone,
-                Otp           = body.Code,
-                ApplicationId = applicationId
-            }, ct);
             verified = true;
+            activity?.SetTag("otp.match_source", "gateway_minted");
         }
-        catch (ApiException apiEx)
+        else
         {
-            // PR review B5: NEVER log apiEx / apiEx.Message — the NSwag
-            // ApiException embeds the upstream response body in Message,
-            // which may echo the submitted code or other OTP-adjacent data.
-            // Log only the upstream HTTP status.
-            verified       = false;
-            upstreamStatus = apiEx.StatusCode;
-        }
-        catch (OperationCanceledException)
-        {
-            // Request was cancelled (caller disconnect / shutdown). Surface
-            // 499-equivalent via the framework default by rethrowing.
-            throw;
-        }
-        catch (Exception ex)
-        {
-            // Network / timeout failure before reaching upstream — safe to
-            // log the exception type but NOT the message (defense in depth).
-            _log.LogWarning(
-                "Handover OTP verify pre-upstream failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
-                deliveryId, ex.GetType().Name, correlationId);
-            return Problem(
-                title:      "OTP verification failed",
-                detail:     "Unable to reach the one-time-password service.",
-                statusCode: StatusCodes.Status502BadGateway);
+            activity?.SetTag("otp.match_source", "one_time_password");
+            try
+            {
+                await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
+                {
+                    PhoneNumber   = delivery.RecipientPhone,
+                    Otp           = body.Code,
+                    ApplicationId = applicationId
+                }, ct);
+                verified = true;
+            }
+            catch (ApiException apiEx)
+            {
+                // PR review B5: NEVER log apiEx / apiEx.Message — the NSwag
+                // ApiException embeds the upstream response body in Message,
+                // which may echo the submitted code or other OTP-adjacent data.
+                // Log only the upstream HTTP status.
+                verified       = false;
+                upstreamStatus = apiEx.StatusCode;
+            }
+            catch (OperationCanceledException)
+            {
+                // Request was cancelled (caller disconnect / shutdown). Surface
+                // 499-equivalent via the framework default by rethrowing.
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Network / timeout failure before reaching upstream — safe to
+                // log the exception type but NOT the message (defense in depth).
+                _log.LogWarning(
+                    "Handover OTP verify pre-upstream failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
+                    deliveryId, ex.GetType().Name, correlationId);
+                return Problem(
+                    title:      "OTP verification failed",
+                    detail:     "Unable to reach the one-time-password service.",
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
         }
 
         if (verified)
@@ -1507,6 +1551,7 @@ public class DeliveriesController : ControllerBase
     private async Task<IActionResult> TriggerOtpViaDeliveryServiceAsync(
         string deliveryId,
         DeliveryRequest delivery,
+        string callerId,
         string correlationId,
         Activity? activity,
         CancellationToken ct)
@@ -1588,7 +1633,9 @@ public class DeliveriesController : ControllerBase
         {
             DeliveryId = deliveryId,
             Triggered  = true,
-            Message    = "4-digit OTP sent to the delivery recipient."
+            Message    = "4-digit OTP sent to the delivery recipient.",
+            // Gap G4 store-miss fallback: echo the accept-issued code to the OWNER only.
+            Code       = await ReadOwnerHandoverCodeAsync(callerId, delivery, ct)
         });
     }
 
@@ -1631,35 +1678,51 @@ public class DeliveriesController : ControllerBase
         //    code; the NSwag client throws ApiException for a wrong/expired
         //    code. We collapse that to a success boolean — the raw code is
         //    discarded here and NEVER forwarded to delivery-service (AC5).
+        // Gap G4 (run-24 CHECK C) verify-precedence: when the customer read the code
+        // IN-APP (minted at offer-accept), the gateway holds it — match it FIRST
+        // (constant-time) and, on a hit, treat as a valid code INSTEAD OF the
+        // one-time-password round-trip. On no-stored-code-or-mismatch, fall through to
+        // the existing SMS-code validation so the SMS-minted code keeps working. Either
+        // way only the success boolean reaches delivery-service (AC5); the raw code
+        // never leaves the gateway and is never logged.
         bool success;
-        try
+        if (await _handoverCodes.TryMatchAsync(deliveryId, code, ct))
         {
-            await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
-            {
-                PhoneNumber   = delivery.RecipientPhone,
-                Otp           = code,
-                ApplicationId = applicationId
-            }, ct);
             success = true;
+            activity?.SetTag("otp.match_source", "gateway_minted");
         }
-        catch (ApiException)
+        else
         {
-            // Wrong/expired code. Do NOT log apiEx/Message (B5/AC5).
-            success = false;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(
-                "Handover OTP verify (upstream path) pre-validate failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
-                deliveryId, ex.GetType().Name, correlationId);
-            return Problem(
-                title:      "OTP verification failed",
-                detail:     "Unable to reach the one-time-password service.",
-                statusCode: StatusCodes.Status502BadGateway);
+            activity?.SetTag("otp.match_source", "one_time_password");
+            try
+            {
+                await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
+                {
+                    PhoneNumber   = delivery.RecipientPhone,
+                    Otp           = code,
+                    ApplicationId = applicationId
+                }, ct);
+                success = true;
+            }
+            catch (ApiException)
+            {
+                // Wrong/expired code. Do NOT log apiEx/Message (B5/AC5).
+                success = false;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(
+                    "Handover OTP verify (upstream path) pre-validate failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
+                    deliveryId, ex.GetType().Name, correlationId);
+                return Problem(
+                    title:      "OTP verification failed",
+                    detail:     "Unable to reach the one-time-password service.",
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
         }
 
         activity?.SetTag("otp.path", "upstream");
