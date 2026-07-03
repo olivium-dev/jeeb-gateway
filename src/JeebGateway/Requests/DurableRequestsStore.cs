@@ -234,6 +234,9 @@ public sealed class DurableRequestsStore : IRequestsStore
     public Task<bool> SetJeeberIdAsync(string requestId, string jeeberId, CancellationToken ct)
         => _inner.SetJeeberIdAsync(requestId, jeeberId, ct);
 
+    public Task<bool> TrySetAcceptedFeeAsync(string requestId, decimal fee, CancellationToken ct)
+        => _inner.TrySetAcceptedFeeAsync(requestId, fee, ct);
+
     public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
         => _inner.GetByConversationIdAsync(conversationId, ct);
 
