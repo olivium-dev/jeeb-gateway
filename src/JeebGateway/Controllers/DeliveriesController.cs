@@ -614,8 +614,31 @@ public class DeliveriesController : ControllerBase
     ///
     /// Counterparty push fires on every committed cancel so the other
     /// party finds out without polling.
+    ///
+    /// <para><b>fix/offer-visibility P2 — V1 request-keyed aliases.</b> The mobile
+    /// client cancels a request PRE-ACCEPT keyed by <c>requestId</c>, but the V1
+    /// surface had no such route (only the frozen legacy <c>DELETE /requests/{id}</c>
+    /// and this <c>POST /deliveries/{id}/cancel</c> existed, forcing the client to
+    /// resolve a delivery id first). Because the gateway seeds the durable delivery
+    /// row with <c>deliveryId == requestId</c>, the request-keyed cancel IS this
+    /// action; we register <c>POST /v1/requests/{id}/cancel</c> and
+    /// <c>DELETE /v1/requests/{id}</c> as additional templates on the SAME action
+    /// (the established pattern of the <c>/v1/deliveries/*</c> read/OTP aliases in
+    /// this controller), so the V1 cancel serves byte-identically through the
+    /// canonical path: PR-G2 canonical phase-set membership, counterparty push, and
+    /// best-effort upstream propagation
+    /// (<see cref="TryPropagateCancellationUpstreamAsync"/>). Semantics follow the
+    /// existing cancel contract: pre-accept / pre-pickup OWNER cancel commits
+    /// immediately (200, frees the BR-9 slot), post-pickup parks on admin approval,
+    /// a non-party gets 403, an unknown id 404s, and a terminal row 409s
+    /// <c>not-cancellable</c>. The body stays OPTIONAL
+    /// (<c>EmptyBodyBehavior.Allow</c>) so a bare <c>DELETE /v1/requests/{id}</c>
+    /// with no JSON body binds <c>null</c> instead of 400-ing — reason remains
+    /// mandatory only for the driver path, enforced by the service.</para>
     /// </summary>
     [HttpPost("{deliveryId}/cancel")]
+    [HttpPost("/v1/requests/{deliveryId}/cancel")]
+    [HttpDelete("/v1/requests/{deliveryId}")]
     [ProducesResponseType(typeof(CancelDeliveryResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -624,7 +647,7 @@ public class DeliveriesController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Cancel(
         string deliveryId,
-        [FromBody] CancelDeliveryBody? body,
+        [FromBody(EmptyBodyBehavior = Microsoft.AspNetCore.Mvc.ModelBinding.EmptyBodyBehavior.Allow)] CancelDeliveryBody? body,
         CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;

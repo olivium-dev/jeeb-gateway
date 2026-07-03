@@ -361,6 +361,7 @@ public sealed class JeebRequestsController : ControllerBase
     public async Task<IActionResult> ListOffersFlat(
         [FromQuery] string? requestId,
         [FromQuery] string? jeeberId,
+        [FromQuery] string? status,
         CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var problem))
@@ -381,24 +382,7 @@ public sealed class JeebRequestsController : ControllerBase
                 });
             }
 
-            // offer-service authorizes on x-user-id == path :jeeber_id; the client sends the
-            // caller's own id in both. A non-2xx / transport blip degrades to an EMPTY list
-            // (never a 5xx) — the contract of ListOffersForJeeberAsync.
-            var myOffers = await _offerService.ListOffersForJeeberAsync(jeeberId, status: null, ct);
-            var myDtos = myOffers.Select(o => new OfferDto
-            {
-                Id = o.OfferId,
-                RequestId = o.RequestId,
-                JeeberId = jeeberId,
-                Status = o.Status,
-                Fee = o.FeeCents / 100m,
-                EtaMinutes = o.EtaMinutes,
-                Note = o.Note,
-                CreatedAt = o.CreatedAt ?? default,
-                UpdatedAt = null,
-            }).ToList();
-
-            return Ok(new { items = myDtos });
+            return Ok(new { items = await ComposeMyOffersAsync(jeeberId, status, ct) });
         }
 
         if (string.IsNullOrWhiteSpace(requestId))
@@ -442,6 +426,125 @@ public sealed class JeebRequestsController : ControllerBase
         }).ToList();
 
         return Ok(new { items = dtos });
+    }
+
+    /// <summary>
+    /// fix/offer-visibility (run-23 CHECK C) — <c>GET /v1/jeebers/me/offers</c>: the
+    /// jeeber "my-offers" surface keyed purely off the bearer identity (the route the
+    /// mobile client called first in run-23 and 404'd on). Same composition, envelope
+    /// (<c>{ items: [...] }</c>) and optional <c>?status=</c> filter as the flat
+    /// <c>GET /v1/offers?jeeberId=&lt;me&gt;</c> sibling; self-scoped by construction
+    /// (no id parameter to mismatch).
+    /// </summary>
+    [HttpGet("v1/jeebers/me/offers")]
+    [RequireCapability(Capabilities.OfferReadOwn)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> ListMyOffers([FromQuery] string? status, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var problem))
+            return problem;
+
+        return Ok(new { items = await ComposeMyOffersAsync(callerId, status, ct) });
+    }
+
+    /// <summary>
+    /// fix/offer-visibility (run-23 CHECK C) — the jeeber "my-offers" composition shared by
+    /// <c>GET /v1/offers?jeeberId=&lt;me&gt;</c> and <c>GET /v1/jeebers/me/offers</c>.
+    ///
+    /// <para><b>The defect.</b> The branch previously delegated ONLY to
+    /// <see cref="IOfferServiceClient.ListOffersForJeeberAsync"/> (offer-service
+    /// <c>GET /api/v1/jeebers/{id}/offers</c>) — a route the deployed offer-service does
+    /// not expose, so the read 404'd upstream and degrade-don't-fail collapsed the
+    /// jeeber's own list to <c>[]</c>: after the customer accepted a competing bid, the
+    /// losing jeeber's offer VANISHED instead of showing its terminal state.</para>
+    ///
+    /// <para><b>The fix.</b> Merge two sources, deduped by offer id:
+    /// (1) the direct jeeber-scoped upstream read (kept first-class so the surface starts
+    /// winning automatically if offer-service ever grows that route; raw upstream statuses
+    /// pass through unchanged), and (2) <see cref="IPendingOffersStore.ListForJeeberAsync"/> —
+    /// on the in-memory store a full any-status scan, on the upstream store the
+    /// routing-index + owner-scoped request-list composition with the HONEST terminal
+    /// status mapping (lost/expired → <c>superseded</c>, self-retracted →
+    /// <c>withdrawn</c>). DEFAULT INCLUDES TERMINAL offers; <paramref name="statusFilter"/>
+    /// narrows the merged list (<c>pending</c> also matches the upstream live vocabulary
+    /// <c>submitted</c>/<c>edited</c>). Newest-first. Customer-facing offers surfaces are
+    /// untouched.</para>
+    /// </summary>
+    private async Task<List<OfferDto>> ComposeMyOffersAsync(
+        string jeeberId, string? statusFilter, CancellationToken ct)
+    {
+        // (1) Direct jeeber-scoped upstream read. offer-service authorizes on
+        // x-user-id == path :jeeber_id; a non-2xx / transport blip degrades to an
+        // EMPTY list (never a 5xx) — the contract of ListOffersForJeeberAsync.
+        var upstream = await _offerService.ListOffersForJeeberAsync(jeeberId, status: null, ct);
+
+        var merged = new List<OfferDto>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var o in upstream)
+        {
+            if (!seen.Add(o.OfferId)) continue;
+            merged.Add(new OfferDto
+            {
+                Id = o.OfferId,
+                RequestId = o.RequestId,
+                JeeberId = jeeberId,
+                Status = o.Status,
+                Fee = o.FeeCents / 100m,
+                EtaMinutes = o.EtaMinutes,
+                Note = o.Note,
+                CreatedAt = o.CreatedAt ?? default,
+                UpdatedAt = null,
+            });
+        }
+
+        // (2) The store-backed composition (terminal rows included). Store items never
+        // shadow a direct upstream row with the same id — upstream is authoritative
+        // where it answers.
+        var stored = await _offers.ListForJeeberAsync(jeeberId, ct);
+        foreach (var o in stored)
+        {
+            if (!seen.Add(o.Id)) continue;
+            merged.Add(new OfferDto
+            {
+                Id = o.Id,
+                RequestId = o.RequestId,
+                JeeberId = o.JeeberId,
+                Status = o.Status,
+                Fee = o.Fee,
+                EtaMinutes = o.EtaMinutes,
+                Note = o.Note,
+                CreatedAt = o.CreatedAt,
+                UpdatedAt = o.UpdatedAt,
+            });
+        }
+
+        IEnumerable<OfferDto> result = merged.OrderByDescending(o => o.CreatedAt);
+
+        if (!string.IsNullOrWhiteSpace(statusFilter))
+        {
+            var wanted = statusFilter.Trim();
+            result = result.Where(o => MatchesStatusFilter(o.Status, wanted));
+        }
+
+        return result.ToList();
+    }
+
+    /// <summary>
+    /// <c>?status=</c> filter matcher for the my-offers surfaces. Case-insensitive exact
+    /// match, with one vocabulary bridge: <c>pending</c> (the gateway's live state) also
+    /// matches the upstream live forms <c>submitted</c> / <c>edited</c>, so a mobile
+    /// "awaiting decision" query works identically against both sources.
+    /// </summary>
+    private static bool MatchesStatusFilter(string offerStatus, string wanted)
+    {
+        if (string.Equals(offerStatus, wanted, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return string.Equals(wanted, "pending", StringComparison.OrdinalIgnoreCase)
+               && (string.Equals(offerStatus, "submitted", StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(offerStatus, "edited", StringComparison.OrdinalIgnoreCase));
     }
 
     private static DeliveryRequestDto ToRequestDto(DeliveryRequest r) => new()
