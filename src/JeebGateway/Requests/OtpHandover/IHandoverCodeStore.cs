@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Logging;
+using StackExchange.Redis;
 
 namespace JeebGateway.Requests.OtpHandover;
 
@@ -76,8 +78,18 @@ public sealed class DistributedCacheHandoverCodeStore : IHandoverCodeStore
     private static string CacheKey(string deliveryId) => $"otp:handovercode:{deliveryId}";
 
     private readonly IDistributedCache _cache;
+    private readonly ILogger<DistributedCacheHandoverCodeStore>? _log;
 
-    public DistributedCacheHandoverCodeStore(IDistributedCache cache) => _cache = cache;
+    public DistributedCacheHandoverCodeStore(IDistributedCache cache)
+        : this(cache, null)
+    {
+    }
+
+    public DistributedCacheHandoverCodeStore(IDistributedCache cache, ILogger<DistributedCacheHandoverCodeStore>? log)
+    {
+        _cache = cache;
+        _log = log;
+    }
 
     public async Task<string> IssueAsync(string deliveryId, CancellationToken ct)
     {
@@ -108,7 +120,32 @@ public sealed class DistributedCacheHandoverCodeStore : IHandoverCodeStore
 
     public async Task<bool> TryMatchAsync(string deliveryId, string submittedCode, CancellationToken ct)
     {
-        var stored = await _cache.GetAsync(CacheKey(deliveryId), ct);
+        byte[]? stored;
+        try
+        {
+            stored = await _cache.GetAsync(CacheKey(deliveryId), ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (IsCacheInfrastructureFault(ex))
+        {
+            // JEBV4-38 (PP-3) — degrade-don't-fail, mirroring
+            // RedisOtpRequestRateLimiter's fail-open precedent. A Redis blip on
+            // this read must never 500 the money-adjacent handover-verify path
+            // (it fires COD settlement). Treat the fault as a MISS — the caller
+            // (DeliveriesController.VerifyHandoverOtp) falls through to the
+            // existing SMS one-time-password validation on any miss, so this is
+            // NOT a bypass: a wrong code is still independently rejected by that
+            // SMS check. Only the in-app-minted-code short-circuit is
+            // unavailable while Redis is down.
+            _log?.LogWarning(ex,
+                "handover_code.cache_fault deliveryId={DeliveryId} op=try_match; failing open to SMS verify",
+                deliveryId);
+            return false;
+        }
+
         if (stored is null || stored.Length == 0)
         {
             return false;
@@ -119,4 +156,20 @@ public sealed class DistributedCacheHandoverCodeStore : IHandoverCodeStore
         // returns false (no throw, no data-dependent early-out) on a length mismatch.
         return CryptographicOperations.FixedTimeEquals(stored, submitted);
     }
+
+    /// <summary>
+    /// JEBV4-38 (PP-3) — recognises a cache-INFRASTRUCTURE fault (Redis
+    /// unreachable/timeout) so it can be told apart from a genuine
+    /// application error. <see cref="RedisException"/> covers
+    /// <c>RedisConnectionException</c> / <c>RedisTimeoutException</c> /
+    /// <c>RedisServerException</c> — exactly what
+    /// <c>RedisOtpRequestRateLimiter.TryAcquire</c> catches for its own
+    /// fail-open precedent. <see cref="TimeoutException"/> is included
+    /// defensively for the (rare) case a client-side timeout surfaces as the
+    /// BCL type rather than StackExchange.Redis's own subtype. The in-memory
+    /// <see cref="IDistributedCache"/> used in dev/tests never throws either,
+    /// so this catch is a safe no-op outside of a real Redis deployment.
+    /// </summary>
+    private static bool IsCacheInfrastructureFault(Exception ex) =>
+        ex is RedisException or TimeoutException;
 }
