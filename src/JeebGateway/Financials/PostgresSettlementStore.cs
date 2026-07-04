@@ -145,7 +145,9 @@ public sealed class PostgresSettlementStore : ISettlementStore
                    payment_method = @PaymentMethod,
                    state         = @State,
                    cod_state     = @CodState,
-                   settled_at    = @SettledAt
+                   settled_at    = @SettledAt,
+                   batch_id      = NULL,
+                   batched_at    = NULL
              WHERE delivery_id = @DeliveryId
                AND state = 'pending_settlement'
             """;
@@ -204,9 +206,19 @@ public sealed class PostgresSettlementStore : ISettlementStore
         DateTimeOffset windowStart, DateTimeOffset windowEnd, int limit, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // M1 (P0 money-loss): only TRULY-settled rows may enter the weekly payout batch.
+        // The handover placeholder is written with state='pending_settlement', cod_state='recorded'
+        // and goods_cost=0 (→ min-fee 1000 LBP commission). Without the state guard it was swept
+        // into the payout batch as a phantom -1000 LBP net, underpaying the Jeeber and booking
+        // commission never collected. Excluding 'pending_settlement' (rather than pinning to
+        // 'settled') keeps rows that legitimately advanced to 'receipt_generated' — via a receipt
+        // read (SettlementsController) — before the weekly run in the batch, so a settled-then-
+        // viewed delivery is still paid out. This guard also closes M2: an unbatched placeholder
+        // can never be re-swept after ReplacePendingAsync.
         const string sql = """
             SELECT * FROM settlements
             WHERE cod_state = 'recorded'
+              AND state <> 'pending_settlement'
               AND settled_at >= @WindowStart
               AND settled_at < @WindowEnd
             ORDER BY settled_at ASC

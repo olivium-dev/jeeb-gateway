@@ -121,8 +121,11 @@ public sealed class InMemorySettlementStore : ISettlementStore
     public Task<IReadOnlyList<Settlement>> ListRecordedInWindowAsync(
         DateTimeOffset windowStart, DateTimeOffset windowEnd, int limit, CancellationToken ct)
     {
+        // M1 (P0): exclude unsettled handover placeholders (state='pending_settlement') from the
+        // weekly payout batch — mirrors PostgresSettlementStore.ListRecordedInWindowAsync.
         var rows = _byId.Values
             .Where(s => s.CodState == CodSettlementState.Recorded
+                     && s.State != SettlementState.PendingSettlement
                      && s.SettledAt >= windowStart
                      && s.SettledAt < windowEnd)
             .Take(limit)
