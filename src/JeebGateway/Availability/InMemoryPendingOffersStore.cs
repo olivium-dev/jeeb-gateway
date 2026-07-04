@@ -342,4 +342,38 @@ public class InMemoryPendingOffersStore : IPendingOffersStore
             .ToArray();
         return Task.FromResult<IReadOnlyList<PendingOffer>>(snapshot);
     }
+
+    public Task<IReadOnlyList<PendingOffer>> ListForJeeberAsync(
+        string jeeberId, CancellationToken ct)
+    {
+        // fix/offer-visibility (run-23 CHECK C): ANY status — a jeeber's own list must
+        // keep showing their terminal (accepted / superseded / withdrawn) offers, not
+        // just the live ones. Newest-first to match ListForRequestAsync.
+        var snapshot = _offers.Values
+            .Where(o => string.Equals(o.JeeberId, jeeberId, StringComparison.Ordinal))
+            .OrderByDescending(o => o.CreatedAt)
+            .ToArray();
+        return Task.FromResult<IReadOnlyList<PendingOffer>>(snapshot);
+    }
+
+    public Task<int> ExpireForRequestAsync(string requestId, DateTimeOffset at, CancellationToken ct)
+    {
+        // Request expired with no winner: every still-pending bid on it is now stale.
+        // Supersede them under the write lock so the transition is atomic w.r.t. a
+        // concurrent submit/accept on the same request. Accepted / withdrawn / already
+        // superseded offers are left untouched (terminal).
+        lock (_writeLock)
+        {
+            var closed = 0;
+            foreach (var offer in _offers.Values)
+            {
+                if (!string.Equals(offer.RequestId, requestId, StringComparison.Ordinal)) continue;
+                if (offer.Status != PendingOfferStatus.Pending) continue;
+                offer.Status = PendingOfferStatus.Superseded;
+                offer.UpdatedAt = at;
+                closed++;
+            }
+            return Task.FromResult(closed);
+        }
+    }
 }

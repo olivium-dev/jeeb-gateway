@@ -56,7 +56,11 @@ public class WeeklyBatchTests
             MinimumFeeApplied = false,
             Currency          = "LBP",
             PaymentMethod     = "cod",
-            State             = "pending_settlement",
+            // A batchable COD row is a TRULY-settled settlement: SettlementService writes
+            // State=Settled once the Jeeber records the cash (SettlementService.cs). The prior
+            // "pending_settlement" seed mislabeled a real-money row as the handover placeholder
+            // that the M1 guard now (correctly) excludes from the payout batch.
+            State             = SettlementState.Settled,
             CodState          = CodSettlementState.Recorded,
             SettledAt         = at,
         };

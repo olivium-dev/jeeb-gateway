@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Conversations.Client;
 using JeebGateway.Conversations.Realtime;
+using JeebGateway.Notifications;
 using JeebGateway.Services;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Authorization;
@@ -51,17 +52,20 @@ public sealed class JeebConversationsController : ControllerBase
 {
     private readonly IJeebConversationClient _client;
     private readonly IRealtimeTicketIssuer _ticketIssuer;
+    private readonly IChatMessagePushNotifier _chatPush;
     private readonly UpstreamFeatureFlags _flags;
     private readonly ILogger<JeebConversationsController> _logger;
 
     public JeebConversationsController(
         IJeebConversationClient client,
         IRealtimeTicketIssuer ticketIssuer,
+        IChatMessagePushNotifier chatPush,
         IOptions<UpstreamFeatureFlags> flags,
         ILogger<JeebConversationsController> logger)
     {
         _client = client;
         _ticketIssuer = ticketIssuer;
+        _chatPush = chatPush;
         _flags = flags.Value;
         _logger = logger;
     }
@@ -181,6 +185,57 @@ public sealed class JeebConversationsController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// PR-G3 alias: <c>GET /v1/chat/jeeb/conversations/by-request/{requestId}</c> — the
+    /// path the mobile client actually calls to resolve a request's conversation, which
+    /// previously 404'd (no route registered). It is a pure alias of the correlation-key
+    /// read (<see cref="GetConversationByCorrelation"/>): the conversation's correlation
+    /// key IS the request id, so this delegates to the SAME
+    /// <see cref="IJeebConversationClient.GetConversationByCorrelationAsync"/> and returns
+    /// the identical body. No new chat state — chat-service remains the authority; the
+    /// gateway forwards the upstream status verbatim (RFC 7807 on error, incl. 404 for an
+    /// unknown request).
+    /// </summary>
+    [HttpGet("v1/chat/jeeb/conversations/by-request/{requestId}")]
+    [Authorize]
+    [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; scoping = STATE (chat-service)
+    [ProducesResponseType(typeof(JeebConversationResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> GetConversationByRequest(
+        string requestId,
+        CancellationToken ct)
+    {
+        if (!TryGetUserId(out _, out var unauthorized))
+        {
+            return unauthorized;
+        }
+
+        if (!_flags.Chat)
+        {
+            return UpstreamUnavailable();
+        }
+
+        if (string.IsNullOrWhiteSpace(requestId))
+        {
+            return Problem(
+                title: "requestId is required.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        try
+        {
+            var result = await _client.GetConversationByCorrelationAsync(requestId, ct);
+            return Ok(result);
+        }
+        catch (JeebConversationApiException ex)
+        {
+            return ForwardUpstream(ex, "read conversation by request");
+        }
+    }
+
     // ---------------------------------------------------------------------
     // H3 / H4 / H8 — append a structured/text message.
     // ---------------------------------------------------------------------
@@ -245,6 +300,11 @@ public sealed class JeebConversationsController : ControllerBase
                 AuthorId = authorId,
                 IdempotencyKey = idempotencyKey,
             }, ct);
+
+            // BUILD-CHAT-PUSH — the only missing link for real A→B chat push: notify the
+            // conversation's other party. Best-effort/degrade-don't-fail — the notifier
+            // never throws and is bounded by a short timeout, so it never affects this 201.
+            await _chatPush.NotifyNewMessageAsync(conversationId, authorId, body.Body, ct);
 
             return StatusCode(StatusCodes.Status201Created, result);
         }

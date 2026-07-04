@@ -48,6 +48,12 @@ public static class Capabilities
 
     // ── D. Jeeber-only {jeeber} ───────────────────────────────────────────────────────
     public const string AvailabilityToggle = "availability.toggle";
+    // GAP-2 (sprint-002, contract-freeze §3): the jeeber's request-discovery feed
+    // (GET /v1/jeebers/me/feed). Jeeber-only — a client never reads the jeeber feed.
+    // Own-scoped: the feed surfaces pending requests an ONLINE jeeber can act on
+    // (online + status=pending + clientId != jeeberId); the row visibility is the
+    // §1 projection predicate, not an L2 STATE rule.
+    public const string JeeberFeedRead = "jeeber.feed.read";
     // Submitting an offer (bid) on a client's request is a JEEBER action; accepting is not
     // (see offer.accept in the client-only group below).
     public const string OfferSubmit = "offer.submit";
@@ -65,6 +71,12 @@ public static class Capabilities
     public const string OfferReject = "offer.reject";                // CLAIM {client}; authz/status = STATE
     public const string OfferEditOwn = "offer.edit.own";              // STATE
     public const string OfferWithdraw = "offer.withdraw";            // STATE
+    // sprint-009 Lane E: reading one's OWN offers is a coarse CLAIM held by BOTH parties —
+    // a CLIENT reads the offers on a request they own (GET /v1/offers?requestId), a JEEBER
+    // reads the offers THEY submitted (GET /v1/offers?jeeberId=me). WHICH rows each may see
+    // is STATE (request-ownership vs self-scope), enforced in the action body, mirroring the
+    // dispute.read.mine / support.read.own CLAIM+STATE split.
+    public const string OfferReadOwn = "offer.read.own";              // {client, jeeber}; own-vs-self = STATE
     public const string DeliveryGpsStream = "delivery.gps.stream";
     public const string EarningsReadOwn = "earnings.read.own";        // STATE: ownership
     public const string EarningsPdfOwn = "earnings.pdf.own";          // STATE: ownership

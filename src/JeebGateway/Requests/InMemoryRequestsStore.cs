@@ -119,6 +119,67 @@ public class InMemoryRequestsStore : IRequestsStore
         }
     }
 
+    public Task<bool> SetJeeberIdAsync(string requestId, string jeeberId, CancellationToken ct)
+    {
+        // Never clear an assignee: a missing upstream actor id must not blank an
+        // already-resolved jeeber. Blank in → no-op false.
+        if (string.IsNullOrWhiteSpace(jeeberId))
+        {
+            return Task.FromResult(false);
+        }
+
+        lock (_writeLock)
+        {
+            if (!_requests.TryGetValue(requestId, out var existing))
+            {
+                return Task.FromResult(false);
+            }
+
+            existing.JeeberId = jeeberId;
+            return Task.FromResult(true);
+        }
+    }
+
+    /// <summary>
+    /// fix/client-visibility (run-22 P1): accepted-fee snapshot write. Mirrors the
+    /// <see cref="SetJeeberIdAsync"/> guards — unknown row or a non-positive fee is
+    /// a no-op false, so a failed upstream fee resolution can never blank or
+    /// corrupt an already-stamped snapshot.
+    /// </summary>
+    public Task<bool> TrySetAcceptedFeeAsync(string requestId, decimal fee, CancellationToken ct)
+    {
+        if (fee <= 0m)
+        {
+            return Task.FromResult(false);
+        }
+
+        lock (_writeLock)
+        {
+            if (!_requests.TryGetValue(requestId, out var existing))
+            {
+                return Task.FromResult(false);
+            }
+
+            existing.AcceptedFee = fee;
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(conversationId))
+        {
+            return Task.FromResult<DeliveryRequest?>(null);
+        }
+
+        lock (_writeLock)
+        {
+            DeliveryRequest? match = _requests.Values
+                .FirstOrDefault(r => string.Equals(r.ConversationId, conversationId, StringComparison.Ordinal));
+            return Task.FromResult(match);
+        }
+    }
+
     public Task<IReadOnlyList<DeliveryRequest>> ListPendingCreatedAtOrBeforeAsync(
         DateTimeOffset cutoff,
         CancellationToken ct)
@@ -561,6 +622,24 @@ public class InMemoryRequestsStore : IRequestsStore
     /// </summary>
     public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct)
         => Task.FromResult(ListForClient(clientId));
+
+    /// <summary>
+    /// Jeeber-scoped list backing <c>GET /v1/deliveries</c> and the
+    /// <c>role=jeeber</c> branch of <c>GET /v1/requests</c>: every row where the
+    /// caller is the assigned jeeber. Mirrors <see cref="ListForClientAsync"/>'s
+    /// write-lock snapshot semantics; read-only, adds no new datastore.
+    /// </summary>
+    public Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            IReadOnlyList<DeliveryRequest> rows = _requests.Values
+                .Where(r => string.Equals(r.JeeberId, jeeberId, StringComparison.Ordinal))
+                .OrderByDescending(r => r.CreatedAt)
+                .ToArray();
+            return Task.FromResult(rows);
+        }
+    }
 
     public Task<int> AnonymizeForClientAsync(string userId, string anonymizedHash, CancellationToken ct)
     {

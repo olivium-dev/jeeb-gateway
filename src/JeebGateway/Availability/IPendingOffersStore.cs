@@ -141,6 +141,51 @@ public interface IPendingOffersStore
     /// </summary>
     Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(
         string requestId, CancellationToken ct);
+
+    /// <summary>
+    /// fix/offer-visibility (run-23 CHECK C) — every offer <paramref name="jeeberId"/>
+    /// has submitted, in ANY status (pending / accepted / superseded / withdrawn),
+    /// newest-first. This is the jeeber "my-offers" read: after the customer accepts a
+    /// competing bid, the losing jeeber's own offer MUST stay visible in its terminal
+    /// state — a list that silently drops terminal rows makes the jeeber's bid vanish
+    /// (the run-23 defect this fixes).
+    ///
+    /// <para>NON-BREAKING EXTENSION (same pattern as <see cref="ExpireForRequestAsync"/>):
+    /// a default interface method so existing implementers / fakes compile unchanged —
+    /// they inherit the safe empty list. The in-memory store overrides it with a full
+    /// any-status scan; the upstream (offer-service) store overrides it with the
+    /// routing-index + owner-scoped request-list composition (offer-service exposes no
+    /// jeeber-scoped list route).</para>
+    ///
+    /// <para>DEGRADE-DON'T-FAIL: an upstream blip yields the offers that could be
+    /// resolved (possibly none), never a 5xx.</para>
+    /// </summary>
+    Task<IReadOnlyList<PendingOffer>> ListForJeeberAsync(
+        string jeeberId, CancellationToken ct)
+        => Task.FromResult<IReadOnlyList<PendingOffer>>(Array.Empty<PendingOffer>());
+
+    /// <summary>
+    /// T-backend-028 follow-up — close every still-live (<see cref="PendingOfferStatus.Pending"/>)
+    /// offer on <paramref name="requestId"/> when the request itself reaches a terminal
+    /// state (expiry). Once the request can no longer be accepted, its outstanding bids
+    /// are stale: leaving them <c>pending</c> lets a jeeber keep believing their bid is
+    /// live and lets a late accept race a dead request. Each such offer is transitioned to
+    /// <see cref="PendingOfferStatus.Superseded"/> ("not selected" — the request closed
+    /// around no winner), which the mobile app already renders; no new offer status is
+    /// introduced. Returns the number of offers transitioned.
+    ///
+    /// <para>NON-BREAKING EXTENSION (mirrors <see cref="ListOffersForJeeberAsync"/> on the
+    /// offer-service client): a default interface method so existing implementers / fakes
+    /// compile unchanged — they inherit the safe 0 no-op. The in-memory store overrides it;
+    /// the upstream (offer-service) store inherits the no-op because offer-service owns its
+    /// own request lifecycle and expires its offers server-side when its mirrored request
+    /// row expires — the gateway must not double-drive that transition over the wire.</para>
+    ///
+    /// <para>DEGRADE-DON'T-FAIL: callers invoke this best-effort AFTER the request is
+    /// already durably expired; a failure here must never undo the expiry.</para>
+    /// </summary>
+    Task<int> ExpireForRequestAsync(string requestId, DateTimeOffset at, CancellationToken ct)
+        => Task.FromResult(0);
 }
 
 /// <summary>
@@ -282,5 +327,28 @@ public class DuplicateOfferException : Exception
         RequestId = requestId;
         JeeberId = jeeberId;
         ExistingOfferId = existingOfferId;
+    }
+}
+
+/// <summary>
+/// sprint-009 Lane E — the request is not open for new offers (offer-service
+/// <c>request_not_open</c>: the auction is already accepted, expired, or cancelled).
+/// This is DISTINCT from the 20-offer cap (<see cref="TooManyOffersForRequestException"/>):
+/// both surface as HTTP 409 upstream, but rendering the cap message for a closed auction
+/// is misleading. The controller maps this to its own <c>request-not-open-for-offers</c>
+/// ProblemDetails so the jeeber sees "the auction is closed", not "20-offer cap reached".
+/// </summary>
+public class RequestNotOpenForOffersException : Exception
+{
+    public string RequestId { get; }
+
+    /// <summary>The offer-service error <c>code</c> that drove the classification, when present.</summary>
+    public string? UpstreamCode { get; }
+
+    public RequestNotOpenForOffersException(string requestId, string? upstreamCode)
+        : base($"Request '{requestId}' is not open for new offers (upstream code '{upstreamCode ?? "request_not_open"}').")
+    {
+        RequestId = requestId;
+        UpstreamCode = upstreamCode;
     }
 }

@@ -1,4 +1,7 @@
+using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
+using JeebGateway.Users;
+using Microsoft.AspNetCore.Http;
 
 namespace JeebGateway.Availability;
 
@@ -54,10 +57,37 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
     private const long MinimumFeeCents = 100;
 
     private readonly IOfferServiceClient _client;
+    private readonly IHttpContextAccessor? _httpContext;
+    private readonly IOfferRequestIndex? _offerIndex;
+    private readonly IRequestsStore? _requests;
 
-    public UpstreamPendingOffersStore(IOfferServiceClient client)
+    /// <param name="httpContext">
+    /// Optional so the existing single-arg construction in the write/conflict unit tests compiles
+    /// unchanged (those paths never read the caller identity). The production DI factory in
+    /// <c>Program.cs</c> always injects the real accessor, which <see cref="ListForRequestAsync"/>
+    /// needs to forward the owner's <c>x-user-id</c> to offer-service.
+    /// </param>
+    /// <param name="offerIndex">
+    /// Optional (fix/offer-visibility): the submit-time offerId → (requestId, jeeberId) routing
+    /// index. Needed only by <see cref="ListForJeeberAsync"/> to recover the jeeber's own offers
+    /// (offer-service exposes no jeeber-scoped list route); when absent that read degrades to an
+    /// empty list, the pre-fix behaviour.
+    /// </param>
+    /// <param name="requests">
+    /// Optional (fix/offer-visibility): the gateway request read-model, used by
+    /// <see cref="ListForJeeberAsync"/> to resolve each bid's request OWNER (offer-service's
+    /// request-scoped list authorizes on <c>x-user-id == owner</c>).
+    /// </param>
+    public UpstreamPendingOffersStore(
+        IOfferServiceClient client,
+        IHttpContextAccessor? httpContext = null,
+        IOfferRequestIndex? offerIndex = null,
+        IRequestsStore? requests = null)
     {
         _client = client;
+        _httpContext = httpContext;
+        _offerIndex = offerIndex;
+        _requests = requests;
     }
 
     public async Task<PendingOffer> TrySubmitAsync(
@@ -111,17 +141,23 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
         }
         catch (OfferUpstreamConflictException ex)
         {
-            // offer-service uses one 409 surface for both "you already offered"
-            // and "request not open". Map the duplicate case onto the gateway's
-            // DuplicateOfferException (controller → 409 offer-already-exists);
-            // anything else (request_not_open) re-surfaces as the cap exception
-            // so the controller still returns a 409 ProblemDetails rather than a
-            // raw 500. The exact upstream code drives the choice.
+            // offer-service reuses one 409 surface for three distinct conflicts:
+            //   (1) "you already offered"  -> DuplicateOfferException (409 offer-already-exists)
+            //   (2) "request not open"     -> RequestNotOpenForOffersException (409 request-not-open-for-offers)
+            //   (3) 20-offer cap reached   -> TooManyOffersForRequestException (409 offers-per-request-exceeded)
+            // The exact upstream error code drives the choice. sprint-009 Lane E: (2) used
+            // to be swept into (3), rendering the misleading "20-offer cap" banner for an
+            // already-closed auction; it now maps to its own ProblemDetails.
             if (IsDuplicateCode(ex.UpstreamCode))
             {
                 // The upstream owns the existing offer id; we do not have it
                 // here, so report the request-scoped duplicate without it.
                 throw new DuplicateOfferException(requestId, jeeberId, existingOfferId: "(upstream)");
+            }
+
+            if (IsRequestNotOpenCode(ex.UpstreamCode))
+            {
+                throw new RequestNotOpenForOffersException(requestId, ex.UpstreamCode);
             }
 
             throw new TooManyOffersForRequestException(
@@ -192,10 +228,127 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
             "offer-service exposes no get-offer-by-id route; the offer-accept lookup path stays on the " +
             "in-memory store until offer-service grows GET /api/v1/offers/{id} (tracked fast-follow).");
 
-    public Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(string requestId, CancellationToken ct)
-        => throw new NotSupportedException(
-            "offer-service exposes no list-offers-for-request route; the listing path stays on the in-memory " +
-            "store until offer-service grows GET /api/v1/requests/{id}/offers (tracked fast-follow).");
+    /// <summary>
+    /// BUG-3 fix (customer offers-read 500). offer-service GREW
+    /// <c>GET /api/v1/requests/{id}/offers</c> after the original "tracked fast-follow" comment was
+    /// written, so the old unconditional <see cref="NotSupportedException"/> surfaced as a hard 500 on
+    /// the live upstream wire (<c>UseUpstream:Offer=true</c>) — the customer could never list/accept the
+    /// jeeber's offer (Core Flow step 4). We now proxy that owner-scoped route: offer-service authorizes
+    /// on <c>x-user-id == owner</c> (else 403), and the owner is the in-request authenticated caller
+    /// whose ownership the controller (<c>JeebRequestsController.ListOffers/ListOffersFlat</c> and
+    /// <c>JeebOrdersListController</c>) has ALREADY verified before reaching this store. Money (cents→
+    /// dollars) and the status vocabulary are mapped via <see cref="ToPendingOffer"/>; the
+    /// degrade-don't-fail (a blip → empty list, never a 500) lives in the client.
+    /// </summary>
+    public async Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(string requestId, CancellationToken ct)
+    {
+        var actingUserId = ResolveOwnerId();
+        if (string.IsNullOrWhiteSpace(actingUserId))
+        {
+            // No in-request identity to authorize the upstream read (not expected on the controller
+            // path, which is always authenticated). Return empty rather than 500 — the offers-read
+            // must never crash the customer's accept sheet.
+            return Array.Empty<PendingOffer>();
+        }
+
+        var wires = await _client.ListForRequestAsync(actingUserId!, requestId, ct);
+        return wires
+            .Where(w => !string.IsNullOrWhiteSpace(w.Id))
+            .Select(ToPendingOffer)
+            .ToList();
+    }
+
+    /// <summary>
+    /// The in-request authenticated caller's canonical id (JWT <c>sub</c>/<c>sid</c>, or the edge-
+    /// injected <c>X-User-Id</c>), resolved exactly as the controllers do via
+    /// <see cref="UserIdentity"/>. On every caller of <see cref="ListForRequestAsync"/> this is the
+    /// request owner (ownership is controller-verified first), which is the identity offer-service's
+    /// owner-scoped list route requires. <c>null</c> when there is no HTTP context / no identity.
+    /// </summary>
+    private string? ResolveOwnerId()
+    {
+        var ctx = _httpContext?.HttpContext;
+        if (ctx is null) return null;
+        return UserIdentity.TryGetUserId(ctx, out var userId, out _) ? userId : null;
+    }
+
+    /// <summary>
+    /// fix/offer-visibility (run-23 CHECK C) — the jeeber's own offers, INCLUDING terminal
+    /// ones, on the upstream wire.
+    ///
+    /// <para><b>Why composed, not proxied.</b> offer-service exposes NO jeeber-scoped list
+    /// route (its router carries only submit/edit/withdraw/accept/reject plus the
+    /// owner-scoped <c>GET /api/v1/requests/{id}/offers</c>), so the gateway's
+    /// <c>GET /api/v1/jeebers/{id}/offers</c> call 404s and degrade-don't-fail collapsed the
+    /// jeeber's list to <c>[]</c> the moment anything was asked of it — the run-23 defect.
+    /// The BFF instead recovers the jeeber's offer ids from the submit-time routing index,
+    /// groups them by request, and reads each request's offer list through the EXISTING
+    /// owner-scoped route, forwarding the request OWNER's id (resolved from the gateway's
+    /// own request read-model) as <c>x-user-id</c>. Authorization is enforced at the
+    /// gateway: the caller's self-scope is checked by the controller, and only rows whose
+    /// bidder is <paramref name="jeeberId"/> are returned — a jeeber can never see another
+    /// bidder's offers through this read.</para>
+    ///
+    /// <para><b>Honest terminal status.</b> The customer-facing <see cref="MapStatus"/>
+    /// folds every non-accept terminal state to <c>withdrawn</c>; the jeeber's OWN view
+    /// must not lie about why the bid ended, so <see cref="MapOwnStatus"/> keeps the
+    /// distinction: lost-the-auction / expired → <c>superseded</c> ("not selected", the
+    /// state mobile already renders), self-retracted → <c>withdrawn</c>.</para>
+    ///
+    /// <para>DEGRADE-DON'T-FAIL: a missing index/read-model or an upstream blip yields
+    /// whatever rows could be resolved (possibly none), never a 5xx. Within-instance
+    /// completeness matches the routing index's documented contract (a bounce re-learns
+    /// pairings as offers are submitted).</para>
+    /// </summary>
+    public async Task<IReadOnlyList<PendingOffer>> ListForJeeberAsync(
+        string jeeberId, CancellationToken ct)
+    {
+        if (_offerIndex is null || _requests is null || string.IsNullOrWhiteSpace(jeeberId))
+        {
+            return Array.Empty<PendingOffer>();
+        }
+
+        var offerIds = _offerIndex.ListOfferIdsForJeeber(jeeberId);
+        if (offerIds.Count == 0)
+        {
+            return Array.Empty<PendingOffer>();
+        }
+
+        var requestIds = offerIds
+            .Select(id => _offerIndex.ResolveRequestId(id))
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id!)
+            .Distinct(StringComparer.Ordinal);
+
+        var mine = new List<PendingOffer>();
+        foreach (var requestId in requestIds)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // Resolve the request OWNER — offer-service's request-scoped list authorizes
+            // on x-user-id == owner. A request unknown to the local read-model cannot be
+            // read upstream; skip it (never guess an identity).
+            var request = await _requests.GetAsync(requestId, ct);
+            if (request is null || string.IsNullOrWhiteSpace(request.ClientId))
+            {
+                continue;
+            }
+
+            // The client degrades any non-2xx / transport blip to an empty list.
+            var wires = await _client.ListForRequestAsync(request.ClientId, requestId, ct);
+            foreach (var wire in wires)
+            {
+                if (string.IsNullOrWhiteSpace(wire.Id)) continue;
+                if (!string.Equals(wire.JeeberId, jeeberId, StringComparison.Ordinal)) continue;
+
+                mine.Add(ToOwnPendingOffer(wire));
+            }
+        }
+
+        return mine
+            .OrderByDescending(o => o.CreatedAt)
+            .ToList();
+    }
 
     public Task<int> WithdrawForJeeberAsync(string jeeberId, CancellationToken ct)
         => throw new NotSupportedException(
@@ -236,9 +389,57 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
         _ => PendingOfferStatus.Withdrawn
     };
 
+    /// <summary>
+    /// fix/offer-visibility — <see cref="ListForJeeberAsync"/>'s wire → local projection
+    /// with the HONEST own-status mapping (<see cref="MapOwnStatus"/>) instead of the
+    /// customer-facing <see cref="MapStatus"/> fold. Everything else matches
+    /// <see cref="ToPendingOffer"/>.
+    /// </summary>
+    private static PendingOffer ToOwnPendingOffer(OfferWire wire) => new()
+    {
+        Id = wire.Id,
+        RequestId = wire.RequestId,
+        JeeberId = wire.JeeberId,
+        Status = MapOwnStatus(wire.Status),
+        CreatedAt = wire.CreatedAt ?? DateTimeOffset.UtcNow,
+        UpdatedAt = wire.UpdatedAt,
+        Fee = ToDollars(wire.FeeCents),
+        EtaMinutes = wire.EtaMinutes,
+        Note = wire.Note,
+    };
+
+    /// <summary>
+    /// The jeeber's-own-view status mapping (fix/offer-visibility). Unlike the
+    /// customer-facing <see cref="MapStatus"/> (which folds every non-accept terminal
+    /// state to <c>withdrawn</c>), the bidder's own list keeps the terminal reason
+    /// honest: <c>rejected</c> / <c>superseded</c> / <c>expired</c> mean "the auction
+    /// closed around you" → <see cref="PendingOfferStatus.Superseded"/> (the state the
+    /// mobile app already renders as "not selected"), while <c>withdrawn</c> stays the
+    /// jeeber's own retraction. Unknown upstream vocabulary falls back to
+    /// <c>withdrawn</c>, matching <see cref="MapStatus"/>.
+    /// </summary>
+    private static string MapOwnStatus(string upstream) => upstream switch
+    {
+        "submitted" or "edited" or "pending" => PendingOfferStatus.Pending,
+        "accepted" => PendingOfferStatus.Accepted,
+        "rejected" or "superseded" or "expired" => PendingOfferStatus.Superseded,
+        "withdrawn" => PendingOfferStatus.Withdrawn,
+        _ => PendingOfferStatus.Withdrawn
+    };
+
     private static bool IsDuplicateCode(string? code)
         => code is not null
            && (code.Contains("duplicate", StringComparison.OrdinalIgnoreCase)
                || code.Contains("already", StringComparison.OrdinalIgnoreCase)
                || code.Contains("offer_exists", StringComparison.OrdinalIgnoreCase));
+
+    // sprint-009 Lane E: offer-service returns `request_not_open` (see the class doc
+    // Contract-freeze note and IOfferServiceClient) when a bid is attempted on a request
+    // that is no longer open (accepted/expired/cancelled). Match it (and the looser
+    // `not_open` form) case-insensitively so a closed auction maps to its own 409, not the
+    // 20-offer-cap message.
+    private static bool IsRequestNotOpenCode(string? code)
+        => code is not null
+           && (code.Contains("request_not_open", StringComparison.OrdinalIgnoreCase)
+               || code.Contains("not_open", StringComparison.OrdinalIgnoreCase));
 }

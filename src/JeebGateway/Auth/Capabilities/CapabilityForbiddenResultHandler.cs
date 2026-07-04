@@ -1,4 +1,5 @@
 using System.Text.Json;
+using JeebGateway.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authorization.Policy;
 using Microsoft.AspNetCore.Http;
@@ -84,7 +85,11 @@ public sealed class CapabilityForbiddenResultHandler : IAuthorizationMiddlewareR
             return true;
         }
 
-        return context.Request.Headers.TryGetValue("X-User-Id", out var header)
+        // SEC-C1: only treat an X-User-Id header as an identified caller when it comes from a
+        // trusted edge (or Development/Testing). Otherwise a forged-header denial would be mapped
+        // to a Layer-2 403, implying the spoofed identity was accepted; it must stay a Layer-1 401.
+        return EdgeIdentityTrust.HeadersTrusted(context)
+            && context.Request.Headers.TryGetValue("X-User-Id", out var header)
             && !string.IsNullOrWhiteSpace(header);
     }
 }

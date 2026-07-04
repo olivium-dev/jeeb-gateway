@@ -34,6 +34,7 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.IdentityModel.Tokens;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -118,6 +119,11 @@ builder.Services.Configure<SecurityOptions>(builder.Configuration.GetSection(Sec
 const string GatewayBearerScheme = "GatewayBearer";
 
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
+
+// SEC-H2 (Leg-11): fail closed if the gateway would boot with a placeholder / dev / too-short
+// signing key outside Development/Testing. Bakes no key — only asserts a real secret was injected.
+JeebGateway.Tokens.JwtSigningKeyGuard.EnsureNotPlaceholder(jwt.SigningKey, builder.Environment, "Jwt:SigningKey");
+
 var signingBytes = Encoding.UTF8.GetBytes(jwt.SigningKey);
 
 // UM trust config (optional, no fail-closed: an absent UmJwt section is fine).
@@ -127,6 +133,14 @@ var signingBytes = Encoding.UTF8.GetBytes(jwt.SigningKey);
 // UmJwt:SigningKey lets UM rotate off the leaked fleet key with no code change.
 var umJwt = builder.Configuration.GetSection(UmJwtOptions.SectionName).Get<UmJwtOptions>() ?? new UmJwtOptions();
 var umSigningKey = string.IsNullOrWhiteSpace(umJwt.SigningKey) ? jwt.SigningKey : umJwt.SigningKey;
+
+// SEC-H2: when UmJwt supplies its OWN key (not the blank fall-through to Jwt:SigningKey,
+// which is already guarded above), it too must not be a placeholder in production.
+if (!string.IsNullOrWhiteSpace(umJwt.SigningKey))
+{
+    JeebGateway.Tokens.JwtSigningKeyGuard.EnsureNotPlaceholder(umJwt.SigningKey, builder.Environment, "UmJwt:SigningKey");
+}
+
 var umSigningBytes = Encoding.UTF8.GetBytes(umSigningKey);
 
 const string UmScheme = "UserManagement";
@@ -560,8 +574,32 @@ builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePu
     var factory = sp.GetRequiredService<IHttpClientFactory>();
     var client = factory.CreateClient("ServicePushNotificationClient");
     var baseUrl = builder.Configuration["PushNotificationServiceApi:BaseUrl"];
-    return new JeebGateway.service.ServicePushNotification.ServicePushNotificationClient(baseUrl, client);
+    var pushClient = new JeebGateway.service.ServicePushNotification.ServicePushNotificationClient(baseUrl, client);
+    // BUILD-NEWREQ-PUSH — forward the optional internal API key to the hand-written
+    // topic seam (Send_notification_to_topicAsync sends X-Api-Key when non-empty).
+    pushClient.InternalApiKey = builder.Configuration["PushNotificationServiceApi:InternalApiKey"];
+    return pushClient;
 });
+
+// BUILD-CHAT-PUSH — the chat-message → push-notification trigger. Best-effort fan-out
+// of an FCM push to the conversation's other delivery principal when a chat message is
+// appended (the only missing link for real A→B chat push). Scoped because it composes
+// the singleton IRequestsStore with the SCOPED ServicePushNotificationClient (:10040).
+builder.Services.AddScoped<JeebGateway.Notifications.IChatMessagePushNotifier,
+    JeebGateway.Notifications.ChatMessagePushNotifier>();
+
+// BUILD-OFFER-PUSH — the offer-submitted → push-notification trigger. Best-effort FCM
+// push to the request's CUSTOMER when a jeeber submits a bid (the second missing push
+// link alongside chat). Scoped: composes the SCOPED ServicePushNotificationClient (:10040).
+builder.Services.AddScoped<JeebGateway.Notifications.IOfferPushNotifier,
+    JeebGateway.Notifications.OfferPushNotifier>();
+
+// BUILD-NEWREQ-PUSH — the request-created → "finding jeebers" push trigger. Best-effort
+// FCM topic broadcast to the jeeb_jeebers topic when a customer creates a delivery
+// request (the third missing push link, after chat and offer). Scoped: composes the
+// SCOPED ServicePushNotificationClient (:10040) via its hand-written topic seam.
+builder.Services.AddScoped<JeebGateway.Notifications.INewRequestPushNotifier,
+    JeebGateway.Notifications.NewRequestPushNotifier>();
 
 // Feedback (ServiceFeedbackClient) — salehly sibling mirror.
 // The NSwag-generated ServiceFeedbackClient
@@ -723,8 +761,26 @@ builder.Services.Configure<JeebGateway.Auth.SuperLogin.SuperLoginOptions>(
     builder.Configuration.GetSection(JeebGateway.Auth.SuperLogin.SuperLoginOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IPhonePolicy,
     JeebGateway.Auth.OtpSignIn.PhonePolicy>();
-builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IOtpRequestRateLimiter,
-    JeebGateway.Auth.OtpSignIn.InMemoryOtpRequestRateLimiter>();
+// Durability register #2 — OTP-request rate limiter. When
+// GatewayRateLimit:RedisConnectionString is present, back the per-phone / per-IP caps
+// with a Redis sorted-set limiter (RedisOtpRequestRateLimiter) so the window is shared
+// across replicas and survives a restart (PR #32 review B2 / AC-GatewayRateLimit). The
+// IConnectionMultiplexer singleton was removed with the salehly mirror, so it is
+// (re)registered here lazily — only on this Redis-configured path. Absent the key
+// (dev / CI / test), the in-process ConcurrentDictionary limiter is kept byte-for-byte.
+var otpRateLimitRedisCs = builder.Configuration["GatewayRateLimit:RedisConnectionString"];
+if (!string.IsNullOrWhiteSpace(otpRateLimitRedisCs))
+{
+    builder.Services.AddSingleton<StackExchange.Redis.IConnectionMultiplexer>(
+        _ => StackExchange.Redis.ConnectionMultiplexer.Connect(otpRateLimitRedisCs));
+    builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IOtpRequestRateLimiter,
+        JeebGateway.Auth.OtpSignIn.RedisOtpRequestRateLimiter>();
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.Auth.OtpSignIn.IOtpRequestRateLimiter,
+        JeebGateway.Auth.OtpSignIn.InMemoryOtpRequestRateLimiter>();
+}
 
 // OpenTelemetry
 var serviceName = "jeeb-gateway";
@@ -782,6 +838,28 @@ builder.Services.AddOpenTelemetry()
             .AddPrometheusExporter();
     });
 
+// GW12-OBS-1 (Leg-12) — trace-correlated, structured logs. Traces + metrics were
+// already OTLP-exported, but logs were plain text with no trace/span id, so a log line
+// could not be stitched to the trace it belongs to, and the X-Correlation-Id a client
+// quotes was never written to any log (CorrelationIdMiddleware only echoed it on the
+// wire). Wiring the OTel log exporter makes every log record automatically carry
+// trace_id / span_id from Activity.Current, and IncludeScopes=true captures the
+// X-Correlation-Id that CorrelationIdMiddleware now pushes as a log scope — so grepping
+// the OTLP log backend for a reported correlation id finally returns the request's log
+// lines. Same OTLP endpoint + service resource as the trace/metric exporters above, so
+// this adds no new config surface and no new dependency (OpenTelemetry.Logs ships in the
+// already-referenced OpenTelemetry core package). With no collector listening (dev/CI)
+// the batching exporter drops silently — identical to the trace/metric exporters that
+// already run in every environment.
+builder.Logging.AddOpenTelemetry(logging =>
+{
+    logging.SetResourceBuilder(ResourceBuilder.CreateDefault().AddService(serviceName));
+    logging.IncludeScopes = true;
+    logging.IncludeFormattedMessage = true;
+    logging.ParseStateValues = true;
+    logging.AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
+});
+
 // T-backend-050 — singleton wrapper around the latency Meter. The Meter is
 // owned by DI so its lifetime matches the host's, which keeps the OTel
 // MeterProvider's subscription alive for the life of the process.
@@ -837,6 +915,19 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
     builder.Services.AddSingleton<JeebGateway.Infrastructure.INpgsqlConnectionFactory>(
         _ => new JeebGateway.Infrastructure.NpgsqlConnectionFactory(gatewayPostgresCs));
     builder.Services.AddSingleton<ISettlementStore, PostgresSettlementStore>();
+
+    // Durability register: requests-durable [A] — the optional gateway-Postgres owner-list
+    // mirror (delivery_requests, migration 0024). Registered ONLY here so DurableRequestsStore
+    // resolves a non-null IDurableRequestsMirror in prod (see the [B] ctor arg below); absent
+    // Postgres the mirror stays null and the durable owner-list degrades to the in-memory model.
+    builder.Services.AddSingleton<JeebGateway.Requests.IDurableRequestsMirror,
+        JeebGateway.Requests.PostgresDurableRequestsMirror>();
+
+    // Durability register #11 — saved-locations. Registered BEFORE AddSavedLocations()
+    // (whose TryAddSingleton InMemory fallback then no-ops), so the durable Postgres store
+    // (saved_locations, migration 0016) wins whenever Postgres is configured.
+    builder.Services.AddSingleton<JeebGateway.Users.SavedLocations.ISavedLocationStore,
+        JeebGateway.Users.SavedLocations.PostgresSavedLocationStore>();
 }
 else
 {
@@ -933,6 +1024,32 @@ else
         JeebGateway.JeebWallet.NullJeebWalletLedgerReader>();
 }
 
+// GW12-OBS-2 (Leg-12) — readiness depth for the gateway-owned Postgres databases.
+// The durability Leg made 9+ stores depend on GatewayPostgres (and the wallet ledger
+// reader on WalletPostgres), but nothing probed those databases, so /health/ready and
+// /health/aggregate stayed green through a DB outage / pool exhaustion / credential
+// rotation while every durable read/write threw. Register a SELECT-1 check per
+// configured database, tagged "ready" (readiness only — a DB blip must not fail the
+// liveness probe and pull the process out of rotation). Gated on the same
+// !IsNullOrWhiteSpace(...) guard as the durable-store wiring, so dev/CI/test (no
+// connection string) register no check and keep the existing green readiness surface.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddHealthChecks()
+        .AddCheck(
+            "gateway-postgres",
+            new JeebGateway.Infrastructure.PostgresHealthCheck(gatewayPostgresCs!, "GatewayPostgres"),
+            tags: new[] { "ready" });
+}
+if (!string.IsNullOrWhiteSpace(walletPostgresCs))
+{
+    builder.Services.AddHealthChecks()
+        .AddCheck(
+            "wallet-postgres",
+            new JeebGateway.Infrastructure.PostgresHealthCheck(walletPostgresCs!, "WalletPostgres"),
+            tags: new[] { "ready" });
+}
+
 // Notification preferences (T-backend-031 / JEB-1498).
 // Wired to the generic remote-user-preferences service (Rust, :10067) so preferences
 // survive restarts. Preferences are stored as an opaque JSON blob under key
@@ -977,7 +1094,17 @@ builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOpt
 // reads device tokens from it — that is a separate C-domain (push transport /
 // retry / SLA) with no upstream owner yet. Do not delete this store until the
 // push-transport service lands; deleting it now would break the send pipeline.
-builder.Services.AddSingleton<IDeviceTokenStore, InMemoryDeviceTokenStore>();
+// Durability register #10 — device tokens. Postgres-backed (device_tokens, migration 0017)
+// when GatewayPostgres is configured so push fan-out targets survive a restart; the
+// in-memory store is kept as the dev/CI/test fallback.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<IDeviceTokenStore, JeebGateway.Push.PostgresDeviceTokenStore>();
+}
+else
+{
+    builder.Services.AddSingleton<IDeviceTokenStore, InMemoryDeviceTokenStore>();
+}
 builder.Services.AddSingleton<IPushRetryQueue, InMemoryPushRetryQueue>();
 builder.Services.AddSingleton<InMemoryPushDeliveryTracker>();
 builder.Services.AddSingleton<IPushDeliveryTracker>(sp => sp.GetRequiredService<InMemoryPushDeliveryTracker>());
@@ -1100,7 +1227,12 @@ if (durableRequests.Enabled)
         sp.GetRequiredService<JeebGateway.Conversations.IConversationProvisioner>(),
         sp.GetRequiredService<JeebGateway.StateService.Durable.IBroadcastEventRecorder>(),
         sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DurableRequestsOptions>>(),
-        sp.GetRequiredService<ILogger<DurableRequestsStore>>()));
+        sp.GetRequiredService<ILogger<DurableRequestsStore>>(),
+        // requests-durable [B] — supply the OPTIONAL 8th ctor arg so DurableRequestsStore's
+        // _mirror is non-null in prod (registered inside the GatewayPostgres block, [A]).
+        // GetService (not GetRequiredService): null when Postgres is not configured, which
+        // degrades the durable owner-list to the in-memory snapshot (today's behaviour).
+        sp.GetService<JeebGateway.Requests.IDurableRequestsMirror>()));
 }
 else
 {
@@ -1123,10 +1255,13 @@ builder.Services.Configure<JeebGateway.Matching.MatchingMirrorOptions>(
 builder.Services.AddScoped<JeebGateway.Matching.IDeliveryRowMirror,
                            JeebGateway.Matching.DeliveryRowMirror>();
 
-// Tier-existence probe consumed by RequestsController to enforce
-// T-backend-007's "validate tier exists" criterion. Distinct interface
-// from JeebGateway.Tiers.ITiersStore (the admin/catalog surface).
-builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.InMemoryTiersStore>();
+// Tier-existence probe consumed by the request-create surfaces to enforce
+// T-backend-007's "validate tier exists" criterion. feat/tier-unify-names:
+// now a thin view over the SINGLE tier source of truth (the catalog at
+// JeebGateway.Tiers.ITiersStore, registered below) — legacy codes
+// (flash/express/standard/on_the_way/eco) stay accepted via the
+// LegacyTierCodes alias table.
+builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.CatalogBackedTiersStore>();
 
 // JEB-1507: CancellationPolicy thresholds (WeeklyThreshold, StrikeThreshold,
 // RestrictionDurationHours) are configurable via appsettings so they can be
@@ -1206,7 +1341,18 @@ builder.Services.AddSingleton<IRatingService, RatingService>();
 
 // OTP handover verification + admin escalation (T-backend-015 / JEEB-33).
 builder.Services.Configure<OtpHandoverOptions>(builder.Configuration.GetSection(OtpHandoverOptions.SectionName));
-builder.Services.AddSingleton<IAdminEscalationStore, InMemoryAdminEscalationStore>();
+// Durability register #5 — admin escalations. Postgres-backed (admin_escalations,
+// migration 0021) when GatewayPostgres is configured so the unbounded escalation list
+// survives a restart; in-memory fallback for dev/CI/test.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<IAdminEscalationStore,
+        JeebGateway.Requests.OtpHandover.PostgresAdminEscalationStore>();
+}
+else
+{
+    builder.Services.AddSingleton<IAdminEscalationStore, InMemoryAdminEscalationStore>();
+}
 builder.Services.AddSingleton<OtpHandoverSweeper>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper>());
 
@@ -1215,7 +1361,29 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper
 // production swaps to AddStackExchangeRedisCache() against the cluster's
 // Redis so attempts cannot be circumvented by hitting different gateway
 // replicas. The same IDistributedCache abstraction works for both.
-builder.Services.AddDistributedMemoryCache();
+// Durability register #1 — shared cache. When Redis:ConnectionString is present, back
+// IDistributedCache with the cluster's Redis (AddStackExchangeRedisCache) so the
+// external-OTP attempt/lockout counters AND the in-app handover code (Gap G4) survive a
+// gateway restart and cannot be circumvented across replicas. Absent the key (dev / CI /
+// test), the in-process AddDistributedMemoryCache() is kept — same IDistributedCache
+// abstraction, identical behaviour.
+var redisCacheCs = builder.Configuration["Redis:ConnectionString"];
+if (!string.IsNullOrWhiteSpace(redisCacheCs))
+{
+    builder.Services.AddStackExchangeRedisCache(o => o.Configuration = redisCacheCs);
+}
+else
+{
+    builder.Services.AddDistributedMemoryCache();
+}
+
+// Gap G4 (run-24 CHECK C): in-app delivery handover code. Minted at offer-accept
+// and returned owner-scoped as `handoverCode`, held cross-replica-safe in the
+// IDistributedCache above (same abstraction as the OTP attempt/lockout markers),
+// and matched at handover via verify-precedence. Singleton (stateless over the
+// singleton cache). See IHandoverCodeStore.
+builder.Services.AddSingleton<JeebGateway.Requests.OtpHandover.IHandoverCodeStore,
+    JeebGateway.Requests.OtpHandover.DistributedCacheHandoverCodeStore>();
 
 // Geo-matching engine (T-backend-008) — RELOCATED to delivery-service.
 // The gateway's in-memory geo-matching engine (great-circle distance scan +
@@ -1264,7 +1432,18 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ScheduledDeliveryA
 // In-memory store for the MVP; production wiring will hit Postgres directly
 // using the schema in db/migrations/0005 (catalog) plus a follow-up migration
 // for the acknowledgment ledger.
-builder.Services.AddSingleton<IProhibitedItemsStore, InMemoryProhibitedItemsStore>();
+// Durability register #12 — prohibited items + acks. Postgres-backed (prohibited_items
+// migration 0005 + severity/acks migration 0018) when GatewayPostgres is configured so
+// admin edits and per-user acknowledgements survive a restart; in-memory fallback otherwise.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<IProhibitedItemsStore,
+        JeebGateway.ProhibitedItems.PostgresProhibitedItemsStore>();
+}
+else
+{
+    builder.Services.AddSingleton<IProhibitedItemsStore, InMemoryProhibitedItemsStore>();
+}
 
 // Prohibited-item NLP scanner + admin review queue (T-backend-048).
 // The scanner runs Damerau-Levenshtein fuzzy matching with a synonym
@@ -1275,7 +1454,18 @@ builder.Services.AddSingleton<IProhibitedItemsStore, InMemoryProhibitedItemsStor
 // admin_actions audit table in 0005.
 builder.Services.AddSingleton<IProhibitedItemSynonymRegistry, InMemorySynonymRegistry>();
 builder.Services.AddSingleton<IProhibitedItemScanner, ProhibitedItemScanner>();
-builder.Services.AddSingleton<IFlaggedRequestStore, InMemoryFlaggedRequestStore>();
+// Durability register #13 — flagged requests. Postgres-backed (flagged_requests,
+// migration 0019) when GatewayPostgres is configured so moderation queue entries survive
+// a restart; in-memory fallback for dev/CI/test.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<IFlaggedRequestStore,
+        JeebGateway.ProhibitedItems.FlaggedRequests.PostgresFlaggedRequestStore>();
+}
+else
+{
+    builder.Services.AddSingleton<IFlaggedRequestStore, InMemoryFlaggedRequestStore>();
+}
 
 // JEB-63 (S05 N1 / A1.1): gateway-owned create-time prohibited-items moderation
 // gate flag (default ON, INDEPENDENT of FeatureFlags:DurableRequests). When ON,
@@ -1307,7 +1497,17 @@ if (createModerationEnabled)
 // In-memory append-only store for the MVP; production swap writes to
 // db/migrations/0005.admin_actions on the same transaction as the
 // mutation so the audit trail can never diverge from entity state.
-builder.Services.AddSingleton<IAdminAuditLog, InMemoryAdminAuditLog>();
+// Durability register #14 — admin audit log. Postgres-backed (admin_actions, migration
+// 0005) when GatewayPostgres is configured so the append-only admin action trail survives
+// a restart; in-memory fallback for dev/CI/test.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<IAdminAuditLog, JeebGateway.Admin.PostgresAdminAuditLog>();
+}
+else
+{
+    builder.Services.AddSingleton<IAdminAuditLog, InMemoryAdminAuditLog>();
+}
 
 // Dispute reporting pipeline (T-backend-025 / JEEB-43).
 //
@@ -1364,7 +1564,12 @@ if (!string.IsNullOrWhiteSpace(paymentBaseUrl))
     {
         http.BaseAddress = new Uri(paymentBaseUrl!.TrimEnd('/') + "/");
         http.Timeout = TimeSpan.FromSeconds(5);
-    });
+    })
+        // R6 (sprint-009 money-resilience-audit): front UPG refund with the org-standard
+        // circuit breaker so a sustained UPG outage fails fast instead of eating the full
+        // timeout on every dispute-resolve. Retry is double-refund-safe — the refund carries
+        // an Idempotency-Key (dispute:{caseId}:refund), so UPG dedupes replays.
+        .AddStandardResilienceHandler();
 }
 else
 {
@@ -1389,7 +1594,12 @@ if (!string.IsNullOrWhiteSpace(paymentBaseUrl))
         {
             http.BaseAddress = new Uri(paymentBaseUrl!.TrimEnd('/') + "/");
             http.Timeout = TimeSpan.FromSeconds(10);
-        });
+        })
+            // R6 (sprint-009 money-resilience-audit): front UPG COD-record/mark-paid with the
+            // org-standard circuit breaker so a slow UPG fails fast rather than degrading every
+            // COD-record call for the full timeout. Retry is safe — the COD record carries an
+            // Idempotency-Key (delivery_id), so UPG dedupes replays.
+            .AddStandardResilienceHandler();
 }
 else
 {
@@ -1415,7 +1625,25 @@ builder.Services.AddSingleton<IKycBffSeam, KycBffSeam>();
 // In-memory store for the MVP; production wiring will proxy to auth-service
 // via an NSwag-generated client, backed by the schema in 0001 + 0006.
 builder.Services.AddSingleton<InMemoryUsersStore>();
-builder.Services.AddSingleton<IUsersStore>(sp => sp.GetRequiredService<InMemoryUsersStore>());
+// Durability register #8 — users-durable. When GatewayPostgres is configured, IUsersStore
+// resolves to UpstreamBackedUsersStore: admin user-search + the token-mint active_role read
+// are served from a durable Postgres projection (users table, migration 0025) hydrated from
+// user-management, and no longer evaporate on a bounce. Identity remains UM's source of
+// truth (Postgres is a read-model projection). The in-process InMemoryUsersStore is kept as
+// the permissive inner store (saved addresses / non-UUID OTP fallback). Absent Postgres,
+// the in-memory store IS IUsersStore exactly as before.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.Users.IUserProjectionStore,
+        JeebGateway.Users.PostgresUserProjectionStore>();
+    builder.Services.AddSingleton<JeebGateway.Users.IUpstreamUserProfileClient,
+        JeebGateway.Users.ScopedUserManagementProfileClient>();
+    builder.Services.AddSingleton<IUsersStore, JeebGateway.Users.UpstreamBackedUsersStore>();
+}
+else
+{
+    builder.Services.AddSingleton<IUsersStore>(sp => sp.GetRequiredService<InMemoryUsersStore>());
+}
 
 // Dual-role identity + BR-1 enforcement (T-backend-041).
 // Validates that a user cannot act as both Client and Jeeber simultaneously
@@ -1431,7 +1659,22 @@ builder.Services.AddSingleton<IDualRoleService, DualRoleService>();
 builder.Services.AddSingleton<InMemoryFinancialLedger>();
 builder.Services.AddSingleton<IFinancialLedgerAnonymizer>(sp => sp.GetRequiredService<InMemoryFinancialLedger>());
 builder.Services.AddSingleton<InMemoryAccountDeletionStore>();
-builder.Services.AddSingleton<IAccountDeletionStore>(sp => sp.GetRequiredService<InMemoryAccountDeletionStore>());
+// Durability register #15 — account-deletion (GDPR 30-day purge SLA). Postgres-backed
+// (account_deletions, migration 0010) + the AccountDeletionPurgeWorker background sweeper
+// when GatewayPostgres is configured, so a queued deletion and its purge deadline survive a
+// restart. In-memory fallback (no worker) for dev/CI/test — today's behaviour.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<IAccountDeletionStore,
+        JeebGateway.Users.PostgresAccountDeletionStore>();
+    builder.Services.AddSingleton<JeebGateway.Users.AccountDeletionPurgeWorker>();
+    builder.Services.AddHostedService(sp =>
+        sp.GetRequiredService<JeebGateway.Users.AccountDeletionPurgeWorker>());
+}
+else
+{
+    builder.Services.AddSingleton<IAccountDeletionStore>(sp => sp.GetRequiredService<InMemoryAccountDeletionStore>());
+}
 
 // Data-export pipeline (T-backend-042, GDPR-like right of access).
 // POST /users/me/data-export queues a full export (profile, orders,
@@ -1441,7 +1684,25 @@ builder.Services.AddSingleton<IAccountDeletionStore>(sp => sp.GetRequiredService
 // in-memory store/providers for the Postgres-backed worker and an NSwag
 // notification-service client.
 builder.Services.Configure<DataExportOptions>(builder.Configuration.GetSection(DataExportOptions.SectionName));
-builder.Services.AddSingleton<IDataExportStore, InMemoryDataExportStore>();
+// Durability register #16 — data-export (GDPR 72-hr SLA + single-use download tokens).
+// Postgres-backed (data_exports, migration 0023) + the DataExportWorker SLA sweeper when
+// GatewayPostgres is configured, so a queued export, its download token, and its SLA
+// deadline survive a restart. The existing DataExportProcessor (packaging) resolves
+// IDataExportStore and drives the durable store transparently; the new worker only marks
+// overdue rows failed (complementary, not a duplicate). In-memory fallback for dev/CI/test.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.Users.DataExport.PostgresDataExportStore>();
+    builder.Services.AddSingleton<IDataExportStore>(sp =>
+        sp.GetRequiredService<JeebGateway.Users.DataExport.PostgresDataExportStore>());
+    builder.Services.AddSingleton<JeebGateway.Users.DataExport.DataExportWorker>();
+    builder.Services.AddHostedService(sp =>
+        sp.GetRequiredService<JeebGateway.Users.DataExport.DataExportWorker>());
+}
+else
+{
+    builder.Services.AddSingleton<IDataExportStore, InMemoryDataExportStore>();
+}
 builder.Services.AddSingleton<InMemoryDataExportRatingsProvider>();
 builder.Services.AddSingleton<IDataExportRatingsProvider>(sp => sp.GetRequiredService<InMemoryDataExportRatingsProvider>());
 // Chat history for GDPR export. The gateway no longer carries a chat BFF client
@@ -1566,7 +1827,14 @@ builder.Services.AddSingleton<IPendingOffersStore>(sp =>
     if (flags.Offer)
     {
         return new UpstreamPendingOffersStore(
-            sp.GetRequiredService<JeebGateway.Services.Clients.IOfferServiceClient>());
+            sp.GetRequiredService<JeebGateway.Services.Clients.IOfferServiceClient>(),
+            sp.GetRequiredService<Microsoft.AspNetCore.Http.IHttpContextAccessor>(),
+            // fix/offer-visibility (run-23 CHECK C): the submit-time routing index + the
+            // request read-model let ListForJeeberAsync recover the jeeber's own (incl.
+            // TERMINAL) offers through the owner-scoped request-list route — offer-service
+            // exposes no jeeber-scoped list route.
+            sp.GetRequiredService<IOfferRequestIndex>(),
+            sp.GetRequiredService<JeebGateway.Requests.IRequestsStore>());
     }
 
     return sp.GetRequiredService<InMemoryPendingOffersStore>();
@@ -1597,7 +1865,19 @@ builder.Services.AddSingleton<IOfferRealtimeNotifier>(sp => sp.GetRequiredServic
 // (T-backend-022, T-backend-023) so they obey the same transport and retry
 // rules as any other trigger.
 builder.Services.AddSingleton<IAutoOfflineNotifier, PushAutoOfflineNotifier>();
-builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();
+// Durability register #9 — availability (admin ops-map + auto-offline). Postgres-backed
+// (jeeber_availability, migration 0003 + zone/last_interaction_at migration 0026) when
+// GatewayPostgres is configured so the gateway-owned availability view survives a restart;
+// matching is unaffected. In-memory fallback for dev/CI/test.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<IAvailabilityStore,
+        JeebGateway.Availability.PostgresAvailabilityStore>();
+}
+else
+{
+    builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();
+}
 builder.Services.AddHostedService<AutoOfflineSweeper>();
 
 // GPS location streaming + SSE delivery tracking (T-backend-014).
@@ -1859,6 +2139,21 @@ if (stateServiceWired)
     // client's circuit-breaker rather than failing the file/list path.
     builder.Services.AddSingleton<IDisputeStore, StateServiceDisputeStore>();
 
+    // Durability register #3 — refresh-token store. Re-points IRefreshTokenStore from the
+    // in-memory MVP store (rows lost on every gateway bounce → refresh-reuse detection and
+    // active-token revocation evaporate) to the state-service-backed store, which persists
+    // the token row + status chain + hash/user index in the R1 idempotency KV (registered
+    // above). Overrides the InMemoryRefreshTokenStore registered earlier (last-wins DI).
+    builder.Services.AddSingleton<IRefreshTokenStore,
+        JeebGateway.Tokens.StateServiceRefreshTokenStore>();
+
+    // Durability register #4 — dispute-case (v2) store. Re-points IDisputeCaseStore from the
+    // in-memory MVP store to the state-service-backed store (opaque KV body + delivery/user
+    // prefix indexes), mirroring the sibling StateServiceDisputeStore above so escalated
+    // dispute cases survive a bounce. Overrides InMemoryDisputeCaseStore (last-wins DI).
+    builder.Services.AddSingleton<IDisputeCaseStore,
+        JeebGateway.Disputes.V2.StateServiceDisputeCaseStore>();
+
     // Add jeeb-state-service to the aggregate-health roster (now 18 checks).
     builder.Services.AddHealthChecks()
         .AddUrlGroup(
@@ -2052,6 +2347,13 @@ app.UseRouting();
 // template (e.g. "/api/requests/{id}") instead of the raw URL path; this
 // keeps the metric's `route` label cardinality bounded.
 app.UseMiddleware<RequestLatencyMiddleware>();
+
+// F2 (Leg-12): fail-closed 404 for [DevOnly] endpoints BEFORE authentication, so an
+// anonymous request to a disabled dev/diagnostic route gets 404 (route does not exist)
+// rather than the 401 the authorization middleware would otherwise return (which leaks
+// route existence). Placed after UseRouting (endpoint metadata resolved) and before
+// UseAuthentication/UseAuthorization. Pure pass-through when Features:DevEndpoints:Enabled.
+app.UseMiddleware<JeebGateway.Security.DevOnlyEndpointGuardMiddleware>();
 
 // CORS must run after UseRouting so endpoint-specific CORS metadata applies,
 // and before UseAuthentication so preflight requests are not rejected as 401.

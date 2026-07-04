@@ -77,19 +77,17 @@ public sealed class JeebOrdersListController : ControllerBase
         IReadOnlyList<DeliveryRequest> rows;
         try
         {
-            var all = await _requests.ListForClientAsync(userId, ct);
             if (jeeberScope)
             {
-                // Jeeber scope: requests where THIS user is the assigned jeeber. ListForClient only
-                // returns client-owned rows, so for the jeeber view we cannot reuse it — there is no
-                // ListForJeeber on the store. Degrade to empty rather than mis-scoping: the assigned-
-                // jobs surface for the driver is the PR #225 feed; this list stays client-accurate and
-                // never leaks another client's rows. (Empty-tolerant by contract.)
-                rows = all.Where(r => string.Equals(r.JeeberId, userId, StringComparison.Ordinal)).ToList();
+                // Jeeber scope: requests where THIS user is the assigned jeeber. P0 fix — sourced from
+                // ListForJeeberAsync (WHERE JeeberId == caller). ListForClientAsync only returns
+                // client-owned rows, so a jeeber's accepted deliveries (ClientId = the requesting
+                // client, not the jeeber) were never in that set and this branch was always empty.
+                rows = await _requests.ListForJeeberAsync(userId, ct);
             }
             else
             {
-                rows = all;
+                rows = await _requests.ListForClientAsync(userId, ct);
             }
         }
         catch (Exception ex)
@@ -97,6 +95,15 @@ public sealed class JeebOrdersListController : ControllerBase
             // NEVER 5xx the Orders tab — degrade to an empty page on any store fault.
             _log.LogWarning(ex, "v1/requests list read failed for {UserId}; serving empty page", userId);
             rows = Array.Empty<DeliveryRequest>();
+        }
+
+        // PR-G1: the jeeber Jobs surface shows only in-flight assigned jobs — terminal
+        // (Done/Cancelled) and Expired rows drop out. The client history surface
+        // (role=client) is intentionally UNFILTERED: it is order history and must show
+        // terminal rows too (they are still canonical-status'd via ToOrderItem).
+        if (jeeberScope)
+        {
+            rows = rows.Where(IsListableActive).ToList();
         }
 
         var (pg, sz) = NormalizePaging(page, pageSize);
@@ -150,10 +157,19 @@ public sealed class JeebOrdersListController : ControllerBase
             // is assigned to as jeeber are rows where JeeberId == caller; deliveries the user owns as
             // client are their own created rows that have reached a delivery stage. Union both so the
             // Jobs tab shows the caller's deliveries from whichever side they participate.
-            var own = await _requests.ListForClientAsync(userId, ct);
-            rows = own
-                .Where(r => string.Equals(r.JeeberId, userId, StringComparison.Ordinal)
-                            || string.Equals(r.ClientId, userId, StringComparison.Ordinal))
+            //
+            // P0 fix: the jeeber-assigned rows must come from ListForJeeberAsync (WHERE JeeberId ==
+            // caller). They CANNOT be recovered from ListForClientAsync — an accepted delivery's
+            // ClientId is the requesting client (e.g. Nour), never the jeeber (Karim), so the prior
+            // ListForClientAsync(caller) + JeeberId-filter returned nothing for a jeeber and the Jobs
+            // tab was always empty. Union the jeeber-assigned rows with the caller's own client rows
+            // and de-dupe by id (a user is never both parties on one row, but de-dupe is defensive).
+            var assigned = await _requests.ListForJeeberAsync(userId, ct);
+            var ownClient = await _requests.ListForClientAsync(userId, ct);
+            rows = assigned
+                .Concat(ownClient)
+                .GroupBy(r => r.Id, StringComparer.Ordinal)
+                .Select(g => g.First())
                 .ToList();
         }
         catch (Exception ex)
@@ -163,9 +179,14 @@ public sealed class JeebOrdersListController : ControllerBase
             rows = Array.Empty<DeliveryRequest>();
         }
 
+        // PR-G1: the Jobs tab lists only in-flight deliveries — canonical-terminal
+        // (Done/Cancelled) and Expired rows are excluded so a completed/cancelled job
+        // stops occupying the active list. totalCount reflects the filtered set.
+        var listable = rows.Where(IsListableActive).ToList();
+
         var (pg, sz) = NormalizePaging(page, pageSize);
-        var total = rows.Count;
-        var window = rows
+        var total = listable.Count;
+        var window = listable
             .OrderByDescending(r => r.CreatedAt)
             .Skip((pg - 1) * sz)
             .Take(sz)
@@ -182,12 +203,43 @@ public sealed class JeebOrdersListController : ControllerBase
         return (pg, sz);
     }
 
+    /// <summary>
+    /// PR-G1: a row is listable-active when its CANONICAL status is non-terminal and
+    /// not the request-lifecycle <c>Expired</c> terminal. Terminal canonical states
+    /// (<see cref="CanonicalDeliveryStatus.Done"/> / <see cref="CanonicalDeliveryStatus.Cancelled"/>)
+    /// and Expired drop out of the active list surfaces (deliveries / role=jeeber jobs);
+    /// <see cref="CanonicalDeliveryStatus.FailedNeedsEscalation"/> is deliberately
+    /// non-terminal (admin-resolvable) so it stays visible. Rows whose status has no
+    /// canonical delivery mapping (pre-acceptance <c>scheduled/pending/matched</c> and
+    /// the holding <c>cancellation_requested</c>) are still in flight, so they list
+    /// unless they are a legacy terminal token. The client /v1/requests history surface
+    /// is NOT filtered by this — it shows terminal rows too (canonicalized only).
+    /// </summary>
+    private static bool IsListableActive(DeliveryRequest r)
+    {
+        var canonical = DeliveryStatusAlias.ToCanonical(r.Status);
+        if (canonical is not null)
+        {
+            return !CanonicalDeliveryStatus.IsTerminal(canonical)
+                && !string.Equals(canonical, CanonicalDeliveryStatus.Expired, StringComparison.Ordinal);
+        }
+
+        // No canonical delivery mapping (scheduled/pending/matched/cancellation_requested):
+        // in flight unless the persisted legacy token is itself terminal.
+        return !RequestStatus.IsTerminal(r.Status);
+    }
+
     private static OrderListItem ToOrderItem(DeliveryRequest r, int offersCount) => new()
     {
         Id = r.Id,
         // No DisplayId on the row; mobile tolerates absence. Short, stable handle derived from the id.
         DisplayId = r.Id.Length > 8 ? r.Id[..8] : r.Id,
-        Status = r.Status,
+        // PR-G1: surface the CANONICAL SM-1 status token (Ordered/Picked/InTransit/AtDoor/
+        // Done/…). In-flight rows persisted under the legacy vocabulary (picked_up/
+        // heading_off/…) dual-read to canonical so the mobile Orders/Jobs list shows a
+        // 'Picked' row as Picked (never picked_up) and vice-versa, consistently. An
+        // entirely unknown token falls back to the raw value rather than dropping it.
+        Status = DeliveryStatusAlias.ToCanonical(r.Status) ?? r.Status,
         Title = r.Description,
         Tier = r.TierId,
         OffersCount = offersCount,

@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Security;
 using JeebGateway.Services;
 
 namespace JeebGateway.Controllers;
@@ -38,6 +39,22 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Produces("application/json", "application/problem+json")]
+// GW12-SEC-1 (Leg-12): fail-closed environment gate. This diagnostic surface is a
+// shadow read-path into every upstream datastore (OWASP-API9) AND a cross-user read
+// seam (BOLA on the per-user routes below), so it must NOT be routable in production.
+// [DevOnly] short-circuits every action with 404 unless Features:DevEndpoints:Enabled
+// is explicitly true (committed false in EVERY environment, incl. appsettings.Production.json
+// — same fail-closed pattern as DevController / TestControlPlaneController). The E2E
+// harness that exercises these probes already runs with Features__DevEndpoints__Enabled=true,
+// so its coverage is unaffected.
+//
+// F2 (Leg-12): [DevOnly] is an ACTION FILTER, which runs INSIDE the endpoint pipeline —
+// AFTER the [Authorize] authorization middleware. So the attribute ordering here does NOT
+// make a disabled route 404 for an ANONYMOUS caller: the auth middleware would 401 first.
+// The pre-auth DevOnlyEndpointGuardMiddleware (registered in Program.cs before
+// UseAuthentication) is what actually returns 404 uniformly — for anonymous and
+// authenticated callers alike — when the flag is off; [DevOnly] remains as defence-in-depth.
+[DevOnly]
 [Authorize]
 // ADR-005 §A public at L2: DB-probe diagnostic reads carry no user-type gate. L1 [Authorize] is
 // preserved (token still required); [PublicEndpoint] opts out of L2 + satisfies the coverage guard.

@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Microsoft.Extensions.Hosting;
 
 namespace JeebGateway.ProhibitedItems;
@@ -50,7 +51,28 @@ public sealed class DefaultLexiconSeeder : IHostedService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        var existing = await _store.ListActiveAsync(cancellationToken);
+        // Degrade-don't-crash: with a durable (Postgres-backed) IProhibitedItemsStore the
+        // startup catalog read can fail transiently (DB briefly unreachable at boot). The
+        // seeder must NEVER fault host startup over it — a missing lexicon degrades the
+        // create-moderation gate to empty (recoverable on the next restart / admin seed),
+        // whereas a thrown StartAsync would crash-loop the whole gateway. With the in-memory
+        // store this read never throws, so behaviour there is byte-identical.
+        IReadOnlyList<ProhibitedItem> existing;
+        try
+        {
+            existing = await _store.ListActiveAsync(cancellationToken);
+        }
+        catch (DbException ex)
+        {
+            // F6: degrade ONLY on a connectivity/transient DB fault — a schema or
+            // programming error must surface at boot, not be silently swallowed, and
+            // OperationCanceledException (host shutdown) must propagate untouched.
+            _logger.LogWarning(ex,
+                "Prohibited-items lexicon read failed at startup (transient DB fault); skipping default seed " +
+                "(moderation lexicon stays empty until the store is reachable). Host startup continues.");
+            return;
+        }
+
         if (existing.Count > 0)
         {
             _logger.LogInformation(
@@ -75,10 +97,12 @@ public sealed class DefaultLexiconSeeder : IHostedService
                 // Another concurrent seed or an admin entry already covers this
                 // name — idempotent, not an error.
             }
-            catch (Exception ex)
+            catch (DbException ex)
             {
+                // F6: only a connectivity/transient DB fault is a skip-this-entry —
+                // a schema/programming fault (and OperationCanceledException) propagates.
                 _logger.LogWarning(ex,
-                    "Failed to seed prohibited item '{Name}'; skipping entry.",
+                    "Failed to seed prohibited item '{Name}' (transient DB fault); skipping entry.",
                     name);
             }
         }

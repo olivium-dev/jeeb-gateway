@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using JeebGateway.Security;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
@@ -37,7 +38,11 @@ internal static class UserIdentity
             return true;
         }
 
-        if (httpContext.Request.Headers.TryGetValue("X-User-Id", out var header)
+        // SEC-C1: the X-User-Id header is trusted ONLY when the request comes from a
+        // trusted edge (or in Development/Testing). Outside that, a raw client could spoof
+        // any identity, so the header is ignored and identity must come from the JWT above.
+        if (EdgeIdentityTrust.HeadersTrusted(httpContext)
+            && httpContext.Request.Headers.TryGetValue("X-User-Id", out var header)
             && !string.IsNullOrWhiteSpace(header))
         {
             userId = header.ToString();
@@ -61,7 +66,11 @@ internal static class UserIdentity
 
         if (claimed.Count > 0) return claimed;
 
-        if (httpContext.Request.Headers.TryGetValue("X-User-Roles", out var header)
+        // SEC-C1: the X-User-Roles header (which drives capability/admin authorization) is
+        // trusted ONLY from a trusted edge (or Development/Testing). Otherwise a raw client
+        // could self-assign the admin role, so the header is ignored.
+        if (EdgeIdentityTrust.HeadersTrusted(httpContext)
+            && httpContext.Request.Headers.TryGetValue("X-User-Roles", out var header)
             && !string.IsNullOrWhiteSpace(header))
         {
             return header.ToString()

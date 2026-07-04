@@ -5,6 +5,7 @@ using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
@@ -48,17 +49,23 @@ public sealed class RequestVoiceController : ControllerBase
     private readonly ITiersStore _tiers;
     private readonly IVoiceTranscriptionClient _voice;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
+    private readonly Notifications.INewRequestPushNotifier _newRequestPush;
+    private readonly ILogger<RequestVoiceController> _logger;
 
     public RequestVoiceController(
         IRequestsStore store,
         ITiersStore tiers,
         IVoiceTranscriptionClient voice,
-        IOptionsMonitor<UpstreamFeatureFlags> flags)
+        IOptionsMonitor<UpstreamFeatureFlags> flags,
+        Notifications.INewRequestPushNotifier newRequestPush,
+        ILogger<RequestVoiceController> logger)
     {
         _store = store;
         _tiers = tiers;
         _voice = voice;
         _flags = flags;
+        _newRequestPush = newRequestPush;
+        _logger = logger;
     }
 
     /// <summary>
@@ -157,7 +164,8 @@ public sealed class RequestVoiceController : ControllerBase
                     Transcription = prior.Transcription,
                     TranscriptionConfidence = prior.TranscriptionConfidence,
                     Language = "ar",
-                    TierId = prior.TierId
+                    TierId = prior.TierId,
+                    Description = prior.Description
                 });
             }
         }
@@ -257,6 +265,24 @@ public sealed class RequestVoiceController : ControllerBase
             });
         }
 
+        // BUILD-NEWREQ-PUSH — best-effort "finding jeebers" broadcast. Hooked ONLY here,
+        // at the genuinely-NEW-row signal: the idempotent re-submit path returns 200 OK
+        // earlier (see the (A1) block above) BEFORE reaching TryCreateWithLimitAsync, so a
+        // double-tap / network-retry collapsing onto an existing row never reaches this
+        // line and never double-notifies. Only a fresh create (this 201 path) fires the
+        // push. Belt-and-braces try/catch so the broadcast never flips the voice 201.
+        try
+        {
+            await _newRequestPush.NotifyNewRequestAsync(
+                created.Id, created.TierId, created.Description, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "New-request push hook (voice) for request {RequestId} failed; create stays 201.",
+                created.Id);
+        }
+
         // Echo the S04 voice contract: {requestId, transcription, transcription_confidence, language}.
         // requestId echoes the client idempotency anchor when supplied, else the new row id.
         var echoedRequestId = string.IsNullOrWhiteSpace(requestId) ? created.Id : requestId;
@@ -268,7 +294,8 @@ public sealed class RequestVoiceController : ControllerBase
             Transcription = transcript,
             TranscriptionConfidence = confidence,
             Language = language,
-            TierId = created.TierId
+            TierId = created.TierId,
+            Description = created.Description
         });
     }
 
@@ -301,7 +328,9 @@ public sealed class RequestVoiceController : ControllerBase
             Transcription = existing.Transcription,
             TranscriptionConfidence = existing.TranscriptionConfidence,
             Language = "ar",
-            TierId = existing.TierId
+            TierId = existing.TierId,
+            // run-24 CHECK A: echo the stored description on the by-id read.
+            Description = existing.Description
         });
     }
 }
@@ -343,4 +372,15 @@ public sealed class VoiceRequestResponse
     public required string Language { get; init; }
     [System.Text.Json.Serialization.JsonPropertyName("tierId")]
     public string? TierId { get; init; }
+
+    /// <summary>
+    /// run-24 CHECK A: the request description, echoed so the customer's own by-id read
+    /// (<c>GET /v1/requests/{id}</c>, which this controller serves at Order 0) returns
+    /// what they typed. The typed-text create sets it from the client's input; the voice
+    /// create seeds it from the transcript — either way the row always carries it, so the
+    /// read previously DROPPED a field that existed. ADDITIVE and nullable; the camelCase
+    /// <c>description</c> name matches the field the client sends on create.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("description")]
+    public string? Description { get; init; }
 }

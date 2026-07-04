@@ -183,7 +183,9 @@ public class SettlementIdempotencyTests
         string deliveryId,
         string jeeberId,
         decimal goodsCost = 100_000m,
-        string? codState = null)
+        string? codState = null,
+        string? state = null,
+        DateTimeOffset? settledAt = null)
     {
         var tier = CommissionTier.Standard;
         var breakdown = CommissionCalculator.Calculate(goodsCost, tier);
@@ -203,9 +205,9 @@ public class SettlementIdempotencyTests
             MinimumFeeApplied = breakdown.MinimumFeeApplied,
             Currency        = "LBP",
             PaymentMethod   = "cash",
-            State           = SettlementState.Settled,
+            State           = state ?? SettlementState.Settled,
             CodState        = codState ?? CodSettlementState.Recorded,
-            SettledAt       = DateTimeOffset.UtcNow,
+            SettledAt       = settledAt ?? DateTimeOffset.UtcNow,
         };
     }
 }

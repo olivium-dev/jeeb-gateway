@@ -1,3 +1,4 @@
+using JeebGateway.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 
@@ -62,8 +63,13 @@ public sealed class GatewayAudienceHandler : AuthorizationHandler<GatewayAudienc
         // (2) The by-design edge path: a trusted X-User-Id header injected by the edge.
         // Mirrors UserIdentity.TryGetUserId so the fallback authorizes exactly the set of
         // callers the gateway already treats as identified — nothing more, nothing less.
+        // SEC-C1: only honour the edge X-User-Id fallback when the request is proven to
+        // come from a trusted edge (or in Development/Testing). Otherwise a raw client could
+        // satisfy the fallback authorization with a spoofed header and reach every endpoint
+        // that had no explicit [Authorize].
         var http = _httpContextAccessor.HttpContext;
         if (http is not null
+            && EdgeIdentityTrust.HeadersTrusted(http)
             && http.Request.Headers.TryGetValue("X-User-Id", out var header)
             && !string.IsNullOrWhiteSpace(header))
         {

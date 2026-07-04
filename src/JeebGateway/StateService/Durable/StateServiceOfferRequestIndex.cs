@@ -54,6 +54,20 @@ public sealed class StateServiceOfferRequestIndex : IOfferRequestIndex
     internal const string KeyPrefix = "offer-routing:";
 
     /// <summary>
+    /// F2 — reverse (jeeber → offer ids) index namespace. One durable KV row per
+    /// (jeeberId, offerId) pair, keyed <c>offer-routing-jeeber:{jeeberId}:{offerId}</c>,
+    /// body = the offerId. Enumerated with <see cref="IIdempotencyStore.FindByPrefixAsync"/>
+    /// on a cold <see cref="ListOfferIdsForJeeber"/> miss so a jeeber's own bids survive a
+    /// bounce / replica move. Distinct from <see cref="KeyPrefix"/> (<c>offer-routing:</c>):
+    /// the char after <c>offer-routing</c> is <c>-</c> here vs <c>:</c> there, so a
+    /// forward GET-by-key and a reverse prefix-scan never cross-match.
+    /// </summary>
+    internal const string ReverseKeyPrefix = "offer-routing-jeeber:";
+
+    private static string ReverseKey(string jeeberId, string offerId)
+        => ReverseKeyPrefix + jeeberId + ":" + offerId;
+
+    /// <summary>
     /// 7-day TTL — comfortably longer than any auction lifetime (a request that is still
     /// pre-acceptance after a week has expired). Bounds the KV growth; an offer resolved
     /// after expiry simply 404s as a phantom, the correct contract for a stale offer.
@@ -92,6 +106,15 @@ public sealed class StateServiceOfferRequestIndex : IOfferRequestIndex
         // never the 201. The state-service client carries its own retry/breaker/timeout.
         var normalizedJeeberId = string.IsNullOrWhiteSpace(jeeberId) ? null : jeeberId;
         _ = MirrorAsync(offerId, requestId, normalizedJeeberId);
+
+        // F2: additionally mirror the reverse (jeeber → offerId) pair so the jeeber's
+        // own bids ("my-offers") survive a bounce / cold replica. Best-effort,
+        // fire-and-forget — a failure only forfeits reverse-lookup bounce-survivability
+        // for THIS pair, never the 201 (identical posture to the forward mirror).
+        if (normalizedJeeberId is not null)
+        {
+            _ = MirrorReverseAsync(normalizedJeeberId, offerId);
+        }
     }
 
     public string? ResolveRequestId(string offerId)
@@ -99,6 +122,42 @@ public sealed class StateServiceOfferRequestIndex : IOfferRequestIndex
 
     public string? ResolveJeeberId(string offerId)
         => Resolve(offerId)?.JeeberId;
+
+    /// <summary>
+    /// F2 — reverse (jeeber → offer ids) lookup. The fast in-memory cache is
+    /// authoritative-within-instance; on a COLD read (post-bounce / cross-replica) it
+    /// is empty, so we additionally enumerate the durable reverse index
+    /// (<see cref="ReverseKeyPrefix"/>) and UNION its offer ids in. A durable-store
+    /// blip degrades to the in-memory result — never a fault — exactly the pre-fix
+    /// "no locally-known offers" contract, only now bounce-survivable.
+    /// </summary>
+    public IReadOnlyList<string> ListOfferIdsForJeeber(string jeeberId)
+    {
+        var local = _local.ListOfferIdsForJeeber(jeeberId);
+        if (string.IsNullOrWhiteSpace(jeeberId))
+        {
+            return local;
+        }
+
+        var durable = ReadDurableReverse(jeeberId);
+        if (durable.Count == 0)
+        {
+            return local;
+        }
+
+        // Union local ∪ durable, preserving order (local first) and de-duping.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var merged = new List<string>(local.Count + durable.Count);
+        foreach (var id in local)
+        {
+            if (seen.Add(id)) merged.Add(id);
+        }
+        foreach (var id in durable)
+        {
+            if (seen.Add(id)) merged.Add(id);
+        }
+        return merged;
+    }
 
     // ------------------------------------------------------------------
     // internals
@@ -152,6 +211,58 @@ public sealed class StateServiceOfferRequestIndex : IOfferRequestIndex
                 "Durable mirror of offer-routing pairing {OfferId} -> {RequestId} failed; "
                 + "the pairing stays in-memory only and will not survive a gateway bounce.",
                 offerId, requestId);
+        }
+    }
+
+    private async Task MirrorReverseAsync(string jeeberId, string offerId)
+    {
+        try
+        {
+            // Body = the offerId verbatim. PutOrGet is insert-once idempotent on the
+            // key, so re-recording the same (jeeber, offer) pair is a no-op mirror.
+            await _durable.PutOrGetAsync(
+                ReverseKey(jeeberId, offerId), statusCode: 200, offerId, TtlSeconds, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Durable mirror of reverse offer-routing pair jeeber {JeeberId} -> {OfferId} failed; "
+                + "the jeeber's my-offers list will not survive a gateway bounce for this offer.",
+                jeeberId, offerId);
+        }
+    }
+
+    private IReadOnlyList<string> ReadDurableReverse(string jeeberId)
+    {
+        try
+        {
+            var rows = _durable
+                .FindByPrefixAsync(ReverseKeyPrefix + jeeberId + ":", CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+
+            if (rows is null || rows.Count == 0)
+            {
+                return Array.Empty<string>();
+            }
+
+            var offerIds = new List<string>(rows.Count);
+            foreach (var row in rows)
+            {
+                if (!string.IsNullOrWhiteSpace(row.ResponseBodyJson))
+                {
+                    offerIds.Add(row.ResponseBodyJson);
+                }
+            }
+            return offerIds;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Durable reverse read of offer-routing pairs for jeeber {JeeberId} failed; "
+                + "returning the in-memory-only my-offers set.",
+                jeeberId);
+            return Array.Empty<string>();
         }
     }
 

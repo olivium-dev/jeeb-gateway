@@ -73,10 +73,14 @@ public static class AggregateHealthResponseWriter
 
                 if (entry.Exception is not null)
                 {
-                    // Never leak stack traces to /health — surface the message
-                    // only. Full exception detail stays in the OTel span
-                    // produced by HealthCheckPublisher (when enabled).
-                    writer.WriteString("error", entry.Exception.Message);
+                    // F3: /health/ready and /health/aggregate are AllowAnonymous, so the
+                    // per-check exception MESSAGE must not be serialized — Npgsql (and the
+                    // URL-group probes) embed the DB/upstream host:port in ex.Message, leaking
+                    // internal topology to unauthenticated callers. Emit only the exception
+                    // TYPE name (e.g. "NpgsqlException") — enough for a red/green dashboard to
+                    // see a fault class without disclosing hosts. The full exception (message +
+                    // stack) stays SERVER-SIDE in the OTel span produced by HealthCheckPublisher.
+                    writer.WriteString("error", entry.Exception.GetType().Name);
                 }
 
                 writer.WriteEndObject();

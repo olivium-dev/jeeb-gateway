@@ -38,9 +38,14 @@ public class SwaggerGatingTests
 {
     // Mirrors JwtOptions defaults (src/JeebGateway/Tokens/JwtOptions.cs) — the
     // JWT bearer handler validates against the "Jwt" config section.
-    private const string SigningKey = "dev-only-signing-key-32-bytes-minimum!!";
+    // SEC-H2: the Production fail-closed boot guard rejects the dev/placeholder signing key, so this
+    // Production-env suite must boot with a real (non-placeholder) key. Assertions are unchanged.
+    private const string SigningKey = "swagger-gating-suite-real-signing-key-32b+min";
     private const string Issuer = "jeeb-gateway";
     private const string Audience = "jeeb-clients";
+    // SEC-C1: raw client X-User-* headers are no longer trusted on the public host; a legitimate
+    // edge presents this shared secret. The edge-admin gate tests drive that secure path.
+    private const string EdgeSecret = "swagger-gating-trusted-edge-secret";
 
     // -----------------------------------------------------------------
     // flag OFF (committed default) -> 404 on every /swagger* path,
@@ -92,15 +97,16 @@ public class SwaggerGatingTests
     [Fact]
     public async Task Swagger_FlagOn_Production_AdminEdgeHeader_Returns200()
     {
-        using var factory = NewFactory(enabled: true);
+        using var factory = NewFactory(enabled: true, edgeSecret: EdgeSecret);
         var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Edge-Auth", EdgeSecret); // SEC-C1: trusted edge
         client.DefaultRequestHeaders.Add("X-User-Id", "admin-edge-1");
         client.DefaultRequestHeaders.Add("X-User-Roles", "admin");
 
         var resp = await client.GetAsync("/swagger/v1/swagger.json");
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK,
-            "the edge-injected X-User-Roles:admin path must also satisfy the admin gate");
+            "a TRUSTED edge (correct shared secret) injecting X-User-Roles:admin must satisfy the admin gate");
     }
 
     // -----------------------------------------------------------------
@@ -126,8 +132,9 @@ public class SwaggerGatingTests
     [Fact]
     public async Task Swagger_FlagOn_Production_NonAdminEdgeHeader_Returns404()
     {
-        using var factory = NewFactory(enabled: true);
+        using var factory = NewFactory(enabled: true, edgeSecret: EdgeSecret);
         var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Edge-Auth", EdgeSecret); // SEC-C1: trusted edge, but non-admin role
         client.DefaultRequestHeaders.Add("X-User-Id", "cust-edge-1");
         client.DefaultRequestHeaders.Add("X-User-Roles", "customer");
 
@@ -157,7 +164,7 @@ public class SwaggerGatingTests
     // helpers
     // -----------------------------------------------------------------
 
-    private static WebApplicationFactory<Program> NewFactory(bool enabled)
+    private static WebApplicationFactory<Program> NewFactory(bool enabled, string? edgeSecret = null)
     {
         return new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
@@ -167,6 +174,13 @@ public class SwaggerGatingTests
                 // host's environment.
                 builder.UseEnvironment("Production");
                 builder.UseSetting("Features:Swagger:Enabled", enabled ? "true" : "false");
+
+                // SEC-C1: when a test drives the trusted-edge identity path, configure the shared
+                // secret the edge must present. Absent it, X-User-* headers are ignored (fail closed).
+                if (edgeSecret is not null)
+                {
+                    builder.UseSetting("Security:EdgeIdentity:SharedSecret", edgeSecret);
+                }
 
                 // Under Production the BffStartupValidator (AC1) would fail boot
                 // when required downstream BaseUrls are absent. This Swagger test

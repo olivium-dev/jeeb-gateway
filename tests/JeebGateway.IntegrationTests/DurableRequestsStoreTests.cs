@@ -324,12 +324,228 @@ public sealed class DurableRequestsStoreTests
         delivery.CreatedRows.Should().ContainSingle();
     }
 
+    // -- requests-durable: durable read / list / mirror -----------------------
+
+    private static DurableRequestsStore BuildWithMirror(
+        out InMemoryRequestsStore inner,
+        out RecordingDeliveryClient delivery,
+        out RecordingMirror mirror)
+    {
+        inner = new InMemoryRequestsStore(Clock);
+        delivery = new RecordingDeliveryClient();
+        mirror = new RecordingMirror();
+        return new DurableRequestsStore(
+            inner, delivery,
+            new RecordingBundleRecorder(SagaBundleRecordOutcome.Recorded),
+            new RecordingConversationProvisioner(null),
+            new RecordingBroadcastEventRecorder(BroadcastEventRecordOutcome.Recorded),
+            Options.Create(new DurableRequestsOptions { Enabled = true }),
+            NullLogger<DurableRequestsStore>.Instance,
+            mirror);
+    }
+
+    [Fact]
+    public async Task Get_reads_through_to_delivery_service_when_inner_misses()
+    {
+        // Cold path (post-bounce): the in-memory mirror lost the row, so GetAsync
+        // resolves it from delivery-service and maps the upstream projection.
+        var store = BuildWithMirror(out _, out var delivery, out _);
+        delivery.UpstreamRow = new DeliveryRequestUpstream
+        {
+            Id = "d-cold-1",
+            ClientId = "client-9",
+            Status = RequestStatus.HeadingOff,
+            Description = "canonical row",
+            TierId = "flash",
+        };
+
+        var row = await store.GetAsync("d-cold-1", CancellationToken.None);
+
+        row.Should().NotBeNull();
+        row!.Id.Should().Be("d-cold-1");
+        row.ClientId.Should().Be("client-9");
+        row.Status.Should().Be(RequestStatus.HeadingOff);
+        row.Description.Should().Be("canonical row");
+        delivery.GetDeliveryCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Get_returns_null_when_inner_misses_and_delivery_unavailable()
+    {
+        // A 404 / transport blip on the read-through degrades to null — exactly
+        // today's unknown-id behaviour (controllers map null → 404). Never a 5xx.
+        var store = BuildWithMirror(out _, out var delivery, out _);
+        // UpstreamRow left null → GetDeliveryAsync throws (simulated fault).
+
+        var row = await store.GetAsync("does-not-exist", CancellationToken.None);
+
+        row.Should().BeNull();
+        delivery.GetDeliveryCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Get_prefers_inner_and_never_reads_through_when_warm()
+    {
+        // Warm read: the row is in the in-memory mirror, so GetAsync returns it
+        // verbatim and NEVER touches delivery-service (strict superset — identical
+        // to today, full gateway field set intact).
+        var store = BuildWithMirror(out _, out var delivery, out _);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        var row = await store.GetAsync(created.Id, CancellationToken.None);
+
+        row.Should().NotBeNull();
+        row!.Id.Should().Be(created.Id);
+        delivery.GetDeliveryCalls.Should().Be(0, "a warm read must not round-trip to delivery-service");
+    }
+
+    [Fact]
+    public async Task Create_mirrors_the_row_into_the_owner_list_mirror()
+    {
+        // The durable owner-list is backed by the gateway Postgres mirror; the
+        // create path must upsert each new request into it so the list has rows.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        mirror.Upserted.Should().ContainSingle();
+        mirror.Upserted[0].Id.Should().Be(created.Id);
+        mirror.Upserted[0].ClientId.Should().Be("client-1");
+    }
+
+    [Fact]
+    public async Task List_merges_durable_mirror_rows_with_inner_preferring_inner()
+    {
+        // The owner-list merges the in-memory rows OVER the durable mirror: the
+        // in-memory row wins on an id collision (live status), while the mirror
+        // contributes rows the in-memory model lost on a bounce. Oldest-first.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        // Stale durable snapshot of the SAME row (cancelled) + an older cold row
+        // the in-memory model no longer holds.
+        mirror.Rows.Add(new DeliveryRequest
+        {
+            Id = created.Id,
+            ClientId = "client-1",
+            Status = RequestStatus.Cancelled,
+            Description = "stale mirror snapshot",
+            CreatedAt = created.CreatedAt,
+        });
+        mirror.Rows.Add(new DeliveryRequest
+        {
+            Id = "cold-row",
+            ClientId = "client-1",
+            Status = RequestStatus.Delivered,
+            Description = "survived a bounce",
+            CreatedAt = created.CreatedAt.AddHours(-1),
+        });
+
+        var list = await store.ListForClientAsync("client-1", CancellationToken.None);
+
+        list.Should().HaveCount(2);
+        // Inner won the id collision — the live 'pending' status, not the mirror's stale 'cancelled'.
+        list.Single(r => r.Id == created.Id).Status.Should().Be(RequestStatus.Pending);
+        // The cold row (mirror-only) is surfaced.
+        list.Should().Contain(r => r.Id == "cold-row" && r.Status == RequestStatus.Delivered);
+        // Oldest-first: the -1h cold row precedes the just-created row.
+        list[0].Id.Should().Be("cold-row");
+    }
+
+    [Fact]
+    public async Task Cancel_mirrors_committed_status_into_the_mirror()
+    {
+        // A committed cancel reflects the resulting status onto the durable mirror
+        // so a post-bounce owner-list shows the cancel.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        var allowedFrom = new HashSet<string>(StringComparer.Ordinal) { RequestStatus.Pending };
+        var result = await store.TryCancelAsync(
+            created.Id, allowedFrom, RequestStatus.Cancelled,
+            cancelledBy: "client", reason: "changed my mind", at: Clock.GetUtcNow(), CancellationToken.None);
+
+        result.Should().NotBeNull();
+        result!.Outcome.Should().Be(CancellationStoreOutcome.Committed);
+        mirror.Cancels.Should().ContainSingle();
+        mirror.Cancels[0].Id.Should().Be(created.Id);
+        mirror.Cancels[0].GwStatus.Should().Be(RequestStatus.Cancelled);
+    }
+
+    [Fact]
+    public async Task SetStatus_mirrors_the_new_status_into_the_owner_list_mirror()
+    {
+        // F4: an owner-list-visible status mutation must be reflected onto the durable
+        // mirror so a post-bounce list shows the live status, not the create-time
+        // 'pending'. Previously SetStatusAsync delegated to the in-memory store only.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        var ok = await store.SetStatusAsync(created.Id, RequestStatus.HeadingOff, CancellationToken.None);
+
+        ok.Should().BeTrue();
+        mirror.Updates.Should().ContainSingle();
+        mirror.Updates[0].Id.Should().Be(created.Id);
+        mirror.Updates[0].GwStatus.Should().Be(RequestStatus.HeadingOff);
+        mirror.Updates[0].GwJeeberId.Should().BeNull("a status-only mutation leaves the jeeber column untouched");
+    }
+
+    [Fact]
+    public async Task SetJeeberId_mirrors_the_assignment_into_the_owner_list_mirror()
+    {
+        // F4: assigning the jeeber must reflect onto the durable owner-list.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        var ok = await store.SetJeeberIdAsync(created.Id, "jeeber-77", CancellationToken.None);
+
+        ok.Should().BeTrue();
+        mirror.Updates.Should().ContainSingle();
+        mirror.Updates[0].GwJeeberId.Should().Be("jeeber-77");
+        mirror.Updates[0].GwStatus.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task SetAcceptedFee_mirrors_the_fee_into_the_owner_list_mirror()
+    {
+        // F4: the accepted fee must reflect onto the durable owner-list.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        var ok = await store.TrySetAcceptedFeeAsync(created.Id, 42.5m, CancellationToken.None);
+
+        ok.Should().BeTrue();
+        mirror.Updates.Should().ContainSingle();
+        mirror.Updates[0].GwAcceptedFee.Should().Be(42.5m);
+    }
+
+    [Fact]
+    public async Task SetStatus_on_unknown_id_does_not_mirror()
+    {
+        // A failed (no-op) mutation must NOT touch the mirror — nothing changed.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+
+        var ok = await store.SetStatusAsync("never-created", RequestStatus.HeadingOff, CancellationToken.None);
+
+        ok.Should().BeFalse();
+        mirror.Updates.Should().BeEmpty("a mutation that changed nothing must not write to the mirror");
+    }
+
     // -- fakes ---------------------------------------------------------------
 
     private sealed class RecordingDeliveryClient : NotImplementedDeliveryClient
     {
         public List<CreateDeliveryRowUpstream> CreatedRows { get; } = new();
         public string? EchoMismatchedId { get; init; }
+
+        /// <summary>requests-durable: canned read-through row. When set (and the id
+        /// matches) <see cref="GetDeliveryAsync"/> returns it; otherwise it throws
+        /// to simulate a 404 / transport fault so the decorator degrades to null.</summary>
+        public DeliveryRequestUpstream? UpstreamRow { get; set; }
+
+        /// <summary>Counts read-through calls so a warm read can prove it never
+        /// touched delivery-service.</summary>
+        public int GetDeliveryCalls { get; private set; }
 
         public override Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct)
         {
@@ -340,6 +556,59 @@ public sealed class DurableRequestsStoreTests
                 TenantId = body.TenantId,
                 Status = "Ordered",
             });
+        }
+
+        public override Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct)
+        {
+            GetDeliveryCalls++;
+            if (UpstreamRow is not null && string.Equals(UpstreamRow.Id, deliveryId, StringComparison.Ordinal))
+            {
+                return Task.FromResult(UpstreamRow);
+            }
+            throw new InvalidOperationException("simulated delivery-service 404 / transport fault");
+        }
+    }
+
+    /// <summary>
+    /// requests-durable: in-memory <see cref="IDurableRequestsMirror"/> double. Tracks
+    /// create-upserts + cancel-mirrors and returns whatever <see cref="Rows"/> is
+    /// seeded with for the owner-list (so the merge-preferring-inner can be exercised).
+    /// </summary>
+    private sealed class RecordingMirror : IDurableRequestsMirror
+    {
+        public List<DeliveryRequest> Upserted { get; } = new();
+        public List<(string Id, string GwStatus)> Cancels { get; } = new();
+        public List<DeliveryRequest> Rows { get; } = new();
+        public List<(string Id, string? GwStatus, string? GwJeeberId, decimal? GwAcceptedFee)> Updates { get; } = new();
+
+        public Task UpsertOnCreateAsync(DeliveryRequest row, CancellationToken ct)
+        {
+            Upserted.Add(row);
+            return Task.CompletedTask;
+        }
+
+        public Task UpdateLifecycleAsync(
+            string requestId, string? gwStatus, string? gwJeeberId, decimal? gwAcceptedFee,
+            DateTimeOffset at, CancellationToken ct)
+        {
+            Updates.Add((requestId, gwStatus, gwJeeberId, gwAcceptedFee));
+            return Task.CompletedTask;
+        }
+
+        public Task MarkCancelledAsync(
+            string requestId, string gwStatus, string? cancelledBy,
+            string? cancellationReason, DateTimeOffset at, CancellationToken ct)
+        {
+            Cancels.Add((requestId, gwStatus));
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct)
+        {
+            IReadOnlyList<DeliveryRequest> rows = Rows
+                .Where(r => string.Equals(r.ClientId, clientId, StringComparison.Ordinal))
+                .ToList();
+            return Task.FromResult(rows);
         }
     }
 
@@ -407,7 +676,7 @@ public sealed class DurableRequestsStoreTests
         public Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct) => throw new NotImplementedException();
         public Task<ShipmentsListDto> ListShipmentsAsync(string? orderId, string? stage, int? limit, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct) => throw new NotImplementedException();
-        public Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct) => throw new NotImplementedException();
+        public virtual Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryRequestUpstream> StatusTransitionAsync(string deliveryId, string status, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(string deliveryId, string to, string partySource, string actorId, string actorRole, CancellationToken ct) => throw new NotImplementedException();

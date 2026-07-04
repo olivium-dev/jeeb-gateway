@@ -1,6 +1,6 @@
-using System.Security.Claims;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.NotificationPreferences;
+using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
@@ -43,14 +43,22 @@ public class NotificationPreferencesController : ControllerBase
         if (!TryGetUserId(out var userId, out var problem)) return problem;
 
         if (body is null)
-            return BadRequest(new ProblemDetails { Title = "Request body is required.", Status = StatusCodes.Status400BadRequest });
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Request body is required.",
+                Status = StatusCodes.Status400BadRequest,
+                // Contract-audit finding 8: give clients a stable machine-readable code to
+                // branch on, matching the rest of the errors/* family.
+                Type = "https://jeeb.dev/errors/request-body-required"
+            });
 
         if (body.Otp is false || body.SystemCritical is false || body.Kyc is false || body.Disputes is false)
             return BadRequest(new ProblemDetails
             {
                 Title = "Transactional channels cannot be disabled.",
                 Detail = "Remove 'otp', 'systemCritical', 'kyc', and 'disputes' from the request body, or set them to true.",
-                Status = StatusCodes.Status400BadRequest
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/transactional-channel-required"
             });
 
         var patch = new NotificationPreferencesPatch
@@ -67,26 +75,12 @@ public class NotificationPreferencesController : ControllerBase
         return Ok(ToResponse(updated));
     }
 
+    // SEC-C1 (Leg-11): identity derives from the validated JWT principal; the raw
+    // X-User-Id header is honoured ONLY when EdgeIdentityTrust permits it (Dev/Testing or
+    // a secret-gated trusted edge). Delegating to the shared, gated UserIdentity closes the
+    // spoof/IDOR — a raw client can no longer read/write another user's notification prefs.
     private bool TryGetUserId(out string userId, out IActionResult problem)
-    {
-        var fromClaim = User?.FindFirstValue(ClaimTypes.NameIdentifier)
-                        ?? User?.FindFirstValue("sub");
-        if (!string.IsNullOrWhiteSpace(fromClaim))
-        {
-            userId = fromClaim;
-            problem = null!;
-            return true;
-        }
-        if (Request.Headers.TryGetValue("X-User-Id", out var header) && !string.IsNullOrWhiteSpace(header))
-        {
-            userId = header.ToString();
-            problem = null!;
-            return true;
-        }
-        userId = string.Empty;
-        problem = Unauthorized();
-        return false;
-    }
+        => UserIdentity.TryGetUserId(HttpContext, out userId, out problem);
 
     private static NotificationPreferencesResponse ToResponse(UserNotificationPreferences prefs) => new()
     {

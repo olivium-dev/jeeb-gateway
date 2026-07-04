@@ -124,6 +124,16 @@ public sealed class UsersMeController : ControllerBase
             {
                 var profile = await _umProfile.ProfileAsync(userId);
                 display = new ProfileDisplay(profile?.Username, profile?.Email, profile?.ProfilePic);
+
+                // jeeberName gap fix: user-management's username is the ONLY display
+                // name real (OTP-minted) accounts carry anywhere in the flow, and the
+                // deliveries jeeberName enrichment reads the gateway's LOCAL users
+                // projection — which the OTP mint fills with Name = "". Hydrate the
+                // projection from this successful UM read so a jeeber who has a UM
+                // username gets a resolvable display name after their first /me read
+                // (the app calls this at login), without any extra UM round-trip.
+                // Best-effort: a projection write fault never degrades the read.
+                await HydrateLocalDisplayNameAsync(userId, display, ct);
             }
             catch (UmApiException ex)
             {
@@ -333,6 +343,31 @@ public sealed class UsersMeController : ControllerBase
 
         // 3) Last resort — the roles claim on the validated session token.
         return UserIdentity.GetRoles(HttpContext);
+    }
+
+    /// <summary>
+    /// jeeberName gap fix — best-effort mirror of the UM display name into the local
+    /// users projection (the store the deliveries jeeberName enrichment reads). Only
+    /// fills a MISSING local name; a name already learned locally (e.g. via the
+    /// profile-update mirror) is never overwritten by this passive read path. Never
+    /// throws into the /me read.
+    /// </summary>
+    private async Task HydrateLocalDisplayNameAsync(string userId, ProfileDisplay display, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(display.Name)) return;
+
+        try
+        {
+            var local = await _users.GetByIdAsync(userId, ct);
+            if (!string.IsNullOrWhiteSpace(local?.Name)) return;
+
+            await _users.UpdateProfileAsync(userId, new ProfilePatch { Name = display.Name.Trim() }, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "v1/users/me local display-name hydration failed for {UserId}; read is unaffected.", userId);
+        }
     }
 
     private static string ProfileCacheKey(string userId) => $"v1:users:me:profile:{userId}";

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 
@@ -53,11 +54,22 @@ public sealed class UpstreamExceptionHandler : IExceptionHandler
                 "https://jeeb.dev/errors/internal-error")
         };
 
+        // GW12-OBS-4 (Leg-12): stamp the single most important incident log line with
+        // the correlation id (the value a client/support ticket quotes) and the OTel
+        // trace id (the key that stitches this line to its distributed trace). Both are
+        // resolved defensively so a missing id never disturbs the exception mapping.
+        // Belt-and-suspenders alongside GW12-OBS-1's log-scope: an on-call engineer can
+        // land on THIS line and immediately have both grep keys inline.
+        var correlationId = httpContext.Items.TryGetValue("CorrelationId", out var cid) && cid is string c
+            ? c
+            : "(none)";
+        var traceId = Activity.Current?.TraceId.ToString() ?? "(none)";
+
         // Log with the real exception so ops keeps full fidelity; the wire
         // response never leaks exception text.
         _logger.LogError(exception,
-            "Unhandled exception on {Method} {Path} → {Status}",
-            httpContext.Request.Method, httpContext.Request.Path, status);
+            "Unhandled exception on {Method} {Path} → {Status} (CorrelationId={CorrelationId} TraceId={TraceId})",
+            httpContext.Request.Method, httpContext.Request.Path, status, correlationId, traceId);
 
         httpContext.Response.StatusCode = status;
 

@@ -231,6 +231,21 @@ public class DeliveryRequest
     public DateTimeOffset? AcceptedAt { get; set; }
 
     /// <summary>
+    /// fix/client-visibility (run-22 P1): SNAPSHOT of the accepted offer's fee,
+    /// stamped at accept time by the accept orchestration (both the in-memory and
+    /// the upstream offer-service paths). The delivery read enrichment
+    /// (<c>GET /deliveries/{id}</c> → <c>amount</c>) previously RE-RESOLVED the fee
+    /// from the offers store on every read; that lookup is owner-scoped on the
+    /// upstream wire (offer-service 403s any non-owner, so the assigned JEEBER
+    /// never saw the agreed amount) and can stop matching once the offer's
+    /// upstream state collapses to a terminal token after completion. The receipt
+    /// is read AFTER completion by definition, so the agreed fee must live on the
+    /// delivery row itself. Null until an offer is accepted; never cleared by a
+    /// status transition.
+    /// </summary>
+    public decimal? AcceptedFee { get; set; }
+
+    /// <summary>
     /// JEB-50 (S05 H7 / H9b): id of the broadcasting conversation auto-created
     /// for this order. Set ONCE by the gateway's stateless create orchestration
     /// (<c>DurableRequestsStore</c>) immediately after the delivery row is seeded
@@ -481,6 +496,47 @@ public class DeliveryRequestDto
     /// (T-backend-015).
     /// </summary>
     public string? OtpEscalationId { get; init; }
+
+    /// <summary>
+    /// PR-G3 (S09): gross fee (in the offer's currency units, LBP) of the ACCEPTED
+    /// offer for this delivery — the amount the client agreed to pay the jeeber.
+    /// Resolved on the single-read (<c>GET /v1/deliveries/{id}</c>) from the
+    /// pending-offers store's accepted offer. ADDITIVE and nullable: it is
+    /// omitted from the JSON entirely when unknown (no accepted offer resolvable),
+    /// so existing consumers are unaffected. Settable so the read handler can
+    /// enrich the projected DTO after building it.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public decimal? Amount { get; set; }
+
+    /// <summary>
+    /// PR-G3 (S09): display name of the assigned jeeber, when a cheap in-process
+    /// resolution seam exists. ADDITIVE and nullable — omitted from the JSON when
+    /// unresolved (the gateway does not add an upstream user-management round-trip to
+    /// the delivery read just to populate it). Settable so the read handler can enrich
+    /// the projected DTO after building it.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? JeeberName { get; set; }
+
+    /// <summary>
+    /// Gap G4 (run-24 CHECK C): the 4-digit delivery handover code the CUSTOMER
+    /// reads IN-APP. Populated ONLY on the offer-accept response
+    /// (<c>POST /v1/offers/{offerId}/accept</c>) and returned ONLY to the accepting
+    /// owner — the gateway mints it at accept (owner-scoped by construction), and
+    /// the mobile client reads it as <c>handoverCode</c> (camelCase; it also accepts
+    /// the <c>handover_code</c> snake alias) and persists it store-first. ADDITIVE
+    /// and nullable: omitted from the JSON entirely (<see cref="System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull"/>)
+    /// on every OTHER surface that projects this DTO, so those bodies — and the
+    /// jeeber's reads — are byte-for-byte unchanged and never carry the code.
+    /// Settable so the accept handler enriches the projected DTO after building it.
+    /// NEVER logged.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? HandoverCode { get; set; }
 }
 
 /// <summary>

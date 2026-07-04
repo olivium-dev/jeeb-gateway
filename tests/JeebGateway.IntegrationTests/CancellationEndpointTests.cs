@@ -264,6 +264,63 @@ public class CancellationEndpointTests
         lifetime.Should().Be(4, "every Jeeber cancellation counts toward the lifetime rate");
     }
 
+    // -------- PR-G2: canonical-vocab membership ------------------------
+    //
+    // A row persisted under the CANONICAL SM-1 vocabulary (Picked/InTransit/AtDoor)
+    // must be cancellable via the same phase rules as the legacy vocabulary. Before
+    // PR-G2 the sets string-matched only the legacy tokens {accepted, picked_up,
+    // heading_off}, so a canonical 'Picked' row fell through to NotCancellable → 409.
+
+    [Fact]
+    public async Task Jeeber_Cancel_On_Canonical_Picked_Succeeds_Where_Old_Code_409d()
+    {
+        using var factory = NewFactory(out _);
+        // Seed a jeeber-bound row and stamp the CANONICAL 'Picked' token (dual-vocab).
+        var seed = await SeedRow(factory, CanonicalDeliveryStatus.Picked);
+
+        var resp = await JeeberClient(factory, seed.JeeberId!)
+            .PostAsJsonAsync($"/deliveries/{seed.Id}/cancel", new { reason = "customer no-show" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "the jeeber-cancellable set is canonical {Ordered,Picked,InTransit,AtDoor}, so a Picked row cancels (old code 409'd)");
+        var dto = await resp.Content.ReadFromJsonAsync<CancelDeliveryResponse>();
+        dto!.Status.Should().Be(RequestStatus.Cancelled);
+        dto.PreviousStatus.Should().Be(CanonicalDeliveryStatus.Picked);
+    }
+
+    [Fact]
+    public async Task Client_Cancel_On_Canonical_Picked_Goes_To_Admin_Queue_Not_409()
+    {
+        using var factory = NewFactory(out _);
+        var seed = await SeedRow(factory, CanonicalDeliveryStatus.Picked);
+
+        var resp = await ClientFor(factory, seed.ClientId)
+            .PostAsJsonAsync($"/deliveries/{seed.Id}/cancel", new { reason = "changed my mind" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "canonical Picked is client post-pickup, so the cancel parks on the admin queue instead of 409");
+        var dto = await resp.Content.ReadFromJsonAsync<CancelDeliveryResponse>();
+        dto!.Status.Should().Be(RequestStatus.CancellationRequested);
+        dto.PendingApproval.Should().BeTrue();
+        dto.PreviousStatus.Should().Be(CanonicalDeliveryStatus.Picked);
+    }
+
+    [Fact]
+    public async Task Jeeber_Cancel_On_Canonical_AtDoor_Succeeds()
+    {
+        // The legacy JeeberCancellable set was missing at_door entirely; the canonical
+        // set includes AtDoor, so a jeeber at the door can now cancel.
+        using var factory = NewFactory(out _);
+        var seed = await SeedRow(factory, CanonicalDeliveryStatus.AtDoor);
+
+        var resp = await JeeberClient(factory, seed.JeeberId!)
+            .PostAsJsonAsync($"/deliveries/{seed.Id}/cancel", new { reason = "package damaged at door" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var dto = await resp.Content.ReadFromJsonAsync<CancelDeliveryResponse>();
+        dto!.Status.Should().Be(RequestStatus.Cancelled);
+    }
+
     // -------- Auth + edge cases ----------------------------------------
 
     [Fact]

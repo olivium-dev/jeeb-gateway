@@ -29,7 +29,9 @@ public sealed class StateServiceOfferRequestIndexTests
             new InMemoryOfferRequestIndex(), durable, NullLogger<StateServiceOfferRequestIndex>.Instance);
 
         index.Record("off-1", "req-1", "jeeber-1");
-        await durable.WaitForWritesAsync(1);
+        // F2: a Record with a jeeberId now mirrors a FORWARD (offer→request) and a
+        // REVERSE (jeeber→offer) KV row — 2 writes.
+        await durable.WaitForWritesAsync(2);
 
         durable.Get("offer-routing:off-1").Should().NotBeNull("the pairing is mirrored under the namespaced key");
     }
@@ -42,7 +44,8 @@ public sealed class StateServiceOfferRequestIndexTests
         var instanceA = new StateServiceOfferRequestIndex(
             new InMemoryOfferRequestIndex(), durable, NullLogger<StateServiceOfferRequestIndex>.Instance);
         instanceA.Record("off-2", "req-2", "jeeber-2");
-        await durable.WaitForWritesAsync(1);
+        // F2: forward + reverse mirror = 2 writes.
+        await durable.WaitForWritesAsync(2);
 
         // Instance B is COLD (fresh in-memory cache — a bounce / different replica) but
         // shares the SAME durable store. It must resolve the pairing from the durable mirror.
@@ -80,6 +83,62 @@ public sealed class StateServiceOfferRequestIndexTests
         // A durable read fault on a local miss degrades to null (phantom-offer 404), never throws.
         index.Invoking(i => i.ResolveRequestId("off-cold-miss")).Should().NotThrow();
         index.ResolveRequestId("off-cold-miss").Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ListOfferIdsForJeeber_On_ColdInstance_ReHydrates_From_DurableReverseIndex()
+    {
+        // F2: the jeeber → offerIds reverse index must survive a bounce. Instance A
+        // records two offers for jeeber-X and one for jeeber-Y (each Record mirrors a
+        // forward AND a reverse KV row = 2 writes), so 3 records => 6 durable writes.
+        var durable = new FakeIdempotencyStore();
+        var instanceA = new StateServiceOfferRequestIndex(
+            new InMemoryOfferRequestIndex(), durable, NullLogger<StateServiceOfferRequestIndex>.Instance);
+        instanceA.Record("off-a1", "req-a1", "jeeber-X");
+        instanceA.Record("off-a2", "req-a2", "jeeber-X");
+        instanceA.Record("off-b1", "req-b1", "jeeber-Y");
+        await durable.WaitForWritesAsync(6);
+
+        // Instance B is COLD (empty local cache — a bounce / different replica) but
+        // shares the SAME durable store. Its my-offers list must be recovered durably.
+        var instanceB = new StateServiceOfferRequestIndex(
+            new InMemoryOfferRequestIndex(), durable, NullLogger<StateServiceOfferRequestIndex>.Instance);
+
+        instanceB.ListOfferIdsForJeeber("jeeber-X")
+            .Should().BeEquivalentTo(new[] { "off-a1", "off-a2" },
+                "the cold replica recovers the jeeber's own offers from the durable reverse index");
+        instanceB.ListOfferIdsForJeeber("jeeber-Y")
+            .Should().BeEquivalentTo(new[] { "off-b1" });
+        instanceB.ListOfferIdsForJeeber("jeeber-none")
+            .Should().BeEmpty("a jeeber that never bid has no durable reverse rows");
+    }
+
+    [Fact]
+    public async Task ListOfferIdsForJeeber_Unions_Local_And_Durable_WithoutDuplicates()
+    {
+        // A warm instance that also has the durable rows must not double-count an offer
+        // present in both its local cache and the durable reverse index.
+        var durable = new FakeIdempotencyStore();
+        var index = new StateServiceOfferRequestIndex(
+            new InMemoryOfferRequestIndex(), durable, NullLogger<StateServiceOfferRequestIndex>.Instance);
+        index.Record("off-dup", "req-dup", "jeeber-Z");
+        await durable.WaitForWritesAsync(2);
+
+        index.ListOfferIdsForJeeber("jeeber-Z")
+            .Should().ContainSingle().Which.Should().Be("off-dup");
+    }
+
+    [Fact]
+    public void ListOfferIdsForJeeber_When_DurableStore_Faults_DegradesTo_LocalCache_NeverThrows()
+    {
+        var faulting = new FaultingIdempotencyStore();
+        var index = new StateServiceOfferRequestIndex(
+            new InMemoryOfferRequestIndex(), faulting, NullLogger<StateServiceOfferRequestIndex>.Instance);
+
+        // A mirror fault on Record must not throw, and the local reverse lookup still works.
+        index.Invoking(i => i.Record("off-f1", "req-f1", "jeeber-F")).Should().NotThrow();
+        index.Invoking(i => i.ListOfferIdsForJeeber("jeeber-F")).Should().NotThrow();
+        index.ListOfferIdsForJeeber("jeeber-F").Should().BeEquivalentTo(new[] { "off-f1" });
     }
 
     // -----------------------------------------------------------------

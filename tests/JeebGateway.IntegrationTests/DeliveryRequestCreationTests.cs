@@ -2,9 +2,12 @@ using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Requests;
+using JeebGateway.Services;
+using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -272,34 +275,98 @@ public class DeliveryRequestCreationTests : IClassFixture<WebApplicationFactory<
 }
 
 /// <summary>
-/// Pure unit tests for the tier-catalog store — no host required.
-/// Covers the seeded codes from db/migrations/0011 and the
-/// case-sensitivity contract (tier codes are stable lowercase).
+/// Pure unit tests for the create-time tier-existence probe — no host required.
+/// feat/tier-unify-names: the probe is now catalog-backed
+/// (<see cref="CatalogBackedTiersStore"/> over <see cref="JeebGateway.Tiers.InMemoryTiersStore"/>),
+/// so it accepts BOTH the catalog ids (urgent/same-day/…) and the mapped
+/// legacy 0011 codes (flash/express/standard/on_the_way/eco). Lookups are
+/// case-insensitive, matching the catalog store's id semantics.
 /// </summary>
 public class InMemoryTiersStoreTests
 {
+    private static CatalogBackedTiersStore NewStore()
+        => StoreOver(new JeebGateway.Tiers.InMemoryTiersStore());
+
+    // feat/fix-tier-validate-upstream: the probe now takes IDeliveryServiceClient +
+    // IOptionsMonitor<UpstreamFeatureFlags>. These unit tests pin the Delivery-upstream-OFF
+    // behaviour (local catalog + LegacyTierCodes), so the delivery client is wired to a
+    // handler that THROWS if hit — enforcing the invariant that the OFF path makes no
+    // upstream call.
+    private static CatalogBackedTiersStore StoreOver(JeebGateway.Tiers.ITiersStore catalog)
+        => new(
+            catalog,
+            new DeliveryServiceClient(
+                new HttpClient(new UnusedDeliveryHandler()) { BaseAddress = new Uri("http://unused.test/") }),
+            new StaticFlagsMonitor(new UpstreamFeatureFlags { Delivery = false }));
+
     [Theory]
+    // Legacy 0011 codes — accepted via the LegacyTierCodes alias table.
     [InlineData("flash")]
     [InlineData("express")]
     [InlineData("standard")]
     [InlineData("on_the_way")]
     [InlineData("eco")]
+    // Catalog ids — the single source of truth, accepted directly.
+    [InlineData("urgent")]
+    [InlineData("same-day")]
+    [InlineData("scheduled")]
+    [InlineData("economy")]
+    [InlineData("on-the-way")]
+    // Case-insensitive, matching the catalog store's id semantics.
+    [InlineData("FLASH")]
+    [InlineData("Urgent")]
     public async Task ExistsAsync_Returns_True_For_Seeded_Codes(string code)
     {
-        var store = new InMemoryTiersStore();
+        var store = NewStore();
         (await store.ExistsAsync(code, CancellationToken.None)).Should().BeTrue();
     }
 
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
-    [InlineData("FLASH")]                  // case-sensitive
     [InlineData("platinum_super_fast")]
     [InlineData("nope")]
     public async Task ExistsAsync_Returns_False_For_Unknown_Or_Blank(string code)
     {
-        var store = new InMemoryTiersStore();
+        var store = NewStore();
         (await store.ExistsAsync(code, CancellationToken.None)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Deleting_A_Catalog_Row_Retires_Its_Legacy_Aliases_Too()
+    {
+        // Single-source-of-truth proof: retiring "urgent" from the catalog must
+        // also retire the legacy codes that alias to it (flash, express).
+        var catalog = new JeebGateway.Tiers.InMemoryTiersStore();
+        var store = StoreOver(catalog);
+
+        (await store.ExistsAsync("flash", CancellationToken.None)).Should().BeTrue();
+
+        (await catalog.DeleteAsync("urgent", CancellationToken.None)).Should().BeTrue();
+
+        (await store.ExistsAsync("urgent", CancellationToken.None)).Should().BeFalse();
+        (await store.ExistsAsync("flash", CancellationToken.None)).Should().BeFalse();
+        (await store.ExistsAsync("express", CancellationToken.None)).Should().BeFalse();
+        // Tiers aliased to OTHER catalog rows are untouched.
+        (await store.ExistsAsync("standard", CancellationToken.None)).Should().BeTrue();
+    }
+
+    // Fails loudly if the OFF path ever dials the delivery upstream.
+    private sealed class UnusedDeliveryHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+            => throw new InvalidOperationException(
+                "Delivery upstream must not be called when FeatureFlags:UseUpstream:Delivery is off.");
+    }
+
+    // Same hand-rolled shape as GeoServiceLocationStoreTests.StaticOptionsMonitor.
+    private sealed class StaticFlagsMonitor : IOptionsMonitor<UpstreamFeatureFlags>
+    {
+        public StaticFlagsMonitor(UpstreamFeatureFlags value) => CurrentValue = value;
+        public UpstreamFeatureFlags CurrentValue { get; }
+        public UpstreamFeatureFlags Get(string? name) => CurrentValue;
+        public IDisposable? OnChange(Action<UpstreamFeatureFlags, string?> listener) => null;
     }
 }
 

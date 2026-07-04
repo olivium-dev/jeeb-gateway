@@ -86,7 +86,12 @@ public sealed class InMemorySettlementStore : ISettlementStore
                 return Task.FromResult<Settlement?>(null);
             }
 
-            if (row.State != SettlementState.ReceiptGenerated)
+            // M1 (P0 money-loss) — mirrors PostgresSettlementStore.MarkReceiptGeneratedAsync:
+            // ONLY a truly-settled row may advance to receipt_generated (settled → receipt_generated).
+            // A 'pending_settlement' handover placeholder must NOT be flippable to receipt_generated
+            // by a pre-settle receipt read — otherwise it slips the batch's state guard and underpays
+            // the Jeeber. Repeat reads on an already-receipt_generated row are idempotent no-ops.
+            if (row.State == SettlementState.Settled)
             {
                 row.State = SettlementState.ReceiptGenerated;
                 row.ReceiptGeneratedAt = at;
@@ -121,8 +126,13 @@ public sealed class InMemorySettlementStore : ISettlementStore
     public Task<IReadOnlyList<Settlement>> ListRecordedInWindowAsync(
         DateTimeOffset windowStart, DateTimeOffset windowEnd, int limit, CancellationToken ct)
     {
+        // M1 (P0): only TRULY-settled rows enter the weekly payout batch — POSITIVELY require
+        // state IN (settled, receipt_generated). Mirrors PostgresSettlementStore.ListRecordedInWindowAsync.
+        // A 'pending_settlement' handover placeholder can never satisfy this predicate, and (with the
+        // MarkReceiptGeneratedAsync guard above) can never advance to receipt_generated pre-settle.
         var rows = _byId.Values
             .Where(s => s.CodState == CodSettlementState.Recorded
+                     && (s.State == SettlementState.Settled || s.State == SettlementState.ReceiptGenerated)
                      && s.SettledAt >= windowStart
                      && s.SettledAt < windowEnd)
             .Take(limit)

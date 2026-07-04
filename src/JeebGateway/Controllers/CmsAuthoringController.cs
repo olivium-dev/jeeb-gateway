@@ -1,5 +1,7 @@
+using System.Security.Claims;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Cms;
+using JeebGateway.Security;
 using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
@@ -157,7 +159,11 @@ public sealed class CmsAuthoringController : ControllerBase
         }
 
         // TOTP valid → surface lookup now drives 404.
-        var userId = Request.Headers[UserIdHeaderName].ToString();
+        // SEC-C1 (Leg-11): the publish actor / audit id must come from the VALIDATED principal,
+        // not the raw X-User-Id header. A raw client could otherwise forge the publish actor after
+        // clearing the CMS capability/TOTP gates. The header is honoured ONLY when EdgeIdentityTrust
+        // permits it (Dev/Testing or a secret-gated trusted edge); otherwise the actor is "unknown".
+        var userId = ResolvePublishActor();
         var version = _store.Publish(
             surfaceId,
             string.IsNullOrWhiteSpace(userId) ? "unknown" : userId,
@@ -231,6 +237,34 @@ public sealed class CmsAuthoringController : ControllerBase
         Ok(new CmsStepUpDevCodeResponse(CmsStepUpValidator.DevStepUpCode, ExpiresInSeconds: 900));
 
     // ---- helpers ------------------------------------------------------------
+
+    /// <summary>
+    /// SEC-C1 — resolve the publish actor / audit id from the validated JWT principal, mirroring
+    /// <see cref="JeebGateway.Users.UserIdentity"/>'s claim precedence (sid → NameIdentifier → sub).
+    /// The raw <c>X-User-Id</c> header is only honoured when <see cref="EdgeIdentityTrust"/> permits
+    /// it, so a raw public caller cannot forge the publish actor after passing the capability/TOTP
+    /// gates. Returns <c>null</c> when no trustworthy identity is available (caller stamps "unknown").
+    /// </summary>
+    private string? ResolvePublishActor()
+    {
+        var fromClaim = User?.FindFirstValue(ClaimTypes.Sid)
+                        ?? User?.FindFirstValue("sid")
+                        ?? User?.FindFirstValue(ClaimTypes.NameIdentifier)
+                        ?? User?.FindFirstValue("sub");
+        if (!string.IsNullOrWhiteSpace(fromClaim))
+        {
+            return fromClaim;
+        }
+
+        if (EdgeIdentityTrust.HeadersTrusted(HttpContext)
+            && Request.Headers.TryGetValue(UserIdHeaderName, out var header)
+            && !string.IsNullOrWhiteSpace(header))
+        {
+            return header.ToString();
+        }
+
+        return null;
+    }
 
     private bool IsCapabilityDenied() =>
         string.Equals(

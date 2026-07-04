@@ -52,6 +52,39 @@ public interface IRequestsStore
     Task<bool> SetStatusAsync(string requestId, string status, CancellationToken ct);
 
     /// <summary>
+    /// Stamps the winning <paramref name="jeeberId"/> onto the local request
+    /// read-model row. This is the WRITE counterpart that makes
+    /// <see cref="ListForJeeberAsync"/> able to surface an accepted delivery to
+    /// the jeeber on the UPSTREAM accept path (FeatureFlags:UseUpstream:Offer=on):
+    /// that path commits the single-winner transition in offer-service and only
+    /// projects the STATUS locally (<see cref="SetStatusAsync"/>) — it never wrote
+    /// the assignee, so the local row's <c>JeeberId</c> stayed null and the jeeber's
+    /// Jobs/Deliveries list came back empty. The legacy in-memory accept path
+    /// (<see cref="TryAcceptByJeeberAsync"/>) already stamped JeeberId; this exposes
+    /// the same write to the upstream composer in the gateway BFF.
+    ///
+    /// <para>Guards: returns false (row untouched) when the request is unknown.
+    /// Never clears an assignee — a null/blank <paramref name="jeeberId"/> is a no-op
+    /// returning false, so a missing upstream actor id can never overwrite a
+    /// previously-resolved jeeber. Idempotent: re-stamping the same id is a no-op
+    /// success.</para>
+    /// </summary>
+    Task<bool> SetJeeberIdAsync(string requestId, string jeeberId, CancellationToken ct);
+
+    /// <summary>
+    /// fix/client-visibility (run-22 P1): stamps the ACCEPTED offer's fee onto the
+    /// local request/delivery row at accept time (see
+    /// <see cref="DeliveryRequest.AcceptedFee"/>). Write counterpart of the
+    /// delivery-read <c>amount</c> enrichment: the receipt read (which happens
+    /// AFTER the delivery goes terminal, and possibly by the non-owner party)
+    /// falls back to this snapshot when the live offers-store lookup cannot
+    /// resolve the accepted offer. Returns false (row untouched) when the request
+    /// is unknown or <paramref name="fee"/> is not positive; idempotent —
+    /// re-stamping overwrites with the same accepted fee.
+    /// </summary>
+    Task<bool> TrySetAcceptedFeeAsync(string requestId, decimal fee, CancellationToken ct);
+
+    /// <summary>
     /// Returns every request whose creation timestamp is at or before
     /// <paramref name="cutoff"/> and whose status is still in the
     /// pre-acceptance set (<c>pending</c>, <c>matched</c>). The
@@ -133,6 +166,38 @@ public interface IRequestsStore
     /// the same shape so the controller stays storage-agnostic.
     /// </summary>
     Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct);
+
+    /// <summary>
+    /// Jeeber-scoped read of every request this jeeber is the assigned
+    /// <see cref="DeliveryRequest.JeeberId"/> on, newest-relevant first. The
+    /// dual of <see cref="ListForClientAsync"/> for the driver side: backs the
+    /// jeeber Orders/Jobs surfaces (<c>GET /v1/deliveries</c> and
+    /// <c>GET /v1/requests?role=jeeber</c>), which previously had no way to
+    /// resolve the rows a jeeber accepted (the accepted row's ClientId is the
+    /// requesting client, never the jeeber, so the client-scoped read never
+    /// contained it). Returns an empty list — never null — when the jeeber has
+    /// no assigned deliveries. The production Postgres store replaces this with
+    /// a "WHERE jeeber_id = ?" query; the BFF migration target implements the
+    /// same shape so the controller stays storage-agnostic.
+    /// </summary>
+    Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct);
+
+    /// <summary>
+    /// Resolves the request whose chat <c>ConversationId</c> equals
+    /// <paramref name="conversationId"/>, or null when none matches.
+    ///
+    /// <para>Backs the chat-message → push-notification trigger: the chat send
+    /// handlers are keyed by conversationId, but the chat client exposes no
+    /// participant-roster read by conversationId (only by correlation key ==
+    /// requestId). The gateway already owns the two delivery principals on the
+    /// request row — <c>ClientId</c> (the requester) and <c>JeeberId</c> (the
+    /// awarded jeeber, set post-accept) — and stamps the conversation id onto the
+    /// row at create / accept. This lookup recovers those principals so a new chat
+    /// message can be pushed to the other party (A→B). It surfaces only the two
+    /// delivery principals, not the full chat-service participant set (broadcasting
+    /// offerers) which remains chat-service's authority — a follow-up.</para>
+    /// </summary>
+    Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct);
 
     /// <summary>
     /// BR-10 (T-backend-039): counts the requests where

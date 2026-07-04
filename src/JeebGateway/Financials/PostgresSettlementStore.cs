@@ -145,7 +145,9 @@ public sealed class PostgresSettlementStore : ISettlementStore
                    payment_method = @PaymentMethod,
                    state         = @State,
                    cod_state     = @CodState,
-                   settled_at    = @SettledAt
+                   settled_at    = @SettledAt,
+                   batch_id      = NULL,
+                   batched_at    = NULL
              WHERE delivery_id = @DeliveryId
                AND state = 'pending_settlement'
             """;
@@ -182,21 +184,36 @@ public sealed class PostgresSettlementStore : ISettlementStore
     public async Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, DateTimeOffset at, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // M1 (P0 money-loss) — state-machine guard: ONLY a truly-settled row may advance
+        // to receipt_generated. The transition is `settled → receipt_generated` and nothing
+        // else. Previously the guard was `state != @NewState`, which happily advanced a
+        // 'pending_settlement' HANDOVER PLACEHOLDER (goods_cost=0, min-fee phantom commission,
+        // NO ledger entry — written by DeliveriesController) straight to receipt_generated the
+        // first time ANY party read the receipt BEFORE POST /settle ran. That phantom row then
+        // (a) satisfied the weekly payout batch selector and underpaid the Jeeber, and
+        // (b) made SettlementService.SettleAsync short-circuit AlreadySettled on a non-pending
+        // state, so the real commission math + ledger post never ran. Pinning the WHERE to
+        // `state = 'settled'` slams that escape hatch shut: a placeholder stays
+        // 'pending_settlement' until a real settle (ReplacePendingAsync) advances it to
+        // 'settled', and only THEN can a receipt read advance it to receipt_generated.
         const string sql = """
             UPDATE settlements
             SET state = @NewState, receipt_generated_at = @At, updated_at = now()
-            WHERE id = @Id AND state != @NewState
+            WHERE id = @Id AND state = @SettledState
             RETURNING *
             """;
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("Id", Guid.Parse(settlementId));
         cmd.Parameters.AddWithValue("NewState", SettlementState.ReceiptGenerated);
+        cmd.Parameters.AddWithValue("SettledState", SettlementState.Settled);
         cmd.Parameters.AddWithValue("At", at);
 
         var results = await ReadListAsync(cmd, ct);
         if (results.Count > 0) return results[0];
 
-        // Already in receipt_generated state — return the existing row.
+        // Not in 'settled' state: either already receipt_generated (idempotent repeat read —
+        // return the existing row unchanged) or still a pending_settlement placeholder (a
+        // pre-settle receipt read does NOT advance it). Either way, return the row as-is.
         return await GetByIdAsync(settlementId, ct);
     }
 
@@ -204,9 +221,27 @@ public sealed class PostgresSettlementStore : ISettlementStore
         DateTimeOffset windowStart, DateTimeOffset windowEnd, int limit, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // M1 (P0 money-loss): only TRULY-settled rows may enter the weekly payout batch.
+        // The handover placeholder is written with state='pending_settlement', cod_state='recorded'
+        // and goods_cost=0 (→ min-fee 1000 LBP commission). Swept into the payout batch it becomes
+        // a phantom -1000 LBP net, underpaying the Jeeber and booking commission never collected.
+        //
+        // The selector POSITIVELY requires a completed settlement: state IN ('settled',
+        // 'receipt_generated'). A row only reaches those states through SettlementService.SettleAsync
+        // (ReplacePendingAsync / TryInsertAsync sets 'settled') and, optionally, a post-settle
+        // receipt read ('receipt_generated'). A placeholder is 'pending_settlement' and is now
+        // ALSO barred from advancing to receipt_generated pre-settle (see MarkReceiptGeneratedAsync
+        // guard), so it can never satisfy this predicate — closing the receipt-before-settle escape
+        // hatch belt-and-suspenders with that guard. We key on state rather than
+        // `ledger_entry_id IS NOT NULL` because the ledger post is best-effort/replayed
+        // (SettlementService.cs) — a genuinely-settled row whose ledger post is still pending would
+        // be wrongly WITHHELD from payout by a ledger predicate; state is the gateway's authoritative
+        // "settlement complete" signal (the row is the system of record). Also closes M2: an
+        // unbatched placeholder can never be re-swept after ReplacePendingAsync.
         const string sql = """
             SELECT * FROM settlements
             WHERE cod_state = 'recorded'
+              AND state IN ('settled', 'receipt_generated')
               AND settled_at >= @WindowStart
               AND settled_at < @WindowEnd
             ORDER BY settled_at ASC

@@ -1,6 +1,7 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations.Client;
+using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -69,6 +70,7 @@ public class RequestOffersController : ControllerBase
     private readonly IOfferRealtimeNotifier _realtime;
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly IJeebConversationClient _conversations;
+    private readonly IOfferPushNotifier _offerPush;
     private readonly UpstreamFeatureFlags _flags;
     private readonly TimeProvider _clock;
     private readonly ILogger<RequestOffersController> _logger;
@@ -80,6 +82,7 @@ public class RequestOffersController : ControllerBase
         IOfferRealtimeNotifier realtime,
         IOfferRequestIndex offerRequestIndex,
         IJeebConversationClient conversations,
+        IOfferPushNotifier offerPush,
         IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         ILogger<RequestOffersController> logger)
@@ -90,12 +93,22 @@ public class RequestOffersController : ControllerBase
         _realtime = realtime;
         _offerRequestIndex = offerRequestIndex;
         _conversations = conversations;
+        _offerPush = offerPush;
         _flags = flags.Value;
         _clock = clock;
         _logger = logger;
     }
 
     [HttpPost("requests/{requestId}/offers")]
+    // S03 GAP-A (S002-BLOCK-OFFER-CREATE): the mobile app calls the /v1/-prefixed
+    // template, which previously bound GET only (JeebRequestsController.cs:255) — so
+    // POST /v1/requests/{requestId}/offers returned 405 (Allow: GET). ASP.NET allows
+    // multiple route templates on one action, so we register the /v1/ POST here and it
+    // serves byte-identically through the SAME Submit logic (validation, dual-role,
+    // mirror+retry, seat, offer-index, realtime). No logic is duplicated or rewritten;
+    // both the legacy un-prefixed route and the /v1/ route share this single code path
+    // and return 201 with the same OfferDto (offerId). See legacy-research.md §1.
+    [HttpPost("v1/requests/{requestId}/offers")]
     // ADR-005 L2 §D jeeber-only: replaces [RequireRole(Roles.Jeeber)]. Fee/cap/one-live-offer = STATE.
     [RequireCapability(Capabilities.OfferSubmit)]
     [RequireActiveUser]
@@ -227,6 +240,18 @@ public class RequestOffersController : ControllerBase
                 Type = "https://jeeb.dev/errors/offer-already-exists"
             });
         }
+        catch (RequestNotOpenForOffersException)
+        {
+            // sprint-009 Lane E — the auction is closed (accepted/expired/cancelled), NOT
+            // the 20-offer cap. Its own ProblemDetails so the jeeber sees the right reason.
+            return Conflict(new ProblemDetails
+            {
+                Title = "This request is no longer open for offers.",
+                Detail = "The auction has already been accepted, expired, or cancelled.",
+                Status = StatusCodes.Status409Conflict,
+                Type = "https://jeeb.dev/errors/request-not-open-for-offers"
+            });
+        }
         catch (TooManyOffersForRequestException ex)
         {
             return Conflict(new ProblemDetails
@@ -280,6 +305,27 @@ public class RequestOffersController : ControllerBase
                 requestId, created.Id);
         }
 
+        // BUILD-OFFER-PUSH — notify the request's CUSTOMER (the requester) that a new
+        // offer landed so they can open the auction and compare bids. clientId is read
+        // straight off the request row already loaded above — no extra fetch.
+        //
+        // DEGRADE-DON'T-FAIL: the offer is already durable and the 201 is committed. The
+        // notifier itself swallows every push-service failure; the extra try/catch here
+        // is belt-and-braces so even a bug in the notifier can NEVER flip the 201 into a
+        // 5xx or slow it materially (the FCM round-trip is timeout-bounded inside the
+        // notifier). Same contract as the realtime fan-out above and the AdvancePhase seat.
+        try
+        {
+            await _offerPush.NotifyNewOfferAsync(
+                request.ClientId, requestId, created.Id, created.Fee, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to dispatch offer push for request {RequestId}, offer {OfferId}; offer stays 201.",
+                requestId, created.Id);
+        }
+
         return Created($"/requests/{requestId}/offers/{created.Id}", ToDto(created));
     }
 
@@ -318,6 +364,37 @@ public class RequestOffersController : ControllerBase
             }),
             _ => StatusCode(StatusCodes.Status500InternalServerError)
         };
+    }
+
+    /// <summary>
+    /// sprint-009 Lane E — flat offer-scoped withdraw alias. The mobile client withdraws a
+    /// bid by offer id alone (<c>DELETE /v1/offers/{offerId}</c>), but the canonical
+    /// offer-service withdraw route is request-scoped. The gateway already knows the
+    /// <c>offerId → requestId</c> pairing (recorded at submit time in
+    /// <see cref="IOfferRequestIndex"/>), so this alias resolves the requestId and reuses the
+    /// EXACT same <see cref="Withdraw"/> logic (authz, ownership, status mapping) — no logic
+    /// is duplicated. An offer unknown to this gateway instance resolves to a 404 (phantom
+    /// offer), the same contract as the offer-scoped accept route. Same capability + active
+    /// guards as the nested route.
+    /// </summary>
+    [HttpDelete("v1/offers/{offerId}")]
+    [RequireCapability(Capabilities.OfferWithdraw)]
+    [RequireActiveUser]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> WithdrawFlat(string offerId, CancellationToken ct)
+    {
+        var requestId = _offerRequestIndex.ResolveRequestId(offerId);
+        if (requestId is null)
+        {
+            // Unknown to this gateway instance — phantom offer. 404 mirrors the accept path.
+            return NotFound();
+        }
+
+        return await Withdraw(requestId, offerId, ct);
     }
 
     /// <summary>

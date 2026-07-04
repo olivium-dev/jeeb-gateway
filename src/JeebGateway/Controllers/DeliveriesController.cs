@@ -1,4 +1,5 @@
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Availability;
 using JeebGateway.Financials;
 using JeebGateway.Push;
 using JeebGateway.Requests;
@@ -54,6 +55,9 @@ public class DeliveriesController : ControllerBase
 {
     private static readonly ActivitySource ActivitySource = new("JeebGateway.Deliveries");
     private readonly IRequestsStore _store;
+    // PR-G3: accepted-offer fee lookup (Amount enrich) + jeeber display-name seam.
+    private readonly IPendingOffersStore _offers;
+    private readonly IUsersStore _users;
     // JEB-56: settlement store for COD platform records (recorded→batched→paid).
     private readonly ISettlementStore _settlementStore;
     private readonly IPushNotificationService _push;
@@ -64,6 +68,7 @@ public class DeliveriesController : ControllerBase
     private readonly IServiceOTPClient _otpClient;
     private readonly IDeliveryServiceClient _deliveryClient;
     private readonly IDistributedCache _cache;
+    private readonly IHandoverCodeStore _handoverCodes;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly TimeProvider _clock;
     private readonly ILogger<DeliveriesController> _log;
@@ -102,8 +107,53 @@ public class DeliveriesController : ControllerBase
     private string ResolveOtpApplicationId()
         => _otpSignInOptions.Value.ApplicationId;
 
+    /// <summary>
+    /// Gap G4 (run-24 CHECK C) store-miss fallback: the accept-issued in-app handover
+    /// code, echoed on <c>GET /otp</c> ONLY to the delivery's OWN client (owner-scoped
+    /// by an identity match against <see cref="DeliveryRequest.ClientId"/>) so a client
+    /// that lost its local copy can re-read it. A READ only — it never mints. Returns
+    /// null for a jeeber / non-owner caller and when no code is held. NEVER logs the code.
+    /// </summary>
+    private async Task<string?> ReadOwnerHandoverCodeAsync(
+        string callerId, DeliveryRequest delivery, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(callerId)
+            || !string.Equals(callerId, delivery.ClientId, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return await _handoverCodes.GetAsync(delivery.Id, ct);
+    }
+
+    /// <summary>
+    /// F1/F3/F4 (sprint-009 gateway-flow-correctness-audit): the class capability is the
+    /// coarse <c>{client, jeeber}</c> role — i.e. ANY client or ANY jeeber on the platform,
+    /// not a party to <em>this</em> delivery. The money-terminating handover steps
+    /// (OTP verify/trigger, client-unreachable) additionally require the caller to be a
+    /// PARTY to the delivery, exactly like the cancel path. Without this, any authenticated
+    /// jeeber who learns/observes the handover code (or simply enumerates ids) could complete
+    /// or disrupt someone else's delivery. On the upstream compose path
+    /// (<c>FeatureFlags:UseUpstream:Delivery</c>) delivery-service enforces the X-Actor party
+    /// guard; these gateway checks close the in-memory (production-live) path.
+    /// </summary>
+    private static bool IsCallerParty(string callerId, DeliveryRequest delivery)
+        => !string.IsNullOrEmpty(callerId)
+           && (string.Equals(callerId, delivery.ClientId, StringComparison.Ordinal)
+               || string.Equals(callerId, delivery.JeeberId, StringComparison.Ordinal));
+
+    private ObjectResult NotAPartyProblem()
+        => StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
+        {
+            Title = "You are not a party to this delivery.",
+            Status = StatusCodes.Status403Forbidden,
+            Type = "https://jeeb.dev/errors/not-a-party"
+        });
+
     public DeliveriesController(
         IRequestsStore store,
+        IPendingOffersStore offers,
+        IUsersStore users,
         ISettlementStore settlementStore,
         IPushNotificationService push,
         ICancellationService cancellations,
@@ -113,11 +163,14 @@ public class DeliveriesController : ControllerBase
         IServiceOTPClient otpClient,
         IDeliveryServiceClient deliveryClient,
         IDistributedCache cache,
+        IHandoverCodeStore handoverCodes,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         ILogger<DeliveriesController> log)
     {
         _store = store;
+        _offers = offers;
+        _users = users;
         _settlementStore = settlementStore;
         _push = push;
         _cancellations = cancellations;
@@ -127,6 +180,7 @@ public class DeliveriesController : ControllerBase
         _otpClient = otpClient;
         _deliveryClient = deliveryClient;
         _cache = cache;
+        _handoverCodes = handoverCodes;
         _flags = flags;
         _clock = clock;
         _log = log;
@@ -151,12 +205,49 @@ public class DeliveriesController : ControllerBase
         [FromQuery] int? limit,
         CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
 
         try
         {
-            var result = await _deliveryClient.ListShipmentsAsync(orderId, stage, limit, ct);
-            return Ok(result);
+            // fix/client-visibility (run-22 P0 hardening): the mobile client-home bucket
+            // calls this route with the BUCKET alias `stage=active`, which is NOT a
+            // canonical delivery stage (Ordered/Picked/InTransit/AtDoor/Done) — forwarded
+            // verbatim it matches nothing upstream and the client's active bucket goes
+            // permanently blind. Resolve the alias GATEWAY-SIDE: fetch without the stage
+            // filter and keep only in-flight rows (canonical non-terminal, mirroring
+            // JeebOrdersListController.IsListableActive semantics). Canonical/unknown
+            // stage tokens keep forwarding verbatim (no behavior change).
+            var activeBucket = string.Equals(stage, "active", StringComparison.OrdinalIgnoreCase);
+            var upstreamStage = activeBucket ? null : stage;
+
+            var result = await _deliveryClient.ListShipmentsAsync(orderId, upstreamStage, limit, ct);
+
+            // PR-G3: the upstream shipments feed is NOT caller-scoped — it returns rows
+            // across all orders. Intersect it with the caller's OWN order ids (the
+            // gateway's request store, keyed by request id == order id) so a caller only
+            // ever sees shipments for orders they participate in. fix/client-visibility:
+            // the owned set is the UNION of the rows the caller created (client side) and
+            // the rows the caller is the assigned jeeber on — symmetric with the
+            // /v1/deliveries list — so the assigned jeeber's active work is visible on
+            // this legacy surface too. A shipment whose orderId is absent from the set —
+            // or whose orderId is null — is dropped (cannot prove participation → fail
+            // closed). This is authorization scoping, not a fabricated dataset.
+            var ownedOrderIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var owned in await _store.ListForClientAsync(userId, ct))
+            {
+                ownedOrderIds.Add(owned.Id);
+            }
+            foreach (var assigned in await _store.ListForJeeberAsync(userId, ct))
+            {
+                ownedOrderIds.Add(assigned.Id);
+            }
+
+            var scoped = result.Shipments
+                .Where(s => s.OrderId is { } oid && ownedOrderIds.Contains(oid))
+                .Where(s => !activeBucket || IsActiveStage(s.CurrentStage))
+                .ToList();
+
+            return Ok(new ShipmentsListDto { Shipments = scoped, Count = scoped.Count });
         }
         catch (Exception ex)
         {
@@ -230,7 +321,7 @@ public class DeliveriesController : ControllerBase
                 {
                     return NotFound();
                 }
-                return Ok(new DeliveryRequestDto
+                var canonicalDto = new DeliveryRequestDto
                 {
                     Id = canonical.DeliveryId,
                     ClientId = canonical.ClientId ?? string.Empty,
@@ -239,7 +330,16 @@ public class DeliveriesController : ControllerBase
                     TierId = canonical.TierId,
                     JeeberId = canonical.JeeberId,
                     CreatedAt = canonical.CreatedAt
-                });
+                };
+                // fix/client-visibility (run-22 P1): the local mirror row carries the
+                // accept-time fee snapshot the enrichment falls back to when the live
+                // offers lookup cannot resolve the accepted offer (jeeber-party reads,
+                // post-terminal offer-state collapse). Best-effort — a mirror miss just
+                // means no snapshot.
+                var mirror = await _store.GetAsync(deliveryId, ct);
+                await EnrichWithOfferAndJeeberAsync(
+                    canonicalDto, deliveryId, canonical.JeeberId, mirror?.AcceptedFee, ct);
+                return Ok(canonicalDto);
             }
             catch (HttpRequestException hre)
             {
@@ -257,10 +357,114 @@ public class DeliveriesController : ControllerBase
             return NotFound();
         }
 
-        return Ok(ToDto(delivery));
+        var dto = ToDto(delivery);
+        await EnrichWithOfferAndJeeberAsync(dto, deliveryId, delivery.JeeberId, delivery.AcceptedFee, ct);
+        return Ok(dto);
+    }
+
+    /// <summary>
+    /// fix/client-visibility (run-22 P0 hardening): a shipment stage counts as ACTIVE
+    /// (in flight) when its canonical resolution is non-terminal and not Expired —
+    /// the exact IsListableActive predicate the /v1 Jobs list uses. A stage with no
+    /// canonical mapping (e.g. an upstream-internal token like <c>created</c>) is
+    /// treated as in flight rather than dropped, mirroring the /v1 semantics.
+    /// </summary>
+    private static bool IsActiveStage(string? stage)
+    {
+        if (string.IsNullOrWhiteSpace(stage))
+        {
+            return true;
+        }
+
+        var canonical = DeliveryStatusAlias.ToCanonical(stage);
+        if (canonical is null)
+        {
+            return !RequestStatus.IsTerminal(stage);
+        }
+
+        return !CanonicalDeliveryStatus.IsTerminal(canonical)
+            && !string.Equals(canonical, CanonicalDeliveryStatus.Expired, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// PR-G3 (S09): best-effort enrichment of a single-read <see cref="DeliveryRequestDto"/>
+    /// with the accepted offer's fee (<see cref="DeliveryRequestDto.Amount"/>) and the
+    /// assigned jeeber's display name (<see cref="DeliveryRequestDto.JeeberName"/>).
+    /// Both are ADDITIVE and nullable — a resolution miss leaves the field null (omitted
+    /// from the JSON), and any store fault is swallowed so a read is NEVER turned into a
+    /// 5xx by the decoration. deliveryId == requestId, so the accepted offer is resolved
+    /// via the pending-offers store keyed by request id; the jeeber name is resolved via
+    /// the gateway's own users projection store (a cheap in-process seam, not an added
+    /// upstream user-management round-trip).
+    /// </summary>
+    private async Task EnrichWithOfferAndJeeberAsync(
+        DeliveryRequestDto dto, string deliveryId, string? jeeberId, decimal? snapshotFee, CancellationToken ct)
+    {
+        try
+        {
+            var offers = await _offers.ListForRequestAsync(deliveryId, ct);
+            // The single accepted offer is the awarded bid; its Fee is the agreed amount.
+            var accepted = offers.FirstOrDefault(o =>
+                string.Equals(o.Status, PendingOfferStatus.Accepted, StringComparison.Ordinal));
+            // fix/client-visibility (run-22 P1): once the delivery completes, the
+            // upstream offer's terminal state can collapse out of "accepted" (the
+            // gateway's three-state mapping folds every non-accept terminal to
+            // withdrawn). The awarded bid is still identifiable as the assigned
+            // jeeber's offer — match on the winner before giving up.
+            if (accepted is null && !string.IsNullOrWhiteSpace(jeeberId))
+            {
+                accepted = offers
+                    .Where(o => string.Equals(o.JeeberId, jeeberId, StringComparison.Ordinal))
+                    .OrderByDescending(o => o.CreatedAt)
+                    .FirstOrDefault();
+            }
+            if (accepted is not null)
+            {
+                dto.Amount = accepted.Fee;
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Accepted-offer amount enrich failed for delivery {DeliveryId}; returning without Amount.",
+                deliveryId);
+        }
+
+        // fix/client-visibility (run-22 P1): the live offers lookup is owner-scoped on
+        // the upstream wire (offer-service 403s any non-owner → empty list here), so a
+        // JEEBER reading their own delivery — and any post-completion receipt read that
+        // no longer matches an accepted-status offer — falls back to the fee snapshot
+        // stamped on the row at accept time. Additive and ignore-when-null preserved.
+        if (dto.Amount is null && snapshotFee is > 0m)
+        {
+            dto.Amount = snapshotFee;
+        }
+
+        if (!string.IsNullOrWhiteSpace(jeeberId))
+        {
+            try
+            {
+                var profile = await _users.GetByIdAsync(jeeberId, ct);
+                if (!string.IsNullOrWhiteSpace(profile?.Name))
+                {
+                    dto.JeeberName = profile.Name;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "Jeeber display-name enrich failed for delivery {DeliveryId} jeeber {JeeberId}; "
+                    + "returning without JeeberName.",
+                    deliveryId, jeeberId);
+            }
+        }
     }
 
     [HttpPatch("{deliveryId}/status")]
+    // S03 §5.4 contract alias: the mobile app calls the /v1-prefixed form. Additive
+    // second template (byte-compatible, no behavior change) so both the relative and
+    // the frozen-contract /v1 form resolve to this action instead of 404.
+    [HttpPatch("/v1/deliveries/{deliveryId}/status")]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -456,8 +660,31 @@ public class DeliveriesController : ControllerBase
     ///
     /// Counterparty push fires on every committed cancel so the other
     /// party finds out without polling.
+    ///
+    /// <para><b>fix/offer-visibility P2 — V1 request-keyed aliases.</b> The mobile
+    /// client cancels a request PRE-ACCEPT keyed by <c>requestId</c>, but the V1
+    /// surface had no such route (only the frozen legacy <c>DELETE /requests/{id}</c>
+    /// and this <c>POST /deliveries/{id}/cancel</c> existed, forcing the client to
+    /// resolve a delivery id first). Because the gateway seeds the durable delivery
+    /// row with <c>deliveryId == requestId</c>, the request-keyed cancel IS this
+    /// action; we register <c>POST /v1/requests/{id}/cancel</c> and
+    /// <c>DELETE /v1/requests/{id}</c> as additional templates on the SAME action
+    /// (the established pattern of the <c>/v1/deliveries/*</c> read/OTP aliases in
+    /// this controller), so the V1 cancel serves byte-identically through the
+    /// canonical path: PR-G2 canonical phase-set membership, counterparty push, and
+    /// best-effort upstream propagation
+    /// (<see cref="TryPropagateCancellationUpstreamAsync"/>). Semantics follow the
+    /// existing cancel contract: pre-accept / pre-pickup OWNER cancel commits
+    /// immediately (200, frees the BR-9 slot), post-pickup parks on admin approval,
+    /// a non-party gets 403, an unknown id 404s, and a terminal row 409s
+    /// <c>not-cancellable</c>. The body stays OPTIONAL
+    /// (<c>EmptyBodyBehavior.Allow</c>) so a bare <c>DELETE /v1/requests/{id}</c>
+    /// with no JSON body binds <c>null</c> instead of 400-ing — reason remains
+    /// mandatory only for the driver path, enforced by the service.</para>
     /// </summary>
     [HttpPost("{deliveryId}/cancel")]
+    [HttpPost("/v1/requests/{deliveryId}/cancel")]
+    [HttpDelete("/v1/requests/{deliveryId}")]
     [ProducesResponseType(typeof(CancelDeliveryResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -466,7 +693,7 @@ public class DeliveriesController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Cancel(
         string deliveryId,
-        [FromBody] CancelDeliveryBody? body,
+        [FromBody(EmptyBodyBehavior = Microsoft.AspNetCore.Mvc.ModelBinding.EmptyBodyBehavior.Allow)] CancelDeliveryBody? body,
         CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
@@ -521,6 +748,19 @@ public class DeliveriesController : ControllerBase
             case CancellationOutcome.CancelledByJeeber:
             case CancellationOutcome.PendingAdminApproval:
                 await NotifyCancellationCounterpartyAsync(result.Request!, result.PreviousStatus!, result.Outcome, ct);
+
+                // PR-G2: when the gateway commit landed the row TERMINALLY cancelled
+                // (immediate client cancel / jeeber cancel), best-effort drive the
+                // canonical delivery-service row terminal too so the shipments /
+                // canonical projections stop showing the delivery as active. The admin-
+                // approval outcome is NOT terminal yet (the row parks on
+                // cancellation_requested), so it is deliberately excluded here — upstream
+                // propagation happens when the admin approves.
+                if (result.Outcome != CancellationOutcome.PendingAdminApproval)
+                {
+                    await TryPropagateCancellationUpstreamAsync(result.Request!, callerId, ct);
+                }
+
                 return Ok(new CancelDeliveryResponse
                 {
                     DeliveryId = result.Request!.Id,
@@ -537,6 +777,43 @@ public class DeliveriesController : ControllerBase
                 return Problem(
                     title: "Unhandled cancellation outcome.",
                     statusCode: StatusCodes.Status500InternalServerError);
+        }
+    }
+
+    /// <summary>
+    /// PR-G2: best-effort propagation of a committed terminal cancel to the canonical
+    /// delivery-service row via the existing SM-1 transition contract
+    /// (<see cref="IDeliveryServiceClient.CanonicalTransitionAsync"/>, to =
+    /// <see cref="CanonicalDeliveryStatus.Cancelled"/>). Gated on the delivery
+    /// kill-switch (<c>FeatureFlags:UseUpstream:Delivery</c>) — when the gateway is the
+    /// authoritative writer (flag off) there is no canonical row to reconcile. This is
+    /// STRICTLY best-effort: the gateway commit already succeeded and the client 200 is
+    /// authoritative, so any upstream fault (already-terminal 422, wrong-party 403,
+    /// network 502, …) is swallowed with a LogWarning and never turned into a 5xx. A
+    /// sweeper / admin reconcile remains the backstop for a missed propagation.
+    /// </summary>
+    private async Task TryPropagateCancellationUpstreamAsync(
+        DeliveryRequest req, string callerId, CancellationToken ct)
+    {
+        if (!_flags.CurrentValue.Delivery)
+        {
+            return;
+        }
+
+        try
+        {
+            var partySource = CanonicalDeliveryVocab.PartySourceFor(HttpContext);
+            var actorRole = CanonicalDeliveryVocab.ActorRoleFor(HttpContext);
+            await _deliveryClient.CanonicalTransitionAsync(
+                req.Id, CanonicalDeliveryStatus.Cancelled, partySource, callerId, actorRole, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Cancellation upstream propagation failed for delivery {DeliveryId}; the gateway "
+                + "commit is authoritative and the client cancel already succeeded. The canonical "
+                + "row may lag until reconciled.",
+                req.Id);
         }
     }
 
@@ -676,7 +953,7 @@ public class DeliveriesController : ControllerBase
         [FromBody] OtpVerificationRequest? body,
         CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
 
         if (body is null || string.IsNullOrWhiteSpace(body.OtpCode))
         {
@@ -687,6 +964,12 @@ public class DeliveriesController : ControllerBase
                 Type = "https://jeeb.dev/errors/otp-required"
             });
         }
+
+        // F1 (flow-correctness-audit): legacy in-memory verify — require party membership
+        // before an OTP match can flip the delivery to Delivered (mirrors VerifyHandoverOtp).
+        var legacyDelivery = await _store.GetAsync(deliveryId, ct);
+        if (legacyDelivery is null) return NotFound();
+        if (!IsCallerParty(callerId, legacyDelivery)) return NotAPartyProblem();
 
         var opts = _otpOptions.Value;
         var now = _clock.GetUtcNow();
@@ -798,7 +1081,14 @@ public class DeliveriesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> MarkClientUnreachable(string deliveryId, CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
+
+        // F3 (flow-correctness-audit): only a party to THIS delivery may start the 15-min
+        // unreachable-escalation timer — otherwise any authenticated user could enumerate ids
+        // and flood the moderation/escalation queue on deliveries they are not part of.
+        var target = await _store.GetAsync(deliveryId, ct);
+        if (target is null) return NotFound();
+        if (!IsCallerParty(callerId, target)) return NotAPartyProblem();
 
         var row = await _store.MarkClientUnreachableAsync(deliveryId, _clock.GetUtcNow(), ct);
         if (row is null) return NotFound();
@@ -823,6 +1113,9 @@ public class DeliveriesController : ControllerBase
     /// OTP is dispatched (PR review B1; per AC1).
     /// </summary>
     [HttpGet("{deliveryId}/otp")]
+    // S03 §5.4 contract alias: mobile calls /v1/deliveries/{id}/otp. Additive second
+    // template, byte-compatible — both forms resolve here instead of 404 on /v1.
+    [HttpGet("/v1/deliveries/{deliveryId}/otp")]
     // ADR-005 L2 §E handover OTP trigger (still {client, jeeber}; AtDoor SM state = STATE).
     [RequireCapability(Capabilities.HandoverOtpRead)]
     [ProducesResponseType(typeof(OtpTriggerResponse), StatusCodes.Status200OK)]
@@ -837,7 +1130,10 @@ public class DeliveriesController : ControllerBase
 
         var correlationId = Activity.Current?.Id ?? HttpContext.TraceIdentifier;
 
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        // Gap G4 (run-24 CHECK C): capture the caller id — the accept-issued in-app
+        // handover code is echoed on this GET ONLY when the caller owns the delivery
+        // (owner-scoped store-miss fallback; see ReadOwnerHandoverCodeAsync).
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
 
         // Get delivery and validate status
         var delivery = await _store.GetAsync(deliveryId, ct);
@@ -855,7 +1151,15 @@ public class DeliveriesController : ControllerBase
         // intact as the documented rollback lever.
         if (_flags.CurrentValue.Delivery)
         {
-            return await TriggerOtpViaDeliveryServiceAsync(deliveryId, delivery, correlationId, activity, ct);
+            return await TriggerOtpViaDeliveryServiceAsync(deliveryId, delivery, callerId, correlationId, activity, ct);
+        }
+
+        // F4 (flow-correctness-audit): in-memory path — only a party to THIS delivery may
+        // trigger the real SMS dispatch to the recipient, preventing SMS-cost abuse and the
+        // 404-vs-400 existence oracle over enumerated delivery ids.
+        if (!IsCallerParty(callerId, delivery))
+        {
+            return NotAPartyProblem();
         }
 
         // PR review B1 (JEB-628): AC1 requires status `at_door` (the
@@ -916,7 +1220,9 @@ public class DeliveriesController : ControllerBase
             {
                 DeliveryId = deliveryId,
                 Triggered  = true,
-                Message    = "4-digit OTP sent to the delivery recipient."
+                Message    = "4-digit OTP sent to the delivery recipient.",
+                // Gap G4 store-miss fallback: echo the accept-issued code to the OWNER only.
+                Code       = await ReadOwnerHandoverCodeAsync(callerId, delivery, ct)
             });
         }
         catch (ApiException apiEx)
@@ -962,6 +1268,10 @@ public class DeliveriesController : ControllerBase
     /// <see cref="IAdminEscalationStore"/> (PR review B7).
     /// </summary>
     [HttpPost("{deliveryId}/otp/verify")]
+    // S03 §5.4 contract alias: mobile calls /v1/deliveries/{id}/otp/verify (the real
+    // device deliver step). Additive second template, byte-compatible — both forms
+    // resolve here instead of 404 on the /v1-prefixed form.
+    [HttpPost("/v1/deliveries/{deliveryId}/otp/verify")]
     // ADR-005 L2 §E handover OTP verify (still {client, jeeber}; party/SM/lockout = STATE).
     [RequireCapability(Capabilities.HandoverOtpRead)]
     [ProducesResponseType(typeof(OtpHandoverVerificationResponse), StatusCodes.Status200OK)]
@@ -1017,6 +1327,14 @@ public class DeliveriesController : ControllerBase
                 deliveryId, delivery, body.Code!, callerId, actorRole, correlationId, activity, ct);
         }
 
+        // F1 (flow-correctness-audit, CRITICAL): in-memory (production-live) path — the caller
+        // must be a party to THIS delivery before an OTP match can drive it to Delivered and
+        // fire settlement. Identity, not just OTP secrecy, gates the money-terminating step.
+        if (!IsCallerParty(callerId, delivery))
+        {
+            return NotAPartyProblem();
+        }
+
         // PR review B1: handover OTP applies at the `at_door` step.
         if (delivery.Status != RequestStatus.AtDoor)
         {
@@ -1069,42 +1387,59 @@ public class DeliveriesController : ControllerBase
 
         bool verified;
         int upstreamStatus = 0;
-        try
+
+        // Gap G4 (run-24 CHECK C) verify-precedence: when the customer read the code
+        // IN-APP (minted at offer-accept), the gateway holds it — match it FIRST
+        // (constant-time). A hit is a valid handover code, short-circuiting the
+        // one-time-password round-trip; a miss (or no stored code) falls through to
+        // the existing SMS-code validation, so the SMS-minted code keeps working
+        // unchanged. The downstream transition/settlement below is untouched; a wrong
+        // code still 400s. The submitted code is never logged.
+        if (await _handoverCodes.TryMatchAsync(deliveryId, body.Code!, ct))
         {
-            await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
-            {
-                PhoneNumber   = delivery.RecipientPhone,
-                Otp           = body.Code,
-                ApplicationId = applicationId
-            }, ct);
             verified = true;
+            activity?.SetTag("otp.match_source", "gateway_minted");
         }
-        catch (ApiException apiEx)
+        else
         {
-            // PR review B5: NEVER log apiEx / apiEx.Message — the NSwag
-            // ApiException embeds the upstream response body in Message,
-            // which may echo the submitted code or other OTP-adjacent data.
-            // Log only the upstream HTTP status.
-            verified       = false;
-            upstreamStatus = apiEx.StatusCode;
-        }
-        catch (OperationCanceledException)
-        {
-            // Request was cancelled (caller disconnect / shutdown). Surface
-            // 499-equivalent via the framework default by rethrowing.
-            throw;
-        }
-        catch (Exception ex)
-        {
-            // Network / timeout failure before reaching upstream — safe to
-            // log the exception type but NOT the message (defense in depth).
-            _log.LogWarning(
-                "Handover OTP verify pre-upstream failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
-                deliveryId, ex.GetType().Name, correlationId);
-            return Problem(
-                title:      "OTP verification failed",
-                detail:     "Unable to reach the one-time-password service.",
-                statusCode: StatusCodes.Status502BadGateway);
+            activity?.SetTag("otp.match_source", "one_time_password");
+            try
+            {
+                await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
+                {
+                    PhoneNumber   = delivery.RecipientPhone,
+                    Otp           = body.Code,
+                    ApplicationId = applicationId
+                }, ct);
+                verified = true;
+            }
+            catch (ApiException apiEx)
+            {
+                // PR review B5: NEVER log apiEx / apiEx.Message — the NSwag
+                // ApiException embeds the upstream response body in Message,
+                // which may echo the submitted code or other OTP-adjacent data.
+                // Log only the upstream HTTP status.
+                verified       = false;
+                upstreamStatus = apiEx.StatusCode;
+            }
+            catch (OperationCanceledException)
+            {
+                // Request was cancelled (caller disconnect / shutdown). Surface
+                // 499-equivalent via the framework default by rethrowing.
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Network / timeout failure before reaching upstream — safe to
+                // log the exception type but NOT the message (defense in depth).
+                _log.LogWarning(
+                    "Handover OTP verify pre-upstream failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
+                    deliveryId, ex.GetType().Name, correlationId);
+                return Problem(
+                    title:      "OTP verification failed",
+                    detail:     "Unable to reach the one-time-password service.",
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
         }
 
         if (verified)
@@ -1269,6 +1604,7 @@ public class DeliveriesController : ControllerBase
     private async Task<IActionResult> TriggerOtpViaDeliveryServiceAsync(
         string deliveryId,
         DeliveryRequest delivery,
+        string callerId,
         string correlationId,
         Activity? activity,
         CancellationToken ct)
@@ -1350,7 +1686,9 @@ public class DeliveriesController : ControllerBase
         {
             DeliveryId = deliveryId,
             Triggered  = true,
-            Message    = "4-digit OTP sent to the delivery recipient."
+            Message    = "4-digit OTP sent to the delivery recipient.",
+            // Gap G4 store-miss fallback: echo the accept-issued code to the OWNER only.
+            Code       = await ReadOwnerHandoverCodeAsync(callerId, delivery, ct)
         });
     }
 
@@ -1393,35 +1731,51 @@ public class DeliveriesController : ControllerBase
         //    code; the NSwag client throws ApiException for a wrong/expired
         //    code. We collapse that to a success boolean — the raw code is
         //    discarded here and NEVER forwarded to delivery-service (AC5).
+        // Gap G4 (run-24 CHECK C) verify-precedence: when the customer read the code
+        // IN-APP (minted at offer-accept), the gateway holds it — match it FIRST
+        // (constant-time) and, on a hit, treat as a valid code INSTEAD OF the
+        // one-time-password round-trip. On no-stored-code-or-mismatch, fall through to
+        // the existing SMS-code validation so the SMS-minted code keeps working. Either
+        // way only the success boolean reaches delivery-service (AC5); the raw code
+        // never leaves the gateway and is never logged.
         bool success;
-        try
+        if (await _handoverCodes.TryMatchAsync(deliveryId, code, ct))
         {
-            await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
-            {
-                PhoneNumber   = delivery.RecipientPhone,
-                Otp           = code,
-                ApplicationId = applicationId
-            }, ct);
             success = true;
+            activity?.SetTag("otp.match_source", "gateway_minted");
         }
-        catch (ApiException)
+        else
         {
-            // Wrong/expired code. Do NOT log apiEx/Message (B5/AC5).
-            success = false;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(
-                "Handover OTP verify (upstream path) pre-validate failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
-                deliveryId, ex.GetType().Name, correlationId);
-            return Problem(
-                title:      "OTP verification failed",
-                detail:     "Unable to reach the one-time-password service.",
-                statusCode: StatusCodes.Status502BadGateway);
+            activity?.SetTag("otp.match_source", "one_time_password");
+            try
+            {
+                await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
+                {
+                    PhoneNumber   = delivery.RecipientPhone,
+                    Otp           = code,
+                    ApplicationId = applicationId
+                }, ct);
+                success = true;
+            }
+            catch (ApiException)
+            {
+                // Wrong/expired code. Do NOT log apiEx/Message (B5/AC5).
+                success = false;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(
+                    "Handover OTP verify (upstream path) pre-validate failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
+                    deliveryId, ex.GetType().Name, correlationId);
+                return Problem(
+                    title:      "OTP verification failed",
+                    detail:     "Unable to reach the one-time-password service.",
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
         }
 
         activity?.SetTag("otp.path", "upstream");
@@ -1496,6 +1850,29 @@ public class DeliveriesController : ControllerBase
         _log.LogInformation(
             "handover.verified deliveryId={DeliveryId} correlationId={CorrelationId} status={Status}",
             deliveryId, correlationId, result.Status ?? RequestStatus.Delivered);
+
+        // S03 — terminal read-model projection on the FLAG-ON upstream path.
+        // The canonical AtDoor→Done transition + settlement already committed in
+        // delivery-service above; this mirrors the terminal flip onto the gateway's
+        // local request read-model so the client-facing GET /v1/requests/{id} reads
+        // `delivered` (not the last PATCH-status value, e.g. AtDoor). deliveryId ==
+        // requestId, so this lands on the right request row. This is the same
+        // projection the legacy flag-OFF path performs (mirror of the
+        // _store.SetStatusAsync(..., Delivered) call in the in-memory branch).
+        // Degrade-don't-fail: a committed, verified handover must NEVER be turned
+        // into a 5xx by a best-effort local cache write — log and continue.
+        try
+        {
+            await _store.SetStatusAsync(deliveryId, RequestStatus.Delivered, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Post-verify terminal status projection for delivery {DeliveryId} failed; "
+                + "the handover stays verified (200), the request read-model may lag until "
+                + "reconciled. correlationId {CorrelationId}",
+                deliveryId, correlationId);
+        }
 
         activity?.SetTag("otp.verified", "true");
 

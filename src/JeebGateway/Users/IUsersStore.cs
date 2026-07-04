@@ -20,6 +20,13 @@ public interface IUsersStore
     /// claims user-management persisted. Additive; the gateway still SIGNS the OTP
     /// sign-in session (mint stays in the gateway), it just no longer invents the
     /// identity. Idempotent upsert — safe to call repeatedly.
+    ///
+    /// <para>Display-field semantics (jeeberName gap fix): the identity callers
+    /// project no display data (Name = ""), so implementations MUST preserve any
+    /// locally-known non-blank Name / Email / AvatarUrl when the incoming
+    /// projection's value is blank — a re-login must never wipe a display name the
+    /// profile-update path (or the /v1/users/me hydration) has already learned. An
+    /// incoming non-blank display value still replaces the local one.</para>
     /// </summary>
     Task UpsertProjectionAsync(UserProfile profile, CancellationToken ct);
 
