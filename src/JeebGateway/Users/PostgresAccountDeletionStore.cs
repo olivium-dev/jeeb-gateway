@@ -61,6 +61,16 @@ public sealed class PostgresAccountDeletionStore : IAccountDeletionStore
     private readonly TimeProvider _clock;
     private readonly ILogger<PostgresAccountDeletionStore> _log;
 
+    // GW12-PERF-2 (Leg-12): per-tick page size for the background sweep's list queries.
+    // Both AdvanceAsync scans (pending→scheduled, scheduled→completed) walk the result
+    // set making 2-3 sequential awaited DB/HTTP calls per row. Without a bound, a sweep
+    // that falls behind (state-service / ledger degraded for a while) materializes the
+    // ENTIRE backlog into memory and processes it serially in one tick. A LIMIT drains
+    // the backlog incrementally across ticks instead. Each processed row changes status
+    // (or is skipped and retried next tick), so the queries make forward progress and
+    // eventually drain the whole backlog even without an ORDER BY.
+    private const int SweepPageSize = 200;
+
     public PostgresAccountDeletionStore(
         INpgsqlConnectionFactory db,
         IUsersStore users,
@@ -306,9 +316,13 @@ public sealed class PostgresAccountDeletionStore : IAccountDeletionStore
     private async Task<List<AccountDeletionRequest>> ListByStatusAsync(string status, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
-        const string sql = "SELECT * FROM account_deletions WHERE status = @Status::account_deletion_status";
+        // GW12-PERF-2: bounded page so a backlog drains incrementally across ticks
+        // rather than being materialized in one unbounded batch.
+        const string sql =
+            "SELECT * FROM account_deletions WHERE status = @Status::account_deletion_status LIMIT @Limit";
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("Status", status);
+        cmd.Parameters.AddWithValue("Limit", SweepPageSize);
         return await ReadListAsync(cmd, ct);
     }
 
@@ -318,12 +332,15 @@ public sealed class PostgresAccountDeletionStore : IAccountDeletionStore
         // 'scheduled' is inlined as a literal (not parameterized) — this query only
         // ever runs against the one fixed status, same as
         // PostgresSettlementStore.ListRecordedInWindowAsync's `cod_state = 'recorded'`.
+        // GW12-PERF-2: bounded page so a purge backlog drains incrementally across ticks.
         const string sql = """
             SELECT * FROM account_deletions
             WHERE status = 'scheduled'::account_deletion_status AND scheduled_purge_at <= @Now
+            LIMIT @Limit
             """;
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("Now", now);
+        cmd.Parameters.AddWithValue("Limit", SweepPageSize);
         return await ReadListAsync(cmd, ct);
     }
 
