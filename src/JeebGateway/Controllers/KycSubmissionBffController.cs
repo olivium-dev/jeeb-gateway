@@ -385,14 +385,23 @@ public sealed class KycSubmissionBffController : ControllerBase
             return FieldProblem("id_type", $"id_type '{body.IdType}' is not a supported value (expected one of: {string.Join(", ", AllowedIdTypes)}).");
         }
 
-        // AC6 — id_number must be exactly 12 digits (^\d{12}$). Required for national_id.
-        if (string.IsNullOrWhiteSpace(body.IdNumber))
+        // AC6 — id_number must be exactly 12 digits (^\d{12}$), but this rule is
+        // scoped to id_type == national_id (JEBV4-113 §3.1). Passport and
+        // residency_permit submissions carry a different identifier shape (or
+        // none the gateway validates today) and must not be blocked by a
+        // national-ID-shaped rule. Previously this fired unconditionally,
+        // 400-walling every non-national_id submission (and any submission
+        // where id_type itself was never supplied).
+        if (string.Equals(body.IdType, "national_id", StringComparison.OrdinalIgnoreCase))
         {
-            return FieldProblem("id_number", "id_number is required.");
-        }
-        if (!NationalIdRegex.IsMatch(body.IdNumber!))
-        {
-            return FieldProblem("id_number", "id_number must be exactly 12 digits (^\\d{12}$).");
+            if (string.IsNullOrWhiteSpace(body.IdNumber))
+            {
+                return FieldProblem("id_number", "id_number is required.");
+            }
+            if (!NationalIdRegex.IsMatch(body.IdNumber!))
+            {
+                return FieldProblem("id_number", "id_number must be exactly 12 digits (^\\d{12}$).");
+            }
         }
 
         // AC8 — tos_accepted_version must cross-link to a known ToS template

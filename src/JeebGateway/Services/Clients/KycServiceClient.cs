@@ -43,10 +43,24 @@ public sealed class KycServiceClient : IKycServiceClient
     {
         // Map the gateway-facing rich payload onto the LIVE kyc-service wire
         // contract (KycSubmitRequest: subject, vehicleType, vehicleRegistration,
-        // idFrontRef, idBackRef, selfieRef, grantsRole). The Jeeb role-grant
-        // INTENT ("jeeber") is set here by the gateway (it owns Jeeb semantics,
-        // BR-1); kyc-service stores it and echoes it back on approve. `subject`
-        // is the owning user id.
+        // idFrontRef, idBackRef, selfieRef, grantsRole, metadata). The Jeeb
+        // role-grant INTENT ("jeeber") is set here by the gateway (it owns Jeeb
+        // semantics, BR-1); kyc-service stores it and echoes it back on approve.
+        // `subject` is the owning user id.
+        //
+        // JEBV4-113 §3.2: kyc-service's KycSubmitRequest has NO first-class slot
+        // for id_type / id_number / driver_license_number / driver_license_expiry
+        // / tos_accepted_version (verified against the real upstream contract at
+        // kyc-service/src/KycService/Models/Contracts.cs — confirmed no upstream
+        // edit was made here). Previously these were validated by the gateway
+        // then silently discarded before this call — dead validation with no
+        // downstream consumer. The upstream contract DOES already accept (and
+        // durably persist, as a jsonb column — see KycStore.SubmitAsync) a
+        // generic opaque `metadata` bag that it never itself reads or validates
+        // (product-neutral by design, ARCH LAW). That is the correct home for
+        // these fields: they land in the OWNING service's own store, not a new
+        // gateway-side projection, and kyc-service can promote them to
+        // first-class columns later without another wire-format bump.
         var wire = new KycSubmitWire
         {
             Subject = payload.UserId,
@@ -56,6 +70,7 @@ public sealed class KycServiceClient : IKycServiceClient
             IdBackRef = payload.IdDocumentBackRef,
             SelfieRef = payload.SelfieWithLivenessRef,
             GrantsRole = JeeberRole,
+            Metadata = BuildMetadata(payload),
         };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "v1/kyc/submissions")
@@ -410,6 +425,23 @@ public sealed class KycServiceClient : IKycServiceClient
     private static HttpRequestException EmptyId(HttpResponseMessage response) =>
         new($"kyc-service {response.RequestMessage?.RequestUri} returned a payload with no id/status.");
 
+    // JEBV4-113 §3.2 — assembles the fields kyc-service's KycSubmitRequest has no
+    // named slot for into the generic `metadata` bag it already accepts. Only
+    // non-blank values are included; returns null (omitted from the wire body
+    // entirely, via JsonIgnoreCondition.WhenWritingNull) when there is nothing
+    // to carry.
+    private static JsonElement? BuildMetadata(KycSubmitUpstreamPayload payload)
+    {
+        var fields = new Dictionary<string, string?>();
+        if (!string.IsNullOrWhiteSpace(payload.IdType)) fields["id_type"] = payload.IdType;
+        if (!string.IsNullOrWhiteSpace(payload.IdNumber)) fields["id_number"] = payload.IdNumber;
+        if (!string.IsNullOrWhiteSpace(payload.DriverLicenseNumber)) fields["driver_license_number"] = payload.DriverLicenseNumber;
+        if (!string.IsNullOrWhiteSpace(payload.DriverLicenseExpiry)) fields["driver_license_expiry"] = payload.DriverLicenseExpiry;
+        if (!string.IsNullOrWhiteSpace(payload.TosAcceptedVersion)) fields["tos_accepted_version"] = payload.TosAcceptedVersion;
+
+        return fields.Count == 0 ? null : JsonSerializer.SerializeToElement(fields, JsonOptions);
+    }
+
     // The Jeeb role-grant intent. The gateway owns Jeeb semantics (BR-1); it
     // tells kyc-service which opaque role an approve should signal, and composes
     // the actual user-management append itself (kyc-service never calls UM).
@@ -429,6 +461,11 @@ public sealed class KycServiceClient : IKycServiceClient
         public string? IdBackRef { get; init; }
         public string? SelfieRef { get; init; }
         public string? GrantsRole { get; init; }
+
+        // Generic opaque bag kyc-service already accepts and durably persists
+        // (jsonb `metadata` column) but never itself reads/validates — see
+        // JEBV4-113 §3.2 and BuildMetadata() above.
+        public JsonElement? Metadata { get; init; }
     }
 
     private sealed class KycTosSignatureWire
