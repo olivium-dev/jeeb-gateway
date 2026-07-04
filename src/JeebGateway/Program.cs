@@ -1564,7 +1564,12 @@ if (!string.IsNullOrWhiteSpace(paymentBaseUrl))
     {
         http.BaseAddress = new Uri(paymentBaseUrl!.TrimEnd('/') + "/");
         http.Timeout = TimeSpan.FromSeconds(5);
-    });
+    })
+        // R6 (sprint-009 money-resilience-audit): front UPG refund with the org-standard
+        // circuit breaker so a sustained UPG outage fails fast instead of eating the full
+        // timeout on every dispute-resolve. Retry is double-refund-safe — the refund carries
+        // an Idempotency-Key (dispute:{caseId}:refund), so UPG dedupes replays.
+        .AddStandardResilienceHandler();
 }
 else
 {
@@ -1589,7 +1594,12 @@ if (!string.IsNullOrWhiteSpace(paymentBaseUrl))
         {
             http.BaseAddress = new Uri(paymentBaseUrl!.TrimEnd('/') + "/");
             http.Timeout = TimeSpan.FromSeconds(10);
-        });
+        })
+            // R6 (sprint-009 money-resilience-audit): front UPG COD-record/mark-paid with the
+            // org-standard circuit breaker so a slow UPG fails fast rather than degrading every
+            // COD-record call for the full timeout. Retry is safe — the COD record carries an
+            // Idempotency-Key (delivery_id), so UPG dedupes replays.
+            .AddStandardResilienceHandler();
 }
 else
 {
