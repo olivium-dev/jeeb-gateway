@@ -125,6 +125,49 @@ public sealed class JeebOffersController : ControllerBase
         if (requestId is null)
             return NotFound();
 
+        // F2 / BR-10 (sprint-009 gateway-flow-correctness-audit): this is the route the
+        // mobile client actually calls, yet — unlike the legacy OffersController and this
+        // controller's own in-memory accept path — it never enforced the per-jeeber active-
+        // delivery cap. offer-service does NOT enforce BR-10 today (successive accepts all
+        // returned 200 on the live fleet), so the gateway BFF is the enforcement point. The
+        // cap is checked against the WINNING bidder (the offer's jeeber), resolved from the
+        // routing index recorded at submit time. Check BEFORE forwarding the accept saga so
+        // no third delivery is ever created.
+        //
+        // Degrade-don't-fail: a delivery-service count blip must NEVER turn an otherwise-valid
+        // accept into a 5xx — on a fault we log and treat the jeeber as under cap and forward
+        // (the offer-service Conflict mapping remains the backstop). Mirrors OffersController.
+        var winningJeeberId = _offerRequestIndex.ResolveJeeberId(offerId);
+        if (winningJeeberId is not null)
+        {
+            int? activeCount = null;
+            try
+            {
+                activeCount = await _deliveryService.CountActiveDeliveriesByJeeberAsync(winningJeeberId, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "BR-10 active-delivery count for jeeber {JeeberId} (offer {OfferId}) failed on the /v1 accept; " +
+                    "treating as under cap and forwarding the accept (offer-service Conflict is the backstop).",
+                    winningJeeberId, offerId);
+            }
+
+            if (activeCount is int count && count >= ActiveDeliveriesLimit)
+            {
+                _logger.LogInformation(
+                    "BR-10: rejecting /v1 accept of offer {OfferId} — jeeber {JeeberId} already holds {Count} active deliveries (limit {Limit}); no third delivery created.",
+                    offerId, winningJeeberId, count, ActiveDeliveriesLimit);
+                return Conflict(new ProblemDetails
+                {
+                    Title = "Maximum 2 active deliveries. Complete a delivery before accepting another.",
+                    Detail = $"Jeeber has {count} active deliveries (limit {ActiveDeliveriesLimit}).",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/too-many-active-deliveries"
+                });
+            }
+        }
+
         var key = string.IsNullOrWhiteSpace(idempotencyKey)
             ? Guid.NewGuid().ToString("N")
             : idempotencyKey;

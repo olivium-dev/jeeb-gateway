@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -109,6 +110,50 @@ public class JeebOffersAcceptDeliveryLegTests
         deliveryFake.Calls.Should().NotContain(c => c.JeeberId != null);
     }
 
+    // F2 / BR-10 (gateway-flow-correctness-audit) — the /v1 accept route must enforce
+    // the per-jeeber active-delivery cap BEFORE forwarding the accept saga.
+
+    [Fact]
+    public async Task Accept_WhenWinningJeeberAtCap_Returns409_AndDoesNotForwardSaga()
+    {
+        var offerFake = AcceptedFake("offer-cap", "jeeber-busy");
+        var deliveryFake = new RecordingDeliveryClient { ActiveDeliveryCount = 2 };
+        using var factory = NewFactory(offerFake, deliveryFake);
+
+        var requestId = await SeedRequestAsync(factory, "client-owner");
+        SeedRouting(factory, "offer-cap", requestId, "jeeber-busy");
+
+        var resp = await ClientActor(factory, "client-owner")
+            .PostAsync("/v1/offers/offer-cap/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var problem = await resp.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/too-many-active-deliveries");
+
+        deliveryFake.LastCountedJeeberId.Should().Be("jeeber-busy");
+        // The cap short-circuits BEFORE the accept saga — no third delivery is created.
+        offerFake.AcceptCallCount.Should().Be(0);
+        deliveryFake.Calls.Should().NotContain(c => c.JeeberId != null);
+    }
+
+    [Fact]
+    public async Task Accept_WhenWinningJeeberUnderCap_ProceedsHttp200()
+    {
+        var offerFake = AcceptedFake("offer-under", "jeeber-ok");
+        var deliveryFake = new RecordingDeliveryClient { ActiveDeliveryCount = 1 };
+        using var factory = NewFactory(offerFake, deliveryFake);
+
+        var requestId = await SeedRequestAsync(factory, "client-owner");
+        SeedRouting(factory, "offer-under", requestId, "jeeber-ok");
+
+        var resp = await ClientActor(factory, "client-owner")
+            .PostAsync("/v1/offers/offer-under/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        deliveryFake.LastCountedJeeberId.Should().Be("jeeber-ok");
+        offerFake.AcceptCallCount.Should().Be(1);
+    }
+
     // ---------------------------------------------------------------------
     // helpers
     // ---------------------------------------------------------------------
@@ -181,10 +226,14 @@ public class JeebOffersAcceptDeliveryLegTests
     private sealed class FakeAcceptOfferClient : IOfferServiceClient
     {
         public required OfferAcceptResult Result { get; init; }
+        public int AcceptCallCount { get; private set; }
 
         public Task<OfferAcceptResult> AcceptWithStatusAsync(
             string actingUserId, string requestId, string offerId, string idempotencyKey, CancellationToken ct)
-            => Task.FromResult(Result);
+        {
+            AcceptCallCount++;
+            return Task.FromResult(Result);
+        }
 
         public Task<OfferAcceptWire> AcceptAsync(
             string actingUserId, string requestId, string offerId, string idempotencyKey, CancellationToken ct)
@@ -219,6 +268,11 @@ public class JeebOffersAcceptDeliveryLegTests
         public ConcurrentQueue<CreateDeliveryRowUpstream> Calls { get; } = new();
         public bool ThrowOnJeeberAssignment { get; init; }
         public int JeeberAssignmentAttempts { get; private set; }
+
+        // F2 / BR-10: when set, the pre-forward active-delivery count returns this value.
+        // Null (default) preserves the "count not exercised" throw for the degrade tests.
+        public int? ActiveDeliveryCount { get; init; }
+        public string? LastCountedJeeberId { get; private set; }
 
         public Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct)
         {
@@ -265,6 +319,10 @@ public class JeebOffersAcceptDeliveryLegTests
         public Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct)
             => throw new NotSupportedException();
         public Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct)
-            => throw new NotSupportedException();
+        {
+            LastCountedJeeberId = jeeberId;
+            if (ActiveDeliveryCount is int c) return Task.FromResult(c);
+            throw new NotSupportedException();
+        }
     }
 }
