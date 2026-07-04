@@ -108,11 +108,52 @@ public sealed class KycTosCeremonyAndValidationTests
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
+    // ----- JEBV4-113 §3.1: id_number gate is scoped to id_type == national_id -----
+
+    [Fact]
+    public async Task SubmitJson_NationalId_Missing_IdNumber_Returns_400_Field_ProblemDetails()
+    {
+        var client = ClientFor("e3-national-missing-user");
+        var resp = await PostJsonAsync(
+            client, "/v1/kyc/submit", Package(idType: "national_id", idNumber: null), Guid.NewGuid().ToString("N"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("field").GetString().Should().Be("id_number");
+    }
+
+    [Theory]
+    [InlineData("passport")]
+    [InlineData("residency_permit")]
+    public async Task SubmitJson_NonNationalId_With_No_IdNumber_Returns_201_Not_Blocked(string idType)
+    {
+        _factory.ContractSigning.Reset();
+        var client = ClientFor($"e3-nonnational-{idType}-user");
+        var resp = await PostJsonAsync(
+            client, "/v1/kyc/submit", Package(idType: idType, idNumber: null), Guid.NewGuid().ToString("N"));
+
+        // Before the fix this 400'd unconditionally on the missing/12-digit
+        // id_number check even though national-ID-shaped ids are irrelevant to
+        // passport/residency_permit submissions (JEBV4-113 §3.1).
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+    }
+
+    [Fact]
+    public async Task SubmitJson_NonNationalId_With_BadShaped_IdNumber_Is_Not_Gated_Returns_201()
+    {
+        _factory.ContractSigning.Reset();
+        var client = ClientFor("e3-passport-freeform-user");
+        var resp = await PostJsonAsync(
+            client, "/v1/kyc/submit", Package(idType: "passport", idNumber: "P1234567"), Guid.NewGuid().ToString("N"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+    }
+
     // ----- helpers -----
 
-    private static object Package(string idNumber = "123456789012", string tos = "v1") => new
+    private static object Package(string idType = "national_id", string? idNumber = "123456789012", string tos = "v1") => new
     {
-        id_type = "national_id",
+        id_type = idType,
         id_number = idNumber,
         id_document_front_url = "cdn://obj/front",
         id_document_back_url = "cdn://obj/back",
