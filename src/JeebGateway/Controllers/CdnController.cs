@@ -23,6 +23,37 @@ namespace JeebGateway.Controllers;
 /// so this path is a runtime kill switch: when off, the endpoints return 503
 /// ProblemDetails rather than dialing an unconfigured/unroutable downstream.
 /// This mirrors the remote-user-preferences net-new kill-switch shape.
+///
+/// <para>
+/// <b>JEBV4-113 §CDN fallback — ESCALATE, no Postgres-backed fallback built
+/// (decision recorded here, not implemented).</b> When the flag is OFF, ALL
+/// THREE actions below (<see cref="BrokerUploadUrl"/>, <see cref="GetAsset"/>,
+/// <see cref="GetSignedUrl"/>) 503 via <see cref="UpstreamDisabled"/> with NO
+/// fallback path — this is the entire current behavior, confirmed by reading
+/// this file; there is no partial/degraded mode today. A gateway-Postgres-backed
+/// asset store was considered and rejected as NOT small/clean:
+/// <list type="bullet">
+///   <item>The whole point of this endpoint is a signed <b>PUT</b> — the client
+///     uploads bytes directly to a URL this broker mints. Reproducing that in
+///     Postgres means building (a) an HTTP endpoint that accepts raw byte PUTs
+///     and writes them to a <c>bytea</c>/large-object column, (b) a URL-signing
+///     scheme (HMAC + expiry) to authorize that PUT without the caller's normal
+///     bearer auth (signed URLs are deliberately bearer-free), and (c) a
+///     symmetric signed-GET path for <see cref="GetSignedUrl"/> plus the
+///     content-type/size/90-day-retention bookkeeping <see cref="GetAsset"/>
+///     already promises. That is a from-scratch object-storage service, not a
+///     fallback.</item>
+///   <item>Building it in the gateway would re-implement cdn-service's actual
+///     job inside the BFF — the same "gateway holds zero durable business
+///     state, only aggregates" law this class's own doc comment states for the
+///     KYC domain applies here too (ADR-0004). A duplicate, gateway-local
+///     object store would fork asset state across two stores the moment
+///     cdn-service does go live, with no migration story.</item>
+/// </list>
+/// Per the ticket's own guardrail ("if not clean, do NOT hack it — ESCALATE"),
+/// no fallback is implemented; the owner-visible behavior remains an honest 503
+/// until cdn-service is deployed and the flag flips on.
+/// </para>
 /// </summary>
 [ApiController]
 [Route("api/cdn/assets")]
@@ -213,6 +244,9 @@ public sealed class CdnController : ControllerBase
         return Ok(signed);
     }
 
+    // JEBV4-113: no fallback by design — see the class-level ESCALATE note. Every
+    // action 503s here when the flag is off; there is no degraded/gateway-local
+    // storage path.
     private IActionResult UpstreamDisabled() => Problem(
         title: "CDN upstream disabled",
         detail: "FeatureFlags:UseUpstream:Cdn is off in this environment "
