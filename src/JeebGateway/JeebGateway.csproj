@@ -78,6 +78,16 @@
     <PackageReference Include="StackExchange.Redis" Version="2.8.16" />
 
     <!--
+      Microsoft.Extensions.Caching.StackExchangeRedis — durability migration (register
+      item #1). Backs AddStackExchangeRedisCache() so the IDistributedCache (external-OTP
+      attempt/lockout counters + the in-app handover code) survives a gateway restart
+      when Redis:ConnectionString is present. Falls back to AddDistributedMemoryCache()
+      when Redis is not configured (dev/CI/test). 8.0.14 targets net8.0 and rides the
+      existing StackExchange.Redis 2.8.16 transitive graph.
+    -->
+    <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="8.0.14" />
+
+    <!--
       libphonenumber-csharp — the canonical .NET port of Google's libphonenumber,
       used by the F-E gateway phone policy (Auth/OtpSignIn/PhonePolicy.cs) to
       E.164-parse and region-classify sign-in phones BEFORE the OTP upstream is

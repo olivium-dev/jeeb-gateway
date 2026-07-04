@@ -40,6 +40,12 @@ public class PostgresAvailabilityStoreTests
         using var factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(b =>
             {
+                // UseSetting lands in host configuration, which is assembled BEFORE the
+                // Program.cs top-level `gatewayPostgresCs` read — ConfigureAppConfiguration
+                // alone is applied at Build time (too late for that read). This mirrors the
+                // proven StateServiceRewireTests idiom.
+                b.UseSetting("GatewayPostgres:ConnectionString",
+                    "Host=127.0.0.1;Port=1;Database=jeeb_test;Username=jeeb;Password=jeeb;Timeout=1");
                 b.ConfigureAppConfiguration((_, cfg) =>
                     cfg.AddInMemoryCollection(new Dictionary<string, string?>
                     {

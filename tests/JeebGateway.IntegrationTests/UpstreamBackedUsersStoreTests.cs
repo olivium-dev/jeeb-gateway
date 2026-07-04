@@ -211,14 +211,19 @@ public sealed class UpstreamBackedUsersStoreTests
         {
             lock (_lock)
             {
-                var incoming = Clone(profile);
-                if (_rows.TryGetValue(profile.Id, out var existing))
+                _rows.TryGetValue(profile.Id, out var existing);
+                // UserProfile.Phone is init-only, so blank-preserve it at clone time
+                // rather than mutating the constructed instance.
+                var effectivePhone = (existing is not null && string.IsNullOrWhiteSpace(profile.Phone))
+                    ? existing.Phone
+                    : profile.Phone;
+                var incoming = Clone(profile, effectivePhone);
+                if (existing is not null)
                 {
                     // Display fields are blank-preserving.
                     if (string.IsNullOrWhiteSpace(incoming.Name)) incoming.Name = existing.Name;
                     if (string.IsNullOrWhiteSpace(incoming.Email)) incoming.Email = existing.Email;
                     if (string.IsNullOrWhiteSpace(incoming.AvatarUrl)) incoming.AvatarUrl = existing.AvatarUrl;
-                    if (string.IsNullOrWhiteSpace(incoming.Phone)) incoming.Phone = existing.Phone;
                     // Suspension / rating / created_at preserved on conflict.
                     incoming.IsSuspended = existing.IsSuspended;
                     incoming.SuspensionReason = existing.SuspensionReason;
@@ -278,15 +283,15 @@ public sealed class UpstreamBackedUsersStoreTests
                 var ordered = matches.OrderByDescending(u => u.CreatedAt).ToList();
                 var page = Math.Max(query.Page, 1);
                 var size = Math.Clamp(query.PageSize, 1, 100);
-                var slice = ordered.Skip((page - 1) * size).Take(size).Select(Clone).ToList();
+                var slice = ordered.Skip((page - 1) * size).Take(size).Select(u => Clone(u)).ToList();
                 return Task.FromResult(new UserSearchResult { Items = slice, Total = ordered.Count });
             }
         }
 
-        private static UserProfile Clone(UserProfile p) => new()
+        private static UserProfile Clone(UserProfile p, string? phoneOverride = null) => new()
         {
             Id = p.Id,
-            Phone = p.Phone,
+            Phone = phoneOverride ?? p.Phone,
             Email = p.Email,
             Name = p.Name,
             AvatarUrl = p.AvatarUrl,

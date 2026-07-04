@@ -50,7 +50,25 @@ public sealed class DefaultLexiconSeeder : IHostedService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        var existing = await _store.ListActiveAsync(cancellationToken);
+        // Degrade-don't-crash: with a durable (Postgres-backed) IProhibitedItemsStore the
+        // startup catalog read can fail transiently (DB briefly unreachable at boot). The
+        // seeder must NEVER fault host startup over it — a missing lexicon degrades the
+        // create-moderation gate to empty (recoverable on the next restart / admin seed),
+        // whereas a thrown StartAsync would crash-loop the whole gateway. With the in-memory
+        // store this read never throws, so behaviour there is byte-identical.
+        IReadOnlyList<ProhibitedItem> existing;
+        try
+        {
+            existing = await _store.ListActiveAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Prohibited-items lexicon read failed at startup; skipping default seed (moderation lexicon " +
+                "stays empty until the store is reachable). Host startup continues.");
+            return;
+        }
+
         if (existing.Count > 0)
         {
             _logger.LogInformation(

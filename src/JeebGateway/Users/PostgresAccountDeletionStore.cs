@@ -164,7 +164,7 @@ public sealed class PostgresAccountDeletionStore : IAccountDeletionStore
             if (active > 0) continue;
 
             var scheduledPurgeAt = now + InMemoryAccountDeletionStore.PurgeDelay;
-            var advanced = await TryTransitionAsync(
+            var advanced = await TryAdvanceStatusAsync(
                 record.UserId,
                 fromStatus: AccountDeletionStatus.PendingActiveDelivery,
                 toStatus: AccountDeletionStatus.Scheduled,
@@ -189,7 +189,7 @@ public sealed class PostgresAccountDeletionStore : IAccountDeletionStore
             // `scheduled` so the next tick retries the purge instead of silently
             // landing `completed` with PII still present.
             await _users.PurgePiiAsync(record.UserId, ct);
-            var advanced = await TryTransitionAsync(
+            var advanced = await TryAdvanceStatusAsync(
                 record.UserId,
                 fromStatus: AccountDeletionStatus.Scheduled,
                 toStatus: AccountDeletionStatus.Completed,
@@ -240,7 +240,7 @@ public sealed class PostgresAccountDeletionStore : IAccountDeletionStore
     /// <c>updated_at</c> is refreshed by the 0010 <c>account_deletions_set_updated_at</c>
     /// trigger — not set here.
     /// </summary>
-    private async Task<bool> TryTransitionAsync(
+    private async Task<bool> TryAdvanceStatusAsync(
         string userId, string fromStatus, string toStatus,
         DateTimeOffset? scheduledPurgeAt, DateTimeOffset? completedAt, CancellationToken ct)
     {
