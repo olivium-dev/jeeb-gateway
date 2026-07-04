@@ -244,15 +244,20 @@ public sealed class JeebRequestsController : ControllerBase
     /// Returns the full <see cref="DeliveryRequestDto"/> including conversation id
     /// and GPS-tracking state. 404 when the id is unknown; 403 when the caller
     /// is not the request owner.
+    ///
+    /// JEBV4-61: this is now the SOLE action mapped to this route. It previously
+    /// carried an explicit <c>Order = 1</c> to yield to
+    /// <see cref="JeebGateway.Controllers.RequestVoiceController.GetVoiceById"/>,
+    /// which ALSO mapped <c>GET v1/requests/{id}</c> at the default (higher-
+    /// priority) <c>Order = 0</c> — so the narrow voice shape won for EVERY
+    /// request, voice-created or not, and the full DTO action here was dead code:
+    /// clients reading via <see cref="DeliveryRequestDto"/> (jeeberId,
+    /// conversationId, pickup/dropoff locations, …) got a clean 200 with those
+    /// fields silently absent. The voice read-back moved to its own
+    /// non-colliding route (<c>GET v1/requests/{id}/voice</c>), so there is no
+    /// same-path/same-verb ambiguity left for an integer to resolve.
     /// </summary>
-    // Order = 1 deprioritises this V1 read so it yields to RequestVoiceController.GetById
-    // (default Order 0) which ALSO maps GET /v1/requests/{id}. The two actions cannot be
-    // disambiguated by content-type (GET has no request body), so without an explicit
-    // precedence ASP.NET Core throws AmbiguousMatchException → 500. The voice read-back
-    // (S04 H2, a locked cross-surface contract) owns this exact route and echoes the
-    // transcript/confidence/language fields that DeliveryRequestDto does not carry; this
-    // V1 action remains the registered fallback. See JEB-1431 / #177 disambiguation note.
-    [HttpGet("v1/requests/{id}", Order = 1)]
+    [HttpGet("v1/requests/{id}")]
     [RequireCapability(Capabilities.RequestReadOwn)]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
