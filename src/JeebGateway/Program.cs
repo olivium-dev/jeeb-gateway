@@ -34,6 +34,7 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.IdentityModel.Tokens;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -837,6 +838,28 @@ builder.Services.AddOpenTelemetry()
             .AddPrometheusExporter();
     });
 
+// GW12-OBS-1 (Leg-12) — trace-correlated, structured logs. Traces + metrics were
+// already OTLP-exported, but logs were plain text with no trace/span id, so a log line
+// could not be stitched to the trace it belongs to, and the X-Correlation-Id a client
+// quotes was never written to any log (CorrelationIdMiddleware only echoed it on the
+// wire). Wiring the OTel log exporter makes every log record automatically carry
+// trace_id / span_id from Activity.Current, and IncludeScopes=true captures the
+// X-Correlation-Id that CorrelationIdMiddleware now pushes as a log scope — so grepping
+// the OTLP log backend for a reported correlation id finally returns the request's log
+// lines. Same OTLP endpoint + service resource as the trace/metric exporters above, so
+// this adds no new config surface and no new dependency (OpenTelemetry.Logs ships in the
+// already-referenced OpenTelemetry core package). With no collector listening (dev/CI)
+// the batching exporter drops silently — identical to the trace/metric exporters that
+// already run in every environment.
+builder.Logging.AddOpenTelemetry(logging =>
+{
+    logging.SetResourceBuilder(ResourceBuilder.CreateDefault().AddService(serviceName));
+    logging.IncludeScopes = true;
+    logging.IncludeFormattedMessage = true;
+    logging.ParseStateValues = true;
+    logging.AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
+});
+
 // T-backend-050 — singleton wrapper around the latency Meter. The Meter is
 // owned by DI so its lifetime matches the host's, which keeps the OTel
 // MeterProvider's subscription alive for the life of the process.
@@ -999,6 +1022,32 @@ else
 {
     builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader,
         JeebGateway.JeebWallet.NullJeebWalletLedgerReader>();
+}
+
+// GW12-OBS-2 (Leg-12) — readiness depth for the gateway-owned Postgres databases.
+// The durability Leg made 9+ stores depend on GatewayPostgres (and the wallet ledger
+// reader on WalletPostgres), but nothing probed those databases, so /health/ready and
+// /health/aggregate stayed green through a DB outage / pool exhaustion / credential
+// rotation while every durable read/write threw. Register a SELECT-1 check per
+// configured database, tagged "ready" (readiness only — a DB blip must not fail the
+// liveness probe and pull the process out of rotation). Gated on the same
+// !IsNullOrWhiteSpace(...) guard as the durable-store wiring, so dev/CI/test (no
+// connection string) register no check and keep the existing green readiness surface.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddHealthChecks()
+        .AddCheck(
+            "gateway-postgres",
+            new JeebGateway.Infrastructure.PostgresHealthCheck(gatewayPostgresCs!, "GatewayPostgres"),
+            tags: new[] { "ready" });
+}
+if (!string.IsNullOrWhiteSpace(walletPostgresCs))
+{
+    builder.Services.AddHealthChecks()
+        .AddCheck(
+            "wallet-postgres",
+            new JeebGateway.Infrastructure.PostgresHealthCheck(walletPostgresCs!, "WalletPostgres"),
+            tags: new[] { "ready" });
 }
 
 // Notification preferences (T-backend-031 / JEB-1498).
