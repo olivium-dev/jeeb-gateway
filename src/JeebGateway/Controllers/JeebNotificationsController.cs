@@ -90,7 +90,14 @@ public class JeebNotificationsController : ControllerBase
 
         if (result.Status == NotificationDispatchStatus.DLQ && !result.WasDeduplicated)
         {
-            return BadRequest(new { error = result.Error ?? "Dispatch failed." });
+            // JEBV4-63: was an ad-hoc { error } object — now the same RFC7807 envelope
+            // every other 4xx on this surface uses.
+            return BadRequest(new ProblemDetails
+            {
+                Title = result.Error ?? "Dispatch failed.",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/notification-dispatch-failed"
+            });
         }
 
         var dto = new DispatchNotificationResponseDto

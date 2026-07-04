@@ -191,13 +191,18 @@ public class UserPreferencesEndpointTests
 
         var resp = await client.GetAsync("/api/UserPreferences/preferences/missing-key");
 
-        // salehly controller catches RemoteUserPreferencesApiException and relays
-        // the upstream status code via StatusCode(ex.StatusCode, ex.Message).
+        // JEBV4-63: the controller catches RemoteUserPreferencesApiException and relays
+        // the upstream status code via Problem(statusCode: ex.StatusCode, detail: ex.Message, ...) —
+        // an RFC7807 envelope, not the old bare StatusCode(ex.StatusCode, ex.Message) string.
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
+        var problem = await resp.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        problem!.Status.Should().Be((int)HttpStatusCode.NotFound);
+        problem.Title.Should().Be("Upstream user-preferences error");
     }
 
     [Fact]
-    public async Task GetAllPreferences_Relays_Upstream_500_As_500()
+    public async Task GetAllPreferences_Relays_Upstream_500_As_ProblemDetails()
     {
         var stub = new StubHttpMessageHandler(_ =>
             new HttpResponseMessage(HttpStatusCode.InternalServerError)
@@ -210,7 +215,56 @@ public class UserPreferencesEndpointTests
 
         var resp = await client.GetAsync("/api/UserPreferences/preferences");
 
+        // JEBV4-63: no more bare "Internal server error: {ex.Message}" string leak —
+        // the upstream 500 is relayed as an RFC7807 ProblemDetails body.
         resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
+        var problem = await resp.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        problem!.Status.Should().Be((int)HttpStatusCode.InternalServerError);
+        problem.Detail.Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Fact]
+    public async Task GetAllPreferences_AuthenticatedButNoIdClaim_Returns_401_With_Empty_Body()
+    {
+        // JEBV4-63: a token that clears [Authorize] (valid signature/issuer) but carries
+        // NONE of the claim aliases GetUserId() resolves (Sid/sub/sid) exercises the
+        // controller's OWN `if (string.IsNullOrEmpty(userId)) return ...;` guard — this
+        // used to be a bare StatusCode(401, "Unauthorized") string body; pins it now
+        // returns the established EMPTY-body Unauthorized() convention instead.
+        var stub = new StubHttpMessageHandler(_ =>
+            throw new InvalidOperationException("upstream must not be called when the guard 401s"));
+
+        using var factory = NewFactory(stub);
+        var config = factory.Services.GetRequiredService<IConfiguration>();
+        var issuer = config["Jwt:Issuer"] ?? TestIssuer;
+        var audience = config["Jwt:Audience"] ?? TestAudience;
+        var signingKey = config["Jwt:SigningKey"] ?? TestSigningKey;
+        var creds = new SigningCredentials(
+            new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey)),
+            SecurityAlgorithms.HmacSha256);
+        var token = new JwtSecurityToken(
+            issuer: issuer,
+            audience: audience,
+            claims: new[] { new Claim("roles", "client") }, // no sub/Sid/sid
+            notBefore: DateTime.UtcNow.AddMinutes(-1),
+            expires: DateTime.UtcNow.AddMinutes(30),
+            signingCredentials: creds);
+
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", new JwtSecurityTokenHandler().WriteToken(token));
+
+        var resp = await client.GetAsync("/api/UserPreferences/preferences");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        // The Unauthorized() result is upgraded to an RFC7807 body by the gateway's
+        // status-code pages (AddProblemDetails in Program.cs) — the point of JEBV4-63:
+        // no more bare "Unauthorized" string; one machine-parseable envelope.
+        resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
+        var problem = await resp.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        problem!.Status.Should().Be((int)HttpStatusCode.Unauthorized);
+        problem.Title.Should().Be("Unauthorized");
     }
 
     // -----------------------------------------------------------------

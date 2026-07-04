@@ -107,7 +107,10 @@ namespace JeebGateway.Controllers
         {
             if (ex.StatusCode == 404)
                 return Problem(statusCode: 404, detail: ex.Message, title: "Not Found");
-            return StatusCode(ex.StatusCode, ex.Message);
+            // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) — a
+            // non-ProblemDetails string body. Route every upstream user-management
+            // failure through the same RFC7807 envelope as the 404 branch above.
+            return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-management error");
         }
 
         private ActionResult<(string userId, bool isValid)> ValidateUserAndServices()
@@ -156,11 +159,6 @@ namespace JeebGateway.Controllers
             {
                 return HandleUpstreamException(ex);
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error in health check");
-                return StatusCode(500, $"Error in health check: {ex.Message}");
-            }
         }
 
         /// <summary>
@@ -189,11 +187,6 @@ namespace JeebGateway.Controllers
             {
                 return HandleUpstreamException(ex);
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error retrieving all users");
-                return StatusCode(500, $"Error retrieving all users: {ex.Message}");
-            }
         }
 
         /// <summary>
@@ -217,7 +210,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.RegisterAsync(request);
@@ -226,11 +224,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error registering user");
-                return StatusCode(500, $"Error registering user: {ex.Message}");
             }
         }
 
@@ -257,7 +250,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.LoginAsync(request);
@@ -266,11 +264,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during login");
-                return StatusCode(500, $"Error during login: {ex.Message}");
             }
         }
 
@@ -297,7 +290,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.TokenLoginAsync(request);
@@ -306,11 +304,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during token login");
-                return StatusCode(500, $"Error during token login: {ex.Message}");
             }
         }
 
@@ -326,7 +319,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.UserIdLoginAsync(request);
@@ -335,11 +333,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during login by userId");
-                return StatusCode(500, $"Error during login by userId: {ex.Message}");
             }
         }
 
@@ -367,7 +360,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 // GATE INTACT: user-management validates the SuperAdmin passcode. A wrong
@@ -416,11 +414,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during user ID login");
-                return StatusCode(500, $"Error during user ID login: {ex.Message}");
             }
         }
 
@@ -483,7 +476,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.LogoutAsync(request);
@@ -492,11 +490,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during logout");
-                return StatusCode(500, $"Error during logout: {ex.Message}");
             }
         }
 
@@ -523,7 +516,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.SocialAsync(request);
@@ -532,11 +530,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during social login");
-                return StatusCode(500, $"Error during social login: {ex.Message}");
             }
         }
 
@@ -560,7 +553,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.ForgotAsync(request);
@@ -569,11 +567,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during forgot password");
-                return StatusCode(500, $"Error during forgot password: {ex.Message}");
             }
         }
 
@@ -597,7 +590,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.ResetAsync(request);
@@ -606,11 +604,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during password reset");
-                return StatusCode(500, $"Error during password reset: {ex.Message}");
             }
         }
 
@@ -630,10 +623,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
             }
         }
 
@@ -673,11 +662,6 @@ namespace JeebGateway.Controllers
             {
                 return HandleUpstreamException(ex);
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error retrieving user profile");
-                return StatusCode(500, $"Error retrieving user profile: {ex.Message}");
-            }
         }
 
         /// <summary>
@@ -702,7 +686,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.UpdateAsync(request);
@@ -717,11 +706,6 @@ namespace JeebGateway.Controllers
             {
                 return HandleUpstreamException(ex);
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error updating user profile");
-                return StatusCode(500, $"Error updating user profile: {ex.Message}");
-            }
         }
 
         [HttpPut("profile/update")]
@@ -735,7 +719,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.UpdateAsync(request);
@@ -748,11 +737,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error updating user profile");
-                return StatusCode(500, $"Error updating user profile: {ex.Message}");
             }
         }
 
@@ -882,11 +866,6 @@ namespace JeebGateway.Controllers
             {
                 return HandleUpstreamException(ex);
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error deleting user profile");
-                return StatusCode(500, $"Error deleting user profile: {ex.Message}");
-            }
         }
 
         [HttpDelete("profile/delete")]
@@ -909,7 +888,10 @@ namespace JeebGateway.Controllers
                 }
                 if (string.IsNullOrEmpty(userId))
                 {
-                    return Unauthorized("User ID not found in token.");
+                    // JEBV4-63: was Unauthorized("User ID not found in token.") — a bare
+                    // string body. Empty Unauthorized() is upgraded to RFC7807 by the
+                    // gateway's status-code pages.
+                    return Unauthorized();
                 }
 
                 var response = await _serviceUserManagementClient.DeleteAsync(userId);
@@ -918,11 +900,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error deleting user profile");
-                return StatusCode(500, $"Error deleting user profile: {ex.Message}");
             }
         }
 
@@ -946,7 +923,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.DeleteByEmailsAsync(request);
@@ -955,11 +937,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error deleting users by emails");
-                return StatusCode(500, $"Error deleting users by emails: {ex.Message}");
             }
         }
 
@@ -984,7 +961,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.Register2Async(request);
@@ -993,11 +975,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error registering device");
-                return StatusCode(500, $"Error registering device: {ex.Message}");
             }
         }
 
@@ -1021,7 +998,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.UnregisterAsync(request);
@@ -1030,11 +1012,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error unregistering device");
-                return StatusCode(500, $"Error unregistering device: {ex.Message}");
             }
         }
 
@@ -1058,7 +1035,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.IssuePaymentAuthTokenAsync(request);
@@ -1067,11 +1049,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error issuing payment auth token");
-                return StatusCode(500, $"Error issuing payment auth token: {ex.Message}");
             }
         }
 
@@ -1105,10 +1082,6 @@ namespace JeebGateway.Controllers
             {
                 return HandleUpstreamException(ex);
             }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
-            }
         }
 
         /// <summary>
@@ -1134,7 +1107,12 @@ namespace JeebGateway.Controllers
             {
                 if (request == null)
                 {
-                    return BadRequest("Request body cannot be null");
+                    return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Title = "Request body is required.",
+                        Status = StatusCodes.Status400BadRequest,
+                        Type = "https://jeeb.dev/errors/request-body-required"
+                    });
                 }
 
                 var response = await _serviceUserManagementClient.ValidatePaymentAuthTokenAsync(request);
@@ -1143,11 +1121,6 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return HandleUpstreamException(ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error validating payment auth token");
-                return StatusCode(500, $"Error validating payment auth token: {ex.Message}");
             }
         }
     }

@@ -28,7 +28,16 @@ public sealed class CallsController : ControllerBase
             request.DeliveryId, userId, request.CalleeUserId, ct);
 
         if (session is null)
-            return NotFound(new { error = "Masked calls are not enabled" });
+        {
+            // JEBV4-63: was an ad-hoc { error } object — now the same RFC7807 envelope
+            // every other 4xx on this surface uses.
+            return NotFound(new ProblemDetails
+            {
+                Title = "Masked calls are not enabled",
+                Status = StatusCodes.Status404NotFound,
+                Type = "https://jeeb.dev/errors/masked-calls-disabled"
+            });
+        }
 
         return Ok(session);
     }
