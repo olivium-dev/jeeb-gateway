@@ -43,14 +43,22 @@ public class NotificationPreferencesController : ControllerBase
         if (!TryGetUserId(out var userId, out var problem)) return problem;
 
         if (body is null)
-            return BadRequest(new ProblemDetails { Title = "Request body is required.", Status = StatusCodes.Status400BadRequest });
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Request body is required.",
+                Status = StatusCodes.Status400BadRequest,
+                // Contract-audit finding 8: give clients a stable machine-readable code to
+                // branch on, matching the rest of the errors/* family.
+                Type = "https://jeeb.dev/errors/request-body-required"
+            });
 
         if (body.Otp is false || body.SystemCritical is false || body.Kyc is false || body.Disputes is false)
             return BadRequest(new ProblemDetails
             {
                 Title = "Transactional channels cannot be disabled.",
                 Detail = "Remove 'otp', 'systemCritical', 'kyc', and 'disputes' from the request body, or set them to true.",
-                Status = StatusCodes.Status400BadRequest
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://jeeb.dev/errors/transactional-channel-required"
             });
 
         var patch = new NotificationPreferencesPatch
