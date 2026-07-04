@@ -66,9 +66,17 @@ public sealed class PostgresAccountDeletionStore : IAccountDeletionStore
     // set making 2-3 sequential awaited DB/HTTP calls per row. Without a bound, a sweep
     // that falls behind (state-service / ledger degraded for a while) materializes the
     // ENTIRE backlog into memory and processes it serially in one tick. A LIMIT drains
-    // the backlog incrementally across ticks instead. Each processed row changes status
-    // (or is skipped and retried next tick), so the queries make forward progress and
-    // eventually drain the whole backlog even without an ORDER BY.
+    // the backlog incrementally across ticks instead.
+    //
+    // GW12-PERF-2 fix (Leg-12 F1): the LIMIT alone was UNSAFE without a deterministic
+    // order. A bare `LIMIT 200` with no ORDER BY lets Postgres return ANY 200 rows, and a
+    // page whose rows are all currently un-advanceable — e.g. pending rows whose client
+    // still has an active delivery (CountActiveForClientAsync > 0 ⇒ `continue`) — makes ZERO
+    // forward progress that tick AND may be the SAME 200 physical rows the next tick, so
+    // rows outside that page are starved indefinitely. `ORDER BY requested_at` pins the page
+    // to the OLDEST requests (FIFO fairness): advanceable rows drain oldest-first, and any
+    // un-advanceable row is a transient block (its active delivery completes) after which the
+    // page window slides forward. Forward progress is therefore guaranteed, not assumed.
     private const int SweepPageSize = 200;
 
     public PostgresAccountDeletionStore(
@@ -317,9 +325,11 @@ public sealed class PostgresAccountDeletionStore : IAccountDeletionStore
     {
         await using var conn = await _db.OpenAsync(ct);
         // GW12-PERF-2: bounded page so a backlog drains incrementally across ticks
-        // rather than being materialized in one unbounded batch.
+        // rather than being materialized in one unbounded batch. F1: ORDER BY requested_at
+        // makes the page deterministic (oldest-first / FIFO) so no row is starved behind a
+        // recurring page of currently-un-advanceable (active-delivery-blocked) rows.
         const string sql =
-            "SELECT * FROM account_deletions WHERE status = @Status::account_deletion_status LIMIT @Limit";
+            "SELECT * FROM account_deletions WHERE status = @Status::account_deletion_status ORDER BY requested_at ASC LIMIT @Limit";
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("Status", status);
         cmd.Parameters.AddWithValue("Limit", SweepPageSize);
@@ -333,9 +343,12 @@ public sealed class PostgresAccountDeletionStore : IAccountDeletionStore
         // ever runs against the one fixed status, same as
         // PostgresSettlementStore.ListRecordedInWindowAsync's `cod_state = 'recorded'`.
         // GW12-PERF-2: bounded page so a purge backlog drains incrementally across ticks.
+        // F1: ORDER BY requested_at makes the page deterministic (oldest-first / FIFO) so a
+        // due row can never be starved behind a recurring arbitrary page under the LIMIT.
         const string sql = """
             SELECT * FROM account_deletions
             WHERE status = 'scheduled'::account_deletion_status AND scheduled_purge_at <= @Now
+            ORDER BY requested_at ASC
             LIMIT @Limit
             """;
         await using var cmd = new NpgsqlCommand(sql, conn);
