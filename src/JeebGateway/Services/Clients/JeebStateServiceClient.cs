@@ -323,6 +323,16 @@ namespace JeebGateway.Services.Clients
                             return;
                         }
                         else
+                        if (status_ == 201)
+                        {
+                            return;
+                        }
+                        else
+                        if (status_ == 204)
+                        {
+                            return;
+                        }
+                        else
                         {
                             var responseData_ = response_.Content == null ? null : await response_.Content.ReadAsStringAsync().ConfigureAwait(false);
                             throw new JeebStateServiceApiException("The HTTP status code of the response was not expected (" + status_ + ").", status_, responseData_, headers_, null);
@@ -490,6 +500,11 @@ namespace JeebGateway.Services.Clients
                             return;
                         }
                         else
+                        if (status_ == 201)
+                        {
+                            return;
+                        }
+                        else
                         {
                             var responseData_ = response_.Content == null ? null : await response_.Content.ReadAsStringAsync().ConfigureAwait(false);
                             throw new JeebStateServiceApiException("The HTTP status code of the response was not expected (" + status_ + ").", status_, responseData_, headers_, null);
@@ -571,6 +586,11 @@ namespace JeebGateway.Services.Clients
 
                         var status_ = (int)response_.StatusCode;
                         if (status_ == 200)
+                        {
+                            return;
+                        }
+                        else
+                        if (status_ == 201)
                         {
                             return;
                         }
@@ -727,6 +747,11 @@ namespace JeebGateway.Services.Clients
 
                         var status_ = (int)response_.StatusCode;
                         if (status_ == 200)
+                        {
+                            return;
+                        }
+                        else
+                        if (status_ == 201)
                         {
                             return;
                         }
@@ -914,6 +939,16 @@ namespace JeebGateway.Services.Clients
                             throw new JeebStateServiceApiException("Not Found", status_, responseText_, headers_, null);
                         }
                         else
+                        if (status_ == 201)
+                        {
+                            var objectResponse_ = await ReadObjectResponseAsync<KycRecord>(response_, headers_, cancellationToken).ConfigureAwait(false);
+                            if (objectResponse_.Object == null)
+                            {
+                                throw new JeebStateServiceApiException("Response was null which was not expected.", status_, objectResponse_.Text, headers_, null);
+                            }
+                            return objectResponse_.Object;
+                        }
+                        else
                         {
                             var responseData_ = response_.Content == null ? null : await response_.Content.ReadAsStringAsync().ConfigureAwait(false);
                             throw new JeebStateServiceApiException("The HTTP status code of the response was not expected (" + status_ + ").", status_, responseData_, headers_, null);
@@ -989,6 +1024,11 @@ namespace JeebGateway.Services.Clients
 
                         var status_ = (int)response_.StatusCode;
                         if (status_ == 200)
+                        {
+                            return;
+                        }
+                        else
+                        if (status_ == 201)
                         {
                             return;
                         }
@@ -1071,6 +1111,11 @@ namespace JeebGateway.Services.Clients
                             return;
                         }
                         else
+                        if (status_ == 201)
+                        {
+                            return;
+                        }
+                        else
                         {
                             var responseData_ = response_.Content == null ? null : await response_.Content.ReadAsStringAsync().ConfigureAwait(false);
                             throw new JeebStateServiceApiException("The HTTP status code of the response was not expected (" + status_ + ").", status_, responseData_, headers_, null);
@@ -1146,6 +1191,11 @@ namespace JeebGateway.Services.Clients
 
                         var status_ = (int)response_.StatusCode;
                         if (status_ == 200)
+                        {
+                            return;
+                        }
+                        else
+                        if (status_ == 201)
                         {
                             return;
                         }
@@ -1240,6 +1290,11 @@ namespace JeebGateway.Services.Clients
                             return;
                         }
                         else
+                        if (status_ == 201)
+                        {
+                            return;
+                        }
+                        else
                         {
                             var responseData_ = response_.Content == null ? null : await response_.Content.ReadAsStringAsync().ConfigureAwait(false);
                             throw new JeebStateServiceApiException("The HTTP status code of the response was not expected (" + status_ + ").", status_, responseData_, headers_, null);
@@ -1315,6 +1370,11 @@ namespace JeebGateway.Services.Clients
 
                         var status_ = (int)response_.StatusCode;
                         if (status_ == 200)
+                        {
+                            return;
+                        }
+                        else
+                        if (status_ == 201)
                         {
                             return;
                         }
@@ -1398,6 +1458,11 @@ namespace JeebGateway.Services.Clients
                             return;
                         }
                         else
+                        if (status_ == 201)
+                        {
+                            return;
+                        }
+                        else
                         {
                             var responseData_ = response_.Content == null ? null : await response_.Content.ReadAsStringAsync().ConfigureAwait(false);
                             throw new JeebStateServiceApiException("The HTTP status code of the response was not expected (" + status_ + ").", status_, responseData_, headers_, null);
@@ -1473,6 +1538,11 @@ namespace JeebGateway.Services.Clients
 
                         var status_ = (int)response_.StatusCode;
                         if (status_ == 200)
+                        {
+                            return;
+                        }
+                        else
+                        if (status_ == 201)
                         {
                             return;
                         }
@@ -1556,6 +1626,11 @@ namespace JeebGateway.Services.Clients
                             return;
                         }
                         else
+                        if (status_ == 201)
+                        {
+                            return;
+                        }
+                        else
                         {
                             var responseData_ = response_.Content == null ? null : await response_.Content.ReadAsStringAsync().ConfigureAwait(false);
                             throw new JeebStateServiceApiException("The HTTP status code of the response was not expected (" + status_ + ").", status_, responseData_, headers_, null);
@@ -1635,6 +1710,11 @@ namespace JeebGateway.Services.Clients
                             return;
                         }
                         else
+                        if (status_ == 201)
+                        {
+                            return;
+                        }
+                        else
                         {
                             var responseData_ = response_.Content == null ? null : await response_.Content.ReadAsStringAsync().ConfigureAwait(false);
                             throw new JeebStateServiceApiException("The HTTP status code of the response was not expected (" + status_ + ").", status_, responseData_, headers_, null);
@@ -1710,6 +1790,11 @@ namespace JeebGateway.Services.Clients
 
                         var status_ = (int)response_.StatusCode;
                         if (status_ == 200)
+                        {
+                            return;
+                        }
+                        else
+                        if (status_ == 201)
                         {
                             return;
                         }

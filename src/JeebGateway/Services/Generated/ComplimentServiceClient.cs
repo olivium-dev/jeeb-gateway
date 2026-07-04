@@ -169,7 +169,7 @@ namespace JeebGateway.Services.Generated.ComplimentService
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200 || status_ == 201)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<ComplimentResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -249,7 +249,7 @@ namespace JeebGateway.Services.Generated.ComplimentService
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<System.Collections.Generic.List<string>>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -329,7 +329,7 @@ namespace JeebGateway.Services.Generated.ComplimentService
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<System.Collections.Generic.List<string>>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -414,7 +414,7 @@ namespace JeebGateway.Services.Generated.ComplimentService
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<ConversationResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)

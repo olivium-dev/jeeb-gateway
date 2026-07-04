@@ -138,7 +138,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -251,7 +251,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -364,7 +364,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -477,7 +477,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -595,7 +595,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Text_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -707,7 +707,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Text_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -825,7 +825,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Image_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -937,7 +937,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Image_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1055,7 +1055,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Video_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1167,7 +1167,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Video_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1285,7 +1285,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Audio_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1397,7 +1397,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Audio_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1515,7 +1515,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Location_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1627,7 +1627,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Location_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1745,7 +1745,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Reply_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1857,7 +1857,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Reply_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1975,7 +1975,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Moderated_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -2087,7 +2087,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<Moderated_messageNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -2205,7 +2205,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<ComplimentNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -2317,7 +2317,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<ComplimentNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -2435,7 +2435,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<LikeNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -2547,7 +2547,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<LikeNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -2665,7 +2665,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<MatchNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -2777,7 +2777,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<MatchNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -2895,7 +2895,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<FavoriteNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -3007,7 +3007,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<FavoriteNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -3125,7 +3125,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<VisitNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -3237,7 +3237,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<VisitNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -3355,7 +3355,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<BanNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -3467,7 +3467,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<BanNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -3585,7 +3585,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<RevealNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -3697,7 +3697,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<RevealNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -3815,7 +3815,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<GiftNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -3927,7 +3927,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<GiftNotification>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -4047,7 +4047,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -4157,7 +4157,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -4271,7 +4271,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -4385,7 +4385,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -4498,7 +4498,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -4618,7 +4618,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -4732,7 +4732,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -4912,7 +4912,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -5058,7 +5058,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -5154,7 +5154,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -5250,7 +5250,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -5340,7 +5340,7 @@ namespace JeebGateway.service.ServiceNotification
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<object>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)

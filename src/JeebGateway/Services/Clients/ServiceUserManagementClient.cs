@@ -127,7 +127,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<FindOrCreateResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -214,7 +214,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             return;
                         }
@@ -301,7 +301,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<GetAllUsersResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -383,7 +383,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<RegisterUserResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -465,7 +465,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<LoginResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -547,7 +547,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<LoginResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -629,7 +629,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200 || status_ == 201)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<SocialLoginResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -711,7 +711,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<LogoutResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -793,7 +793,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<SocialLoginResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -875,7 +875,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<ForgotPasswordResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -957,7 +957,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<ResetPasswordResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1039,7 +1039,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<UserProfileResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1142,7 +1142,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<UserRolesResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1239,7 +1239,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<UserRolesResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1341,7 +1341,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<RoleSwitchReissueResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1453,7 +1453,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<GrantAvailableRoleResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1555,7 +1555,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<UpdateUserProfileResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1637,7 +1637,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<DeleteUserProfileResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1719,7 +1719,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<BulkOperationResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1801,7 +1801,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<RegisterDeviceResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1883,7 +1883,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<UnregisterDeviceResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -1965,7 +1965,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<PaymentAuthTokenResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -2047,7 +2047,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<ValidatePaymentAuthTokenResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -2124,7 +2124,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             return;
                         }
@@ -2196,7 +2196,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             return;
                         }
@@ -2268,7 +2268,7 @@ namespace JeebGateway.service.ServiceUserManagement
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             return;
                         }

@@ -52,7 +52,7 @@ namespace JeebGateway.Services.Clients
 
                 ProcessResponse(client_, response_);
                 var status_ = (int)response_.StatusCode;
-                if (status_ == 200)
+                if (status_ >= 200 && status_ < 300)
                 {
                     var obj_ = await ReadObjectResponseAsync<System.Collections.Generic.IReadOnlyList<IdempotencyRecord>>(
                         response_, headers_, cancellationToken).ConfigureAwait(false);
