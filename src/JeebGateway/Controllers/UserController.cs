@@ -103,6 +103,113 @@ namespace JeebGateway.Controllers
             return Ok(new { users });
         }
 
+        /// <summary>
+        /// JEBV4-8 — GET /api/User/super-login/users. The FULL Super-Login+ picker
+        /// roster: EVERY live user-management user (~84), not just the 3 seeded demo
+        /// rows served by <c>/api/User/demo-users</c>. Sourced from user-management's
+        /// own list API (<c>ServiceUserManagementClient.AllAsync</c> → UM
+        /// <c>GET /api/User/all</c>) — the gateway NEVER reads UM's database directly
+        /// (service boundary). Returns the demo-users-compatible
+        /// <c>{ users: [ { userId, name, role, roles } ] }</c> shape but carries
+        /// NO <c>passcode</c> field: real users never expose one. The picker re-POSTs
+        /// its shared dev SuperAdmin passcode to <c>/api/User/user-id-login</c>, which
+        /// user-management validates server-side (the admin gate is unchanged).
+        ///
+        /// SECURITY: this endpoint ENUMERATES all users. It is gated behind the SAME
+        /// two flags as demo-users (<c>SuperLogin:OpenMode</c> + <c>DemoUsers:Enabled</c>),
+        /// so the SEC-13 prod-off (OpenMode=false) kills it too → 404. It MUST die with
+        /// SEC-13; never ship it enabled to production.
+        /// </summary>
+        [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+        [PublicEndpoint("Debug Super-Login+ FULL user picker roster — precedes any session token; gated by SuperLogin:OpenMode + DemoUsers:Enabled (dies with SEC-13). ADR-005 §A public.")]
+        [HttpGet("super-login/users")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status502BadGateway)]
+        public async Task<ActionResult> SuperLoginUsers()
+        {
+            // SECURITY-GATE: identical to demo-users. The anonymous full-roster picker
+            // is only served in DEMO open mode. Default (OpenMode=false) or the
+            // DemoUsers surface disabled = prod-safe → 404, so a flag-unset deploy
+            // never enumerates users anonymously. Dies with SEC-13.
+            if (!_superLogin.Value.OpenMode)
+            {
+                return NotFound();
+            }
+            if (!_demoUsers.Value.Enabled)
+            {
+                return NotFound();
+            }
+
+            // Source the FULL roster from user-management's own list API — page through
+            // until hasMore is exhausted (cap the loop so a misbehaving upstream can't
+            // spin us forever). NEVER touch UM's database directly (service boundary).
+            const int pageSize = 200;
+            const int maxPages = 100; // hard cap: 20k users
+            var roster = new List<object>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var skip = 0;
+                for (var page = 0; page < maxPages; page++)
+                {
+                    var batch = await _serviceUserManagementClient.AllAsync(skip, pageSize, null);
+                    var rows = batch?.Users;
+                    if (rows is null || rows.Count == 0)
+                    {
+                        break;
+                    }
+
+                    foreach (var u in rows)
+                    {
+                        if (string.IsNullOrWhiteSpace(u.UserId) || !seen.Add(u.UserId!))
+                        {
+                            continue;
+                        }
+
+                        var available = (u.Available_roles ?? new List<string>())
+                            .Where(r => !string.IsNullOrWhiteSpace(r))
+                            .ToList();
+                        var role = !string.IsNullOrWhiteSpace(u.Active_role)
+                            ? u.Active_role!
+                            : (available.Count > 0 ? available[0] : "client");
+
+                        // NO passcode field for real users — the picker submits the
+                        // shared dev SuperAdmin passcode, which UM validates server-side.
+                        roster.Add(new
+                        {
+                            userId = u.UserId,
+                            name = string.IsNullOrWhiteSpace(u.Username) ? u.UserId : u.Username,
+                            role,
+                            roles = available,
+                        });
+                    }
+
+                    if (batch is not null && !batch.HasMore)
+                    {
+                        break;
+                    }
+                    skip += pageSize;
+                }
+            }
+            catch (UserManagementApiException ex)
+            {
+                _logger.LogError(ex, "user.super-login/users UM list failed (status={Status})", ex.StatusCode);
+                return Problem(statusCode: StatusCodes.Status502BadGateway,
+                    detail: "Failed to load the user roster from user-management.",
+                    title: "Bad Gateway");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "user.super-login/users unexpected failure loading roster");
+                return Problem(statusCode: StatusCodes.Status502BadGateway,
+                    detail: "Failed to load the user roster from user-management.",
+                    title: "Bad Gateway");
+            }
+
+            return Ok(new { users = roster });
+        }
+
         private ActionResult HandleUpstreamException(UserManagementApiException ex)
         {
             if (ex.StatusCode == 404)
