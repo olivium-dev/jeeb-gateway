@@ -622,6 +622,90 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         problem!.Type.Should().Be("https://jeeb.dev/errors/not-at-door");
     }
 
+    // ----------------------- F1/F3/F4 party-guard (flow-correctness-audit) ----
+    //
+    // The class capability is the coarse {client, jeeber} role. On the in-memory
+    // (production-live) handover path the caller must ALSO be a party to THIS
+    // delivery. A non-party jeeber (valid driver role, unrelated to the order)
+    // must be rejected 403 not-a-party BEFORE any money-terminating side effect.
+
+    [Fact]
+    public async Task VerifyHandoverOtp_NonParty_Returns403NotAParty()
+    {
+        var otp        = new FakeServiceOtpClient { ValidateOutcome = FakeServiceOtpClient.OtpResult.Correct };
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture); // in-memory path
+
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700123123");
+        var intruder = AuthClient(factory, $"jeeber-intruder-{Guid.NewGuid()}");
+
+        var resp = await intruder.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "1234" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/not-a-party");
+    }
+
+    [Fact]
+    public async Task TriggerOtp_NonParty_Returns403NotAParty()
+    {
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture); // in-memory path
+
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700124124");
+        var intruder = AuthClient(factory, $"jeeber-intruder-{Guid.NewGuid()}");
+
+        var resp = await intruder.GetAsync($"/deliveries/{seed.Id}/otp");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/not-a-party");
+
+        // The non-party must never trigger a real SMS dispatch.
+        otp.SendOtpCalls.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task MarkClientUnreachable_NonParty_Returns403NotAParty()
+    {
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
+
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700125125");
+        var intruder = AuthClient(factory, $"jeeber-intruder-{Guid.NewGuid()}");
+
+        var resp = await intruder.PostAsync($"/deliveries/{seed.Id}/client-unreachable", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/not-a-party");
+    }
+
+    [Fact]
+    public async Task VerifyHandoverOtp_Party_StillReaches_AtDoor_Logic()
+    {
+        // Guard must NOT block the legitimate party: the jeeber assigned to the
+        // delivery passes the party check and proceeds into the handover logic.
+        var otp        = new FakeServiceOtpClient { ValidateOutcome = FakeServiceOtpClient.OtpResult.Wrong };
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture); // in-memory path
+
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700126126");
+        var party = AuthClient(factory, seed.JeeberId);
+
+        var resp = await party.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "0000" });
+
+        // The assigned jeeber is a party: the request passes the guard and reaches
+        // the OTP logic (a wrong code is NOT a 403 not-a-party rejection).
+        resp.StatusCode.Should().NotBe(HttpStatusCode.Forbidden);
+    }
+
     // ----------------------- helpers -----------------------------------------
 
     private HttpClient AuthClient(string userId) => AuthClient(_factory, userId);

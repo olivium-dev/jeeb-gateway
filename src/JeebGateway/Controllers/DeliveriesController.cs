@@ -126,6 +126,30 @@ public class DeliveriesController : ControllerBase
         return await _handoverCodes.GetAsync(delivery.Id, ct);
     }
 
+    /// <summary>
+    /// F1/F3/F4 (sprint-009 gateway-flow-correctness-audit): the class capability is the
+    /// coarse <c>{client, jeeber}</c> role — i.e. ANY client or ANY jeeber on the platform,
+    /// not a party to <em>this</em> delivery. The money-terminating handover steps
+    /// (OTP verify/trigger, client-unreachable) additionally require the caller to be a
+    /// PARTY to the delivery, exactly like the cancel path. Without this, any authenticated
+    /// jeeber who learns/observes the handover code (or simply enumerates ids) could complete
+    /// or disrupt someone else's delivery. On the upstream compose path
+    /// (<c>FeatureFlags:UseUpstream:Delivery</c>) delivery-service enforces the X-Actor party
+    /// guard; these gateway checks close the in-memory (production-live) path.
+    /// </summary>
+    private static bool IsCallerParty(string callerId, DeliveryRequest delivery)
+        => !string.IsNullOrEmpty(callerId)
+           && (string.Equals(callerId, delivery.ClientId, StringComparison.Ordinal)
+               || string.Equals(callerId, delivery.JeeberId, StringComparison.Ordinal));
+
+    private ObjectResult NotAPartyProblem()
+        => StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
+        {
+            Title = "You are not a party to this delivery.",
+            Status = StatusCodes.Status403Forbidden,
+            Type = "https://jeeb.dev/errors/not-a-party"
+        });
+
     public DeliveriesController(
         IRequestsStore store,
         IPendingOffersStore offers,
@@ -929,7 +953,7 @@ public class DeliveriesController : ControllerBase
         [FromBody] OtpVerificationRequest? body,
         CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
 
         if (body is null || string.IsNullOrWhiteSpace(body.OtpCode))
         {
@@ -940,6 +964,12 @@ public class DeliveriesController : ControllerBase
                 Type = "https://jeeb.dev/errors/otp-required"
             });
         }
+
+        // F1 (flow-correctness-audit): legacy in-memory verify — require party membership
+        // before an OTP match can flip the delivery to Delivered (mirrors VerifyHandoverOtp).
+        var legacyDelivery = await _store.GetAsync(deliveryId, ct);
+        if (legacyDelivery is null) return NotFound();
+        if (!IsCallerParty(callerId, legacyDelivery)) return NotAPartyProblem();
 
         var opts = _otpOptions.Value;
         var now = _clock.GetUtcNow();
@@ -1051,7 +1081,14 @@ public class DeliveriesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> MarkClientUnreachable(string deliveryId, CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
+
+        // F3 (flow-correctness-audit): only a party to THIS delivery may start the 15-min
+        // unreachable-escalation timer — otherwise any authenticated user could enumerate ids
+        // and flood the moderation/escalation queue on deliveries they are not part of.
+        var target = await _store.GetAsync(deliveryId, ct);
+        if (target is null) return NotFound();
+        if (!IsCallerParty(callerId, target)) return NotAPartyProblem();
 
         var row = await _store.MarkClientUnreachableAsync(deliveryId, _clock.GetUtcNow(), ct);
         if (row is null) return NotFound();
@@ -1115,6 +1152,14 @@ public class DeliveriesController : ControllerBase
         if (_flags.CurrentValue.Delivery)
         {
             return await TriggerOtpViaDeliveryServiceAsync(deliveryId, delivery, callerId, correlationId, activity, ct);
+        }
+
+        // F4 (flow-correctness-audit): in-memory path — only a party to THIS delivery may
+        // trigger the real SMS dispatch to the recipient, preventing SMS-cost abuse and the
+        // 404-vs-400 existence oracle over enumerated delivery ids.
+        if (!IsCallerParty(callerId, delivery))
+        {
+            return NotAPartyProblem();
         }
 
         // PR review B1 (JEB-628): AC1 requires status `at_door` (the
@@ -1280,6 +1325,14 @@ public class DeliveriesController : ControllerBase
             var actorRole = CanonicalDeliveryVocab.ActorRoleFor(HttpContext);
             return await VerifyOtpViaDeliveryServiceAsync(
                 deliveryId, delivery, body.Code!, callerId, actorRole, correlationId, activity, ct);
+        }
+
+        // F1 (flow-correctness-audit, CRITICAL): in-memory (production-live) path — the caller
+        // must be a party to THIS delivery before an OTP match can drive it to Delivered and
+        // fire settlement. Identity, not just OTP secrecy, gates the money-terminating step.
+        if (!IsCallerParty(callerId, delivery))
+        {
+            return NotAPartyProblem();
         }
 
         // PR review B1: handover OTP applies at the `at_door` step.
