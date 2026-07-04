@@ -730,4 +730,78 @@ public static class ServiceClientExtensions
         var code = (int)response.StatusCode;
         return code >= 500 || code == 408;
     }
+
+    /// <summary>
+    /// JEBV4-58 (PP-7) — attaches ONLY the org-standard resilience handler
+    /// (retry / circuit-breaker / timeout, see <see cref="ConfigureStandardResilience"/>)
+    /// to a NAMED client builder, deliberately WITHOUT the
+    /// <see cref="BearerForwardingHandler"/> / <see cref="ServiceAuthSigningHandler"/>
+    /// pair that <see cref="AttachStandardPipeline"/> adds for post-auth typed
+    /// clients.
+    ///
+    /// The PP-7 stragglers (Chat/Notification/Feedback/Catalog named clients in
+    /// Program.cs) are exact salehly-gateway mirrors that were deliberately
+    /// registered with NO bearer/ServiceAuth handler chain (see the "NOT part of
+    /// this named-downstream-client set" notes earlier in this file — the
+    /// upstream services authorize on their own terms, not the gateway's
+    /// caller JWT). Routing them through the full <see cref="AttachStandardPipeline"/>
+    /// would silently start forwarding the caller's bearer + signing
+    /// X-Service-Auth on every call — an auth-behavior change out of scope for
+    /// a resilience-only fix. This helper closes the actual PP-7 gap (default
+    /// 100s HttpClient.Timeout, no retry, no breaker) without touching
+    /// auth-header behavior.
+    ///
+    /// Safe for GET-dominant / idempotent-write clients only — see
+    /// <see cref="AttachBreakerAndTimeoutOnly"/> for clients that also carry a
+    /// non-idempotent, non-idempotency-keyed POST (push dispatch, wallet
+    /// money-mutation) where retrying a transient 5xx/timeout risks a
+    /// duplicate side effect upstream.
+    /// </summary>
+    internal static IHttpClientBuilder AttachResilienceOnly(IHttpClientBuilder builder)
+    {
+        builder.AddResilienceHandler("standard", ConfigureStandardResilience);
+        return builder;
+    }
+
+    /// <summary>
+    /// JEBV4-58 (PP-7) — attaches circuit-breaker + timeout ONLY (no retry, no
+    /// bearer/ServiceAuth) to a NAMED client builder. Use for a client that
+    /// mixes safe reads with a non-idempotent POST that carries no
+    /// idempotency key: <c>ServicePushNotificationClient</c> (device
+    /// register/broadcast/send-to-user — a retried 5xx could duplicate-deliver
+    /// a push) and <c>ServiceWalletClient</c> (money-adjacent; the same named
+    /// client also backs <c>holder/add</c> and the deactivate endpoints, so a
+    /// retried 5xx after the upstream already applied the mutation would risk
+    /// double-crediting/deactivating a wallet). The breaker still trips on a
+    /// truly failing upstream and the 10s per-attempt timeout still bounds a
+    /// hung call; only the "retry the same request again" behavior is
+    /// withheld until these calls carry an idempotency key.
+    /// </summary>
+    internal static IHttpClientBuilder AttachBreakerAndTimeoutOnly(IHttpClientBuilder builder)
+    {
+        builder.AddResilienceHandler("standard-no-retry", ConfigureBreakerAndTimeoutOnly);
+        return builder;
+    }
+
+    /// <summary>
+    /// Circuit-breaker + timeout halves of <see cref="ConfigureStandardResilience"/>,
+    /// factored out for <see cref="AttachBreakerAndTimeoutOnly"/> — deliberately
+    /// omits the retry strategy for non-idempotent, non-idempotency-keyed POSTs
+    /// (see that method's remarks).
+    /// </summary>
+    private static void ConfigureBreakerAndTimeoutOnly(ResiliencePipelineBuilder<HttpResponseMessage> b)
+    {
+        b.AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
+        {
+            SamplingDuration = TimeSpan.FromSeconds(30),
+            FailureRatio = 0.5,
+            MinimumThroughput = 10,
+            BreakDuration = TimeSpan.FromSeconds(30),
+        });
+
+        b.AddTimeout(new HttpTimeoutStrategyOptions
+        {
+            Timeout = TimeSpan.FromSeconds(10),
+        });
+    }
 }

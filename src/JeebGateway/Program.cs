@@ -416,14 +416,21 @@ builder.Services.AddScoped<JeebGateway.Services.Generated.ServiceRemoteUserPrefe
 // members, sessions). This replaces the former jeeb-specific 1:1 conversation
 // BFF (ChatServiceClient + Redis topology map + SignalR ChatHub/ChatDispatcher),
 // which has been removed.
-builder.Services.AddHttpClient("ServiceChatClient", client =>
+// JEBV4-58 (PP-7) — was registered with ONLY a BaseAddress (default 100s
+// HttpClient timeout, no retry, no breaker: a slow chat-service call froze
+// the request for up to 100s). Sub-100s timeout + the standard
+// retry/breaker/timeout pipeline via AttachResilienceOnly (resilience only —
+// deliberately NOT AttachStandardPipeline; this salehly-mirror client carries
+// no bearer/ServiceAuth chain, see ServiceClientExtensions.AttachResilienceOnly).
+ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient("ServiceChatClient", client =>
 {
     var apiUrl = builder.Configuration["ChatServiceApi:BaseUrl"];
     if (!string.IsNullOrWhiteSpace(apiUrl))
     {
         client.BaseAddress = new Uri(apiUrl);
     }
-});
+    client.Timeout = TimeSpan.FromSeconds(30);
+}));
 builder.Services.AddScoped<JeebGateway.service.ServiceChat.ServiceChatClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -481,14 +488,21 @@ builder.Services.AddSingleton<JeebGateway.Conversations.Realtime.IRealtimeTicket
 // in salehly's appsettings, so salehly's client receives a null base URL. jeeb
 // uses the CORRECT key "ServiceNotificationClient:BaseUrl" in BOTH places so the
 // client actually resolves the upstream address.
-builder.Services.AddHttpClient("ServiceNotificationClient", client =>
+// JEBV4-58 (PP-7) — was registered with ONLY a BaseAddress (default 100s
+// timeout, no retry, no breaker). All gateway calls on this client are reads
+// (list/unread-count) or PATCH mark-read/unread (naturally idempotent), so
+// the full standard resilience pipeline (retry+breaker+timeout) is safe here.
+// AttachResilienceOnly, not AttachStandardPipeline: this salehly-mirror client
+// carries no bearer/ServiceAuth chain by design (see that helper's remarks).
+ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient("ServiceNotificationClient", client =>
 {
     var apiUrl = builder.Configuration["ServiceNotificationClient:BaseUrl"];
     if (!string.IsNullOrWhiteSpace(apiUrl))
     {
         client.BaseAddress = new Uri(apiUrl);
     }
-});
+    client.Timeout = TimeSpan.FromSeconds(30);
+}));
 builder.Services.AddScoped<JeebGateway.service.ServiceNotification.ServiceNotificationClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -561,14 +575,24 @@ if (notificationUpstreamEnabled && notificationSeederEnabled)
 // broadcast, health). This replaces the former jeeb-specific device-register
 // passthrough (PushController + IPushNotificationClient + PushNotificationClient),
 // which has been removed.
-builder.Services.AddHttpClient("ServicePushNotificationClient", client =>
+// JEBV4-58 (PP-7) — was registered with ONLY a BaseAddress (default 100s
+// timeout, no retry, no breaker). This client's writes are dispatch actions
+// (device register, broadcast, send-to-user) with NO idempotency key in the
+// generated client, so a retried 5xx/timeout could duplicate-deliver a push
+// the upstream already sent — the exact non-idempotent-POST case PP-7 calls
+// out. AttachBreakerAndTimeoutOnly gives it the sub-100s timeout + breaker
+// (a genuinely down upstream still trips and fails fast) WITHOUT retrying the
+// same dispatch call. Not AttachStandardPipeline either: no bearer/ServiceAuth
+// chain by design (salehly mirror).
+ServiceClientExtensions.AttachBreakerAndTimeoutOnly(builder.Services.AddHttpClient("ServicePushNotificationClient", client =>
 {
     var apiUrl = builder.Configuration["PushNotificationServiceApi:BaseUrl"];
     if (!string.IsNullOrWhiteSpace(apiUrl))
     {
         client.BaseAddress = new Uri(apiUrl);
     }
-});
+    client.Timeout = TimeSpan.FromSeconds(30);
+}));
 builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePushNotificationClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -622,14 +646,21 @@ builder.Services.AddScoped<JeebGateway.Notifications.INewRequestPushNotifier,
 // salehly NSwag artifacts consumed ONLY by TechnicianReviewService — no other
 // jeeb code depends on them; the jeeb auth/role-switch surfaces keep their own
 // hand-coded user-management clients.
-builder.Services.AddHttpClient("ServiceFeedbackClient", client =>
+// JEBV4-58 (PP-7) — was registered with ONLY a BaseAddress (default 100s
+// timeout, no retry, no breaker). The only write is POST comment, which the
+// upstream already guards with a documented 409 Conflict (duplicate-safe by
+// contract), so the full standard resilience pipeline (retry+breaker+timeout)
+// is safe. AttachResilienceOnly, not AttachStandardPipeline: no bearer/
+// ServiceAuth chain by design (salehly mirror).
+ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient("ServiceFeedbackClient", client =>
 {
     var apiUrl = builder.Configuration["FeedbackServiceApi:BaseUrl"];
     if (!string.IsNullOrWhiteSpace(apiUrl))
     {
         client.BaseAddress = new Uri(apiUrl);
     }
-});
+    client.Timeout = TimeSpan.FromSeconds(30);
+}));
 builder.Services.AddScoped<JeebGateway.service.ServiceFeedback.ServiceFeedbackClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -638,14 +669,20 @@ builder.Services.AddScoped<JeebGateway.service.ServiceFeedback.ServiceFeedbackCl
     return new JeebGateway.service.ServiceFeedback.ServiceFeedbackClient(baseUrl, client);
 });
 
-builder.Services.AddHttpClient("ServiceCatalogClient", client =>
+// JEBV4-58 (PP-7) — was registered with ONLY a BaseAddress (default 100s
+// timeout, no retry, no breaker). Catalog is read-only (ItemGETAsync via
+// TechnicianReviewService), so the full standard resilience pipeline is safe.
+// AttachResilienceOnly, not AttachStandardPipeline: no bearer/ServiceAuth
+// chain by design (salehly mirror).
+ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient("ServiceCatalogClient", client =>
 {
     var apiUrl = builder.Configuration["CatalogServiceApi:BaseUrl"];
     if (!string.IsNullOrWhiteSpace(apiUrl))
     {
         client.BaseAddress = new Uri(apiUrl);
     }
-});
+    client.Timeout = TimeSpan.FromSeconds(30);
+}));
 builder.Services.AddScoped<JeebGateway.service.ServiceCatalog.ServiceCatalogClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -970,14 +1007,31 @@ builder.Services.AddSingleton<ISettlementService, SettlementService>();
 // ===========================================================================
 void ConfigureNamedClient(string name, string configKey)
 {
-    builder.Services.AddHttpClient(name, client =>
+    var walletBuilder = builder.Services.AddHttpClient(name, client =>
     {
         var apiUrl = builder.Configuration[$"{configKey}:BaseUrl"];
         if (!string.IsNullOrEmpty(apiUrl))
         {
             client.BaseAddress = new Uri(apiUrl);
         }
+
+        // JEBV4-58 (PP-7) — was ONLY a BaseAddress (default 100s timeout, no
+        // retry, no breaker): the uncapped money-read ServiceWalletClient call
+        // out. Sub-100s timeout below; see AttachBreakerAndTimeoutOnly call
+        // for why retry is deliberately withheld on this client.
+        client.Timeout = TimeSpan.FromSeconds(30);
     });
+
+    // This same named client also backs WalletController's money-MUTATING
+    // POSTs (holder/add, {holderId}/{walletId}/deactivate[/force-deactivate])
+    // with no idempotency key in the generated client — a retried 5xx/timeout
+    // after the upstream already applied the mutation risks a duplicate
+    // credit/deactivation. AttachBreakerAndTimeoutOnly gives the client the
+    // sub-100s timeout + circuit breaker (a genuinely failing wallet-service
+    // still fails fast) WITHOUT retrying the same money-mutating request.
+    // Not AttachStandardPipeline either: no bearer/ServiceAuth chain by design
+    // (salehly mirror) — see AttachResilienceOnly's remarks.
+    ServiceClientExtensions.AttachBreakerAndTimeoutOnly(walletBuilder);
 }
 
 ConfigureNamedClient("ServiceWalletClient", "WalletServiceApi");
@@ -987,14 +1041,23 @@ ConfigureNamedClient("ServiceWalletClient", "WalletServiceApi");
 // wallet client; the BaseAddress is normalised with a trailing slash so the controller's
 // relative "v1/wallet/jeeb/earnings" path resolves correctly. The caller's bearer is
 // forwarded per-request inside the controller (own-scoped read).
-builder.Services.AddHttpClient(JeebGateway.Controllers.JeebEarningsBffController.WalletHttpClientName, client =>
+//
+// JEBV4-58 (PP-7) — the money-READ client the ticket calls out by name: was
+// ONLY a BaseAddress (default 100s timeout, no retry, no breaker), so a slow
+// (not down) wallet-service froze the earnings screen for up to 100s. Read-only
+// (GET .../earnings[/export]) so the full standard resilience pipeline
+// (retry+breaker+timeout via AttachResilienceOnly) is safe here — unlike the
+// ServiceWalletClient above, this client never carries the money-mutating
+// holder/add / deactivate POSTs.
+ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(JeebGateway.Controllers.JeebEarningsBffController.WalletHttpClientName, client =>
 {
     var apiUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
     if (!string.IsNullOrWhiteSpace(apiUrl))
     {
         client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
     }
-});
+    client.Timeout = TimeSpan.FromSeconds(30);
+}));
 
 builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient>(sp =>
 {
