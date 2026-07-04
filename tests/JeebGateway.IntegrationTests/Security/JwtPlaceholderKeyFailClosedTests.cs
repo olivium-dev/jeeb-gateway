@@ -41,6 +41,44 @@ public class JwtPlaceholderKeyFailClosedTests
             .WithMessage("*signing key*", "a non-secret key in production must fail closed");
     }
 
+    /// <summary>
+    /// SEC-H2 (A3) — every dev/placeholder default signing key ACTUALLY shipped in the repo
+    /// (JwtOptions code default + committed appsettings placeholder) must be refused in
+    /// Production. These are caught by BOTH the exact known-default list and the case-insensitive
+    /// placeholder markers (<c>DEV-ONLY</c>, <c>REPLACE-WITH</c>), so a drifted edit still fails.
+    /// </summary>
+    [Theory]
+    [InlineData("dev-only-signing-key-32-bytes-minimum!!")]  // JwtOptions.cs code default
+    [InlineData("REPLACE-WITH-PRODUCTION-SIGNING-KEY-32+")]   // appsettings.json committed placeholder
+    [InlineData("DEV-ONLY-but-someone-lengthened-the-marker-value-here")] // drifted DEV-ONLY marker
+    public void Guard_Refuses_Every_Repo_Shipped_Dev_Default_In_Production(string key)
+    {
+        var act = () => JwtSigningKeyGuard.EnsureNotPlaceholder(key, new FakeEnv { EnvironmentName = "Production" });
+
+        act.Should().Throw<InvalidOperationException>(
+            "every dev/placeholder default shipped in the repo must fail closed in Production");
+    }
+
+    /// <summary>
+    /// SEC-H2 (A3) — CONSCIOUS ACCEPT. The guard intentionally does NOT reject a strong (>=32 byte)
+    /// operator-injected key merely because it contains the substring "dev" (e.g. a real secret like
+    /// "developer-team-rotated-strong-secret-2026"). A naive 'dev' substring reject would false-trip
+    /// such a legitimate key. All dev-DEFAULTS actually shipped are already covered by the exact
+    /// known-default list plus the "DEV-ONLY" marker, so the only residual gap is a hypothetical
+    /// strong key containing 'dev', which we accept rather than risk denying a real injected secret.
+    /// </summary>
+    [Fact]
+    public void Guard_Accepts_Strong_Injected_Key_That_Merely_Contains_dev_Substring()
+    {
+        var strongKeyWithDev = "developer-team-rotated-strong-secret-2026-01";
+        Encoding.UTF8.GetBytes(strongKeyWithDev).Length.Should().BeGreaterThanOrEqualTo(32);
+
+        var act = () => JwtSigningKeyGuard.EnsureNotPlaceholder(strongKeyWithDev, new FakeEnv { EnvironmentName = "Production" });
+
+        act.Should().NotThrow(
+            "a strong injected key must not be rejected just for containing 'dev' — that would false-trip a real secret");
+    }
+
     [Fact]
     public void Guard_Accepts_Real_Key_In_Production()
     {

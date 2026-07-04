@@ -1,6 +1,6 @@
-using System.Security.Claims;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.NotificationPreferences;
+using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
@@ -67,26 +67,12 @@ public class NotificationPreferencesController : ControllerBase
         return Ok(ToResponse(updated));
     }
 
+    // SEC-C1 (Leg-11): identity derives from the validated JWT principal; the raw
+    // X-User-Id header is honoured ONLY when EdgeIdentityTrust permits it (Dev/Testing or
+    // a secret-gated trusted edge). Delegating to the shared, gated UserIdentity closes the
+    // spoof/IDOR — a raw client can no longer read/write another user's notification prefs.
     private bool TryGetUserId(out string userId, out IActionResult problem)
-    {
-        var fromClaim = User?.FindFirstValue(ClaimTypes.NameIdentifier)
-                        ?? User?.FindFirstValue("sub");
-        if (!string.IsNullOrWhiteSpace(fromClaim))
-        {
-            userId = fromClaim;
-            problem = null!;
-            return true;
-        }
-        if (Request.Headers.TryGetValue("X-User-Id", out var header) && !string.IsNullOrWhiteSpace(header))
-        {
-            userId = header.ToString();
-            problem = null!;
-            return true;
-        }
-        userId = string.Empty;
-        problem = Unauthorized();
-        return false;
-    }
+        => UserIdentity.TryGetUserId(HttpContext, out userId, out problem);
 
     private static NotificationPreferencesResponse ToResponse(UserNotificationPreferences prefs) => new()
     {

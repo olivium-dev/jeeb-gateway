@@ -1,8 +1,8 @@
 using System.Net;
-using System.Security.Claims;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
+using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 
@@ -156,29 +156,12 @@ public sealed class RealtimeController : ControllerBase
             Status = StatusCodes.Status503ServiceUnavailable,
         });
 
+    // SEC-C1 (Leg-11): the sender identity derives from the validated JWT principal; the raw
+    // X-User-Id header is honoured ONLY when EdgeIdentityTrust permits it (Dev/Testing or a
+    // secret-gated trusted edge). Delegating to the shared, gated UserIdentity ensures a raw
+    // client can never fan out a chat message AS another user.
     private bool TryGetUserId(out string userId, out IActionResult problem)
-    {
-        var fromClaim = User?.FindFirstValue(ClaimTypes.NameIdentifier)
-                        ?? User?.FindFirstValue("sub");
-        if (!string.IsNullOrWhiteSpace(fromClaim))
-        {
-            userId = fromClaim;
-            problem = null!;
-            return true;
-        }
-
-        if (Request.Headers.TryGetValue("X-User-Id", out var header)
-            && !string.IsNullOrWhiteSpace(header))
-        {
-            userId = header.ToString();
-            problem = null!;
-            return true;
-        }
-
-        userId = string.Empty;
-        problem = Unauthorized();
-        return false;
-    }
+        => UserIdentity.TryGetUserId(HttpContext, out userId, out problem);
 }
 
 /// <summary>
