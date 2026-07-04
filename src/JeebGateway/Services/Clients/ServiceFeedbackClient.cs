@@ -123,7 +123,7 @@ namespace JeebGateway.service.ServiceFeedback
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<CommentResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -249,7 +249,7 @@ namespace JeebGateway.service.ServiceFeedback
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<GetCommentsResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -341,7 +341,7 @@ namespace JeebGateway.service.ServiceFeedback
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<int>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -477,7 +477,7 @@ namespace JeebGateway.service.ServiceFeedback
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<GetGroupedCommentsResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -597,7 +597,7 @@ namespace JeebGateway.service.ServiceFeedback
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<System.Collections.Generic.IDictionary<string, double>>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)
@@ -701,7 +701,7 @@ namespace JeebGateway.service.ServiceFeedback
                         ProcessResponse(client_, response_);
 
                         var status_ = (int)response_.StatusCode;
-                        if (status_ == 200)
+                        if (status_ >= 200 && status_ < 300)
                         {
                             var objectResponse_ = await ReadObjectResponseAsync<GetAverageRatingResponse>(response_, headers_, cancellationToken).ConfigureAwait(false);
                             if (objectResponse_.Object == null)

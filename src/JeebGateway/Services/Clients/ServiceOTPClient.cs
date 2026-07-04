@@ -161,6 +161,11 @@ namespace JeebGateway.Services.Clients
                             return;
                         }
                         else
+                        if (status_ == 201)
+                        {
+                            return;
+                        }
+                        else
                         {
                             var responseData_ = response_.Content == null ? null : await response_.Content.ReadAsStringAsync().ConfigureAwait(false);
                             throw new ApiException("The HTTP status code of the response was not expected (" + status_ + ").", status_, responseData_, headers_, null);
@@ -305,6 +310,11 @@ namespace JeebGateway.Services.Clients
 
                         var status_ = (int)response_.StatusCode;
                         if (status_ == 200)
+                        {
+                            return;
+                        }
+                        else
+                        if (status_ == 201)
                         {
                             return;
                         }

@@ -26,6 +26,12 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "201": {
+            "description": "OK"
+          },
+          "204": {
+            "description": "OK"
           }
         }
       }
@@ -82,6 +88,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "201": {
+            "description": "OK"
           }
         }
       }
@@ -105,6 +114,9 @@
         },
         "responses": {
           "200": {
+            "description": "OK"
+          },
+          "201": {
             "description": "OK"
           }
         }
@@ -152,6 +164,9 @@
         },
         "responses": {
           "200": {
+            "description": "OK"
+          },
+          "201": {
             "description": "OK"
           }
         }
@@ -229,6 +244,16 @@
           },
           "404": {
             "description": "Not Found"
+          },
+          "201": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KycRecord"
+                }
+              }
+            }
           }
         }
       }
@@ -251,6 +276,9 @@
         },
         "responses": {
           "200": {
+            "description": "OK"
+          },
+          "201": {
             "description": "OK"
           }
         }
@@ -275,6 +303,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "201": {
+            "description": "OK"
           }
         }
       }
@@ -297,6 +328,9 @@
         },
         "responses": {
           "200": {
+            "description": "OK"
+          },
+          "201": {
             "description": "OK"
           }
         }
@@ -333,6 +367,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "201": {
+            "description": "OK"
           }
         }
       }
@@ -355,6 +392,9 @@
         },
         "responses": {
           "200": {
+            "description": "OK"
+          },
+          "201": {
             "description": "OK"
           }
         }
@@ -379,6 +419,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "201": {
+            "description": "OK"
           }
         }
       }
@@ -401,6 +444,9 @@
         },
         "responses": {
           "200": {
+            "description": "OK"
+          },
+          "201": {
             "description": "OK"
           }
         }
@@ -425,6 +471,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "201": {
+            "description": "OK"
           }
         }
       }
@@ -448,6 +497,9 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "201": {
+            "description": "OK"
           }
         }
       }
@@ -470,6 +522,9 @@
         },
         "responses": {
           "200": {
+            "description": "OK"
+          },
+          "201": {
             "description": "OK"
           }
         }
@@ -633,7 +688,7 @@
             "type": "string",
             "nullable": true
           },
-          "payload": { },
+          "payload": {},
           "createdAt": {
             "type": "string",
             "format": "date-time"
