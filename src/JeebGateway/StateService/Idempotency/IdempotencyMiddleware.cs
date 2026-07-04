@@ -24,6 +24,37 @@ public sealed class IdempotencyMiddleware
         HttpMethods.Post, HttpMethods.Put, HttpMethods.Patch, HttpMethods.Delete
     };
 
+    // JEBV4-45 (PP-8): per-key serialization for concurrent same-key requests.
+    // The lookup→execute→persist sequence below is check-then-act: two TRULY
+    // concurrent requests with the same key could both miss GetAsync, both run
+    // the endpoint (double side-effects — e.g. two rows in IRequestsStore even
+    // though PutOrGetAsync deduped the HTTP responses afterwards), which is the
+    // confirmed server-side create double-submit defect (M5#9). Same-key
+    // requests within one replica now serialize on a striped semaphore so the
+    // loser's GetAsync observes the winner's persisted response and replays it
+    // WITHOUT re-invoking the endpoint. Striping (256 slots by key hash) keeps
+    // memory bounded; unrelated keys colliding on a stripe merely serialize —
+    // they never share responses (the store lookup is still exact-key).
+    // Cross-replica the durable store's ON CONFLICT semantics remain the
+    // authority; this closes the dominant same-replica double-tap/retry race.
+    private static readonly SemaphoreSlim[] KeyStripes = CreateKeyStripes();
+
+    private static SemaphoreSlim[] CreateKeyStripes()
+    {
+        var stripes = new SemaphoreSlim[256];
+        for (var i = 0; i < stripes.Length; i++) stripes[i] = new SemaphoreSlim(1, 1);
+        return stripes;
+    }
+
+    private static SemaphoreSlim StripeFor(string key)
+    {
+        // Stable, non-randomized hash so the stripe choice is deterministic
+        // for a given key within the process lifetime.
+        var hash = 17;
+        foreach (var ch in key) hash = unchecked(hash * 31 + ch);
+        return KeyStripes[(hash & 0x7fffffff) % KeyStripes.Length];
+    }
+
     private readonly RequestDelegate _next;
     private readonly ILogger<IdempotencyMiddleware> _logger;
 
@@ -41,6 +72,21 @@ public sealed class IdempotencyMiddleware
             return;
         }
 
+        // JEBV4-45: serialize same-key concurrent requests (see KeyStripes doc).
+        var stripe = StripeFor(key!);
+        await stripe.WaitAsync(context.RequestAborted);
+        try
+        {
+            await InvokeSerializedAsync(context, store, key!);
+        }
+        finally
+        {
+            stripe.Release();
+        }
+    }
+
+    private async Task InvokeSerializedAsync(HttpContext context, IIdempotencyStore store, string key)
+    {
         // 1. Fast replay path: if we've already stored a response, return it.
         IdempotencyOutcome? existing;
         try
