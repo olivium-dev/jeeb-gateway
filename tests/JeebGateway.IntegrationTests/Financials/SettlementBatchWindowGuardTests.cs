@@ -17,8 +17,12 @@ namespace JeebGateway.IntegrationTests.Financials;
 /// These tests pin the guard: unsettled placeholders are EXCLUDED from the batch
 /// window; truly-settled rows (state=settled AND state=receipt_generated) are
 /// INCLUDED; and a placeholder replaced by a real settlement appears exactly once.
+/// They also pin the RECEIPT-BEFORE-SETTLE escape hatch closure: a placeholder read
+/// via <see cref="ISettlementStore.MarkReceiptGeneratedAsync"/> must NOT advance to
+/// receipt_generated (only a settled row may), so it can never leak into the batch.
 /// Exercised on the in-memory store — the Postgres store carries the identical
-/// `state &lt;&gt; 'pending_settlement'` guard.
+/// positive `state IN ('settled','receipt_generated')` batch guard and the identical
+/// `state = 'settled'` receipt-transition guard.
 /// </summary>
 public class SettlementBatchWindowGuardTests
 {
@@ -85,6 +89,48 @@ public class SettlementBatchWindowGuardTests
         var after = await _store.ListRecordedInWindowAsync(WindowStart, WindowEnd, 100, CancellationToken.None);
         after.Where(s => s.DeliveryId == "del-replace").Should().ContainSingle()
             .Which.GoodsCost.Should().Be(250_000m, "the real settled amount, not the phantom placeholder");
+    }
+
+    [Fact]
+    public async Task ReceiptRead_OnPendingPlaceholder_DoesNotAdvance_And_StaysOutOfBatch()
+    {
+        // ESCAPE HATCH (Codex gw-leg12-b2 P0): a party reads the receipt BEFORE the Jeeber
+        // settles. MarkReceiptGeneratedAsync must NOT flip the pending_settlement placeholder
+        // to receipt_generated — otherwise it satisfies the batch's state guard and underpays
+        // the Jeeber (phantom min-fee net, no ledger entry).
+        var placeholder = MakePlaceholder("del-early-receipt", "jeeber-4");
+        await _store.TryInsertAsync(placeholder, CancellationToken.None);
+
+        var stamped = await _store.MarkReceiptGeneratedAsync(placeholder.Id, InWindow, CancellationToken.None);
+
+        stamped!.State.Should().Be(SettlementState.PendingSettlement,
+            "a pre-settle receipt read must NOT advance a placeholder out of pending_settlement");
+        stamped.ReceiptGeneratedAt.Should().BeNull("no receipt timestamp is stamped on an unsettled placeholder");
+
+        var batch = await _store.ListRecordedInWindowAsync(WindowStart, WindowEnd, 100, CancellationToken.None);
+        batch.Should().NotContain(s => s.DeliveryId == "del-early-receipt",
+            "a placeholder that was 'receipt-read' before settle must still be EXCLUDED from the payout batch");
+    }
+
+    [Fact]
+    public async Task ReceiptRead_AfterRealSettle_Advances_And_IsIncludedInBatch()
+    {
+        // The legitimate path: placeholder → real settle (state=settled) → receipt read
+        // (state=receipt_generated). The settled-then-viewed row MUST be paid out.
+        var placeholder = MakePlaceholder("del-settle-then-receipt", "jeeber-5");
+        await _store.TryInsertAsync(placeholder, CancellationToken.None);
+
+        var real = MakeSettled("del-settle-then-receipt", "jeeber-5", goodsCost: 80_000m);
+        (await _store.ReplacePendingAsync("del-settle-then-receipt", real, CancellationToken.None))
+            .Should().BeTrue();
+
+        var stamped = await _store.MarkReceiptGeneratedAsync(real.Id, InWindow, CancellationToken.None);
+        stamped!.State.Should().Be(SettlementState.ReceiptGenerated,
+            "a settled row advances to receipt_generated on first receipt read");
+
+        var batch = await _store.ListRecordedInWindowAsync(WindowStart, WindowEnd, 100, CancellationToken.None);
+        batch.Where(s => s.DeliveryId == "del-settle-then-receipt").Should().ContainSingle()
+            .Which.GoodsCost.Should().Be(80_000m, "the real settled-then-viewed row is paid out exactly once");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
