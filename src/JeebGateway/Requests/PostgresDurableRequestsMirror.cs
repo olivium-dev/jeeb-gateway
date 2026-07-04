@@ -210,6 +210,56 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
         return await ReadListAsync(cmd, ct);
     }
 
+    /// <summary>
+    /// JEBV4-140: durable jeeber-side owner-list. Symmetric with
+    /// <see cref="ListForClientAsync"/> — reads the mirror rows the jeeber has been
+    /// assigned (<c>gw_jeeber_id</c>) so a jeeber's accepted deliveries survive a
+    /// process bounce. Newest-first, matching the in-memory
+    /// <see cref="InMemoryRequestsStore.ListForJeeberAsync"/> ordering. The
+    /// <c>gw_jeeber_id</c> column is a text column (seeded verbatim from the gateway
+    /// jeeber id, not a UUID FK like <c>client_id</c>), so it is compared as text and
+    /// a non-UUID jeeber id is valid.
+    /// </summary>
+    public async Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(jeeberId)) return Array.Empty<DeliveryRequest>();
+
+        await using var conn = await _db.OpenAsync(ct);
+
+        const string sql = """
+            SELECT
+                id,
+                client_id,
+                COALESCE(gw_status, status::text)  AS status,
+                description,
+                transcription,
+                audio_url,
+                gw_tier_code,
+                ST_Y(pickup_location::geometry)     AS pickup_lat,
+                ST_X(pickup_location::geometry)     AS pickup_lng,
+                ST_Y(dropoff_location::geometry)    AS dropoff_lat,
+                ST_X(dropoff_location::geometry)    AS dropoff_lng,
+                pickup_address,
+                dropoff_address,
+                gw_recipient_phone,
+                created_at,
+                scheduled_at,
+                gw_jeeber_id,
+                gw_accepted_fee,
+                gw_conversation_id,
+                gw_cancelled_by,
+                gw_cancellation_reason,
+                gw_cancelled_at
+            FROM delivery_requests
+            WHERE gw_jeeber_id = @JeeberId AND gw_mirror = TRUE
+            ORDER BY created_at DESC
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("JeeberId", jeeberId);
+        return await ReadListAsync(cmd, ct);
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private static async Task<List<DeliveryRequest>> ReadListAsync(NpgsqlCommand cmd, CancellationToken ct)

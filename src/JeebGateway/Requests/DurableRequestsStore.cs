@@ -563,8 +563,67 @@ public sealed class DurableRequestsStore : IRequestsStore
         CancellationReason = u.CancellationReason,
     };
 
-    public Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct)
-        => _inner.ListForJeeberAsync(jeeberId, ct);
+    /// <summary>
+    /// JEBV4-140: durable jeeber-side owner-list, symmetric with
+    /// <see cref="ListForClientAsync"/>. delivery-service exposes NO jeeber-scoped
+    /// list, so — exactly like the client side — the durable rows come from the
+    /// gateway Postgres mirror (seeded on create, jeeber assigned post-accept). The
+    /// in-memory list is MERGED OVER the mirror: an in-memory row wins on id
+    /// collision (it carries the live status + every gateway-only field), while the
+    /// mirror contributes rows the in-memory model lost on a bounce. Newest-first,
+    /// matching the in-memory jeeber-list ordering (DESCENDING — note this differs
+    /// from the client list's oldest-first). STRICT SUPERSET: with no mirror wired
+    /// (Postgres absent) this is exactly the in-memory list; with a mirror it
+    /// additionally survives a restart — which is the whole point (a jeeber's
+    /// accepted deliveries previously vanished on a process bounce while the client
+    /// side survived).
+    ///
+    /// The stateless end-state is to read jeeber deliveries from delivery-service
+    /// directly (JEBV4-140 follow-up); the mirror-read is the correct minimal fix now.
+    /// </summary>
+    public async Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct)
+    {
+        var localRows = await _inner.ListForJeeberAsync(jeeberId, ct);
+        if (_mirror is null)
+        {
+            return localRows;
+        }
+
+        IReadOnlyList<DeliveryRequest> durableRows;
+        try
+        {
+            durableRows = await _mirror.ListForJeeberAsync(jeeberId, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "requests-durable: jeeber-list mirror read failed for {JeeberId}; returning in-memory rows only.",
+                jeeberId);
+            return localRows;
+        }
+
+        if (durableRows.Count == 0)
+        {
+            return localRows;
+        }
+
+        // Merge by id; the in-memory row wins (live status + full field set).
+        // Newest-first to match the in-memory jeeber-list ordering.
+        var byId = new Dictionary<string, DeliveryRequest>(StringComparer.Ordinal);
+        foreach (var row in durableRows)
+        {
+            byId[row.Id] = row;
+        }
+        foreach (var row in localRows)
+        {
+            byId[row.Id] = row;
+        }
+        return byId.Values.OrderByDescending(r => r.CreatedAt).ToArray();
+    }
 
     public Task<int> CountActiveForJeeberAsync(string jeeberId, CancellationToken ct)
         => _inner.CountActiveForJeeberAsync(jeeberId, ct);

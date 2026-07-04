@@ -452,6 +452,92 @@ public sealed class DurableRequestsStoreTests
         list[0].Id.Should().Be("cold-row");
     }
 
+    // -- JEBV4-140: jeeber-side owner-list survives a process restart -----------
+
+    [Fact]
+    public async Task JeeberList_surfaces_a_mirror_only_row_after_a_simulated_restart()
+    {
+        // The feed asymmetry bug: a jeeber's accepted delivery lived ONLY in the
+        // in-memory model, so a process bounce erased it while the client side
+        // survived. Simulate the bounce: the in-memory store holds nothing for the
+        // jeeber, but the durable Postgres mirror still has the assigned row. The
+        // jeeber list must now surface it (symmetric with ListForClientAsync).
+        var store = BuildWithMirror(out var inner, out _, out var mirror);
+
+        // Nothing in the in-memory model for this jeeber (post-bounce cold state).
+        (await inner.ListForJeeberAsync("jeeber-77", CancellationToken.None)).Should().BeEmpty();
+
+        mirror.Rows.Add(new DeliveryRequest
+        {
+            Id = "d-survived-bounce",
+            ClientId = "client-1",
+            JeeberId = "jeeber-77",
+            Status = RequestStatus.Delivered,
+            Description = "accepted before the bounce",
+            CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-5),
+        });
+
+        var list = await store.ListForJeeberAsync("jeeber-77", CancellationToken.None);
+
+        list.Should().ContainSingle(r => r.Id == "d-survived-bounce" && r.JeeberId == "jeeber-77");
+    }
+
+    [Fact]
+    public async Task JeeberList_merges_durable_mirror_rows_with_inner_preferring_inner_newest_first()
+    {
+        // Symmetric with the client list: the in-memory row wins on an id collision
+        // (live status), the mirror contributes rows the in-memory model lost, and
+        // ordering is newest-first (matching the in-memory jeeber-list ordering,
+        // which — unlike the client list — is DESCENDING).
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+        (await store.SetJeeberIdAsync(created.Id, "jeeber-77", CancellationToken.None)).Should().BeTrue();
+
+        // Stale durable snapshot of the SAME row (cancelled) + a newer cold row the
+        // in-memory model no longer holds.
+        mirror.Rows.Add(new DeliveryRequest
+        {
+            Id = created.Id,
+            ClientId = "client-1",
+            JeeberId = "jeeber-77",
+            Status = RequestStatus.Cancelled,
+            Description = "stale mirror snapshot",
+            CreatedAt = created.CreatedAt,
+        });
+        mirror.Rows.Add(new DeliveryRequest
+        {
+            Id = "cold-row",
+            ClientId = "client-1",
+            JeeberId = "jeeber-77",
+            Status = RequestStatus.Delivered,
+            Description = "survived a bounce",
+            CreatedAt = created.CreatedAt.AddHours(1),
+        });
+
+        var list = await store.ListForJeeberAsync("jeeber-77", CancellationToken.None);
+
+        list.Should().HaveCount(2);
+        // Inner won the id collision — NOT the mirror's stale 'cancelled'.
+        list.Single(r => r.Id == created.Id).Status.Should().NotBe(RequestStatus.Cancelled);
+        list.Should().Contain(r => r.Id == "cold-row" && r.Status == RequestStatus.Delivered);
+        // Newest-first: the +1h cold row precedes the just-created row.
+        list[0].Id.Should().Be("cold-row");
+    }
+
+    [Fact]
+    public async Task JeeberList_without_a_mirror_is_exactly_the_in_memory_list()
+    {
+        // STRICT SUPERSET: with no mirror wired the durable jeeber list is byte-for-
+        // byte the in-memory list — no behavioural change on the no-Postgres path.
+        var store = Build(out _, out _, out _);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+        (await store.SetJeeberIdAsync(created.Id, "jeeber-77", CancellationToken.None)).Should().BeTrue();
+
+        var list = await store.ListForJeeberAsync("jeeber-77", CancellationToken.None);
+
+        list.Should().ContainSingle(r => r.Id == created.Id && r.JeeberId == "jeeber-77");
+    }
+
     [Fact]
     public async Task Cancel_mirrors_committed_status_into_the_mirror()
     {
@@ -607,6 +693,14 @@ public sealed class DurableRequestsStoreTests
         {
             IReadOnlyList<DeliveryRequest> rows = Rows
                 .Where(r => string.Equals(r.ClientId, clientId, StringComparison.Ordinal))
+                .ToList();
+            return Task.FromResult(rows);
+        }
+
+        public Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct)
+        {
+            IReadOnlyList<DeliveryRequest> rows = Rows
+                .Where(r => string.Equals(r.JeeberId, jeeberId, StringComparison.Ordinal))
                 .ToList();
             return Task.FromResult(rows);
         }

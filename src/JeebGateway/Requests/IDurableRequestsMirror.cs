@@ -73,4 +73,15 @@ public interface IDurableRequestsMirror
     /// empty list when the client id is not a UUID or has no mirrored rows.
     /// </summary>
     Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct);
+
+    /// <summary>
+    /// JEBV4-140: reads the durable jeeber-side list for <paramref name="jeeberId"/>
+    /// (mirror rows whose <c>gw_jeeber_id</c> matches), newest-first — the same
+    /// ordering as the in-memory <see cref="IRequestsStore.ListForJeeberAsync"/>.
+    /// The symmetric counterpart of <see cref="ListForClientAsync"/>: without it a
+    /// jeeber's accepted deliveries live only in the in-memory model and vanish on a
+    /// process bounce, while the client side survives. Returns an empty list when the
+    /// jeeber has no mirrored rows.
+    /// </summary>
+    Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct);
 }
