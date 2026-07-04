@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using StackExchange.Redis;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
@@ -1365,7 +1366,13 @@ public class DeliveriesController : ControllerBase
         // in-memory in tests) replaces the static Dictionary. Lockout has a
         // TTL so a stuck row self-heals.
         var now = _clock.GetUtcNow();
-        var existingLockout = await _cache.GetAsync(LockoutCacheKey(deliveryId), ct);
+        // JEBV4-38 (PP-3) — fail-open on a cache-infrastructure fault: a Redis
+        // blip must never itself lock a customer out of a money-adjacent
+        // handover, mirroring RedisOtpRequestRateLimiter's precedent. Treat an
+        // unreadable lockout marker as "not locked"; this is a resilience
+        // degrade, not a security bypass — the code-match check further below
+        // is unaffected and a wrong code is still rejected independently.
+        var existingLockout = await TryReadCacheAsync(LockoutCacheKey(deliveryId), "read_lockout", deliveryId, ct);
         if (existingLockout is not null)
         {
             // Re-surface the prior escalation if it exists, otherwise return
@@ -1479,9 +1486,13 @@ public class DeliveriesController : ControllerBase
             // already canonical — this is a best-effort local sync.
             await _store.SetStatusAsync(deliveryId, RequestStatus.Delivered, ct);
 
-            // Clear the attempt + lockout markers (no-op if absent).
-            await _cache.RemoveAsync(AttemptsCacheKey(deliveryId), ct);
-            await _cache.RemoveAsync(LockoutCacheKey(deliveryId), ct);
+            // Clear the attempt + lockout markers (no-op if absent). JEBV4-38
+            // (PP-3): best-effort — the verify already succeeded and the
+            // delivery already transitioned upstream, so a cache-infra fault
+            // here must not fail this response; it only means the markers
+            // self-heal via their own TTL instead of an explicit clear.
+            await TryRemoveCacheAsync(AttemptsCacheKey(deliveryId), "clear_attempts", deliveryId, ct);
+            await TryRemoveCacheAsync(LockoutCacheKey(deliveryId), "clear_lockout", deliveryId, ct);
 
             // FT-07: enqueue the pending-settlement placeholder so the
             // financial pipeline has a record at handover-complete.
@@ -1539,13 +1550,20 @@ public class DeliveriesController : ControllerBase
         if (attemptCount >= maxAttempts)
         {
             // Persist the lockout flag with the timestamp so subsequent
-            // requests can read the locked-at moment back.
-            await _cache.SetAsync(
+            // requests can read the locked-at moment back. JEBV4-38 (PP-3):
+            // this decision (attemptCount >= maxAttempts, computed above) does
+            // not depend on the write succeeding, so a cache-infra fault here
+            // is best-effort — log and continue to the real admin-escalation
+            // row and the 423 response below rather than 500ing. A blip that
+            // drops this write only means the lockout does not durably persist
+            // across a Redis outage window, not that this request's rejection
+            // is skipped.
+            await TrySetCacheAsync(
                 LockoutCacheKey(deliveryId),
                 EncodeLockoutTimestamp(now),
                 new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = ExternalOtpLockoutTtl },
-                ct);
-            await _cache.RemoveAsync(AttemptsCacheKey(deliveryId), ct);
+                "set_lockout", deliveryId, ct);
+            await TryRemoveCacheAsync(AttemptsCacheKey(deliveryId), "clear_attempts_on_lockout", deliveryId, ct);
 
             // PR review B7: real admin escalation row — surfaces in the
             // moderation queue so ops can triage stuck handovers.
@@ -2123,17 +2141,108 @@ public class DeliveriesController : ControllerBase
 
     private async Task<int> ReadAttemptCountAsync(string deliveryId, CancellationToken ct)
     {
-        var bytes = await _cache.GetAsync(AttemptsCacheKey(deliveryId), ct);
+        // JEBV4-38 (PP-3) — fail-open: an unreadable attempt counter degrades
+        // to 0 (no known prior attempts) rather than 500ing the verify. This
+        // only affects the LOCKOUT bookkeeping, never the code-match check
+        // itself, mirroring RedisOtpRequestRateLimiter's fail-open precedent
+        // for a best-effort abuse-control counter.
+        var bytes = await TryReadCacheAsync(AttemptsCacheKey(deliveryId), "read_attempt_count", deliveryId, ct);
         if (bytes is null || bytes.Length == 0) return 0;
         return int.TryParse(Encoding.UTF8.GetString(bytes), NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n : 0;
     }
 
     private Task WriteAttemptCountAsync(string deliveryId, int count, CancellationToken ct)
-        => _cache.SetAsync(
+        => TrySetCacheAsync(
             AttemptsCacheKey(deliveryId),
             Encoding.UTF8.GetBytes(count.ToString(CultureInfo.InvariantCulture)),
             new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = ExternalOtpAttemptsTtl },
-            ct);
+            "write_attempt_count", deliveryId, ct);
+
+    // ---- JEBV4-38 (PP-3) degrade-don't-fail cache wrappers -------------------
+    //
+    // The OTP-handover VERIFY path is money-adjacent (it fires COD
+    // settlement) and MUST NOT fail-closed on a Redis blip — mirroring
+    // RedisOtpRequestRateLimiter.TryAcquire's fail-open precedent for the
+    // (lower-stakes) sign-in limiter. These wrappers catch ONLY a
+    // cache-infrastructure fault (Redis unreachable/timeout — see
+    // IsCacheInfrastructureFault) and degrade:
+    //   - a READ returns null/no-op (treated as "no marker" by the caller —
+    //     e.g. "not locked" or "0 prior attempts");
+    //   - a WRITE is best-effort (logged, swallowed) — the caller's response
+    //     to the user does not depend on the write succeeding.
+    // This is a resilience gate, not a security gate: nothing here ever turns
+    // a fault into an accepted/matched code. TryMatchAsync's own fail-open
+    // (DistributedCacheHandoverCodeStore, Requests/OtpHandover) independently
+    // falls through to the SMS one-time-password check, which still rejects a
+    // wrong code even mid-outage.
+
+    private async Task<byte[]?> TryReadCacheAsync(string cacheKey, string op, string deliveryId, CancellationToken ct)
+    {
+        try
+        {
+            return await _cache.GetAsync(cacheKey, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (IsCacheInfrastructureFault(ex))
+        {
+            _log.LogWarning(ex,
+                "handover.cache_fault deliveryId={DeliveryId} op={Op}; failing open",
+                deliveryId, op);
+            return null;
+        }
+    }
+
+    private async Task TrySetCacheAsync(
+        string cacheKey, byte[] value, DistributedCacheEntryOptions options, string op, string deliveryId, CancellationToken ct)
+    {
+        try
+        {
+            await _cache.SetAsync(cacheKey, value, options, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (IsCacheInfrastructureFault(ex))
+        {
+            _log.LogWarning(ex,
+                "handover.cache_fault deliveryId={DeliveryId} op={Op}; best-effort write dropped",
+                deliveryId, op);
+        }
+    }
+
+    private async Task TryRemoveCacheAsync(string cacheKey, string op, string deliveryId, CancellationToken ct)
+    {
+        try
+        {
+            await _cache.RemoveAsync(cacheKey, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (IsCacheInfrastructureFault(ex))
+        {
+            _log.LogWarning(ex,
+                "handover.cache_fault deliveryId={DeliveryId} op={Op}; best-effort clear dropped (marker self-heals via TTL)",
+                deliveryId, op);
+        }
+    }
+
+    /// <summary>
+    /// JEBV4-38 (PP-3) — recognises a cache-INFRASTRUCTURE fault (Redis
+    /// unreachable/timeout), the same catch shape as
+    /// <c>RedisOtpRequestRateLimiter.TryAcquire</c>. <see cref="TimeoutException"/>
+    /// is included defensively for a client-side timeout surfaced as the BCL
+    /// type. The in-memory <see cref="IDistributedCache"/> used in dev/tests
+    /// never throws either, so this is a safe no-op outside a real Redis
+    /// deployment.
+    /// </summary>
+    private static bool IsCacheInfrastructureFault(Exception ex) =>
+        ex is RedisException or TimeoutException;
 
     private static byte[] EncodeLockoutTimestamp(DateTimeOffset at)
         => Encoding.UTF8.GetBytes(at.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture));
