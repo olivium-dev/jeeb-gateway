@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Security;
 using JeebGateway.Services;
 
 namespace JeebGateway.Controllers;
@@ -38,6 +39,16 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Produces("application/json", "application/problem+json")]
+// GW12-SEC-1 (Leg-12): fail-closed environment gate. This diagnostic surface is a
+// shadow read-path into every upstream datastore (OWASP-API9) AND a cross-user read
+// seam (BOLA on the per-user routes below), so it must NOT be routable in production.
+// [DevOnly] short-circuits every action with 404 unless Features:DevEndpoints:Enabled
+// is explicitly true (committed false in EVERY environment, incl. appsettings.Production.json
+// — same fail-closed pattern as DevController / TestControlPlaneController). The E2E
+// harness that exercises these probes already runs with Features__DevEndpoints__Enabled=true,
+// so its coverage is unaffected. Ordered before [Authorize] so a disabled surface returns
+// 404 (route does not exist) rather than 401 (route exists but needs a token).
+[DevOnly]
 [Authorize]
 // ADR-005 §A public at L2: DB-probe diagnostic reads carry no user-type gate. L1 [Authorize] is
 // preserved (token still required); [PublicEndpoint] opts out of L2 + satisfies the coverage guard.

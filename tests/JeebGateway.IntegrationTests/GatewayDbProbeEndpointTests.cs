@@ -106,11 +106,51 @@ public class GatewayDbProbeEndpointTests
     }
 
     // -----------------------------------------------------------------
+    // GW12-SEC-1 — production-safety: [DevOnly] fails closed. With the flag off
+    // (the committed value in every environment, incl. production) EVERY probe
+    // route behaves as if it does not exist — 404 — EVEN with a valid bearer.
+    // This is the fix for the OWASP-API9 shadow-diagnostic + cross-user BOLA
+    // exposure: the surface is unreachable in prod, not merely token-gated.
+    // -----------------------------------------------------------------
+
+    [Theory]
+    [MemberData(nameof(ProbeRoutes))]
+    public async Task ProbeRoute_FlagOff_WithValidToken_Returns404(string route, string _)
+    {
+        // Upstream must NOT be dialed — the [DevOnly] gate short-circuits first.
+        using var factory = NewFactory(
+            (__, ___) => throw new InvalidOperationException(
+                "upstream must not be called when the DbProbe [DevOnly] gate is closed"),
+            devEnabled: false);
+        var client = Authorized(factory);
+
+        var resp = await client.GetAsync(route);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound,
+            "a [DevOnly]-gated probe route must be indistinguishable from a non-existent route in prod");
+    }
+
+    [Fact]
+    public async Task Realtime_AdminTopics_FlagOff_WithValidToken_Returns404()
+    {
+        using var factory = NewFactory(
+            (_, __) => throw new InvalidOperationException(
+                "upstream must not be called when the DbProbe [DevOnly] gate is closed"),
+            devEnabled: false);
+        var client = Authorized(factory);
+
+        var resp = await client.GetAsync("/realtime/admin/topics");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
     private static WebApplicationFactory<Program> NewFactory(
-        Func<string, HttpRequestMessage, HttpResponseMessage> upstream)
+        Func<string, HttpRequestMessage, HttpResponseMessage> upstream,
+        bool devEnabled = true)
     {
         var probeConfig = new Dictionary<string, string?>
         {
@@ -128,6 +168,12 @@ public class GatewayDbProbeEndpointTests
         return new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
+                // GW12-SEC-1: the probe controller is now [DevOnly] (fail-closed in prod).
+                // The E2E harness that drives these routes runs with this flag on; mirror
+                // that here so the relay/negative-auth contracts below are exercised. The
+                // flag-off → 404 production-safety guarantee is asserted separately in
+                // ProbeRoute_FlagOff_Returns404.
+                builder.UseSetting("Features:DevEndpoints:Enabled", devEnabled ? "true" : "false");
                 builder.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(probeConfig));
                 builder.ConfigureTestServices(services =>
                 {
