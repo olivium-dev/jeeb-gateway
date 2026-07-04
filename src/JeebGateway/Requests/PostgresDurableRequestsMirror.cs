@@ -132,6 +132,43 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task UpdateLifecycleAsync(
+        string requestId,
+        string? gwStatus,
+        string? gwJeeberId,
+        decimal? gwAcceptedFee,
+        DateTimeOffset at,
+        CancellationToken ct)
+    {
+        if (!Guid.TryParse(requestId, out var id)) return;
+
+        // Nothing to reflect — avoid a needless round-trip.
+        if (gwStatus is null && gwJeeberId is null && gwAcceptedFee is null) return;
+
+        await using var conn = await _db.OpenAsync(ct);
+
+        // Touch ONLY the gateway columns. COALESCE(@X, col) leaves a column as-is when
+        // its argument is NULL, so a status-only / jeeber-only / fee-only mutation
+        // updates just what changed. The native enum status + its coupled CHECK
+        // constraints are never touched, so no constraint can fire on any mutation.
+        const string sql = """
+            UPDATE delivery_requests
+               SET gw_status       = COALESCE(@GwStatus, gw_status),
+                   gw_jeeber_id    = COALESCE(@GwJeeberId, gw_jeeber_id),
+                   gw_accepted_fee = COALESCE(@GwAcceptedFee, gw_accepted_fee),
+                   gw_updated_at   = now()
+             WHERE id = @Id AND gw_mirror = TRUE
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("Id", id);
+        cmd.Parameters.AddWithValue("GwStatus", (object?)gwStatus ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("GwJeeberId", (object?)gwJeeberId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("GwAcceptedFee", (object?)gwAcceptedFee ?? DBNull.Value);
+
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct)
     {
         // client_id is a UUID column; a non-UUID client can have no mirror rows.

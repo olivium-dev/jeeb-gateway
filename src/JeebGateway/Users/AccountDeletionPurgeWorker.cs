@@ -68,7 +68,19 @@ public sealed class AccountDeletionPurgeWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // F11: guard a misconfigured interval. A zero interval would hot-spin the loop;
+        // a NEGATIVE interval makes Task.Delay throw ArgumentOutOfRangeException, which
+        // (only OperationCanceledException is caught around the delay) would escape
+        // ExecuteAsync and FAULT the BackgroundService — silently killing the sweep.
+        // Clamp any non-positive value to the sane hourly default instead.
         var interval = _options.Value.SweepInterval;
+        if (interval <= TimeSpan.Zero)
+        {
+            _logger.LogWarning(
+                "AccountDeletionPurge SweepInterval was {Interval} (must be > 0); clamping to 1h default.",
+                interval);
+            interval = TimeSpan.FromHours(1);
+        }
         while (!stoppingToken.IsCancellationRequested)
         {
             try

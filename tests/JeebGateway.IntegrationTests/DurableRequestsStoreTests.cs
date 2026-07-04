@@ -472,6 +472,65 @@ public sealed class DurableRequestsStoreTests
         mirror.Cancels[0].GwStatus.Should().Be(RequestStatus.Cancelled);
     }
 
+    [Fact]
+    public async Task SetStatus_mirrors_the_new_status_into_the_owner_list_mirror()
+    {
+        // F4: an owner-list-visible status mutation must be reflected onto the durable
+        // mirror so a post-bounce list shows the live status, not the create-time
+        // 'pending'. Previously SetStatusAsync delegated to the in-memory store only.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        var ok = await store.SetStatusAsync(created.Id, RequestStatus.HeadingOff, CancellationToken.None);
+
+        ok.Should().BeTrue();
+        mirror.Updates.Should().ContainSingle();
+        mirror.Updates[0].Id.Should().Be(created.Id);
+        mirror.Updates[0].GwStatus.Should().Be(RequestStatus.HeadingOff);
+        mirror.Updates[0].GwJeeberId.Should().BeNull("a status-only mutation leaves the jeeber column untouched");
+    }
+
+    [Fact]
+    public async Task SetJeeberId_mirrors_the_assignment_into_the_owner_list_mirror()
+    {
+        // F4: assigning the jeeber must reflect onto the durable owner-list.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        var ok = await store.SetJeeberIdAsync(created.Id, "jeeber-77", CancellationToken.None);
+
+        ok.Should().BeTrue();
+        mirror.Updates.Should().ContainSingle();
+        mirror.Updates[0].GwJeeberId.Should().Be("jeeber-77");
+        mirror.Updates[0].GwStatus.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task SetAcceptedFee_mirrors_the_fee_into_the_owner_list_mirror()
+    {
+        // F4: the accepted fee must reflect onto the durable owner-list.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        var ok = await store.TrySetAcceptedFeeAsync(created.Id, 42.5m, CancellationToken.None);
+
+        ok.Should().BeTrue();
+        mirror.Updates.Should().ContainSingle();
+        mirror.Updates[0].GwAcceptedFee.Should().Be(42.5m);
+    }
+
+    [Fact]
+    public async Task SetStatus_on_unknown_id_does_not_mirror()
+    {
+        // A failed (no-op) mutation must NOT touch the mirror — nothing changed.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+
+        var ok = await store.SetStatusAsync("never-created", RequestStatus.HeadingOff, CancellationToken.None);
+
+        ok.Should().BeFalse();
+        mirror.Updates.Should().BeEmpty("a mutation that changed nothing must not write to the mirror");
+    }
+
     // -- fakes ---------------------------------------------------------------
 
     private sealed class RecordingDeliveryClient : NotImplementedDeliveryClient
@@ -520,10 +579,19 @@ public sealed class DurableRequestsStoreTests
         public List<DeliveryRequest> Upserted { get; } = new();
         public List<(string Id, string GwStatus)> Cancels { get; } = new();
         public List<DeliveryRequest> Rows { get; } = new();
+        public List<(string Id, string? GwStatus, string? GwJeeberId, decimal? GwAcceptedFee)> Updates { get; } = new();
 
         public Task UpsertOnCreateAsync(DeliveryRequest row, CancellationToken ct)
         {
             Upserted.Add(row);
+            return Task.CompletedTask;
+        }
+
+        public Task UpdateLifecycleAsync(
+            string requestId, string? gwStatus, string? gwJeeberId, decimal? gwAcceptedFee,
+            DateTimeOffset at, CancellationToken ct)
+        {
+            Updates.Add((requestId, gwStatus, gwJeeberId, gwAcceptedFee));
             return Task.CompletedTask;
         }
 

@@ -70,6 +70,31 @@ public sealed class PostgresAdminAuditLog : IAdminAuditLog
     {
         ArgumentNullException.ThrowIfNull(entry);
 
+        // F7: admin_user_id is UUID + NOT NULL + FK. The X-User-Id UM-down MVP fallback
+        // mints a NON-GUID admin id, which Guid.Parse would 500 on (a regression versus
+        // the permissive InMemory log). Degrade gracefully: skip the durable row and
+        // return a synthesized entry so the mutation itself is never blocked — matching
+        // the way entity_id already TryParse-degrades to NULL below.
+        if (!Guid.TryParse(entry.AdminUserId, out var adminGuid))
+        {
+            _log.LogWarning(
+                "Admin action for non-GUID adminUserId={AdminUserId} action={Action} entityType={EntityType} " +
+                "not persisted to admin_actions (MVP fallback identity); returning a non-durable entry.",
+                entry.AdminUserId, entry.Action, entry.EntityType);
+            return new AdminAuditEntry
+            {
+                Id = Guid.NewGuid().ToString(),
+                AdminUserId = entry.AdminUserId,
+                Action = entry.Action,
+                EntityType = entry.EntityType,
+                EntityId = entry.EntityId,
+                BeforeState = entry.BeforeState,
+                AfterState = entry.AfterState,
+                RequestId = entry.RequestId,
+                CreatedAt = DateTimeOffset.UtcNow,
+            };
+        }
+
         await using var conn = await _db.OpenAsync(ct);
 
         const string insertSql = """
@@ -89,7 +114,7 @@ public sealed class PostgresAdminAuditLog : IAdminAuditLog
 
         await using var insertCmd = new NpgsqlCommand(insertSql, conn);
         insertCmd.Parameters.AddWithValue("Id", Guid.NewGuid());
-        insertCmd.Parameters.AddWithValue("AdminUserId", Guid.Parse(entry.AdminUserId));
+        insertCmd.Parameters.AddWithValue("AdminUserId", adminGuid);
         insertCmd.Parameters.AddWithValue("Action", entry.Action);
         insertCmd.Parameters.AddWithValue("EntityType", entry.EntityType);
         insertCmd.Parameters.Add(new NpgsqlParameter("EntityId", NpgsqlDbType.Uuid)

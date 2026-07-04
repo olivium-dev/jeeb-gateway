@@ -50,6 +50,24 @@ public interface IDurableRequestsMirror
         CancellationToken ct);
 
     /// <summary>
+    /// F4: reflects an owner-list-visible lifecycle mutation (accept / status change /
+    /// jeeber assignment / accepted-fee) onto the mirror by updating ONLY the gateway
+    /// columns (<c>gw_status</c> / <c>gw_jeeber_id</c> / <c>gw_accepted_fee</c>) — the
+    /// native enum/CHECK columns are left untouched so no constraint can fire. Each
+    /// argument is optional: a <see langword="null"/> leaves that column as-is (via
+    /// COALESCE), so a status-only or jeeber-only mutation touches only what changed.
+    /// Lets a post-bounce owner-list surface the live accepted/in-progress status and
+    /// the assigned jeeber/fee instead of the stale create-time <c>pending</c>.
+    /// </summary>
+    Task UpdateLifecycleAsync(
+        string requestId,
+        string? gwStatus,
+        string? gwJeeberId,
+        decimal? gwAcceptedFee,
+        DateTimeOffset at,
+        CancellationToken ct);
+
+    /// <summary>
     /// Reads the durable owner-list for <paramref name="clientId"/> (mirror rows
     /// only), oldest-first — the same ordering as the in-memory list. Returns an
     /// empty list when the client id is not a UUID or has no mirrored rows.

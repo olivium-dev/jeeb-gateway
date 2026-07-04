@@ -98,12 +98,15 @@ public sealed class PostgresAdminEscalationStore : IAdminEscalationStore
     {
         await using var conn = await _db.OpenAsync(ct);
 
-        // Full scan, newest-first — powers the admin triage queue. Escalation
-        // volume is low (lockout / client-unreachable edge cases only), so an
-        // unindexed sort here is intentional; see migration 0021 remarks.
+        // Newest-first — powers the admin triage queue. Escalation volume is low
+        // (lockout / client-unreachable edge cases only), so an unindexed sort here is
+        // intentional; see migration 0021 remarks. F9: a bounded LIMIT caps the worst
+        // case as the table grows over time — the triage queue only ever needs the most
+        // recent escalations, and no caller paginates beyond this page today.
         const string sql = """
             SELECT * FROM admin_escalations
             ORDER BY created_at DESC
+            LIMIT 500
             """;
         await using var cmd = new NpgsqlCommand(sql, conn);
         return await ReadListAsync(cmd, ct);

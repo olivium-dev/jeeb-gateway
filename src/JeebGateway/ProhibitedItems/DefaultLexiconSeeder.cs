@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Microsoft.Extensions.Hosting;
 
 namespace JeebGateway.ProhibitedItems;
@@ -61,11 +62,14 @@ public sealed class DefaultLexiconSeeder : IHostedService
         {
             existing = await _store.ListActiveAsync(cancellationToken);
         }
-        catch (Exception ex)
+        catch (DbException ex)
         {
+            // F6: degrade ONLY on a connectivity/transient DB fault — a schema or
+            // programming error must surface at boot, not be silently swallowed, and
+            // OperationCanceledException (host shutdown) must propagate untouched.
             _logger.LogWarning(ex,
-                "Prohibited-items lexicon read failed at startup; skipping default seed (moderation lexicon " +
-                "stays empty until the store is reachable). Host startup continues.");
+                "Prohibited-items lexicon read failed at startup (transient DB fault); skipping default seed " +
+                "(moderation lexicon stays empty until the store is reachable). Host startup continues.");
             return;
         }
 
@@ -93,10 +97,12 @@ public sealed class DefaultLexiconSeeder : IHostedService
                 // Another concurrent seed or an admin entry already covers this
                 // name — idempotent, not an error.
             }
-            catch (Exception ex)
+            catch (DbException ex)
             {
+                // F6: only a connectivity/transient DB fault is a skip-this-entry —
+                // a schema/programming fault (and OperationCanceledException) propagates.
                 _logger.LogWarning(ex,
-                    "Failed to seed prohibited item '{Name}'; skipping entry.",
+                    "Failed to seed prohibited item '{Name}' (transient DB fault); skipping entry.",
                     name);
             }
         }

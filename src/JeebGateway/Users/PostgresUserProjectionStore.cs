@@ -167,7 +167,16 @@ public sealed class PostgresUserProjectionStore : IUserProjectionStore
 
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("Id", id);
-        cmd.Parameters.AddWithValue("Phone", profile.Phone ?? string.Empty);
+        // F1: bind NULL (not '') for a phone-less UM profile. An empty string
+        // passes the column's NOT-NULL default but FAILS the users_phone_format
+        // regex CHECK, so the INSERT threw for every email-login / super-login /
+        // UM-cold-hydration projection (0027 drops the NOT NULL; NULL satisfies
+        // the CHECK and is distinct under users_phone_uniq). The blank-preserving
+        // COALESCE(NULLIF(btrim(EXCLUDED.phone),''), users.phone) on the ON
+        // CONFLICT path still backfills the real phone on a later phone-OTP login.
+        cmd.Parameters.AddWithValue(
+            "Phone",
+            string.IsNullOrWhiteSpace(profile.Phone) ? (object)DBNull.Value : profile.Phone);
         cmd.Parameters.AddWithValue("Email", (object?)profile.Email ?? DBNull.Value);
         cmd.Parameters.AddWithValue("Name", profile.Name ?? string.Empty);
         cmd.Parameters.AddWithValue("AvatarUrl", (object?)profile.AvatarUrl ?? DBNull.Value);
@@ -253,7 +262,9 @@ public sealed class PostgresUserProjectionStore : IUserProjectionStore
         return new UserProfile
         {
             Id            = r.GetGuid(r.GetOrdinal("id")).ToString(),
-            Phone         = r.GetString(r.GetOrdinal("phone")),
+            // F1: phone is now nullable (0027) for phone-less UM profiles — read a
+            // NULL back as "" so the non-null UserProfile.Phone contract holds.
+            Phone         = r.IsDBNull(r.GetOrdinal("phone")) ? string.Empty : r.GetString(r.GetOrdinal("phone")),
             Email         = r.IsDBNull(r.GetOrdinal("email")) ? null : r.GetString(r.GetOrdinal("email")),
             Name          = r.GetString(r.GetOrdinal("name")),
             AvatarUrl     = r.IsDBNull(r.GetOrdinal("avatar_url")) ? null : r.GetString(r.GetOrdinal("avatar_url")),

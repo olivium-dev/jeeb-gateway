@@ -1,9 +1,12 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using JeebGateway.Ratings.Jeeb;
 using JeebGateway.service.ServiceFeedback;
+using JeebGateway.StateService.Idempotency;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using FeedbackApiException = JeebGateway.service.ServiceFeedback.ApiException;
 
 namespace JeebGateway.Ratings;
@@ -51,24 +54,57 @@ public sealed class FeedbackServiceRatingStore : IRatingStore
     private static readonly Guid JeebRatingIdNamespace =
         new("3f2c8d6e-4b1a-4f7c-9e2d-1a6b5c4d3e2f");
 
+    /// <summary>
+    /// F3 — durable party/anchor seed namespace. One idempotency-KV row per delivery,
+    /// keyed <c>rating-seed:{deliveryId}</c>, body = the (clientId, jeeberId,
+    /// deliveredAt) anchor. Mirrored on the first <see cref="EnsureAsync"/> and read
+    /// back on a local miss so a rating GET/SUBMIT for a delivery whose window opened
+    /// before a gateway bounce still resolves the party map instead of returning null
+    /// / hard-throwing.
+    /// </summary>
+    private const string SeedKeyPrefix = "rating-seed:";
+
+    // 30 days — comfortably longer than the 7-day blind/reveal rating window, so the
+    // anchor outlives any legitimate rating lifecycle; bounds KV growth.
+    private const int SeedTtlSeconds = 30 * 24 * 60 * 60;
+
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IIdempotencyStore _durable;
+    private readonly ILogger<FeedbackServiceRatingStore> _logger;
 
     // Per-delivery party/anchor seed — the gateway-side row the upstream does not
     // hold. Keyed by deliveryId, ordinal, as in InMemoryRatingStore.
     private readonly ConcurrentDictionary<string, RatingPair> _seeds =
         new(StringComparer.Ordinal);
 
-    public FeedbackServiceRatingStore(IServiceScopeFactory scopeFactory)
+    public FeedbackServiceRatingStore(
+        IServiceScopeFactory scopeFactory,
+        IIdempotencyStore durable,
+        ILogger<FeedbackServiceRatingStore> logger)
     {
         _scopeFactory = scopeFactory;
+        _durable = durable;
+        _logger = logger;
     }
+
+    private static string SeedKey(string deliveryId) => SeedKeyPrefix + deliveryId;
+
+    private sealed record SeedDto(string DeliveryId, string ClientId, string JeeberId, DateTimeOffset DeliveredAt);
 
     public async Task<RatingPair?> GetAsync(string deliveryId, CancellationToken ct)
     {
         if (!_seeds.TryGetValue(deliveryId, out var seed))
         {
-            // Unknown delivery — no party map to project a reveal onto.
-            return null;
+            // F3: local miss (cold replica / post-bounce) — recover the party/anchor
+            // seed from the durable KV before giving up, so a rating window opened
+            // before the bounce still resolves instead of returning null.
+            var hydrated = await TryHydrateSeedAsync(deliveryId, ct).ConfigureAwait(false);
+            if (hydrated is null)
+            {
+                // Genuinely unknown delivery — no party map to project a reveal onto.
+                return null;
+            }
+            seed = hydrated;
         }
 
         var correlationId = JeebRatingVocabulary.CorrelationForDelivery(deliveryId);
@@ -110,15 +146,30 @@ public sealed class FeedbackServiceRatingStore : IRatingStore
         return pair;
     }
 
-    public Task<RatingPair> EnsureAsync(
+    public async Task<RatingPair> EnsureAsync(
         string deliveryId,
         string clientId,
         string jeeberId,
         DateTimeOffset deliveredAt,
         CancellationToken ct)
     {
-        // Idempotent seed: capture party ids + delivered-at on FIRST call only so
-        // the rating-window anchor is stable (parity with InMemoryRatingStore).
+        // Fast path: already seeded in-process.
+        if (_seeds.TryGetValue(deliveryId, out var existing))
+        {
+            return existing;
+        }
+
+        // F3: post-bounce recovery — if a durable seed already exists for this
+        // delivery, hydrate the ORIGINAL anchor from it (preserving the first-call
+        // anchor stability the in-memory store guarantees) instead of minting a new one.
+        var hydrated = await TryHydrateSeedAsync(deliveryId, ct).ConfigureAwait(false);
+        if (hydrated is not null)
+        {
+            return hydrated;
+        }
+
+        // First-ever Ensure: capture party ids + delivered-at, then mirror the anchor
+        // durably (best-effort) so it survives a bounce.
         var seed = _seeds.GetOrAdd(deliveryId, _ => new RatingPair
         {
             DeliveryId = deliveryId,
@@ -126,7 +177,8 @@ public sealed class FeedbackServiceRatingStore : IRatingStore
             JeeberId = jeeberId,
             DeliveredAt = deliveredAt,
         });
-        return Task.FromResult(seed);
+        await MirrorSeedAsync(seed, ct).ConfigureAwait(false);
+        return seed;
     }
 
     public async Task<RatingPair> SubmitAsync(
@@ -137,10 +189,18 @@ public sealed class FeedbackServiceRatingStore : IRatingStore
     {
         if (!_seeds.TryGetValue(deliveryId, out var seed))
         {
-            // Parity with InMemoryRatingStore: a submit before the row is seeded is
-            // a caller error, not an upstream round trip.
-            throw new InvalidOperationException(
-                $"Rating row for delivery {deliveryId} has not been initialised. Call EnsureAsync first.");
+            // F3: local miss (cold replica / post-bounce) — recover the party/anchor
+            // seed from the durable KV before treating this as an uninitialised row,
+            // so a legitimate submission for a pre-bounce delivery no longer hard-throws.
+            var hydrated = await TryHydrateSeedAsync(deliveryId, ct).ConfigureAwait(false);
+            if (hydrated is null)
+            {
+                // Parity with InMemoryRatingStore: a submit before the row is seeded is
+                // a caller error, not an upstream round trip.
+                throw new InvalidOperationException(
+                    $"Rating row for delivery {deliveryId} has not been initialised. Call EnsureAsync first.");
+            }
+            seed = hydrated;
         }
 
         var role = JeebRatingVocabulary.RoleFor(callerIsClient);
@@ -224,6 +284,71 @@ public sealed class FeedbackServiceRatingStore : IRatingStore
         guidBytes[8] = (byte)((guidBytes[8] & 0x3F) | 0x80);
 
         return ReadGuidBigEndian(guidBytes);
+    }
+
+    /// <summary>
+    /// F3: mirror the per-delivery party/anchor seed into the durable idempotency KV
+    /// (best-effort). PutOrGet is insert-once idempotent on the key, so the FIRST
+    /// Ensure's anchor wins and a later mirror of the same delivery is a no-op — the
+    /// same anchor-stability guarantee the in-memory GetOrAdd provides.
+    /// </summary>
+    private async Task MirrorSeedAsync(RatingPair seed, CancellationToken ct)
+    {
+        try
+        {
+            var body = JsonSerializer.Serialize(
+                new SeedDto(seed.DeliveryId, seed.ClientId, seed.JeeberId, seed.DeliveredAt));
+            await _durable.PutOrGetAsync(SeedKey(seed.DeliveryId), statusCode: 200, body, SeedTtlSeconds, ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Durable mirror of rating party/anchor seed for delivery {DeliveryId} failed; "
+                + "the seed stays in-memory only and will not survive a gateway bounce.",
+                seed.DeliveryId);
+        }
+    }
+
+    /// <summary>
+    /// F3: recover the party/anchor seed from the durable KV on a local miss and
+    /// re-populate the in-process cache. Returns null when no durable seed exists or
+    /// on a store fault (degrade-don't-fail — the caller then treats the delivery as
+    /// unseeded, exactly the pre-fix contract).
+    /// </summary>
+    private async Task<RatingPair?> TryHydrateSeedAsync(string deliveryId, CancellationToken ct)
+    {
+        try
+        {
+            var outcome = await _durable.GetAsync(SeedKey(deliveryId), ct).ConfigureAwait(false);
+            if (outcome is null || string.IsNullOrWhiteSpace(outcome.ResponseBodyJson))
+            {
+                return null;
+            }
+
+            var dto = JsonSerializer.Deserialize<SeedDto>(outcome.ResponseBodyJson);
+            if (dto is null || string.IsNullOrWhiteSpace(dto.ClientId) || string.IsNullOrWhiteSpace(dto.JeeberId))
+            {
+                return null;
+            }
+
+            // Re-seed the in-process cache so subsequent calls hit the fast path.
+            return _seeds.GetOrAdd(deliveryId, _ => new RatingPair
+            {
+                DeliveryId = dto.DeliveryId,
+                ClientId = dto.ClientId,
+                JeeberId = dto.JeeberId,
+                DeliveredAt = dto.DeliveredAt,
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Durable read of rating party/anchor seed for delivery {DeliveryId} failed; "
+                + "treating the delivery as unseeded (pre-fix contract).",
+                deliveryId);
+            return null;
+        }
     }
 
     private static RatingEntry? ToEntry(

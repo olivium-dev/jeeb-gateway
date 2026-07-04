@@ -191,7 +191,12 @@ public class FeedbackServiceRatingStoreTests
         var services = new ServiceCollection();
         services.AddScoped(_ => stub);
         var provider = services.BuildServiceProvider();
-        return new FeedbackServiceRatingStore(provider.GetRequiredService<IServiceScopeFactory>());
+        // F3: the store now also mirrors/hydrates its party/anchor seed durably — a
+        // real in-process idempotency KV substitutes for the state-service KV here.
+        return new FeedbackServiceRatingStore(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            new JeebGateway.StateService.Idempotency.InMemoryIdempotencyStore(TimeProvider.System),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<FeedbackServiceRatingStore>.Instance);
     }
 
     /// <summary>

@@ -87,29 +87,49 @@ public sealed class PostgresDataExportStore : IDataExportStore
             RETURNING id
             """;
 
-        await using var insertCmd = new NpgsqlCommand(insertSql, conn);
-        insertCmd.Parameters.AddWithValue("Id", Guid.Parse(record.Id));
-        insertCmd.Parameters.AddWithValue("UserId", record.UserId);
-        insertCmd.Parameters.AddWithValue("Status", record.Status);
-        insertCmd.Parameters.AddWithValue("Format", record.Format);
-        insertCmd.Parameters.AddWithValue("RequestedAt", record.RequestedAt);
-        insertCmd.Parameters.AddWithValue("DueBy", record.DueBy);
-
-        var inserted = await insertCmd.ExecuteScalarAsync(ct) is not null;
-
-        if (inserted)
+        // F10: insert-or-fetch is a two-step (INSERT ON CONFLICT DO NOTHING, then read
+        // the conflicting open row). There is a narrow race: the open row that caused
+        // the conflict can transition to a terminal state (completed/failed) between the
+        // insert and the follow-up read, so GetOpenForUserAsync returns null — the old
+        // `return existing!` would then push a NULL into the non-null contract (NPE at
+        // the caller). Loop instead: on a null fetch, the blocker has cleared, so a fresh
+        // insert now succeeds. Bounded so a pathological flapping row can't spin forever.
+        const int maxAttempts = 5;
+        for (var attempt = 1; ; attempt++)
         {
-            _log.LogInformation(
-                "Data export {ExportId} queued for user {UserId} (dueBy={DueBy})",
-                record.Id, userId, record.DueBy);
-            return record;
-        }
+            await using var insertCmd = new NpgsqlCommand(insertSql, conn);
+            insertCmd.Parameters.AddWithValue("Id", Guid.Parse(record.Id));
+            insertCmd.Parameters.AddWithValue("UserId", record.UserId);
+            insertCmd.Parameters.AddWithValue("Status", record.Status);
+            insertCmd.Parameters.AddWithValue("Format", record.Format);
+            insertCmd.Parameters.AddWithValue("RequestedAt", record.RequestedAt);
+            insertCmd.Parameters.AddWithValue("DueBy", record.DueBy);
 
-        // Conflict — an open export already exists for this user; return it
-        // unchanged so a retried POST never double-queues.
-        var existing = await GetOpenForUserAsync(userId, ct);
-        _log.LogDebug("Data export already open for user {UserId}; returning existing row", userId);
-        return existing!;
+            var inserted = await insertCmd.ExecuteScalarAsync(ct) is not null;
+            if (inserted)
+            {
+                _log.LogInformation(
+                    "Data export {ExportId} queued for user {UserId} (dueBy={DueBy})",
+                    record.Id, userId, record.DueBy);
+                return record;
+            }
+
+            // Conflict — an open export already exists for this user; return it
+            // unchanged so a retried POST never double-queues.
+            var existing = await GetOpenForUserAsync(userId, ct);
+            if (existing is not null)
+            {
+                _log.LogDebug("Data export already open for user {UserId}; returning existing row", userId);
+                return existing;
+            }
+
+            // The conflicting open export closed between the insert and this read.
+            if (attempt >= maxAttempts)
+            {
+                throw new InvalidOperationException(
+                    $"Data export request for user {userId} could neither insert nor find an open row after {maxAttempts} attempts (open export flapping).");
+            }
+        }
     }
 
     public async Task<DataExportRequest?> GetLatestForUserAsync(string userId, CancellationToken ct)

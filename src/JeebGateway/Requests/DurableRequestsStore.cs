@@ -289,14 +289,72 @@ public sealed class DurableRequestsStore : IRequestsStore
     public Task<int> CountActiveForClientAsync(string clientId, CancellationToken ct)
         => _inner.CountActiveForClientAsync(clientId, ct);
 
-    public Task<bool> SetStatusAsync(string requestId, string status, CancellationToken ct)
-        => _inner.SetStatusAsync(requestId, status, ct);
+    /// <summary>
+    /// F4: status mutation with a durable EFFECT. The in-memory model owns the
+    /// authoritative state machine (delegated verbatim); on a committed change the
+    /// new status is reflected onto the durable owner-list mirror (best-effort) so a
+    /// post-bounce <see cref="ListForClientAsync"/> shows the live status instead of
+    /// the stale create-time <c>pending</c>.
+    /// </summary>
+    public async Task<bool> SetStatusAsync(string requestId, string status, CancellationToken ct)
+    {
+        var ok = await _inner.SetStatusAsync(requestId, status, ct);
+        if (ok)
+        {
+            await MirrorLifecycleAsync(requestId, gwStatus: status, gwJeeberId: null, gwAcceptedFee: null, ct);
+        }
+        return ok;
+    }
 
-    public Task<bool> SetJeeberIdAsync(string requestId, string jeeberId, CancellationToken ct)
-        => _inner.SetJeeberIdAsync(requestId, jeeberId, ct);
+    /// <summary>F4: jeeber assignment mirrored to the durable owner-list (best-effort).</summary>
+    public async Task<bool> SetJeeberIdAsync(string requestId, string jeeberId, CancellationToken ct)
+    {
+        var ok = await _inner.SetJeeberIdAsync(requestId, jeeberId, ct);
+        if (ok)
+        {
+            await MirrorLifecycleAsync(requestId, gwStatus: null, gwJeeberId: jeeberId, gwAcceptedFee: null, ct);
+        }
+        return ok;
+    }
 
-    public Task<bool> TrySetAcceptedFeeAsync(string requestId, decimal fee, CancellationToken ct)
-        => _inner.TrySetAcceptedFeeAsync(requestId, fee, ct);
+    /// <summary>F4: accepted-fee mirrored to the durable owner-list (best-effort).</summary>
+    public async Task<bool> TrySetAcceptedFeeAsync(string requestId, decimal fee, CancellationToken ct)
+    {
+        var ok = await _inner.TrySetAcceptedFeeAsync(requestId, fee, ct);
+        if (ok)
+        {
+            await MirrorLifecycleAsync(requestId, gwStatus: null, gwJeeberId: null, gwAcceptedFee: fee, ct);
+        }
+        return ok;
+    }
+
+    /// <summary>
+    /// F4: best-effort reflection of an owner-list-visible lifecycle mutation onto the
+    /// durable mirror. No-op when no mirror is wired (Postgres absent). NEVER throws
+    /// into a mutation path — a mirror fault only means the owner-list may show a
+    /// stale field until the next write (exactly the pre-fix behaviour).
+    /// </summary>
+    private async Task MirrorLifecycleAsync(
+        string requestId, string? gwStatus, string? gwJeeberId, decimal? gwAcceptedFee, CancellationToken ct)
+    {
+        if (_mirror is null) return;
+        try
+        {
+            await _mirror.UpdateLifecycleAsync(
+                requestId, gwStatus, gwJeeberId, gwAcceptedFee, DateTimeOffset.UtcNow, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "requests-durable: owner-list mirror lifecycle update failed for {RequestId}; " +
+                "the list may show a stale status/jeeber/fee after a bounce.",
+                requestId);
+        }
+    }
 
     public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
         => _inner.GetByConversationIdAsync(conversationId, ct);
@@ -511,8 +569,27 @@ public sealed class DurableRequestsStore : IRequestsStore
     public Task<int> CountActiveForJeeberAsync(string jeeberId, CancellationToken ct)
         => _inner.CountActiveForJeeberAsync(jeeberId, ct);
 
-    public Task<DeliveryRequest?> TryAcceptByJeeberAsync(string requestId, string jeeberId, int limit, DateTimeOffset at, CancellationToken ct)
-        => _inner.TryAcceptByJeeberAsync(requestId, jeeberId, limit, at, ct);
+    /// <summary>
+    /// F4: jeeber-accept with a durable EFFECT. The in-memory model owns the
+    /// authoritative accept state machine (delegated verbatim); on a committed accept
+    /// the resulting status + assigned jeeber are reflected onto the durable owner-list
+    /// mirror (best-effort) so a post-bounce list shows the accepted/in-progress state
+    /// and the jeeberId instead of the stale create-time <c>pending</c>.
+    /// </summary>
+    public async Task<DeliveryRequest?> TryAcceptByJeeberAsync(string requestId, string jeeberId, int limit, DateTimeOffset at, CancellationToken ct)
+    {
+        var result = await _inner.TryAcceptByJeeberAsync(requestId, jeeberId, limit, at, ct);
+        if (result is not null)
+        {
+            await MirrorLifecycleAsync(
+                requestId,
+                gwStatus: result.Status,
+                gwJeeberId: string.IsNullOrWhiteSpace(result.JeeberId) ? jeeberId : result.JeeberId,
+                gwAcceptedFee: result.AcceptedFee,
+                ct);
+        }
+        return result;
+    }
 
     /// <summary>
     /// requests-durable: cancel with a durable EFFECT. The in-memory model owns
