@@ -41,6 +41,8 @@ public sealed class BearerForwardingHandler : DelegatingHandler
         _httpContextAccessor = httpContextAccessor;
     }
 
+    private const string CorrelationIdHeader = "X-Correlation-Id";
+
     protected override Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request,
         CancellationToken cancellationToken)
@@ -54,7 +56,52 @@ public sealed class BearerForwardingHandler : DelegatingHandler
             }
         }
 
+        // GW12-OBS-3 (Leg-12): forward the inbound X-Correlation-Id onto the outbound
+        // downstream call so an on-call engineer can grep ONE id across gateway +
+        // downstream logs. W3C traceparent propagates automatically via HttpClient
+        // instrumentation, but the human-readable correlation id a client/QA actually
+        // quotes did not survive the gateway→downstream hop until now. This handler is
+        // the universal first handler on every named downstream client (BearerForwarding
+        // → ServiceAuthSigning), so forwarding here covers all of them; the Contains
+        // guard keeps it idempotent and never overwrites an explicitly-set header.
+        if (!request.Headers.Contains(CorrelationIdHeader))
+        {
+            var correlationId = ExtractInboundCorrelationId();
+            if (!string.IsNullOrEmpty(correlationId))
+            {
+                request.Headers.TryAddWithoutValidation(CorrelationIdHeader, correlationId);
+            }
+        }
+
         return base.SendAsync(request, cancellationToken);
+    }
+
+    private string? ExtractInboundCorrelationId()
+    {
+        var ctx = _httpContextAccessor.HttpContext;
+        if (ctx is null)
+        {
+            return null;
+        }
+
+        // Prefer the value CorrelationIdMiddleware stashed (it mints one when the client
+        // omits the header, so this is populated for every gateway-originated request);
+        // fall back to the raw inbound header for calls that bypass the middleware.
+        if (ctx.Items.TryGetValue("CorrelationId", out var stashed) && stashed is string s && s.Length > 0)
+        {
+            return s;
+        }
+
+        if (ctx.Request.Headers.TryGetValue(CorrelationIdHeader, out var values))
+        {
+            var header = values.ToString();
+            if (!string.IsNullOrWhiteSpace(header))
+            {
+                return header;
+            }
+        }
+
+        return null;
     }
 
     private string? ExtractInboundBearer()

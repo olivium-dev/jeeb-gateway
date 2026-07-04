@@ -133,6 +133,93 @@ public class BearerForwardingHandlerTests
         capturing.LastRequest!.Headers.Authorization.Should().BeNull();
     }
 
+    // -----------------------------------------------------------------
+    // GW12-OBS-3 — X-Correlation-Id downstream propagation.
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task Forwards_CorrelationId_From_Items_To_Outbound_Request()
+    {
+        var accessor = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
+        // CorrelationIdMiddleware stashes the (possibly minted) id in Items.
+        accessor.HttpContext!.Items["CorrelationId"] = "corr-abc-123";
+
+        var handler = new BearerForwardingHandler(accessor) { InnerHandler = new CapturingHandler() };
+        var capturing = (CapturingHandler)handler.InnerHandler!;
+        using var invoker = new HttpMessageInvoker(handler);
+        using var req = new HttpRequestMessage(HttpMethod.Get, "http://downstream.test/ping");
+
+        await invoker.SendAsync(req, CancellationToken.None);
+
+        capturing.LastRequest!.Headers.TryGetValues("X-Correlation-Id", out var values).Should().BeTrue();
+        values!.Should().ContainSingle().Which.Should().Be("corr-abc-123");
+    }
+
+    [Fact]
+    public async Task Forwards_CorrelationId_From_Inbound_Header_When_Items_Absent()
+    {
+        var accessor = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
+        accessor.HttpContext!.Request.Headers["X-Correlation-Id"] = "corr-from-header";
+
+        var handler = new BearerForwardingHandler(accessor) { InnerHandler = new CapturingHandler() };
+        var capturing = (CapturingHandler)handler.InnerHandler!;
+        using var invoker = new HttpMessageInvoker(handler);
+        using var req = new HttpRequestMessage(HttpMethod.Get, "http://downstream.test/ping");
+
+        await invoker.SendAsync(req, CancellationToken.None);
+
+        capturing.LastRequest!.Headers.TryGetValues("X-Correlation-Id", out var values).Should().BeTrue();
+        values!.Should().ContainSingle().Which.Should().Be("corr-from-header");
+    }
+
+    [Fact]
+    public async Task Does_Not_Overwrite_Outbound_CorrelationId_Already_Set()
+    {
+        var accessor = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
+        accessor.HttpContext!.Items["CorrelationId"] = "inbound-corr";
+
+        var handler = new BearerForwardingHandler(accessor) { InnerHandler = new CapturingHandler() };
+        var capturing = (CapturingHandler)handler.InnerHandler!;
+        using var invoker = new HttpMessageInvoker(handler);
+        using var req = new HttpRequestMessage(HttpMethod.Get, "http://downstream.test/ping");
+        req.Headers.TryAddWithoutValidation("X-Correlation-Id", "explicit-outbound-corr");
+
+        await invoker.SendAsync(req, CancellationToken.None);
+
+        capturing.LastRequest!.Headers.GetValues("X-Correlation-Id")
+            .Should().ContainSingle().Which.Should().Be("explicit-outbound-corr");
+    }
+
+    [Fact]
+    public async Task Does_Not_Forward_CorrelationId_When_None_Present()
+    {
+        var accessor = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
+
+        var handler = new BearerForwardingHandler(accessor) { InnerHandler = new CapturingHandler() };
+        var capturing = (CapturingHandler)handler.InnerHandler!;
+        using var invoker = new HttpMessageInvoker(handler);
+        using var req = new HttpRequestMessage(HttpMethod.Get, "http://downstream.test/ping");
+
+        await invoker.SendAsync(req, CancellationToken.None);
+
+        capturing.LastRequest!.Headers.Contains("X-Correlation-Id").Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task NoOp_CorrelationId_When_No_HttpContext_Available()
+    {
+        var accessor = new HttpContextAccessor(); // background work, no context
+
+        var handler = new BearerForwardingHandler(accessor) { InnerHandler = new CapturingHandler() };
+        var capturing = (CapturingHandler)handler.InnerHandler!;
+        using var invoker = new HttpMessageInvoker(handler);
+        using var req = new HttpRequestMessage(HttpMethod.Get, "http://downstream.test/ping");
+
+        await invoker.SendAsync(req, CancellationToken.None);
+
+        capturing.LastRequest!.Headers.Contains("X-Correlation-Id").Should().BeFalse();
+    }
+
     /// <summary>
     /// Captures the outbound HttpRequestMessage so the test can assert on
     /// the headers the handler attached. Returns a canned 200 so the
