@@ -175,7 +175,11 @@ public static class RateLimitingExtensions
                   ?? ctx.User?.FindFirstValue("sub");
         if (!string.IsNullOrWhiteSpace(sub)) return sub;
 
-        if (ctx.Request.Headers.TryGetValue("X-User-Id", out var hdr)
+        // SEC-C1: only trust the X-User-Id header for the per-user partition when it comes
+        // from a trusted edge (or Development/Testing); otherwise a raw client could pick its
+        // own partition key at will.
+        if (EdgeIdentityTrust.HeadersTrusted(ctx)
+            && ctx.Request.Headers.TryGetValue("X-User-Id", out var hdr)
             && !string.IsNullOrWhiteSpace(hdr))
         {
             return hdr.ToString();
@@ -185,12 +189,14 @@ public static class RateLimitingExtensions
 
     internal static string? ResolveClientIp(HttpContext ctx)
     {
-        if (ctx.Request.Headers.TryGetValue("X-Forwarded-For", out var fwd)
-            && !string.IsNullOrWhiteSpace(fwd))
-        {
-            var first = fwd.ToString().Split(',', StringSplitOptions.RemoveEmptyEntries)[0].Trim();
-            if (!string.IsNullOrWhiteSpace(first)) return first;
-        }
+        // SEC-H1: do NOT read the raw X-Forwarded-For header here. UseForwardedHeaders()
+        // (Program.cs) already promotes X-Forwarded-For into Connection.RemoteIpAddress, but
+        // ONLY when the immediate peer is in the ForwardedHeaders:KnownProxies/KnownNetworks
+        // allowlist (the real trust boundary). Reading the raw header ourselves bypasses that
+        // allowlist and lets any client spoof its rate-limit partition key — making every
+        // per-IP limiter (global IP limiter, auth token bucket, sensitive fixed window, and
+        // the OTP request limiter, which all call this method) trivially bypassable. Trust the
+        // validated connection remote IP only.
         return ctx.Connection.RemoteIpAddress?.ToString();
     }
 }

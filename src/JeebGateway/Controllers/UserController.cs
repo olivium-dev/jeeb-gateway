@@ -843,7 +843,38 @@ namespace JeebGateway.Controllers
                     return validationResult.Result;
                 }
 
-                var targetUserId = string.IsNullOrEmpty(userId) ? validationResult.Value.userId : userId;
+                var callerId = validationResult.Value.userId;
+                var targetUserId = string.IsNullOrEmpty(userId) ? callerId : userId;
+
+                // SEC-IDOR (Leg-11): this is the SELF profile-delete (ProfileWriteSelf =
+                // any-authenticated). Before the guard, the query-param userId won over the
+                // caller's token id with NO ownership check, so any authenticated caller could
+                // permanently delete ANY account (BOLA). Enforce caller==target; genuine admin
+                // deletion of another account goes through the admin-capability bulk endpoint.
+                if (!string.Equals(targetUserId, callerId, StringComparison.Ordinal)
+                    && !JeebGateway.Users.UserIdentity.IsAdmin(HttpContext))
+                {
+                    var ownershipProblem = new Microsoft.AspNetCore.Mvc.ProblemDetails
+                    {
+                        Type = "https://jeeb.dev/errors/forbidden-ownership",
+                        Title = "Forbidden",
+                        Detail = "You may only delete your own account.",
+                        Status = StatusCodes.Status403Forbidden,
+                        Instance = HttpContext.Request.Path
+                    };
+                    // Emit the RFC7807 application/problem+json shape explicitly (matching
+                    // CapabilityForbiddenResultHandler); ControllerBase.Problem()/ObjectResult
+                    // content-negotiate down to application/json in this app.
+                    return new ContentResult
+                    {
+                        StatusCode = StatusCodes.Status403Forbidden,
+                        ContentType = "application/problem+json",
+                        Content = System.Text.Json.JsonSerializer.Serialize(
+                            ownershipProblem,
+                            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))
+                    };
+                }
+
                 var response = await _serviceUserManagementClient.DeleteAsync(targetUserId);
                 return Ok(response);
             }

@@ -3,6 +3,9 @@ using FluentAssertions;
 using JeebGateway.Auth.Capabilities;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -16,12 +19,27 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public sealed class CapabilityAuthorizationHandlerTests
 {
+    private sealed class TestHostEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = Environments.Development;
+        public string ApplicationName { get; set; } = "JeebGateway.Tests";
+        public string ContentRootPath { get; set; } = ".";
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
+    }
+
     private static AuthorizationHandlerContext Evaluate(
         string capability,
         IEnumerable<Claim>? roleClaims = null,
         string? xUserRolesHeader = null)
     {
         var http = new DefaultHttpContext();
+        // SEC-C1: the X-User-Roles edge-header path is trusted only from Development/Testing or a
+        // secret-gated trusted edge. This unit context simulates the local/dev host so the edge
+        // header path (which a real request always evaluates with a populated IHostEnvironment)
+        // is honoured exactly as before the hardening.
+        http.RequestServices = new ServiceCollection()
+            .AddSingleton<IHostEnvironment>(new TestHostEnvironment())
+            .BuildServiceProvider();
 
         var claims = new List<Claim>();
         if (roleClaims is not null)

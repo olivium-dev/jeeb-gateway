@@ -118,6 +118,11 @@ builder.Services.Configure<SecurityOptions>(builder.Configuration.GetSection(Sec
 const string GatewayBearerScheme = "GatewayBearer";
 
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
+
+// SEC-H2 (Leg-11): fail closed if the gateway would boot with a placeholder / dev / too-short
+// signing key outside Development/Testing. Bakes no key — only asserts a real secret was injected.
+JeebGateway.Tokens.JwtSigningKeyGuard.EnsureNotPlaceholder(jwt.SigningKey, builder.Environment, "Jwt:SigningKey");
+
 var signingBytes = Encoding.UTF8.GetBytes(jwt.SigningKey);
 
 // UM trust config (optional, no fail-closed: an absent UmJwt section is fine).
@@ -127,6 +132,14 @@ var signingBytes = Encoding.UTF8.GetBytes(jwt.SigningKey);
 // UmJwt:SigningKey lets UM rotate off the leaked fleet key with no code change.
 var umJwt = builder.Configuration.GetSection(UmJwtOptions.SectionName).Get<UmJwtOptions>() ?? new UmJwtOptions();
 var umSigningKey = string.IsNullOrWhiteSpace(umJwt.SigningKey) ? jwt.SigningKey : umJwt.SigningKey;
+
+// SEC-H2: when UmJwt supplies its OWN key (not the blank fall-through to Jwt:SigningKey,
+// which is already guarded above), it too must not be a placeholder in production.
+if (!string.IsNullOrWhiteSpace(umJwt.SigningKey))
+{
+    JeebGateway.Tokens.JwtSigningKeyGuard.EnsureNotPlaceholder(umJwt.SigningKey, builder.Environment, "UmJwt:SigningKey");
+}
+
 var umSigningBytes = Encoding.UTF8.GetBytes(umSigningKey);
 
 const string UmScheme = "UserManagement";

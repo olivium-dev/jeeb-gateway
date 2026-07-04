@@ -26,6 +26,13 @@ public class SecurityOptions
     /// </summary>
     public TokenMintConfig TokenMint { get; set; } = new();
 
+    /// <summary>
+    /// SEC-C1 (Leg-11) — trusted-edge identity gate. Controls whether the gateway will
+    /// honour client-supplied <c>X-User-Id</c> / <c>X-User-Roles</c> headers outside of
+    /// Development/Testing. See <see cref="EdgeIdentityTrust"/>.
+    /// </summary>
+    public EdgeIdentityConfig EdgeIdentity { get; set; } = new();
+
     public class CorsConfig
     {
         /// <summary>Named CORS policy applied to every endpoint.</summary>
@@ -164,6 +171,27 @@ public class SecurityOptions
         /// via <c>Security__TokenMint__Key</c> from a swarm secret.
         /// </summary>
         public string Key { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// SEC-C1 — trusted-edge identity configuration. When <see cref="SharedSecret"/> is
+    /// blank (the committed default), inbound <c>X-User-*</c> identity headers are NOT
+    /// trusted in non-Development/Testing environments — identity derives from the verified
+    /// JWT alone (fail closed). To re-enable an authenticated edge that legitimately injects
+    /// identity, inject a non-empty secret via <c>Security__EdgeIdentity__SharedSecret</c>
+    /// (from a swarm secret); the edge must then present it in <see cref="SharedSecretHeader"/>.
+    /// Never commit a real secret value.
+    /// </summary>
+    public class EdgeIdentityConfig
+    {
+        /// <summary>Header the trusted edge presents to prove it is the edge.</summary>
+        public string SharedSecretHeader { get; set; } = "X-Edge-Auth";
+
+        /// <summary>
+        /// Shared secret proving a request originates from the trusted edge. Blank by
+        /// default → header identity is ignored outside Development/Testing (fail closed).
+        /// </summary>
+        public string SharedSecret { get; set; } = string.Empty;
     }
 
     public class RequestValidationConfig
