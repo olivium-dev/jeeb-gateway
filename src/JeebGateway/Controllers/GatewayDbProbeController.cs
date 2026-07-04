@@ -46,8 +46,14 @@ namespace JeebGateway.Controllers;
 // is explicitly true (committed false in EVERY environment, incl. appsettings.Production.json
 // — same fail-closed pattern as DevController / TestControlPlaneController). The E2E
 // harness that exercises these probes already runs with Features__DevEndpoints__Enabled=true,
-// so its coverage is unaffected. Ordered before [Authorize] so a disabled surface returns
-// 404 (route does not exist) rather than 401 (route exists but needs a token).
+// so its coverage is unaffected.
+//
+// F2 (Leg-12): [DevOnly] is an ACTION FILTER, which runs INSIDE the endpoint pipeline —
+// AFTER the [Authorize] authorization middleware. So the attribute ordering here does NOT
+// make a disabled route 404 for an ANONYMOUS caller: the auth middleware would 401 first.
+// The pre-auth DevOnlyEndpointGuardMiddleware (registered in Program.cs before
+// UseAuthentication) is what actually returns 404 uniformly — for anonymous and
+// authenticated callers alike — when the flag is off; [DevOnly] remains as defence-in-depth.
 [DevOnly]
 [Authorize]
 // ADR-005 §A public at L2: DB-probe diagnostic reads carry no user-type gate. L1 [Authorize] is

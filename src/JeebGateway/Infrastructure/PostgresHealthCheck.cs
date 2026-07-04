@@ -22,8 +22,11 @@ namespace JeebGateway.Infrastructure;
 /// (readiness), never <c>/health/live</c> (liveness) — a DB blip must not pull the
 /// stateless gateway process out of rotation, matching the documented liveness /
 /// readiness split. A connection or query failure maps to
-/// <see cref="HealthStatus.Unhealthy"/>; the exception message is captured in the
-/// check's <c>description</c> for the ops dashboard but never surfaced to clients.</para>
+/// <see cref="HealthStatus.Unhealthy"/> with a GENERIC description
+/// (<c>"{label} unreachable"</c>); the underlying exception (whose Npgsql message can
+/// carry the DB host:port) is attached to the result for SERVER-SIDE capture only and is
+/// never serialized to the AllowAnonymous <c>/health/ready</c> / <c>/health/aggregate</c>
+/// response.</para>
 /// </summary>
 public sealed class PostgresHealthCheck : IHealthCheck
 {
@@ -63,11 +66,16 @@ public sealed class PostgresHealthCheck : IHealthCheck
         }
         catch (Exception ex)
         {
-            // Message only (no stack, no connection string) — enough for an on-call
-            // engineer to distinguish "pool exhausted" / "auth failed" / "host down"
-            // on the aggregate dashboard.
+            // F3: GENERIC client-facing description — no ex.Message. Npgsql connect failures
+            // embed the DB host:port ("Failed to connect to 10.x.x.x:5432") in ex.Message, and
+            // /health/ready + /health/aggregate are AllowAnonymous, so interpolating ex.Message
+            // into the description leaked the database host to any unauthenticated caller. The
+            // real exception is attached to the HealthCheckResult so it is captured SERVER-SIDE
+            // only (OTel span via HealthCheckPublisher / logs) — never serialized to the anon
+            // response (AggregateHealthResponseWriter no longer emits raw exception messages).
             return HealthCheckResult.Unhealthy(
-                $"{_databaseLabel} unreachable: {ex.Message}");
+                description: $"{_databaseLabel} unreachable",
+                exception: ex);
         }
     }
 }

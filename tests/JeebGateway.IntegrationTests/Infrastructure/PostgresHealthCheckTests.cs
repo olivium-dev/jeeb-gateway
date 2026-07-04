@@ -45,6 +45,25 @@ public class PostgresHealthCheckTests
     }
 
     [Fact]
+    public async Task F3_Unhealthy_Description_Is_Generic_And_Never_Leaks_DB_Host()
+    {
+        // F3: /health/ready + /health/aggregate are AllowAnonymous. Npgsql connect failures
+        // embed the DB host:port in ex.Message; that must NOT reach the client-facing
+        // description. The description is the GENERIC "{label} unreachable" and the real
+        // exception is carried on the result for server-side (OTel) capture only.
+        var check = new PostgresHealthCheck(UnreachableCs, "GatewayPostgres");
+
+        var result = await check.CheckHealthAsync(new HealthCheckContext(), CancellationToken.None);
+
+        result.Status.Should().Be(HealthStatus.Unhealthy);
+        result.Description.Should().Be("GatewayPostgres unreachable",
+            "the client-facing description must be generic — no host, port, or driver detail");
+        result.Description!.Should().NotContain("127.0.0.1").And.NotContain("Port=1").And.NotContain(":1");
+        // The underlying exception is retained for server-side diagnosis (OTel span), not the client.
+        result.Exception.Should().NotBeNull("the real fault is captured server-side for on-call");
+    }
+
+    [Fact]
     public async Task Does_Not_Throw_On_Cancellation()
     {
         var check = new PostgresHealthCheck(UnreachableCs, "GatewayPostgres");

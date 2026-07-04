@@ -144,6 +144,26 @@ public class GatewayDbProbeEndpointTests
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 
+    [Theory]
+    [MemberData(nameof(ProbeRoutes))]
+    public async Task ProbeRoute_FlagOff_WithoutToken_Returns404_Not401(string route, string _)
+    {
+        // F2 (Leg-12): an ANONYMOUS caller of a disabled dev/diagnostic route must get 404
+        // (route does not exist), NOT the 401 the auth middleware would otherwise return —
+        // which would leak that the route is real. The pre-auth DevOnlyEndpointGuardMiddleware
+        // short-circuits to 404 before authentication runs, uniformly with the authed case.
+        using var factory = NewFactory(
+            (__, ___) => throw new InvalidOperationException(
+                "upstream must not be called when the DbProbe [DevOnly] gate is closed"),
+            devEnabled: false);
+        var client = factory.CreateClient(); // no bearer token
+
+        var resp = await client.GetAsync(route);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound,
+            "an anonymous request to a disabled [DevOnly] route must 404 (masked), not 401 (route-exists disclosure)");
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------

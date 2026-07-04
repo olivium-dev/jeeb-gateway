@@ -2348,6 +2348,13 @@ app.UseRouting();
 // keeps the metric's `route` label cardinality bounded.
 app.UseMiddleware<RequestLatencyMiddleware>();
 
+// F2 (Leg-12): fail-closed 404 for [DevOnly] endpoints BEFORE authentication, so an
+// anonymous request to a disabled dev/diagnostic route gets 404 (route does not exist)
+// rather than the 401 the authorization middleware would otherwise return (which leaks
+// route existence). Placed after UseRouting (endpoint metadata resolved) and before
+// UseAuthentication/UseAuthorization. Pure pass-through when Features:DevEndpoints:Enabled.
+app.UseMiddleware<JeebGateway.Security.DevOnlyEndpointGuardMiddleware>();
+
 // CORS must run after UseRouting so endpoint-specific CORS metadata applies,
 // and before UseAuthentication so preflight requests are not rejected as 401.
 var corsPolicyName = (builder.Configuration.GetSection(SecurityOptions.SectionName)
