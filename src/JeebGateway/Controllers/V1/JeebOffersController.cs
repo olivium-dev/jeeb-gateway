@@ -119,25 +119,40 @@ public sealed class JeebOffersController : ControllerBase
         string? idempotencyKey,
         CancellationToken ct)
     {
-        // Resolve offerId → requestId via the in-process routing index learned at
-        // offer-submission time (populated by RequestOffersController.Submit).
-        var requestId = _offerRequestIndex.ResolveRequestId(offerId);
-        if (requestId is null)
+        // fix/offer-notpending-fullflow — resolve the offer-scoped accept route's
+        // offerId → (requestId, jeeberId) pairing AUTHORITATIVELY and restart-safely.
+        //
+        // The submit-time IOfferRequestIndex is the fast cache for this pairing, but a
+        // COLD gateway (post-restart / cross-replica with an empty in-memory index and
+        // no durable index wired) previously resolved a genuinely-LIVE offer to null and
+        // returned a bare 404 — which the mobile client renders as "this offer is no
+        // longer available". That is a FALSE unavailability produced purely by lost
+        // GATEWAY memory. ResolveOfferRoutingAsync removes that in-memory dependence: on
+        // an index miss it reconciles the pairing from the AUTHORITATIVE offer-service
+        // (the accepting owner's live offer lists), so a still-pending offer resolves and
+        // accepts even after a bounce, while a genuinely gone/non-pending offer still
+        // resolves to 404 (unknown) or is forwarded to the accept saga which returns the
+        // authoritative 409/410 — real NotPending semantics are preserved.
+        var routing = await ResolveOfferRoutingAsync(offerId, actorId, ct);
+        if (routing is null)
             return NotFound();
+
+        var requestId = routing.Value.RequestId;
 
         // F2 / BR-10 (sprint-009 gateway-flow-correctness-audit): this is the route the
         // mobile client actually calls, yet — unlike the legacy OffersController and this
         // controller's own in-memory accept path — it never enforced the per-jeeber active-
         // delivery cap. offer-service does NOT enforce BR-10 today (successive accepts all
         // returned 200 on the live fleet), so the gateway BFF is the enforcement point. The
-        // cap is checked against the WINNING bidder (the offer's jeeber), resolved from the
-        // routing index recorded at submit time. Check BEFORE forwarding the accept saga so
-        // no third delivery is ever created.
+        // cap is checked against the WINNING bidder (the offer's jeeber), resolved above
+        // (from the routing index, or the authoritative offer-service reconciliation on a
+        // cold miss). Check BEFORE forwarding the accept saga so no third delivery is ever
+        // created.
         //
         // Degrade-don't-fail: a delivery-service count blip must NEVER turn an otherwise-valid
         // accept into a 5xx — on a fault we log and treat the jeeber as under cap and forward
         // (the offer-service Conflict mapping remains the backstop). Mirrors OffersController.
-        var winningJeeberId = _offerRequestIndex.ResolveJeeberId(offerId);
+        var winningJeeberId = routing.Value.JeeberId;
         if (winningJeeberId is not null)
         {
             int? activeCount = null;
@@ -204,6 +219,121 @@ public sealed class JeebOffersController : ControllerBase
                 Status = StatusCodes.Status502BadGateway
             })
         };
+    }
+
+    /// <summary>
+    /// fix/offer-notpending-fullflow — AUTHORITATIVE, restart-safe resolution of the
+    /// offer-scoped accept route's <c>offerId → (requestId, jeeberId)</c> pairing.
+    ///
+    /// <para><b>Why.</b> The mobile accept route is offer-scoped
+    /// (<c>POST /v1/offers/{offerId}/accept</c>) while the offer-service accept saga is
+    /// request-scoped, so the gateway must recover the requestId from the offerId. The
+    /// submit-time <see cref="IOfferRequestIndex"/> is the fast in-process (or, when
+    /// state-service is wired, durable) cache for that pairing, but on a COLD gateway
+    /// — empty in-memory index after a restart, or a replica that never saw the submit,
+    /// with no durable index — a genuinely LIVE offer resolved to <c>null</c> and the
+    /// accept returned a bare 404. The mobile client surfaces that as "this offer is no
+    /// longer available": a FALSE unavailability caused solely by lost GATEWAY memory,
+    /// even though the offer is perfectly pending in offer-service.</para>
+    ///
+    /// <para><b>What.</b> On an index MISS this reconciles the pairing from the
+    /// AUTHORITATIVE offer-service instead of trusting gateway memory. The accept caller
+    /// is the request-OWNING client, so the gateway enumerates that client's own still-
+    /// open auctions (<see cref="RequestStatus.Pending"/>/<see cref="RequestStatus.Matched"/>)
+    /// from its request read-model and, for each, reads the owner-scoped offer list
+    /// (<c>GET /api/v1/requests/{id}/offers</c> — the only authoritative offer read
+    /// offer-service exposes; there is deliberately no get-offer-by-id route). The offer
+    /// whose id matches yields its requestId and bidder id straight from offer-service
+    /// LIVE data; the pairing is re-recorded into the index so the next accept/edit is
+    /// fast again (and, with the durable index wired, bounce-survivable).</para>
+    ///
+    /// <para><b>Stateless-correct.</b> The availability truth — does this live offer
+    /// exist, and under which request/jeeber — is derived from offer-service on every
+    /// cold path, never from gateway memory. The gateway performs ROUTING only and
+    /// re-derives no auction rule: a matched offer is always forwarded to the accept
+    /// saga, which is the sole authority for accepted/withdrawn/expired (→ 409/410), so
+    /// a genuinely non-pending offer still correctly rejects. An offer that is truly
+    /// gone appears in no owner list → a correct 404. DEGRADE-DON'T-FAIL: every
+    /// offer-service read here is best-effort (the client returns an empty list on any
+    /// blip and the request-list is bounded by the owner's open auctions), so a fault
+    /// degrades to the pre-fix "unresolved → 404" contract, never a 5xx.</para>
+    /// </summary>
+    private async Task<(string RequestId, string? JeeberId)?> ResolveOfferRoutingAsync(
+        string offerId, string actorId, CancellationToken ct)
+    {
+        // 1) Fast path: the submit-time routing index (in-memory, or the durable
+        //    write-through decorator when state-service is wired).
+        var indexedRequestId = _offerRequestIndex.ResolveRequestId(offerId);
+        if (!string.IsNullOrWhiteSpace(indexedRequestId))
+        {
+            return (indexedRequestId, _offerRequestIndex.ResolveJeeberId(offerId));
+        }
+
+        // 2) Cold path: authoritative reconciliation from offer-service. NEVER read an
+        //    index miss as "offer gone" — the offer may be live and the index simply
+        //    cold. Enumerate the accepting owner's still-open auctions and find the
+        //    offer by id in the owner-scoped offer-service list.
+        IReadOnlyList<DeliveryRequest> ownRequests;
+        try
+        {
+            ownRequests = await _requests.ListForClientAsync(actorId, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Cold offer-routing reconciliation for offer {OfferId}: listing owner {ActorId}'s "
+                + "requests failed; falling back to the unresolved (404) contract.", offerId, actorId);
+            return null;
+        }
+
+        foreach (var request in ownRequests)
+        {
+            if (request is null || string.IsNullOrWhiteSpace(request.Id))
+            {
+                continue;
+            }
+
+            // Only a pre-acceptance auction (pending/matched) can still hold the offer
+            // being accepted; skip terminal / in-flight rows to bound the upstream fan-out.
+            if (!string.Equals(request.Status, RequestStatus.Pending, StringComparison.Ordinal)
+                && !string.Equals(request.Status, RequestStatus.Matched, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // Owner-scoped read: actorId IS the request owner (offer-service 403s otherwise);
+            // the client degrades a blip to an empty list, so this never throws a 5xx.
+            var offers = await _offerService.ListForRequestAsync(actorId, request.Id, ct);
+            var match = offers.FirstOrDefault(
+                o => string.Equals(o.Id, offerId, StringComparison.Ordinal));
+            if (match is null)
+            {
+                continue;
+            }
+
+            var resolvedJeeberId = string.IsNullOrWhiteSpace(match.JeeberId) ? null : match.JeeberId;
+
+            // Re-hydrate the routing index from the authoritative pairing so the next
+            // accept/edit of this offer resolves on the fast path (and survives the next
+            // bounce when the durable index is wired). Structural routing fact only.
+            _offerRequestIndex.Record(offerId, request.Id, resolvedJeeberId);
+
+            _logger.LogInformation(
+                "Cold offer-routing reconciliation for offer {OfferId}: recovered request {RequestId} "
+                + "(jeeber {JeeberId}) from offer-service; index re-hydrated — no false unavailability.",
+                offerId, request.Id, resolvedJeeberId);
+
+            return (request.Id, resolvedJeeberId);
+        }
+
+        // Unknown to offer-service across all of the owner's open auctions: the offer
+        // genuinely is not an acceptable pending offer for this owner → 404 (authoritative,
+        // not a memory-loss false negative).
+        return null;
     }
 
     private async Task<IActionResult> BuildAcceptedResponseAsync(
