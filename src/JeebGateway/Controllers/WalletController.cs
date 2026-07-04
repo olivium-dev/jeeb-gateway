@@ -38,11 +38,8 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
             }
         }
 
@@ -59,11 +56,8 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
             }
         }
 
@@ -79,11 +73,8 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
             }
         }
 
@@ -99,11 +90,8 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
             }
         }
 
@@ -119,11 +107,8 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
             }
         }
 
@@ -139,11 +124,8 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
             }
         }
 
@@ -159,11 +141,8 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
             }
         }
 
@@ -189,11 +168,8 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
             }
         }
 

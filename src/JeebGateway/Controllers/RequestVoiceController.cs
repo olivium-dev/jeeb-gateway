@@ -300,11 +300,19 @@ public sealed class RequestVoiceController : ControllerBase
     }
 
     /// <summary>
-    /// Voice-create read-back (S04 H2). Aligns the <c>/v1/requests/{id}</c> read
-    /// surface used by the voice flow onto the same owner-scoped store read as
-    /// <c>GET /requests/{id}</c>, echoing the voice contract fields.
+    /// Voice-create read-back (S04 H2). JEBV4-61: this used to sit at
+    /// <c>GET v1/requests/{id}</c> (implicit <c>Order = 0</c>), which shadowed
+    /// <see cref="JeebGateway.Controllers.V1.JeebRequestsController.Get"/> — the
+    /// route every mobile detail/tracking screen needs (full
+    /// <see cref="Requests.DeliveryRequestDto"/>: jeeberId, conversationId,
+    /// pickup/dropoff locations, …) — for EVERY request, voice-created or not,
+    /// with a clean 200 and no signal that fields were missing. <c>GET
+    /// v1/requests/{id}</c> is now SOLELY owned by <c>JeebRequestsController.Get</c>;
+    /// the voice-specific echo (transcription/confidence/language, which the
+    /// canonical DTO does not carry) moved to this distinct, non-colliding path so
+    /// there is no ambiguity resolved by an integer.
     /// </summary>
-    [HttpGet("{requestId}")]
+    [HttpGet("{requestId}/voice")]
     // ADR-005 L2 §C client-only (STATE: ownership stays in-action).
     [RequireCapability(Capabilities.RequestReadOwn)]
     [RequireActiveUser]
@@ -312,7 +320,7 @@ public sealed class RequestVoiceController : ControllerBase
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> GetById(string requestId, CancellationToken ct)
+    public async Task<IActionResult> GetVoiceById(string requestId, CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var clientId, out var problem)) return problem;
 

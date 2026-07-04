@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -79,7 +80,10 @@ public class RequestVoiceEndpointTests : IClassFixture<WebApplicationFactory<Pro
         var create = await client.PostAsync("/v1/requests", VoiceForm(new byte[] { 1 }, reqId));
         var created = await create.Content.ReadFromJsonAsync<VoiceResp>();
 
-        var read = await client.GetAsync($"/v1/requests/{reqId}");
+        // JEBV4-61: the voice-specific echo (transcription/confidence/language)
+        // now lives on its own non-colliding route; GET /v1/requests/{id} is
+        // solely owned by JeebRequestsController.Get (canonical DeliveryRequestDto).
+        var read = await client.GetAsync($"/v1/requests/{reqId}/voice");
 
         read.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await read.Content.ReadFromJsonAsync<VoiceResp>();
@@ -196,6 +200,89 @@ public class RequestVoiceEndpointTests : IClassFixture<WebApplicationFactory<Pro
         blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
         var problem = await blocked.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
         problem!.Status.Should().Be((int)HttpStatusCode.Conflict);
+    }
+
+    // ----- JEBV4-61: GET /v1/requests/{id} route-collision fix -----
+    //
+    // Before the fix, RequestVoiceController.GetVoiceById mapped GET v1/requests/{id}
+    // at implicit Order = 0 and JeebRequestsController.Get mapped the SAME route at
+    // an explicit Order = 1, so the narrow VoiceRequestResponse shape won for EVERY
+    // request (voice-created or not) and the full DeliveryRequestDto action never
+    // ran — jeeberId/conversationId/pickup/dropoff locations were silently absent
+    // from a clean 200. This test pins the canonical shape for BOTH creation paths.
+
+    [Fact]
+    public async Task GetById_Returns_Canonical_DeliveryRequestDto_For_Voice_Created_Request()
+    {
+        var client = ClientFor("jebv4-61-voice");
+        var reqId = Guid.NewGuid().ToString();
+        var create = await client.PostAsync("/v1/requests", VoiceForm(new byte[] { 1, 2, 3 }, reqId));
+        create.StatusCode.Should().Be(HttpStatusCode.Created);
+
+        var read = await client.GetAsync($"/v1/requests/{reqId}");
+        read.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        using var doc = JsonDocument.Parse(await read.Content.ReadAsStringAsync());
+        var root = doc.RootElement;
+
+        // Canonical DeliveryRequestDto fields the voice shape used to swallow.
+        root.GetProperty("id").GetString().Should().Be(reqId);
+        root.GetProperty("clientId").GetString().Should().Be("jebv4-61-voice");
+        root.TryGetProperty("jeeberId", out _).Should().BeTrue(
+            "the full DTO carries jeeberId (even when null) — the field this bug swallowed");
+        root.TryGetProperty("conversationId", out _).Should().BeTrue(
+            "the full DTO carries conversationId (even when null) — the field this bug swallowed");
+        root.TryGetProperty("pickupLocation", out var pickup).Should().BeTrue();
+        pickup.ValueKind.Should().NotBe(JsonValueKind.Undefined);
+        root.TryGetProperty("dropoffLocation", out _).Should().BeTrue();
+        root.TryGetProperty("createdAt", out _).Should().BeTrue();
+        root.TryGetProperty("photos", out _).Should().BeTrue();
+        root.GetProperty("transcription").GetString().Should().NotBeNullOrWhiteSpace(
+            "DeliveryRequestDto.Transcription is populated even for a voice-created row");
+
+        // Distinguishing markers of the OLD narrow VoiceRequestResponse shape that must
+        // NOT appear on the canonical route anymore (that shape lives at .../voice now).
+        root.TryGetProperty("requestId", out _).Should().BeFalse(
+            "requestId is a VoiceRequestResponse-only field; must not leak onto the canonical route");
+        root.TryGetProperty("transcription_confidence", out _).Should().BeFalse(
+            "transcription_confidence is a VoiceRequestResponse-only field; belongs on GET .../voice");
+        root.TryGetProperty("language", out _).Should().BeFalse(
+            "language is a VoiceRequestResponse-only field; belongs on GET .../voice");
+    }
+
+    [Fact]
+    public async Task GetById_Returns_Canonical_DeliveryRequestDto_For_Json_Created_Request()
+    {
+        var client = ClientFor("jebv4-61-json");
+        var createResp = await client.PostAsJsonAsync("/v1/requests", new
+        {
+            description = "Two large pizzas, ring the top bell",
+            tierId = "standard",
+            pickupLocation = new { lat = 24.7, lng = 46.6 },
+            dropoffLocation = new { lat = 24.6, lng = 46.7 },
+        });
+        createResp.StatusCode.Should().Be(HttpStatusCode.Created);
+        using var createdDoc = JsonDocument.Parse(await createResp.Content.ReadAsStringAsync());
+        var reqId = createdDoc.RootElement.GetProperty("id").GetString();
+
+        var read = await client.GetAsync($"/v1/requests/{reqId}");
+        read.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        using var doc = JsonDocument.Parse(await read.Content.ReadAsStringAsync());
+        var root = doc.RootElement;
+
+        root.GetProperty("id").GetString().Should().Be(reqId);
+        root.GetProperty("clientId").GetString().Should().Be("jebv4-61-json");
+        root.GetProperty("description").GetString().Should().Be("Two large pizzas, ring the top bell");
+        root.GetProperty("pickupLocation").GetProperty("lat").GetDouble().Should().BeApproximately(24.7, 0.0001);
+        root.GetProperty("dropoffLocation").GetProperty("lng").GetDouble().Should().BeApproximately(46.7, 0.0001);
+        root.TryGetProperty("jeeberId", out _).Should().BeTrue();
+        root.TryGetProperty("conversationId", out _).Should().BeTrue();
+        root.TryGetProperty("createdAt", out _).Should().BeTrue();
+
+        root.TryGetProperty("requestId", out _).Should().BeFalse();
+        root.TryGetProperty("transcription_confidence", out _).Should().BeFalse();
+        root.TryGetProperty("language", out _).Should().BeFalse();
     }
 
     private sealed record VoiceResp(

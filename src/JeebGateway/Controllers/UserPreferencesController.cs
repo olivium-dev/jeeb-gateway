@@ -62,18 +62,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 var result = await _preferencesClient.Data_GetItemsAsync(userId, data_type, page, size, order);
                 return Ok(result);
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -89,18 +86,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 await _preferencesClient.Data_AddItemsAsync(userId, data_type, items);
                 return StatusCode(201, new { Message = "Items added successfully" });
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -116,18 +110,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 await _preferencesClient.Data_ReplaceSetAsync(userId, data_type, items);
                 return Ok(new { Message = "Set replaced successfully" });
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -143,18 +134,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 await _preferencesClient.Data_DeleteFromSetAsync(userId, data_type, items);
                 return Ok(new { Message = "Items deleted successfully" });
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -168,18 +156,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 var result = await _preferencesClient.Data_GetAllItemsAsync(userId, data_type);
                 return Ok(result);
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -193,18 +178,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 await _preferencesClient.Data_DeleteSetAsync(userId, data_type);
                 return Ok(new { Message = "Set deleted successfully" });
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -227,18 +209,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 var result = await _preferencesClient.Data_GetNestedPreferenceAsync(userId, pref_key);
                 return Ok(result);
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -254,18 +233,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 await _preferencesClient.Data_SetNestedPreferenceAsync(userId, pref_key, preference);
                 return StatusCode(201, new { Message = "Nested preference set successfully" });
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -283,18 +259,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 var result = await _preferencesClient.Data_GetPreferencesAsync(userId);
                 return Ok(result);
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -308,18 +281,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 await _preferencesClient.Data_SetPreferenceAsync(userId, preference);
                 return StatusCode(201, new { Message = "Preference set successfully" });
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -334,18 +304,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 var result = await _preferencesClient.Data_GetSinglePreferenceAsync(userId, pref_key);
                 return Ok(result);
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -361,18 +328,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 await _preferencesClient.Data_SetSinglePreferenceAsync(userId, pref_key, value);
                 return StatusCode(201, new { Message = "Preference set successfully" });
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
@@ -388,18 +352,15 @@ namespace JeebGateway.Controllers
             {
                 var userId = GetUserId();
                 if (string.IsNullOrEmpty(userId))
-                    return StatusCode(401, "Unauthorized");
+                    return Unauthorized();
 
                 await _preferencesClient.Data_UpdatePreferenceAsync(userId, pref_key, value);
                 return Ok(new { Message = "Preference updated successfully" });
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, "Internal server error: " + ex.Message);
+                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
+                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
             }
         }
 
