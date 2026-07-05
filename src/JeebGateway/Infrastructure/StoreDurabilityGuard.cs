@@ -84,6 +84,14 @@ internal static class StoreDurabilityGuard
         (typeof(JeebGateway.Services.Dispatch.INotificationDispatchOutbox), new[] { typeof(JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox) }),
         (typeof(JeebGateway.Push.IPushRetryQueue),                          new[] { typeof(JeebGateway.Push.PostgresPushRetryQueue) }),
         (typeof(JeebGateway.Push.IPushDeliveryTracker),                     new[] { typeof(JeebGateway.Push.PostgresPushDeliveryTracker) }),
+        // JEBV4-132 (IN-MEM-LIVE): promoted from the in-memory backlog once the durable target
+        // landed. The gateway-owned CMS authoring plane (WS-01 — surfaces, drafts, and the
+        // append-only published-version history that drives every MFE config envelope) is now
+        // Postgres-backed (cms_surfaces + cms_surface_versions tables, migration 0032); in a
+        // prod-like env it MUST resolve to PostgresCmsSurfaceStore, never InMemoryCmsSurfaceStore —
+        // a fallback means every admin draft edit and published config version evaporates on
+        // restart, flapping the MFEs back to the seeded v1 defaults.
+        (typeof(JeebGateway.Cms.ICmsSurfaceStore),                          new[] { typeof(JeebGateway.Cms.PostgresCmsSurfaceStore) }),
     };
 
     /// <summary>
@@ -100,10 +108,39 @@ internal static class StoreDurabilityGuard
         // targets Postgres* impls + migration 0030 now exist.
         // JeebGateway.Users.IFinancialLedgerAnonymizer promoted to Critical (JEBV4-154) — durable
         // target PostgresFinancialLedger + migration 0030 now exist.
-        typeof(JeebGateway.Cms.ICmsSurfaceStore),
-        typeof(JeebGateway.Availability.IGeoIndex),
+        // JeebGateway.Cms.ICmsSurfaceStore promoted to Critical (JEBV4-132) — durable target
+        // PostgresCmsSurfaceStore + migration 0032 now exist.
+        // JeebGateway.Availability.IGeoIndex moved to IntentionalInMemory (JEBV4-156) — it is a
+        // DERIVED, rebuildable hot-path cache (a Redis GEO index), NOT a store of record; see below.
         typeof(JeebGateway.Whisper.IAudioStore),
         typeof(JeebGateway.Whisper.ITranscriptionFallbackQueue),
+    };
+
+    /// <summary>
+    /// Stores that are in-memory <b>by design</b> and are NOT a durability gap: derived,
+    /// rebuildable caches / hot-path indexes whose authoritative data lives in a durable store of
+    /// record elsewhere. Unlike <see cref="KnownInMemoryBacklog"/> (stores of record still awaiting a
+    /// Postgres target), these have NO pending migration — migrating them to Postgres would be wrong.
+    /// They are logged at boot as informational (rebuildable, not lost-forever) and never block startup.
+    ///
+    /// <para><b>JEBV4-156 — IGeoIndex is intentional in-memory (derived/rebuildable cache, not a
+    /// store of record).</b> Per db/JEEBER_LOCATION_DESIGN.md, the Jeeber online-presence system of
+    /// record is the durable Postgres <c>jeeber_availability</c> table (is_online, vehicle_type,
+    /// <c>last_location GEOGRAPHY(Point,4326)</c>, last_seen_at) — owned by
+    /// <see cref="JeebGateway.Availability.IAvailabilityStore"/>, which is ALREADY a
+    /// <see cref="Critical"/> Postgres-backed store (<see cref="JeebGateway.Availability.PostgresAvailabilityStore"/>).
+    /// <see cref="JeebGateway.Availability.IGeoIndex"/> is only the spatial ACCELERATION index over
+    /// that truth — its production target is a <b>Redis</b> GEO sorted set
+    /// (<c>jeeber:online:geo</c> + per-vehicle sets, GEOADD/GEOSEARCH), explicitly a hot-path cache,
+    /// not Postgres. PostgresAvailabilityStore.AddAsync writes the durable row and then updates the
+    /// derived geo index, so the index is fully rebuildable from Postgres and its loss on restart
+    /// costs only a warm-up, never authoritative data. Migrating it to a durable Postgres store would
+    /// duplicate <c>jeeber_availability</c> and defeat the whole point of the hot path. It therefore
+    /// stays in-memory (Redis in prod) by design and is deliberately NOT on the migration backlog.</para>
+    /// </summary>
+    internal static readonly Type[] IntentionalInMemory =
+    {
+        typeof(JeebGateway.Availability.IGeoIndex),
     };
 
     /// <summary>
@@ -153,6 +190,13 @@ internal static class StoreDurabilityGuard
         {
             logger?.LogWarning(
                 "StoreDurability: {Interface} is still in-memory (no durable target yet) — its data is lost on restart. Tracked on the AUDIT-A Tier-1 backlog.",
+                iface.Name);
+        }
+
+        foreach (var iface in IntentionalInMemory)
+        {
+            logger?.LogInformation(
+                "StoreDurability: {Interface} is in-memory BY DESIGN — a derived, rebuildable hot-path cache whose authoritative data lives in a durable store of record (not a durability gap; no migration pending).",
                 iface.Name);
         }
 
