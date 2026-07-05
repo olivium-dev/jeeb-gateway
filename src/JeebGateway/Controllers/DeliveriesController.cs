@@ -532,6 +532,26 @@ public class DeliveriesController : ControllerBase
         var partySource = CanonicalDeliveryVocab.PartySourceFor(HttpContext);
         var actorRole = CanonicalDeliveryVocab.ActorRoleFor(HttpContext);
 
+        // fix/status-change-push (AUDIT-B #1): this canonical PATCH path is the sole
+        // notification composer on live (flag-on), but historically it never emitted
+        // the counterparty StatusChange push the retired in-memory VerifyOtp branch
+        // did (NotifyOtherPartyAsync at the old line ~1060). Capture the pre-transition
+        // row NOW so that, on a committed transition, we can fan the "status updated"
+        // push to the opposite party (Client<->Jeeber) with the correct from->to.
+        // STRICTLY best-effort: a null/failed read only means the push is skipped, it
+        // never blocks or fails the transition.
+        DeliveryRequest? preTransitionRow = null;
+        try
+        {
+            preTransitionRow = await _store.GetAsync(deliveryId, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Status-change push pre-read failed for delivery {DeliveryId}; the transition still proceeds, only the counterparty push may be skipped.",
+                deliveryId);
+        }
+
         try
         {
             var upstream = await _deliveryClient.CanonicalTransitionAsync(
@@ -549,6 +569,30 @@ public class DeliveriesController : ControllerBase
                 _log.LogWarning(ex,
                     "Canonical transition mirror failed for delivery {DeliveryId} (status {Status}); upstream write is authoritative.",
                     deliveryId, upstream.Status);
+            }
+
+            // fix/status-change-push (AUDIT-B #1): the transition committed (200 is
+            // authoritative) — fan the StatusChange push to the counterparty, mirroring
+            // exactly what the retired in-memory VerifyOtp branch did via
+            // NotifyOtherPartyAsync(req, previousStatus). We reuse the pre-transition row
+            // for the recipients (ClientId/JeeberId) and stamp the fresh upstream status
+            // as the new "to". STRICTLY best-effort: NotifyOtherPartyAsync already swallows
+            // per-recipient push faults, and this outer guard ensures a push-composer throw
+            // can NEVER turn a committed transition into a 5xx.
+            if (preTransitionRow is { } notifyRow)
+            {
+                try
+                {
+                    var previousStatus = notifyRow.Status;
+                    notifyRow.Status = upstream.Status;
+                    await NotifyOtherPartyAsync(notifyRow, previousStatus, ct);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex,
+                        "Status-change counterparty push failed for delivery {DeliveryId} (to {Status}); the canonical transition already committed (200) and is authoritative.",
+                        deliveryId, upstream.Status);
+                }
             }
 
             // JEB (jeeber-earnings-on-complete): completion can also land via the
@@ -1917,6 +1961,25 @@ public class DeliveriesController : ControllerBase
         // reaching it, so a completed delivery credited nothing. Best-effort +
         // idempotent — a settlement/ledger fault must never fail this canonical 200.
         await CreditJeeberOnCompletionAsync(deliveryId, correlationId, ct);
+
+        // fix/status-change-push (AUDIT-B #1): the handover is COMPLETE — fan the
+        // StatusChange->Done push to the counterparty, mirroring the retired in-memory
+        // VerifyOtp branch's NotifyOtherPartyAsync(req, HeadingOff) call that the flag-ON
+        // compose path lost (so nobody got the "delivery completed" push on live).
+        // STRICTLY best-effort: a push fault must NEVER turn a committed, verified
+        // handover into a 5xx.
+        try
+        {
+            var previousStatus = delivery.Status;
+            delivery.Status = result.Status ?? RequestStatus.Delivered;
+            await NotifyOtherPartyAsync(delivery, previousStatus, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Handover completion counterparty push failed for delivery {DeliveryId}; the handover stays verified (200). correlationId {CorrelationId}",
+                deliveryId, correlationId);
+        }
 
         return Ok(new OtpHandoverVerificationResponse
         {
