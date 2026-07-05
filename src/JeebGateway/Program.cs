@@ -1733,8 +1733,26 @@ builder.Services.AddSingleton<IDualRoleService, DualRoleService>();
 // polls db/migrations/0010.account_deletions and proxies the financial
 // anonymization step to unified_payment_gateway (locked-in payments
 // policy). The 30-day SLA lives in InMemoryAccountDeletionStore.PurgeDelay.
+// Financial-ledger anonymization bookkeeping (GDPR account-deletion seam).
+// Durability register (JEBV4-154, AUDIT-A IN-MEM-LIVE) — the gateway's own
+// per-owner retained-row anonymization counters used to live ONLY in process
+// memory, so the record of which financial rows had already been pseudonymized
+// for a deleted user was LOST on every restart/replica move (money + GDPR — the
+// highest-risk remaining in-memory store). PostgresFinancialLedger
+// (financial_ledger_anonymization table, migration 0030) is the durable system
+// of record whenever GatewayPostgres:ConnectionString is configured; the
+// in-memory store stays the dev/CI/test fallback when it is absent — the
+// established FAIL-OPEN-then-gate pattern (StoreDurabilityGuard now enforces the
+// Postgres store in prod-like envs).
 builder.Services.AddSingleton<InMemoryFinancialLedger>();
-builder.Services.AddSingleton<IFinancialLedgerAnonymizer>(sp => sp.GetRequiredService<InMemoryFinancialLedger>());
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<IFinancialLedgerAnonymizer, JeebGateway.Users.PostgresFinancialLedger>();
+}
+else
+{
+    builder.Services.AddSingleton<IFinancialLedgerAnonymizer>(sp => sp.GetRequiredService<InMemoryFinancialLedger>());
+}
 builder.Services.AddSingleton<InMemoryAccountDeletionStore>();
 // Durability register #15 — account-deletion (GDPR 30-day purge SLA). Postgres-backed
 // (account_deletions, migration 0010) + the AccountDeletionPurgeWorker background sweeper
