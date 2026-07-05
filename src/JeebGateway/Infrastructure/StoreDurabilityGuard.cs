@@ -84,6 +84,16 @@ internal static class StoreDurabilityGuard
         (typeof(JeebGateway.Services.Dispatch.INotificationDispatchOutbox), new[] { typeof(JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox) }),
         (typeof(JeebGateway.Push.IPushRetryQueue),                          new[] { typeof(JeebGateway.Push.PostgresPushRetryQueue) }),
         (typeof(JeebGateway.Push.IPushDeliveryTracker),                     new[] { typeof(JeebGateway.Push.PostgresPushDeliveryTracker) }),
+        // JEBV4-126 (IN-MEM-LIVE): the voice-note transcription FALLBACK queue —
+        // small metadata rows (audio_id, reason, queued_at) for jobs awaiting a
+        // re-drive once Whisper recovers — promoted from the in-memory backlog now
+        // that its durable target landed (transcription_fallback_queue, migration
+        // 0033). In a prod-like env it MUST resolve to PostgresTranscriptionFallbackQueue,
+        // never InMemoryTranscriptionFallbackQueue: a fallback means the pending-retry
+        // backlog and the health-check/status PendingQueueDepth silently evaporate on
+        // restart. (Only the job metadata is durable here — the raw audio bytes are the
+        // intentional-transient IAudioStore buffer on the backlog below, NOT this queue.)
+        (typeof(JeebGateway.Whisper.ITranscriptionFallbackQueue),           new[] { typeof(JeebGateway.Whisper.PostgresTranscriptionFallbackQueue) }),
     };
 
     /// <summary>
@@ -100,10 +110,22 @@ internal static class StoreDurabilityGuard
         // targets Postgres* impls + migration 0030 now exist.
         // JeebGateway.Users.IFinancialLedgerAnonymizer promoted to Critical (JEBV4-154) — durable
         // target PostgresFinancialLedger + migration 0030 now exist.
+        // JeebGateway.Whisper.ITranscriptionFallbackQueue promoted to Critical (JEBV4-126) —
+        // durable target PostgresTranscriptionFallbackQueue + migration 0033 now exist.
         typeof(JeebGateway.Cms.ICmsSurfaceStore),
         typeof(JeebGateway.Availability.IGeoIndex),
+        // JEBV4-133 (INTENTIONAL — transient audio buffer, NOT a store of record):
+        // IAudioStore holds the raw voice-note BYTES (WhisperAudio.Content). Large audio
+        // blobs deliberately do NOT belong in the gateway Postgres DB — their durable home
+        // is the voice-transcription-service's S3-compatible object storage (per IAudioStore's
+        // own doc-comment), a reusable microservice the gateway must not reach into or own
+        // (org no-coupling law → ESCALATE for a true durable audio home, out of gateway
+        // scope). In the gateway it is only a transient in-process buffer of the bytes already
+        // in-hand at the moment of fallback (SaveAsync is the ONLY method ever called — there
+        // is no GetAsync / drain-back path in the gateway), so it is left in-memory ON PURPOSE.
+        // It stays on this backlog (logged loudly) but is NOT pending a gateway-Postgres
+        // migration — do not promote it to Critical.
         typeof(JeebGateway.Whisper.IAudioStore),
-        typeof(JeebGateway.Whisper.ITranscriptionFallbackQueue),
     };
 
     /// <summary>
