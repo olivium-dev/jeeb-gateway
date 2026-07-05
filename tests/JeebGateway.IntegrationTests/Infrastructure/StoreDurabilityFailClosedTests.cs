@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using FluentAssertions;
 using JeebGateway.Infrastructure;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -168,6 +169,58 @@ public class StoreDurabilityFailClosedTests
             provider, new FakeEnv { EnvironmentName = "Testing" }, NullLogger.Instance);
 
         act.Should().NotThrow("the test harness must keep in-memory stores and never block boot");
+    }
+
+    // ---- Test-harness escape hatch (StoreDurability:FailClosedDisabled) -------------------------
+
+    /// <summary>Provider that also exposes an IConfiguration built from the given key/values.</summary>
+    private static IServiceProvider ProviderWithConfig(IReadOnlyDictionary<Type, object> storeMap, IDictionary<string, string?> config)
+    {
+        var map = new Dictionary<Type, object>(storeMap.ToDictionary(kv => kv.Key, kv => kv.Value));
+        var cfg = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
+            .AddInMemoryCollection(config)
+            .Build();
+        map[typeof(Microsoft.Extensions.Configuration.IConfiguration)] = cfg;
+        return new MapServiceProvider(map);
+    }
+
+    [Fact]
+    public void EnsureDurable_ProdLike_InMemory_But_FailClosedDisabled_Flag_Does_Not_Throw()
+    {
+        // The NARROW test-harness escape hatch: with StoreDurability:FailClosedDisabled=true the gate
+        // is disarmed EVEN in a prod-like env with an in-memory critical store (this is exactly what
+        // the ProdFactory does so its Production WebApplicationFactory can boot without real Postgres).
+        var storeMap = AllDurableMap();
+        storeMap[typeof(JeebGateway.Financials.ISettlementStore)] =
+            RuntimeHelpers.GetUninitializedObject(typeof(JeebGateway.Financials.InMemorySettlementStore));
+        var provider = ProviderWithConfig(storeMap,
+            new Dictionary<string, string?> { ["StoreDurability:FailClosedDisabled"] = "true" });
+
+        var act = () => StoreDurabilityGuard.EnsureDurable(
+            provider, new FakeEnv { EnvironmentName = "Production" }, NullLogger.Instance);
+
+        act.Should().NotThrow("the test-harness escape hatch disarms the gate when explicitly set true");
+    }
+
+    [Theory]
+    [InlineData(null)]      // flag absent → armed (real prod default)
+    [InlineData("false")]   // flag explicitly false → armed
+    public void EnsureDurable_ProdLike_InMemory_Still_FailsClosed_When_Flag_Not_True(string? flag)
+    {
+        // Real Production NEVER sets the flag (or sets it false) → the gate stays ARMED and fail-closes.
+        var storeMap = AllDurableMap();
+        storeMap[typeof(JeebGateway.Financials.ISettlementStore)] =
+            RuntimeHelpers.GetUninitializedObject(typeof(JeebGateway.Financials.InMemorySettlementStore));
+        var config = new Dictionary<string, string?>();
+        if (flag is not null) config["StoreDurability:FailClosedDisabled"] = flag;
+        var provider = ProviderWithConfig(storeMap, config);
+
+        var act = () => StoreDurabilityGuard.EnsureDurable(
+            provider, new FakeEnv { EnvironmentName = "Production" }, NullLogger.Instance);
+
+        act.Should().Throw<InvalidOperationException>(
+            "the escape hatch defaults to ARMED; only a literal true disables real prod fail-closed")
+            .WithMessage("*FAIL-CLOSED*");
     }
 
     // ---- Sanity: no store is both Critical and on the in-memory backlog -------------------------

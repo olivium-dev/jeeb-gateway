@@ -188,6 +188,11 @@ public class SwaggerGatingTests
                 // the test isolated to the /swagger* surface.
                 builder.UseSetting("BffServices:RequiredInProduction", "false");
 
+                // Test-harness escape hatch: this Production-env factory provides no real durable
+                // stores, so disable the fail-closed StoreDurabilityGuard ONLY here (real prod never
+                // sets this → still fail-closed). Isolates the test to the /swagger* surface.
+                builder.UseSetting("StoreDurability:FailClosedDisabled", "true");
+
                 // Ensure the JWT bearer handler validates against the same key /
                 // issuer / audience the test mints with (JwtOptions defaults).
                 builder.UseSetting("Jwt:SigningKey", SigningKey);

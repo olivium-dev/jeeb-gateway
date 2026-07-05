@@ -175,6 +175,31 @@ internal static class StoreDurabilityGuard
            || string.Equals(environment.EnvironmentName, "Testing", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Config key for the NARROW, prod-safe test-harness escape hatch. DEFAULT FALSE = the fail-closed
+    /// boot gate is ARMED. It exists ONLY so the integration-test harness can boot a
+    /// <c>ASPNETCORE_ENVIRONMENT=Production</c> <see cref="Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory{T}"/>
+    /// (to exercise prod-only controller behaviour) WITHOUT provisioning real Postgres/Redis/upstream
+    /// durable stores. The real appsettings / real environment NEVER sets it, so real Production stays
+    /// fail-closed. Matching by concrete resolved type is unchanged; this flag only decides whether the
+    /// gate is armed at all in a prod-like env.
+    /// </summary>
+    internal const string FailClosedDisabledKey = "StoreDurability:FailClosedDisabled";
+
+    /// <summary>
+    /// Reads the test-harness escape hatch (<see cref="FailClosedDisabledKey"/>) off the built
+    /// container's <see cref="Microsoft.Extensions.Configuration.IConfiguration"/>. Fails SAFE: if the
+    /// provider has no IConfiguration (e.g. the unit-test <c>MapServiceProvider</c>) or the flag is
+    /// absent/unparseable, the gate stays ARMED (returns false). Only a literal <c>true</c> disables it.
+    /// </summary>
+    internal static bool IsFailClosedDisabled(IServiceProvider services)
+    {
+        var config = services?.GetService(typeof(Microsoft.Extensions.Configuration.IConfiguration))
+            as Microsoft.Extensions.Configuration.IConfiguration;
+        var raw = config?[FailClosedDisabledKey];
+        return bool.TryParse(raw, out var disabled) && disabled;
+    }
+
+    /// <summary>
     /// Pure decision core (unit-testable without a real container or DB): given a resolver
     /// interface-&gt;concrete-type, returns a human-readable violation per critical store that did
     /// not resolve to an approved durable implementation. Empty list == all durable.
@@ -206,6 +231,20 @@ internal static class StoreDurabilityGuard
         if (IsExempt(environment))
         {
             return; // dev/CI keep in-memory stores — never block local or test boot.
+        }
+
+        // NARROW test-harness escape hatch (default OFF). The gate is armed in prod-like envs UNLESS
+        // StoreDurability:FailClosedDisabled=true. Only the integration-test ProdFactory sets it (via
+        // UseSetting) so its Production-env WebApplicationFactory can boot without real durable stores;
+        // real Production never sets it → still fail-closed. This weakens NOTHING in real prod.
+        if (IsFailClosedDisabled(services))
+        {
+            logger?.LogWarning(
+                "StoreDurability: fail-closed boot gate DISABLED in '{Env}' via {Key}=true. This is the " +
+                "TEST-HARNESS-ONLY escape hatch — real Production must NEVER set it. In-memory critical " +
+                "stores will NOT block boot.",
+                environment.EnvironmentName, FailClosedDisabledKey);
+            return;
         }
 
         foreach (var iface in KnownInMemoryBacklog)
