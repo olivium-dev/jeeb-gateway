@@ -2176,8 +2176,33 @@ else
     builder.Services.AddSingleton<IWhisperClient, FakeWhisperClient>();
 }
 builder.Services.AddSingleton<IWhisperCircuitBreaker, WhisperCircuitBreaker>();
+// IAudioStore holds the raw voice-note BYTES (WhisperAudio.Content). Large audio
+// blobs deliberately do NOT go into the gateway Postgres DB — their durable home is
+// the voice-transcription-service's S3-compatible storage (see IAudioStore's own
+// doc-comment), which the gateway must not reach into (org no-coupling law). In the
+// gateway it is only a TRANSIENT in-process buffer holding the bytes already in-hand
+// at the moment of fallback (SaveAsync is the ONLY method ever called — there is no
+// GetAsync / drain-back path in the gateway today), NOT a store of record. It is left
+// in-memory ON PURPOSE and is documented as an intentional transient on the AUDIT-A
+// backlog (StoreDurabilityGuard.KnownInMemoryBacklog) — not a pending migration.
 builder.Services.AddSingleton<IAudioStore, InMemoryAudioStore>();
-builder.Services.AddSingleton<ITranscriptionFallbackQueue, InMemoryTranscriptionFallbackQueue>();
+// Durability follow-up — transcription fallback queue (JEBV4-126). This queue holds
+// only SMALL metadata rows (audio_id, reason, queued_at) for voice notes whose
+// transcription fell back and must be re-driven once Whisper recovers; in-memory it
+// evaporated on every restart, silently resetting the pending backlog and the
+// PendingQueueDepth on the Whisper health check + status endpoint. Postgres-backed
+// (transcription_fallback_queue, migration 0033) whenever GatewayPostgres:ConnectionString
+// is configured — the established FAIL-OPEN-then-gate pattern (StoreDurabilityGuard now
+// enforces the Postgres impl in prod-like envs). The in-memory queue stays the
+// dev/CI/test fallback when the connection string is absent.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<ITranscriptionFallbackQueue, PostgresTranscriptionFallbackQueue>();
+}
+else
+{
+    builder.Services.AddSingleton<ITranscriptionFallbackQueue, InMemoryTranscriptionFallbackQueue>();
+}
 builder.Services.AddSingleton<IFallbackTranscriptionProvider, NoOpFallbackTranscriptionProvider>();
 builder.Services.AddScoped<ITranscriptionService, ResilientTranscriptionService>();
 builder.Services.AddHealthChecks()
