@@ -2124,6 +2124,13 @@ builder.Services.AddScoped<ITranscriptionService, ResilientTranscriptionService>
 builder.Services.AddHealthChecks()
     .AddCheck<WhisperHealthCheck>("whisper", tags: new[] { "ready" });
 
+// AUDIT-A (FIX-1) readiness surface for the fail-closed durability gate. "ready"-tagged so
+// /health/ready reports 503 if any critical store of record is in-memory in a prod-like env
+// (belt-and-suspenders on top of the boot gate wired after builder.Build()). No-op-Healthy in
+// Development/Testing. See JeebGateway.Infrastructure.StoreDurabilityGuard.
+builder.Services.AddHealthChecks()
+    .AddCheck<JeebGateway.Infrastructure.StoreDurabilityHealthCheck>("store-durability", tags: new[] { "ready" });
+
 // ---------------------------------------------------------------------------
 // jeeb-state-service durable rewire (ADR-001-rev2, Layer-2 R1–R8).
 //
@@ -2251,6 +2258,16 @@ builder.Services.AddExceptionHandler<JeebGateway.Infrastructure.UpstreamExceptio
 // ---------------------------------------------------------------------------
 
 var app = builder.Build();
+
+// AUDIT-A (FIX-1) — fail-closed durability gate. Refuses to start a prod-like gateway whose
+// money/identity/audit/legal/security stores silently fell back to in-memory because a durability
+// selector env var was dropped/typo'd (the "green health, corrupt state" class this program closes).
+// No-op in Development/Testing. Runs before app.Run(), so a mis-provisioned prod deploy crashes on
+// boot with a message naming each offending store instead of serving ephemeral state. Mirrors
+// JwtSigningKeyGuard. Rollback = delete this call (pure additive; changes no store registration).
+JeebGateway.Infrastructure.StoreDurabilityGuard.EnsureDurable(
+    app.Services, app.Environment,
+    app.Services.GetRequiredService<ILogger<Program>>());
 
 // JEB-1502: populate the test job registry. Each entry delegates to the job's
 // own sweep method — the SAME code path the background scheduler calls. No
