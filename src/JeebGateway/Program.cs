@@ -373,7 +373,14 @@ builder.Services.AddHealthChecks()
 // silently skip — local dev does not have to spin up every backend.
 // ---------------------------------------------------------------------------
 builder.Services.AddBffAggregation(builder.Configuration);
-builder.Services.AddCmsAuthoringPlane(); // WS-01: gateway-owned CMS authoring plane (W4/W7a)
+// WS-01: gateway-owned CMS authoring plane (W4/W7a). Durable Postgres store
+// (cms_surfaces + cms_surface_versions, migration 0032) when
+// GatewayPostgres:ConnectionString is set (JEBV4-132, AUDIT-A IN-MEM-LIVE);
+// in-memory fallback for dev/CI/test. The INpgsqlConnectionFactory the Postgres
+// store depends on is registered later in this file inside the same
+// GatewayPostgres block — DI resolution happens at container-build time, so the
+// registration order here is irrelevant.
+builder.Services.AddCmsAuthoringPlane(builder.Configuration["GatewayPostgres:ConnectionString"]);
 // AddDownstreamClients also registers the typed IContractSigningServiceClient
 // (contract-signing-service / immutable contract templates + per-party
 // signatures; consumed by ContractSigningController, gated by
@@ -1932,6 +1939,17 @@ builder.Services.Configure<AutoOfflineOptions>(builder.Configuration.GetSection(
 // reloaded on config change via IOptionsMonitor so operators can
 // re-shape coverage without redeploying the gateway.
 builder.Services.Configure<ZoneOptions>(builder.Configuration.GetSection(ZoneOptions.SectionName));
+// IGeoIndex is INTENTIONALLY in-memory (JEBV4-156) — it is a DERIVED, rebuildable
+// hot-path spatial index, NOT a store of record, so it must NOT be migrated to
+// Postgres. The Jeeber online-presence system of record is the durable Postgres
+// `jeeber_availability` table (is_online / vehicle_type / last_location / last_seen_at),
+// owned by IAvailabilityStore → PostgresAvailabilityStore (already a Critical durable
+// store). This geo index is only the spatial ACCELERATION layer over that truth; its
+// production target is a Redis GEO sorted set (jeeber:online:geo, GEOADD/GEOSEARCH —
+// see db/JEEBER_LOCATION_DESIGN.md), an explicit hot-path cache. PostgresAvailabilityStore
+// writes the durable row and then updates this index, so it is fully rebuildable from
+// Postgres and its loss on restart costs only a warm-up, never authoritative data.
+// Tracked as IntentionalInMemory (not the migration backlog) in StoreDurabilityGuard.
 builder.Services.AddSingleton<IGeoIndex, InMemoryGeoIndex>();
 
 // Offer record-of-truth (T-backend-010). thin-BFF wire: when
