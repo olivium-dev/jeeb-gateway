@@ -1168,9 +1168,26 @@ else
 {
     builder.Services.AddSingleton<IDeviceTokenStore, InMemoryDeviceTokenStore>();
 }
-builder.Services.AddSingleton<IPushRetryQueue, InMemoryPushRetryQueue>();
-builder.Services.AddSingleton<InMemoryPushDeliveryTracker>();
-builder.Services.AddSingleton<IPushDeliveryTracker>(sp => sp.GetRequiredService<InMemoryPushDeliveryTracker>());
+// Durability register #12 — push-reliability trio (JEBV4-137 retry queue,
+// JEBV4-136 delivery tracker, JEBV4-144 dispatch outbox below). All three used
+// to live ONLY in gateway process memory, so every pending retry, delivery-log
+// record and queued dispatch was silently DROPPED on each restart/replica move.
+// Postgres-backed (push_retry_queue / push_delivery_tracker / notification_dispatch_outbox,
+// migration 0030) whenever GatewayPostgres:ConnectionString is configured — the
+// established FAIL-OPEN-then-gate pattern (StoreDurabilityGuard now enforces the
+// Postgres impls in prod-like envs). The in-memory stores stay the dev/CI/test
+// fallback when the connection string is absent.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<IPushRetryQueue, PostgresPushRetryQueue>();
+    builder.Services.AddSingleton<IPushDeliveryTracker, PostgresPushDeliveryTracker>();
+}
+else
+{
+    builder.Services.AddSingleton<IPushRetryQueue, InMemoryPushRetryQueue>();
+    builder.Services.AddSingleton<InMemoryPushDeliveryTracker>();
+    builder.Services.AddSingleton<IPushDeliveryTracker>(sp => sp.GetRequiredService<InMemoryPushDeliveryTracker>());
+}
 
 var pushOpts = builder.Configuration.GetSection(PushOptions.SectionName).Get<PushOptions>() ?? new PushOptions();
 if (pushOpts.UseFcmTransport)
@@ -1190,12 +1207,22 @@ builder.Services.AddSingleton<PushRetryQueueProcessor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProcessor>());
 
 // JEB-1494: Gateway notification render→dispatch primitive.
-// INotificationDispatchOutbox: in-memory for MVP; swap for Postgres-backed
-// implementation (notification_dispatch_outbox table) when persistence is needed.
+// INotificationDispatchOutbox (JEBV4-144): Postgres-backed
+// (notification_dispatch_outbox, migration 0030) whenever GatewayPostgres is
+// configured so a queued-but-undelivered dispatch survives a restart; the
+// in-memory store stays the dev/CI/test fallback.
 // INotificationTemplateRenderer: static catalog; replace with an HTTP call to
 // notification-service GET /render/{key} when that endpoint is live.
-builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationDispatchOutbox,
-                               JeebGateway.Services.Dispatch.InMemoryNotificationDispatchOutbox>();
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationDispatchOutbox,
+                                   JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox>();
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationDispatchOutbox,
+                                   JeebGateway.Services.Dispatch.InMemoryNotificationDispatchOutbox>();
+}
 builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationTemplateRenderer,
                                JeebGateway.Services.Dispatch.StaticNotificationTemplateRenderer>();
 builder.Services.AddScoped<JeebGateway.Services.Dispatch.IJeebNotificationDispatcher,

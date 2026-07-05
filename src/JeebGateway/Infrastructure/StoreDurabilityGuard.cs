@@ -75,6 +75,15 @@ internal static class StoreDurabilityGuard
         // (financial_ledger_anonymization table, migration 0030); in a prod-like env it MUST
         // resolve to PostgresFinancialLedger, never InMemoryFinancialLedger.
         (typeof(JeebGateway.Users.IFinancialLedgerAnonymizer),             new[] { typeof(JeebGateway.Users.PostgresFinancialLedger) }),
+        // JEBV4-144 / 137 / 136 (IN-MEM-LIVE): the push-reliability trio — dispatch
+        // outbox, retry queue, delivery tracker — promoted from the in-memory backlog
+        // now that their durable targets landed (push_reliability tables, migration
+        // 0031). In a prod-like env each MUST resolve to its Postgres impl, never the
+        // in-memory store: a fallback means pending/retrying pushes and delivery-log
+        // records evaporate on restart (silently dropped notifications).
+        (typeof(JeebGateway.Services.Dispatch.INotificationDispatchOutbox), new[] { typeof(JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox) }),
+        (typeof(JeebGateway.Push.IPushRetryQueue),                          new[] { typeof(JeebGateway.Push.PostgresPushRetryQueue) }),
+        (typeof(JeebGateway.Push.IPushDeliveryTracker),                     new[] { typeof(JeebGateway.Push.PostgresPushDeliveryTracker) }),
     };
 
     /// <summary>
@@ -86,12 +95,12 @@ internal static class StoreDurabilityGuard
     {
         // JeebGateway.Tiers.ITiersStore promoted to Critical (JEBV4-125) — durable target
         // PostgresTiersStore + migration 0029 now exist.
-        typeof(JeebGateway.Cms.ICmsSurfaceStore),
-        typeof(JeebGateway.Services.Dispatch.INotificationDispatchOutbox),
-        typeof(JeebGateway.Push.IPushRetryQueue),
-        typeof(JeebGateway.Push.IPushDeliveryTracker),
+        // The push-reliability trio (INotificationDispatchOutbox / IPushRetryQueue /
+        // IPushDeliveryTracker) promoted to Critical (JEBV4-144/137/136) — durable
+        // targets Postgres* impls + migration 0030 now exist.
         // JeebGateway.Users.IFinancialLedgerAnonymizer promoted to Critical (JEBV4-154) — durable
         // target PostgresFinancialLedger + migration 0030 now exist.
+        typeof(JeebGateway.Cms.ICmsSurfaceStore),
         typeof(JeebGateway.Availability.IGeoIndex),
         typeof(JeebGateway.Whisper.IAudioStore),
         typeof(JeebGateway.Whisper.ITranscriptionFallbackQueue),
