@@ -41,6 +41,11 @@ public sealed class ControllerHeaderSpoofScopingTests
             b.UseSetting("Security:RateLimit:Enabled", "false");
             b.UseSetting("Security:TokenMint:Enabled", "false");
             b.UseSetting("Jwt:SigningKey", ValidSigningKey);
+            // Test-harness escape hatch: this ProdFactory boots ASPNETCORE_ENVIRONMENT=Production to
+            // exercise prod-only controller behaviour but provides NO real Postgres/Redis durable
+            // stores, so disable the fail-closed StoreDurabilityGuard ONLY here (real prod never sets
+            // this → still fail-closed). Keeps these tests testing Production behaviour without a DB.
+            b.UseSetting("StoreDurability:FailClosedDisabled", "true");
             // No Security:EdgeIdentity:SharedSecret → fail closed, raw X-User-* never trusted.
         });
 

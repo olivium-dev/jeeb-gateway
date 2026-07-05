@@ -37,6 +37,9 @@ public class EdgeHeaderTrustTests
             b.UseSetting("Security:RateLimit:Enabled", "false");
             b.UseSetting("Security:TokenMint:Enabled", "false");
             b.UseSetting("Jwt:SigningKey", ValidSigningKey);
+            // Test-harness escape hatch: boot Production without real durable stores by disabling the
+            // fail-closed StoreDurabilityGuard ONLY here (real prod never sets this → still fail-closed).
+            b.UseSetting("StoreDurability:FailClosedDisabled", "true");
             b.UseSetting("Security:EdgeIdentity:SharedSecret", edgeSecret ?? string.Empty);
         });
 
