@@ -65,6 +65,10 @@ internal static class StoreDurabilityGuard
         (typeof(JeebGateway.NotificationPreferences.INotificationPreferencesStore), new[] { typeof(JeebGateway.NotificationPreferences.RemoteUserPreferencesNotificationPreferencesStore) }),
         (typeof(JeebGateway.Requests.Cancellation.IJeeberRestrictionStore), new[] { typeof(JeebGateway.Requests.Cancellation.BanServiceJeeberRestrictionStore) }),
         (typeof(JeebGateway.Auth.OtpSignIn.IOtpRequestRateLimiter),         new[] { typeof(JeebGateway.Auth.OtpSignIn.RedisOtpRequestRateLimiter) }),
+        // JEBV4-125 (IN-MEM-LIVE): promoted from the in-memory backlog once the durable target
+        // landed. The admin delivery-tier catalog is now Postgres-backed (tiers table, migration
+        // 0029); in a prod-like env it MUST resolve to PostgresTiersStore, never InMemoryTiersStore.
+        (typeof(JeebGateway.Tiers.ITiersStore),                             new[] { typeof(JeebGateway.Tiers.PostgresTiersStore) }),
     };
 
     /// <summary>
@@ -74,7 +78,8 @@ internal static class StoreDurabilityGuard
     /// </summary>
     internal static readonly Type[] KnownInMemoryBacklog =
     {
-        typeof(JeebGateway.Tiers.ITiersStore),
+        // JeebGateway.Tiers.ITiersStore promoted to Critical (JEBV4-125) — durable target
+        // PostgresTiersStore + migration 0029 now exist.
         typeof(JeebGateway.Cms.ICmsSurfaceStore),
         typeof(JeebGateway.Services.Dispatch.INotificationDispatchOutbox),
         typeof(JeebGateway.Push.IPushRetryQueue),

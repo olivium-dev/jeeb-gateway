@@ -1457,12 +1457,26 @@ builder.Services.AddSingleton<JeebGateway.Requests.OtpHandover.IHandoverCodeStor
 // See DELIVERY-SERVICE-RELOCATION-DESIGN.md §2.1 + §5.
 
 // Delivery tier catalog (T-backend-009).
-// In-memory store seeded with the five default tiers (Urgent, Same-Day,
-// Scheduled, Economy, On-the-Way); admins can CRUD via /admin/tiers and
-// changes take effect on the next request because each List/Get returns
-// a deep-cloned snapshot. Production wiring will hit Postgres via a
-// follow-up migration colocated with delivery_requests.
-builder.Services.AddSingleton<JeebGateway.Tiers.ITiersStore, JeebGateway.Tiers.InMemoryTiersStore>();
+// Admins CRUD via /admin/tiers and changes take effect on the next request
+// (each List/Get reads fresh). Five default tiers (Urgent, Same-Day, Scheduled,
+// Economy, On-the-Way) are seeded either by migration 0029 (Postgres path) or
+// the in-memory store's constructor (dev/CI fallback).
+//
+// Durability register (JEBV4-125, AUDIT-A IN-MEM-LIVE) — the admin tier catalog
+// used to live ONLY in gateway process memory, so an admin's tier edits reverted
+// to the seeded defaults on every restart/replica move. PostgresTiersStore
+// (tiers table, migration 0029) is the durable system of record whenever
+// GatewayPostgres:ConnectionString is configured; the in-memory store stays the
+// dev/CI/test fallback when it is absent — the established FAIL-OPEN-then-gate
+// pattern (StoreDurabilityGuard now enforces the Postgres store in prod-like envs).
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.Tiers.ITiersStore, JeebGateway.Tiers.PostgresTiersStore>();
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.Tiers.ITiersStore, JeebGateway.Tiers.InMemoryTiersStore>();
+}
 
 // Request expiry + no-offer nudge (T-backend-028).
 // 10-min "try expanding tier" prompt and 30-min terminal expiry. The
