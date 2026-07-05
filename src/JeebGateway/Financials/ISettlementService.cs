@@ -26,5 +26,14 @@ public interface ISettlementService
         SettleDeliveryRequest body,
         CancellationToken ct);
 
+    /// <summary>
+    /// Server-driven settlement fired at handover completion (OTP verify → Done, or
+    /// the customer PATCH → Done). Credits the assigned jeeber using the
+    /// SERVER-AUTHORITATIVE COD amount from the delivery row (BR-16), with no caller
+    /// auth and no client-supplied amount. Idempotent / exactly-once — safe to fire
+    /// on both completion legs. See the implementation for the full contract.
+    /// </summary>
+    Task<SettlementResult> SettleOnCompletionAsync(string deliveryId, CancellationToken ct);
+
     Task<Settlement?> GetByDeliveryAsync(string deliveryId, CancellationToken ct);
 }

@@ -61,6 +61,7 @@ public class DeliveriesController : ControllerBase
     private readonly IUsersStore _users;
     // JEB-56: settlement store for COD platform records (recorded→batched→paid).
     private readonly ISettlementStore _settlementStore;
+    private readonly ISettlementService _settlements;
     private readonly IPushNotificationService _push;
     private readonly ICancellationService _cancellations;
     private readonly IAdminEscalationStore _escalations;
@@ -156,6 +157,7 @@ public class DeliveriesController : ControllerBase
         IPendingOffersStore offers,
         IUsersStore users,
         ISettlementStore settlementStore,
+        ISettlementService settlements,
         IPushNotificationService push,
         ICancellationService cancellations,
         IAdminEscalationStore escalations,
@@ -173,6 +175,7 @@ public class DeliveriesController : ControllerBase
         _offers = offers;
         _users = users;
         _settlementStore = settlementStore;
+        _settlements = settlements;
         _push = push;
         _cancellations = cancellations;
         _escalations = escalations;
@@ -546,6 +549,18 @@ public class DeliveriesController : ControllerBase
                 _log.LogWarning(ex,
                     "Canonical transition mirror failed for delivery {DeliveryId} (status {Status}); upstream write is authoritative.",
                     deliveryId, upstream.Status);
+            }
+
+            // JEB (jeeber-earnings-on-complete): completion can also land via the
+            // customer's PATCH → Done ("received it"). Credit the jeeber here too,
+            // gated on the canonical Done terminal so non-terminal transitions are a
+            // no-op. Idempotent with the OTP-verify leg (exactly-once credit).
+            if (string.Equals(
+                    DeliveryStatusAlias.ToCanonical(upstream.Status),
+                    CanonicalDeliveryStatus.Done,
+                    StringComparison.Ordinal))
+            {
+                await CreditJeeberOnCompletionAsync(deliveryId, HttpContext.TraceIdentifier, ct);
             }
 
             // Surface the canonical row verbatim (status = upstream canonical vocab).
@@ -1894,6 +1909,15 @@ public class DeliveriesController : ControllerBase
 
         activity?.SetTag("otp.verified", "true");
 
+        // JEB (jeeber-earnings-on-complete): the handover is COMPLETE — credit the
+        // assigned jeeber NOW, server-side, using the server-authoritative COD amount
+        // from the delivery row (BR-16). This restores the settlement-on-completion
+        // that the flag-ON path lost: the flag-OFF in-memory branch enqueues at
+        // lines ~1500-1527, but the upstream compose path returned before ever
+        // reaching it, so a completed delivery credited nothing. Best-effort +
+        // idempotent — a settlement/ledger fault must never fail this canonical 200.
+        await CreditJeeberOnCompletionAsync(deliveryId, correlationId, ct);
+
         return Ok(new OtpHandoverVerificationResponse
         {
             DeliveryId = result.DeliveryId,
@@ -1901,6 +1925,37 @@ public class DeliveriesController : ControllerBase
             Status     = result.Status ?? RequestStatus.Delivered,
             Message    = "OTP verified successfully. Delivery completed."
         });
+    }
+
+    /// <summary>
+    /// JEB (jeeber-earnings-on-complete): fire the SERVER-DRIVEN settlement that
+    /// credits the assigned jeeber the moment the delivery reaches the
+    /// handover-complete state. Delegates to
+    /// <see cref="ISettlementService.SettleOnCompletionAsync"/> — which sources the
+    /// COD amount server-authoritatively from the delivery row (BR-16), posts the
+    /// wallet <c>cash_settlement</c> credit, and is idempotent/exactly-once so it is
+    /// safe to fire from BOTH completion legs (OTP verify + customer PATCH → Done).
+    /// Best-effort: every fault is swallowed + logged so a settlement hiccup can
+    /// never turn a committed, verified handover into a 5xx (the settlement row is
+    /// the gateway system of record and the ledger reconciler replays a missed post).
+    /// </summary>
+    private async Task CreditJeeberOnCompletionAsync(string deliveryId, string correlationId, CancellationToken ct)
+    {
+        try
+        {
+            var result = await _settlements.SettleOnCompletionAsync(deliveryId, ct);
+            _log.LogInformation(
+                "settlement.on_complete deliveryId={DeliveryId} correlationId={CorrelationId} outcome={Outcome} settlementId={SettlementId} total={Total}",
+                deliveryId, correlationId, result.Outcome,
+                result.Settlement?.Id ?? "(none)", result.Settlement?.Total ?? 0m);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex,
+                "settlement.on_complete_failed deliveryId={DeliveryId} correlationId={CorrelationId}; "
+                + "the handover stays complete, the jeeber credit will be reconciled/retried.",
+                deliveryId, correlationId);
+        }
     }
 
     /// <summary>

@@ -101,11 +101,114 @@ public sealed class SettlementService : ISettlementService
 
         var tier = CommissionCalculator.ResolveTier(delivery.TierId);
         var breakdown = CommissionCalculator.Calculate(body.GoodsCost, tier);
+        var settlement = BuildSettlement(delivery, existing?.Id, breakdown, paymentMethod, SettlementState.Settled);
 
-        var settlementId = existing?.Id ?? Guid.NewGuid().ToString();
-        var settlement = new Settlement
+        return await PersistAndCreditAsync(settlement, ct);
+    }
+
+    /// <summary>
+    /// JEB (jeeber-earnings-on-complete): SERVER-DRIVEN settlement fired the moment
+    /// the handover terminates (OTP verify → Done, or the customer's PATCH → Done),
+    /// so the assigned jeeber is CREDITED on completion without any manual
+    /// "record cash" step (none exists in the apps). Distinct from
+    /// <see cref="SettleAsync"/>:
+    /// <list type="bullet">
+    ///   <item>NOT caller-authenticated — the SYSTEM settles on the jeeber's behalf
+    ///         (the OTP-verify caller is the jeeber; the customer PATCH caller is the
+    ///         client — neither supplies the amount).</item>
+    ///   <item>BR-16: the COD amount is SERVER-AUTHORITATIVE — sourced from the
+    ///         delivery row's agreed fee (<see cref="DeliveryRequest.AcceptedFee"/>,
+    ///         stamped at accept from the accepted offer), NEVER a client body.</item>
+    /// </list>
+    /// Exactly-once credit: an already-settled row short-circuits (no second ledger
+    /// post), and the wallet ledger post is itself idempotent on the settlement id,
+    /// so firing on BOTH completion legs (verify + PATCH) credits exactly once.
+    /// A missing/≤0 authoritative amount (older rows with no accepted-offer snapshot)
+    /// enqueues the pending-settlement placeholder instead of crediting a bogus
+    /// minimum-fee amount, keeping the COD-record + manual-settle window open.
+    /// </summary>
+    public async Task<SettlementResult> SettleOnCompletionAsync(string deliveryId, CancellationToken ct)
+    {
+        var delivery = await _requests.GetAsync(deliveryId, ct);
+        if (delivery is null)
         {
-            Id = settlementId,
+            return new SettlementResult(SettlementOutcome.DeliveryNotFound, null, null);
+        }
+
+        if (string.IsNullOrWhiteSpace(delivery.JeeberId))
+        {
+            return new SettlementResult(SettlementOutcome.NotAuthorized, null,
+                "No assigned jeeber to credit on completion.");
+        }
+
+        // Settle-ability keys off the CANONICAL handover-complete state (Done, or the
+        // legacy delivered/rated aliases) — mirrors SettleAsync's gate.
+        if (!string.Equals(
+                DeliveryStatusAlias.ToCanonical(delivery.Status),
+                CanonicalDeliveryStatus.Done,
+                StringComparison.Ordinal))
+        {
+            return new SettlementResult(SettlementOutcome.NotDelivered, null,
+                $"Delivery is in '{delivery.Status}'; completion settlement requires the handover-complete state '{CanonicalDeliveryStatus.Done}'.");
+        }
+
+        // Exactly-once: an already-settled row means the jeeber is already credited —
+        // never re-post the ledger, never double-credit.
+        var existing = await _store.GetByDeliveryAsync(deliveryId, ct);
+        if (existing is not null
+            && !string.Equals(existing.State, SettlementState.PendingSettlement, StringComparison.Ordinal))
+        {
+            return new SettlementResult(SettlementOutcome.AlreadySettled, existing, null);
+        }
+
+        var tier = CommissionCalculator.ResolveTier(delivery.TierId);
+
+        // BR-16: server-authoritative COD amount from the delivery row (the agreed
+        // fee the client owes the jeeber), NEVER a caller-supplied body.
+        var codAmount = delivery.AcceptedFee ?? 0m;
+        if (codAmount <= 0m)
+        {
+            // No authoritative amount yet: enqueue the pending-settlement placeholder
+            // (goodsCost=0, NO ledger post) so the COD record/batch and a later manual
+            // settle can still complete against a real row instead of 404ing.
+            if (existing is not null)
+            {
+                return new SettlementResult(SettlementOutcome.AlreadySettled, existing,
+                    "pending intent already open; no server-authoritative amount yet");
+            }
+
+            var pending = BuildSettlement(
+                delivery, existingId: null,
+                CommissionCalculator.Calculate(0m, tier),
+                PaymentMethodCash, SettlementState.PendingSettlement);
+            var (pendingRow, pendingInserted) = await _store.TryInsertAsync(pending, ct);
+            return new SettlementResult(
+                pendingInserted ? SettlementOutcome.Settled : SettlementOutcome.AlreadySettled,
+                pendingRow, "enqueued pending intent; no server-authoritative amount yet");
+        }
+
+        var breakdown = CommissionCalculator.Calculate(codAmount, tier);
+        var settlement = BuildSettlement(delivery, existing?.Id, breakdown, PaymentMethodCash, SettlementState.Settled);
+        return await PersistAndCreditAsync(settlement, ct);
+    }
+
+    public Task<Settlement?> GetByDeliveryAsync(string deliveryId, CancellationToken ct) =>
+        _store.GetByDeliveryAsync(deliveryId, ct);
+
+    /// <summary>
+    /// Projects a delivery + a computed fee breakdown into a settlement row. Shared
+    /// by the caller-authenticated <see cref="SettleAsync"/> and the server-driven
+    /// <see cref="SettleOnCompletionAsync"/> so both produce a byte-identical row.
+    /// </summary>
+    private Settlement BuildSettlement(
+        DeliveryRequest delivery,
+        string? existingId,
+        CommissionBreakdown breakdown,
+        string paymentMethod,
+        string state)
+        => new()
+        {
+            Id = existingId ?? Guid.NewGuid().ToString(),
             DeliveryId = delivery.Id,
             ClientId = delivery.ClientId,
             JeeberId = delivery.JeeberId!,
@@ -119,17 +222,26 @@ public sealed class SettlementService : ISettlementService
             MinimumFeeApplied = breakdown.MinimumFeeApplied,
             Currency = CurrencyLbp,
             PaymentMethod = paymentMethod,
-            State = SettlementState.Settled,
+            State = state,
             CodState = CodSettlementState.Recorded,
             SettledAt = _clock.GetUtcNow(),
         };
 
+    /// <summary>
+    /// Persists a settled row (replacing an open pending-settlement placeholder when
+    /// present, else inserting) and posts the best-effort wallet <c>cash_settlement</c>
+    /// ledger entry that CREDITS the jeeber. Idempotent: the ledger post keys off the
+    /// settlement id, and an insert conflict returns <see cref="SettlementOutcome.AlreadySettled"/>
+    /// without a second post. Extracted verbatim from the original SettleAsync body.
+    /// </summary>
+    private async Task<SettlementResult> PersistAndCreditAsync(Settlement settlement, CancellationToken ct)
+    {
         // FT-07: if a pending-settlement placeholder was created at OTP-verify time,
         // replace it atomically instead of inserting a duplicate. Falls through to
         // TryInsertAsync when no pending row exists (first-time settle path).
         bool inserted;
         Settlement row;
-        var replaced = await _store.ReplacePendingAsync(deliveryId, settlement, ct);
+        var replaced = await _store.ReplacePendingAsync(settlement.DeliveryId, settlement, ct);
         if (replaced)
         {
             row = settlement;
@@ -178,7 +290,4 @@ public sealed class SettlementService : ISettlementService
 
         return new SettlementResult(SettlementOutcome.Settled, row, null);
     }
-
-    public Task<Settlement?> GetByDeliveryAsync(string deliveryId, CancellationToken ct) =>
-        _store.GetByDeliveryAsync(deliveryId, ct);
 }
