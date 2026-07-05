@@ -69,6 +69,12 @@ internal static class StoreDurabilityGuard
         // landed. The admin delivery-tier catalog is now Postgres-backed (tiers table, migration
         // 0029); in a prod-like env it MUST resolve to PostgresTiersStore, never InMemoryTiersStore.
         (typeof(JeebGateway.Tiers.ITiersStore),                             new[] { typeof(JeebGateway.Tiers.PostgresTiersStore) }),
+        // JEBV4-154 (IN-MEM-LIVE): promoted from the in-memory backlog once the durable target
+        // landed. The gateway's financial-ledger anonymization bookkeeping (GDPR account-deletion
+        // seam — money + GDPR, the highest-risk remaining in-memory store) is now Postgres-backed
+        // (financial_ledger_anonymization table, migration 0030); in a prod-like env it MUST
+        // resolve to PostgresFinancialLedger, never InMemoryFinancialLedger.
+        (typeof(JeebGateway.Users.IFinancialLedgerAnonymizer),             new[] { typeof(JeebGateway.Users.PostgresFinancialLedger) }),
     };
 
     /// <summary>
@@ -84,7 +90,8 @@ internal static class StoreDurabilityGuard
         typeof(JeebGateway.Services.Dispatch.INotificationDispatchOutbox),
         typeof(JeebGateway.Push.IPushRetryQueue),
         typeof(JeebGateway.Push.IPushDeliveryTracker),
-        typeof(JeebGateway.Users.IFinancialLedgerAnonymizer),
+        // JeebGateway.Users.IFinancialLedgerAnonymizer promoted to Critical (JEBV4-154) — durable
+        // target PostgresFinancialLedger + migration 0030 now exist.
         typeof(JeebGateway.Availability.IGeoIndex),
         typeof(JeebGateway.Whisper.IAudioStore),
         typeof(JeebGateway.Whisper.ITranscriptionFallbackQueue),
