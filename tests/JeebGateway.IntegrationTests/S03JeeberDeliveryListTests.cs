@@ -173,6 +173,104 @@ public class S03JeeberDeliveryListTests
     }
 
     // ---------------------------------------------------------------------
+    // FIX-2 — jeeber Completed tab: ?status= bucket on /v1/deliveries
+    // ---------------------------------------------------------------------
+
+    [Theory]
+    [InlineData("delivered")] // the shipped mobile DioOrderRepository token
+    [InlineData("completed")]
+    [InlineData("done")]
+    public async Task Deliveries_StatusCompleted_AsAssignedJeeber_ReturnsTheDoneRow(string token)
+    {
+        // The regression: a jeeber's completed (Done) delivery was dropped by the
+        // unconditional active-only filter, so the Completed tab was always empty.
+        // With ?status=<completed-alias> the Done row now surfaces to the assigned jeeber.
+        using var factory = new WebApplicationFactory<Program>();
+        var requestId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        await SetStatusAsync(factory, requestId, RequestStatus.Delivered); // legacy terminal → canonical Done
+
+        var page = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>($"/v1/deliveries?status={token}");
+
+        var item = page!.Items.Should().ContainSingle(i => i.Id == requestId,
+            "the completed bucket must surface the jeeber's Done delivery").Subject;
+        item.Status.Should().Be(CanonicalDeliveryStatus.Done);
+        item.JeeberId.Should().Be(Jeeber);
+        page.TotalCount.Should().Be(1, "totalCount reflects the completed bucket");
+    }
+
+    [Fact]
+    public async Task Deliveries_StatusCompleted_ExcludesInFlightRow()
+    {
+        // The Completed bucket must NOT leak an active (in-flight) delivery.
+        using var factory = new WebApplicationFactory<Program>();
+        var requestId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        await SetStatusAsync(factory, requestId, RequestStatus.PickedUp); // in-flight
+
+        var page = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries?status=delivered");
+
+        page!.Items.Should().NotContain(i => i.Id == requestId,
+            "an in-flight delivery must not appear in the Completed bucket");
+    }
+
+    [Fact]
+    public async Task Deliveries_DefaultActiveBucket_StillExcludesDoneRow_NoRegression()
+    {
+        // The default (no ?status=) path is byte-identical to before: a Done row stays
+        // OUT of the active Jobs list (so the active list + BR-10 slot accounting are untouched).
+        using var factory = new WebApplicationFactory<Program>();
+        var requestId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        await SetStatusAsync(factory, requestId, RequestStatus.Delivered); // canonical Done
+
+        var noParam = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries");
+        noParam!.Items.Should().NotContain(i => i.Id == requestId,
+            "default active bucket still excludes terminal Done rows");
+
+        var explicitActive = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries?status=active");
+        explicitActive!.Items.Should().NotContain(i => i.Id == requestId,
+            "explicit status=active is identical to the default");
+    }
+
+    [Fact]
+    public async Task Deliveries_StatusCancelled_ReturnsCancelledRow_NotInActiveOrCompleted()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var requestId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        await SetStatusAsync(factory, requestId, RequestStatus.Cancelled); // canonical Cancelled
+
+        var cancelled = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries?status=cancelled");
+        cancelled!.Items.Should().ContainSingle(i => i.Id == requestId);
+        cancelled.Items.Single(i => i.Id == requestId).Status.Should().Be(CanonicalDeliveryStatus.Cancelled);
+
+        var completed = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries?status=delivered");
+        completed!.Items.Should().NotContain(i => i.Id == requestId,
+            "a cancelled row must not appear in the Completed (Done) bucket");
+    }
+
+    [Fact]
+    public async Task Deliveries_UnknownStatusToken_FallsBackToActive_NeverLeaksTerminal()
+    {
+        // A malformed/unknown token must degrade to the safe active default — it must never
+        // spill terminal rows into the surface.
+        using var factory = new WebApplicationFactory<Program>();
+        var doneId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        await SetStatusAsync(factory, doneId, RequestStatus.Delivered); // Done (terminal)
+        var activeId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        await SetStatusAsync(factory, activeId, RequestStatus.PickedUp); // in-flight
+
+        var page = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries?status=bananas");
+
+        page!.Items.Should().Contain(i => i.Id == activeId, "unknown token falls back to active");
+        page.Items.Should().NotContain(i => i.Id == doneId, "unknown token must not leak terminal rows");
+    }
+
+    // ---------------------------------------------------------------------
     // helpers
     // ---------------------------------------------------------------------
 

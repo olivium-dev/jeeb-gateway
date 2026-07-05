@@ -134,15 +134,23 @@ public sealed class JeebOrdersListController : ControllerBase
     }
 
     /// <summary>
-    /// GET /v1/deliveries?page&amp;pageSize — the caller's OWN assigned deliveries (Jobs tab).
+    /// GET /v1/deliveries?status&amp;page&amp;pageSize — the caller's OWN assigned deliveries.
     /// A delivery is an accepted request stamped with this user's JeeberId. Identity ALWAYS from the
     /// bearer. Always 200 with a paged envelope (empty when none / on a store blip) — NEVER 404/5xx.
+    ///
+    /// <para>PR-G1 / FIX-2: <c>status</c> selects the bucket the mobile tab wants (see
+    /// <see cref="MatchesBucket"/>). Absent/<c>active</c> = the in-flight Jobs tab (default, unchanged —
+    /// terminal/Expired excluded so the active list + BR-10 slot accounting are untouched);
+    /// <c>completed|delivered|done</c> = the jeeber's Completed tab (canonical <c>Done</c> rows);
+    /// <c>cancelled</c> = cancelled rows. The token vocabulary mirrors the shipped mobile
+    /// convention (<c>DioOrderRepository</c> sends <c>active|delivered|cancelled</c>).</para>
     /// </summary>
     [HttpGet("v1/deliveries")]
     [RequireCapability(Caps.DeliveryParticipate)] // {client, jeeber}
     [ProducesResponseType(typeof(PagedListResponse<OrderListItem>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> ListDeliveries(
+        [FromQuery] string? status,
         [FromQuery] int? page,
         [FromQuery] int? pageSize,
         CancellationToken ct)
@@ -179,10 +187,14 @@ public sealed class JeebOrdersListController : ControllerBase
             rows = Array.Empty<DeliveryRequest>();
         }
 
-        // PR-G1: the Jobs tab lists only in-flight deliveries — canonical-terminal
-        // (Done/Cancelled) and Expired rows are excluded so a completed/cancelled job
-        // stops occupying the active list. totalCount reflects the filtered set.
-        var listable = rows.Where(IsListableActive).ToList();
+        // PR-G1 / FIX-2: default (active bucket) lists only in-flight deliveries —
+        // canonical-terminal (Done/Cancelled) and Expired excluded so a completed/cancelled
+        // job stops occupying the active list (unchanged; BR-10 slot accounting untouched).
+        // A ?status= bucket selects the Completed (Done) / Cancelled surface instead. The
+        // rows already carry the jeeber's Done row from ListForJeeberAsync (no status
+        // predicate at the store), so only this in-handler filter gates which bucket ships.
+        // totalCount reflects the filtered set per bucket.
+        var listable = rows.Where(r => MatchesBucket(r, status)).ToList();
 
         var (pg, sz) = NormalizePaging(page, pageSize);
         var total = listable.Count;
@@ -227,6 +239,35 @@ public sealed class JeebOrdersListController : ControllerBase
         // No canonical delivery mapping (scheduled/pending/matched/cancellation_requested):
         // in flight unless the persisted legacy token is itself terminal.
         return !RequestStatus.IsTerminal(r.Status);
+    }
+
+    /// <summary>
+    /// FIX-2: maps the optional <c>?status=</c> query token to the delivery bucket the mobile
+    /// tab wants. The default (absent / <c>active</c>) is BYTE-IDENTICAL to the prior behaviour —
+    /// <see cref="IsListableActive"/> (in-flight only; terminal + Expired excluded; BR-10 unaffected).
+    /// <c>completed|delivered|done</c> selects the canonical <see cref="CanonicalDeliveryStatus.Done"/>
+    /// bucket (the jeeber Completed tab); <c>cancelled|canceled</c> selects
+    /// <see cref="CanonicalDeliveryStatus.Cancelled"/>. An unknown token falls back to the safe
+    /// active default so a malformed request can never leak terminal rows into the active surface.
+    /// </summary>
+    private static bool MatchesBucket(DeliveryRequest r, string? status)
+    {
+        if (string.IsNullOrWhiteSpace(status)
+            || status.Equals("active", StringComparison.OrdinalIgnoreCase))
+            return IsListableActive(r); // UNCHANGED default (Jobs tab, BR-10 slot accounting)
+
+        var canonical = DeliveryStatusAlias.ToCanonical(r.Status);
+
+        if (status.Equals("completed", StringComparison.OrdinalIgnoreCase)
+            || status.Equals("delivered", StringComparison.OrdinalIgnoreCase)
+            || status.Equals("done", StringComparison.OrdinalIgnoreCase))
+            return string.Equals(canonical, CanonicalDeliveryStatus.Done, StringComparison.Ordinal);
+
+        if (status.Equals("cancelled", StringComparison.OrdinalIgnoreCase)
+            || status.Equals("canceled", StringComparison.OrdinalIgnoreCase))
+            return string.Equals(canonical, CanonicalDeliveryStatus.Cancelled, StringComparison.Ordinal);
+
+        return IsListableActive(r); // unknown token → safe default
     }
 
     private static OrderListItem ToOrderItem(DeliveryRequest r, int offersCount) => new()
