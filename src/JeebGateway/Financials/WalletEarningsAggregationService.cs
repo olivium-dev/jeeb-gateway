@@ -11,9 +11,10 @@ namespace JeebGateway.Financials;
 /// <para>Data source: <c>ServiceWalletClient.CreditRevenueAsync</c>
 /// (<c>GET Transaction/holder/{holderId}/credit-revenue</c>) returns the gross
 /// credited amount for a wallet holder over a named period ("week" / "month" /
-/// "year"). Commission is derived at the standard Jeeb rate (15%) so the
-/// projection is consistent with the gateway's own settlement accounting
-/// (BR-16 — no re-arithmetic on the wallet copy).</para>
+/// "year"). Commission is derived via <see cref="CommissionCalculator"/> at the
+/// standard Jeeb tier (15%) — including its 1,000 LBP minimum-fee floor — so the
+/// wallet-visible commission equals the figure settlement actually deducts
+/// (BR-16 — no divergent re-arithmetic on the wallet copy; JEBV4-119 / JEBV4-43).</para>
 ///
 /// <para>Limitation: the wallet endpoint exposes a period total, not
 /// per-delivery lines. <see cref="EarningsProjection.Entries"/> is omitted
@@ -151,8 +152,33 @@ public sealed class WalletEarningsAggregationService : IEarningsAggregationServi
             PeriodEnd: end);
     }
 
-    private static decimal DeriveCommission(decimal gross) =>
-        Math.Round(gross * CommissionCalculator.StandardRate, 2, MidpointRounding.AwayFromZero);
+    /// <summary>
+    /// Derives the commission for a wallet-projection gross figure so it matches
+    /// the commission settlement actually deducts (JEBV4-119 / JEBV4-43, BR-16 —
+    /// no divergent re-arithmetic on the wallet copy).
+    ///
+    /// <para>Reuses <see cref="CommissionCalculator.Calculate"/> as the single
+    /// source of truth for the rate (Standard tier = 15%), the
+    /// <see cref="CommissionCalculator.MinCommissionLbp"/> minimum-fee floor and
+    /// the <c>Math.Round(v, 2, AwayFromZero)</c> rule, so the two sources can no
+    /// longer drift. Previously this hardcoded a floorless <c>gross * 0.15</c>,
+    /// which under-reported commission below the 6,666.67 LBP breakeven and thus
+    /// OVERSTATED a jeeber's wallet-visible net earnings vs the real payout.</para>
+    ///
+    /// <para>A zero (or non-positive) gross means an empty period with no settled
+    /// deliveries — hence no commission. The per-delivery floor must NOT be
+    /// applied here, otherwise an idle jeeber would show a phantom
+    /// <see cref="CommissionCalculator.MinCommissionLbp"/> charge and a negative
+    /// net. This matches the settlement-backed
+    /// <see cref="EarningsAggregationService"/>, which sums zero rows to a zero
+    /// commission.</para>
+    /// </summary>
+    private static decimal DeriveCommission(decimal gross)
+    {
+        if (gross <= 0m) return 0m;
+
+        return CommissionCalculator.Calculate(gross, CommissionTier.Standard).Commission;
+    }
 
     private static EarningsSummary ToSummary(string jeeberId, EarningsProjection p) =>
         new(jeeberId, p.Totals.Gross, p.Totals.Commission, p.Totals.Net,
