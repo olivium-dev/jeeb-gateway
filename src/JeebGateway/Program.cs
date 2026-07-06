@@ -960,6 +960,16 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
         _ => new JeebGateway.Infrastructure.NpgsqlConnectionFactory(gatewayPostgresCs));
     builder.Services.AddSingleton<ISettlementStore, PostgresSettlementStore>();
 
+    // Durability register (JEBV4-124, AUDIT-A guard-gap) — pending-COD-settlement ENQUEUE
+    // intent. MONEY-ADJACENT: the store's whole contract is idempotency ("no double-enqueue"),
+    // so its in-memory ConcurrentDictionary (InMemorySettlementEnqueueStore) is a data-loss
+    // hole — a restart drops the record of which deliveries were already enqueued and risks a
+    // duplicate settlement enqueue. Postgres-backed (settlement_enqueue, migration 0034) with
+    // DB-level idempotency (delivery_id PK + INSERT ON CONFLICT DO NOTHING, same as
+    // PostgresSettlementStore) whenever GatewayPostgres is configured; guarded fail-closed in
+    // prod-like envs (StoreDurabilityGuard.Critical). In-memory fallback for dev/CI/test only.
+    builder.Services.AddSingleton<ISettlementEnqueueStore, PostgresSettlementEnqueueStore>();
+
     // Durability register: requests-durable [A] — the optional gateway-Postgres owner-list
     // mirror (delivery_requests, migration 0024). Registered ONLY here so DurableRequestsStore
     // resolves a non-null IDurableRequestsMirror in prod (see the [B] ctor arg below); absent
@@ -976,6 +986,9 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 else
 {
     builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
+    // JEBV4-124: in-memory settlement-enqueue fallback for dev/CI/test only. In a prod-like
+    // env the fail-closed guard refuses this fallback (see StoreDurabilityGuard.Critical).
+    builder.Services.AddSingleton<ISettlementEnqueueStore, InMemorySettlementEnqueueStore>();
 }
 
 // GR3 (JEB-1484) — the cash-settlement ledger post runs THROUGH UPG via the
