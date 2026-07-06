@@ -102,6 +102,15 @@ internal static class StoreDurabilityGuard
         // a fallback means every admin draft edit and published config version evaporates on
         // restart, flapping the MFEs back to the seeded v1 defaults.
         (typeof(JeebGateway.Cms.ICmsSurfaceStore),                          new[] { typeof(JeebGateway.Cms.PostgresCmsSurfaceStore) }),
+        // JEBV4-124 (AUDIT-A guard-gap): the pending-COD-settlement ENQUEUE intent
+        // (Financials/ISettlementEnqueueStore) — MONEY-ADJACENT. Its whole contract is
+        // idempotency ("no double-enqueue"), yet InMemorySettlementEnqueueStore held that
+        // intent in a process ConcurrentDictionary that evaporates on restart, so a bounce
+        // could drop the "already enqueued" record and let a delivery be enqueued for
+        // settlement twice. Now Postgres-backed (settlement_enqueue table, migration 0034,
+        // delivery_id PK + INSERT ON CONFLICT DO NOTHING); in a prod-like env it MUST resolve
+        // to PostgresSettlementEnqueueStore, never InMemorySettlementEnqueueStore.
+        (typeof(JeebGateway.Financials.ISettlementEnqueueStore),            new[] { typeof(JeebGateway.Financials.PostgresSettlementEnqueueStore) }),
     };
 
     /// <summary>
@@ -136,6 +145,33 @@ internal static class StoreDurabilityGuard
         // It stays on this backlog (logged loudly) but is NOT pending a gateway-Postgres
         // migration — do not promote it to Critical.
         typeof(JeebGateway.Whisper.IAudioStore),
+
+        // JEBV4-148 (AUDIT-A guard-gap — DURABLE-TARGET-EXISTS-BUT-PROMOTION-OWNER-GATED):
+        // the pending-offers ledger (Availability/IPendingOffersStore). When
+        // FeatureFlags:UseUpstream:Offer is OFF (today's default) the AUTHORITATIVE store is
+        // InMemoryPendingOffersStore — it holds live auction state (pending/accepted/
+        // superseded, edit counts, the 20-offer cap, one-live-offer-per-jeeber) in process
+        // memory, so a restart drops in-flight bids. That is a real gap, hence it is listed
+        // here and logged loudly at boot rather than left silent.
+        //
+        // It is deliberately NOT promoted to Critical, and NOT given a gateway-Postgres table,
+        // because the offer ledger's system of record is the offer-service (Elixir/Phoenix,
+        // its OWN Postgres) — the gateway must not own an offers table (org no-coupling law;
+        // same reason IUsersStore→UpstreamBackedUsersStore and IOfferRequestIndex→
+        // StateServiceOfferRequestIndex are BFF/state-service backed, not gateway-Postgres).
+        // The durable path already exists as the thin-BFF UpstreamPendingOffersStore behind
+        // FeatureFlags:UseUpstream:Offer. Promoting this interface to Critical(
+        // UpstreamPendingOffersStore) would force UseUpstream:Offer=true in prod, but that
+        // BFF still throws NotSupportedException for GetAsync / AcceptAsync /
+        // AcceptWithSupersedeAsync / TryEditAsync / WithdrawForJeeberAsync (offer-service has
+        // no get-by-id or bulk-withdraw-for-jeeber route yet, and accept is driven by
+        // OffersController's own auction-close orchestration, not this seam) — so forcing the
+        // flag on today would 500 the auto-offline sweeper and the offer-accept lookup path.
+        // Promotion is therefore an OWNER decision (confirm prod runs UseUpstream:Offer=true
+        // AND offer-service grows the missing read/withdraw routes so the BFF is complete),
+        // tracked on JEBV4-148 — not a change this PR can safely make. Until then it stays a
+        // loudly-logged known-in-memory gap.
+        typeof(JeebGateway.Availability.IPendingOffersStore),
     };
 
     /// <summary>
@@ -159,10 +195,31 @@ internal static class StoreDurabilityGuard
     /// costs only a warm-up, never authoritative data. Migrating it to a durable Postgres store would
     /// duplicate <c>jeeber_availability</c> and defeat the whole point of the hot path. It therefore
     /// stays in-memory (Redis in prod) by design and is deliberately NOT on the migration backlog.</para>
+    ///
+    /// <para><b>JEBV4-143 — ILocationStore is intentional in-memory (derived/rebuildable
+    /// hot-path cache, not a store of record).</b> <see cref="JeebGateway.Tracking.ILocationStore"/>
+    /// is the per-Jeeber "latest non-expired GPS fix, with a TTL" — a synchronous, lock-free hot
+    /// path sized for the 50k-updates/min location firehose (per db/JEEBER_LOCATION_DESIGN.md).
+    /// Its authoritative last-known location is the DURABLE Postgres <c>jeeber_availability</c>
+    /// table (<c>last_location GEOGRAPHY(Point,4326)</c>, <c>last_seen_at</c>), owned by
+    /// <see cref="JeebGateway.Availability.IAvailabilityStore"/> — ALREADY a <see cref="Critical"/>
+    /// Postgres-backed store (<see cref="JeebGateway.Availability.PostgresAvailabilityStore"/>) —
+    /// promoted from Redis by the debounced flusher. The design doc is explicit that per-second
+    /// location updates deliberately do NOT pay Postgres durability at that frequency ("Hot path
+    /// lives in Redis"); the production target of this store is Redis (<c>SET jeeber:{id}:position
+    /// … EX 300</c>), and a durable upstream ALSO exists behind a flag
+    /// (<see cref="JeebGateway.Tracking.GeoServiceLocationStore"/> → the shared geolocation-service,
+    /// <c>FeatureFlags:UseUpstream:Geolocation</c>). Losing the in-memory latest fix on restart
+    /// costs only a warm-up until the next heartbeat re-populates it — never authoritative data —
+    /// so this is NOT a durability gap. Migrating the per-ping firehose to a synchronous
+    /// gateway-Postgres write would be the write-amplification anti-pattern the design doc rejects.
+    /// It therefore stays in-memory (Redis in prod) by design and is deliberately NOT on the
+    /// migration backlog — the exact IGeoIndex (JEBV4-156) treatment.</para>
     /// </summary>
     internal static readonly Type[] IntentionalInMemory =
     {
         typeof(JeebGateway.Availability.IGeoIndex),
+        typeof(JeebGateway.Tracking.ILocationStore),
     };
 
     /// <summary>
