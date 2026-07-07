@@ -52,10 +52,10 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         var body = await resp.Content.ReadFromJsonAsync<SettleDeliveryResponse>(Json);
         body!.State.Should().Be(SettlementState.Settled);
         body.CommissionTier.Should().Be("Standard");
-        body.CommissionRate.Should().Be(0.15m);
-        body.Commission.Should().Be(300000m);   // max(1000, 2_000_000*0.15)
-        body.Insurance.Should().Be(40000m);     // 2_000_000*0.02
-        body.Total.Should().Be(2340000m);
+        body.CommissionRate.Should().Be(0.10m);
+        body.Commission.Should().Be(200000m);   // 2_000_000*0.10
+        body.Insurance.Should().Be(0m);
+        body.Total.Should().Be(200000m);
         body.Currency.Should().Be("USD");
         body.MinimumFeeApplied.Should().BeFalse();
         body.LedgerEntryId.Should().NotBeNullOrEmpty();
@@ -64,7 +64,7 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
     [Fact] // keystone: legacy 'delivered' alias also settles (dual-read)
     public async Task Settle_On_Legacy_Delivered_Alias_Also_Returns_200()
     {
-        var seed = await SeedAsync(RequestStatus.Delivered);
+        var seed = await SeedAsync(RequestStatus.Delivered, acceptedFee: 100000m);
         var http = AuthClient(seed.JeeberId, "driver");
 
         var resp = await http.PostAsJsonAsync(
@@ -85,24 +85,24 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
     }
 
-    [Fact] // A2: minimum-fee floor on a tiny goods cost
-    public async Task Settle_Tiny_Goods_Floors_Commission_To_Minimum()
+    [Fact] // A2: no minimum-fee floor on a tiny accepted fee
+    public async Task Settle_Tiny_Goods_Commission_Has_No_Minimum_Floor()
     {
-        var seed = await SeedAsync(CanonicalDeliveryStatus.Done);
+        var seed = await SeedAsync(CanonicalDeliveryStatus.Done, acceptedFee: 5000m);
         var http = AuthClient(seed.JeeberId, "driver");
 
         var resp = await http.PostAsJsonAsync(
             $"/deliveries/{seed.Id}/settle", new { goodsCost = 5000m }, Json);
 
         var body = await resp.Content.ReadFromJsonAsync<SettleDeliveryResponse>(Json);
-        body!.Commission.Should().Be(1000m);          // 5000*0.15=750 < 1000 floor
-        body.MinimumFeeApplied.Should().BeTrue();
+        body!.Commission.Should().Be(500m);
+        body.MinimumFeeApplied.Should().BeFalse();
     }
 
     // ── H5 / A4: earnings nested totals envelope ───────────────────────────────
 
     [Fact] // H5
-    public async Task EarningsSummary_Returns_Nested_Totals_With_Lbp_Currency()
+    public async Task EarningsSummary_Returns_Nested_Totals_With_Usd_Currency()
     {
         var seed = await SeedAsync(CanonicalDeliveryStatus.Done);
         var jeeber = AuthClient(seed.JeeberId, "driver");
@@ -118,8 +118,8 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         var totals = doc.RootElement.GetProperty("totals");
         totals.GetProperty("currency").GetString().Should().Be("USD");
         totals.GetProperty("gross").GetDecimal().Should().Be(2000000m);
-        totals.GetProperty("commission").GetDecimal().Should().Be(300000m);
-        totals.GetProperty("net").GetDecimal().Should().Be(1700000m); // gross - commission
+        totals.GetProperty("commission").GetDecimal().Should().Be(200000m);
+        totals.GetProperty("net").GetDecimal().Should().Be(1800000m); // gross - commission
         doc.RootElement.GetProperty("entries").GetArrayLength().Should().Be(1);
         // additive legacy flat keys preserved
         doc.RootElement.TryGetProperty("jeeberId", out _).Should().BeTrue();
@@ -128,7 +128,7 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
     [Fact] // A4.2: lifetime read carries the same nested envelope
     public async Task EarningsLifetime_Returns_Nested_Totals()
     {
-        var seed = await SeedAsync(CanonicalDeliveryStatus.Done);
+        var seed = await SeedAsync(CanonicalDeliveryStatus.Done, acceptedFee: 1000000m);
         var jeeber = AuthClient(seed.JeeberId, "driver");
         (await jeeber.PostAsJsonAsync($"/deliveries/{seed.Id}/settle",
             new { goodsCost = 1000000m }, Json)).EnsureSuccessStatusCode();
@@ -144,7 +144,7 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
     [Fact] // A5
     public async Task EarningsSummary_Emits_ETag_And_304_On_Conditional_Read()
     {
-        var seed = await SeedAsync(CanonicalDeliveryStatus.Done);
+        var seed = await SeedAsync(CanonicalDeliveryStatus.Done, acceptedFee: 500000m);
         var jeeber = AuthClient(seed.JeeberId, "driver");
         (await jeeber.PostAsJsonAsync($"/deliveries/{seed.Id}/settle",
             new { goodsCost = 500000m }, Json)).EnsureSuccessStatusCode();
@@ -196,7 +196,7 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
     [Fact] // COD by-delivery read by a non-party → 403
     public async Task Cod_ReadBack_NonParty_Returns_403()
     {
-        var seed = await SeedAsync(CanonicalDeliveryStatus.Done);
+        var seed = await SeedAsync(CanonicalDeliveryStatus.Done, acceptedFee: 1000000m);
         var jeeber = AuthClient(seed.JeeberId, "driver");
         (await jeeber.PostAsJsonAsync($"/deliveries/{seed.Id}/settle",
             new { goodsCost = 1000000m }, Json)).EnsureSuccessStatusCode();
@@ -275,7 +275,7 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
     [Fact] // H6 (ar): the bilingual path also produces a PDF
     public async Task Statement_Arabic_Returns_Application_Pdf()
     {
-        var seed = await SeedAsync(CanonicalDeliveryStatus.Done);
+        var seed = await SeedAsync(CanonicalDeliveryStatus.Done, acceptedFee: 750000m);
         var jeeber = AuthClient(seed.JeeberId, "driver");
         (await jeeber.PostAsJsonAsync($"/deliveries/{seed.Id}/settle",
             new { goodsCost = 750000m }, Json)).EnsureSuccessStatusCode();
@@ -299,7 +299,7 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         return c;
     }
 
-    private async Task<Seed> SeedAsync(string status)
+    private async Task<Seed> SeedAsync(string status, decimal acceptedFee = 2000000m)
     {
         var store = _factory.Services.GetRequiredService<IRequestsStore>();
         var clientId = $"client-{Guid.NewGuid()}";
@@ -314,6 +314,7 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         var accepted = await store.TryAcceptByJeeberAsync(
             created.Id, jeeberId, limit: int.MaxValue, at: DateTimeOffset.UtcNow, ct: default);
         accepted.Should().NotBeNull();
+        (await store.TrySetAcceptedFeeAsync(created.Id, acceptedFee, default)).Should().BeTrue();
         await store.SetStatusAsync(created.Id, status, default);
         return new Seed(created.Id, clientId, jeeberId);
     }

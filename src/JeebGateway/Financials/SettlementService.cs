@@ -41,12 +41,6 @@ public sealed class SettlementService : ISettlementService
         SettleDeliveryRequest body,
         CancellationToken ct)
     {
-        if (body.GoodsCost < 0)
-        {
-            return new SettlementResult(SettlementOutcome.InvalidAmount, null,
-                "goodsCost must be non-negative.");
-        }
-
         var paymentMethod = string.IsNullOrWhiteSpace(body.PaymentMethod)
             ? PaymentMethodCash
             : body.PaymentMethod.Trim().ToLowerInvariant();
@@ -100,7 +94,18 @@ public sealed class SettlementService : ISettlementService
         // The TryInsertAsync will return the existing row if deliveryId conflicts.
 
         var tier = CommissionCalculator.ResolveTier(delivery.TierId);
-        var breakdown = CommissionCalculator.Calculate(body.GoodsCost, tier);
+
+        // Q-011 / BR-16: manual settle must use the same server-authoritative
+        // accepted-offer amount as completion settlement. The body value is
+        // client-supplied and must never choose the commission base.
+        var codAmount = delivery.AcceptedFee ?? 0m;
+        if (codAmount <= 0m)
+        {
+            return new SettlementResult(SettlementOutcome.InvalidAmount, null,
+                "No server-authoritative accepted fee is available for this delivery.");
+        }
+
+        var breakdown = CommissionCalculator.Calculate(codAmount, tier);
         var settlement = BuildSettlement(delivery, existing?.Id, breakdown, paymentMethod, SettlementState.Settled);
 
         return await PersistAndCreditAsync(settlement, ct);

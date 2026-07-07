@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {"type": "string"},
+    "files_touched": {"type": "array", "items": {"type": "string"}},
+    "build_errors": {"type": "number"},
+    "committed": {"type": "boolean"},
+    "commit_sha": {"type": "string"},
+    "golden_rule_check": {"type": "string"},
+    "notes": {"type": "string"}
+  },
+  "required": ["summary", "files_touched", "build_errors", "committed", "commit_sha", "golden_rule_check", "notes"],
+  "additionalProperties": false
+}

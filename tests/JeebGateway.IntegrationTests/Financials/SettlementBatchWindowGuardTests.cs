@@ -10,8 +10,8 @@ namespace JeebGateway.IntegrationTests.Financials;
 /// The weekly payout batch selects settlements via
 /// <see cref="ISettlementStore.ListRecordedInWindowAsync"/>. Handover writes a
 /// placeholder row (state=pending_settlement, cod_state=recorded, goods_cost=0 →
-/// min-fee 1000 USD commission). Before the fix the batch selected purely on
-/// cod_state='recorded', sweeping the placeholder in as a phantom -1000 USD net
+/// zero USD commission). Before the fix the batch selected purely on
+/// cod_state='recorded', sweeping the placeholder in as a phantom zero-gross row
 /// (underpaying the Jeeber and booking uncollected commission).
 ///
 /// These tests pin the guard: unsettled placeholders are EXCLUDED from the batch
@@ -35,10 +35,10 @@ public class SettlementBatchWindowGuardTests
     [Fact]
     public async Task ListRecordedInWindow_ExcludesUnsettledPlaceholder_And_IncludesSettledRow()
     {
-        // Placeholder written at handover: goods_cost=0, min-fee commission=1000,
+        // Placeholder written at handover: goods_cost=0, commission=0,
         // state=pending_settlement, cod_state=recorded.
         var placeholder = MakePlaceholder("del-pending", "jeeber-1");
-        placeholder.Commission.Should().Be(1_000m, "zero goods-cost floors to the 1000 USD min fee");
+        placeholder.Commission.Should().Be(0m, "zero goods-cost has no minimum commission floor");
 
         var settled = MakeSettled("del-settled", "jeeber-1", goodsCost: 100_000m);
 
