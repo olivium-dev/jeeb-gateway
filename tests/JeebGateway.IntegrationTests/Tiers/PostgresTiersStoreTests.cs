@@ -116,9 +116,9 @@ public class PostgresTiersStoreTests
 
     [Theory]
     [InlineData("Same-Day", "same-day")]
-    [InlineData("On-the-Way", "on-the-way")]
+    [InlineData("Scheduled", "scheduled")]
     [InlineData("  Express  Lane  ", "express-lane")]
-    [InlineData("Économy!!!", "conomy")] // non-ASCII stripped, matching the [^a-z0-9]+ collapse
+    [InlineData("Éclair!!!", "clair")] // non-ASCII stripped, matching the [^a-z0-9]+ collapse
     public void Slugify_Matches_InMemory_Store_Id_Derivation(string name, string expectedSlug)
     {
         PostgresTiersStore.Slugify(name).Should().Be(expectedSlug);
