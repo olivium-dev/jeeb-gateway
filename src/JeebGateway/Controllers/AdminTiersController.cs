@@ -2,6 +2,8 @@ using JeebGateway.Auth.Capabilities;
 using JeebGateway.Tiers;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
+using RequestExpiryOptions = JeebGateway.Requests.RequestExpiryOptions;
 
 namespace JeebGateway.Controllers;
 
@@ -27,10 +29,14 @@ public class AdminTiersController : ControllerBase
     private const int MaxRequestTtlSeconds = 30 * 24 * 60 * 60; // 30 days
 
     private readonly ITiersStore _store;
+    private readonly int _minRequestTtlSeconds;
 
-    public AdminTiersController(ITiersStore store)
+    public AdminTiersController(ITiersStore store, IOptions<RequestExpiryOptions> expiryOptions)
     {
         _store = store;
+        _minRequestTtlSeconds = Math.Max(
+            60,
+            (int)Math.Ceiling(expiryOptions.Value.NoOfferNudgeWindow.TotalSeconds));
     }
 
     [HttpGet]
@@ -230,11 +236,11 @@ public class AdminTiersController : ControllerBase
 
     private bool ValidateRequestTtl(int? seconds, out IActionResult? error)
     {
-        if (seconds is null || seconds < 60 || seconds > MaxRequestTtlSeconds)
+        if (seconds is null || seconds < _minRequestTtlSeconds || seconds > MaxRequestTtlSeconds)
         {
             error = BadRequest(new ProblemDetails
             {
-                Title = $"request_ttl_seconds must be between 60 and {MaxRequestTtlSeconds}.",
+                Title = $"request_ttl_seconds must be between {_minRequestTtlSeconds} and {MaxRequestTtlSeconds}.",
                 Status = StatusCodes.Status400BadRequest
             });
             return false;

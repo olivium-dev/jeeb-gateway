@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Requests;
+using JeebGateway.Tiers;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -52,6 +53,34 @@ public class RequestExpirySweeperTests
         // re-send the prompt to the same Client.
         await SweepOnce(factory);
         notifier.Nudges.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task Shorter_Other_Tier_Ttl_Does_Not_Nudge_Before_No_Offer_Window()
+    {
+        var factory = NewFactory(out var clock);
+        var client = ClientFor(factory, "expiry-short-tier-client");
+
+        var tiers = factory.Services.GetRequiredService<JeebGateway.Tiers.ITiersStore>();
+        await tiers.CreateAsync(new DeliveryTierCreate
+        {
+            Id = "admin-short",
+            Name = "Admin Short",
+            SlaHours = 1,
+            RadiusKm = 1.0,
+            RequestTtlSeconds = 5 * 60,
+            CommissionRate = 0.1,
+            PriceHint = "short scan"
+        }, "admin", CancellationToken.None);
+
+        var requestId = await CreateRequest(client, "Groceries on normal tier");
+
+        clock.Advance(TimeSpan.FromMinutes(6));
+        await SweepOnce(factory);
+
+        var notifier = (InMemoryRequestExpiryNotifier)factory.Services.GetRequiredService<IRequestExpiryNotifier>();
+        notifier.Nudges.Should().NotContain(n => n.RequestId == requestId);
+        notifier.Expiries.Should().NotContain(e => e.RequestId == requestId);
     }
 
     [Fact]

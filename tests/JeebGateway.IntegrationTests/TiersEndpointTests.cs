@@ -162,6 +162,25 @@ public class TiersEndpointTests
     }
 
     [Fact]
+    public async Task Admin_Create_Rejects_Request_Ttl_Below_No_Offer_Nudge_Window()
+    {
+        using var factory = NewFactory();
+        var admin = AdminClient(factory, "admin-short-ttl");
+
+        var resp = await admin.PostAsJsonAsync("/admin/tiers", new
+        {
+            name = "Too Short",
+            slaHours = 1,
+            radiusKm = 1.0,
+            requestTtlSeconds = 60,
+            commissionRate = 0.1,
+            priceHint = "x"
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
     public async Task Admin_Create_Returns_409_On_Case_Insensitive_Duplicate_Name()
     {
         using var factory = NewFactory();

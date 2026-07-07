@@ -138,6 +138,7 @@ public class RequestExpirySweeper : BackgroundService
             // pool has been notified the status moves to 'matched' and the
             // nudge is no longer relevant.
             if (req.Status != RequestStatus.Pending) continue;
+            if (req.CreatedAt > now - opts.NoOfferNudgeWindow) continue;
 
             if (await store.MarkNudgedAsync(req.Id, now, ct))
             {
