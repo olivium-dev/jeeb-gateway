@@ -24,6 +24,7 @@ public class AdminTiersController : ControllerBase
     private const int MaxPriceHintLength = 500;
     private const int MaxSlaHours = 30 * 24; // 30 days
     private const double MaxRadiusKm = 1000.0;
+    private const int MaxRequestTtlSeconds = 30 * 24 * 60 * 60; // 30 days
 
     private readonly ITiersStore _store;
 
@@ -71,6 +72,7 @@ public class AdminTiersController : ControllerBase
         if (ValidateName(body.Name, out var err) is false) return err!;
         if (ValidateSlaHours(body.SlaHours, out err) is false) return err!;
         if (ValidateRadius(body.RadiusKm, out err) is false) return err!;
+        if (ValidateRequestTtl(body.RequestTtlSeconds, out err) is false) return err!;
         if (ValidateCommission(body.CommissionRate, out err) is false) return err!;
         if (ValidatePriceHint(body.PriceHint, out err) is false) return err!;
         if (body.Id is not null && ValidateId(body.Id, out err) is false) return err!;
@@ -83,6 +85,7 @@ public class AdminTiersController : ControllerBase
                 Name = body.Name!,
                 SlaHours = body.SlaHours!.Value,
                 RadiusKm = body.RadiusKm!.Value,
+                RequestTtlSeconds = body.RequestTtlSeconds!.Value,
                 CommissionRate = body.CommissionRate!.Value,
                 PriceHint = body.PriceHint!
             }, adminId, ct);
@@ -114,6 +117,7 @@ public class AdminTiersController : ControllerBase
         if (ValidateName(body.Name, out var err) is false) return err!;
         if (ValidateSlaHours(body.SlaHours, out err) is false) return err!;
         if (ValidateRadius(body.RadiusKm, out err) is false) return err!;
+        if (ValidateRequestTtl(body.RequestTtlSeconds, out err) is false) return err!;
         if (ValidateCommission(body.CommissionRate, out err) is false) return err!;
         if (ValidatePriceHint(body.PriceHint, out err) is false) return err!;
 
@@ -124,6 +128,7 @@ public class AdminTiersController : ControllerBase
                 Name = body.Name!,
                 SlaHours = body.SlaHours!.Value,
                 RadiusKm = body.RadiusKm!.Value,
+                RequestTtlSeconds = body.RequestTtlSeconds!.Value,
                 CommissionRate = body.CommissionRate!.Value,
                 PriceHint = body.PriceHint!
             }, adminId, ct);
@@ -214,6 +219,22 @@ public class AdminTiersController : ControllerBase
             error = BadRequest(new ProblemDetails
             {
                 Title = $"radius_km must be > 0 and <= {MaxRadiusKm}.",
+                Status = StatusCodes.Status400BadRequest
+            });
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    private bool ValidateRequestTtl(int? seconds, out IActionResult? error)
+    {
+        if (seconds is null || seconds < 60 || seconds > MaxRequestTtlSeconds)
+        {
+            error = BadRequest(new ProblemDetails
+            {
+                Title = $"request_ttl_seconds must be between 60 and {MaxRequestTtlSeconds}.",
                 Status = StatusCodes.Status400BadRequest
             });
             return false;

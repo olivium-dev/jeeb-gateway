@@ -89,7 +89,7 @@ public interface IRequestsStore
     /// <paramref name="cutoff"/> and whose status is still in the
     /// pre-acceptance set (<c>pending</c>, <c>matched</c>). The
     /// <see cref="RequestExpirySweeper"/> uses this to find both the
-    /// 10-min nudge candidates and the 30-min expiry candidates in a
+    /// no-offer nudge candidates and the per-tier expiry candidates in a
     /// single scan.
     /// </summary>
     Task<IReadOnlyList<DeliveryRequest>> ListPendingCreatedAtOrBeforeAsync(

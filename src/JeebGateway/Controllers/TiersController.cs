@@ -10,8 +10,8 @@ namespace JeebGateway.Controllers;
 /// <summary>
 /// Public read of the delivery tier catalog (T-backend-009). The mobile app
 /// hits this on the request-creation screen to render the tier picker.
-/// The five default tiers (Urgent, Same-Day, Scheduled, Economy, On-the-Way)
-/// are seeded on startup; admins may edit the catalog via /admin/tiers and
+/// The three default tiers (Urgent, Same-Day, Scheduled) are seeded on startup;
+/// admins may edit the catalog via /admin/tiers and
 /// changes are picked up on the next request.
 /// </summary>
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
@@ -62,6 +62,7 @@ public class TiersController : ControllerBase
         Name = t.Name,
         SlaHours = t.SlaHours,
         RadiusKm = t.RadiusKm,
+        RequestTtlSeconds = t.RequestTtlSeconds,
         CommissionRate = t.CommissionRate,
         PriceHint = t.PriceHint,
         CreatedAt = t.CreatedAt,

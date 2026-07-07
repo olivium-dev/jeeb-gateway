@@ -1505,9 +1505,9 @@ builder.Services.AddSingleton<JeebGateway.Requests.OtpHandover.IHandoverCodeStor
 
 // Delivery tier catalog (T-backend-009).
 // Admins CRUD via /admin/tiers and changes take effect on the next request
-// (each List/Get reads fresh). Five default tiers (Urgent, Same-Day, Scheduled,
-// Economy, On-the-Way) are seeded either by migration 0029 (Postgres path) or
-// the in-memory store's constructor (dev/CI fallback).
+// (each List/Get reads fresh). Three default tiers (Urgent, Same-Day,
+// Scheduled) are seeded either by migration 0029 + 0035 (Postgres path) or the
+// in-memory store's constructor (dev/CI fallback).
 //
 // Durability register (JEBV4-125, AUDIT-A IN-MEM-LIVE) — the admin tier catalog
 // used to live ONLY in gateway process memory, so an admin's tier edits reverted
@@ -1526,11 +1526,11 @@ else
 }
 
 // Request expiry + no-offer nudge (T-backend-028).
-// 10-min "try expanding tier" prompt and 30-min terminal expiry. The
-// in-memory notifier records calls so integration tests can assert
-// delivery; production swap proxies to notification-service via the
-// BFF NSwag-generated client. The sweeper drives both windows from a
-// single periodic scan against IRequestsStore.
+// 10-min "try expanding tier" prompt and per-tier terminal expiry. The
+// in-memory notifier records calls so integration tests can assert delivery;
+// production swap proxies to notification-service via the BFF NSwag-generated
+// client. The sweeper drives both windows from a single periodic scan against
+// IRequestsStore.
 builder.Services.Configure<RequestExpiryOptions>(builder.Configuration.GetSection(RequestExpiryOptions.SectionName));
 builder.Services.AddSingleton<InMemoryRequestExpiryNotifier>();
 builder.Services.AddSingleton<IRequestExpiryNotifier>(sp => sp.GetRequiredService<InMemoryRequestExpiryNotifier>());

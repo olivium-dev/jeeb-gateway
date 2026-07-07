@@ -210,7 +210,7 @@ public class DeliveryRequest
 
     /// <summary>
     /// When the request was terminally expired by the sweeper. Null until
-    /// the 30-min window elapses without an accepted offer.
+    /// the selected tier's request TTL elapses without an accepted offer.
     /// </summary>
     public DateTimeOffset? ExpiredAt { get; set; }
 

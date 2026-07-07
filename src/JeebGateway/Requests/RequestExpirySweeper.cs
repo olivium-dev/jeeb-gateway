@@ -11,8 +11,8 @@ namespace JeebGateway.Requests;
 ///   * <see cref="RequestExpiryOptions.NoOfferNudgeWindow"/> after creation
 ///     with the request still in <c>pending</c> — sends the "Try expanding
 ///     tier" prompt once.
-///   * <see cref="RequestExpiryOptions.ExpiryWindow"/> after creation
-///     without an accepted offer — moves the request to <c>expired</c>
+///   * the selected tier's request TTL after creation without an accepted
+///     offer — moves the request to <c>expired</c>
 ///     and notifies the Client. Once expired the request is terminal and
 ///     cannot receive new offers (enforced inside <see cref="IRequestsStore"/>).
 /// </summary>
@@ -70,20 +70,31 @@ public class RequestExpirySweeper : BackgroundService
         var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
         var notifier = scope.ServiceProvider.GetRequiredService<IRequestExpiryNotifier>();
         var offers = scope.ServiceProvider.GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
+        var tiers = scope.ServiceProvider.GetRequiredService<JeebGateway.Tiers.ITiersStore>();
         var opts = _options.Value;
 
         var now = _clock.GetUtcNow();
-        // Pull every still-pre-acceptance request created at or before the
-        // 10-min cutoff. The 30-min set is a strict subset of this set, so
-        // a single scan covers both windows.
-        var nudgeCutoff = now - opts.NoOfferNudgeWindow;
-        var expiryCutoff = now - opts.ExpiryWindow;
+        var tierTtls = await LoadTierTtlsAsync(tiers, ct);
+        if (tierTtls.Count == 0)
+        {
+            _logger.LogError("Request expiry sweep skipped: no tier TTLs are configured");
+            return;
+        }
 
-        var candidates = await store.ListPendingCreatedAtOrBeforeAsync(nudgeCutoff, ct);
+        var shortestExpiryWindow = tierTtls.Values.Min();
+        var scanWindow = opts.NoOfferNudgeWindow < shortestExpiryWindow
+            ? opts.NoOfferNudgeWindow
+            : shortestExpiryWindow;
+        var scanCutoff = now - scanWindow;
+
+        var candidates = await store.ListPendingCreatedAtOrBeforeAsync(scanCutoff, ct);
 
         foreach (var req in candidates)
         {
-            // 30-min expiry takes precedence: if the request is past the
+            var expiryWindow = ResolveExpiryWindow(req, tierTtls);
+            var expiryCutoff = now - expiryWindow;
+
+            // Tier TTL expiry takes precedence: if the request is past the
             // hard window we move it to terminal and notify, then skip the
             // nudge — the Client just got the harsher "expired" push and a
             // simultaneous "try expanding tier" would be confusing.
@@ -117,7 +128,7 @@ public class RequestExpirySweeper : BackgroundService
                     _logger.LogInformation(
                         "Request {RequestId} expired after {WindowMinutes}m without accepted offer",
                         req.Id,
-                        opts.ExpiryWindow.TotalMinutes);
+                        expiryWindow.TotalMinutes);
                 }
                 continue;
             }
@@ -137,5 +148,40 @@ public class RequestExpirySweeper : BackgroundService
                     opts.NoOfferNudgeWindow.TotalMinutes);
             }
         }
+    }
+
+    private async Task<IReadOnlyDictionary<string, TimeSpan>> LoadTierTtlsAsync(
+        JeebGateway.Tiers.ITiersStore tiers,
+        CancellationToken ct)
+    {
+        var catalog = await tiers.ListAsync(ct);
+        return catalog
+            .Where(t => t.RequestTtlSeconds > 0)
+            .ToDictionary(
+                t => t.Id,
+                t => TimeSpan.FromSeconds(t.RequestTtlSeconds),
+                StringComparer.OrdinalIgnoreCase);
+    }
+
+    private TimeSpan ResolveExpiryWindow(
+        DeliveryRequest req,
+        IReadOnlyDictionary<string, TimeSpan> tierTtls)
+    {
+        var tierId = req.TierId ?? string.Empty;
+        var canonicalTierId = JeebGateway.Tiers.LegacyTierCodes.Canonicalize(tierId);
+
+        if (!string.IsNullOrWhiteSpace(canonicalTierId)
+            && tierTtls.TryGetValue(canonicalTierId, out var ttl))
+        {
+            return ttl;
+        }
+
+        var fallback = tierTtls.Values.Min();
+        _logger.LogWarning(
+            "Request {RequestId} has unknown tier {TierId}; using shortest configured tier TTL {WindowMinutes}m",
+            req.Id,
+            string.IsNullOrWhiteSpace(tierId) ? "<empty>" : tierId,
+            fallback.TotalMinutes);
+        return fallback;
     }
 }

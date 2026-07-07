@@ -8,8 +8,8 @@ namespace JeebGateway.Tiers;
 /// each write takes a short critical section so the uniqueness check and the
 /// insert/update form a single atomic block.
 ///
-/// Seeded with the five default tiers (Urgent, Same-Day, Scheduled, Economy,
-/// On-the-Way) on construction. Admins may add/edit/remove rows; the seeded
+/// Seeded with the three default tiers (Urgent, Same-Day, Scheduled) on
+/// construction. Admins may add/edit/remove rows; the seeded
 /// rows are not protected — removing them is intentionally allowed so a
 /// product change does not require a code change.
 /// </summary>
@@ -60,6 +60,7 @@ public class InMemoryTiersStore : ITiersStore
             Name = name,
             SlaHours = input.SlaHours,
             RadiusKm = input.RadiusKm,
+            RequestTtlSeconds = input.RequestTtlSeconds,
             CommissionRate = input.CommissionRate,
             PriceHint = priceHint,
             CreatedBy = adminUserId,
@@ -96,6 +97,7 @@ public class InMemoryTiersStore : ITiersStore
             existing.Name = name;
             existing.SlaHours = input.SlaHours;
             existing.RadiusKm = input.RadiusKm;
+            existing.RequestTtlSeconds = input.RequestTtlSeconds;
             existing.CommissionRate = input.CommissionRate;
             existing.PriceHint = input.PriceHint.Trim();
             existing.UpdatedBy = adminUserId;
@@ -144,6 +146,7 @@ public class InMemoryTiersStore : ITiersStore
         Name = t.Name,
         SlaHours = t.SlaHours,
         RadiusKm = t.RadiusKm,
+        RequestTtlSeconds = t.RequestTtlSeconds,
         CommissionRate = t.CommissionRate,
         PriceHint = t.PriceHint,
         CreatedBy = t.CreatedBy,
@@ -170,7 +173,8 @@ public class InMemoryTiersStore : ITiersStore
             Id = "urgent",
             Name = "Urgent",
             SlaHours = 1,
-            RadiusKm = 5.0,
+            RadiusKm = 3.0,
+            RequestTtlSeconds = 30 * 60,
             CommissionRate = 0.25,
             PriceHint = "Premium — fastest dispatch, top-of-list matching",
             CreatedAt = now,
@@ -182,8 +186,9 @@ public class InMemoryTiersStore : ITiersStore
         {
             Id = "same-day",
             Name = "Same-Day",
-            SlaHours = 8,
-            RadiusKm = 15.0,
+            SlaHours = 2,
+            RadiusKm = 10.0,
+            RequestTtlSeconds = 2 * 60 * 60,
             CommissionRate = 0.20,
             PriceHint = "Standard same-day rate",
             CreatedAt = now,
@@ -197,34 +202,9 @@ public class InMemoryTiersStore : ITiersStore
             Name = "Scheduled",
             SlaHours = 24,
             RadiusKm = 25.0,
+            RequestTtlSeconds = 24 * 60 * 60,
             CommissionRate = 0.15,
             PriceHint = "Choose a delivery window up to 24h ahead",
-            CreatedAt = now,
-            UpdatedAt = now,
-            CreatedBy = "system",
-            UpdatedBy = "system"
-        };
-        yield return new DeliveryTier
-        {
-            Id = "economy",
-            Name = "Economy",
-            SlaHours = 48,
-            RadiusKm = 50.0,
-            CommissionRate = 0.10,
-            PriceHint = "Lowest price — best for non-urgent items",
-            CreatedAt = now,
-            UpdatedAt = now,
-            CreatedBy = "system",
-            UpdatedBy = "system"
-        };
-        yield return new DeliveryTier
-        {
-            Id = "on-the-way",
-            Name = "On-the-Way",
-            SlaHours = 4,
-            RadiusKm = 10.0,
-            CommissionRate = 0.18,
-            PriceHint = "Matched to Jeebers already routed near your pickup",
             CreatedAt = now,
             UpdatedAt = now,
             CreatedBy = "system",
