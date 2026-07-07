@@ -26,10 +26,9 @@ namespace JeebGateway.Availability;
 ///     <c>accepted</c>, and treat every other terminal state as
 ///     <c>withdrawn</c>.</item>
 ///   <item><b>Conflict codes.</b> offer-service returns HTTP 409 with a typed
-///     error code on submit; we translate it back into the same
-///     <see cref="DuplicateOfferException"/> /
-///     <see cref="TooManyOffersForRequestException"/> the controller already
-///     catches, so the controller is untouched.</item>
+///     error code on submit; duplicate and request-not-open retain their specific
+///     gateway exceptions, while unknown conflicts remain generic 409s instead
+///     of being rendered as a retired offer-count cap.</item>
 ///   <item><b>Acting user.</b> offer-service authorizes on a gateway-injected
 ///     <c>x-user-id</c> header. The store contract already threads the acting
 ///     <c>jeeberId</c> into every write, so we forward it directly.</item>
@@ -51,7 +50,7 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
 {
     /// <summary>
     /// offer-service's own floor (<c>validate_number(:fee_cents, greater_than_or_equal_to: 100)</c>)
-    /// and the gateway's $1 minimum. Used to surface a clear duplicate/cap
+    /// and the gateway's $1 minimum. Used to surface clear duplicate/conflict
     /// translation; fee validation itself stays in the controller.
     /// </summary>
     private const long MinimumFeeCents = 100;
@@ -120,7 +119,7 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
     }
 
     /// <summary>
-    /// One submit attempt with the 409 → duplicate/cap translation. The 404
+    /// One submit attempt with the 409 → duplicate/request-not-open/generic-conflict translation. The 404
     /// (<see cref="OfferRequestNotMirroredException"/>) and 422/400
     /// (<see cref="OfferUpstreamValidationException"/>) cases are surfaced by the
     /// client and handled by the caller (mirror-retry / ProblemDetails mapping).
@@ -141,13 +140,11 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
         }
         catch (OfferUpstreamConflictException ex)
         {
-            // offer-service reuses one 409 surface for three distinct conflicts:
+            // offer-service reuses one 409 surface for multiple distinct conflicts:
             //   (1) "you already offered"  -> DuplicateOfferException (409 offer-already-exists)
             //   (2) "request not open"     -> RequestNotOpenForOffersException (409 request-not-open-for-offers)
-            //   (3) 20-offer cap reached   -> TooManyOffersForRequestException (409 offers-per-request-exceeded)
-            // The exact upstream error code drives the choice. sprint-009 Lane E: (2) used
-            // to be swept into (3), rendering the misleading "20-offer cap" banner for an
-            // already-closed auction; it now maps to its own ProblemDetails.
+            //   (3) any other conflict     -> OfferSubmitConflictException (409 offer-submit-conflict)
+            // The retired 20-offer cap must not be inferred from an unknown upstream code.
             if (IsDuplicateCode(ex.UpstreamCode))
             {
                 // The upstream owns the existing offer id; we do not have it
@@ -160,8 +157,7 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
                 throw new RequestNotOpenForOffersException(requestId, ex.UpstreamCode);
             }
 
-            throw new TooManyOffersForRequestException(
-                requestId, liveCount: maxPerRequest, limit: maxPerRequest);
+            throw new OfferSubmitConflictException(requestId, ex.UpstreamCode);
         }
     }
 
@@ -436,8 +432,7 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
     // sprint-009 Lane E: offer-service returns `request_not_open` (see the class doc
     // Contract-freeze note and IOfferServiceClient) when a bid is attempted on a request
     // that is no longer open (accepted/expired/cancelled). Match it (and the looser
-    // `not_open` form) case-insensitively so a closed auction maps to its own 409, not the
-    // 20-offer-cap message.
+    // `not_open` form) case-insensitively so a closed auction maps to its own 409.
     private static bool IsRequestNotOpenCode(string? code)
         => code is not null
            && (code.Contains("request_not_open", StringComparison.OrdinalIgnoreCase)

@@ -15,7 +15,7 @@ namespace JeebGateway.IntegrationTests;
 /// Covers the full set of acceptance criteria:
 /// <list type="bullet">
 ///   <item>POST /requests/{id}/offers — happy path, fee >= $1, valid eta.</item>
-///   <item>409 once a request hits 20 live offers.</item>
+///   <item>More than 20 live offers are allowed.</item>
 ///   <item>409 when the same Jeeber tries to submit a second live offer.</item>
 ///   <item>DELETE /requests/{id}/offers/{offerId} — withdraw, allows re-offer.</item>
 ///   <item>Realtime "new offer" event dispatched on every accepted submission.</item>
@@ -169,7 +169,7 @@ public class RequestOffersEndpointTests : IClassFixture<WebApplicationFactory<Pr
     }
 
     [Fact]
-    public async Task Twenty_First_Offer_From_Distinct_Jeebers_Returns_409()
+    public async Task Twenty_First_Offer_From_Distinct_Jeebers_Succeeds()
     {
         var (_, requestId) = await SeedRequestAsync();
 
@@ -187,10 +187,9 @@ public class RequestOffersEndpointTests : IClassFixture<WebApplicationFactory<Pr
             $"/requests/{requestId}/offers",
             new { fee = 5m, etaMinutes = 20 });
 
-        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/offers-per-request-exceeded");
-        problem.Detail.Should().Contain("20");
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var dto = await resp.Content.ReadFromJsonAsync<OfferDto>();
+        dto!.RequestId.Should().Be(requestId);
     }
 
     [Fact]

@@ -22,9 +22,9 @@ namespace JeebGateway.IntegrationTests;
 /// <summary>
 /// sprint-009 Lane E — 409 fidelity on submit. offer-service reuses HTTP 409 for three
 /// distinct conflicts; the store must map each to the RIGHT signal. Before this fix, an
-/// upstream <c>request_not_open</c> (auction closed) was swept into the 20-offer-cap
+/// upstream <c>request_not_open</c> (auction closed) was swept into the retired offer-cap
 /// message. Now it maps to <see cref="RequestNotOpenForOffersException"/> →
-/// <c>request-not-open-for-offers</c> ProblemDetails, while genuine cap / duplicate codes
+/// <c>request-not-open-for-offers</c> ProblemDetails, while duplicate and generic codes
 /// keep their existing mapping (regression guard).
 /// </summary>
 public class RequestNotOpen409FidelityTests
@@ -59,16 +59,15 @@ public class RequestNotOpen409FidelityTests
     }
 
     [Fact]
-    public async Task Submit_UpstreamUnknownConflictCode_Still_Maps_To_Cap()
+    public async Task Submit_UpstreamUnknownConflictCode_Maps_To_GenericConflict_NotCap()
     {
-        // Any conflict code that is neither duplicate nor request_not_open keeps the
-        // existing cap mapping — the fix is additive, not a reroute of everything.
         var store = new UpstreamPendingOffersStore(new ConflictClient("some_other_cap_code"));
 
         Func<Task> act = () => store.TrySubmitAsync(
-            "req-1", "jeeber-1", 5m, 10, null, 20, DateTimeOffset.UtcNow, CancellationToken.None);
+            "req-1", "jeeber-1", 5m, 10, null, int.MaxValue, DateTimeOffset.UtcNow, CancellationToken.None);
 
-        await act.Should().ThrowAsync<TooManyOffersForRequestException>();
+        await act.Should().ThrowAsync<OfferSubmitConflictException>();
+        await act.Should().NotThrowAsync<TooManyOffersForRequestException>();
     }
 
     // -----------------------------------------------------------------

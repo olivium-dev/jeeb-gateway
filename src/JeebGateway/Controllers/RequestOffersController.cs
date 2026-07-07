@@ -27,7 +27,7 @@ namespace JeebGateway.Controllers;
 /// Acceptance criteria enforced here:
 /// <list type="bullet">
 ///   <item>Fee &gt;= $1 (mobile floor; DB CHECK enforces &gt; 0).</item>
-///   <item>Max <see cref="MaxLiveOffersPerRequest"/> live offers per request.</item>
+///   <item>Unlimited live offers per request.</item>
 ///   <item>One live offer per Jeeber per request (re-offer allowed after
 ///     withdraw).</item>
 ///   <item>Realtime "new offer" event to the Client on every accepted
@@ -44,12 +44,9 @@ namespace JeebGateway.Controllers;
 public class RequestOffersController : ControllerBase
 {
     /// <summary>
-    /// T-backend-010 acceptance criterion: at most 20 live offers per
-    /// request. Hard ceiling at the application layer — beyond this the
-    /// auction is effectively saturated and additional bids do not help
-    /// the Client compare.
+    /// Retired T-backend-010 offer-count cap: live offers per request are unlimited.
     /// </summary>
-    public const int MaxLiveOffersPerRequest = 20;
+    public const int MaxLiveOffersPerRequest = int.MaxValue;
 
     /// <summary>
     /// Minimum gross fee in the Client's currency. Below $1 is treated
@@ -242,14 +239,24 @@ public class RequestOffersController : ControllerBase
         }
         catch (RequestNotOpenForOffersException)
         {
-            // sprint-009 Lane E — the auction is closed (accepted/expired/cancelled), NOT
-            // the 20-offer cap. Its own ProblemDetails so the jeeber sees the right reason.
+            // sprint-009 Lane E — the auction is closed (accepted/expired/cancelled).
+            // Its own ProblemDetails so the jeeber sees the right reason.
             return Conflict(new ProblemDetails
             {
                 Title = "This request is no longer open for offers.",
                 Detail = "The auction has already been accepted, expired, or cancelled.",
                 Status = StatusCodes.Status409Conflict,
                 Type = "https://jeeb.dev/errors/request-not-open-for-offers"
+            });
+        }
+        catch (OfferSubmitConflictException ex)
+        {
+            return Conflict(new ProblemDetails
+            {
+                Title = "Offer could not be submitted because the request is in conflict upstream.",
+                Detail = $"upstreamCode={ex.UpstreamCode ?? "unknown"}",
+                Status = StatusCodes.Status409Conflict,
+                Type = "https://jeeb.dev/errors/offer-submit-conflict"
             });
         }
         catch (TooManyOffersForRequestException ex)

@@ -14,9 +14,8 @@ namespace JeebGateway.IntegrationTests;
 /// <summary>
 /// Legacy in-memory accept path (FeatureFlags:UseUpstream:Offer = false).
 /// S07: accepting is a CLIENT action — the request-owning client awards the
-/// delivery to a jeeber's offer. BR-10 (T-backend-039) still caps the OFFER's
-/// jeeber at 2 active deliveries (statuses accepted, picked_up, heading_off);
-/// acceptance returns 409 once the cap is hit, with a clear error message.
+/// delivery to a jeeber's offer. The retired BR-10 active-delivery cap no
+/// longer blocks additional accepts for the same jeeber.
 ///
 /// Tests share a single WebApplicationFactory and therefore a single
 /// in-memory store across cases; each test scopes itself with unique
@@ -54,26 +53,19 @@ public class OffersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
-    public async Task Accept_When_Jeeber_At_Cap_Returns_409_With_BR10_Message()
+    public async Task Accept_With_Two_Active_Deliveries_Still_Succeeds()
     {
         var jeeberId = $"jeeber-cap-{Guid.NewGuid()}";
         var clientId = $"client-{Guid.NewGuid()}";
 
-        // Seed two already-accepted deliveries so the Jeeber is at the
-        // BR-10 cap before the third accept attempt.
+        // Seed two already-accepted deliveries; the retired BR-10 cap must not
+        // block the next accept.
         await SeatActiveDeliveriesAsync(jeeberId, clientId, count: 2);
 
         var (jeeberClient, _, offerId) = await SeedOfferAsync(jeeberId, clientId);
 
         var resp = await jeeberClient.PostAsync($"/offers/{offerId}/accept", content: null);
-        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
-
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Title.Should().Be(
-            "Maximum 2 active deliveries. Complete a delivery before accepting another.");
-        problem.Status.Should().Be((int)HttpStatusCode.Conflict);
-        problem.Type.Should().Be("https://jeeb.dev/errors/too-many-active-deliveries");
-        problem.Detail.Should().Contain("limit 2");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
     }
 
     [Fact]
@@ -98,8 +90,8 @@ public class OffersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 
         var seated = await SeatActiveDeliveriesAsync(jeeberId, clientId, count: 2);
 
-        // Drop one of the two seeded deliveries to a terminal state so the
-        // BR-10 cap is no longer hit.
+        // Drop one of the two seeded deliveries to a terminal state; accepts
+        // should succeed regardless now that the BR-10 cap is retired.
         await MoveToStatus(seated[0], "delivered");
 
         var (jeeberClient, _, offerId) = await SeedOfferAsync(jeeberId, clientId);

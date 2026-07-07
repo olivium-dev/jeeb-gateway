@@ -8,31 +8,27 @@ namespace JeebGateway.Requests;
 /// tests; production wiring will hit Postgres directly using the schema
 /// in db/migrations/0004.
 ///
-/// The contract is intentionally minimal — just enough to enforce the
-/// BR-9 concurrency cap (max 3 active per Client) on creation. The
-/// downstream delivery-service owns the full state machine.
+/// The contract is intentionally minimal. The downstream delivery-service owns
+/// the full state machine; historical active-request and active-delivery caps are
+/// retained only as unreachable 409 plumbing when callers pass unlimited limits.
 /// </summary>
 public interface IRequestsStore
 {
     /// <summary>
     /// Returns the number of requests for <paramref name="clientId"/>
     /// whose status is in <see cref="RequestStatus.ActiveStates"/>
-    /// (anything before <c>delivered</c>). Used by the BR-9 cap.
+    /// (anything before <c>delivered</c>). Retained for read/ops surfaces.
     /// </summary>
     Task<int> CountActiveForClientAsync(string clientId, CancellationToken ct);
 
     /// <summary>
-    /// Persists a new request in the <c>pending</c> state. Callers MUST
-    /// have already enforced the BR-9 cap via
-    /// <see cref="CountActiveForClientAsync"/>.
+    /// Persists a new request in the <c>pending</c> state.
     /// </summary>
     Task<DeliveryRequest> CreateAsync(CreateRequestInput input, CancellationToken ct);
 
     /// <summary>
-    /// Atomic "count active + insert" — enforces the BR-9 concurrency cap
-    /// inside the store so the check and the write cannot race. Throws
-    /// <see cref="TooManyActiveRequestsException"/> when the client is at
-    /// or above <paramref name="limit"/>.
+    /// Atomic insert path. The historical BR-9 cap is retired, so gateway callers
+    /// pass <see cref="int.MaxValue"/>; the exception shape remains for compatibility.
     /// </summary>
     Task<DeliveryRequest> TryCreateWithLimitAsync(
         CreateRequestInput input,
@@ -41,8 +37,7 @@ public interface IRequestsStore
 
     /// <summary>
     /// Test/admin helper: forcibly set a request's status. Used by the
-    /// integration tests to flip a request out of an active state so
-    /// the BR-9 cap behavior at the 3-active boundary can be exercised.
+    /// integration tests to flip a request out of an active state.
     ///
     /// Returns false (and leaves the row untouched) when the request is
     /// already in a terminal state — terminal rows are immutable so the
@@ -200,30 +195,28 @@ public interface IRequestsStore
     Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct);
 
     /// <summary>
-    /// BR-10 (T-backend-039): counts the requests where
+    /// Counts the requests where
     /// <see cref="DeliveryRequest.JeeberId"/> equals <paramref name="jeeberId"/>
     /// and the status is in <see cref="RequestStatus.JeeberActiveStates"/>
-    /// (accepted / picked_up / heading_off). Used by the offer-accept
-    /// endpoint and surfaced on the Jeeber profile for ops triage.
+    /// (accepted / picked_up / heading_off). Surfaced on the Jeeber profile
+    /// for ops triage.
     /// </summary>
     Task<int> CountActiveForJeeberAsync(string jeeberId, CancellationToken ct);
 
     /// <summary>
-    /// BR-10 atomic accept: under the store's write lock, validates the
-    /// request is still in <see cref="RequestStatus.PreAcceptanceStates"/>
-    /// and the Jeeber has fewer than <paramref name="limit"/> active
-    /// deliveries, then transitions the row to
+    /// Atomic accept: under the store's write lock, validates the request is still
+    /// in <see cref="RequestStatus.PreAcceptanceStates"/> and transitions the row to
     /// <see cref="RequestStatus.Accepted"/> while stamping
     /// <see cref="DeliveryRequest.JeeberId"/> and
     /// <see cref="DeliveryRequest.AcceptedAt"/>.
     ///
-    /// Throws <see cref="TooManyActiveDeliveriesException"/> when the
-    /// Jeeber is already at or above the cap. Returns null when the
-    /// request is unknown. Returns the updated request otherwise.
+    /// The historical active-delivery cap is retired, so gateway callers pass
+    /// <see cref="int.MaxValue"/>. Returns null when the request is unknown.
+    /// Returns the updated request otherwise.
     /// Throws <see cref="RequestNotAcceptableException"/> when the
     /// request is no longer in a pre-acceptance state (already accepted
     /// by someone else, cancelled, expired, …) — the caller maps this
-    /// to a 409 distinct from the BR-10 cap.
+    /// to a 409 distinct from other accept conflicts.
     /// </summary>
     Task<DeliveryRequest?> TryAcceptByJeeberAsync(
         string requestId,
@@ -429,7 +422,7 @@ public class CreateRequestInput
 
 /// <summary>
 /// Thrown by the controller (and surfaced as ProblemDetails) when the
-/// client has already reached the BR-9 concurrency cap. The
+/// client has already reached the retired BR-9 concurrency cap. The
 /// <see cref="ActiveCount"/> field is included in the response detail
 /// so dashboards / mobile clients can show the exact value.
 /// </summary>
@@ -447,7 +440,7 @@ public class TooManyActiveRequestsException : Exception
 }
 
 /// <summary>
-/// BR-10 (T-backend-039): the offer-accept endpoint surfaces this as
+/// Retired BR-10 active-delivery cap: the offer-accept endpoint surfaces this as
 /// ProblemDetails with HTTP 409. <see cref="ActiveCount"/> mirrors the
 /// shape of <see cref="TooManyActiveRequestsException"/> so the mobile
 /// app can render the exact value in the error banner.

@@ -202,7 +202,7 @@ public class ScheduledDeliveryTests
     }
 
     [Fact]
-    public async Task Scheduled_Request_Counts_Toward_BR9_Active_Cap()
+    public async Task More_Than_Three_Scheduled_Requests_Are_Allowed()
     {
         var factory = NewFactory(out var clock);
         var client = ClientFor(factory, "sched-br9-client");
@@ -215,15 +215,9 @@ public class ScheduledDeliveryTests
                 ValidBody($"sched {i}", scheduledAt))).StatusCode.Should().Be(HttpStatusCode.Created);
         }
 
-        // Fourth scheduled MUST hit the BR-9 cap exactly like an immediate
-        // request would — scheduled is in the ActiveStates set.
-        var blocked = await client.PostAsJsonAsync("/requests",
+        var fourth = await client.PostAsJsonAsync("/requests",
             ValidBody("fourth scheduled", scheduledAt));
-        blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
-
-        var problem = await blocked.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Title.Should().Be(
-            "Maximum 3 active requests. Complete or cancel an existing request.");
+        fourth.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
     // -----------------------------------------------------------------

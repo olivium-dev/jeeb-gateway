@@ -30,8 +30,8 @@ namespace JeebGateway.Controllers.V1;
 [ApiController]
 public sealed class JeebOffersController : ControllerBase
 {
-    /// <summary>BR-10: per-jeeber maximum of concurrent active deliveries.</summary>
-    private const int ActiveDeliveriesLimit = 2;
+    /// <summary>Retired BR-10 cap: active deliveries are unlimited.</summary>
+    private const int ActiveDeliveriesLimit = int.MaxValue;
 
     private readonly IPendingOffersStore _offers;
     private readonly IRequestsStore _requests;
@@ -139,49 +139,9 @@ public sealed class JeebOffersController : ControllerBase
 
         var requestId = routing.Value.RequestId;
 
-        // F2 / BR-10 (sprint-009 gateway-flow-correctness-audit): this is the route the
-        // mobile client actually calls, yet — unlike the legacy OffersController and this
-        // controller's own in-memory accept path — it never enforced the per-jeeber active-
-        // delivery cap. offer-service does NOT enforce BR-10 today (successive accepts all
-        // returned 200 on the live fleet), so the gateway BFF is the enforcement point. The
-        // cap is checked against the WINNING bidder (the offer's jeeber), resolved above
-        // (from the routing index, or the authoritative offer-service reconciliation on a
-        // cold miss). Check BEFORE forwarding the accept saga so no third delivery is ever
-        // created.
-        //
-        // Degrade-don't-fail: a delivery-service count blip must NEVER turn an otherwise-valid
-        // accept into a 5xx — on a fault we log and treat the jeeber as under cap and forward
-        // (the offer-service Conflict mapping remains the backstop). Mirrors OffersController.
         var winningJeeberId = routing.Value.JeeberId;
-        if (winningJeeberId is not null)
-        {
-            int? activeCount = null;
-            try
-            {
-                activeCount = await _deliveryService.CountActiveDeliveriesByJeeberAsync(winningJeeberId, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "BR-10 active-delivery count for jeeber {JeeberId} (offer {OfferId}) failed on the /v1 accept; " +
-                    "treating as under cap and forwarding the accept (offer-service Conflict is the backstop).",
-                    winningJeeberId, offerId);
-            }
-
-            if (activeCount is int count && count >= ActiveDeliveriesLimit)
-            {
-                _logger.LogInformation(
-                    "BR-10: rejecting /v1 accept of offer {OfferId} — jeeber {JeeberId} already holds {Count} active deliveries (limit {Limit}); no third delivery created.",
-                    offerId, winningJeeberId, count, ActiveDeliveriesLimit);
-                return Conflict(new ProblemDetails
-                {
-                    Title = "Maximum 2 active deliveries. Complete a delivery before accepting another.",
-                    Detail = $"Jeeber has {count} active deliveries (limit {ActiveDeliveriesLimit}).",
-                    Status = StatusCodes.Status409Conflict,
-                    Type = "https://jeeb.dev/errors/too-many-active-deliveries"
-                });
-            }
-        }
+        // Retired BR-10 active-delivery cap: do not pre-count delivery-service
+        // assignments here. Offer-service still owns real accept conflicts below.
 
         var key = string.IsNullOrWhiteSpace(idempotencyKey)
             ? Guid.NewGuid().ToString("N")
@@ -832,7 +792,7 @@ public sealed class JeebOffersController : ControllerBase
         {
             return Conflict(new ProblemDetails
             {
-                Title = "Maximum 2 active deliveries. Complete a delivery before accepting another.",
+                Title = "Active delivery concurrency is unlimited.",
                 Detail = $"Jeeber has {ex.ActiveCount} active deliveries (limit {ex.Limit}).",
                 Status = StatusCodes.Status409Conflict,
                 Type = "https://jeeb.dev/errors/too-many-active-deliveries"

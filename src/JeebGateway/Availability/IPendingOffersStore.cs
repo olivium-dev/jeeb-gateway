@@ -6,15 +6,15 @@ namespace JeebGateway.Availability;
 /// 1. The auto-offline sweeper (T-backend-023). When a Jeeber goes offline
 ///    we withdraw any in-flight offers so matching does not keep waiting
 ///    for a response from someone unreachable.
-/// 2. The offer-accept endpoint (T-backend-039, BR-10). The Jeeber
+/// 2. The offer-accept endpoint. The Jeeber
 ///    accepts a specific offer they were extended; the gateway needs to
 ///    resolve <c>offerId → (jeeberId, requestId)</c> to authorize the
 ///    caller and bind the request to the Jeeber.
 /// 3. The offer-submission endpoints (T-backend-010, FR-6.*). The Jeeber
 ///    submits a bid (<see cref="TrySubmitAsync"/>) and may retract it
-///    before acceptance (<see cref="TryWithdrawAsync"/>). The gateway
-///    enforces "max 20 offers per request" and "one live offer per Jeeber
-///    per request" inside the store so the check and the write cannot race.
+///    before acceptance (<see cref="TryWithdrawAsync"/>). The gateway keeps
+///    the "one live offer per Jeeber per request" check inside the store so
+///    the check and the write cannot race; offer count per request is unlimited.
 /// </summary>
 public interface IPendingOffersStore
 {
@@ -86,9 +86,8 @@ public interface IPendingOffersStore
     /// Atomic submit (T-backend-010). Under the store's write lock the
     /// store checks:
     /// <list type="bullet">
-    ///   <item>The request does not already hold <paramref name="maxPerRequest"/>
-    ///     live (<see cref="PendingOfferStatus.Pending"/>) offers — throws
-    ///     <see cref="TooManyOffersForRequestException"/> if so.</item>
+    ///   <item>The historical <paramref name="maxPerRequest"/> cap is retired;
+    ///     gateway callers pass <see cref="int.MaxValue"/>.</item>
     ///   <item>This <paramref name="jeeberId"/> does not already have a live
     ///     offer on this request — throws <see cref="DuplicateOfferException"/>
     ///     if so. A previously <see cref="PendingOfferStatus.Withdrawn"/> offer
@@ -290,8 +289,8 @@ public readonly record struct EditOfferOutcome(EditOfferStatus Status, PendingOf
 }
 
 /// <summary>
-/// T-backend-010 acceptance criterion: a request may hold at most 20 live
-/// offers. The controller maps this to 409 ProblemDetails.
+/// Retired T-backend-010 offer-count cap. Kept so older lower layers can still
+/// surface the historical 409 shape, but gateway stores now pass an unlimited limit.
 /// </summary>
 public class TooManyOffersForRequestException : Exception
 {
@@ -333,10 +332,9 @@ public class DuplicateOfferException : Exception
 /// <summary>
 /// sprint-009 Lane E — the request is not open for new offers (offer-service
 /// <c>request_not_open</c>: the auction is already accepted, expired, or cancelled).
-/// This is DISTINCT from the 20-offer cap (<see cref="TooManyOffersForRequestException"/>):
-/// both surface as HTTP 409 upstream, but rendering the cap message for a closed auction
-/// is misleading. The controller maps this to its own <c>request-not-open-for-offers</c>
-/// ProblemDetails so the jeeber sees "the auction is closed", not "20-offer cap reached".
+/// This is distinct from generic submit conflicts. The controller maps this to its own
+/// <c>request-not-open-for-offers</c> ProblemDetails so the jeeber sees that the auction
+/// is closed.
 /// </summary>
 public class RequestNotOpenForOffersException : Exception
 {
@@ -347,6 +345,23 @@ public class RequestNotOpenForOffersException : Exception
 
     public RequestNotOpenForOffersException(string requestId, string? upstreamCode)
         : base($"Request '{requestId}' is not open for new offers (upstream code '{upstreamCode ?? "request_not_open"}').")
+    {
+        RequestId = requestId;
+        UpstreamCode = upstreamCode;
+    }
+}
+
+/// <summary>
+/// Generic upstream submit conflict after known duplicate/request-not-open codes have
+/// been classified. This preserves HTTP 409 without rendering a retired offer-count cap.
+/// </summary>
+public class OfferSubmitConflictException : Exception
+{
+    public string RequestId { get; }
+    public string? UpstreamCode { get; }
+
+    public OfferSubmitConflictException(string requestId, string? upstreamCode)
+        : base($"Request '{requestId}' rejected offer submit with upstream conflict code '{upstreamCode ?? "unknown"}'.")
     {
         RequestId = requestId;
         UpstreamCode = upstreamCode;

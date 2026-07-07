@@ -344,7 +344,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
     /// <inheritdoc />
     public async Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct)
     {
-        // S07 / BR-10: read-only count of the jeeber's ACTIVE deliveries from the
+        // Read-only count of the jeeber's ACTIVE deliveries from the
         // canonical delivery-service endpoint. delivery-service owns the "active"
         // definition (status NOT IN Done/Cancelled/FailedNeedsEscalation); the
         // gateway never re-derives it. snake_case body (Go) — bound via the DTO's
