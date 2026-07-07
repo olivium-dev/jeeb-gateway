@@ -1,11 +1,6 @@
 namespace JeebGateway.Ratings;
 
-public sealed record UnrevealedRating(
-    string Id,
-    string DeliveryId,
-    string RatedUserId,
-    int Score,
-    DateTimeOffset SubmittedAt);
+public sealed record RatingWindowSweepResult(int RevealedCount, int ClosedCount);
 
 public sealed record JeeberRatingSummary(
     string JeeberId,
@@ -19,10 +14,8 @@ public sealed record JeeberRatingSummary(
 /// </summary>
 public interface IRatingStoreExtended : IRatingStore
 {
-    Task<IReadOnlyList<UnrevealedRating>> ListUnrevealedBeforeAsync(
-        DateTimeOffset cutoff, CancellationToken ct);
-
-    Task<bool> TryRevealAsync(string ratingId, DateTimeOffset at, CancellationToken ct);
+    Task<RatingWindowSweepResult> SweepExpiredWindowsAsync(
+        DateTimeOffset deliveredAtCutoff, DateTimeOffset processedAt, CancellationToken ct);
 
     Task<IReadOnlyList<JeeberRatingSummary>> ListJeebersBelowAverageAsync(
         double threshold, int minRatings, CancellationToken ct);

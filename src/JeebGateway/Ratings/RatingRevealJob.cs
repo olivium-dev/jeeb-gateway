@@ -1,4 +1,3 @@
-using JeebGateway.Push;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -7,13 +6,15 @@ namespace JeebGateway.Ratings;
 public sealed class RatingRevealOptions
 {
     public const string SectionName = "RatingReveal";
+    public string WindowName { get; set; } = "ratings-mutual-blind";
     public TimeSpan SweepInterval { get; set; } = TimeSpan.FromHours(1);
-    public TimeSpan BlindPeriod { get; set; } = TimeSpan.FromDays(7);
+    public TimeSpan RatingWindow { get; set; } = BlindRevealPolicy.DefaultRatingWindow;
 }
 
 /// <summary>
-/// T-backend-021 (JEEB-39): background job that scans for ratings past the
-/// 7-day blind window and reveals them to both parties.
+/// T-backend-021 (JEEB-39): background job that scans for rating windows past the
+/// named 7-day blind window. It reveals only mutually-rated pairs and closes
+/// one-sided/empty windows without revealing.
 ///
 /// JEB-1502: <see cref="SweepOnceAsync"/> is the extracted sweep body, shared
 /// between the background loop and the test control-plane force-runner. The
@@ -57,7 +58,8 @@ public sealed class RatingRevealJob : BackgroundService
     }
 
     /// <summary>
-    /// Execute one sweep: reveal all ratings past the blind-period cutoff.
+    /// Execute one sweep: reveal mutually-rated expired windows and close all
+    /// other expired windows without auto-revealing one-sided ratings.
     /// Called by the background loop AND by the JEB-1502 test control-plane
     /// force-runner — no test-only logic forks.
     /// </summary>
@@ -67,32 +69,18 @@ public sealed class RatingRevealJob : BackgroundService
         var ratingStore = scope.ServiceProvider.GetService<IRatingStoreExtended>();
         if (ratingStore is null) return;
 
-        var push = scope.ServiceProvider.GetRequiredService<IPushNotificationService>();
-        var cutoff = _clock.GetUtcNow() - _opts.Value.BlindPeriod;
-        var unrevealed = await ratingStore.ListUnrevealedBeforeAsync(cutoff, ct);
+        var now = _clock.GetUtcNow();
+        var options = _opts.Value;
+        var cutoff = now - options.RatingWindow;
+        var result = await ratingStore.SweepExpiredWindowsAsync(cutoff, now, ct);
 
-        var revealed = 0;
-        foreach (var rating in unrevealed)
+        if (result.RevealedCount > 0 || result.ClosedCount > 0)
         {
-            var ok = await ratingStore.TryRevealAsync(rating.Id, _clock.GetUtcNow(), ct);
-            if (!ok) continue;
-
-            revealed++;
-
-            await push.SendAsync(new PushNotificationRequest(
-                UserId: rating.RatedUserId,
-                Trigger: NotificationTrigger.RatingRevealed,
-                Title: "Rating revealed",
-                Body: $"Your delivery rating has been revealed: {rating.Score}/5",
-                Data: new Dictionary<string, string>
-                {
-                    ["ratingId"] = rating.Id,
-                    ["deliveryId"] = rating.DeliveryId
-                }),
-                ct);
+            _log.LogInformation(
+                "Rating reveal job swept {WindowName}: revealed {RevealedCount} mutual windows and closed {ClosedCount} non-mutual windows",
+                options.WindowName,
+                result.RevealedCount,
+                result.ClosedCount);
         }
-
-        if (revealed > 0)
-            _log.LogInformation("Rating reveal job: revealed {Count} ratings", revealed);
     }
 }

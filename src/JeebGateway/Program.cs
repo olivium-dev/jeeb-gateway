@@ -1406,8 +1406,8 @@ builder.Services.AddSingleton<ICancellationService, CancellationService>();
 // Mutual-blind ratings (T-backend-020 / JEEB-38).
 //
 // Reveal logic is pure (BlindRevealPolicy): both parties' ratings stay
-// blind until both sides submit OR the 7-day window closes (after which
-// the row is locked as no-rating, with whatever exists already visible).
+// blind until both sides submit. If the 7-day window closes first, the
+// row is locked as no-rating without revealing one-sided ratings.
 // The mutual-blind pairing store is the record-of-truth. Default is in-memory;
 // when FeatureFlags:UseUpstream:Ratings is ON the store is swapped for
 // FeedbackServiceRatingStore (persists/reads via the NSwag ServiceFeedbackClient).
@@ -1445,7 +1445,9 @@ if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
 }
 else
 {
-    builder.Services.AddSingleton<IRatingStore, InMemoryRatingStore>();
+    builder.Services.AddSingleton<InMemoryRatingStore>();
+    builder.Services.AddSingleton<IRatingStore>(sp => sp.GetRequiredService<InMemoryRatingStore>());
+    builder.Services.AddSingleton<IRatingStoreExtended>(sp => sp.GetRequiredService<InMemoryRatingStore>());
 }
 builder.Services.AddSingleton<IRatingService, RatingService>();
 
@@ -2396,7 +2398,7 @@ var weeklyBatch = app.Services.GetRequiredService<JeebGateway.Financials.WeeklyS
 testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
 {
     Name = "rating-reveal",
-    Description = "Reveal ratings past the 7-day blind window (RatingRevealJob.SweepOnceAsync).",
+    Description = "Reveal mutually rated windows and close one-sided windows past the 7-day blind window (RatingRevealJob.SweepOnceAsync).",
     RunAsync = ct => ratingRevealJob.SweepOnceAsync(ct)
 });
 testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob

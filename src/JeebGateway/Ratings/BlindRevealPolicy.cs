@@ -21,8 +21,7 @@ namespace JeebGateway.Ratings;
 ///   <item>If the window has closed (now &gt; deliveredAt + window) and at least
 ///     one side did not submit, return
 ///     <see cref="BlindRevealOutcome.LockedNoRating"/>; the row is now
-///     immutable. Any side that submitted is visible; the missing side stays
-///     null.</item>
+///     immutable and no one-sided rating is revealed.</item>
 /// </list>
 ///
 /// This type is intentionally static + side-effect free so unit tests can
@@ -68,14 +67,14 @@ public static class BlindRevealPolicy
                 WindowExpired: windowExpired);
         }
 
-        // Window closed without both sides submitting — locked.
-        // Whatever ratings exist are revealed; the missing side stays null.
+        // Window closed without both sides submitting - locked without revealing
+        // any one-sided rating.
         if (windowExpired)
         {
             return new BlindRevealView(
                 Outcome: BlindRevealOutcome.LockedNoRating,
-                MyRating: mine,
-                TheirRating: theirs,
+                MyRating: null,
+                TheirRating: null,
                 WindowClosesAt: windowClosesAt,
                 WindowExpired: true);
         }
