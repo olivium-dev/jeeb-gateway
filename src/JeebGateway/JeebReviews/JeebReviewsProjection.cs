@@ -215,7 +215,9 @@ public static class JeebReviewsProjection
         var theirsSubmitted = theirs?.Submitted == true;
 
         var rows = new List<JeebRatingRow>();
-        if (upstream.Revealed && upstream.SubmittedCount >= 2)
+        var mutuallySubmitted = selfSubmitted && theirsSubmitted;
+
+        if (upstream.Revealed && mutuallySubmitted)
         {
             if (theirs is { Submitted: true })
             {
@@ -237,7 +239,7 @@ public static class JeebReviewsProjection
     /// in-gateway lattice (the shared primitive has no Jeeb 7-day window concept):
     /// <list type="bullet">
     ///   <item>both submitted AND revealed → <c>revealed</c></item>
-    ///   <item>revealed but fewer than 2 submitted -> <c>locked_no_rating</c>
+    ///   <item>revealed but not mutually submitted -> <c>locked_no_rating</c>
     ///     (defensive compatibility for stale upstream auto-reveal state)</item>
     ///   <item>only the viewer submitted → <c>pending_counter</c> (waiting on them)</item>
     ///   <item>only the counterparty submitted → <c>pending_self</c> (waiting on you)</item>
@@ -246,14 +248,15 @@ public static class JeebReviewsProjection
     /// </summary>
     public static string StateCode(BlindRevealStateResponse upstream)
     {
-        if (upstream.Revealed)
-        {
-            if (upstream.SubmittedCount < 2) return StatusCodes.LockedNoRating;
-            return StatusCodes.Revealed;
-        }
-
         var selfSubmitted = upstream.Self?.Submitted == true;
         var theirsSubmitted = upstream.Counterparty?.Submitted == true;
+        var mutuallySubmitted = selfSubmitted && theirsSubmitted;
+
+        if (upstream.Revealed)
+        {
+            if (!mutuallySubmitted) return StatusCodes.LockedNoRating;
+            return StatusCodes.Revealed;
+        }
 
         if (selfSubmitted) return StatusCodes.PendingCounter;   // you rated; waiting on them
         if (theirsSubmitted) return StatusCodes.PendingSelf;    // they rated; waiting on you
