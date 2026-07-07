@@ -53,7 +53,7 @@ public class EarningsAggregationTests
             Insurance         = 0m,
             Total             = grossAmount,
             MinimumFeeApplied = false,
-            Currency          = "LBP",
+            Currency          = "USD",
             PaymentMethod     = "cod",
             State             = "pending_settlement",
             CodState          = codState,
@@ -175,7 +175,7 @@ public class EarningsAggregationTests
     // ── AC5 — All entries in same currency ────────────────────────────────────
 
     [Fact]
-    public async Task AC5_EarningsEntries_AllLBP()
+    public async Task AC5_EarningsEntries_AllUSD()
     {
         for (var i = 0; i < 5; i++)
             await SeedAsync("j-004", CodSettlementState.Paid, 100_000m + i * 10_000m);
@@ -185,8 +185,8 @@ public class EarningsAggregationTests
 
         var currencies = earnings.Entries.Select(e => e.Currency).Distinct().ToList();
         Assert.Single(currencies);
-        Assert.Equal("LBP", currencies[0]);
-        Assert.Equal("LBP", earnings.Totals.Currency);
+        Assert.Equal("USD", currencies[0]);
+        Assert.Equal("USD", earnings.Totals.Currency);
     }
 
     // ── AC6 — Cache: two calls → one DB hit ──────────────────────────────────

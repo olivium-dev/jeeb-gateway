@@ -17,9 +17,9 @@ namespace JeebGateway.Financials;
 ///   source       = "jeeb.cod"           (the gateway-owned settlement channel)
 ///   externalRef  = deliveryId           (natural idempotency key)
 ///   payeeRef     = jeeberId
-///   grossAmount  = total cash collected
-///   feeAmount    = commission + insurance (platform fee)
-///   netAmount    = goods cost (net to the payee)
+///   grossAmount  = accepted offer amount collected
+///   feeAmount    = flat commission (platform fee)
+///   netAmount    = accepted offer amount less commission
 ///
 /// Jeeb-specific identifiers (client id, tier, payment method) ride in
 /// <c>metadata</c>, opaque to UPG. Registered behind
@@ -46,7 +46,7 @@ public sealed class UpgSettlementLedgerClient : ISettlementLedgerClient
 
     public async Task<LedgerEntryResponse> PostLedgerEntryAsync(LedgerEntryRequest request, CancellationToken ct)
     {
-        var fee = request.Commission + request.Insurance;
+        var fee = request.Commission;
 
         var metadata = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -54,7 +54,6 @@ public sealed class UpgSettlementLedgerClient : ISettlementLedgerClient
             ["payment_method"] = request.PaymentMethod,
             ["entry_type"] = request.EntryType,
             ["commission"] = request.Commission.ToString("0.####", CultureInfo.InvariantCulture),
-            ["insurance"] = request.Insurance.ToString("0.####", CultureInfo.InvariantCulture),
             ["gateway_settlement_id"] = request.IdempotencyKey,
         };
 
@@ -64,9 +63,9 @@ public sealed class UpgSettlementLedgerClient : ISettlementLedgerClient
                 Source = Source,
                 ExternalRef = request.DeliveryId,
                 PayeeRef = request.JeeberId,
-                GrossAmount = request.Total,
+                GrossAmount = request.GoodsCost,
                 FeeAmount = fee,
-                NetAmount = request.GoodsCost,
+                NetAmount = request.GoodsCost - fee,
                 Currency = request.Currency,
                 Metadata = metadata,
             },

@@ -25,7 +25,7 @@ public class EarningsPdfTests : IDisposable
     // Fixed deterministic earnings projection for golden-file rendering.
     private static readonly EarningsProjection TestProjection = new(
         JeeberId: "test-jeeber-001",
-        Totals:   new EarningsTotals(Net: 127_500m, Gross: 150_000m, Commission: 22_500m, Currency: "LBP"),
+        Totals:   new EarningsTotals(Net: 127_500m, Gross: 150_000m, Commission: 22_500m, Currency: "USD"),
         Entries:  new[]
         {
             new EarningsEntry(
@@ -34,7 +34,7 @@ public class EarningsPdfTests : IDisposable
                 Gross:        150_000m,
                 Commission:   22_500m,
                 Net:          127_500m,
-                Currency:     "LBP",
+                Currency:     "USD",
                 SettledAt:    new DateTimeOffset(2026, 6, 5, 10, 0, 0, TimeSpan.Zero))
         },
         DeliveryCount: 1,

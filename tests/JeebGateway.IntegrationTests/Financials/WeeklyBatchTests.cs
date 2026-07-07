@@ -54,7 +54,7 @@ public class WeeklyBatchTests
             Insurance         = 0m,
             Total             = grossAmount,
             MinimumFeeApplied = false,
-            Currency          = "LBP",
+            Currency          = "USD",
             PaymentMethod     = "cod",
             // A batchable COD row is a TRULY-settled settlement: SettlementService writes
             // State=Settled once the Jeeber records the cash (SettlementService.cs). The prior
@@ -148,9 +148,9 @@ public class WeeklyBatchTests
             Math.Max(1_000m, Math.Round(a * 0.15m, 2, MidpointRounding.AwayFromZero)));
         var expectedNet = expectedGross - expectedCommission;
 
-        Assert.Equal(expectedGross,      batch.TotalGrossLbp,      precision: 2);
-        Assert.Equal(expectedCommission, batch.TotalCommissionLbp,  precision: 2);
-        Assert.Equal(expectedNet,        batch.TotalNetLbp,          precision: 2);
+        Assert.Equal(expectedGross,      batch.TotalGrossUsd,      precision: 2);
+        Assert.Equal(expectedCommission, batch.TotalCommissionUsd,  precision: 2);
+        Assert.Equal(expectedNet,        batch.TotalNetUsd,          precision: 2);
         Assert.Equal(amounts.Length,     batch.SettlementCount);
     }
 
@@ -260,7 +260,7 @@ public class WeeklyBatchTests
         Assert.Single(bB);
         Assert.Equal(2,         aB[0].SettlementCount);
         Assert.Equal(1,         bB[0].SettlementCount);
-        Assert.Equal(150_000m,  aB[0].TotalGrossLbp);
-        Assert.Equal(200_000m,  bB[0].TotalGrossLbp);
+        Assert.Equal(150_000m,  aB[0].TotalGrossUsd);
+        Assert.Equal(200_000m,  bB[0].TotalGrossUsd);
     }
 }

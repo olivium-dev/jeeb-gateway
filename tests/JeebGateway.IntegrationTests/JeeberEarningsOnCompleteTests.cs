@@ -41,11 +41,11 @@ public class JeeberEarningsOnCompleteTests
     private const string TenantApplicationId = "17f6f47f-4047-4f1e-bac2-632a5eaa9a46";
     private const string ValidCode = "1234";
 
-    // Standard tier on a 2,000,000 LBP agreed fee.
+    // Standard tier on a 2,000,000 USD agreed fee.
     private const decimal AcceptedFee = 2_000_000m;
-    private const decimal ExpectedCommission = 300_000m;  // max(1000, 2_000_000 * 0.15)
-    private const decimal ExpectedInsurance = 40_000m;     // 2_000_000 * 0.02
-    private const decimal ExpectedTotal = 2_340_000m;      // goods + commission + insurance
+    private const decimal ExpectedCommission = 200_000m;  // 2_000_000 * 0.10
+    private const decimal ExpectedInsurance = 0m;
+    private const decimal ExpectedTotal = ExpectedCommission;
 
     /// <summary>
     /// KEYSTONE: an OTP verify that completes the handover on the flag-ON upstream path
@@ -87,7 +87,7 @@ public class JeeberEarningsOnCompleteTests
         totals.GetProperty("gross").GetDecimal().Should().Be(AcceptedFee);
         totals.GetProperty("commission").GetDecimal().Should().Be(ExpectedCommission);
         totals.GetProperty("net").GetDecimal().Should().Be(AcceptedFee - ExpectedCommission);
-        totals.GetProperty("currency").GetString().Should().Be("LBP");
+        totals.GetProperty("currency").GetString().Should().Be("USD");
     }
 
     /// <summary>

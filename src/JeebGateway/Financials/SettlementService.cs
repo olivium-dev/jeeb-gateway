@@ -11,7 +11,7 @@ namespace JeebGateway.Financials;
 /// </summary>
 public sealed class SettlementService : ISettlementService
 {
-    public const string CurrencyLbp = "LBP";
+    public const string CurrencyUsd = "USD";
     public const string PaymentMethodCash = "cash";
 
     private readonly ISettlementStore _store;
@@ -163,8 +163,8 @@ public sealed class SettlementService : ISettlementService
 
         var tier = CommissionCalculator.ResolveTier(delivery.TierId);
 
-        // BR-16: server-authoritative COD amount from the delivery row (the agreed
-        // fee the client owes the jeeber), NEVER a caller-supplied body.
+        // Q-011 / BR-16: server-authoritative amount from the delivery row (the
+        // accepted offer fee the client owes the jeeber), NEVER a caller body.
         var codAmount = delivery.AcceptedFee ?? 0m;
         if (codAmount <= 0m)
         {
@@ -220,7 +220,7 @@ public sealed class SettlementService : ISettlementService
             Insurance = breakdown.Insurance,
             Total = breakdown.Total,
             MinimumFeeApplied = breakdown.MinimumFeeApplied,
-            Currency = CurrencyLbp,
+            Currency = CurrencyUsd,
             PaymentMethod = paymentMethod,
             State = state,
             CodState = CodSettlementState.Recorded,

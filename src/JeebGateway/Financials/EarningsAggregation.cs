@@ -26,7 +26,7 @@ public sealed record DailyEarnings(
 /// The canonical earnings totals envelope (S10 H5/A4 / JEB-58, BR-16/BR-17).
 ///
 /// <c>net == gross - commission</c> for the period, all in <see cref="Currency"/>
-/// (always "LBP"). The wallet copies the per-settlement values verbatim — the
+/// (always "USD"). The wallet copies the per-settlement values verbatim — the
 /// gateway performs no rate re-derivation, it only sums the persisted rows.
 /// </summary>
 public sealed record EarningsTotals(
@@ -117,7 +117,7 @@ public interface IEarningsAggregationService
 /// behind the same interface without changing the controller.
 ///
 /// <para>net = gross(goodsCost) - commission, per settled delivery; the period
-/// totals are the sums. Currency is always LBP (the gateway's single
+/// totals are the sums. Currency is always USD (the gateway's single
 /// operating currency). No re-arithmetic on the persisted commission (BR-16).</para>
 /// </summary>
 public sealed class EarningsAggregationService : IEarningsAggregationService
@@ -161,7 +161,7 @@ public sealed class EarningsAggregationService : IEarningsAggregationService
 
         return new EarningsProjection(
             JeeberId: jeeberId,
-            Totals: new EarningsTotals(net, gross, commission, SettlementService.CurrencyLbp),
+            Totals: new EarningsTotals(net, gross, commission, SettlementService.CurrencyUsd),
             Entries: entries,
             DeliveryCount: rows.Count,
             PeriodStart: periodStart,
@@ -239,7 +239,7 @@ public sealed class EarningsAggregationService : IEarningsAggregationService
 
         return new EarningsProjection(
             JeeberId:      jeeberId,
-            Totals:        new EarningsTotals(net, gross, commission, SettlementService.CurrencyLbp),
+            Totals:        new EarningsTotals(net, gross, commission, SettlementService.CurrencyUsd),
             Entries:       entries,
             DeliveryCount: rows.Count,
             PeriodStart:   from,

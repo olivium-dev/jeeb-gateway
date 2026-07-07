@@ -932,8 +932,8 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 // Track per-controller migrations against GATEWAY-REMEDIATION-PLAN.md.
 // ===========================================================================
 
-// JEB-56: JeebPricingOptions — makes commission rates and floor config-overridable.
-// Defaults match CommissionCalculator constants (Standard=15%, Express=20%, etc.).
+// JEB-56: JeebPricingOptions — makes commission rates config-overridable.
+// Defaults match CommissionCalculator constants (all tiers flat 10%).
 builder.Services.Configure<JeebPricingOptions>(
     builder.Configuration.GetSection(JeebPricingOptions.SectionName));
 
@@ -945,8 +945,8 @@ builder.Services.Configure<JeebPricingOptions>(
 // connection string is absent (local dev / CI without Postgres), the in-memory
 // fallback keeps the vertical exercisable.
 //
-// SettlementService re-computes the Jeeb fee (commission % per tier +
-// 2% insurance, min 1000 LBP) from the row's tier and posts a single
+// SettlementService re-computes the Jeeb fee (flat 10% commission,
+// no insurance or floor) from the row's tier and posts a single
 // best-effort ledger entry via ISettlementLedgerClient. The settlement row
 // is the gateway-side system of record; the ledger post is idempotent on the
 // settlement id. Cash settlement is a Jeeb product concern and keeps its own

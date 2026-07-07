@@ -17,7 +17,7 @@ namespace JeebGateway.IntegrationTests;
 ///
 ///   * H1/A1/A3 — settle a REAL Done delivery (the keystone: the gate now accepts
 ///                the canonical Done state, not just the legacy delivered/rated).
-///   * H5/A4    — earnings summary nested totals envelope {net,gross,commission,currency:LBP}.
+///   * H5/A4    — earnings summary nested totals envelope {net,gross,commission,currency:USD}.
 ///   * A5       — ETag header + If-None-Match → 304.
 ///   * N15      — from>to → 400.
 ///   * H3.3/H4/N10/N11 — COD-compose: record → by-delivery read → mark-paid
@@ -56,7 +56,7 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         body.Commission.Should().Be(300000m);   // max(1000, 2_000_000*0.15)
         body.Insurance.Should().Be(40000m);     // 2_000_000*0.02
         body.Total.Should().Be(2340000m);
-        body.Currency.Should().Be("LBP");
+        body.Currency.Should().Be("USD");
         body.MinimumFeeApplied.Should().BeFalse();
         body.LedgerEntryId.Should().NotBeNullOrEmpty();
     }
@@ -116,7 +116,7 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         var totals = doc.RootElement.GetProperty("totals");
-        totals.GetProperty("currency").GetString().Should().Be("LBP");
+        totals.GetProperty("currency").GetString().Should().Be("USD");
         totals.GetProperty("gross").GetDecimal().Should().Be(2000000m);
         totals.GetProperty("commission").GetDecimal().Should().Be(300000m);
         totals.GetProperty("net").GetDecimal().Should().Be(1700000m); // gross - commission
@@ -136,7 +136,7 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         var resp = await jeeber.GetAsync("/api/earnings/lifetime");
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-        doc.RootElement.GetProperty("totals").GetProperty("currency").GetString().Should().Be("LBP");
+        doc.RootElement.GetProperty("totals").GetProperty("currency").GetString().Should().Be("USD");
     }
 
     // ── A5: ETag / 304 ─────────────────────────────────────────────────────────
