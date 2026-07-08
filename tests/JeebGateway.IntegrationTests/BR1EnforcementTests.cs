@@ -98,7 +98,7 @@ public class BR1EnforcementTests : IClassFixture<WebApplicationFactory<Program>>
         SeedUser(new UserProfile
         {
             Id = userId,
-            Phone = "+96550001111",
+            Phone = "+9613001111",
             Name = "Client Only",
             Roles = new List<string> { Roles.Client },
             CreatedAt = DateTimeOffset.UtcNow,
@@ -249,7 +249,7 @@ public class BR1EnforcementTests : IClassFixture<WebApplicationFactory<Program>>
         SeedUser(new UserProfile
         {
             Id = userId,
-            Phone = "+96550009999",
+            Phone = "+9613009999",
             Name = "Dual-Role Test",
             Roles = new List<string> { Roles.Client, Roles.Jeeber },
             ActiveRole = activeRole,
