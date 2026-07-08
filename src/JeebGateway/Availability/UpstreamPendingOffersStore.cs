@@ -25,10 +25,11 @@ namespace JeebGateway.Availability;
 ///     the live states (submitted/edited/pending) to <c>pending</c>, keep
 ///     <c>accepted</c>, and treat every other terminal state as
 ///     <c>withdrawn</c>.</item>
-///   <item><b>Conflict codes.</b> offer-service returns HTTP 409 with a typed
-///     error code on submit; duplicate and request-not-open retain their specific
-///     gateway exceptions, while unknown conflicts remain generic 409s instead
-///     of being rendered as a retired offer-count cap.</item>
+///   <item><b>Conflict codes.</b> offer-service returns HTTP 409 on submit.
+///     The gateway can preserve specific duplicate/request-not-open exceptions
+///     only when upstream emits typed codes; today's real wire emits generic
+///     <c>conflict</c> for those cases, so it remains a generic submit 409
+///     instead of being rendered as a retired offer-count cap.</item>
 ///   <item><b>Acting user.</b> offer-service authorizes on a gateway-injected
 ///     <c>x-user-id</c> header. The store contract already threads the acting
 ///     <c>jeeberId</c> into every write, so we forward it directly.</item>
@@ -141,10 +142,13 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
         catch (OfferUpstreamConflictException ex)
         {
             // offer-service reuses one 409 surface for multiple distinct conflicts:
-            //   (1) "you already offered"  -> DuplicateOfferException (409 offer-already-exists)
-            //   (2) "request not open"     -> RequestNotOpenForOffersException (409 request-not-open-for-offers)
-            //   (3) any other conflict     -> OfferSubmitConflictException (409 offer-submit-conflict)
+            //   (1) typed "you already offered"  -> DuplicateOfferException (409 offer-already-exists)
+            //   (2) typed "request not open"     -> RequestNotOpenForOffersException (409 request-not-open-for-offers)
+            //   (3) generic/unknown conflict     -> OfferSubmitConflictException (409 offer-submit-conflict)
             // The retired 20-offer cap must not be inferred from an unknown upstream code.
+            // Fidelity gap: current offer-service submit renders request_not_open and
+            // already_submitted as generic code=conflict, so the specific branches are
+            // unreachable until offer-service emits typed error codes.
             // offer-service submit has no count cap: unique (request_id, jeeber_id) only; 409s are state conflicts; edit cap is 422.
             if (IsDuplicateCode(ex.UpstreamCode))
             {
@@ -424,16 +428,19 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
         _ => PendingOfferStatus.Withdrawn
     };
 
+    // Fidelity gap: current offer-service submit emits generic code=conflict for
+    // request_not_open and already_submitted. These typed-code matchers are
+    // forward-compatible only; real code=conflict maps to OfferSubmitConflictException
+    // until the separate offer-service-contract fix emits typed error codes.
     private static bool IsDuplicateCode(string? code)
         => code is not null
            && (code.Contains("duplicate", StringComparison.OrdinalIgnoreCase)
                || code.Contains("already", StringComparison.OrdinalIgnoreCase)
                || code.Contains("offer_exists", StringComparison.OrdinalIgnoreCase));
 
-    // sprint-009 Lane E: offer-service returns `request_not_open` (see the class doc
-    // Contract-freeze note and IOfferServiceClient) when a bid is attempted on a request
-    // that is no longer open (accepted/expired/cancelled). Match it (and the looser
-    // `not_open` form) case-insensitively so a closed auction maps to its own 409.
+    // Forward-compatible with the future typed-code contract: match request_not_open
+    // and the looser not_open form case-insensitively so a closed auction can map
+    // to its own 409 once offer-service stops emitting generic conflict here.
     private static bool IsRequestNotOpenCode(string? code)
         => code is not null
            && (code.Contains("request_not_open", StringComparison.OrdinalIgnoreCase)

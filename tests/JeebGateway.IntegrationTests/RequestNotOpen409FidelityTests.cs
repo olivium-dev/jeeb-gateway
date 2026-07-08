@@ -20,12 +20,13 @@ using Xunit;
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// sprint-009 Lane E — 409 fidelity on submit. offer-service reuses HTTP 409 for three
-/// distinct conflicts; the store must map each to the RIGHT signal. Before this fix, an
-/// upstream <c>request_not_open</c> (auction closed) was swept into the retired offer-cap
-/// message. Now it maps to <see cref="RequestNotOpenForOffersException"/> →
-/// <c>request-not-open-for-offers</c> ProblemDetails, while duplicate and generic codes
-/// keep their existing mapping (regression guard).
+/// sprint-009 Lane E — 409 fidelity on submit. offer-service reuses HTTP 409 for
+/// distinct conflicts, but its current fallback controller emits the generic JSON
+/// error code <c>conflict</c> for both request-not-open and duplicate submit. The
+/// source-of-truth reality cases below pin today's gateway behavior: generic
+/// <c>offer-submit-conflict</c> 409, not the specific duplicate/request-not-open
+/// signals. The typed-code tests are forward-compatibility guards for a future
+/// offer-service contract fix.
 /// </summary>
 public class RequestNotOpen409FidelityTests
 {
@@ -33,9 +34,29 @@ public class RequestNotOpen409FidelityTests
     // Store-level unit tests (the mechanism)
     // -----------------------------------------------------------------
 
-    [Fact]
-    public async Task Submit_UpstreamRequestNotOpen_Throws_RequestNotOpen_NotCap()
+    [Theory]
+    [InlineData("request_not_open")]
+    [InlineData("already_submitted")]
+    public async Task Submit_OfferServiceRealConflictCode_Throws_GenericConflict_NotSpecific(string upstreamScenario)
     {
+        var store = new UpstreamPendingOffersStore(new ConflictClient("conflict"));
+
+        Func<Task> act = () => store.TrySubmitAsync(
+            "req-1", "jeeber-1", 5m, 10, null, 20, DateTimeOffset.UtcNow, CancellationToken.None);
+
+        var ex = (await act.Should().ThrowAsync<OfferSubmitConflictException>(
+            $"offer-service currently emits code=conflict for {upstreamScenario}")).Which;
+        ex.UpstreamCode.Should().Be("conflict");
+        await act.Should().NotThrowAsync<RequestNotOpenForOffersException>();
+        await act.Should().NotThrowAsync<DuplicateOfferException>();
+        await act.Should().NotThrowAsync<TooManyOffersForRequestException>();
+    }
+
+    [Fact]
+    public async Task Submit_HypotheticalTypedRequestNotOpenCode_Throws_RequestNotOpen_NotCap()
+    {
+        // Forward-compat typed-code contract only. offer-service does not
+        // currently emit request_not_open on submit; see the real conflict case.
         var store = new UpstreamPendingOffersStore(new ConflictClient("request_not_open"));
 
         Func<Task> act = () => store.TrySubmitAsync(
@@ -48,8 +69,10 @@ public class RequestNotOpen409FidelityTests
     }
 
     [Fact]
-    public async Task Submit_UpstreamDuplicate_Still_Throws_Duplicate()
+    public async Task Submit_HypotheticalTypedDuplicateCode_Still_Throws_Duplicate()
     {
+        // Forward-compat typed-code contract only. offer-service does not
+        // currently emit offer_already_exists on submit; see the real conflict case.
         var store = new UpstreamPendingOffersStore(new ConflictClient("offer_already_exists"));
 
         Func<Task> act = () => store.TrySubmitAsync(
@@ -74,9 +97,62 @@ public class RequestNotOpen409FidelityTests
     // Controller E2E — the rendered ProblemDetails
     // -----------------------------------------------------------------
 
-    [Fact]
-    public async Task Submit_WhenUpstreamRequestNotOpen_Renders_RequestNotOpen_ProblemDetails_NotCap()
+    [Theory]
+    [InlineData("request_not_open")]
+    [InlineData("already_submitted")]
+    public async Task Submit_WhenOfferServiceRealConflictCode_Renders_GenericConflict_ProblemDetails(string upstreamScenario)
     {
+        var fake = new ConflictClient("conflict");
+        using var factory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureAppConfiguration((_, cfg) =>
+                    cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        { "FeatureFlags:UseUpstream:Offer", "true" }
+                    }));
+                builder.ConfigureTestServices(services =>
+                {
+                    services.RemoveAll<IOfferServiceClient>();
+                    services.AddSingleton<IOfferServiceClient>(fake);
+                });
+            });
+
+        var clientId = $"client-{Guid.NewGuid()}";
+        string requestId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
+            var created = await store.CreateAsync(new CreateRequestInput
+            {
+                ClientId = clientId,
+                Description = $"offer-service generic conflict for {upstreamScenario}",
+            }, default);
+            requestId = created.Id;
+        }
+
+        var jeeber = factory.CreateClient();
+        jeeber.DefaultRequestHeaders.Add("X-User-Id", $"jeeber-{Guid.NewGuid()}");
+        jeeber.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        var resp = await jeeber.PostAsJsonAsync(
+            $"/requests/{requestId}/offers",
+            new { fee = 9m, etaMinutes = 20 });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/offer-submit-conflict",
+            $"offer-service currently emits only code=conflict for {upstreamScenario}");
+        problem.Type.Should().NotBe("https://jeeb.dev/errors/request-not-open-for-offers");
+        problem.Type.Should().NotBe("https://jeeb.dev/errors/offer-already-exists");
+        problem.Type.Should().NotBe("https://jeeb.dev/errors/offers-per-request-exceeded");
+    }
+
+    [Fact]
+    public async Task Submit_WhenHypotheticalTypedRequestNotOpenCode_Renders_RequestNotOpen_ProblemDetails_NotCap()
+    {
+        // Forward-compat typed-code contract only. offer-service does not
+        // currently emit request_not_open on submit; see the real conflict case.
         var fake = new ConflictClient("request_not_open");
         using var factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
@@ -94,8 +170,9 @@ public class RequestNotOpen409FidelityTests
             });
 
         // The LOCAL request row is pending (pre-acceptance), so the controller's local
-        // gate passes and the submit reaches the upstream store, which returns the
-        // request_not_open 409 (the local read-model lagged the closed auction).
+        // gate passes and the submit reaches the upstream store. This typed
+        // request_not_open code is hypothetical until offer-service changes its
+        // fallback JSON error code away from generic conflict.
         var clientId = $"client-{Guid.NewGuid()}";
         string requestId;
         using (var scope = factory.Services.CreateScope())

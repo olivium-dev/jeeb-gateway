@@ -77,9 +77,30 @@ public class OfferServiceClientContractTests
         body.Should().Contain("\"fee_cents\":100").And.Contain("\"eta_minutes\":10");
     }
 
-    [Fact]
-    public async Task SubmitAsync_Maps_409_To_OfferUpstreamConflictException()
+    [Theory]
+    [InlineData("request_not_open")]
+    [InlineData("already_submitted")]
+    public async Task SubmitAsync_Preserves_OfferServiceReal_GenericConflict_Code(string upstreamScenario)
     {
+        // Source-of-truth submit 409 wire today: offer-service's fallback
+        // controller emits generic code=conflict for both request_not_open and
+        // already_submitted. It does not currently emit typed submit codes.
+        var client = ClientReturning(HttpStatusCode.Conflict,
+            """{"error":{"code":"conflict","message":"conflict"}}""");
+
+        var act = async () =>
+            await client.SubmitAsync(UserId, RequestId, 1500, 25, null, CancellationToken.None);
+
+        (await act.Should().ThrowAsync<OfferUpstreamConflictException>(
+                $"offer-service currently emits generic code=conflict for {upstreamScenario}"))
+            .Which.UpstreamCode.Should().Be("conflict");
+    }
+
+    [Fact]
+    public async Task SubmitAsync_HypotheticalTypedRequestNotOpenCode_Maps_409_To_OfferUpstreamConflictException()
+    {
+        // Forward-compat typed-code contract only. offer-service does not
+        // currently emit request_not_open on submit; see the real conflict case.
         var client = ClientReturning(HttpStatusCode.Conflict,
             """{"error":{"code":"request_not_open","message":"Request is no longer open"}}""");
 
@@ -237,9 +258,31 @@ public class OfferServiceClientContractTests
         offer.Status.Should().Be(PendingOfferStatus.Pending); // "submitted" collapses to pending
     }
 
-    [Fact]
-    public async Task UpstreamStore_Translates_DuplicateConflict_To_DuplicateOfferException()
+    [Theory]
+    [InlineData("request_not_open")]
+    [InlineData("already_submitted")]
+    public async Task UpstreamStore_OfferServiceRealConflictCode_Translates_To_GenericOfferSubmitConflict(string upstreamScenario)
     {
+        // Source-of-truth submit 409 behavior today: code=conflict is not enough
+        // information for the gateway to classify duplicate/request-not-open, so
+        // RequestOffersController renders https://jeeb.dev/errors/offer-submit-conflict.
+        var client = ClientReturning(HttpStatusCode.Conflict,
+            """{"error":{"code":"conflict","message":"conflict"}}""");
+        var store = new UpstreamPendingOffersStore(client);
+
+        var act = async () => await store.TrySubmitAsync(
+            RequestId, UserId, 15m, 25, null, 20, DateTimeOffset.UtcNow, CancellationToken.None);
+
+        var ex = (await act.Should().ThrowAsync<OfferSubmitConflictException>(
+            $"offer-service currently emits generic code=conflict for {upstreamScenario}")).Which;
+        ex.UpstreamCode.Should().Be("conflict");
+    }
+
+    [Fact]
+    public async Task UpstreamStore_HypotheticalTypedDuplicateConflict_Translates_To_DuplicateOfferException()
+    {
+        // Forward-compat typed-code contract only. offer-service does not
+        // currently emit offer_already_exists on submit; see the real conflict case.
         var client = ClientReturning(HttpStatusCode.Conflict,
             """{"error":{"code":"offer_already_exists","message":"already offered"}}""");
         var store = new UpstreamPendingOffersStore(client);
