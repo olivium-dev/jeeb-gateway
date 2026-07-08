@@ -116,9 +116,9 @@ public class PostgresTiersStoreTests
 
     [Theory]
     [InlineData("Same-Day", "same-day")]
-    [InlineData("On-the-Way", "on-the-way")]
+    [InlineData("Scheduled", "scheduled")]
     [InlineData("  Express  Lane  ", "express-lane")]
-    [InlineData("Économy!!!", "conomy")] // non-ASCII stripped, matching the [^a-z0-9]+ collapse
+    [InlineData("Éclair!!!", "clair")] // non-ASCII stripped, matching the [^a-z0-9]+ collapse
     public void Slugify_Matches_InMemory_Store_Id_Derivation(string name, string expectedSlug)
     {
         PostgresTiersStore.Slugify(name).Should().Be(expectedSlug);
@@ -171,9 +171,8 @@ public class PostgresTiersStoreTests
     {
         // Property: ReplaceAsync on an unknown id returns null (→ 404, never
         // creating a row); DeleteAsync returns true when a row was removed and
-        // false otherwise — the same contract InMemoryTiersStore exposes. A tier
-        // an admin deletes stays deleted across restarts (the seed only inserts
-        // once, ON CONFLICT DO NOTHING).
+        // false otherwise — the same store contract InMemoryTiersStore exposes.
+        // The admin HTTP boundary protects canonical tiers from deletion.
         Assert.True(true, "Replace-unknown/Delete semantics verified against a live Postgres in the QV Testcontainers suite.");
     }
 

@@ -29,6 +29,7 @@ public class DeliveryTierCreate
     public required string Name { get; init; }
     public required int SlaHours { get; init; }
     public required double RadiusKm { get; init; }
+    public required int RequestTtlSeconds { get; init; }
     public required double CommissionRate { get; init; }
     public required string PriceHint { get; init; }
 }
@@ -38,6 +39,7 @@ public class DeliveryTierReplace
     public required string Name { get; init; }
     public required int SlaHours { get; init; }
     public required double RadiusKm { get; init; }
+    public required int RequestTtlSeconds { get; init; }
     public required double CommissionRate { get; init; }
     public required string PriceHint { get; init; }
 }

@@ -395,14 +395,14 @@ public sealed class DurableRequestsStore : IRequestsStore
 
                 // Row exists in delivery-service but not in local mirror (post-restart).
                 // Build a minimal DeliveryRequest from the canonical data so the sweeper
-                // can expire it. Fields not available from the shipment are left empty —
-                // TryExpireAsync only needs the Id and the sweeper only checks Status/CreatedAt.
+                // can expire it. Fields not available from the shipment are left empty.
                 merged.Add(new DeliveryRequest
                 {
                     Id          = s.Id,
                     ClientId    = string.Empty,
                     Status      = RequestStatus.Pending,
                     Description = string.Empty,
+                    TierId      = s.TierId,
                     CreatedAt   = s.CreatedAt,
                 });
             }

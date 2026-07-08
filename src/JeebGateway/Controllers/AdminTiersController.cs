@@ -2,6 +2,8 @@ using JeebGateway.Auth.Capabilities;
 using JeebGateway.Tiers;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
+using RequestExpiryOptions = JeebGateway.Requests.RequestExpiryOptions;
 
 namespace JeebGateway.Controllers;
 
@@ -24,12 +26,17 @@ public class AdminTiersController : ControllerBase
     private const int MaxPriceHintLength = 500;
     private const int MaxSlaHours = 30 * 24; // 30 days
     private const double MaxRadiusKm = 1000.0;
+    private const int MaxRequestTtlSeconds = 30 * 24 * 60 * 60; // 30 days
 
     private readonly ITiersStore _store;
+    private readonly int _minRequestTtlSeconds;
 
-    public AdminTiersController(ITiersStore store)
+    public AdminTiersController(ITiersStore store, IOptions<RequestExpiryOptions> expiryOptions)
     {
         _store = store;
+        _minRequestTtlSeconds = Math.Max(
+            60,
+            (int)Math.Ceiling(expiryOptions.Value.NoOfferNudgeWindow.TotalSeconds));
     }
 
     [HttpGet]
@@ -71,9 +78,11 @@ public class AdminTiersController : ControllerBase
         if (ValidateName(body.Name, out var err) is false) return err!;
         if (ValidateSlaHours(body.SlaHours, out err) is false) return err!;
         if (ValidateRadius(body.RadiusKm, out err) is false) return err!;
+        if (ValidateRequestTtl(body.RequestTtlSeconds, out err) is false) return err!;
         if (ValidateCommission(body.CommissionRate, out err) is false) return err!;
         if (ValidatePriceHint(body.PriceHint, out err) is false) return err!;
         if (body.Id is not null && ValidateId(body.Id, out err) is false) return err!;
+        if (ValidateCreatableTierId(body, out err) is false) return err!;
 
         try
         {
@@ -83,6 +92,7 @@ public class AdminTiersController : ControllerBase
                 Name = body.Name!,
                 SlaHours = body.SlaHours!.Value,
                 RadiusKm = body.RadiusKm!.Value,
+                RequestTtlSeconds = body.RequestTtlSeconds!.Value,
                 CommissionRate = body.CommissionRate!.Value,
                 PriceHint = body.PriceHint!
             }, adminId, ct);
@@ -114,6 +124,7 @@ public class AdminTiersController : ControllerBase
         if (ValidateName(body.Name, out var err) is false) return err!;
         if (ValidateSlaHours(body.SlaHours, out err) is false) return err!;
         if (ValidateRadius(body.RadiusKm, out err) is false) return err!;
+        if (ValidateRequestTtl(body.RequestTtlSeconds, out err) is false) return err!;
         if (ValidateCommission(body.CommissionRate, out err) is false) return err!;
         if (ValidatePriceHint(body.PriceHint, out err) is false) return err!;
 
@@ -124,6 +135,7 @@ public class AdminTiersController : ControllerBase
                 Name = body.Name!,
                 SlaHours = body.SlaHours!.Value,
                 RadiusKm = body.RadiusKm!.Value,
+                RequestTtlSeconds = body.RequestTtlSeconds!.Value,
                 CommissionRate = body.CommissionRate!.Value,
                 PriceHint = body.PriceHint!
             }, adminId, ct);
@@ -144,6 +156,8 @@ public class AdminTiersController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Delete(string id, CancellationToken ct)
     {
+        if (ValidateDeletableTierId(id, out var err) is false) return err!;
+
         var removed = await _store.DeleteAsync(id, ct);
         if (!removed) return NotFound();
         return NoContent();
@@ -223,15 +237,71 @@ public class AdminTiersController : ControllerBase
         return true;
     }
 
-    private bool ValidateCommission(double? rate, out IActionResult? error)
+    private bool ValidateRequestTtl(int? seconds, out IActionResult? error)
     {
-        if (rate is null || double.IsNaN(rate.Value) || rate < 0 || rate > 1)
+        if (seconds is null || seconds < _minRequestTtlSeconds || seconds > MaxRequestTtlSeconds)
         {
             error = BadRequest(new ProblemDetails
             {
-                Title = "commission_rate must be between 0 and 1 (inclusive).",
+                Title = $"request_ttl_seconds must be between {_minRequestTtlSeconds} and {MaxRequestTtlSeconds}.",
                 Status = StatusCodes.Status400BadRequest
             });
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    private bool ValidateCommission(double? rate, out IActionResult? error)
+    {
+        // Reject any non-flat rate with a clean 400. The predicate is EXACT (matches the
+        // Postgres CHECK (commission_rate = 0.10) exactly) so no near-miss value can pass
+        // the API and then hit the DB constraint as an uncaught 500. A valid "0.10" payload
+        // parses to the same double as RequiredCommissionRate, so exact equality accepts it.
+        if (rate is null
+            || double.IsNaN(rate.Value)
+            || rate.Value != InMemoryTiersStore.RequiredCommissionRate)
+        {
+            error = BadRequest(new ProblemDetails
+            {
+                Title = "commission_rate must be exactly 0.10.",
+                Status = StatusCodes.Status400BadRequest
+            });
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    private IActionResult? FixedCatalogProblem(string title) => BadRequest(new ProblemDetails
+    {
+        Title = title,
+        Status = StatusCodes.Status400BadRequest
+    });
+
+    private bool ValidateCreatableTierId(DeliveryTierCreateRequest body, out IActionResult? error)
+    {
+        var id = string.IsNullOrWhiteSpace(body.Id)
+            ? InMemoryTiersStore.Slugify(body.Name!)
+            : body.Id.Trim();
+
+        if (!InMemoryTiersStore.IsCanonicalTierId(id))
+        {
+            error = FixedCatalogProblem("tier catalog is fixed to exactly three ids: urgent, same-day, scheduled.");
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    private bool ValidateDeletableTierId(string id, out IActionResult? error)
+    {
+        if (InMemoryTiersStore.IsCanonicalTierId(id))
+        {
+            error = FixedCatalogProblem("canonical tiers cannot be deleted; the catalog must remain exactly three tiers.");
             return false;
         }
 

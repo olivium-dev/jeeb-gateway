@@ -12,13 +12,13 @@
 --            the table's natural unique key, so re-running this migration
 --            is a no-op and never overwrites an admin's hand-edited row.
 --
---            Commission rates encode the flat 10% USD policy.
+--            Commission is a flat 10% (USD) across all tiers.
 --
 --            Test accounts for the P1-P5 personas live in
 --            db/seeds/test_accounts.sql; they are NOT in this migration
 --            because production must never auto-create them.
 -- Refs:      FR-4.1 (tier matrix), FR-17.1 (prohibited items list),
---            BR-2   (commission policy per tier).
+--            BR-2   (flat commission policy).
 -- =====================================================================
 
 BEGIN;

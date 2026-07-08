@@ -21,15 +21,10 @@
 --
 -- Notes:     Idempotent — CREATE TABLE/INDEX IF NOT EXISTS + the seed uses
 --            ON CONFLICT DO NOTHING, so re-running is a no-op and never
---            stomps an admin's hand-edited row. The five default tiers
---            (urgent, same-day, scheduled, economy, on-the-way) mirror
---            InMemoryTiersStore.DefaultTiers EXACTLY (same ids, SLAs,
---            radii, commission rates, price hints, created_by/updated_by=
---            'system') so first-run behaviour is byte-for-byte the same as
---            the in-memory seed. Because the seed only inserts once (ON
---            CONFLICT DO NOTHING), a tier an admin later DELETES stays
---            deleted across restarts — the durable, correct behaviour
---            (the in-memory store used to resurrect it on every boot).
+--            stomps an admin's hand-edited row. Migration 0035 later collapses
+--            this table to the fixed three-tier catalog used by the current
+--            gateway; these first-run seed rows all carry the flat 10%
+--            commission policy.
 --
 --            Name uniqueness is enforced case-insensitively via a UNIQUE
 --            index on LOWER(name), matching InMemoryTiersStore's
@@ -67,17 +62,16 @@ CREATE INDEX IF NOT EXISTS idx_tiers_sla_name
     ON tiers (sla_hours, LOWER(name));
 
 -- ---------------------------------------------------------------------
--- Seed the five default tiers — EXACT mirror of
--- InMemoryTiersStore.DefaultTiers(now). ON CONFLICT DO NOTHING keeps this
+-- Seed the original tier catalog. ON CONFLICT DO NOTHING keeps this
 -- idempotent and never overwrites an admin's edit.
 -- ---------------------------------------------------------------------
 INSERT INTO tiers (id, name, sla_hours, radius_km, commission_rate, price_hint, created_by, updated_by)
 VALUES
-    ('urgent',     'Urgent',      1,  5.0,  0.25, 'Premium — fastest dispatch, top-of-list matching', 'system', 'system'),
-    ('same-day',   'Same-Day',    8,  15.0, 0.20, 'Standard same-day rate',                           'system', 'system'),
-    ('scheduled',  'Scheduled',  24,  25.0, 0.15, 'Choose a delivery window up to 24h ahead',         'system', 'system'),
+    ('urgent',     'Urgent',      1,  5.0,  0.10, 'Premium — fastest dispatch, top-of-list matching', 'system', 'system'),
+    ('same-day',   'Same-Day',    8,  15.0, 0.10, 'Standard same-day rate',                           'system', 'system'),
+    ('scheduled',  'Scheduled',  24,  25.0, 0.10, 'Choose a delivery window up to 24h ahead',         'system', 'system'),
     ('economy',    'Economy',    48,  50.0, 0.10, 'Lowest price — best for non-urgent items',         'system', 'system'),
-    ('on-the-way', 'On-the-Way',  4,  10.0, 0.18, 'Matched to Jeebers already routed near your pickup','system', 'system')
+    ('on-the-way', 'On-the-Way',  4,  10.0, 0.10, 'Matched to Jeebers already routed near your pickup','system', 'system')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO schema_migrations (version)

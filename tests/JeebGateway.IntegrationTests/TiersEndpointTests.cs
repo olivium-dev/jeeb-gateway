@@ -9,7 +9,7 @@ namespace JeebGateway.IntegrationTests;
 
 /// <summary>
 /// T-backend-009: delivery tier catalog endpoints. Asserts both the public
-/// read surface (GET /tiers returns the five seeded tiers with the required
+/// read surface (GET /tiers returns the three seeded tiers with the required
 /// shape) and the admin CRUD surface (POST/PUT/DELETE /admin/tiers), plus
 /// the "tier changes take effect on next request" acceptance criterion.
 ///
@@ -26,7 +26,7 @@ public class TiersEndpointTests
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task Get_Tiers_Returns_Five_Default_Tiers_With_Required_Fields()
+    public async Task Get_Tiers_Returns_Three_Default_Tiers_With_Required_Fields()
     {
         using var factory = NewFactory();
         var client = factory.CreateClient();
@@ -35,18 +35,27 @@ public class TiersEndpointTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<ListResponse>();
-        body!.Items.Should().HaveCount(5);
+        body!.Items.Should().HaveCount(3);
 
         body.Items.Select(t => t.Name).Should().BeEquivalentTo(new[]
         {
-            "Urgent", "Same-Day", "Scheduled", "Economy", "On-the-Way"
+            "Urgent", "Same-Day", "Scheduled"
         });
+
+        body.Items.Single(t => t.Id == "urgent").RadiusKm.Should().Be(3.0);
+        body.Items.Single(t => t.Id == "urgent").RequestTtlSeconds.Should().Be(30 * 60);
+        body.Items.Single(t => t.Id == "same-day").RadiusKm.Should().Be(10.0);
+        body.Items.Single(t => t.Id == "same-day").RequestTtlSeconds.Should().Be(2 * 60 * 60);
+        body.Items.Single(t => t.Id == "scheduled").RadiusKm.Should().Be(25.0);
+        body.Items.Single(t => t.Id == "scheduled").RequestTtlSeconds.Should().Be(24 * 60 * 60);
+        body.Items.Should().OnlyContain(t => t.CommissionRate == 0.10);
 
         foreach (var t in body.Items)
         {
             t.Id.Should().NotBeNullOrWhiteSpace();
             t.SlaHours.Should().BeGreaterThan(0);
             t.RadiusKm.Should().BeGreaterThan(0);
+            t.RequestTtlSeconds.Should().BeGreaterThan(0);
             t.CommissionRate.Should().BeInRange(0, 1);
             t.PriceHint.Should().NotBeNullOrWhiteSpace();
         }
@@ -68,7 +77,7 @@ public class TiersEndpointTests
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task Admin_Create_Returns_201_With_Generated_Slug_Id()
+    public async Task Admin_Create_Rejects_Fourth_NonCanonical_Tier()
     {
         using var factory = NewFactory();
         var admin = AdminClient(factory, "admin-create-1");
@@ -78,20 +87,16 @@ public class TiersEndpointTests
             name = "Overnight",
             slaHours =12,
             radiusKm =20.0,
-            commissionRate =0.22,
+            requestTtlSeconds =12 * 60 * 60,
+            commissionRate =0.10,
             priceHint ="Pick up tonight, drop off tomorrow"
         });
 
-        resp.StatusCode.Should().Be(HttpStatusCode.Created);
-        var created = await resp.Content.ReadFromJsonAsync<TierDto>();
-        created!.Id.Should().Be("overnight");
-        created.Name.Should().Be("Overnight");
-        created.SlaHours.Should().Be(12);
-        created.RadiusKm.Should().Be(20.0);
-        created.CommissionRate.Should().Be(0.22);
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
         var list = await admin.GetFromJsonAsync<ListResponse>("/tiers");
-        list!.Items.Should().Contain(t => t.Id == "overnight");
+        list!.Items.Should().HaveCount(3);
+        list.Items.Should().NotContain(t => t.Id == "overnight");
     }
 
     [Fact]
@@ -105,6 +110,7 @@ public class TiersEndpointTests
             name = "ShouldFail",
             slaHours =1,
             radiusKm =1.0,
+            requestTtlSeconds =30 * 60,
             commissionRate =0.1,
             priceHint ="x"
         });
@@ -128,6 +134,7 @@ public class TiersEndpointTests
     [InlineData("X", 0, 1.0, 0.1, "x", "sla zero")]
     [InlineData("X", 1, 0.0, 0.1, "x", "radius zero")]
     [InlineData("X", 1, 1.0, -0.1, "x", "negative commission")]
+    [InlineData("X", 1, 1.0, 0.11, "x", "non-flat commission")]
     [InlineData("X", 1, 1.0, 1.5, "x", "commission > 1")]
     [InlineData("X", 1, 1.0, 0.1, "", "blank price hint")]
     public async Task Admin_Create_Rejects_Invalid_Input(
@@ -142,8 +149,28 @@ public class TiersEndpointTests
             name,
             slaHours =sla,
             radiusKm =radius,
+            requestTtlSeconds =30 * 60,
             commissionRate =commission,
             priceHint =hint
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task Admin_Create_Rejects_Request_Ttl_Below_No_Offer_Nudge_Window()
+    {
+        using var factory = NewFactory();
+        var admin = AdminClient(factory, "admin-short-ttl");
+
+        var resp = await admin.PostAsJsonAsync("/admin/tiers", new
+        {
+            name = "Too Short",
+            slaHours = 1,
+            radiusKm = 1.0,
+            requestTtlSeconds = 60,
+            commissionRate = 0.1,
+            priceHint = "x"
         });
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
@@ -160,7 +187,8 @@ public class TiersEndpointTests
             name = "urgent",
             slaHours =2,
             radiusKm =5.0,
-            commissionRate =0.3,
+            requestTtlSeconds =30 * 60,
+            commissionRate =0.1,
             priceHint ="duplicate"
         });
 
@@ -179,6 +207,7 @@ public class TiersEndpointTests
             name = "BadSlug",
             slaHours =1,
             radiusKm =1.0,
+            requestTtlSeconds =30 * 60,
             commissionRate =0.1,
             priceHint ="x"
         });
@@ -197,7 +226,8 @@ public class TiersEndpointTests
             name = "Urgent",
             slaHours =2,
             radiusKm =7.5,
-            commissionRate =0.30,
+            requestTtlSeconds =45 * 60,
+            commissionRate =0.10,
             priceHint ="Updated hint"
         });
 
@@ -205,8 +235,52 @@ public class TiersEndpointTests
         var updated = await resp.Content.ReadFromJsonAsync<TierDto>();
         updated!.SlaHours.Should().Be(2);
         updated.RadiusKm.Should().Be(7.5);
-        updated.CommissionRate.Should().Be(0.30);
+        updated.RequestTtlSeconds.Should().Be(45 * 60);
+        updated.CommissionRate.Should().Be(0.10);
         updated.PriceHint.Should().Be("Updated hint");
+    }
+
+    [Fact]
+    public async Task Admin_Put_Rejects_NonFlat_Commission()
+    {
+        using var factory = NewFactory();
+        var admin = AdminClient(factory, "admin-put-commission");
+
+        var resp = await admin.PutAsJsonAsync("/admin/tiers/urgent", new
+        {
+            name = "Urgent",
+            slaHours =2,
+            radiusKm =7.5,
+            requestTtlSeconds =45 * 60,
+            commissionRate =0.11,
+            priceHint ="Updated hint"
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Theory]
+    [InlineData(0.11)]          // gross non-flat
+    [InlineData(0.1000005)]     // near-miss (~5e-7)
+    [InlineData(0.1000000005)]  // tinier near-miss (~5e-10) — must still be a clean 400, not a DB 500
+    public async Task Admin_Put_Rejects_NonExact_Commission_With_Clean_400(double commissionRate)
+    {
+        // Any value that is not exactly 0.10 must be rejected with a clean 400 at the API,
+        // so it can never slip past the tolerance and hit the exact Postgres CHECK as a 500.
+        using var factory = NewFactory();
+        var admin = AdminClient(factory, "admin-put-commission-nonexact");
+
+        var resp = await admin.PutAsJsonAsync("/admin/tiers/urgent", new
+        {
+            name = "Urgent",
+            slaHours = 2,
+            radiusKm = 7.5,
+            requestTtlSeconds = 45 * 60,
+            commissionRate,
+            priceHint = "Updated hint"
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 
     [Fact]
@@ -220,6 +294,7 @@ public class TiersEndpointTests
             name = "Ghost",
             slaHours =1,
             radiusKm =1.0,
+            requestTtlSeconds =30 * 60,
             commissionRate =0.1,
             priceHint ="x"
         });
@@ -228,17 +303,17 @@ public class TiersEndpointTests
     }
 
     [Fact]
-    public async Task Admin_Delete_Removes_Tier_And_Subsequent_Get_Excludes_It()
+    public async Task Admin_Delete_Rejects_Canonical_Tier()
     {
         using var factory = NewFactory();
         var admin = AdminClient(factory, "admin-delete");
 
-        var del = await admin.DeleteAsync("/admin/tiers/economy");
-        del.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        var del = await admin.DeleteAsync("/admin/tiers/scheduled");
+        del.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
         var list = await admin.GetFromJsonAsync<ListResponse>("/tiers");
-        list!.Items.Should().NotContain(t => t.Id == "economy");
-        list.Items.Should().HaveCount(4);
+        list!.Items.Should().Contain(t => t.Id == "scheduled");
+        list.Items.Should().HaveCount(3);
     }
 
     [Fact]
@@ -272,7 +347,8 @@ public class TiersEndpointTests
             name = "Urgent",
             slaHours =3,
             radiusKm =6.0,
-            commissionRate =0.27,
+            requestTtlSeconds =60 * 60,
+            commissionRate =0.10,
             priceHint ="Now slower"
         });
         put.EnsureSuccessStatusCode();
@@ -281,6 +357,7 @@ public class TiersEndpointTests
         var urgentAfter = after!.Items.Single(t => t.Id == "urgent");
         urgentAfter.SlaHours.Should().Be(3);
         urgentAfter.RadiusKm.Should().Be(6.0);
+        urgentAfter.RequestTtlSeconds.Should().Be(60 * 60);
     }
 
     [Fact]
@@ -300,7 +377,8 @@ public class TiersEndpointTests
             Name = "Urgent",
             SlaHours = originalSla + 100,
             RadiusKm = 99.0,
-            CommissionRate = 0.42,
+            RequestTtlSeconds = 90 * 60,
+            CommissionRate = 0.10,
             PriceHint = "mutated"
         }, "admin", CancellationToken.None);
 
@@ -333,6 +411,7 @@ public class TiersEndpointTests
         string Name,
         int SlaHours,
         double RadiusKm,
+        int RequestTtlSeconds,
         double CommissionRate,
         string PriceHint,
         DateTimeOffset CreatedAt,

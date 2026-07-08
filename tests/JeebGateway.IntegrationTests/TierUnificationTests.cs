@@ -30,8 +30,8 @@ namespace JeebGateway.IntegrationTests;
 ///
 /// <list type="bullet">
 ///   <item><description>The legacy→catalog alias table (<see cref="LegacyTierCodes"/>):
-///     flash→urgent, express→urgent, standard→same-day, on_the_way→on-the-way,
-///     eco→economy; unknown ids pass through untouched.</description></item>
+///     flash→urgent, express→urgent, standard→same-day, on_the_way→same-day,
+///     eco→scheduled; unknown ids pass through untouched.</description></item>
 ///   <item><description><see cref="NewRequestPushNotifier"/> resolves a human display
 ///     name for BOTH catalog ids and legacy-mapped codes (the original defect: a legacy
 ///     code never resolved, so push bodies silently lost the tier suffix). Unresolvable
@@ -53,10 +53,10 @@ public class TierUnificationTests
     [InlineData("flash", "urgent")]
     [InlineData("express", "urgent")]
     [InlineData("standard", "same-day")]
-    [InlineData("on_the_way", "on-the-way")]
-    [InlineData("eco", "economy")]
+    [InlineData("on_the_way", "same-day")]
+    [InlineData("eco", "scheduled")]
     [InlineData("FLASH", "urgent")]        // case-insensitive, like the catalog store
-    [InlineData(" eco ", "economy")]       // trimmed
+    [InlineData(" eco ", "scheduled")]     // trimmed
     public void LegacyCode_MapsToItsCatalogEquivalent(string legacy, string expectedCatalogId)
     {
         LegacyTierCodes.TryMapToCatalogId(legacy, out var catalogId).Should().BeTrue();
@@ -68,8 +68,6 @@ public class TierUnificationTests
     [InlineData("urgent")]
     [InlineData("same-day")]
     [InlineData("scheduled")]
-    [InlineData("economy")]
-    [InlineData("on-the-way")]
     [InlineData("some-admin-added-tier")]
     public void NonLegacyId_PassesThroughCanonicalizeUntouched(string id)
     {
@@ -100,14 +98,12 @@ public class TierUnificationTests
     [InlineData("urgent", "Urgent")]
     [InlineData("same-day", "Same-Day")]
     [InlineData("scheduled", "Scheduled")]
-    [InlineData("economy", "Economy")]
-    [InlineData("on-the-way", "On-the-Way")]
     // Legacy-mapped codes resolve to their aliased catalog row's display name.
     [InlineData("flash", "Urgent")]
     [InlineData("express", "Urgent")]
     [InlineData("standard", "Same-Day")]
-    [InlineData("on_the_way", "On-the-Way")]
-    [InlineData("eco", "Economy")]
+    [InlineData("on_the_way", "Same-Day")]
+    [InlineData("eco", "Scheduled")]
     public async Task PushBody_CarriesDisplayName_ForCatalogAndLegacyTierIds(
         string tierId, string expectedDisplayName)
     {
@@ -386,13 +382,13 @@ public class TierUnificationTests
                     new DeliveryTierDto
                     {
                         Id = UpstreamStandardTierId, Name = "Standard", SlaHours = 24,
-                        RadiusKm = 5.0, CommissionRate = 0.12, PriceHint = "Standard rate",
+                        RadiusKm = 5.0, CommissionRate = 0.10, PriceHint = "Standard rate",
                         CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
                     },
                     new DeliveryTierDto
                     {
                         Id = "9f1c0e6b-1b2a-5c3d-8e4f-0a1b2c3d4e5f", Name = "Express", SlaHours = 4,
-                        RadiusKm = 8.0, CommissionRate = 0.15, PriceHint = "Faster dispatch",
+                        RadiusKm = 8.0, CommissionRate = 0.10, PriceHint = "Faster dispatch",
                         CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
                     },
                 };

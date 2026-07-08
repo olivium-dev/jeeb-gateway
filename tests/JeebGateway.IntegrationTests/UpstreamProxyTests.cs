@@ -46,7 +46,8 @@ public class UpstreamProxyTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<TiersListDto>();
-        body!.Items.Should().HaveCount(5);
+        body!.Items.Should().HaveCount(3);
+        body.Items.Select(t => t.Id).Should().BeEquivalentTo(new[] { "urgent", "same-day", "scheduled" });
     }
 
     [Fact]

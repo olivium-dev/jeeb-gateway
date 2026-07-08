@@ -876,6 +876,7 @@ public sealed class ShipmentDetailDto
     public required string Id { get; init; }
     public string? TenantId { get; init; }
     public string? OrderId { get; init; }
+    public string? TierId { get; init; }
     public string? WorkflowId { get; init; }
     public int WorkflowVersion { get; init; }
     public required string CurrentStage { get; init; }

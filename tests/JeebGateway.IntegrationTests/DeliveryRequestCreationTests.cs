@@ -251,18 +251,22 @@ public class DeliveryRequestCreationTests : IClassFixture<WebApplicationFactory<
     }
 
     /// <summary>
-    /// Acceptance criterion: request expires after 30 minutes if no offer
-    /// is accepted. The sweeper itself has its own unit-test file
-    /// (RequestExpirySweeperTests) — here we just lock in the default
-    /// 30-min window so a future config tweak that violates the ticket
-    /// surfaces as a failed test rather than silent regression.
+    /// Acceptance criterion: request expiry is tier-specific. The sweeper
+    /// itself has its own unit-test file (RequestExpirySweeperTests) — here
+    /// we lock in the seeded catalog TTLs so a future catalog tweak surfaces
+    /// as a failed test rather than silent regression.
     /// </summary>
     [Fact]
-    public void Default_Expiry_Window_Is_30_Minutes()
+    public async Task Seeded_Tier_Request_Ttls_Are_Canonical()
     {
-        var defaults = new RequestExpiryOptions();
-        defaults.ExpiryWindow.Should().Be(TimeSpan.FromMinutes(30));
-        defaults.NoOfferNudgeWindow.Should().BeLessThan(defaults.ExpiryWindow);
+        var tiers = await new JeebGateway.Tiers.InMemoryTiersStore().ListAsync(CancellationToken.None);
+
+        tiers.Single(t => t.Id == "urgent").RequestTtlSeconds.Should().Be(30 * 60);
+        tiers.Single(t => t.Id == "same-day").RequestTtlSeconds.Should().Be(2 * 60 * 60);
+        tiers.Single(t => t.Id == "scheduled").RequestTtlSeconds.Should().Be(24 * 60 * 60);
+
+        new RequestExpiryOptions().NoOfferNudgeWindow.Should()
+            .BeLessThan(TimeSpan.FromSeconds(tiers.Min(t => t.RequestTtlSeconds)));
     }
 
     private HttpClient ClientFor(string userId)
@@ -278,7 +282,7 @@ public class DeliveryRequestCreationTests : IClassFixture<WebApplicationFactory<
 /// Pure unit tests for the create-time tier-existence probe — no host required.
 /// feat/tier-unify-names: the probe is now catalog-backed
 /// (<see cref="CatalogBackedTiersStore"/> over <see cref="JeebGateway.Tiers.InMemoryTiersStore"/>),
-/// so it accepts BOTH the catalog ids (urgent/same-day/…) and the mapped
+    /// so it accepts BOTH the catalog ids (urgent/same-day/scheduled) and the mapped
 /// legacy 0011 codes (flash/express/standard/on_the_way/eco). Lookups are
 /// case-insensitive, matching the catalog store's id semantics.
 /// </summary>
@@ -310,8 +314,6 @@ public class InMemoryTiersStoreTests
     [InlineData("urgent")]
     [InlineData("same-day")]
     [InlineData("scheduled")]
-    [InlineData("economy")]
-    [InlineData("on-the-way")]
     // Case-insensitive, matching the catalog store's id semantics.
     [InlineData("FLASH")]
     [InlineData("Urgent")]
