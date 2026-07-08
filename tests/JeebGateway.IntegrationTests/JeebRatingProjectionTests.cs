@@ -16,8 +16,18 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public class JeebRatingProjectionTests
 {
-    private static BlindRatingPartyState Submitted(int score, string? comment = "ok")
-        => new() { Submitted = true, Score = score, Comment = comment, SubmittedAt = DateTimeOffset.UtcNow };
+    private static BlindRatingPartyState Submitted(
+        int score,
+        string? comment = "ok",
+        IEnumerable<string>? tags = null)
+        => new()
+        {
+            Submitted = true,
+            Score = score,
+            Comment = comment,
+            Tags = tags is null ? null : new List<string>(tags),
+            SubmittedAt = DateTimeOffset.UtcNow,
+        };
 
     private static BlindRatingPartyState NotSubmitted() => new() { Submitted = false };
 
@@ -99,9 +109,66 @@ public class JeebRatingProjectionTests
         var view = JeebRatingProjection.Project("d-2", JeebRatingRole.Kamal, upstream);
 
         view.State.Should().Be(RatingStateCodes.PendingTheirs);
-        view.Mine.Stars.Should().Be(5);
+        view.Mine.Submitted.Should().BeTrue();
+        view.Mine.Stars.Should().BeNull("rating details must stay blind until mutually revealed");
+        view.Mine.Comment.Should().BeNull();
+        view.Mine.Tags.Should().BeNullOrEmpty();
         view.Theirs.Submitted.Should().BeTrue();
         view.Theirs.Stars.Should().BeNull("counterparty detail must stay blind until revealed");
+    }
+
+    [Fact]
+    public void Project_LockedNoRating_When_Upstream_Revealed_But_SubmittedCount_Is_Under_Two()
+    {
+        var upstream = new BlindRevealStateResponse
+        {
+            CorrelationId = "jeeb:delivery:d-2b",
+            Revealed = true,
+            RevealedAt = DateTimeOffset.UtcNow,
+            SubmittedCount = 1,
+            Self = Submitted(5, "mine", new[] { "punctuality" }),
+            Counterparty = Submitted(2, "theirs", new[] { "courtesy" }),
+        };
+
+        var view = JeebRatingProjection.Project("d-2b", JeebRatingRole.Sami, upstream);
+
+        view.State.Should().Be(RatingStateCodes.LockedNoRating);
+        view.Revealed.Should().BeFalse();
+        view.RevealedAt.Should().BeNull();
+        view.Mine.Submitted.Should().BeTrue();
+        view.Mine.Stars.Should().BeNull();
+        view.Mine.Comment.Should().BeNull();
+        view.Mine.Tags.Should().BeNullOrEmpty();
+        view.Theirs.Submitted.Should().BeTrue();
+        view.Theirs.Stars.Should().BeNull();
+        view.Theirs.Comment.Should().BeNull();
+        view.Theirs.Tags.Should().BeNullOrEmpty();
+    }
+
+    [Fact]
+    public void Project_LockedNoRating_When_Upstream_Revealed_But_Only_One_Party_Submitted()
+    {
+        var upstream = new BlindRevealStateResponse
+        {
+            CorrelationId = "jeeb:delivery:d-2c",
+            Revealed = true,
+            RevealedAt = DateTimeOffset.UtcNow,
+            SubmittedCount = 1,
+            Self = NotSubmitted(),
+            Counterparty = Submitted(2, "theirs", new[] { "courtesy" }),
+        };
+
+        var view = JeebRatingProjection.Project("d-2c", JeebRatingRole.Sami, upstream);
+
+        view.State.Should().Be(RatingStateCodes.LockedNoRating);
+        view.Revealed.Should().BeFalse();
+        view.RevealedAt.Should().BeNull();
+        view.Mine.Submitted.Should().BeFalse();
+        view.Mine.Stars.Should().BeNull();
+        view.Theirs.Submitted.Should().BeTrue();
+        view.Theirs.Stars.Should().BeNull();
+        view.Theirs.Comment.Should().BeNull();
+        view.Theirs.Tags.Should().BeNullOrEmpty();
     }
 
     [Fact]
