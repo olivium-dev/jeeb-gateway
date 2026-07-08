@@ -47,5 +47,9 @@ public class RatingStoreSwapWiringTests
 
         store.Should().BeOfType<FeedbackServiceRatingStore>(
             "flag-on repoints the delivery-ratings record-of-truth to feedback-service");
+
+        var extended = factory.Services.GetRequiredService<IRatingStoreExtended>();
+        extended.Should().BeOfType<UnsupportedUpstreamRatingStoreExtended>(
+            "feedback-service lacks list-expired-window and mark-revealed/closed APIs, so the reveal job must fail closed instead of silently skipping");
     }
 }

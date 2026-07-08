@@ -123,11 +123,11 @@ public class BlindRevealPolicyTests
     }
 
     [Fact]
-    public void Window_Closure_Reveals_Whatever_Side_Already_Submitted()
+    public void Window_Closure_With_One_Side_Submitted_Does_Not_Reveal()
     {
         // Client rated within the window; Jeeber missed the window.
-        // After expiry the locked-no-rating outcome surfaces; the existing
-        // side is visible to both parties (no point hiding it once locked).
+        // After expiry the locked-no-rating outcome surfaces without exposing
+        // the one-sided rating to either party.
         var client = ClientEntry();
         var view = BlindRevealPolicy.ProjectFor(
             now: DeliveredAt + Window + TimeSpan.FromHours(1),
@@ -139,8 +139,8 @@ public class BlindRevealPolicyTests
 
         view.Outcome.Should().Be(BlindRevealOutcome.LockedNoRating);
         view.WindowExpired.Should().BeTrue();
-        view.MyRating.Should().BeNull("jeeber never submitted");
-        view.TheirRating.Should().Be(client);
+        view.MyRating.Should().BeNull();
+        view.TheirRating.Should().BeNull("one-sided ratings are never revealed after expiry");
     }
 
     [Fact]

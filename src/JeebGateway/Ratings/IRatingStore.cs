@@ -12,6 +12,8 @@ public sealed class RatingPair
     public required DateTimeOffset DeliveredAt { get; init; }
     public RatingEntry? ClientRating { get; set; }
     public RatingEntry? JeeberRating { get; set; }
+    public DateTimeOffset? RevealedAt { get; set; }
+    public DateTimeOffset? WindowClosedAt { get; set; }
 }
 
 /// <summary>

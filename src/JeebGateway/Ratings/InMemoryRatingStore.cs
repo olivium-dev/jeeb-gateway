@@ -7,7 +7,7 @@ namespace JeebGateway.Ratings;
 /// mutual-blind state machine; the optional feedback-service-backed store
 /// (behind <c>FeatureFlags:UseUpstream:Ratings</c>) is the upstream swap.
 /// </summary>
-public sealed class InMemoryRatingStore : IRatingStore
+public sealed class InMemoryRatingStore : IRatingStoreExtended
 {
     private readonly ConcurrentDictionary<string, RatingPair> _pairs = new(StringComparer.Ordinal);
     private readonly object _writeLock = new();
@@ -70,5 +70,69 @@ public sealed class InMemoryRatingStore : IRatingStore
 
             return Task.FromResult(pair);
         }
+    }
+
+    public Task<RatingWindowSweepResult> SweepExpiredWindowsAsync(
+        DateTimeOffset deliveredAtCutoff,
+        DateTimeOffset processedAt,
+        CancellationToken ct)
+    {
+        var revealed = 0;
+        var closed = 0;
+
+        lock (_writeLock)
+        {
+            foreach (var pair in _pairs.Values)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                if (pair.RevealedAt is not null || pair.WindowClosedAt is not null)
+                {
+                    continue;
+                }
+
+                // The submit path treats exactly deliveredAt + window as still open.
+                if (pair.DeliveredAt >= deliveredAtCutoff)
+                {
+                    continue;
+                }
+
+                if (pair.ClientRating is not null && pair.JeeberRating is not null)
+                {
+                    pair.RevealedAt = processedAt;
+                    revealed++;
+                }
+                else
+                {
+                    pair.WindowClosedAt = processedAt;
+                    closed++;
+                }
+            }
+        }
+
+        return Task.FromResult(new RatingWindowSweepResult(revealed, closed));
+    }
+
+    public Task<IReadOnlyList<JeeberRatingSummary>> ListJeebersBelowAverageAsync(
+        double threshold,
+        int minRatings,
+        CancellationToken ct)
+    {
+        List<JeeberRatingSummary> summaries;
+
+        lock (_writeLock)
+        {
+            summaries = _pairs.Values
+                .Where(pair => pair.RevealedAt is not null && pair.ClientRating is not null)
+                .GroupBy(pair => pair.JeeberId, StringComparer.Ordinal)
+                .Select(group => new JeeberRatingSummary(
+                    JeeberId: group.Key,
+                    AverageScore: group.Average(pair => pair.ClientRating!.Stars),
+                    RatingCount: group.Count()))
+                .Where(summary => summary.RatingCount >= minRatings && summary.AverageScore < threshold)
+                .ToList();
+        }
+
+        return Task.FromResult<IReadOnlyList<JeeberRatingSummary>>(summaries);
     }
 }
