@@ -154,7 +154,7 @@ public class JeeberEarningsOnCompleteTests
 
         result.Outcome.Should().Be(SettlementOutcome.Settled);
         result.Settlement!.GoodsCost.Should().Be(fee, "the amount comes from DeliveryRequest.AcceptedFee, not a caller input");
-        result.Settlement.Commission.Should().Be(112_500m); // 750_000 * 0.15
+        result.Settlement.Commission.Should().Be(75_000m); // 750_000 * 0.10 (flat, no insurance/floor — Q-001)
     }
 
     // ----------------------------------------------------------------------

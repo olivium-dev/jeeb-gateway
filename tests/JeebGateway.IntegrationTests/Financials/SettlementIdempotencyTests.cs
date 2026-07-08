@@ -172,9 +172,9 @@ public class SettlementIdempotencyTests
         result.Insurance.GetType().Should().Be(typeof(decimal));
         result.Total.GetType().Should().Be(typeof(decimal));
 
-        // Re-derive and confirm no accumulation drift.
-        var reDerived = result.GoodsCost + result.Commission + result.Insurance;
-        reDerived.Should().Be(result.Total, "total must equal sum of components, not an accumulated value");
+        // New money model (Q-001): flat 10% commission, no insurance, no floor — Total == Commission only.
+        result.Insurance.Should().Be(0m, "insurance surcharge is retired under Q-001");
+        result.Total.Should().Be(result.Commission, "total equals commission only — goods cost and insurance never accumulate into it");
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
