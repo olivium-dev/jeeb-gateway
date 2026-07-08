@@ -107,6 +107,7 @@ public sealed class JeebRequestsController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Create([FromBody] CreateRequestBody? body, CancellationToken ct)
     {
@@ -128,16 +129,16 @@ public sealed class JeebRequestsController : ControllerBase
         // the unified catalog — either a catalog id (urgent/same-day/…) or a mapped
         // legacy code (flash/express/standard/on_the_way/eco). tierId stays OPTIONAL on
         // this surface (a tier-less create is still allowed; it simply skips the
-        // delivery-row seed), so only a present-but-unknown id is rejected. Same 400
+        // delivery-row seed), so only a present-but-unknown id is rejected. Same
         // envelope (tier-not-found type URI) as the legacy create surfaces.
         if (!string.IsNullOrWhiteSpace(body.TierId)
             && !await _tiers.ExistsAsync(body.TierId, ct))
         {
-            return BadRequest(new ProblemDetails
+            return NotFound(new ProblemDetails
             {
                 Title = "tierId does not match any active delivery tier.",
                 Detail = $"tierId={body.TierId}",
-                Status = StatusCodes.Status400BadRequest,
+                Status = StatusCodes.Status404NotFound,
                 Type = "https://jeeb.dev/errors/tier-not-found"
             });
         }

@@ -31,6 +31,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.IdentityModel.Tokens;
@@ -2415,6 +2416,19 @@ testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
 
 // Must be registered early in the pipeline so it wraps the whole request.
 app.UseExceptionHandler();
+app.UseStatusCodePages(async statusCodeContext =>
+{
+    var httpContext = statusCodeContext.HttpContext;
+    var problemDetails = httpContext.RequestServices.GetRequiredService<IProblemDetailsService>();
+    await problemDetails.TryWriteAsync(new ProblemDetailsContext
+    {
+        HttpContext = httpContext,
+        ProblemDetails = new ProblemDetails
+        {
+            Status = httpContext.Response.StatusCode
+        }
+    });
+});
 
 // STT seam visibility (Track C): make the active Whisper path obvious in startup logs.
 if (useRealWhisper)
