@@ -259,13 +259,16 @@ public class TiersEndpointTests
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 
-    [Fact]
-    public async Task Admin_Put_Rejects_NearMiss_Commission_With_Clean_400()
+    [Theory]
+    [InlineData(0.11)]          // gross non-flat
+    [InlineData(0.1000005)]     // near-miss (~5e-7)
+    [InlineData(0.1000000005)]  // tinier near-miss (~5e-10) — must still be a clean 400, not a DB 500
+    public async Task Admin_Put_Rejects_NonExact_Commission_With_Clean_400(double commissionRate)
     {
-        // A near-miss (0.1000005) must be rejected with a clean 400 at the API,
-        // not slip past a loose tolerance and hit the exact Postgres CHECK as a 500.
+        // Any value that is not exactly 0.10 must be rejected with a clean 400 at the API,
+        // so it can never slip past the tolerance and hit the exact Postgres CHECK as a 500.
         using var factory = NewFactory();
-        var admin = AdminClient(factory, "admin-put-commission-nearmiss");
+        var admin = AdminClient(factory, "admin-put-commission-nonexact");
 
         var resp = await admin.PutAsJsonAsync("/admin/tiers/urgent", new
         {
@@ -273,7 +276,7 @@ public class TiersEndpointTests
             slaHours = 2,
             radiusKm = 7.5,
             requestTtlSeconds = 45 * 60,
-            commissionRate = 0.1000005,
+            commissionRate,
             priceHint = "Updated hint"
         });
 

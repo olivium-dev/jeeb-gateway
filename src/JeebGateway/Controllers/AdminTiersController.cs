@@ -255,12 +255,13 @@ public class AdminTiersController : ControllerBase
 
     private bool ValidateCommission(double? rate, out IActionResult? error)
     {
-        // Reject any non-flat rate with a clean 400. The tolerance is essentially exact
-        // (1e-9) so a near-miss like 0.1000005 cannot pass the API and then hit the exact
-        // Postgres CHECK (commission_rate = 0.10) as an uncaught 500.
+        // Reject any non-flat rate with a clean 400. The predicate is EXACT (matches the
+        // Postgres CHECK (commission_rate = 0.10) exactly) so no near-miss value can pass
+        // the API and then hit the DB constraint as an uncaught 500. A valid "0.10" payload
+        // parses to the same double as RequiredCommissionRate, so exact equality accepts it.
         if (rate is null
             || double.IsNaN(rate.Value)
-            || Math.Abs(rate.Value - InMemoryTiersStore.RequiredCommissionRate) > 1e-9)
+            || rate.Value != InMemoryTiersStore.RequiredCommissionRate)
         {
             error = BadRequest(new ProblemDetails
             {
