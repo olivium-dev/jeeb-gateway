@@ -1,6 +1,7 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Financials;
+using JeebGateway.Observability;
 using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
@@ -1601,6 +1602,8 @@ public class DeliveriesController : ControllerBase
         _log.LogWarning(
             "handover.verification_failed deliveryId={DeliveryId} correlationId={CorrelationId} attempt={Attempt}/{Max} upstreamStatus={UpstreamStatus}",
             deliveryId, correlationId, attemptCount, _otpOptions.Value.MaxAttempts, upstreamStatus);
+        BusinessOutcomeTelemetry.OtpVerifyFailures.Add(1,
+            new KeyValuePair<string, object?>("outcome", "handover_invalid_code"));
 
         activity?.SetTag("otp.verified", "false");
         activity?.SetTag("otp.attempt_count", attemptCount);
@@ -1637,6 +1640,11 @@ public class DeliveriesController : ControllerBase
                 CreatedAt       = now,
                 OtpAttemptCount = attemptCount,
             }, ct);
+
+            BusinessOutcomeTelemetry.OtpLockouts.Add(1,
+                new KeyValuePair<string, object?>("outcome", "handover_lockout"));
+            BusinessOutcomeTelemetry.HandoverEscalations.Add(1,
+                new KeyValuePair<string, object?>("outcome", "otp_locked"));
 
             _log.LogWarning(
                 "handover.lockout deliveryId={DeliveryId} correlationId={CorrelationId} attempts={Attempts} escalationId={EscalationId}",

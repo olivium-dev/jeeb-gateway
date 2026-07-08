@@ -1,3 +1,4 @@
+using JeebGateway.Observability;
 using JeebGateway.Services.Clients;
 
 namespace JeebGateway.StateService.Durable;
@@ -83,6 +84,8 @@ public sealed class StateServiceRefreshFamilyWriter : IStateRefreshFamilyWriter
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "state-service-refresh-family"));
             _logger.LogWarning(ex, "Refresh-family rotate unavailable; degrading to local store");
             return RefreshRotateOutcome.Unavailable;
         }

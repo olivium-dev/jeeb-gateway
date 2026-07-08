@@ -1,4 +1,5 @@
 using JeebGateway.Conversations;
+using JeebGateway.Observability;
 using JeebGateway.Requests.OtpHandover;
 using JeebGateway.Services.Clients;
 using JeebGateway.StateService.Durable;
@@ -253,6 +254,8 @@ public sealed class DurableRequestsStore : IRequestsStore
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "postgres-requests-owner-list"));
             _logger.LogWarning(ex,
                 "requests-durable: owner-list mirror upsert failed for {RequestId}; the row is durable in " +
                 "delivery-service but absent from the gateway owner-list mirror until the next write.",
@@ -349,6 +352,8 @@ public sealed class DurableRequestsStore : IRequestsStore
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "postgres-requests-owner-list"));
             _logger.LogWarning(ex,
                 "requests-durable: owner-list mirror lifecycle update failed for {RequestId}; " +
                 "the list may show a stale status/jeeber/fee after a bounce.",
@@ -693,6 +698,8 @@ public sealed class DurableRequestsStore : IRequestsStore
             }
             catch (Exception ex)
             {
+                BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                    new KeyValuePair<string, object?>("store", "postgres-requests-owner-list"));
                 _logger.LogWarning(ex,
                     "requests-durable: owner-list mirror cancel-status update failed for {RequestId}; " +
                     "the list may show a stale status after a bounce.",

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using JeebGateway.Availability;
+using JeebGateway.Observability;
 using JeebGateway.Services.Clients;
 using JeebGateway.StateService.Idempotency;
 
@@ -207,6 +208,8 @@ public sealed class StateServiceOfferRequestIndex : IOfferRequestIndex
         {
             // Mirror failure only forfeits bounce-survivability for THIS pairing; the local
             // index still resolves it within the instance. Never throws into the 201 path.
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "state-service-offer-routing"));
             _logger.LogWarning(ex,
                 "Durable mirror of offer-routing pairing {OfferId} -> {RequestId} failed; "
                 + "the pairing stays in-memory only and will not survive a gateway bounce.",
@@ -225,6 +228,8 @@ public sealed class StateServiceOfferRequestIndex : IOfferRequestIndex
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "state-service-offer-routing"));
             _logger.LogWarning(ex,
                 "Durable mirror of reverse offer-routing pair jeeber {JeeberId} -> {OfferId} failed; "
                 + "the jeeber's my-offers list will not survive a gateway bounce for this offer.",

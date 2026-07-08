@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using JeebGateway.Observability;
 
 namespace JeebGateway.StateService.Durable;
 
@@ -106,6 +107,8 @@ public sealed class StateServiceBroadcastEventRecorder : IBroadcastEventRecorder
             }
 
             // Any non-2xx (incl. 5xx after retries/breaker) — degrade.
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "state-service-broadcast-events"));
             _logger.LogWarning(
                 "Broadcast event record for {ContextId} returned {Status}; degrading (order create still succeeds).",
                 contextId, (int)response.StatusCode);
@@ -118,6 +121,8 @@ public sealed class StateServiceBroadcastEventRecorder : IBroadcastEventRecorder
             // the broadcasting conversation (which actually carries the phase) is
             // already created in chat; the broadcast_events row is the durable,
             // cross-service audit trail of that event.
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "state-service-broadcast-events"));
             _logger.LogWarning(ex,
                 "Broadcast event record for {ContextId} unavailable; degrading (order create still succeeds).",
                 contextId);
