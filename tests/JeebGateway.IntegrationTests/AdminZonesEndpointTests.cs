@@ -47,11 +47,11 @@ public class AdminZonesEndpointTests : IClassFixture<AdminZonesEndpointTests.Fix
     public async Task Get_Groups_Online_Jeebers_By_Configured_Boundary_With_Vehicle_Type()
     {
         var factory = _fixture.Factory();
-        await GoOnline(factory, "jeeber-downtown-a", "motorbike", "amman-downtown", lon: 35.935, lat: 31.955);
-        await GoOnline(factory, "jeeber-downtown-b", "car",       "amman-downtown", lon: 35.940, lat: 31.960);
-        await GoOnline(factory, "jeeber-abdoun-a",   "bicycle",   "amman-abdoun",   lon: 35.880, lat: 31.945);
+        await GoOnline(factory, "jeeber-downtown-a", "motorbike", "beirut-downtown",  lon: 35.500, lat: 33.898);
+        await GoOnline(factory, "jeeber-downtown-b", "car",       "beirut-downtown",  lon: 35.503, lat: 33.900);
+        await GoOnline(factory, "jeeber-achrafieh-a", "bicycle",  "beirut-achrafieh", lon: 35.525, lat: 33.888);
         // Offline Jeeber must not surface on the ops map even though it has a location.
-        await GoOnline(factory, "jeeber-going-offline", "scooter", "amman-shmeisani", lon: 35.905, lat: 31.975);
+        await GoOnline(factory, "jeeber-going-offline", "scooter", "beirut-hamra", lon: 35.484, lat: 33.896);
         await GoOffline(factory, "jeeber-going-offline");
 
         var admin = AdminClient(factory);
@@ -63,7 +63,7 @@ public class AdminZonesEndpointTests : IClassFixture<AdminZonesEndpointTests.Fix
         body!.TotalOnline.Should().Be(3);
         body.RefreshIntervalSeconds.Should().Be(30);
 
-        var downtown = body.Zones.Single(z => z.Key == "amman-downtown");
+        var downtown = body.Zones.Single(z => z.Key == "beirut-downtown");
         downtown.Count.Should().Be(2);
         downtown.CountByVehicleType.Should().BeEquivalentTo(new Dictionary<string, int>
         {
@@ -76,16 +76,16 @@ public class AdminZonesEndpointTests : IClassFixture<AdminZonesEndpointTests.Fix
             "jeeber-downtown-b"
         });
         downtown.Bounds.Should().NotBeNull();
-        downtown.Bounds!.MinLatitude.Should().Be(31.94);
+        downtown.Bounds!.MinLatitude.Should().Be(33.893);
         downtown.Jeebers.Should().OnlyContain(j => j.Latitude.HasValue && j.Longitude.HasValue);
 
-        var abdoun = body.Zones.Single(z => z.Key == "amman-abdoun");
-        abdoun.Count.Should().Be(1);
-        abdoun.Jeebers.Single().VehicleType.Should().Be("bicycle");
+        var achrafieh = body.Zones.Single(z => z.Key == "beirut-achrafieh");
+        achrafieh.Count.Should().Be(1);
+        achrafieh.Jeebers.Single().VehicleType.Should().Be("bicycle");
 
-        var shmeisani = body.Zones.Single(z => z.Key == "amman-shmeisani");
-        shmeisani.Count.Should().Be(0);
-        shmeisani.Jeebers.Should().BeEmpty();
+        var hamra = body.Zones.Single(z => z.Key == "beirut-hamra");
+        hamra.Count.Should().Be(0);
+        hamra.Jeebers.Should().BeEmpty();
     }
 
     [Fact]
@@ -237,7 +237,7 @@ public class AdminZonesEndpointTests : IClassFixture<AdminZonesEndpointTests.Fix
             {
                 // PostConfigure replaces whatever the appsettings binder
                 // produced. This is the simplest way to swap the default
-                // Amman boundaries for a deterministic test set without
+                // configured boundaries for a deterministic test set without
                 // wrestling with array-merge semantics in IConfiguration.
                 builder.ConfigureServices(services =>
                 {

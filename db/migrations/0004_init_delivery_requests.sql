@@ -34,7 +34,7 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 --
 -- `code` is the stable identifier used by application code and API
 -- contracts. `sla_minutes` is NULL for tiers without an SLA (on_the_way).
--- `commission_rate` is stored as a fraction (0.1500 = 15%) so finance
+-- `commission_rate` is stored as a fraction (0.1000 = 10%) so finance
 -- math doesn't have to remember to divide by 100.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS delivery_tiers (

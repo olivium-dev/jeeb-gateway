@@ -71,11 +71,11 @@ public sealed class SettlementBatch
     public required string JeeberId { get; init; }
     public DateOnly PeriodStart { get; init; }
     public DateOnly PeriodEnd { get; init; }
-    public decimal TotalGrossLbp { get; set; }
-    public decimal TotalCommissionLbp { get; set; }
-    public decimal TotalNetLbp { get; set; }
+    public decimal TotalGrossUsd { get; set; }
+    public decimal TotalCommissionUsd { get; set; }
+    public decimal TotalNetUsd { get; set; }
     public int SettlementCount { get; set; }
-    public string Currency { get; init; } = "LBP";
+    public string Currency { get; init; } = "USD";
     public string Status { get; set; } = "open";
     public DateTimeOffset? PaidAt { get; set; }
     public string? PaidBy { get; set; }
@@ -140,12 +140,12 @@ public sealed class PostgresSettlementBatchStore : ISettlementBatchStore
         const string upsertSql = """
             INSERT INTO settlement_batches (
                 id, jeeber_id, period_start, period_end,
-                total_gross_lbp, total_commission_lbp, total_net_lbp,
+                total_gross_usd, total_commission_usd, total_net_usd,
                 settlement_count, currency, status, created_at, updated_at
             ) VALUES (
                 gen_random_uuid(), @JeeberId, @PeriodStart, @PeriodEnd,
                 @TotalGross, @TotalCommission, @TotalNet,
-                @Count, 'LBP', 'open', now(), now()
+                @Count, 'USD', 'open', now(), now()
             )
             ON CONFLICT (jeeber_id, period_start) DO NOTHING
             RETURNING id
@@ -268,9 +268,9 @@ public sealed class PostgresSettlementBatchStore : ISettlementBatchStore
                 JeeberId            = reader.GetString(reader.GetOrdinal("jeeber_id")),
                 PeriodStart         = reader.GetFieldValue<DateOnly>(reader.GetOrdinal("period_start")),
                 PeriodEnd           = reader.GetFieldValue<DateOnly>(reader.GetOrdinal("period_end")),
-                TotalGrossLbp       = reader.GetDecimal(reader.GetOrdinal("total_gross_lbp")),
-                TotalCommissionLbp  = reader.GetDecimal(reader.GetOrdinal("total_commission_lbp")),
-                TotalNetLbp         = reader.GetDecimal(reader.GetOrdinal("total_net_lbp")),
+                TotalGrossUsd       = reader.GetDecimal(reader.GetOrdinal("total_gross_usd")),
+                TotalCommissionUsd  = reader.GetDecimal(reader.GetOrdinal("total_commission_usd")),
+                TotalNetUsd         = reader.GetDecimal(reader.GetOrdinal("total_net_usd")),
                 SettlementCount     = reader.GetInt32(reader.GetOrdinal("settlement_count")),
                 Currency            = reader.GetString(reader.GetOrdinal("currency")),
                 Status              = reader.GetString(reader.GetOrdinal("status")),
@@ -322,9 +322,9 @@ internal sealed class InMemoryFallbackSettlementBatchStore : ISettlementBatchSto
                 JeeberId           = jeeberId,
                 PeriodStart        = periodStart,
                 PeriodEnd          = periodEnd,
-                TotalGrossLbp      = settlements.Sum(s => s.GoodsCost),
-                TotalCommissionLbp = settlements.Sum(s => s.Commission),
-                TotalNetLbp        = settlements.Sum(s => s.GoodsCost - s.Commission),
+                TotalGrossUsd      = settlements.Sum(s => s.GoodsCost),
+                TotalCommissionUsd = settlements.Sum(s => s.Commission),
+                TotalNetUsd        = settlements.Sum(s => s.GoodsCost - s.Commission),
                 SettlementCount    = settlements.Count,
                 Status             = "open",
                 CreatedAt          = DateTimeOffset.UtcNow,
@@ -500,8 +500,8 @@ public sealed class WeeklySettlementBatch : BackgroundService
                     jeeberId, periodStart, periodEnd, settlements, ct);
 
                 _log.LogInformation(
-                    "Settlement batch {BatchId} created for jeeber {JeeberId}: {Count} settlements, net {NetLbp} LBP",
-                    batch.Id, jeeberId, settlements.Count, batch.TotalNetLbp);
+                    "Settlement batch {BatchId} created for jeeber {JeeberId}: {Count} settlements, net {NetUsd} USD",
+                    batch.Id, jeeberId, settlements.Count, batch.TotalNetUsd);
 
                 batchCount++;
             }

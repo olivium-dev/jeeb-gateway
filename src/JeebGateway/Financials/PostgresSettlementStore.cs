@@ -223,8 +223,8 @@ public sealed class PostgresSettlementStore : ISettlementStore
         await using var conn = await _db.OpenAsync(ct);
         // M1 (P0 money-loss): only TRULY-settled rows may enter the weekly payout batch.
         // The handover placeholder is written with state='pending_settlement', cod_state='recorded'
-        // and goods_cost=0 (→ min-fee 1000 LBP commission). Swept into the payout batch it becomes
-        // a phantom -1000 LBP net, underpaying the Jeeber and booking commission never collected.
+        // and goods_cost=0. Sweeping placeholders into payout batches underpays the Jeeber
+        // and books commission never collected.
         //
         // The selector POSITIVELY requires a completed settlement: state IN ('settled',
         // 'receipt_generated'). A row only reaches those states through SettlementService.SettleAsync

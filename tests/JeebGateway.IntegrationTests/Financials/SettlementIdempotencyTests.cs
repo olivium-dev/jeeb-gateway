@@ -48,12 +48,12 @@ public class SettlementIdempotencyTests
     // ── P2: Commission math ───────────────────────────────────────────────────
 
     [Theory]
-    [InlineData("urgent",      150_000, 0.20, 30_000, 3_000, 183_000)]   // Express 20%
-    [InlineData("same-day",    150_000, 0.15, 22_500, 3_000, 175_500)]   // Standard 15%
-    [InlineData("economy",     150_000, 0.15, 22_500, 3_000, 175_500)]   // Standard 15%
-    [InlineData("on-the-way",  150_000, 0.10, 15_000, 3_000, 168_000)]   // OnTheWay 10%
-    [InlineData("unknown",     150_000, 0.15, 22_500, 3_000, 175_500)]   // Fallback → Standard
-    [InlineData("scheduled",     5_000, 0.15,  1_000,   100,   6_100)]   // Min fee 1,000 LBP
+    [InlineData("urgent",      150_000, 0.10, 15_000, 0, 15_000)]   // Express flat 10%
+    [InlineData("same-day",    150_000, 0.10, 15_000, 0, 15_000)]   // Standard flat 10%
+    [InlineData("economy",     150_000, 0.10, 15_000, 0, 15_000)]   // Standard flat 10%
+    [InlineData("on-the-way",  150_000, 0.10, 15_000, 0, 15_000)]   // OnTheWay flat 10%
+    [InlineData("unknown",     150_000, 0.10, 15_000, 0, 15_000)]   // Fallback -> Standard
+    [InlineData("scheduled",     5_000, 0.10,    500, 0,    500)]   // No floor
     public void CommissionCalculator_MatchesPolicy(
         string tierId, decimal goodsCost,
         decimal expectedRate, decimal expectedCommission,
@@ -64,21 +64,21 @@ public class SettlementIdempotencyTests
 
         result.CommissionRate.Should().Be(expectedRate, "rate must match tier policy");
         result.Commission.Should().Be(expectedCommission, "commission must be exact decimal");
-        result.Insurance.Should().Be(expectedInsurance, "insurance must be 2% of goodsCost");
-        result.Total.Should().Be(expectedTotal, "total = goodsCost + commission + insurance");
+        result.Insurance.Should().Be(expectedInsurance, "insurance is not applied");
+        result.Total.Should().Be(expectedTotal, "total must equal commission only");
     }
 
     [Fact]
-    public void CommissionCalculator_NoFloatArithmetic_MinimumFeeCase()
+    public void CommissionCalculator_NoFloatArithmetic_NoMinimumFeeCase()
     {
-        // goodsCost=6,666, Standard: 6666 * 0.15 = 999.90 < 1000 → floor applied.
+        // goodsCost=6,666, Standard: 6666 * 0.10 = 666.60, no floor applied.
         var result = CommissionCalculator.Calculate(6_666m, CommissionTier.Standard);
 
-        result.MinimumFeeApplied.Should().BeTrue("floor applies when rate math < 1000 LBP");
-        result.Commission.Should().Be(1_000m, "minimum commission is exactly 1,000 LBP");
+        result.MinimumFeeApplied.Should().BeFalse("there is no minimum commission floor");
+        result.Commission.Should().Be(666.60m, "commission is exactly 10% of the accepted offer amount");
         // Verify no floating-point drift: decimal arithmetic only.
         result.Commission.GetType().Should().Be(typeof(decimal));
-        result.Total.Should().Be(6_666m + 1_000m + result.Insurance);
+        result.Total.Should().Be(result.Commission);
     }
 
     // ── P3: State machine — cod_state transitions ─────────────────────────────
@@ -172,9 +172,9 @@ public class SettlementIdempotencyTests
         result.Insurance.GetType().Should().Be(typeof(decimal));
         result.Total.GetType().Should().Be(typeof(decimal));
 
-        // Re-derive and confirm no accumulation drift.
-        var reDerived = result.GoodsCost + result.Commission + result.Insurance;
-        reDerived.Should().Be(result.Total, "total must equal sum of components, not an accumulated value");
+        // New money model (Q-001): flat 10% commission, no insurance, no floor — Total == Commission only.
+        result.Insurance.Should().Be(0m, "insurance surcharge is retired under Q-001");
+        result.Total.Should().Be(result.Commission, "total equals commission only — goods cost and insurance never accumulate into it");
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -203,7 +203,7 @@ public class SettlementIdempotencyTests
             Insurance       = breakdown.Insurance,
             Total           = breakdown.Total,
             MinimumFeeApplied = breakdown.MinimumFeeApplied,
-            Currency        = "LBP",
+            Currency        = "USD",
             PaymentMethod   = "cash",
             State           = state ?? SettlementState.Settled,
             CodState        = codState ?? CodSettlementState.Recorded,

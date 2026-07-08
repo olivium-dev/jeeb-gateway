@@ -45,7 +45,7 @@ public class GatewayDbProbeEndpointTests
         // (which UPG's :api pipeline 401s). Covered by S10CodSettlementEarningsTests.
         new object[] { $"/api/compliments/list?userId={TestUserId}", "db-probe-compliment" },
         new object[] { $"/api/ban/{TestUserId}/status", "db-probe-ban" },
-        new object[] { "/api/otp/status/+96512345678", "db-probe-otp" },
+        new object[] { "/api/otp/status/+9613001234", "db-probe-otp" },
     };
 
     [Theory]

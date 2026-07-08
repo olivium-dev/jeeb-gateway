@@ -13,7 +13,7 @@ namespace JeebGateway.Controllers;
 /// <list type="bullet">
 ///   <item>POST /deliveries/{id}/settle — the assigned Jeeber records the
 ///         cash they collected. The gateway computes the fee breakdown
-///         (commission % + 2% insurance, min 1000 LBP) and posts a single
+///         (flat 10% commission, no insurance or floor) and posts a single
 ///         ledger entry to wallet-service.</item>
 ///   <item>GET /deliveries/{id}/receipt — returns the persisted settlement
 ///         as a render-ready receipt. The state machine advances from

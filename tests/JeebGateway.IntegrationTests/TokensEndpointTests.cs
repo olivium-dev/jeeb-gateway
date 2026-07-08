@@ -76,7 +76,7 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         Seed(new UserProfile
         {
             Id = "u-claims",
-            Phone = "+96550000111",
+            Phone = "+9613000111",
             Name = "Hala",
             Roles = new List<string> { "customer", "driver" },
             CreatedAt = DateTimeOffset.UtcNow,

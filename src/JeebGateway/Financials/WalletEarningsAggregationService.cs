@@ -12,7 +12,7 @@ namespace JeebGateway.Financials;
 /// (<c>GET Transaction/holder/{holderId}/credit-revenue</c>) returns the gross
 /// credited amount for a wallet holder over a named period ("week" / "month" /
 /// "year"). Commission is derived via <see cref="CommissionCalculator"/> at the
-/// standard Jeeb tier (15%) — including its 1,000 LBP minimum-fee floor — so the
+/// standard Jeeb tier (10%) — with no insurance or minimum-fee floor — so the
 /// wallet-visible commission equals the figure settlement actually deducts
 /// (BR-16 — no divergent re-arithmetic on the wallet copy; JEBV4-119 / JEBV4-43).</para>
 ///
@@ -138,14 +138,14 @@ public sealed class WalletEarningsAggregationService : IEarningsAggregationServi
                     Gross: gross,
                     Commission: commission,
                     Net: net,
-                    Currency: SettlementService.CurrencyLbp,
+                    Currency: SettlementService.CurrencyUsd,
                     SettledAt: end)
             }
             : Array.Empty<EarningsEntry>();
 
         return new EarningsProjection(
             JeeberId: jeeberId,
-            Totals: new EarningsTotals(net, gross, commission, SettlementService.CurrencyLbp),
+            Totals: new EarningsTotals(net, gross, commission, SettlementService.CurrencyUsd),
             Entries: entries,
             DeliveryCount: 0,
             PeriodStart: start,
@@ -158,18 +158,12 @@ public sealed class WalletEarningsAggregationService : IEarningsAggregationServi
     /// no divergent re-arithmetic on the wallet copy).
     ///
     /// <para>Reuses <see cref="CommissionCalculator.Calculate"/> as the single
-    /// source of truth for the rate (Standard tier = 15%), the
-    /// <see cref="CommissionCalculator.MinCommissionLbp"/> minimum-fee floor and
-    /// the <c>Math.Round(v, 2, AwayFromZero)</c> rule, so the two sources can no
-    /// longer drift. Previously this hardcoded a floorless <c>gross * 0.15</c>,
-    /// which under-reported commission below the 6,666.67 LBP breakeven and thus
-    /// OVERSTATED a jeeber's wallet-visible net earnings vs the real payout.</para>
+    /// source of truth for the rate (Standard tier = 10%) and the
+    /// <c>Math.Round(v, 2, AwayFromZero)</c> rule, so the two sources can no
+    /// longer drift.</para>
     ///
     /// <para>A zero (or non-positive) gross means an empty period with no settled
-    /// deliveries — hence no commission. The per-delivery floor must NOT be
-    /// applied here, otherwise an idle jeeber would show a phantom
-    /// <see cref="CommissionCalculator.MinCommissionLbp"/> charge and a negative
-    /// net. This matches the settlement-backed
+    /// deliveries — hence no commission. This matches the settlement-backed
     /// <see cref="EarningsAggregationService"/>, which sums zero rows to a zero
     /// commission.</para>
     /// </summary>

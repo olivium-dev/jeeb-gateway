@@ -8,10 +8,10 @@ namespace JeebGateway.Financials;
 /// </summary>
 public enum CommissionTier
 {
-    /// <summary>15% commission. Default for same-day / scheduled / economy.</summary>
+    /// <summary>10% flat commission. Default for same-day / scheduled / economy.</summary>
     Standard,
 
-    /// <summary>20% commission. Faster SLAs (urgent / flash / express).</summary>
+    /// <summary>10% flat commission. Faster SLAs (urgent / flash / express).</summary>
     Express,
 
     /// <summary>10% commission. On-the-way / opportunistic deliveries.</summary>
@@ -21,7 +21,7 @@ public enum CommissionTier
 /// <summary>
 /// Result of a single <see cref="CommissionCalculator.Calculate"/> call.
 /// Every monetary field is in the same currency as <see cref="GoodsCost"/>
-/// (Jeeb operates in LBP) and is rounded to two decimal places.
+/// (Jeeb operates in USD) and is rounded to two decimal places.
 /// </summary>
 public sealed record CommissionBreakdown(
     decimal GoodsCost,
@@ -35,16 +35,15 @@ public sealed record CommissionBreakdown(
 /// <summary>
 /// Pure Jeeb-fee calculator (T-backend-016, JEEB-34).
 ///
-/// Total = max(MinFee, goodsCost * commissionRate) + (goodsCost * insuranceRate)
+/// Total = commission = accepted offer amount * 10%
 ///
 /// Locked-in policy:
 /// <list type="bullet">
-///   <item>Standard tier → 15%</item>
-///   <item>Express tier  → 20%</item>
+///   <item>Standard tier → 10%</item>
+///   <item>Express tier  → 10%</item>
 ///   <item>OnTheWay tier → 10%</item>
-///   <item>Insurance → 2% of goods cost (always applied)</item>
-///   <item>Minimum commission → 1,000 LBP (overrides the rate when the rate
-///         math would produce a smaller value)</item>
+///   <item>Insurance → not applied</item>
+///   <item>Minimum commission → not applied</item>
 /// </list>
 ///
 /// No external dependencies — this class is unit-testable in isolation
@@ -52,35 +51,32 @@ public sealed record CommissionBreakdown(
 /// </summary>
 public static class CommissionCalculator
 {
-    public const decimal MinCommissionLbp = 1000m;
-    public const decimal InsuranceRate = 0.02m;
+    public const decimal FlatRate = 0.10m;
 
-    public const decimal StandardRate = 0.15m;
-    public const decimal ExpressRate = 0.20m;
-    public const decimal OnTheWayRate = 0.10m;
+    public const decimal StandardRate = FlatRate;
+    public const decimal ExpressRate = FlatRate;
+    public const decimal OnTheWayRate = FlatRate;
 
-    public static CommissionBreakdown Calculate(decimal goodsCost, CommissionTier tier)
+    public static CommissionBreakdown Calculate(decimal acceptedOfferAmount, CommissionTier tier)
     {
-        if (goodsCost < 0)
+        if (acceptedOfferAmount < 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(goodsCost), "goodsCost must be non-negative.");
+            throw new ArgumentOutOfRangeException(nameof(acceptedOfferAmount), "accepted offer amount must be non-negative.");
         }
 
         var rate = RateFor(tier);
-        var rawCommission = Round(goodsCost * rate);
-        var minApplied = rawCommission < MinCommissionLbp;
-        var commission = minApplied ? MinCommissionLbp : rawCommission;
-        var insurance = Round(goodsCost * InsuranceRate);
-        var total = Round(goodsCost + commission + insurance);
+        var commission = Round(acceptedOfferAmount * rate);
+        const decimal insurance = 0m;
+        var total = commission;
 
         return new CommissionBreakdown(
-            GoodsCost: Round(goodsCost),
+            GoodsCost: Round(acceptedOfferAmount),
             Tier: tier,
             CommissionRate: rate,
             Commission: commission,
             Insurance: insurance,
             Total: total,
-            MinimumFeeApplied: minApplied);
+            MinimumFeeApplied: false);
     }
 
     /// <summary>

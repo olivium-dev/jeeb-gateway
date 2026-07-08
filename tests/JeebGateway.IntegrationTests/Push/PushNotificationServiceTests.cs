@@ -364,7 +364,7 @@ public class PushNotificationServiceTests
         users.Seed(new UserProfile
         {
             Id = "user-lang",
-            Phone = "+96550008888",
+            Phone = "+9613008888",
             Name = "Nora",
             Language = "ar",
             Roles = new List<string> { "customer" },
@@ -397,7 +397,7 @@ public class PushNotificationServiceTests
         users.Seed(new UserProfile
         {
             Id = "user-lang-override",
-            Phone = "+96550008889",
+            Phone = "+9613008889",
             Name = "Sara",
             Language = "ar",
             Roles = new List<string> { "customer" },

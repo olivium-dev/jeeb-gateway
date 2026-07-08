@@ -13,11 +13,11 @@ CREATE TABLE IF NOT EXISTS settlement_batches (
     jeeber_id            TEXT NOT NULL,
     period_start         DATE NOT NULL,
     period_end           DATE NOT NULL,
-    total_gross_lbp      NUMERIC(20,4) NOT NULL DEFAULT 0,
-    total_commission_lbp NUMERIC(20,4) NOT NULL DEFAULT 0,
-    total_net_lbp        NUMERIC(20,4) NOT NULL DEFAULT 0,
+    total_gross_usd      NUMERIC(20,4) NOT NULL DEFAULT 0,
+    total_commission_usd NUMERIC(20,4) NOT NULL DEFAULT 0,
+    total_net_usd        NUMERIC(20,4) NOT NULL DEFAULT 0,
     settlement_count     INT NOT NULL DEFAULT 0,
-    currency             TEXT NOT NULL DEFAULT 'LBP',
+    currency             TEXT NOT NULL DEFAULT 'USD',
     status               TEXT NOT NULL DEFAULT 'open',  -- open | closed | paid
     paid_at              TIMESTAMPTZ,
     paid_by              TEXT,                           -- admin userId who marked paid
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS settlements (
     insurance            NUMERIC(20,4) NOT NULL,
     total                NUMERIC(20,4) NOT NULL,
     min_fee_applied      BOOLEAN NOT NULL DEFAULT false,
-    currency             TEXT NOT NULL DEFAULT 'LBP',
+    currency             TEXT NOT NULL DEFAULT 'USD',
     payment_method       TEXT NOT NULL DEFAULT 'cash',
     state                TEXT NOT NULL DEFAULT 'pending_settlement',  -- pending_settlement | settled | receipt_generated
     cod_state            TEXT NOT NULL DEFAULT 'recorded',            -- recorded | batched | paid

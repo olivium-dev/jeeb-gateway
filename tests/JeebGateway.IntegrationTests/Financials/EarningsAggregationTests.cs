@@ -38,7 +38,7 @@ public class EarningsAggregationTests
         DateTimeOffset? settledAt = null)
     {
         var at         = settledAt ?? MidWeek;  // default to mid-week so tests within WeekStart..WeekEnd
-        var commission = Math.Max(1_000m, Math.Round(grossAmount * 0.15m, 2, MidpointRounding.AwayFromZero));
+        var commission = Math.Round(grossAmount * 0.10m, 2, MidpointRounding.AwayFromZero);
         var s = new Settlement
         {
             Id                = Guid.NewGuid().ToString(),
@@ -48,12 +48,12 @@ public class EarningsAggregationTests
             TierId            = "standard",
             GoodsCost         = grossAmount,
             CommissionTier    = CommissionTier.Standard,
-            CommissionRate    = 0.15m,
+            CommissionRate    = 0.10m,
             Commission        = commission,
             Insurance         = 0m,
             Total             = grossAmount,
             MinimumFeeApplied = false,
-            Currency          = "LBP",
+            Currency          = "USD",
             PaymentMethod     = "cod",
             State             = "pending_settlement",
             CodState          = codState,
@@ -96,10 +96,10 @@ public class EarningsAggregationTests
     [Fact]
     public async Task AC2_Net_IsGrossMinusCommission_PerRow()
     {
-        // Arrange: known exact commission values (min-fee scenario)
-        var s1 = await SeedAsync("j-002", CodSettlementState.Paid, 150_000m);  // commission = 22,500
-        var s2 = await SeedAsync("j-002", CodSettlementState.Paid, 75_000m);   // commission = 11,250
-        var s3 = await SeedAsync("j-002", CodSettlementState.Paid, 5_000m);    // commission = max(1000, 750) = 1,000
+        // Arrange: known exact commission values under the flat 10% policy.
+        var s1 = await SeedAsync("j-002", CodSettlementState.Paid, 150_000m);  // commission = 15,000
+        var s2 = await SeedAsync("j-002", CodSettlementState.Paid, 75_000m);   // commission = 7,500
+        var s3 = await SeedAsync("j-002", CodSettlementState.Paid, 5_000m);    // commission = 500
 
         var earnings = await _service.GetProjectionWithStatesAsync(
             "j-002", WeekStart, WeekEnd, EarningsCodStates, CancellationToken.None);
@@ -122,9 +122,9 @@ public class EarningsAggregationTests
         Assert.Equal(expectedCommission, earnings.Totals.Commission);
         Assert.Equal(expectedNet,        earnings.Totals.Net);
 
-        // Assert: different from re-derived net (because of min-fee)
-        var reDerivedNet = (s1.GoodsCost + s2.GoodsCost + s3.GoodsCost) * (1m - 0.15m);
-        Assert.NotEqual(reDerivedNet, earnings.Totals.Net);
+        // Assert: flat 10% has no minimum-fee adjustment.
+        var reDerivedNet = (s1.GoodsCost + s2.GoodsCost + s3.GoodsCost) * (1m - 0.10m);
+        Assert.Equal(reDerivedNet, earnings.Totals.Net);
     }
 
     // ── AC3 — Adjacent period filters are exclusive (no double-counting) ──────
@@ -175,7 +175,7 @@ public class EarningsAggregationTests
     // ── AC5 — All entries in same currency ────────────────────────────────────
 
     [Fact]
-    public async Task AC5_EarningsEntries_AllLBP()
+    public async Task AC5_EarningsEntries_AllUSD()
     {
         for (var i = 0; i < 5; i++)
             await SeedAsync("j-004", CodSettlementState.Paid, 100_000m + i * 10_000m);
@@ -185,8 +185,8 @@ public class EarningsAggregationTests
 
         var currencies = earnings.Entries.Select(e => e.Currency).Distinct().ToList();
         Assert.Single(currencies);
-        Assert.Equal("LBP", currencies[0]);
-        Assert.Equal("LBP", earnings.Totals.Currency);
+        Assert.Equal("USD", currencies[0]);
+        Assert.Equal("USD", earnings.Totals.Currency);
     }
 
     // ── AC6 — Cache: two calls → one DB hit ──────────────────────────────────

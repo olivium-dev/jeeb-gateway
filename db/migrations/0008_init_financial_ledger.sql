@@ -7,7 +7,7 @@
 --            reporting paths (FR-12.*, FR-14.*).
 -- Notes:     Idempotent. Reuses set_updated_at() from 0001. Money is
 --            NUMERIC(12,2) throughout; commission_rate is NUMERIC(5,4)
---            (fraction, e.g. 0.1500 = 15%) — matches delivery_tiers.
+--            (fraction, e.g. 0.1000 = 10%) — matches delivery_tiers.
 --            Settlement-state transitions are enforced at the application
 --            layer; enums here constrain the value domain only.
 -- Refs:      FR-12.* (earnings dashboard), FR-14.* (payouts),
