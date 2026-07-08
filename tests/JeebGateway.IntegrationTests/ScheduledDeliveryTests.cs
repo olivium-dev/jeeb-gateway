@@ -139,25 +139,24 @@ public class ScheduledDeliveryTests
     }
 
     [Fact]
-    public async Task Cancel_Scheduled_Request_Returns_204_And_Frees_BR9_Slot()
+    public async Task Cancel_Scheduled_Request_Returns_204_And_Allows_Future_Create()
     {
         var factory = NewFactory(out var clock);
         var client = ClientFor(factory, "sched-cancel-client");
 
         var scheduledAt = clock.GetUtcNow() + TimeSpan.FromHours(3);
 
-        // Saturate the BR-9 cap with scheduled requests, then cancel one
-        // and prove a fresh request is now accepted. Mirrors the immediate-
-        // delivery cancellation parity AC.
+        // Caps are retired: scheduled requests remain creatable before and
+        // after cancelling one. Mirrors the immediate-delivery cancellation parity AC.
         var ids = new List<string>();
         for (var i = 0; i < 3; i++)
         {
             ids.Add(await CreateScheduled(client, $"sched {i}", scheduledAt));
         }
 
-        var blocked = await client.PostAsJsonAsync("/requests",
-            ValidBody("blocked-by-cap", scheduledAt));
-        blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var fourthCreate = await client.PostAsJsonAsync("/requests",
+            ValidBody("fourth-create", scheduledAt));
+        fourthCreate.StatusCode.Should().Be(HttpStatusCode.Created);
 
         var cancel = await client.DeleteAsync($"/requests/{ids[0]}");
         cancel.StatusCode.Should().Be(HttpStatusCode.NoContent);
