@@ -95,6 +95,28 @@ BEGIN
     END IF;
 END$$;
 
+-- Forward-converge already-deployed delivery_tiers rows to the flat 10% commission.
+-- The 0011 seed uses ON CONFLICT (code) DO NOTHING, so databases provisioned before
+-- the flat-10% ruling still carry the old per-tier rates (15%/20%/12%). This UPDATE
+-- brings them to 0.1000; fresh databases already seed 0.1000 so it is a no-op there.
+UPDATE delivery_tiers
+   SET commission_rate = 0.1000
+ WHERE commission_rate <> 0.1000;
+
+-- Enforce the flat-rate invariant on delivery_tiers going forward (idempotent add).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conname = 'ck_delivery_tiers_commission_rate_flat'
+    ) THEN
+        ALTER TABLE delivery_tiers
+            ADD CONSTRAINT ck_delivery_tiers_commission_rate_flat
+            CHECK (commission_rate = 0.1000);
+    END IF;
+END$$;
+
 INSERT INTO schema_migrations (version)
 VALUES ('0035_tier_table_three_tiers_ttl')
 ON CONFLICT (version) DO NOTHING;

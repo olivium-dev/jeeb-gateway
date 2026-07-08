@@ -260,6 +260,27 @@ public class TiersEndpointTests
     }
 
     [Fact]
+    public async Task Admin_Put_Rejects_NearMiss_Commission_With_Clean_400()
+    {
+        // A near-miss (0.1000005) must be rejected with a clean 400 at the API,
+        // not slip past a loose tolerance and hit the exact Postgres CHECK as a 500.
+        using var factory = NewFactory();
+        var admin = AdminClient(factory, "admin-put-commission-nearmiss");
+
+        var resp = await admin.PutAsJsonAsync("/admin/tiers/urgent", new
+        {
+            name = "Urgent",
+            slaHours = 2,
+            radiusKm = 7.5,
+            requestTtlSeconds = 45 * 60,
+            commissionRate = 0.1000005,
+            priceHint = "Updated hint"
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
     public async Task Admin_Put_Of_Missing_Tier_Returns_404()
     {
         using var factory = NewFactory();
