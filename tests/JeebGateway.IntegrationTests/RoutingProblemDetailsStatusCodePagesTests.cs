@@ -19,7 +19,7 @@ public sealed class RoutingProblemDetailsStatusCodePagesTests : IClassFixture<We
     [Fact]
     public async Task UnmatchedPath_Returns404ProblemDetailsBody()
     {
-        var client = _factory.CreateClient();
+        var client = AuthedClient();
 
         var resp = await client.GetAsync("/definitely-not-a-real-gateway-route");
 
@@ -29,11 +29,22 @@ public sealed class RoutingProblemDetailsStatusCodePagesTests : IClassFixture<We
     [Fact]
     public async Task WrongVerbForExistingRoute_Returns405ProblemDetailsBody()
     {
-        var client = _factory.CreateClient();
+        var client = AuthedClient();
 
         var resp = await client.PutAsync("/requests", JsonContent.Create(new { }));
 
         await AssertProblemDetailsAsync(resp, HttpStatusCode.MethodNotAllowed);
+    }
+
+    // The gateway's dev/OpenMode auth trusts X-User-* headers (same pattern as sibling
+    // integration tests' JeeberClient/ClientActor). Without auth, ANY request 401s before
+    // routing decides 404/405 — so authenticate to actually reach the routing-level 4xx.
+    private HttpClient AuthedClient()
+    {
+        var c = _factory.CreateClient();
+        c.DefaultRequestHeaders.Add("X-User-Id", "routing-test-user");
+        c.DefaultRequestHeaders.Add("X-User-Roles", "customer");
+        return c;
     }
 
     private static async Task AssertProblemDetailsAsync(HttpResponseMessage resp, HttpStatusCode statusCode)
