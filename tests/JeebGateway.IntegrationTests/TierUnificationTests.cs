@@ -382,13 +382,13 @@ public class TierUnificationTests
                     new DeliveryTierDto
                     {
                         Id = UpstreamStandardTierId, Name = "Standard", SlaHours = 24,
-                        RadiusKm = 5.0, CommissionRate = 0.12, PriceHint = "Standard rate",
+                        RadiusKm = 5.0, CommissionRate = 0.10, PriceHint = "Standard rate",
                         CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
                     },
                     new DeliveryTierDto
                     {
                         Id = "9f1c0e6b-1b2a-5c3d-8e4f-0a1b2c3d4e5f", Name = "Express", SlaHours = 4,
-                        RadiusKm = 8.0, CommissionRate = 0.15, PriceHint = "Faster dispatch",
+                        RadiusKm = 8.0, CommissionRate = 0.10, PriceHint = "Faster dispatch",
                         CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
                     },
                 };

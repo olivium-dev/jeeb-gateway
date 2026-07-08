@@ -177,9 +177,19 @@ public class RequestExpirySweeper : BackgroundService
             return ttl;
         }
 
-        var fallback = tierTtls.Values.Min();
+        if (tierTtls.TryGetValue(JeebGateway.Tiers.InMemoryTiersStore.DefaultExpiryTierId, out var fallback))
+        {
+            _logger.LogWarning(
+                "Request {RequestId} has unknown tier {TierId}; using default tier TTL {WindowMinutes}m",
+                req.Id,
+                string.IsNullOrWhiteSpace(tierId) ? "<empty>" : tierId,
+                fallback.TotalMinutes);
+            return fallback;
+        }
+
+        fallback = TimeSpan.FromHours(24);
         _logger.LogWarning(
-            "Request {RequestId} has unknown tier {TierId}; using shortest configured tier TTL {WindowMinutes}m",
+            "Request {RequestId} has unknown tier {TierId}; default tier TTL is unavailable, using safe TTL {WindowMinutes}m",
             req.Id,
             string.IsNullOrWhiteSpace(tierId) ? "<empty>" : tierId,
             fallback.TotalMinutes);

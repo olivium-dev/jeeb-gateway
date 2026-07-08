@@ -171,9 +171,8 @@ public class PostgresTiersStoreTests
     {
         // Property: ReplaceAsync on an unknown id returns null (→ 404, never
         // creating a row); DeleteAsync returns true when a row was removed and
-        // false otherwise — the same contract InMemoryTiersStore exposes. A tier
-        // an admin deletes stays deleted across restarts (the seed only inserts
-        // once, ON CONFLICT DO NOTHING).
+        // false otherwise — the same store contract InMemoryTiersStore exposes.
+        // The admin HTTP boundary protects canonical tiers from deletion.
         Assert.True(true, "Replace-unknown/Delete semantics verified against a live Postgres in the QV Testcontainers suite.");
     }
 

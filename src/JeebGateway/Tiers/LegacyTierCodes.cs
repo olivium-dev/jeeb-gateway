@@ -19,9 +19,9 @@ namespace JeebGateway.Tiers;
 /// accepted at create time and resolves to a human display name in push bodies. The
 /// mapping was chosen from the two seeds' semantics (SLA / commission / price-hint):</para>
 /// <list type="bullet">
-///   <item><description><c>flash</c> (30 min, premium 15%) → <c>urgent</c> (1 h SLA,
+///   <item><description><c>flash</c> (30 min) → <c>urgent</c> (1 h SLA,
 ///     "Premium — fastest dispatch") — both are the fastest premium tier.</description></item>
-///   <item><description><c>express</c> (60 min, premium 15%) → <c>urgent</c> (1 h SLA)
+///   <item><description><c>express</c> (60 min) → <c>urgent</c> (1 h SLA)
 ///     — an EXACT SLA match; the catalog has no second sub-hour tier.</description></item>
 ///   <item><description><c>standard</c> (3 h, default tier — the voice surface's
 ///     fallback) → <c>same-day</c> (2 h TTL, price hint literally "Standard same-day

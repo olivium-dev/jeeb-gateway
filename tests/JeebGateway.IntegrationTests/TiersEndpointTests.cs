@@ -48,6 +48,7 @@ public class TiersEndpointTests
         body.Items.Single(t => t.Id == "same-day").RequestTtlSeconds.Should().Be(2 * 60 * 60);
         body.Items.Single(t => t.Id == "scheduled").RadiusKm.Should().Be(25.0);
         body.Items.Single(t => t.Id == "scheduled").RequestTtlSeconds.Should().Be(24 * 60 * 60);
+        body.Items.Should().OnlyContain(t => t.CommissionRate == 0.10);
 
         foreach (var t in body.Items)
         {
@@ -76,7 +77,7 @@ public class TiersEndpointTests
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task Admin_Create_Returns_201_With_Generated_Slug_Id()
+    public async Task Admin_Create_Rejects_Fourth_NonCanonical_Tier()
     {
         using var factory = NewFactory();
         var admin = AdminClient(factory, "admin-create-1");
@@ -87,21 +88,15 @@ public class TiersEndpointTests
             slaHours =12,
             radiusKm =20.0,
             requestTtlSeconds =12 * 60 * 60,
-            commissionRate =0.22,
+            commissionRate =0.10,
             priceHint ="Pick up tonight, drop off tomorrow"
         });
 
-        resp.StatusCode.Should().Be(HttpStatusCode.Created);
-        var created = await resp.Content.ReadFromJsonAsync<TierDto>();
-        created!.Id.Should().Be("overnight");
-        created.Name.Should().Be("Overnight");
-        created.SlaHours.Should().Be(12);
-        created.RadiusKm.Should().Be(20.0);
-        created.RequestTtlSeconds.Should().Be(12 * 60 * 60);
-        created.CommissionRate.Should().Be(0.22);
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
         var list = await admin.GetFromJsonAsync<ListResponse>("/tiers");
-        list!.Items.Should().Contain(t => t.Id == "overnight");
+        list!.Items.Should().HaveCount(3);
+        list.Items.Should().NotContain(t => t.Id == "overnight");
     }
 
     [Fact]
@@ -139,6 +134,7 @@ public class TiersEndpointTests
     [InlineData("X", 0, 1.0, 0.1, "x", "sla zero")]
     [InlineData("X", 1, 0.0, 0.1, "x", "radius zero")]
     [InlineData("X", 1, 1.0, -0.1, "x", "negative commission")]
+    [InlineData("X", 1, 1.0, 0.11, "x", "non-flat commission")]
     [InlineData("X", 1, 1.0, 1.5, "x", "commission > 1")]
     [InlineData("X", 1, 1.0, 0.1, "", "blank price hint")]
     public async Task Admin_Create_Rejects_Invalid_Input(
@@ -192,7 +188,7 @@ public class TiersEndpointTests
             slaHours =2,
             radiusKm =5.0,
             requestTtlSeconds =30 * 60,
-            commissionRate =0.3,
+            commissionRate =0.1,
             priceHint ="duplicate"
         });
 
@@ -231,7 +227,7 @@ public class TiersEndpointTests
             slaHours =2,
             radiusKm =7.5,
             requestTtlSeconds =45 * 60,
-            commissionRate =0.30,
+            commissionRate =0.10,
             priceHint ="Updated hint"
         });
 
@@ -240,8 +236,27 @@ public class TiersEndpointTests
         updated!.SlaHours.Should().Be(2);
         updated.RadiusKm.Should().Be(7.5);
         updated.RequestTtlSeconds.Should().Be(45 * 60);
-        updated.CommissionRate.Should().Be(0.30);
+        updated.CommissionRate.Should().Be(0.10);
         updated.PriceHint.Should().Be("Updated hint");
+    }
+
+    [Fact]
+    public async Task Admin_Put_Rejects_NonFlat_Commission()
+    {
+        using var factory = NewFactory();
+        var admin = AdminClient(factory, "admin-put-commission");
+
+        var resp = await admin.PutAsJsonAsync("/admin/tiers/urgent", new
+        {
+            name = "Urgent",
+            slaHours =2,
+            radiusKm =7.5,
+            requestTtlSeconds =45 * 60,
+            commissionRate =0.11,
+            priceHint ="Updated hint"
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 
     [Fact]
@@ -264,17 +279,17 @@ public class TiersEndpointTests
     }
 
     [Fact]
-    public async Task Admin_Delete_Removes_Tier_And_Subsequent_Get_Excludes_It()
+    public async Task Admin_Delete_Rejects_Canonical_Tier()
     {
         using var factory = NewFactory();
         var admin = AdminClient(factory, "admin-delete");
 
         var del = await admin.DeleteAsync("/admin/tiers/scheduled");
-        del.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        del.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
         var list = await admin.GetFromJsonAsync<ListResponse>("/tiers");
-        list!.Items.Should().NotContain(t => t.Id == "scheduled");
-        list.Items.Should().HaveCount(2);
+        list!.Items.Should().Contain(t => t.Id == "scheduled");
+        list.Items.Should().HaveCount(3);
     }
 
     [Fact]
@@ -309,7 +324,7 @@ public class TiersEndpointTests
             slaHours =3,
             radiusKm =6.0,
             requestTtlSeconds =60 * 60,
-            commissionRate =0.27,
+            commissionRate =0.10,
             priceHint ="Now slower"
         });
         put.EnsureSuccessStatusCode();
@@ -339,7 +354,7 @@ public class TiersEndpointTests
             SlaHours = originalSla + 100,
             RadiusKm = 99.0,
             RequestTtlSeconds = 90 * 60,
-            CommissionRate = 0.42,
+            CommissionRate = 0.10,
             PriceHint = "mutated"
         }, "admin", CancellationToken.None);
 

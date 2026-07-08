@@ -6,7 +6,8 @@ namespace JeebGateway.Tiers;
 /// the Client when picking a tier for a new delivery request.
 ///
 /// Three default tiers are seeded on startup (Urgent, Same-Day, Scheduled);
-/// admins may add, edit, or remove tiers at any time.
+/// admins may edit canonical tier attributes, but the catalog remains fixed
+/// to those three tier ids.
 /// Tier changes are read fresh on every request so an in-flight request is
 /// never partially affected by a concurrent update.
 /// </summary>

@@ -62,11 +62,10 @@ public class RequestExpirySweeperTests
         var client = ClientFor(factory, "expiry-short-tier-client");
 
         var tiers = factory.Services.GetRequiredService<JeebGateway.Tiers.ITiersStore>();
-        await tiers.CreateAsync(new DeliveryTierCreate
+        await tiers.ReplaceAsync("scheduled", new DeliveryTierReplace
         {
-            Id = "admin-short",
-            Name = "Admin Short",
-            SlaHours = 1,
+            Name = "Scheduled",
+            SlaHours = 24,
             RadiusKm = 1.0,
             RequestTtlSeconds = 5 * 60,
             CommissionRate = 0.1,
@@ -81,6 +80,31 @@ public class RequestExpirySweeperTests
         var notifier = (InMemoryRequestExpiryNotifier)factory.Services.GetRequiredService<IRequestExpiryNotifier>();
         notifier.Nudges.Should().NotContain(n => n.RequestId == requestId);
         notifier.Expiries.Should().NotContain(e => e.RequestId == requestId);
+    }
+
+    [Fact]
+    public async Task Unknown_Tier_Uses_Scheduled_TwentyFourHour_Fallback_Not_Shortest_Ttl()
+    {
+        var factory = NewFactory(out var clock);
+        var store = factory.Services.GetRequiredService<IRequestsStore>();
+
+        var request = await store.CreateAsync(new CreateRequestInput
+        {
+            ClientId = "expiry-unknown-tier-client",
+            Description = "legacy durable row",
+            TierId = "missing-tier",
+            PickupLocation = new GeoPoint { Lat = 24.7136, Lng = 46.6753 },
+            DropoffLocation = new GeoPoint { Lat = 24.6309, Lng = 46.7194 }
+        }, CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromMinutes(31));
+        await SweepOnce(factory);
+
+        var notifier = (InMemoryRequestExpiryNotifier)factory.Services.GetRequiredService<IRequestExpiryNotifier>();
+        notifier.Expiries.Should().NotContain(e => e.RequestId == request.Id,
+            "unknown tier ids fall back to the scheduled 24h TTL, not the shortest 30m tier");
+
+        (await store.GetAsync(request.Id, CancellationToken.None))!.Status.Should().Be(RequestStatus.Pending);
     }
 
     [Fact]

@@ -82,6 +82,7 @@ public class AdminTiersController : ControllerBase
         if (ValidateCommission(body.CommissionRate, out err) is false) return err!;
         if (ValidatePriceHint(body.PriceHint, out err) is false) return err!;
         if (body.Id is not null && ValidateId(body.Id, out err) is false) return err!;
+        if (ValidateCreatableTierId(body, out err) is false) return err!;
 
         try
         {
@@ -155,6 +156,8 @@ public class AdminTiersController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Delete(string id, CancellationToken ct)
     {
+        if (ValidateDeletableTierId(id, out var err) is false) return err!;
+
         var removed = await _store.DeleteAsync(id, ct);
         if (!removed) return NotFound();
         return NoContent();
@@ -252,13 +255,49 @@ public class AdminTiersController : ControllerBase
 
     private bool ValidateCommission(double? rate, out IActionResult? error)
     {
-        if (rate is null || double.IsNaN(rate.Value) || rate < 0 || rate > 1)
+        if (rate is null
+            || double.IsNaN(rate.Value)
+            || Math.Abs(rate.Value - InMemoryTiersStore.RequiredCommissionRate) > 0.000001)
         {
             error = BadRequest(new ProblemDetails
             {
-                Title = "commission_rate must be between 0 and 1 (inclusive).",
+                Title = "commission_rate must be exactly 0.10.",
                 Status = StatusCodes.Status400BadRequest
             });
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    private IActionResult? FixedCatalogProblem(string title) => BadRequest(new ProblemDetails
+    {
+        Title = title,
+        Status = StatusCodes.Status400BadRequest
+    });
+
+    private bool ValidateCreatableTierId(DeliveryTierCreateRequest body, out IActionResult? error)
+    {
+        var id = string.IsNullOrWhiteSpace(body.Id)
+            ? InMemoryTiersStore.Slugify(body.Name!)
+            : body.Id.Trim();
+
+        if (!InMemoryTiersStore.IsCanonicalTierId(id))
+        {
+            error = FixedCatalogProblem("tier catalog is fixed to exactly three ids: urgent, same-day, scheduled.");
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    private bool ValidateDeletableTierId(string id, out IActionResult? error)
+    {
+        if (InMemoryTiersStore.IsCanonicalTierId(id))
+        {
+            error = FixedCatalogProblem("canonical tiers cannot be deleted; the catalog must remain exactly three tiers.");
             return false;
         }
 
