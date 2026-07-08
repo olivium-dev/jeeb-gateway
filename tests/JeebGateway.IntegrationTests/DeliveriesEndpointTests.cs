@@ -161,7 +161,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962799123456");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613123456");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.GetAsync($"/deliveries/{seed.Id}/otp");
@@ -174,7 +174,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
 
         // B6: the OTP service was hit with the row's RecipientPhone, not a placeholder
         otp.SendOtpCalls.Should().ContainSingle();
-        otp.SendOtpCalls[0].PhoneNumber.Should().Be("+962799123456");
+        otp.SendOtpCalls[0].PhoneNumber.Should().Be("+9613123456");
         // JEB-1516: applicationId is the configured tenant GUID — NOT the non-GUID
         // delivery_handover_{id} label that made the upstream Guid.Parse throw → 502.
         otp.SendOtpCalls[0].ApplicationId.Should().Be(TenantApplicationId);
@@ -211,7 +211,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
 
         // B1: en-route is NOT the handover step — must be `at_door`.
-        var seed = await SeedAsync(factory, RequestStatus.HeadingOff, recipientPhone: "+962700111222");
+        var seed = await SeedAsync(factory, RequestStatus.HeadingOff, recipientPhone: "+9613111222");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.GetAsync($"/deliveries/{seed.Id}/otp");
@@ -245,7 +245,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700333444");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613333444");
 
         var resp = await factory.CreateClient().GetAsync($"/deliveries/{seed.Id}/otp");
 
@@ -262,7 +262,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700555666");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613555666");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.PostAsJsonAsync(
@@ -296,7 +296,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700777888");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613777888");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.PostAsJsonAsync(
@@ -324,7 +324,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700999000");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613999000");
         var http = AuthClient(factory, seed.JeeberId);
 
         // First two wrong codes — 401 with remaining-attempt detail
@@ -368,7 +368,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700111000");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613111000");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { });
@@ -386,7 +386,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
 
-        var seed = await SeedAsync(factory, RequestStatus.Accepted, recipientPhone: "+962700222333");
+        var seed = await SeedAsync(factory, RequestStatus.Accepted, recipientPhone: "+9613222333");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.PostAsJsonAsync(
@@ -423,7 +423,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700444555");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613444555");
 
         var resp = await factory.CreateClient().PostAsJsonAsync(
             $"/deliveries/{seed.Id}/otp/verify",
@@ -449,7 +449,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962799123456");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613123456");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.GetAsync($"/deliveries/{seed.Id}/otp");
@@ -463,7 +463,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
 
         // SMS dispatched to the row phone with the canonical applicationId.
         otp.SendOtpCalls.Should().ContainSingle();
-        otp.SendOtpCalls[0].PhoneNumber.Should().Be("+962799123456");
+        otp.SendOtpCalls[0].PhoneNumber.Should().Be("+9613123456");
         // JEB-1516: applicationId is the configured tenant GUID (upstream path).
         otp.SendOtpCalls[0].ApplicationId.Should().Be(TenantApplicationId);
         Guid.TryParse(otp.SendOtpCalls[0].ApplicationId, out _).Should().BeTrue();
@@ -485,7 +485,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
 
         // Seed at AtDoor locally so the local guard would have passed — proving
         // the gate is now the upstream's, not the gateway's.
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962799000111");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613000111");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.GetAsync($"/deliveries/{seed.Id}/otp");
@@ -509,7 +509,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700555666");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613555666");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "1234" });
@@ -554,7 +554,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700777888");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613777888");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "9999" });
@@ -586,7 +586,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700999000");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613999000");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "1111" });
@@ -612,7 +612,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700222333");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613222333");
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "1234" });
@@ -637,7 +637,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture); // in-memory path
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700123123");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613123123");
         var intruder = AuthClient(factory, $"jeeber-intruder-{Guid.NewGuid()}");
 
         var resp = await intruder.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "1234" });
@@ -655,7 +655,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture); // in-memory path
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700124124");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613124124");
         var intruder = AuthClient(factory, $"jeeber-intruder-{Guid.NewGuid()}");
 
         var resp = await intruder.GetAsync($"/deliveries/{seed.Id}/otp");
@@ -676,7 +676,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700125125");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613125125");
         var intruder = AuthClient(factory, $"jeeber-intruder-{Guid.NewGuid()}");
 
         var resp = await intruder.PostAsync($"/deliveries/{seed.Id}/client-unreachable", content: null);
@@ -696,7 +696,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture); // in-memory path
 
-        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+962700126126");
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613126126");
         var party = AuthClient(factory, seed.JeeberId);
 
         var resp = await party.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "0000" });

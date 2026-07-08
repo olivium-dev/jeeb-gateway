@@ -39,7 +39,7 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public class S09RecipientPhonePlumbingTests : IClassFixture<WebApplicationFactory<Program>>
 {
-    private const string RecipientPhone = "+962799123456";
+    private const string RecipientPhone = "+9613123456";
 
     // JEB-1516: the configured Jeeb tenant application GUID the gateway forwards
     // to the shared one-time-password service. In production this is injected via

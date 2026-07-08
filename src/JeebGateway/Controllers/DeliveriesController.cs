@@ -1239,7 +1239,7 @@ public class DeliveriesController : ControllerBase
         // PR review B6 (JEB-628): the recipient phone must come from the
         // delivery row, not a hardcoded placeholder. Reject the request
         // when the field is unset so production traffic never silently
-        // ships OTPs to a placeholder Jordanian number.
+        // ships OTPs to a placeholder Lebanon number.
         if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
         {
             _log.LogWarning(
