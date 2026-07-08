@@ -67,7 +67,12 @@ public sealed class RatingRevealJob : BackgroundService
     {
         await using var scope = _scopes.CreateAsyncScope();
         var ratingStore = scope.ServiceProvider.GetService<IRatingStoreExtended>();
-        if (ratingStore is null) return;
+        if (ratingStore is null)
+        {
+            _log.LogError(
+                "Rating reveal job skipped because no IRatingStoreExtended is registered; the 7-day blind rating sweep is not running.");
+            return;
+        }
 
         var now = _clock.GetUtcNow();
         var options = _opts.Value;

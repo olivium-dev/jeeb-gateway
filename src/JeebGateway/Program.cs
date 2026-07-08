@@ -1441,7 +1441,14 @@ if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
             "refused connection to the placeholder host.");
     }
 
-    builder.Services.AddSingleton<IRatingStore, JeebGateway.Ratings.FeedbackServiceRatingStore>();
+    builder.Services.AddSingleton<JeebGateway.Ratings.FeedbackServiceRatingStore>();
+    builder.Services.AddSingleton<IRatingStore>(
+        sp => sp.GetRequiredService<JeebGateway.Ratings.FeedbackServiceRatingStore>());
+    // Fail-closed honesty guard: feedback-service currently exposes submit/reveal
+    // only, not the list-expired-windows + mark-revealed/closed operations needed
+    // for the gateway-owned 7-day sweep. Register an explicit extended adapter so
+    // RatingRevealJob does not silently skip the upstream path.
+    builder.Services.AddSingleton<IRatingStoreExtended, JeebGateway.Ratings.UnsupportedUpstreamRatingStoreExtended>();
 }
 else
 {
@@ -2375,6 +2382,12 @@ builder.Services.AddExceptionHandler<JeebGateway.Infrastructure.UpstreamExceptio
 // ---------------------------------------------------------------------------
 
 var app = builder.Build();
+
+if (app.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
+{
+    app.Logger.LogCritical(
+        "FeatureFlags:UseUpstream:Ratings is ON, but feedback-service does not expose list-expired-windows or mark-revealed/closed rating APIs; the gateway reveal sweep is registered fail-closed and will not fabricate upstream reveal state.");
+}
 
 // AUDIT-A (FIX-1) — fail-closed durability gate. Refuses to start a prod-like gateway whose
 // money/identity/audit/legal/security stores silently fell back to in-memory because a durability

@@ -110,8 +110,8 @@ public class JeebReviewsProjectionTests
     [Fact]
     public void ProjectStatus_Revealed_Exposes_Counterparty_Rating_Row()
     {
-        // Mutual reveal requires both sides to rate; SubmittedCount is only the
-        // upstream scalar and does not drive visibility.
+        // Mutual reveal requires both sides to rate and the named Q-030 scalar
+        // gate to report two submissions.
         var upstream = new BlindRevealStateResponse
         {
             CorrelationId = "jeeb:delivery:d-4",
@@ -132,17 +132,36 @@ public class JeebReviewsProjectionTests
     }
 
     [Fact]
+    public void ProjectStatus_Does_Not_Reveal_When_SubmittedCount_Is_Under_Two()
+    {
+        var upstream = new BlindRevealStateResponse
+        {
+            CorrelationId = "jeeb:delivery:d-4b",
+            Revealed = true,
+            RevealedAt = DateTimeOffset.UtcNow,
+            SubmittedCount = 1,
+            Self = Submitted(4, "mine"),
+            Counterparty = Submitted(3, "theirs"),
+        };
+
+        var view = JeebReviewsProjection.ProjectStatus("d-4b", upstream);
+
+        view.State.Should().Be(JeebReviewsProjection.StatusCodes.LockedNoRating);
+        view.RatedCount.Should().Be(2);
+        view.Ratings.Should().BeEmpty("the Q-030 submittedCount gate keeps the pair blind below two submissions");
+    }
+
+    [Fact]
     public void ProjectStatus_LockedNoRating_When_Window_Expired_With_One_Side_Rated()
     {
-        // No one-sided auto-reveal: stale upstream rows that claim revealed with a
-        // spoofed submittedCount are projected as locked_no_rating and expose no
-        // rating rows.
+        // No one-sided auto-reveal: a genuine one-sided window close stays blind
+        // and exposes no rating rows.
         var upstream = new BlindRevealStateResponse
         {
             CorrelationId = "jeeb:delivery:d-5",
             Revealed = true,
             RevealedAt = DateTimeOffset.UtcNow,
-            SubmittedCount = 2,
+            SubmittedCount = 1,
             Self = NotSubmitted(),
             Counterparty = Submitted(2, "theirs-never-revealed"),
         };

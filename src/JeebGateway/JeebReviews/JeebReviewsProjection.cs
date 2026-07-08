@@ -216,8 +216,9 @@ public static class JeebReviewsProjection
 
         var rows = new List<JeebRatingRow>();
         var mutuallySubmitted = selfSubmitted && theirsSubmitted;
+        var submittedCountComplete = upstream.SubmittedCount >= 2;
 
-        if (upstream.Revealed && mutuallySubmitted)
+        if (upstream.Revealed && submittedCountComplete && mutuallySubmitted)
         {
             if (theirs is { Submitted: true })
             {
@@ -238,7 +239,7 @@ public static class JeebReviewsProjection
     /// Generic→Jeeb status mapping for the mobile reveal parser. Mirrors the
     /// in-gateway lattice (the shared primitive has no Jeeb 7-day window concept):
     /// <list type="bullet">
-    ///   <item>both submitted AND revealed → <c>revealed</c></item>
+    ///   <item>both submitted, submittedCount >= 2, AND revealed → <c>revealed</c></item>
     ///   <item>revealed but not mutually submitted -> <c>locked_no_rating</c>
     ///     (defensive compatibility for stale upstream auto-reveal state)</item>
     ///   <item>only the viewer submitted → <c>pending_counter</c> (waiting on them)</item>
@@ -251,9 +252,11 @@ public static class JeebReviewsProjection
         var selfSubmitted = upstream.Self?.Submitted == true;
         var theirsSubmitted = upstream.Counterparty?.Submitted == true;
         var mutuallySubmitted = selfSubmitted && theirsSubmitted;
+        var submittedCountComplete = upstream.SubmittedCount >= 2;
 
         if (upstream.Revealed)
         {
+            if (!submittedCountComplete) return StatusCodes.LockedNoRating;
             if (!mutuallySubmitted) return StatusCodes.LockedNoRating;
             return StatusCodes.Revealed;
         }
