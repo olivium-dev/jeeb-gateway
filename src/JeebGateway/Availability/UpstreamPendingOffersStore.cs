@@ -145,6 +145,7 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
             //   (2) "request not open"     -> RequestNotOpenForOffersException (409 request-not-open-for-offers)
             //   (3) any other conflict     -> OfferSubmitConflictException (409 offer-submit-conflict)
             // The retired 20-offer cap must not be inferred from an unknown upstream code.
+            // offer-service submit has no count cap: unique (request_id, jeeber_id) only; 409s are state conflicts; edit cap is 422.
             if (IsDuplicateCode(ex.UpstreamCode))
             {
                 // The upstream owns the existing offer id; we do not have it

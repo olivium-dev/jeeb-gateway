@@ -124,6 +124,61 @@ public class RequestNotOpen409FidelityTests
         problem.Type.Should().NotBe("https://jeeb.dev/errors/offers-per-request-exceeded");
     }
 
+    [Fact]
+    public async Task Gateway_Imposes_No_Offer_Count_Cap_Across_Requests()
+    {
+        var fake = new AcceptingSubmitClient();
+        using var factory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureAppConfiguration((_, cfg) =>
+                    cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        { "FeatureFlags:UseUpstream:Offer", "true" }
+                    }));
+                builder.ConfigureTestServices(services =>
+                {
+                    services.RemoveAll<IOfferServiceClient>();
+                    services.AddSingleton<IOfferServiceClient>(fake);
+                });
+            });
+
+        var jeeberId = $"jeeber-many-{Guid.NewGuid()}";
+        var jeeber = factory.CreateClient();
+        jeeber.DefaultRequestHeaders.Add("X-User-Id", jeeberId);
+        jeeber.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        var requestIds = new List<string>();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
+            for (var i = 0; i < 25; i++)
+            {
+                var created = await store.CreateAsync(new CreateRequestInput
+                {
+                    ClientId = $"client-many-{i}-{Guid.NewGuid()}",
+                    Description = $"open request {i}",
+                }, default);
+                requestIds.Add(created.Id);
+            }
+        }
+
+        foreach (var requestId in requestIds)
+        {
+            var resp = await jeeber.PostAsJsonAsync(
+                $"/requests/{requestId}/offers",
+                new { fee = 9m, etaMinutes = 20 });
+
+            resp.StatusCode.Should().Be(HttpStatusCode.Created,
+                "one jeeber may submit to more than the retired 20-request threshold when each request is distinct");
+            resp.StatusCode.Should().NotBe(HttpStatusCode.Conflict);
+        }
+
+        fake.Submits.Should().HaveCount(requestIds.Count);
+        fake.Submits.Should().OnlyContain(s => s.ActingUserId == jeeberId);
+        fake.Submits.Select(s => s.RequestId).Should().BeEquivalentTo(requestIds);
+    }
+
     // -----------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------
@@ -160,4 +215,51 @@ public class RequestNotOpen409FidelityTests
             string actingUserId, string offerId, CancellationToken ct)
             => throw new NotSupportedException();
     }
+
+    /// <summary>
+    /// Minimal offer-service client whose <see cref="SubmitAsync"/> accepts every
+    /// request-scoped offer with a 201-equivalent wire record.
+    /// </summary>
+    private sealed class AcceptingSubmitClient : IOfferServiceClient
+    {
+        public List<SubmitCall> Submits { get; } = new();
+
+        public Task<OfferWire> SubmitAsync(
+            string actingUserId, string requestId, long feeCents, int etaMinutes, string? note, CancellationToken ct)
+        {
+            Submits.Add(new SubmitCall(actingUserId, requestId));
+            return Task.FromResult(new OfferWire
+            {
+                Id = $"offer-{Submits.Count}",
+                RequestId = requestId,
+                JeeberId = actingUserId,
+                FeeCents = feeCents,
+                EtaMinutes = etaMinutes,
+                Note = note,
+                Status = "submitted",
+                CreatedAt = DateTimeOffset.UtcNow,
+            });
+        }
+
+        public Task<OfferAcceptResult> AcceptWithStatusAsync(
+            string actingUserId, string requestId, string offerId, string idempotencyKey, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<OfferAcceptWire> AcceptAsync(
+            string actingUserId, string requestId, string offerId, string idempotencyKey, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<RequestMirrorResult> MirrorRequestAsync(
+            string actingUserId, string requestId, string clientId, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<OfferWithdrawResult> WithdrawAsync(
+            string actingUserId, string requestId, string offerId, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<OfferMutationResult> EditAsync(
+            string actingUserId, string requestId, string offerId, long? feeCents, int? etaMinutes, string? note, int? maxEdits, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<OfferMutationResult> RejectAsync(
+            string actingUserId, string offerId, CancellationToken ct)
+            => throw new NotSupportedException();
+    }
+
+    private sealed record SubmitCall(string ActingUserId, string RequestId);
 }
