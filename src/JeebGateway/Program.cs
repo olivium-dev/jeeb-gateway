@@ -1515,7 +1515,7 @@ builder.Services.AddSingleton<JeebGateway.Requests.OtpHandover.IHandoverCodeStor
 // Delivery tier catalog (T-backend-009).
 // Admins CRUD via /admin/tiers and changes take effect on the next request
 // (each List/Get reads fresh). Three default tiers (Urgent, Same-Day,
-// Scheduled) are seeded either by migration 0029 + 0035 (Postgres path) or the
+// Scheduled) are seeded either by migration 0029 + 0036 (Postgres path) or the
 // in-memory store's constructor (dev/CI fallback).
 //
 // Durability register (JEBV4-125, AUDIT-A IN-MEM-LIVE) — the admin tier catalog

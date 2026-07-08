@@ -21,7 +21,7 @@
 --
 -- Notes:     Idempotent — CREATE TABLE/INDEX IF NOT EXISTS + the seed uses
 --            ON CONFLICT DO NOTHING, so re-running is a no-op and never
---            stomps an admin's hand-edited row. Migration 0035 later collapses
+--            stomps an admin's hand-edited row. Migration 0036 later collapses
 --            this table to the fixed three-tier catalog used by the current
 --            gateway; these first-run seed rows all carry the flat 10%
 --            commission policy.
