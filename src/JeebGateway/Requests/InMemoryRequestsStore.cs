@@ -4,15 +4,11 @@ using JeebGateway.Requests.OtpHandover;
 namespace JeebGateway.Requests;
 
 /// <summary>
-/// MVP-grade in-memory delivery request store. Backs the BR-9 concurrency
-/// check until the downstream delivery-service (Postgres-backed) is wired
-/// in via an NSwag-generated client.
+/// MVP-grade in-memory delivery request store.
 ///
 /// All public methods are safe under concurrent access. The count + insert
-/// pair in <see cref="TryCreateAsync"/> is performed under a write lock so
-/// the BR-9 check is atomic — without it, two simultaneous creates at the
-/// boundary could both observe 2 active and both proceed, letting the
-/// client end up with 4 active requests.
+/// pair in <see cref="TryCreateWithLimitAsync"/> is performed under a write lock
+/// so the historical limit path remains atomic when exercised with a finite limit.
 /// </summary>
 public class InMemoryRequestsStore : IRequestsStore
 {
@@ -45,7 +41,7 @@ public class InMemoryRequestsStore : IRequestsStore
 
     public Task<DeliveryRequest> CreateAsync(CreateRequestInput input, CancellationToken ct)
     {
-        // Unconditional create — callers that need the BR-9 atomic check
+        // Unconditional create — callers that need the atomic limit-compatible path
         // should use TryCreateWithLimitAsync instead.
         var req = BuildRequest(input);
         _requests[req.Id] = req;
@@ -235,10 +231,9 @@ public class InMemoryRequestsStore : IRequestsStore
     }
 
     /// <summary>
-    /// Atomic count + insert under the store's write lock. Returns the
-    /// created request when the active count for <paramref name="input"/>'s
-    /// client is below <paramref name="limit"/>; throws
-    /// <see cref="TooManyActiveRequestsException"/> otherwise.
+    /// Atomic count + insert under the store's write lock. Gateway callers pass
+    /// <see cref="int.MaxValue"/> now that the active-request cap is retired; finite
+    /// limits still throw <see cref="TooManyActiveRequestsException"/>.
     /// </summary>
     public Task<DeliveryRequest> TryCreateWithLimitAsync(
         CreateRequestInput input,
@@ -260,10 +255,8 @@ public class InMemoryRequestsStore : IRequestsStore
     }
 
     /// <summary>
-    /// BR-10 atomic accept. The count-then-set-status sequence is held
-    /// under the same write lock so two simultaneous accepts at the
-    /// 1→2 boundary cannot both observe 1 active and both succeed,
-    /// leaving the Jeeber on 3.
+    /// Atomic accept. Gateway callers pass <see cref="int.MaxValue"/> now that
+    /// the active-delivery cap is retired; finite limits remain atomic.
     /// </summary>
     public Task<DeliveryRequest?> TryAcceptByJeeberAsync(
         string requestId,
@@ -283,7 +276,7 @@ public class InMemoryRequestsStore : IRequestsStore
             // else (already accepted by another Jeeber, expired by the
             // sweeper, cancelled by the Client) loses the race. Surface it
             // as a distinct exception so the controller maps to a different
-            // ProblemDetails type than the BR-10 cap conflict.
+            // ProblemDetails type than other accept conflicts.
             if (!RequestStatus.IsPreAcceptance(existing.Status))
             {
                 throw new RequestNotAcceptableException(existing.Status);

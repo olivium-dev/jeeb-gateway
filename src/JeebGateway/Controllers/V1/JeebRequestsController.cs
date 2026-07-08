@@ -16,7 +16,8 @@ namespace JeebGateway.Controllers.V1;
 ///
 /// <list type="bullet">
 ///   <item><c>POST /v1/requests</c> — create a delivery request and kick off
-///     tier-aware matching. Delegates BR-9 enforcement to the store and
+///     tier-aware matching. Delegates the atomic insert to the store with the
+///     retired BR-9 cap set to unlimited and
 ///     optionally seeds the canonical delivery-service row + fires matching
 ///     when the <c>FeatureFlags:UseUpstream:Delivery</c> and <c>Matching</c>
 ///     flags are on. Matching kick-off is best-effort (a transient matching
@@ -36,8 +37,8 @@ namespace JeebGateway.Controllers.V1;
 [ApiController]
 public sealed class JeebRequestsController : ControllerBase
 {
-    /// <summary>BR-9: per-client maximum of concurrent active requests.</summary>
-    private const int ActiveRequestsLimit = 3;
+    /// <summary>Retired BR-9 cap: active requests are unlimited.</summary>
+    private const int ActiveRequestsLimit = int.MaxValue;
 
     private const string DefaultTenantId = "default";
 
@@ -79,9 +80,8 @@ public sealed class JeebRequestsController : ControllerBase
     /// Orchestration order (load-bearing):
     /// 1. Resolve caller identity (401 on failure).
     /// 2. Validate description (required field — 400 on missing).
-    /// 3. Atomically enforce BR-9 cap + insert request row in the store
-    ///    (409 on cap exceeded — the check and insert are locked so they
-    ///    cannot race).
+    /// 3. Atomically insert the request row in the store with the retired BR-9
+    ///    cap set to unlimited.
     /// 4. BEST-EFFORT: if <c>FeatureFlags:UseUpstream:Delivery</c> is on and
     ///    the row has a tier, seed the canonical delivery-service deliveries
     ///    row (<c>POST /api/v1/deliveries</c> — idempotent) so the matching run
@@ -168,7 +168,7 @@ public sealed class JeebRequestsController : ControllerBase
         {
             return Conflict(new ProblemDetails
             {
-                Title = "Maximum 3 active requests. Complete or cancel an existing request.",
+                Title = "Active request concurrency is unlimited.",
                 Detail = $"Client has {ex.ActiveCount} active requests (limit {ex.Limit}).",
                 Status = StatusCodes.Status409Conflict,
                 Type = "https://jeeb.dev/errors/too-many-active-requests"

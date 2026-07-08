@@ -95,9 +95,9 @@ public class InMemoryPendingOffersStore : IPendingOffersStore
             offer.UpdatedAt = at;
 
             // The Jeeber committed to one request; their other in-flight
-            // offers are now stale and must not race with the BR-10 cap if
-            // a sibling accept came in milliseconds later on a different
-            // connection. Withdraw them in the same critical section.
+            // offers are now stale if a sibling accept came in milliseconds
+            // later on a different connection. Withdraw them in the same
+            // critical section.
             foreach (var sibling in _offers.Values)
             {
                 if (ReferenceEquals(sibling, offer)) continue;

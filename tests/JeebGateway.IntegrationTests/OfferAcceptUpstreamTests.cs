@@ -288,46 +288,44 @@ public class OfferAcceptUpstreamTests
     }
 
     // -----------------------------------------------------------------
-    // S07 N7 / BR-10 — per-jeeber active-delivery cap (default 2).
+    // Retired BR-10 active-delivery cap.
     //
-    // Accepting an offer assigns the delivery to the OFFER'S jeeber. If that jeeber
-    // already holds >= ActiveDeliveriesLimit ACTIVE deliveries (counted by
-    // delivery-service), the gateway must short-circuit to 409
-    // too-many-active-deliveries BEFORE forwarding the saga — so no third delivery
-    // is created. Below the cap the accept proceeds unchanged.
+    // Accepting an offer still assigns the delivery to the OFFER'S jeeber, but
+    // gateway accept routes no longer pre-count delivery-service active rows.
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task Accept_When_OfferJeeber_AtCap_Returns_409_Without_Forwarding_Saga()
+    public async Task Accept_When_OfferJeeber_Has_Two_Active_Deliveries_Forwards_Saga()
     {
-        // The offer's bidder (jeeber-busy) already holds 2 active deliveries.
         var fake = new FakeOfferServiceClient
         {
-            // Must NOT be consulted — BR-10 short-circuits before the saga call.
-            Result = new OfferAcceptResult { Status = OfferAcceptStatus.Accepted }
+            Result = new OfferAcceptResult
+            {
+                Status = OfferAcceptStatus.Accepted,
+                Envelope = new OfferAcceptWire
+                {
+                    AcceptedOfferId = "offer-cap",
+                    JeeberId = "jeeber-busy",
+                    RejectedOfferIds = Array.Empty<string>()
+                }
+            }
         };
         var delivery = new FakeDeliveryServiceClient { ActiveCount = 2 };
         using var factory = NewUpstreamFactory(fake, delivery);
-        // Record the offer's bidder so the cap is checked against THAT jeeber.
         SeedRouting(factory, offerId: "offer-cap", requestId: "req-cap", jeeberId: "jeeber-busy");
 
         var resp = await ClientActor(factory, "client-cap")
             .PostAsync("/offers/offer-cap/accept", content: null);
 
-        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/too-many-active-deliveries");
-        // The cap was checked against the OFFER'S jeeber (the bidder), not the actor.
-        delivery.LastCountedJeeberId.Should().Be("jeeber-busy");
-        // No third delivery: the saga was NEVER forwarded.
-        fake.CallCount.Should().Be(0);
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        delivery.LastCountedJeeberId.Should().BeNull();
+        fake.CallCount.Should().Be(1);
     }
 
     [Fact]
-    public async Task Accept_When_OfferJeeber_UnderCap_Forwards_Saga_And_Returns_200()
+    public async Task Accept_When_OfferJeeber_Has_One_Active_Delivery_Forwards_Saga_And_Returns_200()
     {
-        // The offer's bidder holds 1 active delivery — below the cap of 2 — so the
-        // accept proceeds exactly as before and forwards to the saga.
+        // The active-delivery count is no longer consulted before forwarding to the saga.
         var fake = new FakeOfferServiceClient
         {
             Result = new OfferAcceptResult
@@ -349,16 +347,13 @@ public class OfferAcceptUpstreamTests
             .PostAsync("/offers/offer-under/accept", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        delivery.LastCountedJeeberId.Should().Be("jeeber-under");
+        delivery.LastCountedJeeberId.Should().BeNull();
         fake.CallCount.Should().Be(1);
     }
 
     [Fact]
-    public async Task Accept_When_DeliveryService_CountFaults_Degrades_To_UnderCap_And_Returns_200()
+    public async Task Accept_Does_Not_Read_DeliveryService_Count_And_Returns_200()
     {
-        // Degrade-don't-fail: a delivery-service blip on the BR-10 count read must
-        // NOT turn an otherwise-valid accept into a 5xx (that would regress S01-S06
-        // happy accepts). The gateway logs and treats the jeeber as under cap.
         var fake = new FakeOfferServiceClient
         {
             Result = new OfferAcceptResult
@@ -383,6 +378,7 @@ public class OfferAcceptUpstreamTests
             .PostAsync("/offers/offer-blip/accept", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        delivery.LastCountedJeeberId.Should().BeNull();
         fake.CallCount.Should().Be(1);
     }
 
@@ -487,10 +483,9 @@ public class OfferAcceptUpstreamTests
     private static WebApplicationFactory<Program> NewUpstreamFactory(IOfferServiceClient fake)
         => NewUpstreamFactory(fake, new FakeDeliveryServiceClient());
 
-    // S07 / BR-10: the accept path now reads the offer-jeeber's active-delivery
-    // count from delivery-service before forwarding. Stub IDeliveryServiceClient so
-    // the suite is deterministic and never dials a real upstream; the default fake
-    // reports 0 active (under cap) so every pre-BR-10 assertion is unaffected.
+    // Stub IDeliveryServiceClient so the suite is deterministic and never dials a
+    // real upstream. The retired active-delivery cap means accept no longer calls
+    // CountActiveDeliveriesByJeeberAsync.
     private static WebApplicationFactory<Program> NewUpstreamFactory(
         IOfferServiceClient fake, IDeliveryServiceClient delivery, bool deliveryUpstream = false)
         => new WebApplicationFactory<Program>()
@@ -598,12 +593,8 @@ public class OfferAcceptUpstreamTests
     }
 
     /// <summary>
-    /// S07 / BR-10 test double for delivery-service. Only
-    /// <see cref="CountActiveDeliveriesByJeeberAsync"/> is exercised on the accept
-    /// path; it returns <see cref="ActiveCount"/> (default 0 = under cap) or throws
-    /// <see cref="Fault"/> when set, so the gateway's cap enforcement and
-    /// degrade-don't-fail posture can be asserted deterministically. Every other
-    /// member throws — the accept path must not call them.
+    /// Delivery-service test double. CountActiveDeliveriesByJeeberAsync is retained
+    /// only to prove the retired active-delivery cap no longer calls it.
     /// </summary>
     private sealed class FakeDeliveryServiceClient : IDeliveryServiceClient
     {

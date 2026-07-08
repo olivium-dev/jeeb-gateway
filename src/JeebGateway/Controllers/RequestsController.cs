@@ -14,27 +14,24 @@ namespace JeebGateway.Controllers;
 /// lifecycle (status transitions during matching/pickup/delivery) stays
 /// with the downstream delivery-service.
 ///
-/// BR-9: a Client may have at most <see cref="ActiveRequestsLimit"/>
-/// active (non-delivered) requests. Active = any status strictly before
-/// <c>delivered</c>: scheduled, pending, matched, accepted, picked_up,
-/// heading_off. Terminal states (delivered, rated, cancelled, expired,
-/// disputed) do not count against the cap. <c>scheduled</c> is included
-/// so Clients cannot bypass the cap by stacking future-dated requests.
+/// BR-9 active-request concurrency is currently unlimited. The store path still
+/// accepts a limit so the historical 409 plumbing remains available if another
+/// conflict raises it, but gateway create routes pass <see cref="int.MaxValue"/>.
 /// </summary>
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
 [Route("requests")]
 public class RequestsController : ControllerBase
 {
-    /// <summary>BR-9: per-Client maximum of concurrent active requests.</summary>
-    public const int ActiveRequestsLimit = 3;
+    /// <summary>Retired BR-9 cap: active requests are unlimited.</summary>
+    public const int ActiveRequestsLimit = int.MaxValue;
 
     /// <summary>
     /// Exact wording from the ticket acceptance criteria — clients render
     /// this verbatim in the mobile error banner.
     /// </summary>
     internal const string LimitExceededMessage =
-        "Maximum 3 active requests. Complete or cancel an existing request.";
+        "Active request concurrency is unlimited.";
 
     /// <summary>T-backend-007: MVP cap on attached photos per request.</summary>
     public const int MaxPhotos = 10;

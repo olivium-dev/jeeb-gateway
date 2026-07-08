@@ -160,11 +160,9 @@ public class OfferAcceptColdIndexReconcileTests
         offerFake.AcceptCallCount.Should().Be(0, "an offer that exists nowhere must never be forwarded to the accept saga");
     }
 
-    // BR-10 stays intact THROUGH cold reconciliation: the winning jeeber resolved from the
-    // authoritative offer-service list is checked against the active-delivery cap BEFORE the
-    // saga is forwarded — a jeeber at cap is 409'd even on the cold path.
+    // The retired BR-10 active-delivery cap must not block cold reconciliation.
     [Fact]
-    public async Task Accept_ColdIndex_WinningJeeberAtCap_Returns409_AndDoesNotForwardSaga()
+    public async Task Accept_ColdIndex_WinningJeeberWithTwoActiveDeliveries_ForwardsSaga()
     {
         var offerFake = new ReconcilingOfferClient();
         var deliveryFake = new StubDeliveryClient { ActiveDeliveryCount = 2 };
@@ -176,12 +174,9 @@ public class OfferAcceptColdIndexReconcileTests
         var resp = await ClientActor(factory, "client-owner")
             .PostAsync("/v1/offers/offer-capcold/accept", content: null);
 
-        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/too-many-active-deliveries");
-        // The cap was checked against the reconciled winning jeeber, and the saga never ran.
-        deliveryFake.LastCountedJeeberId.Should().Be("jeeber-busy");
-        offerFake.AcceptCallCount.Should().Be(0);
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        deliveryFake.LastCountedJeeberId.Should().BeNull();
+        offerFake.AcceptCallCount.Should().Be(1);
     }
 
     // ---------------------------------------------------------------------

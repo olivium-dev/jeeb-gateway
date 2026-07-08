@@ -731,9 +731,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
 /// <summary>
 /// Raised when offer-service rejects a submit with HTTP 409. Carries the
 /// upstream error <c>code</c> so the adapter can map it onto the gateway's
-/// existing <see cref="JeebGateway.Availability.DuplicateOfferException"/> /
-/// <see cref="JeebGateway.Availability.TooManyOffersForRequestException"/>
-/// surface.
+/// existing gateway conflict surface.
 /// </summary>
 public sealed class OfferUpstreamConflictException : Exception
 {

@@ -153,10 +153,11 @@ public class RequestVoiceEndpointTests : IClassFixture<WebApplicationFactory<Pro
     }
 
     [Fact] // N9
-    public async Task Voice_Over_BR9_Cap_Returns_409()
+    public async Task Voice_After_Three_Typed_Creates_Returns_201()
     {
-        var client = ClientFor("s04-n9-capped");
-        // Seed 3 real active requests via the typed path -> reach the BR-9 cap (3).
+        var client = ClientFor("s04-n9-unlimited");
+        // Seed 3 real active requests via the typed path; the retired BR-9 cap
+        // must not block the voice create.
         for (var i = 0; i < 3; i++)
         {
             var seed = await client.PostAsJsonAsync("/requests", new
@@ -171,25 +172,22 @@ public class RequestVoiceEndpointTests : IClassFixture<WebApplicationFactory<Pro
 
         var resp = await client.PostAsync("/v1/requests", VoiceForm(new byte[] { 1 }, Guid.NewGuid().ToString()));
 
-        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
-    [Fact] // N9-reverse: cross-surface cap symmetry — voice creates count toward the
-           // cap a subsequent typed /requests create checks. Locks the shared-store
-           // invariant the live SETUP-5/6/7 -> N9 leg depends on, in the inverse order.
-    public async Task Three_Voice_Creates_Then_Typed_Request_Returns_409()
+    [Fact] // N9-reverse: voice creates and typed creates share the same unlimited store path.
+    public async Task Three_Voice_Creates_Then_Typed_Request_Returns_201()
     {
         var client = ClientFor("s04-n9-voice-first");
 
-        // Seed 3 real active requests via the VOICE path -> reach the BR-9 cap (3).
+        // Seed 3 real active requests via the VOICE path.
         for (var i = 0; i < 3; i++)
         {
             var seed = await client.PostAsync("/v1/requests", VoiceForm(new byte[] { 1 }, Guid.NewGuid().ToString()));
-            seed.StatusCode.Should().Be(HttpStatusCode.Created, $"voice cap-seed {i} should succeed under the cap");
+            seed.StatusCode.Should().Be(HttpStatusCode.Created, $"voice seed {i} should succeed");
         }
 
-        // The 4th create on the TYPED surface must trip the same shared cap -> 409.
-        var blocked = await client.PostAsJsonAsync("/requests", new
+        var fourth = await client.PostAsJsonAsync("/requests", new
         {
             description = "typed after 3 voice",
             tierId = "flash",
@@ -197,9 +195,7 @@ public class RequestVoiceEndpointTests : IClassFixture<WebApplicationFactory<Pro
             dropoffLocation = new { lat = 24.6, lng = 46.7 }
         });
 
-        blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
-        var problem = await blocked.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
-        problem!.Status.Should().Be((int)HttpStatusCode.Conflict);
+        fourth.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
     // ----- JEBV4-61: GET /v1/requests/{id} route-collision fix -----
