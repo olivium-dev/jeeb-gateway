@@ -87,6 +87,35 @@ public sealed class AuthRefreshV1Controller : ControllerBase
         return OtpSignInProblems.Problem(this, StatusCodes.Status401Unauthorized, "invalid_refresh",
             "Refresh rejected", "The refresh token is invalid, expired, or has been revoked. Sign in again.");
     }
+
+    /// <summary>
+    /// POST /v1/auth/logout — revoke the presented refresh token so the session
+    /// can no longer be rotated (JEBV4-244). This is the <c>v1</c> route literal
+    /// the Jeeb client calls; it mirrors the legacy <c>POST /auth/logout</c> in
+    /// the now-[Obsolete] <see cref="JeebGateway.Controllers.AuthController.Logout"/>.
+    ///
+    /// <para><b>Reuse, not rebuild.</b> A thin pass-through to the existing
+    /// <see cref="ITokenService.RevokeAsync"/> with <see cref="RevocationReason.Logout"/>
+    /// — the same refresh-token store as refresh; no new persistence, no new
+    /// business logic, and (like refresh) this path does NOT touch
+    /// user-management. Idempotent: an unknown / already-revoked token still
+    /// returns <c>204</c> (the token service no-ops on a miss), never disclosing
+    /// whether the token existed.</para>
+    /// </summary>
+    [HttpPost("logout")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> Logout([FromBody] RefreshRequestDto? body, CancellationToken ct)
+    {
+        if (body is null || string.IsNullOrWhiteSpace(body.RefreshToken))
+        {
+            return OtpSignInProblems.Problem(this, StatusCodes.Status400BadRequest, "invalid_request",
+                "refreshToken is required", "A refreshToken must be supplied to end the session.");
+        }
+
+        await _tokens.RevokeAsync(body.RefreshToken!, RevocationReason.Logout, ct);
+        return NoContent();
+    }
 }
 
 /// <summary>Request body for <c>POST /v1/auth/refresh</c>.</summary>
