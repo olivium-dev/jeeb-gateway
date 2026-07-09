@@ -36,8 +36,9 @@
 --
 -- Safety:    Idempotent + guarded (information_schema column-presence + to_
 --            regclass + pg_constraint). No-op when already canonical.
---            NON-DESTRUCTIVE: the live cash path only RENAMEs columns / changes
---            DEFAULTs (no data loss); the retired-UPG path only reshapes when
+--            NON-DESTRUCTIVE: the live cash path only RENAMEs columns, changes
+--            DEFAULTs, and relabels the currency string LBP->USD (see steps 3-4;
+--            no magnitude/row loss); the retired-UPG path only reshapes when
 --            the table is EMPTY (fresh DB) and RAISEs otherwise, so populated
 --            financial columns are never dropped. Runs under db/apply.sh which
 --            re-runs every file each deploy.
@@ -123,6 +124,13 @@ BEGIN
         WHERE table_schema = 'public' AND table_name = 'settlement_batches'
           AND column_name = 'total_gross_lbp'
     ) THEN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'settlement_batches'
+              AND column_name = 'total_gross_usd'
+        ) THEN
+            RAISE EXCEPTION 'settlement_batches carries BOTH total_gross_lbp and total_gross_usd (dual-column drift from the in-place-edit era); refusing to auto-rename (would raise 42701). Manual convergence required to choose the authoritative column.';
+        END IF;
         ALTER TABLE settlement_batches RENAME COLUMN total_gross_lbp TO total_gross_usd;
     END IF;
     IF EXISTS (
@@ -130,6 +138,13 @@ BEGIN
         WHERE table_schema = 'public' AND table_name = 'settlement_batches'
           AND column_name = 'total_commission_lbp'
     ) THEN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'settlement_batches'
+              AND column_name = 'total_commission_usd'
+        ) THEN
+            RAISE EXCEPTION 'settlement_batches carries BOTH total_commission_lbp and total_commission_usd (dual-column drift from the in-place-edit era); refusing to auto-rename (would raise 42701). Manual convergence required to choose the authoritative column.';
+        END IF;
         ALTER TABLE settlement_batches RENAME COLUMN total_commission_lbp TO total_commission_usd;
     END IF;
     IF EXISTS (
@@ -137,6 +152,13 @@ BEGIN
         WHERE table_schema = 'public' AND table_name = 'settlement_batches'
           AND column_name = 'total_net_lbp'
     ) THEN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'settlement_batches'
+              AND column_name = 'total_net_usd'
+        ) THEN
+            RAISE EXCEPTION 'settlement_batches carries BOTH total_net_lbp and total_net_usd (dual-column drift from the in-place-edit era); refusing to auto-rename (would raise 42701). Manual convergence required to choose the authoritative column.';
+        END IF;
         ALTER TABLE settlement_batches RENAME COLUMN total_net_lbp TO total_net_usd;
     END IF;
 
@@ -157,6 +179,16 @@ BEGIN
     -- Canonical currency default (the _lbp origin's base default was 'LBP').
     ALTER TABLE settlement_batches ALTER COLUMN currency SET DEFAULT 'USD';
 
+    -- Converge existing rows' currency to 'USD' to match the _usd column rename
+    -- and the flipped default. Base 0015 defaulted currency = 'LBP', so rows
+    -- created before this convergence carry 'LBP' under the _usd column names —
+    -- a self-contradiction the app reads and forwards per row
+    -- (WeeklySettlementBatch.cs -> payment/COD clients). This asserts those
+    -- historical magnitudes are USD-denominated (consistent with the rename).
+    -- Whether any pre-existing magnitude was a genuine LBP amount needing FX
+    -- conversion is an OWNER data-policy call (moot for MSI test data).
+    UPDATE settlement_batches SET currency = 'USD' WHERE currency = 'LBP';
+
     -- Canonical unique + read indexes (same names as base 0015 so no-op on live).
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_settlement_batches_jeeber_period') THEN
         ALTER TABLE settlement_batches
@@ -166,13 +198,18 @@ BEGIN
     CREATE INDEX IF NOT EXISTS idx_settlement_batches_jeeber_id ON settlement_batches(jeeber_id);
     CREATE INDEX IF NOT EXISTS idx_settlement_batches_period    ON settlement_batches(period_start, period_end);
 
-    -- 4. settlements.currency default -> USD (0015 in-place edit re-expressed).
+    -- 4. settlements.currency default + existing rows -> USD (0015 in-place
+    --    edit re-expressed). Base 0015 defaulted settlements.currency = 'LBP';
+    --    the same USD-denomination assertion as settlement_batches applies
+    --    (historical magnitudes treated as USD; genuine-LBP FX is an OWNER
+    --    data-policy call, moot for MSI test data).
     IF EXISTS (
         SELECT 1 FROM information_schema.columns
         WHERE table_schema = 'public' AND table_name = 'settlements'
           AND column_name = 'currency'
     ) THEN
         ALTER TABLE settlements ALTER COLUMN currency SET DEFAULT 'USD';
+        UPDATE settlements SET currency = 'USD' WHERE currency = 'LBP';
     END IF;
 END$$;
 

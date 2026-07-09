@@ -5,13 +5,23 @@
 --            add the per-tier request TTL used by RequestExpirySweeper.
 --
 -- Notes:     Idempotent + fully guarded. Every table-dependent operation is
---            wrapped in a to_regclass presence check and every constraint add
---            is guarded by a pg_constraint name check, so this is safe to run
+--            wrapped in a to_regclass presence check, so this is safe to run
 --            against a fresh DB, the live drifted DB, and an already-converged
 --            DB (no-op when already matching). Adds request_ttl_seconds to the
---            gateway `tiers` table, upserts the canonical three rows, removes
---            rows outside that fixed catalog, and forward-converges
---            `delivery_tiers` to the flat 10% commission.
+--            gateway `tiers` table, collapses it to the canonical three rows,
+--            and forward-converges `delivery_tiers` to the flat 10% commission.
+--
+--            RE-RUN SAFETY: db/apply.sh re-runs EVERY migration on every deploy
+--            under ON_ERROR_STOP=1, and the base seeds 0011/0029 (which stay
+--            byte-identical to their original applied form) re-insert the
+--            pre-convergence rows/rates on each run via ON CONFLICT DO NOTHING.
+--            This migration therefore does NOT add hard CHECK constraints that
+--            would forbid those seeded values: Postgres evaluates a table CHECK
+--            on the proposed row BEFORE ON CONFLICT skips it, so such a CHECK
+--            would brick the 2nd+ deploy (23514) on the very rows this migration
+--            immediately re-converges. The catalog/commission invariants are
+--            instead enforced by the app (JeebTiersController) + this per-deploy
+--            convergence (DELETE + upsert + UPDATE below). See the inline NOTEs.
 -- =====================================================================
 
 BEGIN;
@@ -40,6 +50,13 @@ BEGIN
                 CHECK (request_ttl_seconds BETWEEN 60 AND 2592000);
         END IF;
 
+        -- Collapse to the fixed three-tier catalog BEFORE upserting the
+        -- canonical rows. DELETE-before-UPSERT avoids a uq_tiers_name_lower
+        -- (LOWER(name)) unique collision in the edge case where a row outside
+        -- the canonical set carries a name that LOWER()-matches a canonical
+        -- tier: deleting the stray row first frees the name the upsert then sets.
+        DELETE FROM tiers WHERE id NOT IN ('urgent', 'same-day', 'scheduled');
+
         INSERT INTO tiers (
             id, name, sla_hours, radius_km, request_ttl_seconds,
             commission_rate, price_hint, created_by, updated_by
@@ -56,38 +73,46 @@ BEGIN
                commission_rate     = EXCLUDED.commission_rate,
                price_hint          = EXCLUDED.price_hint,
                updated_by          = 'system',
-               updated_at          = now();
+               updated_at          = now()
+         WHERE tiers.name                IS DISTINCT FROM EXCLUDED.name
+            OR tiers.sla_hours           IS DISTINCT FROM EXCLUDED.sla_hours
+            OR tiers.radius_km           IS DISTINCT FROM EXCLUDED.radius_km
+            OR tiers.request_ttl_seconds IS DISTINCT FROM EXCLUDED.request_ttl_seconds
+            OR tiers.commission_rate     IS DISTINCT FROM EXCLUDED.commission_rate
+            OR tiers.price_hint          IS DISTINCT FROM EXCLUDED.price_hint;
 
-        DELETE FROM tiers WHERE id NOT IN ('urgent', 'same-day', 'scheduled');
-
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_tiers_fixed_catalog_id') THEN
-            ALTER TABLE tiers
-                ADD CONSTRAINT ck_tiers_fixed_catalog_id
-                CHECK (id IN ('urgent', 'same-day', 'scheduled'));
-        END IF;
-
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_tiers_commission_rate_flat') THEN
-            ALTER TABLE tiers
-                ADD CONSTRAINT ck_tiers_commission_rate_flat
-                CHECK (commission_rate = 0.10);
-        END IF;
+        -- NOTE: hard CHECK constraints ck_tiers_fixed_catalog_id
+        -- (id IN urgent/same-day/scheduled) and ck_tiers_commission_rate_flat
+        -- (commission_rate = 0.10) were intentionally REMOVED. apply.sh re-runs
+        -- the 0029 seed every deploy, re-inserting economy/on-the-way (ids
+        -- outside the catalog) and their non-0.10 rates via ON CONFLICT DO
+        -- NOTHING; Postgres checks the constraint on those proposed rows BEFORE
+        -- the conflict is skipped, so either CHECK would brick the 2nd+ deploy
+        -- (23514) even though the DELETE above removes those rows microseconds
+        -- later. The invariant is enforced by the app (V1/JeebTiersController:
+        -- ValidateCreatableTierId + ValidateCommission reject any non-catalog id
+        -- or rate <> 0.10) and by this per-deploy DELETE+upsert convergence.
     END IF;
 
     -- ---- delivery_tiers reference catalog (created by 0004/0011) -----
     IF to_regclass('public.delivery_tiers') IS NOT NULL THEN
         -- Forward-converge already-deployed rows to the flat 10% commission.
-        -- The 0011 seed uses ON CONFLICT (code) DO NOTHING, so DBs provisioned
-        -- before the flat-10% ruling still carry old per-tier rates; fresh DBs
-        -- already seed 0.1000 so this is a no-op there.
+        -- The 0011 seed re-inserts flash/express 0.1500 + standard 0.1200 +
+        -- on_the_way/eco 0.1000 every deploy via ON CONFLICT (code) DO NOTHING
+        -- (existing rows keep their value); this UPDATE re-flattens every row to
+        -- 0.1000 each deploy. (NOT a no-op on a fresh DB: 0011 seeds 15/15/12/
+        -- 10/10; 0035 already flattened it, this is defense-in-depth.)
         UPDATE delivery_tiers
            SET commission_rate = 0.1000
          WHERE commission_rate <> 0.1000;
 
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_delivery_tiers_commission_rate_flat') THEN
-            ALTER TABLE delivery_tiers
-                ADD CONSTRAINT ck_delivery_tiers_commission_rate_flat
-                CHECK (commission_rate = 0.1000);
-        END IF;
+        -- NOTE: hard CHECK ck_delivery_tiers_commission_rate_flat
+        -- (commission_rate = 0.1000) was intentionally REMOVED — same reason as
+        -- the tiers CHECKs above. The 0011 seed re-inserts flash/express 0.1500
+        -- + standard 0.1200 every deploy; a CHECK would be evaluated on those
+        -- proposed rows BEFORE ON CONFLICT (code) DO NOTHING skips them and
+        -- brick apply.sh on the 2nd deploy (23514). The flat-10% invariant is
+        -- enforced by app commission policy + this per-deploy UPDATE.
     END IF;
 END$$;
 
