@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using JeebGateway.Observability;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 
@@ -84,6 +85,7 @@ public class TokenService : ITokenService
             if (existing.ReplacedByTokenId is not null)
             {
                 await _store.RevokeChainAsync(existing.TokenId, RevocationReason.ReuseDetected, ct);
+                BusinessOutcomeTelemetry.RefreshReuseDetected.Add(1);
                 return new RefreshResult { Outcome = RefreshOutcome.ReuseDetected };
             }
             return new RefreshResult { Outcome = RefreshOutcome.Revoked };
@@ -108,6 +110,7 @@ public class TokenService : ITokenService
             // Lost the race; another caller already rotated this token →
             // treat as reuse.
             await _store.RevokeChainAsync(existing.TokenId, RevocationReason.ReuseDetected, ct);
+            BusinessOutcomeTelemetry.RefreshReuseDetected.Add(1);
             return new RefreshResult { Outcome = RefreshOutcome.ReuseDetected };
         }
 

@@ -1,3 +1,4 @@
+using JeebGateway.Observability;
 using JeebGateway.StateService.Durable;
 using JeebGateway.StateService.Idempotency;
 
@@ -77,6 +78,8 @@ public sealed class StateServiceRequestExpiryRecorder : IRequestExpiryRecorder
             // Best-effort mirror. A state-service blip must not fail the sweep or
             // roll back the already-committed in-memory expiry — the local transition
             // is the source of truth; this record is the durable audit trail.
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "state-service-request-expiry"));
             _logger.LogWarning(ex,
                 "Failed to persist expiry record for request {RequestId} to state-service; " +
                 "expiry stands in-memory but will not survive a gateway restart.",
