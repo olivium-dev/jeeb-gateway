@@ -12,13 +12,16 @@
 --            the table's natural unique key, so re-running this migration
 --            is a no-op and never overwrites an admin's hand-edited row.
 --
---            Commission is a flat 10% (USD) across all tiers.
+--            Commission rates encode BR-2 from the requirements pack:
+--              flash/express   15%   (premium SLAs)
+--              standard        12%
+--              on_the_way/eco  10%   (lowest urgency, lowest take-rate)
 --
 --            Test accounts for the P1-P5 personas live in
 --            db/seeds/test_accounts.sql; they are NOT in this migration
 --            because production must never auto-create them.
 -- Refs:      FR-4.1 (tier matrix), FR-17.1 (prohibited items list),
---            BR-2   (flat commission policy).
+--            BR-2   (commission policy per tier).
 -- =====================================================================
 
 BEGIN;
@@ -29,7 +32,7 @@ BEGIN;
 -- `code` is the stable identifier referenced by application code,
 -- API contracts, and the mobile client. `sla_minutes` is NULL for
 -- on_the_way (no SLA by design — the Jeeber is already heading that
--- direction). `commission_rate` is stored as a fraction (0.1000 = 10%).
+-- direction). `commission_rate` is stored as a fraction (0.1500 = 15%).
 -- `sort_order` controls the display order of the tier-picker UI
 -- (FR-4.2): fastest/most-expensive first.
 --
@@ -39,9 +42,9 @@ BEGIN;
 -- ---------------------------------------------------------------------
 INSERT INTO delivery_tiers (code, name, sla_minutes, radius_metres, commission_rate, sort_order, is_active)
 VALUES
-    ('flash',      'Flash',       30,    3000, 0.1000, 10, TRUE),
-    ('express',    'Express',     60,    7000, 0.1000, 20, TRUE),
-    ('standard',   'Standard',   180,   15000, 0.1000, 30, TRUE),
+    ('flash',      'Flash',       30,    3000, 0.1500, 10, TRUE),
+    ('express',    'Express',     60,    7000, 0.1500, 20, TRUE),
+    ('standard',   'Standard',   180,   15000, 0.1200, 30, TRUE),
     ('on_the_way', 'On-the-way', NULL,  25000, 0.1000, 40, TRUE),
     ('eco',        'Eco',       1440,   25000, 0.1000, 50, TRUE)
 ON CONFLICT (code) DO NOTHING;
