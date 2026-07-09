@@ -51,16 +51,6 @@ BEGIN
                 CHECK (request_ttl_seconds BETWEEN 60 AND 2592000);
         END IF;
 
-        -- Drop any stale CHECK constraints left behind by an earlier build of
-        -- this branch (wo/tier-table..6bd9112) that added hard commission/catalog
-        -- CHECKs. A DB that ran that build once has them installed durably; since
-        -- apply.sh re-runs the 0011/0029 seeds every deploy (re-inserting non-0.10
-        -- rates + non-catalog ids that Postgres CHECK-evaluates BEFORE ON CONFLICT
-        -- skips them), those CHECKs brick every subsequent deploy (23514). DROP
-        -- them so this migration converges from that state too; no-op otherwise.
-        ALTER TABLE tiers DROP CONSTRAINT IF EXISTS ck_tiers_fixed_catalog_id;
-        ALTER TABLE tiers DROP CONSTRAINT IF EXISTS ck_tiers_commission_rate_flat;
-
         -- Collapse to the fixed three-tier catalog BEFORE upserting the
         -- canonical rows. DELETE-before-UPSERT avoids a uq_tiers_name_lower
         -- (LOWER(name)) unique collision in the edge case where a row outside
@@ -114,7 +104,9 @@ BEGIN
         -- NOTHING; Postgres checks the constraint on those proposed rows BEFORE
         -- the conflict is skipped, so either CHECK would brick the 2nd+ deploy
         -- (23514) even though the DELETE above removes those rows microseconds
-        -- later. The invariant is enforced by the app write-path
+        -- later. (Any stale copies left by an earlier build of this branch are
+        -- dropped pre-flight in 0010a_drop_stale_tier_checks.sql, before the
+        -- 0011/0029 seeds re-run.) The invariant is enforced by the app write-path
         -- (AdminTiersController: ValidateCreatableTierId + ValidateCommission
         -- reject any non-catalog id or rate <> 0.10) and by this per-deploy
         -- DELETE+upsert convergence.
@@ -122,13 +114,6 @@ BEGIN
 
     -- ---- delivery_tiers reference catalog (created by 0004/0011) -----
     IF to_regclass('public.delivery_tiers') IS NOT NULL THEN
-        -- Drop the stale flat-commission CHECK if an earlier build of this branch
-        -- installed it (same rationale as the tiers CHECKs above): the 0011 seed
-        -- re-inserts flash/express 0.1500 + standard 0.1200 every deploy, which a
-        -- CHECK evaluates BEFORE ON CONFLICT (code) DO NOTHING skips them, bricking
-        -- apply.sh (23514). Idempotent no-op if it was never added.
-        ALTER TABLE delivery_tiers DROP CONSTRAINT IF EXISTS ck_delivery_tiers_commission_rate_flat;
-
         -- Forward-converge already-deployed rows to the flat 10% commission.
         -- The 0011 seed re-inserts flash/express 0.1500 + standard 0.1200 +
         -- on_the_way/eco 0.1000 every deploy via ON CONFLICT (code) DO NOTHING
