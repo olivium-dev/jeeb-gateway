@@ -37,7 +37,7 @@ namespace JeebGateway.IntegrationTests;
 ///     code never resolved, so push bodies silently lost the tier suffix). Unresolvable
 ///     ids still drop the suffix (behavior kept).</description></item>
 ///   <item><description><c>POST /v1/requests</c> (JSON V1 path) now VALIDATES a supplied
-///     tierId against the unified catalog: unknown → 400 with the machine-readable
+///     tierId against the unified catalog: unknown → 404 with the machine-readable
 ///     <c>tier-not-found</c> type URI (same envelope as the legacy create surfaces);
 ///     catalog ids and legacy codes are both accepted; a tier-less create stays
 ///     allowed.</description></item>
@@ -161,7 +161,7 @@ public class TierUnificationTests
     }
 
     [Fact]
-    public async Task V1Create_UnknownTierId_Returns400TierNotFound_AndPublishesNothing()
+    public async Task V1Create_UnknownTierId_Returns404TierNotFound_AndPublishesNothing()
     {
         var push = new RecordingTopicPushClient();
         using var factory = NewFactory(push);
@@ -170,7 +170,7 @@ public class TierUnificationTests
         var resp = await client.PostAsJsonAsync(
             "/v1/requests", ValidPayload("Pick up keys", "platinum_super_fast"));
 
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
         var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
         problem!.Type.Should().Be("https://jeeb.dev/errors/tier-not-found",
             "the reject must carry the same machine-readable code as the legacy create surfaces");
@@ -249,9 +249,9 @@ public class TierUnificationTests
     }
 
     [Fact]
-    public async Task V1Create_DeliveryUpstreamOn_UnknownTierId_Returns400TierNotFound()
+    public async Task V1Create_DeliveryUpstreamOn_UnknownTierId_Returns404TierNotFound()
     {
-        // A genuinely-unknown id is still rejected — with the EXACT same 400
+        // A genuinely-unknown id is still rejected — with the EXACT same
         // ProblemDetails envelope (tier-not-found type URI) as before the fix.
         var push = new RecordingTopicPushClient();
         using var factory = NewUpstreamDeliveryFactory(push);
@@ -260,7 +260,7 @@ public class TierUnificationTests
         var resp = await client.PostAsJsonAsync(
             "/v1/requests", ValidPayload("Pick up keys", "00000000-0000-0000-0000-000000000000"));
 
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
         var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
         problem!.Type.Should().Be("https://jeeb.dev/errors/tier-not-found",
             "an unknown id under the upstream branch keeps the same machine-readable code");
@@ -282,7 +282,7 @@ public class TierUnificationTests
         var resp = await client.PostAsJsonAsync(
             "/v1/requests", ValidPayload("Pick up keys", UpstreamStandardTierId));
 
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
         var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
         problem!.Type.Should().Be("https://jeeb.dev/errors/tier-not-found");
     }

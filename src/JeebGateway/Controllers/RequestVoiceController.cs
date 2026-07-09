@@ -87,6 +87,7 @@ public sealed class RequestVoiceController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status413PayloadTooLarge)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status415UnsupportedMediaType)]
@@ -173,11 +174,11 @@ public sealed class RequestVoiceController : ControllerBase
         var tierId = string.IsNullOrWhiteSpace(tier) ? "standard" : tier.Trim();
         if (!await _tiers.ExistsAsync(tierId, ct))
         {
-            return BadRequest(new ProblemDetails
+            return NotFound(new ProblemDetails
             {
                 Title = "tier does not match any active delivery tier.",
                 Detail = $"tier={tierId}",
-                Status = StatusCodes.Status400BadRequest,
+                Status = StatusCodes.Status404NotFound,
                 Type = "https://jeeb.dev/errors/tier-not-found"
             });
         }
