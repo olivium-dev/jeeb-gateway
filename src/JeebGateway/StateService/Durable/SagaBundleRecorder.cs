@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using JeebGateway.Observability;
 
 namespace JeebGateway.StateService.Durable;
 
@@ -114,6 +115,8 @@ public sealed class StateServiceSagaBundleRecorder : ISagaBundleRecorder
             }
 
             // Any other non-2xx (incl. 5xx after retries/breaker) — degrade.
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "state-service-saga-bundles"));
             _logger.LogWarning(
                 "Saga bundle record for {SourceId} returned {Status}; degrading (create still succeeds).",
                 sourceId, (int)response.StatusCode);
@@ -125,6 +128,8 @@ public sealed class StateServiceSagaBundleRecorder : ISagaBundleRecorder
             // fail the user's create because the durable ledger blipped — the
             // delivery row (the matching-resolve source of truth) is the hard
             // dependency; the bundle is the audit/saga trail.
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "state-service-saga-bundles"));
             _logger.LogWarning(ex,
                 "Saga bundle record for {SourceId} unavailable; degrading (create still succeeds).",
                 sourceId);

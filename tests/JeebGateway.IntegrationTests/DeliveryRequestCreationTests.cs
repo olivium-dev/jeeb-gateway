@@ -92,7 +92,7 @@ public class DeliveryRequestCreationTests : IClassFixture<WebApplicationFactory<
     }
 
     [Fact]
-    public async Task Create_With_Unknown_Tier_Returns_400()
+    public async Task Create_With_Unknown_Tier_Returns_404()
     {
         var client = ClientFor("t007-bad-tier");
 
@@ -104,7 +104,7 @@ public class DeliveryRequestCreationTests : IClassFixture<WebApplicationFactory<
             dropoffLocation = new { lat = 24.6309, lng = 46.7194 }
         });
 
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
         var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
         problem!.Type.Should().Be("https://jeeb.dev/errors/tier-not-found");
     }

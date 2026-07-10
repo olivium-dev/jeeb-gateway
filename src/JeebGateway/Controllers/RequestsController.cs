@@ -106,6 +106,7 @@ public class RequestsController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
     public async Task<IActionResult> Create(CancellationToken ct)
@@ -234,11 +235,11 @@ public class RequestsController : ControllerBase
         }
         if (!await _tiers.ExistsAsync(body.TierId, ct))
         {
-            return BadRequest(new ProblemDetails
+            return NotFound(new ProblemDetails
             {
                 Title = "tierId does not match any active delivery tier.",
                 Detail = $"tierId={body.TierId}",
-                Status = StatusCodes.Status400BadRequest,
+                Status = StatusCodes.Status404NotFound,
                 Type = "https://jeeb.dev/errors/tier-not-found"
             });
         }

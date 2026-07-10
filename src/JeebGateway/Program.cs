@@ -8,6 +8,7 @@ using JeebGateway.Financials;
 using JeebGateway.Kyc;
 using JeebGateway.Middleware;
 using JeebGateway.NotificationPreferences;
+using JeebGateway.Observability;
 using JeebGateway.ProhibitedItems;
 using JeebGateway.StateService;
 using JeebGateway.Ratings;
@@ -31,6 +32,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.IdentityModel.Tokens;
@@ -850,6 +852,8 @@ builder.Services.AddOpenTelemetry()
             .AddMeter(RequestLatencyMetrics.MeterName)
             // T-BE-028 / JEB-64 — dispute case counters & histograms.
             .AddMeter(DisputeCaseTelemetry.MeterName)
+            // GW12-OBS-6 — business outcome counters for auth and durable writers.
+            .AddMeter(BusinessOutcomeTelemetry.MeterName)
             // Explicit buckets keep the 400ms p95 SLO on a bucket boundary so
             // histogram_quantile() does not round across a wide bucket (T-backend-050).
             .AddView(
@@ -2430,6 +2434,19 @@ testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
 
 // Must be registered early in the pipeline so it wraps the whole request.
 app.UseExceptionHandler();
+app.UseStatusCodePages(async statusCodeContext =>
+{
+    var httpContext = statusCodeContext.HttpContext;
+    var problemDetails = httpContext.RequestServices.GetRequiredService<IProblemDetailsService>();
+    await problemDetails.TryWriteAsync(new ProblemDetailsContext
+    {
+        HttpContext = httpContext,
+        ProblemDetails = new ProblemDetails
+        {
+            Status = httpContext.Response.StatusCode
+        }
+    });
+});
 
 // STT seam visibility (Track C): make the active Whisper path obvious in startup logs.
 if (useRealWhisper)

@@ -1,4 +1,5 @@
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Observability;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Tokens;
@@ -203,6 +204,8 @@ public sealed class AuthOtpController : ControllerBase
             // failure (wrong code, expired, no record, too-many-attempts).
             // Surface as the frozen 401 invalid_otp ProblemDetails WITHOUT echoing
             // the upstream body (which may embed the submitted code).
+            BusinessOutcomeTelemetry.OtpVerifyFailures.Add(1,
+                new KeyValuePair<string, object?>("outcome", "invalid_otp"));
             return OtpSignInProblems.Problem(this, StatusCodes.Status401Unauthorized, "invalid_otp",
                 "Invalid code", "The OTP code is incorrect or expired.");
         }
@@ -213,6 +216,8 @@ public sealed class AuthOtpController : ControllerBase
             // returns 429 on the 3rd wrong code for a phone+application window; the
             // gateway forwards its status + Retry-After so the client can back off,
             // without echoing the upstream body (which may embed the submitted code).
+            BusinessOutcomeTelemetry.OtpLockouts.Add(1,
+                new KeyValuePair<string, object?>("outcome", "too_many_attempts"));
             return UpstreamThrottled(ex, "too_many_attempts",
                 "Too many incorrect attempts. Please request a new code and try again later.");
         }
