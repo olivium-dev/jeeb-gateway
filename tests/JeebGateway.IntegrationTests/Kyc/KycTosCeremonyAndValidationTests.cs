@@ -127,8 +127,7 @@ public sealed class KycTosCeremonyAndValidationTests
 
     [Theory]
     [InlineData("passport")]
-    [InlineData("residency")]        // Q-042 canonical vocab
-    [InlineData("residency_permit")] // retained back-compat alias
+    [InlineData("residency")] // Q-042 ratified vocab
     public async Task SubmitJson_NonNationalId_Missing_IdNumber_Returns_400_PerE3(string idType)
     {
         _factory.ContractSigning.Reset();
@@ -140,7 +139,7 @@ public sealed class KycTosCeremonyAndValidationTests
         // id_type — superseding the pre-E3 JEBV4-113 §3.1 scoping that let
         // passport/residency submit with no id_number. The id_type itself is a
         // supported value (so the 400 is scoped to id_number, not id_type),
-        // proving the residency/residency_permit vocab is accepted.
+        // proving the passport/residency vocab is accepted.
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         var json = await ReadJsonAsync(resp);
         json.GetProperty("field").GetString().Should().Be("id_number");
@@ -148,8 +147,7 @@ public sealed class KycTosCeremonyAndValidationTests
 
     [Theory]
     [InlineData("passport", "P1234567")]
-    [InlineData("residency", "RP-2024-55")]        // Q-042 canonical vocab accepted end-to-end
-    [InlineData("residency_permit", "RP-2024-55")] // alias accepted end-to-end
+    [InlineData("residency", "RP-2024-55")] // Q-042 ratified vocab accepted end-to-end
     public async Task SubmitJson_NonNationalId_With_FreeForm_IdNumber_Is_Not_Shape_Gated_Returns_201(
         string idType, string idNumber)
     {
@@ -159,9 +157,27 @@ public sealed class KycTosCeremonyAndValidationTests
             client, "/v1/kyc/submit", Package(idType: idType, idNumber: idNumber), Guid.NewGuid().ToString("N"));
 
         // Non-national id_numbers are free-form: present but NOT subject to the
-        // national-ID ^\d{12}$ rule. residency (canonical) and residency_permit
-        // (alias) both clear the vocab check and reach 201.
+        // national-ID ^\d{12}$ rule. passport and residency (the ratified vocab)
+        // both clear the vocab check and reach 201.
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
+    }
+
+    [Fact]
+    public async Task SubmitJson_ResidencyPermit_Is_Not_A_Supported_IdType_Returns_400()
+    {
+        _factory.ContractSigning.Reset();
+        var client = ClientFor("e3-residency-permit-rejected-user");
+        var resp = await PostJsonAsync(
+            client, "/v1/kyc/submit", Package(idType: "residency_permit", idNumber: "RP-2024-55"), Guid.NewGuid().ToString("N"));
+
+        // E3 DoD (WORK-ORDER-2026-07-07 Lane E): the BFF enumerates EXACTLY
+        // {national_id, passport, residency} — "no more" — and any other value
+        // is rejected. "residency_permit" is NOT kept as an alias: no client
+        // ever sent it (repo-wide search + form-builder flavors + mobile PR #80).
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("field").GetString().Should().Be("id_type");
+        json.GetProperty("detail").GetString().Should().Contain("not a supported value");
     }
 
     // ----- helpers -----

@@ -231,18 +231,16 @@ public sealed class KycSubmissionBffEndpointTests : IClassFixture<KycSubmissionB
         json.GetProperty("detail").GetString().Should().Contain("id_number is required");
     }
 
-    // ----- Q-042 vocab: residency (canonical) + residency_permit (alias) accepted -----
+    // ----- Q-042 / E3 DoD vocab: EXACTLY national_id | passport | residency -----
 
-    [Theory]
-    [InlineData("residency")]        // Q-042 ratified/canonical value
-    [InlineData("residency_permit")] // retained back-compat alias
-    public async Task SubmitJson_Residency_Vocab_Accepted_Returns_201(string idType)
+    [Fact]
+    public async Task SubmitJson_Residency_Vocab_Accepted_Returns_201()
     {
-        var client = ClientFor($"q042-{idType}");
+        var client = ClientFor("q042-residency");
 
         var resp = await PostJsonAsync(client, "/v1/kyc/submit", new
         {
-            id_type = idType,
+            id_type = "residency", // Q-042 ratified value
             id_number = "RP-2024-77", // free-form (non-national), just present
             id_document_front_url = "cdn://obj/front",
             id_document_back_url = "cdn://obj/back",
@@ -250,6 +248,30 @@ public sealed class KycSubmissionBffEndpointTests : IClassFixture<KycSubmissionB
         }, Guid.NewGuid().ToString("N"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
+    }
+
+    [Theory]
+    [InlineData("residency_permit")] // NOT in the ratified set — no alias (E3 DoD: "no more")
+    [InlineData("driving_license")]  // the DoD's literal "any other value is rejected" case
+    public async Task SubmitJson_Unsupported_IdType_Returns_400_Field_IdType(string idType)
+    {
+        var client = ClientFor($"q042-reject-{idType}");
+
+        // E3 DoD (WORK-ORDER-2026-07-07 Lane E): the BFF enumerates EXACTLY
+        // {national_id, passport, residency} and "any other value is rejected".
+        var resp = await PostJsonAsync(client, "/v1/kyc/submit", new
+        {
+            id_type = idType,
+            id_number = "RP-2024-77",
+            id_document_front_url = "cdn://obj/front",
+            id_document_back_url = "cdn://obj/back",
+            selfie_with_liveness_url = "cdn://obj/selfie",
+        }, Guid.NewGuid().ToString("N"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("field").GetString().Should().Be("id_type");
+        json.GetProperty("detail").GetString().Should().Contain("not a supported value");
     }
 
     [Fact]

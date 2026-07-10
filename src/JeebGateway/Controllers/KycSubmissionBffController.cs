@@ -377,11 +377,14 @@ public sealed class KycSubmissionBffController : ControllerBase
     private static readonly System.Text.RegularExpressions.Regex NationalIdRegex =
         new(@"^\d{12}$", System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    // Accepted ID variants per owner decision Q-042 (national_id | passport |
-    // residency). "residency" is the ratified/canonical value; "residency_permit"
-    // is retained as a back-compat alias so existing clients are not 400-walled.
+    // Accepted ID variants per owner decision Q-042 / the E3 DoD
+    // (WORK-ORDER-2026-07-07 Lane E, E3): the BFF enumerates EXACTLY
+    // national_id | passport | residency — "no more" — and any other value is
+    // rejected. No back-compat alias is kept: no client ever sent
+    // "residency_permit" (repo-wide search, form-builder jeeb_jeeber_v1 flavors,
+    // and mobile PR #80 all corroborate).
     private static readonly HashSet<string> AllowedIdTypes =
-        new(StringComparer.OrdinalIgnoreCase) { "national_id", "passport", "residency", "residency_permit" };
+        new(StringComparer.OrdinalIgnoreCase) { "national_id", "passport", "residency" };
 
     private async Task<IActionResult?> ValidateSubmitFieldsAsync(KycSubmitJsonBody body, CancellationToken ct)
     {
