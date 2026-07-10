@@ -1,0 +1,1533 @@
+{
+  "components": {
+    "schemas": {
+      "AvailabilityToggleRequest": {
+        "description": "Body for `POST /v1/geo/agents/{id}/availability`.",
+        "properties": {
+          "available": {
+            "description": "True = Agent goes online; False = Agent goes offline.",
+            "examples": [
+              true
+            ],
+            "title": "Available",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "title": "AvailabilityToggleRequest",
+        "type": "object"
+      },
+      "GpsBatchLatest": {
+        "description": "The newest accepted fix echoed back to the caller.",
+        "properties": {
+          "accuracy": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accuracy"
+          },
+          "lat": {
+            "title": "Lat",
+            "type": "number"
+          },
+          "lng": {
+            "title": "Lng",
+            "type": "number"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          }
+        },
+        "required": [
+          "lat",
+          "lng"
+        ],
+        "title": "GpsBatchLatest",
+        "type": "object"
+      },
+      "GpsBatchPoint": {
+        "description": "A single GPS fix inside a `POST /location/update` batch.\n\nMirrors the gateway `GpsPointDto`: WGS84 `lat`/`lng`, an optional\ndevice `timestamp`, and an optional horizontal `accuracy` in metres.\nField aliases keep the wire contract camelCase / short-key while the\nPython attribute names stay descriptive.",
+        "properties": {
+          "accuracy": {
+            "anyOf": [
+              {
+                "maximum": 10000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Horizontal accuracy in metres (best-effort, optional).",
+            "title": "Accuracy"
+          },
+          "lat": {
+            "examples": [
+              33.8951
+            ],
+            "maximum": 90.0,
+            "minimum": -90.0,
+            "title": "Lat",
+            "type": "number"
+          },
+          "lng": {
+            "examples": [
+              35.5031
+            ],
+            "maximum": 180.0,
+            "minimum": -180.0,
+            "title": "Lng",
+            "type": "number"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Device wall-clock when the fix was sampled (UTC). Defaults to server now when omitted.",
+            "title": "Timestamp"
+          }
+        },
+        "required": [
+          "lat",
+          "lng"
+        ],
+        "title": "GpsBatchPoint",
+        "type": "object"
+      },
+      "GpsPingIngest": {
+        "description": "Body for `POST /v1/geo/ping`.",
+        "properties": {
+          "accuracyM": {
+            "anyOf": [
+              {
+                "maximum": 10000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Horizontal accuracy in metres (mobile-reported).",
+            "title": "Accuracym"
+          },
+          "actorId": {
+            "description": "Agent sending the ping; must match Authorization principal.",
+            "examples": [
+              "kamal-001"
+            ],
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Actorid",
+            "type": "string"
+          },
+          "headingDeg": {
+            "anyOf": [
+              {
+                "exclusiveMaximum": 360.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Compass bearing in degrees, [0, 360).",
+            "title": "Headingdeg"
+          },
+          "lat": {
+            "examples": [
+              33.5138
+            ],
+            "maximum": 90.0,
+            "minimum": -90.0,
+            "title": "Lat",
+            "type": "number"
+          },
+          "lng": {
+            "examples": [
+              36.2765
+            ],
+            "maximum": 180.0,
+            "minimum": -180.0,
+            "title": "Lng",
+            "type": "number"
+          },
+          "recordedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Client wall-clock at sampling (UTC). Defaults to server now.",
+            "title": "Recordedat"
+          },
+          "speedMps": {
+            "anyOf": [
+              {
+                "maximum": 200.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Instantaneous speed in metres-per-second.",
+            "title": "Speedmps"
+          },
+          "trackId": {
+            "description": "The track this position belongs to (business key).",
+            "examples": [
+              "dlv-2026-05-19-0001"
+            ],
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Trackid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trackId",
+          "actorId",
+          "lat",
+          "lng"
+        ],
+        "title": "GpsPingIngest",
+        "type": "object"
+      },
+      "GpsPingResponse": {
+        "description": "Payload returned by the ingest endpoint and pushed on the WS/SSE stream.\n\nField naming uses camelCase on the wire to match the existing\nNSwag-generated client contracts (see `dotnet-cicd-nswag-generation-ci`).",
+        "properties": {
+          "accuracyM": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accuracym"
+          },
+          "actorId": {
+            "title": "Actorid",
+            "type": "string"
+          },
+          "headingDeg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headingdeg"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "lat": {
+            "title": "Lat",
+            "type": "number"
+          },
+          "lng": {
+            "title": "Lng",
+            "type": "number"
+          },
+          "receivedAt": {
+            "format": "date-time",
+            "title": "Receivedat",
+            "type": "string"
+          },
+          "recordedAt": {
+            "format": "date-time",
+            "title": "Recordedat",
+            "type": "string"
+          },
+          "speedMps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speedmps"
+          },
+          "trackId": {
+            "title": "Trackid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "trackId",
+          "actorId",
+          "lat",
+          "lng",
+          "recordedAt",
+          "receivedAt"
+        ],
+        "title": "GpsPingResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IngestAccepted": {
+        "description": "Envelope for the ingest endpoint \u2014 confirms storage + fanout.",
+        "properties": {
+          "accepted": {
+            "default": true,
+            "title": "Accepted",
+            "type": "boolean"
+          },
+          "ping": {
+            "$ref": "#/components/schemas/GpsPingResponse"
+          },
+          "subscribers": {
+            "description": "Number of WS/SSE subscribers that received the fanout (AC6 obs).",
+            "minimum": 0.0,
+            "title": "Subscribers",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ping",
+          "subscribers"
+        ],
+        "title": "IngestAccepted",
+        "type": "object"
+      },
+      "LocationCreate": {
+        "description": "Payload for creating a location.",
+        "properties": {
+          "latitude": {
+            "examples": [
+              40.7128
+            ],
+            "maximum": 90.0,
+            "minimum": -90.0,
+            "title": "Latitude",
+            "type": "number"
+          },
+          "longitude": {
+            "examples": [
+              -74.006
+            ],
+            "maximum": 180.0,
+            "minimum": -180.0,
+            "title": "Longitude",
+            "type": "number"
+          },
+          "tag": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "examples": [
+              "home"
+            ],
+            "title": "Tag"
+          },
+          "user_id": {
+            "examples": [
+              "user-123"
+            ],
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "latitude",
+          "longitude"
+        ],
+        "title": "LocationCreate",
+        "type": "object"
+      },
+      "LocationResponse": {
+        "description": "Location as returned by the API.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "latitude": {
+            "title": "Latitude",
+            "type": "number"
+          },
+          "longitude": {
+            "title": "Longitude",
+            "type": "number"
+          },
+          "tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "user_id",
+          "latitude",
+          "longitude",
+          "created_at",
+          "tag"
+        ],
+        "title": "LocationResponse",
+        "type": "object"
+      },
+      "LocationUpdateRequest": {
+        "description": "Body for `POST /location/update`: a non-empty batch of GPS fixes.",
+        "properties": {
+          "points": {
+            "description": "Ordered batch of GPS fixes (newest-by-timestamp wins).",
+            "items": {
+              "$ref": "#/components/schemas/GpsBatchPoint"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Points",
+            "type": "array"
+          }
+        },
+        "required": [
+          "points"
+        ],
+        "title": "LocationUpdateRequest",
+        "type": "object"
+      },
+      "LocationUpdateResponse": {
+        "description": "Response for `POST /location/update`.\n\n`online` is echoed straight from the persisted presence row so callers\ncan confirm the heartbeat did NOT flip availability (it never does).",
+        "properties": {
+          "accepted": {
+            "minimum": 0.0,
+            "title": "Accepted",
+            "type": "integer"
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GpsBatchLatest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "online": {
+            "title": "Online",
+            "type": "boolean"
+          },
+          "rejected": {
+            "minimum": 0.0,
+            "title": "Rejected",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "accepted",
+          "rejected",
+          "online"
+        ],
+        "title": "LocationUpdateResponse",
+        "type": "object"
+      },
+      "LocationWithDistance": {
+        "description": "Location plus distance in km (for nearest endpoint).",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "distance_km": {
+            "title": "Distance Km",
+            "type": "number"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "latitude": {
+            "title": "Latitude",
+            "type": "number"
+          },
+          "longitude": {
+            "title": "Longitude",
+            "type": "number"
+          },
+          "tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "user_id",
+          "latitude",
+          "longitude",
+          "created_at",
+          "tag",
+          "distance_km"
+        ],
+        "title": "LocationWithDistance",
+        "type": "object"
+      },
+      "NearbyAgentResponse": {
+        "description": "An online Agent within a tier radius \u2014 a matching candidate (C4).",
+        "properties": {
+          "distance_m": {
+            "description": "Geodesic distance from the query point in metres.",
+            "minimum": 0.0,
+            "title": "Distance M",
+            "type": "number"
+          },
+          "last_seen_at": {
+            "format": "date-time",
+            "title": "Last Seen At",
+            "type": "string"
+          },
+          "latitude": {
+            "title": "Latitude",
+            "type": "number"
+          },
+          "location_geohash5": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Geohash5"
+          },
+          "longitude": {
+            "title": "Longitude",
+            "type": "number"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "latitude",
+          "longitude",
+          "last_seen_at",
+          "distance_m"
+        ],
+        "title": "NearbyAgentResponse",
+        "type": "object"
+      },
+      "UserLocationResponse": {
+        "description": "Latitude and longitude for a user (GET by user_id).",
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "latitude": {
+            "title": "Latitude",
+            "type": "number"
+          },
+          "longitude": {
+            "title": "Longitude",
+            "type": "number"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "latitude",
+          "longitude"
+        ],
+        "title": "UserLocationResponse",
+        "type": "object"
+      },
+      "UserStatusResponse": {
+        "description": "Current status row for a Agent.\n\nThe presence position fields (`latitude`/`longitude`/`location_geohash5`/\n`role`) are additive (K3) and default to None, so existing consumers\nthat ignore them \u2014 and rows that predate the first GPS ping \u2014 are\nunaffected.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "last_seen_at": {
+            "format": "date-time",
+            "title": "Last Seen At",
+            "type": "string"
+          },
+          "latitude": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latitude"
+          },
+          "location_geohash5": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Geohash5"
+          },
+          "longitude": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Longitude"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "manual",
+                  "auto_offline",
+                  "heartbeat",
+                  "unchanged"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why this state was produced; emitted by the API/cron, not stored.",
+            "title": "Reason"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "available",
+          "last_seen_at",
+          "updated_at"
+        ],
+        "title": "UserStatusResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Store user locations, query the nearest location(s) by latitude / longitude, and stream live per-track GPS pings over WebSocket or Server-Sent Events. Generic opaque trackId/actorId primitives (JEB-1485 boundary remediation; product-agnostic).",
+    "title": "Location Microservice",
+    "version": "1.2.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/": {
+      "get": {
+        "description": "Liveness probe: returns 200 if the process is running.",
+        "operationId": "health__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Health  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Root"
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "Liveness probe: returns 200 if the process is running.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Health Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health check"
+      }
+    },
+    "/location/update": {
+      "post": {
+        "description": "Record a streamed GPS batch for the authenticated Agent.\n\nPydantic validation already guarantees ``points`` is non-empty and\nevery fix has an in-range ``lat``/``lng`` (a malformed batch yields a\n422 from FastAPI, never a 500). The newest fix by device ``timestamp``\nwins; fixes with no timestamp are ordered after any timestamped fix\nso an explicit device clock takes precedence.",
+        "operationId": "post_location_update_location_update_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocationUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationUpdateResponse"
+                }
+              }
+            },
+            "description": "Batch recorded; last_seen_at bumped."
+          },
+          "401": {
+            "description": "Missing or invalid bearer token."
+          },
+          "422": {
+            "description": "Empty batch or a malformed point."
+          }
+        },
+        "summary": "Ingest a batch of GPS fixes (heartbeat)",
+        "tags": [
+          "location-update"
+        ]
+      }
+    },
+    "/locations": {
+      "post": {
+        "description": "Create a location for a user, or update the existing location if the user_id already exists. Returns the persisted row.\n\nSide effect: every GPS ping bumps `user_status.last_seen_at` for the\nsame user (AC3). The Agent's `available` flag is NEVER changed by a\nping \u2014 only the manual toggle endpoint or the auto-offline sweeper\nmay flip availability.",
+        "operationId": "post_location_locations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocationCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationResponse"
+                }
+              }
+            },
+            "description": "Location updated for existing user_id"
+          },
+          "201": {
+            "description": "Location created for new user_id"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create or update a location",
+        "tags": [
+          "locations"
+        ]
+      }
+    },
+    "/locations/nearest": {
+      "get": {
+        "description": "Return the nearest stored locations to the given coordinates. Optionally filter by user_id.",
+        "operationId": "get_nearest_locations_nearest_get",
+        "parameters": [
+          {
+            "description": "Latitude of the reference point",
+            "in": "query",
+            "name": "latitude",
+            "required": true,
+            "schema": {
+              "description": "Latitude of the reference point",
+              "maximum": 90,
+              "minimum": -90,
+              "title": "Latitude",
+              "type": "number"
+            }
+          },
+          {
+            "description": "Longitude of the reference point",
+            "in": "query",
+            "name": "longitude",
+            "required": true,
+            "schema": {
+              "description": "Longitude of the reference point",
+              "maximum": 180,
+              "minimum": -180,
+              "title": "Longitude",
+              "type": "number"
+            }
+          },
+          {
+            "description": "Maximum number of results",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "description": "Maximum number of results",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Filter by user_id",
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by user_id",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LocationWithDistance"
+                  },
+                  "title": "Response Get Nearest Locations Nearest Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Locations sorted by distance (nearest first), with distance_km."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get nearest locations",
+        "tags": [
+          "locations"
+        ]
+      }
+    },
+    "/locations/user/{user_id}": {
+      "get": {
+        "description": "Return the latest latitude and longitude for a user by user_id. Returns 404 if the user has no stored location.",
+        "operationId": "get_user_location_locations_user__user_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserLocationResponse"
+                }
+              }
+            },
+            "description": "The latest latitude and longitude for the given user."
+          },
+          "404": {
+            "description": "No location found for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get user location",
+        "tags": [
+          "locations"
+        ]
+      }
+    },
+    "/v1/geo/agents/online": {
+      "get": {
+        "description": "Return every Agent currently flagged online.\n\nThe fast-path for matching: a covering index on `(available, last_seen_at)`\nkeeps this query O(online-count).",
+        "operationId": "list_online_agents_v1_geo_agents_online_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UserStatusResponse"
+                  },
+                  "title": "Response List Online Agents V1 Geo Agents Online Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Agents with `available=True`. Consumed by the matching engine (T-BE-010) to scope nearest-agent queries."
+          }
+        },
+        "summary": "List currently online Agents",
+        "tags": [
+          "agents"
+        ]
+      }
+    },
+    "/v1/geo/agents/online/nearby": {
+      "get": {
+        "description": "Return the online, fresh, in-radius Agents nearest the query point.\n\nThe durable presence row (K3) carries each Agent's latest position +\ngeohash5 + role, so this runs a single indexed spatial query with no\njoin to the track-scoped ping table. A `available=True` Agent with\na stale or missing fix is excluded.",
+        "operationId": "list_nearby_online_agents_v1_geo_agents_online_nearby_get",
+        "parameters": [
+          {
+            "description": "Query point latitude.",
+            "in": "query",
+            "name": "latitude",
+            "required": true,
+            "schema": {
+              "description": "Query point latitude.",
+              "maximum": 90,
+              "minimum": -90,
+              "title": "Latitude",
+              "type": "number"
+            }
+          },
+          {
+            "description": "Query point longitude.",
+            "in": "query",
+            "name": "longitude",
+            "required": true,
+            "schema": {
+              "description": "Query point longitude.",
+              "maximum": 180,
+              "minimum": -180,
+              "title": "Longitude",
+              "type": "number"
+            }
+          },
+          {
+            "description": "Tier radius in metres (e.g. 1000 / 3000 / 8000 per F6).",
+            "in": "query",
+            "name": "radius_m",
+            "required": true,
+            "schema": {
+              "description": "Tier radius in metres (e.g. 1000 / 3000 / 8000 per F6).",
+              "exclusiveMinimum": 0,
+              "maximum": 200000,
+              "title": "Radius M",
+              "type": "number"
+            }
+          },
+          {
+            "description": "Exclude Agents whose last fix is older than this.",
+            "in": "query",
+            "name": "max_staleness_seconds",
+            "required": false,
+            "schema": {
+              "default": 120.0,
+              "description": "Exclude Agents whose last fix is older than this.",
+              "exclusiveMinimum": 0,
+              "maximum": 86400,
+              "title": "Max Staleness Seconds",
+              "type": "number"
+            }
+          },
+          {
+            "description": "Presence role to scope to; pass empty/omit-as-null for any.",
+            "in": "query",
+            "name": "role",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "agent",
+              "description": "Presence role to scope to; pass empty/omit-as-null for any.",
+              "title": "Role"
+            }
+          },
+          {
+            "description": "Max candidates returned.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "description": "Max candidates returned.",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/NearbyAgentResponse"
+                  },
+                  "title": "Response List Nearby Online Agents V1 Geo Agents Online Nearby Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Online, fresh Agents within `radius_m` of (latitude, longitude), nearest-first. Consumed by the matching engine (C4 / S06) to scope `POST /matching/run` candidates via a PostGIS `ST_DWithin` query."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List online Agents within a radius (tier-radius matching)",
+        "tags": [
+          "agents"
+        ]
+      }
+    },
+    "/v1/geo/agents/{actor_id}/availability": {
+      "get": {
+        "description": "Return the current availability and last_seen_at for a Agent.",
+        "operationId": "get_agent_availability_v1_geo_agents__actor_id__availability_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "actor_id",
+            "required": true,
+            "schema": {
+              "title": "Actor Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No status row for this Agent"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent availability",
+        "tags": [
+          "agents"
+        ]
+      },
+      "post": {
+        "description": "Set this Agent's availability to `payload.available`.\n\nSide effects:\n  * Upserts `user_status` with `last_seen_at = now()`.\n  * If the boolean changed (or the row was just created), publishes\n    an `availability_changed` event to the configured notifier.\n\nIdempotent: repeating the same call is safe and only refreshes\n`last_seen_at`. The endpoint is sized to stay under 100ms p99 (AC5):\none indexed PK lookup + one upsert + one async notify.",
+        "operationId": "toggle_agent_availability_v1_geo_agents__actor_id__availability_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "actor_id",
+            "required": true,
+            "schema": {
+              "title": "Actor Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AvailabilityToggleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserStatusResponse"
+                }
+              }
+            },
+            "description": "The persisted status row."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Toggle Agent availability",
+        "tags": [
+          "agents"
+        ]
+      }
+    },
+    "/v1/geo/ping": {
+      "post": {
+        "description": "Persist the ping and broadcast to subscribers within ~5 ms (AC1).",
+        "operationId": "post_ping_v1_geo_ping_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GpsPingIngest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "description": "Caller is not authorized for this track"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "description": "Throttled \u2014 wait the indicated seconds"
+          }
+        },
+        "summary": "Ingest a single GPS ping",
+        "tags": [
+          "live-tracking"
+        ]
+      }
+    },
+    "/v1/geo/tracks/{track_id}/tracking": {
+      "get": {
+        "description": "Returns the most recent ping (or `latest=null` if none).\n\nThe response is hand-built so the wire shape stays camelCase\n(matching the NSwag-generated client contracts) without needing a\ndedicated `TrackingResponse` model.",
+        "operationId": "get_tracking_v1_geo_tracks__track_id__tracking_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Tracking V1 Geo Tracks  Track Id  Tracking Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "description": "Caller is not authorized for this track"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get the latest known position for a track",
+        "tags": [
+          "live-tracking"
+        ]
+      }
+    },
+    "/v1/geo/tracks/{track_id}/tracking/stream": {
+      "get": {
+        "description": "Server-Sent-Events stream for clients that can't use WebSockets.\n\nEach ping is sent as an `event: ping` frame with the JSON-encoded\n`GpsPingResponse` as the data payload. sse-starlette emits a colon\ncomment (`: ping`) every `gps_sse_keepalive_seconds` so HTTP proxies\ndon't drop idle connections; the inner loop polls for client\ndisconnect every 500 ms so the generator exits promptly when the\nclient closes.",
+        "operationId": "stream_tracking_sse_v1_geo_tracks__track_id__tracking_stream_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "description": "Caller is not authorized for this track"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Subscribe to live GPS updates over SSE",
+        "tags": [
+          "live-tracking"
+        ]
+      }
+    }
+  }
+}
