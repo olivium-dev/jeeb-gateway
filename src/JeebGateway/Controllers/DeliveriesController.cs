@@ -936,8 +936,17 @@ public class DeliveriesController : ControllerBase
     /// pair when applicable; the canonical "other party" for a Jeeber
     /// action is the Client and vice versa.
     /// </summary>
-    private async Task NotifyOtherPartyAsync(DeliveryRequest req, string previousStatus, CancellationToken ct)
+    private async Task NotifyOtherPartyAsync(
+        DeliveryRequest req, string previousStatus, CancellationToken ct, string? pushStatus = null)
     {
+        // pushStatus decouples the PUSH-facing status vocabulary from the request
+        // read-model (req.Status). Existing callers omit it, so effectiveStatus falls back
+        // to req.Status (byte-for-byte identical behavior). The OTP-verify completion path
+        // passes the CANONICAL terminal token (Done) so the counterparty completion push
+        // carries "Done" while the request read-model stays gateway-local "delivered".
+        // See fix/ci-red-delivery-status-clobber (PR #248).
+        var effectiveStatus = pushStatus ?? req.Status;
+
         // The counterparty depends on the transition:
         //   * pending → matched: notify Client (no Jeeber yet).
         //   * everything else:   notify Client and Jeeber both, since the
@@ -954,12 +963,12 @@ public class DeliveriesController : ControllerBase
         {
             ["deliveryId"] = req.Id,
             ["previousStatus"] = previousStatus,
-            ["status"] = req.Status,
+            ["status"] = effectiveStatus,
             ["gpsTrackingActive"] = req.GpsTrackingActive ? "true" : "false"
         };
 
         var title = "Delivery status updated";
-        var bodyText = $"Status changed from {previousStatus} to {req.Status}.";
+        var bodyText = $"Status changed from {previousStatus} to {effectiveStatus}.";
 
         foreach (var userId in recipients)
         {
@@ -971,7 +980,7 @@ public class DeliveriesController : ControllerBase
                     Title: title,
                     Body: bodyText,
                     Data: data,
-                    IdempotencyKey: $"{req.Id}:{req.Status}:{userId}");
+                    IdempotencyKey: $"{req.Id}:{effectiveStatus}:{userId}");
 
                 await _push.SendAsync(request, ct);
             }
@@ -1946,6 +1955,14 @@ public class DeliveriesController : ControllerBase
         // _store.SetStatusAsync(..., Delivered) call in the in-memory branch).
         // Degrade-don't-fail: a committed, verified handover must NEVER be turned
         // into a 5xx by a best-effort local cache write — log and continue.
+        //
+        // Capture the genuine PRE-completion status (e.g. AtDoor) NOW, before the terminal
+        // projection below flips the row. `delivery` is the LIVE store instance (InMemory
+        // GetAsync returns it with no defensive copy), so SetStatusAsync mutates
+        // delivery.Status in-place; capturing afterwards would read "delivered" and make
+        // the completion push's previousStatus meaningless. Captured here it is correct for
+        // both the in-memory and durable store paths.
+        var preCompletionStatus = delivery.Status;
         try
         {
             await _store.SetStatusAsync(deliveryId, RequestStatus.Delivered, ct);
@@ -1978,9 +1995,22 @@ public class DeliveriesController : ControllerBase
         // handover into a 5xx.
         try
         {
-            var previousStatus = delivery.Status;
-            delivery.Status = result.Status ?? RequestStatus.Delivered;
-            await NotifyOtherPartyAsync(delivery, previousStatus, ct);
+            // COMPLETE fix (fix/ci-red-delivery-status-clobber, PR #248): the read-model
+            // and the counterparty push need OPPOSITE vocab from the same field, so
+            // decouple them.
+            //   * READ-MODEL: already projected to gateway-local "delivered" by
+            //     _store.SetStatusAsync(.., Delivered) above (S03). Do NOT re-write
+            //     delivery.Status here — `delivery` is the LIVE store instance, so a raw
+            //     write bypasses the terminal-state guard and clobbers that projection.
+            //     (That raw write was the S03 red the first commit chased; stamping
+            //     "delivered" onto it then broke this completion push.)
+            //   * PUSH: the StatusChange completion push must carry the CANONICAL terminal
+            //     token ("Done") per contract — passed explicitly via pushStatus, leaving
+            //     the read-model untouched. read-model=delivered AND push data=Done now
+            //     both hold.
+            await NotifyOtherPartyAsync(
+                delivery, preCompletionStatus, ct,
+                pushStatus: result.Status ?? CanonicalDeliveryStatus.Done);
         }
         catch (Exception ex)
         {
