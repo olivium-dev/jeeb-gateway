@@ -247,10 +247,7 @@ public sealed class JeebReviewsController : ControllerBase
         }
         catch (FeedbackApiException ex)
         {
-            return Problem(
-                title: "Upstream feedback-service rejected the rating.",
-                detail: ex.Message,
-                statusCode: ex.StatusCode is >= 400 and < 600 ? ex.StatusCode : StatusCodes.Status502BadGateway);
+            return UpstreamProblem(ex);
         }
     }
 
@@ -288,10 +285,7 @@ public sealed class JeebReviewsController : ControllerBase
         }
         catch (FeedbackApiException ex)
         {
-            return Problem(
-                title: "Upstream feedback-service rejected the reveal read.",
-                detail: ex.Message,
-                statusCode: ex.StatusCode is >= 400 and < 600 ? ex.StatusCode : StatusCodes.Status502BadGateway);
+            return UpstreamProblem(ex);
         }
     }
 
@@ -346,6 +340,32 @@ public sealed class JeebReviewsController : ControllerBase
         Status = StatusCodes.Status403Forbidden,
         Type = "https://jeeb.dev/errors/not-a-party",
     };
+
+    /// <summary>
+    /// JEBV4-249 — map a caught upstream feedback-service <see cref="FeedbackApiException"/>
+    /// to a sanitized RFC 7807 ProblemDetails. The upstream status is preserved (clamped to
+    /// a valid 4xx/5xx; anything else → 502 Bad Gateway), but the upstream message/body is
+    /// logged server-side ONLY and never echoed to the caller. Only the two GENERAL
+    /// submit/reveal catches route here; the graceful reviews-list degrade (returns the
+    /// cold-start empty page), the <c>when (404) → NotFound()</c> un-rated mapping, and the
+    /// local <c>catch (ArgumentException) → Problem400(ex.Message)</c> tag validation keep
+    /// their behaviour. (Previously echoed the raw upstream <c>ex.Message</c> in the
+    /// response detail.)
+    /// </summary>
+    private IActionResult UpstreamProblem(FeedbackApiException ex)
+    {
+        var status = ex.StatusCode is >= 400 and < 600
+            ? ex.StatusCode
+            : StatusCodes.Status502BadGateway;
+
+        _log.LogWarning(ex,
+            "Reviews BFF: feedback-service call failed on {Method} {Path} → {Status}.",
+            Request.Method, Request.Path, status);
+
+        return Problem(
+            title: "The reviews request could not be completed.",
+            statusCode: status);
+    }
 }
 
 /// <summary>

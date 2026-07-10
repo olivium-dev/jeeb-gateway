@@ -9,6 +9,7 @@ using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using JeebGateway.service.ServiceFeedback;
 using FeedbackApiException = JeebGateway.service.ServiceFeedback.ApiException;
@@ -50,15 +51,18 @@ public class JeebRatingsController : ControllerBase
     private readonly ServiceFeedbackClient _feedback;
     private readonly IRequestsStore _requests;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
+    private readonly ILogger<JeebRatingsController> _log;
 
     public JeebRatingsController(
         ServiceFeedbackClient feedback,
         IRequestsStore requests,
-        IOptionsMonitor<UpstreamFeatureFlags> flags)
+        IOptionsMonitor<UpstreamFeatureFlags> flags,
+        ILogger<JeebRatingsController> log)
     {
         _feedback = feedback;
         _requests = requests;
         _flags = flags;
+        _log = log;
     }
 
     /// <summary>
@@ -123,10 +127,7 @@ public class JeebRatingsController : ControllerBase
         }
         catch (FeedbackApiException ex)
         {
-            return Problem(
-                title: "Upstream feedback-service rejected the rating.",
-                detail: ex.Message,
-                statusCode: ex.StatusCode is >= 400 and < 600 ? ex.StatusCode : StatusCodes.Status502BadGateway);
+            return UpstreamProblem(ex);
         }
     }
 
@@ -157,10 +158,7 @@ public class JeebRatingsController : ControllerBase
         }
         catch (FeedbackApiException ex)
         {
-            return Problem(
-                title: "Upstream feedback-service rejected the reveal read.",
-                detail: ex.Message,
-                statusCode: ex.StatusCode is >= 400 and < 600 ? ex.StatusCode : StatusCodes.Status502BadGateway);
+            return UpstreamProblem(ex);
         }
     }
 
@@ -217,4 +215,28 @@ public class JeebRatingsController : ControllerBase
               + "The shared feedback-service blind-rating primitive is not yet wired live; "
               + "the legacy in-gateway /api/deliveries/{id}/rate path remains the default.",
         statusCode: StatusCodes.Status503ServiceUnavailable);
+
+    /// <summary>
+    /// JEBV4-249 — map a caught upstream feedback-service <see cref="FeedbackApiException"/>
+    /// to a sanitized RFC 7807 ProblemDetails. The upstream status is preserved (clamped to
+    /// a valid 4xx/5xx; anything else → 502 Bad Gateway), but the upstream message/body is
+    /// logged server-side ONLY and never echoed to the caller — an info-disclosure leak.
+    /// The local <c>catch (ArgumentException) → Problem400(ex.Message)</c> tag-validation
+    /// branch is a client-supplied 400 and is intentionally left untouched.
+    /// (Previously echoed the raw upstream <c>ex.Message</c> in the response detail.)
+    /// </summary>
+    private IActionResult UpstreamProblem(FeedbackApiException ex)
+    {
+        var status = ex.StatusCode is >= 400 and < 600
+            ? ex.StatusCode
+            : StatusCodes.Status502BadGateway;
+
+        _log.LogWarning(ex,
+            "Ratings BFF: feedback-service call failed on {Method} {Path} → {Status}.",
+            Request.Method, Request.Path, status);
+
+        return Problem(
+            title: "The rating request could not be completed.",
+            statusCode: status);
+    }
 }

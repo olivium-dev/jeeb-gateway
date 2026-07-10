@@ -7,6 +7,7 @@ using JeebGateway.JeebNotifications;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json.Linq;
 using JeebGateway.service.ServiceNotification;
 using NotificationApiException = JeebGateway.service.ServiceNotification.ApiException;
@@ -58,10 +59,39 @@ namespace JeebGateway.Controllers;
 public sealed class JeebNotificationsInboxController : ControllerBase
 {
     private readonly ServiceNotificationClient _notifications;
+    private readonly ILogger<JeebNotificationsInboxController> _log;
 
-    public JeebNotificationsInboxController(ServiceNotificationClient notifications)
+    public JeebNotificationsInboxController(
+        ServiceNotificationClient notifications,
+        ILogger<JeebNotificationsInboxController> log)
     {
         _notifications = notifications;
+        _log = log;
+    }
+
+    /// <summary>
+    /// JEBV4-249 — map a caught upstream notification-service
+    /// <see cref="NotificationApiException"/> to a sanitized RFC 7807 ProblemDetails.
+    /// The upstream status is preserved (clamped to a valid 4xx/5xx; anything else →
+    /// 502 Bad Gateway), but the upstream message/body is logged server-side ONLY and
+    /// never echoed to the caller. Only the GENERAL catches route here; the deliberate
+    /// <c>when (401 or 403) → Unauthorized()</c> and <c>when (404) → NotFound()</c>
+    /// status mappers keep their behaviour. (Previously echoed the raw upstream
+    /// <c>ex.Message</c> in the response detail.)
+    /// </summary>
+    private IActionResult UpstreamProblem(NotificationApiException ex)
+    {
+        var status = ex.StatusCode is >= 400 and < 600
+            ? ex.StatusCode
+            : StatusCodes.Status502BadGateway;
+
+        _log.LogWarning(ex,
+            "Notifications BFF: notification-service call failed on {Method} {Path} → {Status}.",
+            Request.Method, Request.Path, status);
+
+        return Problem(
+            title: "The notifications request could not be completed.",
+            statusCode: status);
     }
 
     /// <summary>
@@ -111,10 +141,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         }
         catch (NotificationApiException ex)
         {
-            return Problem(
-                title: "Upstream notification-service rejected the inbox read.",
-                detail: ex.Message,
-                statusCode: ex.StatusCode is >= 400 and < 600 ? ex.StatusCode : StatusCodes.Status502BadGateway);
+            return UpstreamProblem(ex);
         }
     }
 
@@ -160,10 +187,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         }
         catch (NotificationApiException ex)
         {
-            return Problem(
-                title: "Upstream notification-service rejected the mark-read.",
-                detail: ex.Message,
-                statusCode: ex.StatusCode is >= 400 and < 600 ? ex.StatusCode : StatusCodes.Status502BadGateway);
+            return UpstreamProblem(ex);
         }
     }
 

@@ -5,6 +5,7 @@ using JeebGateway.Auth.Capabilities;
 using JeebGateway.Users;
 using JeebGateway.JeebWallet;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using ServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
 using WalletApiException = JeebGateway.service.ServiceWallet.ApiException;
 
@@ -49,11 +50,16 @@ public sealed class JeebWalletController : ControllerBase
 {
     private readonly ServiceWalletClient _wallet;
     private readonly IJeebWalletLedgerReader _ledger;
+    private readonly ILogger<JeebWalletController> _log;
 
-    public JeebWalletController(ServiceWalletClient wallet, IJeebWalletLedgerReader ledger)
+    public JeebWalletController(
+        ServiceWalletClient wallet,
+        IJeebWalletLedgerReader ledger,
+        ILogger<JeebWalletController> log)
     {
         _wallet = wallet;
         _ledger = ledger;
+        _log = log;
     }
 
     /// <summary>
@@ -82,7 +88,7 @@ public sealed class JeebWalletController : ControllerBase
         }
         catch (WalletApiException ex)
         {
-            return UpstreamProblem("Upstream wallet-service rejected the balance read.", ex);
+            return UpstreamProblem(ex);
         }
     }
 
@@ -175,8 +181,27 @@ public sealed class JeebWalletController : ControllerBase
         return true;
     }
 
-    private IActionResult UpstreamProblem(string title, WalletApiException ex) => Problem(
-        title: title,
-        detail: ex.Message,
-        statusCode: ex.StatusCode is >= 400 and < 600 ? ex.StatusCode : StatusCodes.Status502BadGateway);
+    /// <summary>
+    /// JEBV4-249 — map a caught upstream wallet-service <see cref="WalletApiException"/>
+    /// to a sanitized RFC 7807 <c>ProblemDetails</c>. The upstream status is preserved
+    /// (clamped to a valid 4xx/5xx; anything else → 502 Bad Gateway), but the upstream
+    /// exception message / response body is NEVER echoed to the caller — it is logged
+    /// server-side only. Mirrors the JEBV4-242 <c>ChatController.UpstreamProblem</c> idiom.
+    /// (Previously echoed the raw upstream <c>ex.Message</c> in the response detail — an
+    /// info-disclosure leak of the wrapped upstream body.)
+    /// </summary>
+    private IActionResult UpstreamProblem(WalletApiException ex)
+    {
+        var status = ex.StatusCode is >= 400 and < 600
+            ? ex.StatusCode
+            : StatusCodes.Status502BadGateway;
+
+        _log.LogWarning(ex,
+            "Wallet BFF: wallet-service call failed on {Method} {Path} → {Status}.",
+            Request.Method, Request.Path, status);
+
+        return Problem(
+            title: "The wallet request could not be completed.",
+            statusCode: status);
+    }
 }
