@@ -103,6 +103,57 @@ public sealed class StateServiceRefreshTokenStoreTests
     }
 
     [Fact]
+    public async Task Rotate_Persists_Replacement_Before_Revoking_Old_FailOpen_Ordering()
+    {
+        // PP-11 (JEBV4-39): the durable persist of the NEW token must precede the
+        // revoke/rotate write of the OLD token, so a mid-operation failure leaves the
+        // old token valid (retryable) instead of stranding the user with neither token.
+        var kv = new OrderRecordingIdempotencyStore();
+        var store = NewStore(kv);
+        await store.AddAsync(Token("old", "u-order", "hash-old"), CancellationToken.None);
+
+        (await store.RotateAsync("old", Token("new", "u-order", "hash-new"), CancellationToken.None))
+            .Should().BeTrue();
+
+        // The replacement's durable base row is written BEFORE the old token's
+        // revoke/rotate status revision (refresh-token-status:old:1).
+        var replacementPersistedAt = kv.Writes.IndexOf("refresh-token:new");
+        var oldRevokedAt = kv.Writes.IndexOf("refresh-token-status:old:1");
+        (replacementPersistedAt >= 0).Should().BeTrue("the replacement base row is persisted");
+        (oldRevokedAt >= 0).Should().BeTrue("the old token is rotated on seq 1");
+        (replacementPersistedAt < oldRevokedAt).Should().BeTrue(
+            "fail-open: the new token is durably persisted before the old one is revoked");
+    }
+
+    [Fact]
+    public async Task Rotate_Is_FailOpen_When_Revoke_Old_Write_Fails()
+    {
+        // If the revoke-old write fails mid-rotate (transient state-service write error),
+        // the OLD token must stay active — the refresh is safely retryable — and the
+        // replacement must already be durable. This is the inverse of the previous
+        // fail-CLOSED ordering, which revoked the old token first and could strand the
+        // user if the replacement persist then failed.
+        var kv = new FaultOnStatusWriteIdempotencyStore();
+        var store = NewStore(kv);
+        await store.AddAsync(Token("old", "u-failopen", "hash-old"), CancellationToken.None);
+
+        await store
+            .Invoking(s => s.RotateAsync("old", Token("new", "u-failopen", "hash-new"), CancellationToken.None))
+            .Should().ThrowAsync<InvalidOperationException>("the revoke-old status write fails mid-rotate");
+
+        // Old token survived the failed rotate → still usable for a retry.
+        var old = await store.FindByHashAsync("hash-old", CancellationToken.None);
+        old.Should().NotBeNull();
+        old!.RevokedAt.Should().BeNull(
+            "fail-open: a failed revoke-old write must leave the presented token usable for a retry");
+
+        // Replacement was durably persisted BEFORE the (failed) revoke-old write.
+        var replacement = await store.FindByHashAsync("hash-new", CancellationToken.None);
+        replacement.Should().NotBeNull("the replacement is persisted before the old token is revoked");
+        replacement!.RevokedAt.Should().BeNull();
+    }
+
+    [Fact]
     public async Task Rotate_Reuse_Tombstone_Is_Visible_To_A_Cold_Instance()
     {
         var kv = new FakeIdempotencyStore();
@@ -265,6 +316,91 @@ public sealed class StateServiceRefreshTokenStoreTests
                     StatusCode = 200,
                     ResponseBodyJson = kvp.Value,
                 })
+                .ToList();
+            return Task.FromResult(rows);
+        }
+    }
+
+    /// <summary>
+    /// Insert-once KV that also records the ORDER in which keys are written, so a test
+    /// can assert the replacement is persisted before the presented token is revoked
+    /// (PP-11 fail-open ordering).
+    /// </summary>
+    private sealed class OrderRecordingIdempotencyStore : IIdempotencyStore
+    {
+        private readonly ConcurrentDictionary<string, string> _kv = new(StringComparer.Ordinal);
+
+        public List<string> Writes { get; } = new();
+
+        public Task<IdempotencyOutcome> PutOrGetAsync(
+            string key, int statusCode, string responseBodyJson, int ttlSeconds, CancellationToken ct)
+        {
+            Writes.Add(key);
+            var stored = _kv.GetOrAdd(key, responseBodyJson);
+            return Task.FromResult(new IdempotencyOutcome
+            {
+                Inserted = ReferenceEquals(stored, responseBodyJson),
+                StatusCode = statusCode,
+                ResponseBodyJson = stored,
+            });
+        }
+
+        public Task<IdempotencyOutcome?> GetAsync(string key, CancellationToken ct)
+            => Task.FromResult(_kv.TryGetValue(key, out var body)
+                ? new IdempotencyOutcome { Inserted = false, StatusCode = 200, ResponseBodyJson = body }
+                : null);
+
+        public Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(string prefix, CancellationToken ct)
+        {
+            IReadOnlyList<IdempotencyOutcome> rows = _kv
+                .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(kvp => new IdempotencyOutcome { Inserted = false, StatusCode = 200, ResponseBodyJson = kvp.Value })
+                .ToList();
+            return Task.FromResult(rows);
+        }
+    }
+
+    /// <summary>
+    /// Insert-once KV that THROWS on any write to the revoke/rotate status chain
+    /// (<c>refresh-token-status:</c>), simulating a transient state-service write failure
+    /// on the revoke-old step. Reads and the replacement's base/index writes succeed, so a
+    /// test can prove the replacement was already durable when the revoke-old write failed.
+    /// </summary>
+    private sealed class FaultOnStatusWriteIdempotencyStore : IIdempotencyStore
+    {
+        // Wire prefix of the append-only revoke/rotate status chain. Mirrors
+        // StateServiceRefreshTokenStore.StatusKeyPrefix (internal to the gateway assembly).
+        private const string StatusKeyPrefix = "refresh-token-status:";
+
+        private readonly ConcurrentDictionary<string, string> _kv = new(StringComparer.Ordinal);
+
+        public Task<IdempotencyOutcome> PutOrGetAsync(
+            string key, int statusCode, string responseBodyJson, int ttlSeconds, CancellationToken ct)
+        {
+            if (key.StartsWith(StatusKeyPrefix, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("simulated state-service write failure on revoke-old");
+            }
+
+            var stored = _kv.GetOrAdd(key, responseBodyJson);
+            return Task.FromResult(new IdempotencyOutcome
+            {
+                Inserted = ReferenceEquals(stored, responseBodyJson),
+                StatusCode = statusCode,
+                ResponseBodyJson = stored,
+            });
+        }
+
+        public Task<IdempotencyOutcome?> GetAsync(string key, CancellationToken ct)
+            => Task.FromResult(_kv.TryGetValue(key, out var body)
+                ? new IdempotencyOutcome { Inserted = false, StatusCode = 200, ResponseBodyJson = body }
+                : null);
+
+        public Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(string prefix, CancellationToken ct)
+        {
+            IReadOnlyList<IdempotencyOutcome> rows = _kv
+                .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(kvp => new IdempotencyOutcome { Inserted = false, StatusCode = 200, ResponseBodyJson = kvp.Value })
                 .ToList();
             return Task.FromResult(rows);
         }

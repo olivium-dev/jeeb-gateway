@@ -111,13 +111,37 @@ public sealed class StateServiceRefreshTokenStore : IRefreshTokenStore
         // already-revoked / expired / missing ⇒ false, which the caller treats as reuse.
         if (!latest.IsActive(now)) return false;
 
-        // Mark the presented token rotated on a fresh append-only revision.
+        // Prepare the presented token's rotation revision (not persisted yet).
         latest.RevokedAt = now;
         latest.RevokedReason = RevocationReason.Rotated.ToString();
         latest.ReplacedByTokenId = replacement.TokenId;
 
-        // Insert-once on the next seq is the single-winner rotation guard: if a
-        // concurrent refresh already took seq+1 we lost the race → treat as reuse.
+        // PP-11 (JEBV4-39) — FAIL-OPEN ordering. Durably persist the NEW replacement
+        // token (base + hash + user index) BEFORE revoking/rotating the OLD one. If the
+        // process crashes or the state-service write fails between the two steps, the OLD
+        // token stays active and the whole refresh is safely retryable: the caller
+        // re-presents the still-valid old token and rotates again. The previous
+        // revoke-old-then-persist-new ordering was fail-CLOSED — a failure after the
+        // revoke but before the replacement persisted stranded the user with neither a
+        // valid old nor a delivered new token, forcing a re-login.
+        //
+        // Trade-offs of fail-open (accepted per PP-11):
+        //   • A brief window where BOTH the old and the new token are valid (the old is
+        //     revoked microseconds later, on the very next write). The replacement's raw
+        //     value is NOT returned to the caller until this method returns true, so it is
+        //     undeliverable during that window — the only externally-usable token then is
+        //     the old one the caller already held.
+        //   • On a lost concurrency race (the seq+1 guard below) the just-persisted
+        //     replacement becomes an unreachable, TTL-bounded orphan: its raw value is
+        //     never handed to any caller, and TokenService's reuse-chain burn revokes it
+        //     in the same refresh flow.
+        await AddAsync(replacement, ct);
+
+        // Insert-once on the next seq remains the authoritative single-winner rotation
+        // guard: if a concurrent refresh already took seq+1 we lost the race → treat as
+        // reuse and abandon our (never-delivered) replacement. RotateAsync returns true
+        // for exactly one winner, so the reuse-detection contract at this boundary is
+        // unchanged by the reorder above.
         var nextSeq = seq + 1;
         var outcome = await _kv.PutOrGetAsync(
             StatusKeyPrefix + latest.TokenId + ":" + nextSeq, statusCode: 200, Serialize(latest), TtlSeconds, ct);
@@ -128,9 +152,6 @@ public sealed class StateServiceRefreshTokenStore : IRefreshTokenStore
             return false;
         }
 
-        // Won the rotation — only now persist the replacement (base + hash + user
-        // index) so a lost race never leaves an orphaned, spuriously-active token.
-        await AddAsync(replacement, ct);
         return true;
     }
 
