@@ -34,7 +34,13 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// </summary>
 [ApiController]
 [Route("v1/auth")]
-[Produces("application/json", "application/problem+json")]
+// NOTE: intentionally NO class-level [Produces(...)]. A [Produces] filter CLEARS an
+// ObjectResult's own ContentTypes and forces the first listed media type, which
+// downgraded the RFC 7807 error bodies emitted by OtpSignInProblems.Problem
+// (ContentTypes = "application/problem+json") to "application/json". Omitting it lets
+// each result carry its correct media type — success → application/json, error →
+// application/problem+json — while the per-action [ProducesResponseType] still
+// documents the shapes for Swagger (JEBV4-244).
 [EnableRateLimiting(RateLimitingExtensions.AuthTokenBucketPolicy)]
 // ADR-004 D1: public by design — refresh is authenticated by the rotation cookie, not a bearer.
 [Microsoft.AspNetCore.Authorization.AllowAnonymous]
