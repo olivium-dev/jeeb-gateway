@@ -105,7 +105,7 @@ public sealed class KycSubmissionBffController : ControllerBase
         //    CEREMONY (the contract-signing primitive is template → contract →
         //    signature, NOT a one-shot sign-by-template). The Jeeb ToS template
         //    declares a single accepting party with role_key="client" (see the
-        //    seeded jeeb-client-terms-and-conditions-v1). So we:
+        //    seeded jeeb_tos_v1). So we:
         //      a) CreateContract(template_id, parties:[{role_key:"client",
         //         party_ref:userId}], actor:{type:"PARTY", ref:userId}) → contractId
         //      b) Sign(contractId, role_key:"client", party_ref:userId, proofRef)
@@ -246,11 +246,14 @@ public sealed class KycSubmissionBffController : ControllerBase
 
         // Minimal, contract-true validation of the document refs the package needs.
         // The full field-set validation against the form-builder render schema is
-        // the domain's; here the BFF enforces the four refs are present.
+        // the domain's; here the BFF enforces the required refs are present.
+        // E3 (owner decision Q-039): vehicle information is REMOVED from the KYC
+        // contract, so vehicle_registration_url is NO LONGER a hard-required ref
+        // (it is still forwarded to kyc-service when a caller supplies it). The
+        // required refs are the two id-document faces and the liveness selfie.
         var missing = new List<string>();
         if (string.IsNullOrWhiteSpace(body.IdDocumentFrontUrl)) missing.Add("id_document_front_url");
         if (string.IsNullOrWhiteSpace(body.IdDocumentBackUrl)) missing.Add("id_document_back_url");
-        if (string.IsNullOrWhiteSpace(body.VehicleRegistrationUrl)) missing.Add("vehicle_registration_url");
         if (string.IsNullOrWhiteSpace(body.SelfieWithLivenessUrl)) missing.Add("selfie_with_liveness_url");
         if (missing.Count > 0)
         {
@@ -374,34 +377,46 @@ public sealed class KycSubmissionBffController : ControllerBase
     private static readonly System.Text.RegularExpressions.Regex NationalIdRegex =
         new(@"^\d{12}$", System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    // Accepted ID variants per owner decision Q-042 / the E3 DoD
+    // (WORK-ORDER-2026-07-07 Lane E, E3): the BFF enumerates EXACTLY
+    // national_id | passport | residency — "no more" — and any other value is
+    // rejected. No back-compat alias is kept: no client ever sent
+    // "residency_permit" (repo-wide search, form-builder jeeb_jeeber_v1 flavors,
+    // and mobile PR #80 all corroborate).
     private static readonly HashSet<string> AllowedIdTypes =
-        new(StringComparer.OrdinalIgnoreCase) { "national_id", "passport", "residency_permit" };
+        new(StringComparer.OrdinalIgnoreCase) { "national_id", "passport", "residency" };
 
     private async Task<IActionResult?> ValidateSubmitFieldsAsync(KycSubmitJsonBody body, CancellationToken ct)
     {
+        // E3 (owner decision Q-039 — "Id number is a must"): id_type is REQUIRED.
+        // The JEBV4-113 lane found the BFF treated id_type as optional; E3 makes
+        // both id_type and id_number mandatory collected fields at the BFF.
+        if (string.IsNullOrWhiteSpace(body.IdType))
+        {
+            return FieldProblem("id_type", "id_type is required.");
+        }
+
         // AC6 — id_type must be one of the supported enum values.
-        if (!string.IsNullOrWhiteSpace(body.IdType) && !AllowedIdTypes.Contains(body.IdType!))
+        if (!AllowedIdTypes.Contains(body.IdType!))
         {
             return FieldProblem("id_type", $"id_type '{body.IdType}' is not a supported value (expected one of: {string.Join(", ", AllowedIdTypes)}).");
         }
 
-        // AC6 — id_number must be exactly 12 digits (^\d{12}$), but this rule is
-        // scoped to id_type == national_id (JEBV4-113 §3.1). Passport and
-        // residency_permit submissions carry a different identifier shape (or
-        // none the gateway validates today) and must not be blocked by a
-        // national-ID-shaped rule. Previously this fired unconditionally,
-        // 400-walling every non-national_id submission (and any submission
-        // where id_type itself was never supplied).
-        if (string.Equals(body.IdType, "national_id", StringComparison.OrdinalIgnoreCase))
+        // E3 (Q-039) — id_number is a must for EVERY id_type, so it must be
+        // present. This supersedes the pre-E3 JEBV4-113 §3.1 scoping that only
+        // required id_number for national_id.
+        if (string.IsNullOrWhiteSpace(body.IdNumber))
         {
-            if (string.IsNullOrWhiteSpace(body.IdNumber))
-            {
-                return FieldProblem("id_number", "id_number is required.");
-            }
-            if (!NationalIdRegex.IsMatch(body.IdNumber!))
-            {
-                return FieldProblem("id_number", "id_number must be exactly 12 digits (^\\d{12}$).");
-            }
+            return FieldProblem("id_number", "id_number is required.");
+        }
+
+        // AC6 — the national-ID 12-digit shape rule (^\d{12}$) stays SCOPED to
+        // id_type == national_id (JEBV4-113 §3.1): passport / residency numbers
+        // carry a different shape and must not be blocked by a national-ID rule.
+        if (string.Equals(body.IdType, "national_id", StringComparison.OrdinalIgnoreCase)
+            && !NationalIdRegex.IsMatch(body.IdNumber!))
+        {
+            return FieldProblem("id_number", "id_number must be exactly 12 digits (^\\d{12}$).");
         }
 
         // AC8 — tos_accepted_version must cross-link to a known ToS template
@@ -436,9 +451,12 @@ public sealed class KycSubmissionBffController : ControllerBase
     }
 
     // Resolves the version marker ("v1") of the Jeeb client ToS template from the
-    // contract-signing catalog, by name. Mirrors the H4 resolution so submit and
-    // template-fetch agree on the same source of truth.
-    private const string JeebTosTemplateName = "jeeb-client-terms-and-conditions-v1";
+    // contract-signing catalog, by name. Mirrors the H4 resolution (KycBffController)
+    // so submit and template-fetch agree on the same source of truth. The canonical
+    // template NAME is jeeb_tos_v1 (KycBffController.JeebTosTemplateName); the old
+    // hyphenated literal here matched no real catalog item, so the AC8 cross-check
+    // silently never fired (JEBV4-197 bonus fix).
+    private const string JeebTosTemplateName = "jeeb_tos_v1";
 
     private static string? ResolveKnownTosVersion(JsonElement catalog)
     {
@@ -458,8 +476,11 @@ public sealed class KycSubmissionBffController : ControllerBase
                     : null;
             if (string.Equals(name, JeebTosTemplateName, StringComparison.OrdinalIgnoreCase))
             {
-                // Trailing "-vN" segment is the stable version marker.
-                var idx = name!.LastIndexOf("-v", StringComparison.OrdinalIgnoreCase);
+                // Trailing "_vN" segment is the stable version marker (jeeb_tos_v1
+                // -> "v1"), mirroring KycBffController.TemplateVersionFor so the
+                // cross-link compares against the SAME value the mobile client is
+                // handed by GET /v1/kyc/contract-template.
+                var idx = name!.LastIndexOf("_v", StringComparison.OrdinalIgnoreCase);
                 return idx >= 0 ? name[(idx + 1)..] : name;
             }
         }
