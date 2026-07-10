@@ -108,7 +108,10 @@ public sealed class KycTosCeremonyAndValidationTests
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
-    // ----- JEBV4-113 §3.1: id_number gate is scoped to id_type == national_id -----
+    // ----- E3 (owner decision Q-039: "Id number is a must") -----
+    // id_number is now REQUIRED for every id_type. The national_id 12-digit shape
+    // rule stays scoped to national_id; passport/residency numbers are free-form
+    // but must still be present.
 
     [Fact]
     public async Task SubmitJson_NationalId_Missing_IdNumber_Returns_400_Field_ProblemDetails()
@@ -124,28 +127,40 @@ public sealed class KycTosCeremonyAndValidationTests
 
     [Theory]
     [InlineData("passport")]
-    [InlineData("residency_permit")]
-    public async Task SubmitJson_NonNationalId_With_No_IdNumber_Returns_201_Not_Blocked(string idType)
+    [InlineData("residency")]        // Q-042 canonical vocab
+    [InlineData("residency_permit")] // retained back-compat alias
+    public async Task SubmitJson_NonNationalId_Missing_IdNumber_Returns_400_PerE3(string idType)
     {
         _factory.ContractSigning.Reset();
         var client = ClientFor($"e3-nonnational-{idType}-user");
         var resp = await PostJsonAsync(
             client, "/v1/kyc/submit", Package(idType: idType, idNumber: null), Guid.NewGuid().ToString("N"));
 
-        // Before the fix this 400'd unconditionally on the missing/12-digit
-        // id_number check even though national-ID-shaped ids are irrelevant to
-        // passport/residency_permit submissions (JEBV4-113 §3.1).
-        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        // E3 (Q-039 — "Id number is a must") makes id_number mandatory for EVERY
+        // id_type — superseding the pre-E3 JEBV4-113 §3.1 scoping that let
+        // passport/residency submit with no id_number. The id_type itself is a
+        // supported value (so the 400 is scoped to id_number, not id_type),
+        // proving the residency/residency_permit vocab is accepted.
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("field").GetString().Should().Be("id_number");
     }
 
-    [Fact]
-    public async Task SubmitJson_NonNationalId_With_BadShaped_IdNumber_Is_Not_Gated_Returns_201()
+    [Theory]
+    [InlineData("passport", "P1234567")]
+    [InlineData("residency", "RP-2024-55")]        // Q-042 canonical vocab accepted end-to-end
+    [InlineData("residency_permit", "RP-2024-55")] // alias accepted end-to-end
+    public async Task SubmitJson_NonNationalId_With_FreeForm_IdNumber_Is_Not_Shape_Gated_Returns_201(
+        string idType, string idNumber)
     {
         _factory.ContractSigning.Reset();
-        var client = ClientFor("e3-passport-freeform-user");
+        var client = ClientFor($"e3-nonnational-ok-{idType}-user");
         var resp = await PostJsonAsync(
-            client, "/v1/kyc/submit", Package(idType: "passport", idNumber: "P1234567"), Guid.NewGuid().ToString("N"));
+            client, "/v1/kyc/submit", Package(idType: idType, idNumber: idNumber), Guid.NewGuid().ToString("N"));
 
+        // Non-national id_numbers are free-form: present but NOT subject to the
+        // national-ID ^\d{12}$ rule. residency (canonical) and residency_permit
+        // (alias) both clear the vocab check and reach 201.
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
@@ -219,12 +234,16 @@ public sealed class KycTosCeremonyAndValidationTests
             Signatures.Clear();
         }
 
-        // The catalog returns the seeded Jeeb client ToS template so the AC8 cross-link
-        // resolves "v1" as the known version (and rejects "unknown-tos-id").
+        // The catalog returns the seeded Jeeb ToS template under its CANONICAL name
+        // (jeeb_tos_v1 — the same name KycBffController resolves) so the AC8
+        // cross-link resolves "v1" as the known version (and rejects
+        // "unknown-tos-id"). Before JEBV4-197 the controller looked up a hyphenated
+        // literal that matched no real catalog item, so the check silently never
+        // fired; this fake now names the real template so the check is exercised.
         public Task<JsonElement> ListTemplatesAsync(CancellationToken ct)
         {
             using var doc = JsonDocument.Parse(
-                "{\"items\":[{\"template_id\":\"tmpl-tos-1\",\"name\":\"jeeb-client-terms-and-conditions-v1\",\"status\":\"ACTIVE\"}]}");
+                "{\"items\":[{\"template_id\":\"tmpl-tos-1\",\"name\":\"jeeb_tos_v1\",\"status\":\"ACTIVE\"}]}");
             return Task.FromResult(doc.RootElement.Clone());
         }
 

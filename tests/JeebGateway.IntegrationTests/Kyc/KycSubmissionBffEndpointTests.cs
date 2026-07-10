@@ -151,13 +151,105 @@ public sealed class KycSubmissionBffEndpointTests : IClassFixture<KycSubmissionB
         {
             id_type = "national_id",
             id_number = "123456789012",
-            // all four *_url refs omitted
+            // all *_url refs omitted
             tos_accepted_version = "v1",
         }, Guid.NewGuid().ToString("N"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         var json = await ReadJsonAsync(resp);
         json.GetProperty("detail").GetString().Should().Contain("id_document_front_url");
+    }
+
+    // ----- E3 (owner decision Q-039): vehicle_registration_url relaxed -----
+
+    [Fact]
+    public async Task SubmitJson_No_Vehicle_Registration_Returns_201_E3_Relaxed()
+    {
+        var client = ClientFor("e3-no-vehicle");
+
+        // The exact shape from the JEBV4-113 live evidence that used to 400 with
+        // "the following document refs are required: vehicle_registration_url":
+        // front + back + selfie + national_id + a valid 12-digit id_number, and
+        // NO vehicle_registration_url. E3 removed vehicle from the KYC contract.
+        var resp = await PostJsonAsync(client, "/v1/kyc/submit", new
+        {
+            id_type = "national_id",
+            id_number = "123456789012",
+            id_document_front_url = "cdn://obj/front",
+            id_document_back_url = "cdn://obj/back",
+            selfie_with_liveness_url = "cdn://obj/selfie",
+            tos_accepted_version = "v1",
+            // no vehicle_registration_url / vehicle_plate_number / vehicle_year_make_model
+        }, Guid.NewGuid().ToString("N"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("state").GetString().Should().Be("Submitted");
+    }
+
+    // ----- E3 (owner decision Q-039): id_type and id_number are REQUIRED -----
+
+    [Fact]
+    public async Task SubmitJson_Missing_IdType_Returns_400_Field_IdType()
+    {
+        var client = ClientFor("e3-missing-idtype");
+
+        // All required document refs present, id_number present — only id_type
+        // omitted. Pre-E3 the BFF treated id_type as optional and let this through.
+        var resp = await PostJsonAsync(client, "/v1/kyc/submit", new
+        {
+            id_number = "123456789012",
+            id_document_front_url = "cdn://obj/front",
+            id_document_back_url = "cdn://obj/back",
+            selfie_with_liveness_url = "cdn://obj/selfie",
+        }, Guid.NewGuid().ToString("N"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("field").GetString().Should().Be("id_type");
+        json.GetProperty("detail").GetString().Should().Contain("id_type is required");
+    }
+
+    [Fact]
+    public async Task SubmitJson_Missing_IdNumber_Returns_400_Field_IdNumber()
+    {
+        var client = ClientFor("e3-missing-idnumber");
+
+        // All required document refs present, id_type present — only id_number
+        // omitted. E3 ("Id number is a must") requires it for every id_type.
+        var resp = await PostJsonAsync(client, "/v1/kyc/submit", new
+        {
+            id_type = "national_id",
+            id_document_front_url = "cdn://obj/front",
+            id_document_back_url = "cdn://obj/back",
+            selfie_with_liveness_url = "cdn://obj/selfie",
+        }, Guid.NewGuid().ToString("N"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("field").GetString().Should().Be("id_number");
+        json.GetProperty("detail").GetString().Should().Contain("id_number is required");
+    }
+
+    // ----- Q-042 vocab: residency (canonical) + residency_permit (alias) accepted -----
+
+    [Theory]
+    [InlineData("residency")]        // Q-042 ratified/canonical value
+    [InlineData("residency_permit")] // retained back-compat alias
+    public async Task SubmitJson_Residency_Vocab_Accepted_Returns_201(string idType)
+    {
+        var client = ClientFor($"q042-{idType}");
+
+        var resp = await PostJsonAsync(client, "/v1/kyc/submit", new
+        {
+            id_type = idType,
+            id_number = "RP-2024-77", // free-form (non-national), just present
+            id_document_front_url = "cdn://obj/front",
+            id_document_back_url = "cdn://obj/back",
+            selfie_with_liveness_url = "cdn://obj/selfie",
+        }, Guid.NewGuid().ToString("N"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
     [Fact]
