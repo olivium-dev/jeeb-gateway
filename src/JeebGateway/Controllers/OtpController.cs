@@ -38,7 +38,14 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/otp")]
-[Produces("application/json", "application/problem+json")]
+// NOTE (JEBV4-261): intentionally NO class-level [Produces(...)]. A [Produces] filter
+// CLEARS an ObjectResult's own ContentTypes and forces the FIRST listed media type,
+// which downgraded this surface's RFC 7807 error bodies (ControllerBase.Problem, whose
+// ProblemDetails responses are application/problem+json under the AddProblemDetails wiring
+// in Program.cs) to "application/json". Omitting it lets each result carry its correct
+// media type — success → application/json, error → application/problem+json — while the
+// per-action [ProducesResponseType] still documents the shapes for Swagger. Mirrors the
+// AuthRefreshV1Controller fix (PR #242).
 // ADR-004 D1: public by design — OTP send/validate precede a session token.
 [Microsoft.AspNetCore.Authorization.AllowAnonymous]
 // ADR-005 §A public — bypasses L2.

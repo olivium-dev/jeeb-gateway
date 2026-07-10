@@ -51,7 +51,13 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// </summary>
 [ApiController]
 [Route("v1/auth")]
-[Produces("application/json")]
+// NOTE (JEBV4-261): intentionally NO class-level [Produces(...)]. The single-arg
+// [Produces("application/json")] here was the worst offender — it CLEARED every
+// ObjectResult's ContentTypes and forced "application/json", so the RFC 7807 error
+// bodies emitted by OtpSignInProblems (ContentTypes = "application/problem+json") never
+// reached the caller as problem+json at all. Omitting it lets errors carry
+// application/problem+json while success stays application/json (the negotiated default).
+// Mirrors the AuthRefreshV1Controller fix (PR #242).
 public sealed class AuthEmailFacadeController : ControllerBase
 {
     private readonly UmClient _um;

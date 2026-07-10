@@ -43,7 +43,13 @@ namespace JeebGateway.Auth.OtpSignIn;
 // [Authorize] the UM-audience token is rejected 401 at the auth layer (E4b/N5/N7.3). The manual
 // UserIdentity.TryGetUserId resolution remains as defense-in-depth + the edge X-User-Id path.
 [Authorize]
-[Produces("application/json", "application/problem+json")]
+// NOTE (JEBV4-261): intentionally NO class-level [Produces(...)]. A [Produces] filter
+// CLEARS an ObjectResult's own ContentTypes and forces the FIRST listed media type,
+// which downgraded the RFC 7807 error bodies emitted by OtpSignInProblems.UsersProblem
+// (ObjectResult.ContentTypes = "application/problem+json") to "application/json".
+// Omitting it lets each result carry its correct media type — success → application/json,
+// error → application/problem+json — while the per-action [ProducesResponseType] still
+// documents the shapes for Swagger. Mirrors the AuthRefreshV1Controller fix (PR #242).
 public sealed class UsersMeController : ControllerBase
 {
     private const int ProfileCacheSeconds = 30;
