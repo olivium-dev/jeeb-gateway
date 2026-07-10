@@ -43,6 +43,39 @@ namespace JeebGateway.Controllers
             }
         }
 
+        /// <summary>
+        /// JEBV4-242 — map a caught upstream chat-service <see cref="ChatApiException"/>
+        /// to a sanitized RFC 7807 <c>application/problem+json</c> result. The upstream
+        /// status is preserved (clamped to a valid 4xx/5xx; anything else becomes
+        /// 502 Bad Gateway), but the upstream exception message / response body is
+        /// NEVER echoed to the caller — it is logged server-side only.
+        ///
+        /// <para><b>Why.</b> Every catch previously did
+        /// <c>return StatusCode(ex.StatusCode, ex.Message)</c>, and the NSwag
+        /// <see cref="ChatApiException"/>.Message embeds up to 512 chars of the raw
+        /// upstream response body — an information-disclosure leak across ~30 chat
+        /// endpoints. This mirrors the JEBV4-63 UserController fix and the
+        /// JeebConversationsController / AuthEmailFacadeController upstream-mapping
+        /// idiom (private helper → <c>Problem(...)</c> with a generic client-safe
+        /// title, full detail to the log only).</para>
+        /// </summary>
+        private ActionResult UpstreamProblem(ChatApiException ex)
+        {
+            var status = ex.StatusCode is >= 400 and < 600
+                ? ex.StatusCode
+                : StatusCodes.Status502BadGateway;
+
+            // Full upstream detail (ex.Message carries the wrapped upstream body,
+            // ex.Response the raw payload) goes to the server log only — never on the wire.
+            _logger.LogWarning(ex,
+                "Chat BFF: chat-service call failed on {Method} {Path} → {Status}.",
+                Request.Method, Request.Path, status);
+
+            return Problem(
+                title: "The chat request could not be completed.",
+                statusCode: status);
+        }
+
         #region Health
 
         /// <summary>
@@ -65,7 +98,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -93,7 +126,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -121,7 +154,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -162,7 +195,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -207,7 +240,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -244,7 +277,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -287,7 +320,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -316,7 +349,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -353,7 +386,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -390,7 +423,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -450,7 +483,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -495,7 +528,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -538,7 +571,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -589,7 +622,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -640,7 +673,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -691,7 +724,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -742,7 +775,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -793,7 +826,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -844,7 +877,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -895,7 +928,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -946,7 +979,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -997,7 +1030,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -1048,7 +1081,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -1089,7 +1122,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -1128,7 +1161,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -1159,7 +1192,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -1196,7 +1229,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -1233,7 +1266,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -1270,7 +1303,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -1311,7 +1344,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -1348,7 +1381,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -1385,7 +1418,7 @@ namespace JeebGateway.Controllers
             }
             catch (ChatApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
