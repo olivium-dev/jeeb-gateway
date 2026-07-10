@@ -107,15 +107,18 @@ public class UserControllerErrorShapeTests
     }
 
     [Fact]
-    public async Task GetAllUsers_UpstreamApiException_Relayed_As_ProblemDetails()
+    public async Task GetAllUsers_UpstreamApiException_Relayed_As_Sanitized_ProblemDetails()
     {
         // A well-formed upstream failure (UserManagementApiException, e.g. a 503 from
-        // user-management) goes through HandleUpstreamException, which previously did
-        // `StatusCode(ex.StatusCode, ex.Message)` — also a bare string. Pins the fix.
+        // user-management) goes through UpstreamProblem. JEBV4-249 (residual of JEBV4-63):
+        // the prior partial fix wrapped the leak in an RFC 7807 envelope but STILL forwarded
+        // the raw upstream ex.Message as `detail`. The NSwag ApiException.Message embeds the
+        // upstream body, so a canary planted in the response body must NOT reach the client.
+        const string canary = "SECRET_CANARY_um91 user-management down: Host=10.0.0.5;Password=hunter2";
         var stub = new StubHttpMessageHandler(_ =>
             new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
             {
-                Content = new StringContent("user-management overloaded", System.Text.Encoding.UTF8, "text/plain")
+                Content = new StringContent(canary, System.Text.Encoding.UTF8, "text/plain")
             });
 
         using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
@@ -137,12 +140,119 @@ public class UserControllerErrorShapeTests
 
         var resp = await client.GetAsync("/api/User/all");
 
-        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        // Class-level [Produces("application/json")] keeps the header application/json;
-        // the BODY is the RFC7807 envelope (was a bare ex.Message string before JEBV4-63).
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable,
+            "the upstream status is preserved (in [400,600))");
+
+        // JEBV4-249 / #254 content-type lock: with the class-level [Produces("application/json")]
+        // removed, the in-action Problem() ObjectResult now serializes as the RFC 7807
+        // application/problem+json (was downgraded to application/json by the attribute).
+        resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
+
         var problem = await resp.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
         problem!.Status.Should().Be((int)HttpStatusCode.ServiceUnavailable);
         problem.Title.Should().Be("Upstream user-management error");
+
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().NotContain("SECRET_CANARY_um91",
+            "the upstream ex.Message/body must never reach the client (JEBV4-249)");
+        raw.Should().NotContain("Password=hunter2", "no upstream connection detail may leak");
+        raw.Should().NotContain("The HTTP status code of the response was not expected",
+            "the NSwag ApiException.Message wrapper must not be echoed either");
+    }
+
+    [Fact]
+    public async Task GetAllUsers_Upstream_Status_Outside_Error_Range_Is_Clamped_To_502()
+    {
+        // An upstream status outside [400,600) (e.g. a stray 302) must be clamped to 502,
+        // never forwarded, and must not leak the upstream body.
+        const string canary = "SECRET_CANARY_umClamp redirect-loop internal detail";
+        var stub = new StubHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.Found) // 302
+            {
+                Content = new StringContent(canary, System.Text.Encoding.UTF8, "text/plain")
+            });
+
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<ServiceUserManagementClient>();
+                services.AddScoped(_ =>
+                {
+                    var http = new HttpClient(stub) { BaseAddress = new Uri("http://um.test/") };
+                    return new ServiceUserManagementClient("http://um.test/", http);
+                });
+            });
+        });
+
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", "admin-jebv4-63");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "admin");
+
+        var resp = await client.GetAsync("/api/User/all");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway,
+            "an upstream status outside [400,600) must be clamped to 502");
+        resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().NotContain("SECRET_CANARY_umClamp");
+    }
+
+    /// <summary>
+    /// Source-scan regression guard (JEBV4-249): pins zero LIVE <c>detail: ex.Message</c> in
+    /// UserController, that the class-level <c>[Produces("application/json")]</c> downgrade is
+    /// gone, and that every delegating <c>catch (UserManagementApiException)</c> routes through
+    /// <c>UpstreamProblem(ex)</c>. The single SuperLoginUsers roster-load catch has its own
+    /// sanitized 502 handler and is the one non-delegating upstream catch.
+    /// </summary>
+    [Fact]
+    public void UserController_Source_Has_No_Live_Upstream_Detail_Leak_And_No_Produces_Downgrade()
+    {
+        var path = LocateSource("UserController.cs");
+        path.Should().NotBeNull("src/JeebGateway/Controllers/UserController.cs must be locatable");
+        var liveCode = LiveCode(path!);
+
+        Count(liveCode, "detail: ex.Message").Should().Be(0,
+            "JEBV4-249: no catch may echo the upstream ex.Message/body on the wire");
+        Count(liveCode, "[Produces(\"application/json\")]").Should().Be(0,
+            "#254: the class-level application/json downgrade must be removed so Problem() emits problem+json");
+
+        var catches = Count(liveCode, "catch (UserManagementApiException");
+        var sanitized = Count(liveCode, "UpstreamProblem(ex)");
+        catches.Should().BeGreaterThan(0, "the guard must actually see the upstream catch sites");
+        sanitized.Should().Be(catches - 1,
+            "every catch (UserManagementApiException) delegates to UpstreamProblem(ex) EXCEPT the single "
+            + "SuperLoginUsers roster-load catch, which has its own sanitized 502 handler");
+    }
+
+    private static string? LocateSource(string controllerFileName)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 10 && dir is not null; i++, dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "src", "JeebGateway", "Controllers", controllerFileName);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static string LiveCode(string path)
+        => string.Join("\n",
+            File.ReadAllLines(path).Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+    private static int Count(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal);
+             i >= 0;
+             i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+        return count;
     }
 
     private sealed class StubHttpMessageHandler : HttpMessageHandler

@@ -23,10 +23,39 @@ namespace JeebGateway.Controllers
         private const string PrefKeyAddress = "address";
 
         private readonly ServiceRemoteUserPreferencesClient _preferencesClient;
+        private readonly ILogger<UserPreferencesController> _logger;
 
-        public UserPreferencesController(ServiceRemoteUserPreferencesClient preferencesClient)
+        public UserPreferencesController(
+            ServiceRemoteUserPreferencesClient preferencesClient,
+            ILogger<UserPreferencesController> logger)
         {
             _preferencesClient = preferencesClient;
+            _logger = logger;
+        }
+
+        /// <summary>
+        /// JEBV4-249 (residual of JEBV4-63) — map a caught upstream user-preferences
+        /// <see cref="RemoteUserPreferencesApiException"/> to a sanitized RFC 7807
+        /// ProblemDetails. The upstream status is preserved (clamped to a valid 4xx/5xx;
+        /// anything else → 502 Bad Gateway), but the upstream message / response body is
+        /// NEVER echoed to the caller — it is logged server-side only. The prior JEBV4-63
+        /// partial fix wrapped the leak in an envelope but still forwarded the raw upstream
+        /// <c>ex.Message</c> as the response detail; that information-disclosure leak is
+        /// removed here. Mirrors the JEBV4-242 ChatController.UpstreamProblem idiom.
+        /// </summary>
+        private IActionResult UpstreamProblem(RemoteUserPreferencesApiException ex)
+        {
+            var status = ex.StatusCode is >= 400 and < 600
+                ? ex.StatusCode
+                : StatusCodes.Status502BadGateway;
+
+            _logger.LogWarning(ex,
+                "UserPreferences BFF: user-preferences call failed on {Method} {Path} → {Status}.",
+                Request.Method, Request.Path, status);
+
+            return Problem(
+                title: "Upstream user-preferences error",
+                statusCode: status);
         }
 
         private string? GetUserId()
@@ -69,8 +98,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -93,8 +121,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -117,8 +144,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -141,8 +167,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -163,8 +188,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -185,8 +209,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -216,8 +239,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -240,8 +262,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -266,8 +287,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -288,8 +308,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -311,8 +330,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -335,8 +353,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -359,8 +376,7 @@ namespace JeebGateway.Controllers
             }
             catch (RemoteUserPreferencesApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-preferences error");
+                return UpstreamProblem(ex);
             }
         }
 
