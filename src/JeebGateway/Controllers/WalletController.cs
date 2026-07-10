@@ -20,10 +20,37 @@ namespace JeebGateway.Controllers
     public class WalletController : ControllerBase
     {
         private readonly ServiceWalletClient _walletClient;
+        private readonly ILogger<WalletController> _logger;
 
-        public WalletController(ServiceWalletClient walletClient)
+        public WalletController(ServiceWalletClient walletClient, ILogger<WalletController> logger)
         {
             _walletClient = walletClient;
+            _logger = logger;
+        }
+
+        /// <summary>
+        /// JEBV4-253 — map a caught upstream <see cref="WalletApiException"/> to a
+        /// sanitized RFC 7807 result. The upstream status is preserved (clamped to a
+        /// valid 4xx/5xx; anything else becomes 502 Bad Gateway), but the upstream
+        /// exception message / response body is logged server-side ONLY, never echoed
+        /// to the caller. The JEBV4-63 relay still put <c>ex.Message</c> in the
+        /// ProblemDetails <c>detail</c> field (the NSwag message embeds up to 512 chars
+        /// of the raw upstream body) — this drops it. Mirrors
+        /// <c>ChatController.UpstreamProblem</c> (JEBV4-242).
+        /// </summary>
+        private ActionResult UpstreamProblem(WalletApiException ex)
+        {
+            var status = ex.StatusCode is >= 400 and < 600
+                ? ex.StatusCode
+                : StatusCodes.Status502BadGateway;
+
+            _logger.LogWarning(ex,
+                "Wallet BFF: wallet-service call failed on {Method} {Path} → {Status}.",
+                Request.Method, Request.Path, status);
+
+            return Problem(
+                title: "Upstream wallet-service error",
+                statusCode: status);
         }
 
         [HttpGet("system-wallet")]
@@ -38,8 +65,7 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -56,8 +82,7 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -73,8 +98,7 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -90,8 +114,7 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -107,8 +130,7 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -124,8 +146,7 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -141,8 +162,7 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
+                return UpstreamProblem(ex);
             }
         }
 
@@ -168,8 +188,7 @@ namespace JeebGateway.Controllers
             }
             catch (WalletApiException ex)
             {
-                // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
-                return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream wallet-service error");
+                return UpstreamProblem(ex);
             }
         }
 

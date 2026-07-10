@@ -57,6 +57,28 @@ namespace JeebGateway.Controllers
         }
 
         /// <summary>
+        /// JEBV4-251 — map a caught upstream <see cref="PushNotificationApiException"/> to
+        /// a sanitized RFC 7807 result: the upstream status is preserved (clamped to a
+        /// valid 4xx/5xx; anything else becomes 502 Bad Gateway), but the upstream
+        /// exception message / response body is logged server-side ONLY, never echoed to
+        /// the caller. Mirrors <c>ChatController.UpstreamProblem</c> (JEBV4-242).
+        /// </summary>
+        private ActionResult UpstreamProblem(PushNotificationApiException ex)
+        {
+            var status = ex.StatusCode is >= 400 and < 600
+                ? ex.StatusCode
+                : StatusCodes.Status502BadGateway;
+
+            _logger.LogWarning(ex,
+                "Push BFF: push-notification-service call failed on {Method} {Path} → {Status}.",
+                Request.Method, Request.Path, status);
+
+            return Problem(
+                title: "The push notification request could not be completed.",
+                statusCode: status);
+        }
+
+        /// <summary>
         /// Register a device for push notifications
         /// </summary>
         /// <remarks>
@@ -124,7 +146,7 @@ namespace JeebGateway.Controllers
             }
             catch (PushNotificationApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -183,7 +205,7 @@ namespace JeebGateway.Controllers
             }
             catch (PushNotificationApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -232,7 +254,7 @@ namespace JeebGateway.Controllers
             }
             catch (PushNotificationApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -299,7 +321,7 @@ namespace JeebGateway.Controllers
             }
             catch (PushNotificationApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -351,7 +373,7 @@ namespace JeebGateway.Controllers
             }
             catch (PushNotificationApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -409,7 +431,7 @@ namespace JeebGateway.Controllers
             }
             catch (PushNotificationApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -439,7 +461,7 @@ namespace JeebGateway.Controllers
             }
             catch (PushNotificationApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
