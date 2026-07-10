@@ -34,7 +34,13 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// </summary>
 [ApiController]
 [Route("v1/auth")]
-[Produces("application/json", "application/problem+json")]
+// NOTE: intentionally NO class-level [Produces(...)]. A [Produces] filter CLEARS an
+// ObjectResult's own ContentTypes and forces the first listed media type, which
+// downgraded the RFC 7807 error bodies emitted by OtpSignInProblems.Problem
+// (ContentTypes = "application/problem+json") to "application/json". Omitting it lets
+// each result carry its correct media type — success → application/json, error →
+// application/problem+json — while the per-action [ProducesResponseType] still
+// documents the shapes for Swagger (JEBV4-244).
 [EnableRateLimiting(RateLimitingExtensions.AuthTokenBucketPolicy)]
 // ADR-004 D1: public by design — refresh is authenticated by the rotation cookie, not a bearer.
 [Microsoft.AspNetCore.Authorization.AllowAnonymous]
@@ -86,6 +92,35 @@ public sealed class AuthRefreshV1Controller : ControllerBase
 
         return OtpSignInProblems.Problem(this, StatusCodes.Status401Unauthorized, "invalid_refresh",
             "Refresh rejected", "The refresh token is invalid, expired, or has been revoked. Sign in again.");
+    }
+
+    /// <summary>
+    /// POST /v1/auth/logout — revoke the presented refresh token so the session
+    /// can no longer be rotated (JEBV4-244). This is the <c>v1</c> route literal
+    /// the Jeeb client calls; it mirrors the legacy <c>POST /auth/logout</c> in
+    /// the now-[Obsolete] <see cref="JeebGateway.Controllers.AuthController.Logout"/>.
+    ///
+    /// <para><b>Reuse, not rebuild.</b> A thin pass-through to the existing
+    /// <see cref="ITokenService.RevokeAsync"/> with <see cref="RevocationReason.Logout"/>
+    /// — the same refresh-token store as refresh; no new persistence, no new
+    /// business logic, and (like refresh) this path does NOT touch
+    /// user-management. Idempotent: an unknown / already-revoked token still
+    /// returns <c>204</c> (the token service no-ops on a miss), never disclosing
+    /// whether the token existed.</para>
+    /// </summary>
+    [HttpPost("logout")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> Logout([FromBody] RefreshRequestDto? body, CancellationToken ct)
+    {
+        if (body is null || string.IsNullOrWhiteSpace(body.RefreshToken))
+        {
+            return OtpSignInProblems.Problem(this, StatusCodes.Status400BadRequest, "invalid_request",
+                "refreshToken is required", "A refreshToken must be supplied to end the session.");
+        }
+
+        await _tokens.RevokeAsync(body.RefreshToken!, RevocationReason.Logout, ct);
+        return NoContent();
     }
 }
 

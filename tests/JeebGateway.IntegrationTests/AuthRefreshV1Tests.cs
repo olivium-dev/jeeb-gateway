@@ -25,6 +25,13 @@ namespace JeebGateway.IntegrationTests;
 ///                           NEW refresh also -> 401 (forces re-OTP).
 ///   guards: missing token -> 400; bogus token -> 401.
 ///
+/// Also covers <c>POST /v1/auth/logout</c> (JEBV4-244 regression — the route
+/// previously 404'd in production with no test catching it): valid token ->
+/// 204 and the token is actually revoked; unknown/garbage token -> 204
+/// (idempotent, no oracle); missing token -> 400 problem+json. Logout lives
+/// on the same <see cref="AuthRefreshV1Controller"/> as refresh, so it shares
+/// this file and its <see cref="MakeFactory"/> / <see cref="MintSession"/> harness.
+///
 /// The refresh tokens are minted by the REAL verify path (the genuine
 /// IUsersStore + ITokenService singletons in the test host), so nothing is faked.
 /// </summary>
@@ -108,6 +115,64 @@ public class AuthRefreshV1Tests
 
         resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
         (await resp.Content.ReadAsStringAsync()).Should().Contain("invalid_refresh");
+    }
+
+    // ---------------------------------------------------------------
+    // POST /v1/auth/logout (JEBV4-244) — the route literally 404'd in
+    // production because no test exercised it; these pin the v1 route.
+    // ---------------------------------------------------------------
+
+    [Fact]
+    public async Task Logout_ValidRefreshToken_Returns204_AndRevokesSession()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub);
+        var http = factory.CreateClient();
+
+        var session = await MintSession(http, "+9613000203");
+
+        var logout = await http.PostAsJsonAsync("/v1/auth/logout",
+            new { refreshToken = session.RefreshToken });
+        logout.StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        // Prove revocation actually happened THROUGH THE V1 ROUTE: the same
+        // token can no longer be redeemed for a fresh pair. Before JEBV4-244
+        // was fixed, /v1/auth/logout 404'd, so this call would have gone
+        // nowhere and the token would still be live.
+        var refreshAfterLogout = await http.PostAsJsonAsync("/v1/auth/refresh",
+            new { refreshToken = session.RefreshToken });
+        refreshAfterLogout.StatusCode.Should().Be(HttpStatusCode.Unauthorized,
+            "logout must revoke the refresh token so it can no longer be redeemed");
+    }
+
+    [Fact]
+    public async Task Logout_UnknownRefreshToken_Returns204_Idempotent()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsJsonAsync("/v1/auth/logout",
+            new { refreshToken = "definitely-not-a-real-refresh-token" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NoContent,
+            "logout is idempotent — an unknown or already-revoked token still " +
+            "no-ops to 204, never disclosing whether the token existed (no enumeration oracle)");
+    }
+
+    [Fact]
+    public async Task Logout_MissingRefreshToken_Returns400_ProblemJson()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsync("/v1/auth/logout",
+            new StringContent("""{ }""", Encoding.UTF8, "application/json"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
+        (await resp.Content.ReadAsStringAsync()).Should().Contain("invalid_request");
     }
 
     // ---------------------------------------------------------------
