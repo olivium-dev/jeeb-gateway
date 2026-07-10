@@ -532,13 +532,16 @@ public sealed class JeebConversationsController : ControllerBase
             status = StatusCodes.Status503ServiceUnavailable;
         }
 
-        _logger.LogWarning(
-            "Conversation BFF: chat-service rejected {Action} with {Status}.",
-            action, status);
+        // JEBV4-253 — the upstream response body (ex.Body) is logged server-side ONLY;
+        // it is NEVER echoed on the wire. It embedded raw chat-service response detail,
+        // an information-disclosure leak (the same class the JEBV4-242 ChatController fix
+        // closes). The status is still forwarded verbatim; only the detail is dropped.
+        _logger.LogWarning(ex,
+            "Conversation BFF: chat-service rejected {Action} with {Status}. Upstream body: {UpstreamBody}",
+            action, status, ex.Body);
 
         return Problem(
             title: $"chat-service rejected the {action}.",
-            detail: ex.Body,
             statusCode: status);
     }
 

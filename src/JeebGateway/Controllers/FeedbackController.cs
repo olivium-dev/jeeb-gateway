@@ -63,6 +63,28 @@ namespace JeebGateway.Controllers
         }
 
         /// <summary>
+        /// JEBV4-252 — map a caught upstream <see cref="FeedbackApiException"/> to a
+        /// sanitized RFC 7807 result: the upstream status is preserved (clamped to a
+        /// valid 4xx/5xx; anything else becomes 502 Bad Gateway), but the upstream
+        /// exception message / response body is logged server-side ONLY, never echoed
+        /// to the caller. Mirrors <c>ChatController.UpstreamProblem</c> (JEBV4-242).
+        /// </summary>
+        private ActionResult UpstreamProblem(FeedbackApiException ex)
+        {
+            var status = ex.StatusCode is >= 400 and < 600
+                ? ex.StatusCode
+                : StatusCodes.Status502BadGateway;
+
+            _logger.LogWarning(ex,
+                "Feedback BFF: feedback-service call failed on {Method} {Path} → {Status}.",
+                Request.Method, Request.Path, status);
+
+            return Problem(
+                title: "The feedback request could not be completed.",
+                statusCode: status);
+        }
+
+        /// <summary>
         /// Create a new comment/review
         /// </summary>
         /// <remarks>
@@ -120,7 +142,7 @@ namespace JeebGateway.Controllers
             }
             catch (FeedbackApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -165,7 +187,7 @@ namespace JeebGateway.Controllers
             }
             catch (FeedbackApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -221,7 +243,7 @@ namespace JeebGateway.Controllers
             }
             catch (FeedbackApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -266,7 +288,7 @@ namespace JeebGateway.Controllers
             }
             catch (FeedbackApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -313,7 +335,7 @@ namespace JeebGateway.Controllers
             }
             catch (FeedbackApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -351,7 +373,7 @@ namespace JeebGateway.Controllers
             }
             catch (FeedbackApiException ex)
             {
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {

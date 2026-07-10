@@ -568,6 +568,117 @@ public sealed class JeebConversationsBffTests
     }
 
     // ---------------------------------------------------------------------
+    // JEBV4-253 — upstream body sanitization (ForwardUpstream drops ex.Body)
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public async Task ForwardUpstream_UpstreamFailure_PreservesStatus_ButDoesNotLeakUpstreamBody()
+    {
+        // chat-service rejects the read with a 500 whose body carries internal detail.
+        // ForwardUpstream forwards the status (500 is in [400,600)) but must NEVER echo
+        // the upstream body (ex.Body) on the wire — it is logged server-side only.
+        const string canary =
+            "System.NullReferenceException: SECRET_CANARY_conv253 at ChatService.Internal.SecretRepo.Load() line 42";
+        var fake = new FakeJeebConversationClient
+        {
+            ListThrows = new JeebConversationApiException(HttpStatusCode.InternalServerError, canary),
+        };
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, _) = await MintSession(http, "+9613001850");
+
+        var msg = new HttpRequestMessage(HttpMethod.Get, "/v1/conversations/conv-1/messages");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError,
+            "an upstream 5xx status is forwarded verbatim");
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().NotContain("SECRET_CANARY_conv253",
+            "the upstream response body (ex.Body) must never reach the client (JEBV4-253)");
+        raw.Should().StartWith("{",
+            "the error body must be a JSON ProblemDetails envelope, not a bare string");
+    }
+
+    [Fact]
+    public async Task ForwardUpstream_UpstreamStatusOutsideErrorRange_IsClampedTo503_NoLeak()
+    {
+        // A 302 from chat-service is outside [400,600) — ForwardUpstream defensively
+        // maps it to 503 (readiness concern), never forwards a non-error status, and
+        // still leaks no upstream body.
+        var fake = new FakeJeebConversationClient
+        {
+            ListThrows = new JeebConversationApiException(HttpStatusCode.Found, "SECRET_CANARY_conv253b"),
+        };
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, _) = await MintSession(http, "+9613001851");
+
+        var msg = new HttpRequestMessage(HttpMethod.Get, "/v1/conversations/conv-1/messages");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable,
+            "an upstream status outside [400,600) is clamped to 503, never forwarded");
+        (await resp.Content.ReadAsStringAsync()).Should().NotContain("SECRET_CANARY_conv253b");
+    }
+
+    [Fact]
+    public void JeebConversationsController_Source_Has_No_Live_Upstream_Body_Leak_And_All_Catches_Forward()
+    {
+        // Source-scan regression guard (same idiom as ChatControllerErrorShapeTests):
+        // the ForwardUpstream helper must not echo the upstream response body (ex.Body)
+        // in the ProblemDetails detail field, and every
+        // catch (JeebConversationApiException ...) routes through ForwardUpstream.
+        var path = LocateJeebConversationsControllerSource();
+        path.Should().NotBeNull(
+            "src/JeebGateway/Controllers/JeebConversationsController.cs must be locatable from the test bin dir");
+
+        var liveCode = string.Join(
+            "\n",
+            File.ReadAllLines(path!).Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+        CountOccurrences(liveCode, "detail: ex.Body").Should().Be(0,
+            "JEBV4-253: ForwardUpstream must not echo the upstream response body in the detail field");
+
+        var catches = CountOccurrences(liveCode, "catch (JeebConversationApiException");
+        var forwarded = CountOccurrences(liveCode, "ForwardUpstream(ex");
+        catches.Should().BeGreaterThan(0,
+            "the guard must actually see the upstream catch sites (an emptied/renamed file must not vacuously pass)");
+        forwarded.Should().Be(catches,
+            "every catch (JeebConversationApiException ...) must route through ForwardUpstream(ex, ...)");
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal);
+             i >= 0;
+             i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+        return count;
+    }
+
+    private static string? LocateJeebConversationsControllerSource()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 10 && dir is not null; i++, dir = dir.Parent)
+        {
+            var candidate = Path.Combine(
+                dir.FullName, "src", "JeebGateway", "Controllers", "JeebConversationsController.cs");
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    // ---------------------------------------------------------------------
     // helpers
     // ---------------------------------------------------------------------
 

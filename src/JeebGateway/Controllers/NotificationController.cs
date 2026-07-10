@@ -54,6 +54,28 @@ namespace JeebGateway.Controllers
         }
 
         /// <summary>
+        /// JEBV4-250 — map a caught upstream <see cref="NotificationApiException"/> to a
+        /// sanitized RFC 7807 result: the upstream status is preserved (clamped to a
+        /// valid 4xx/5xx; anything else becomes 502 Bad Gateway), but the upstream
+        /// exception message / response body is logged server-side ONLY, never echoed
+        /// to the caller. Mirrors <c>ChatController.UpstreamProblem</c> (JEBV4-242).
+        /// </summary>
+        private ActionResult UpstreamProblem(NotificationApiException ex)
+        {
+            var status = ex.StatusCode is >= 400 and < 600
+                ? ex.StatusCode
+                : StatusCodes.Status502BadGateway;
+
+            _logger.LogWarning(ex,
+                "Notification BFF: notification-service call failed on {Method} {Path} → {Status}.",
+                Request.Method, Request.Path, status);
+
+            return Problem(
+                title: "The notification request could not be completed.",
+                statusCode: status);
+        }
+
+        /// <summary>
         /// List notifications messages for the authenticated user
         /// </summary>
         /// <remarks>
@@ -106,8 +128,7 @@ namespace JeebGateway.Controllers
             }
             catch (NotificationApiException ex)
             {
-                _logger.LogError(ex, "Error retrieving messages for current user");
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -175,8 +196,7 @@ namespace JeebGateway.Controllers
             }
             catch (NotificationApiException ex)
             {
-                _logger.LogError(ex, "Error retrieving unread count for current user");
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -227,8 +247,7 @@ namespace JeebGateway.Controllers
             }
             catch (NotificationApiException ex)
             {
-                _logger.LogError(ex, "Error marking notification as read");
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -279,8 +298,7 @@ namespace JeebGateway.Controllers
             }
             catch (NotificationApiException ex)
             {
-                _logger.LogError(ex, "Error marking notification as unread");
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -334,8 +352,7 @@ namespace JeebGateway.Controllers
             }
             catch (NotificationApiException ex)
             {
-                _logger.LogError(ex, "Error bulk marking notifications as read");
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -389,8 +406,7 @@ namespace JeebGateway.Controllers
             }
             catch (NotificationApiException ex)
             {
-                _logger.LogError(ex, "Error bulk marking notifications as unread");
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
@@ -425,8 +441,7 @@ namespace JeebGateway.Controllers
             }
             catch (NotificationApiException ex)
             {
-                _logger.LogError(ex, "Notification service health check failed");
-                return StatusCode(ex.StatusCode, ex.Message);
+                return UpstreamProblem(ex);
             }
             catch (Exception ex)
             {
