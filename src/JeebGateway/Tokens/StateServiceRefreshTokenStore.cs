@@ -117,13 +117,20 @@ public sealed class StateServiceRefreshTokenStore : IRefreshTokenStore
         latest.ReplacedByTokenId = replacement.TokenId;
 
         // PP-11 (JEBV4-39) — FAIL-OPEN ordering. Durably persist the NEW replacement
-        // token (base + hash + user index) BEFORE revoking/rotating the OLD one. If the
-        // process crashes or the state-service write fails between the two steps, the OLD
-        // token stays active and the whole refresh is safely retryable: the caller
-        // re-presents the still-valid old token and rotates again. The previous
-        // revoke-old-then-persist-new ordering was fail-CLOSED — a failure after the
-        // revoke but before the replacement persisted stranded the user with neither a
-        // valid old nor a delivered new token, forcing a re-login.
+        // token BEFORE revoking/rotating the OLD one. If the process crashes or the
+        // state-service write fails between the two steps, the OLD token stays active and
+        // the whole refresh is safely retryable: the caller re-presents the still-valid
+        // old token and rotates again. The previous revoke-old-then-persist-new ordering
+        // was fail-CLOSED — a failure after the revoke but before the replacement
+        // persisted stranded the user with neither a valid old nor a delivered new token,
+        // forcing a re-login.
+        //
+        // AddAsync is NOT atomic: it issues THREE independent, non-atomic PutOrGetAsync
+        // writes (base row, hash index, user index). A crash BETWEEN those three can leave
+        // a PARTIALLY-written replacement — that is still safe here, because the
+        // replacement's raw value is never returned unless RotateAsync returns true, so a
+        // partial row is an unreachable orphan and a retry re-runs all three insert-once
+        // writes idempotently.
         //
         // Trade-offs of fail-open (accepted per PP-11):
         //   • A brief window where BOTH the old and the new token are valid (the old is
@@ -132,9 +139,18 @@ public sealed class StateServiceRefreshTokenStore : IRefreshTokenStore
         //     undeliverable during that window — the only externally-usable token then is
         //     the old one the caller already held.
         //   • On a lost concurrency race (the seq+1 guard below) the just-persisted
-        //     replacement becomes an unreachable, TTL-bounded orphan: its raw value is
-        //     never handed to any caller, and TokenService's reuse-chain burn revokes it
-        //     in the same refresh flow.
+        //     replacement becomes an unreachable, TTL-bounded orphan (its raw value is
+        //     never handed to any caller). But note a SHARED hazard this reorder makes
+        //     DETERMINISTIC: on a benign concurrent double-refresh of the SAME old token,
+        //     the loser's RotateAsync returns false and TokenService treats it as reuse,
+        //     calling RevokeChainAsync — whose UNCONDITIONAL revoke-all-for-user burns
+        //     EVERY active token for the user, INCLUDING the winner's just-delivered live
+        //     token. The winner is thus silently logged out on its next refresh. This
+        //     collateral burn is PRE-EXISTING (present under the old ordering too), but was
+        //     racy there because the winner's replacement was persisted only AFTER the
+        //     guard; persisting it BEFORE the guard here means the burn always sees it.
+        //     Distinguishing benign collision from true replay needs a wider RotateAsync
+        //     return contract — deferred to the owner, out of PP-11 scope.
         await AddAsync(replacement, ct);
 
         // Insert-once on the next seq remains the authoritative single-winner rotation

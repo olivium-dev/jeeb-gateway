@@ -188,6 +188,102 @@ public sealed class StateServiceRefreshTokenStoreTests
     }
 
     [Fact]
+    public async Task Rotate_Concurrent_DoubleRotation_YieldsOneWinner_And_ReuseBurn_Revokes_The_Winner_Token()
+    {
+        // PP-11 blast-radius PIN (Finding-1). Two concurrent RotateAsync calls present the
+        // SAME still-active old token — a BENIGN double-refresh (one client, two in-flight
+        // refreshes of the same token). A rendezvous KV forces the genuine interleaving:
+        // BOTH callers read the old token active AND persist their replacement BEFORE
+        // either wins the seq+1 guard, so this exercises the reordered persist-before-guard
+        // path (not the sequential IsActive short-circuit a synchronous fake collapses to).
+        var kv = new RendezvousOnReplacementPersistStore(concurrentRotates: 2);
+        var store = NewStore(kv);
+        await store.AddAsync(Token("old", "u-conc", "hash-old"), CancellationToken.None);
+        kv.Arm();
+
+        // Dedicated threads (LongRunning) guarantee true concurrency regardless of the
+        // thread-pool's sizing, so the rendezvous can't degenerate into a sequential run.
+        var r1 = Task.Factory.StartNew(
+            () => store.RotateAsync("old", Token("new1", "u-conc", "hash-new1"), CancellationToken.None),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+        var r2 = Task.Factory.StartNew(
+            () => store.RotateAsync("old", Token("new2", "u-conc", "hash-new2"), CancellationToken.None),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+        var results = await Task.WhenAll(r1, r2);
+
+        // (a) Exactly ONE winner — the seq+1 insert-once guard stays authoritative.
+        results.Count(ok => ok).Should().Be(1, "the seq+1 guard elects exactly one rotation winner");
+        results.Count(ok => !ok).Should().Be(1, "the concurrent loser is rejected (treated as reuse by the caller)");
+
+        var winnerId = results[0] ? "new1" : "new2";
+        var winnerHash = results[0] ? "hash-new1" : "hash-new2";
+        var loserHash = results[0] ? "hash-new2" : "hash-new1";
+
+        // (b) The old token is rotated toward the WINNER's replacement.
+        var old = await store.FindByHashAsync("hash-old", CancellationToken.None);
+        old!.RevokedAt.Should().NotBeNull();
+        old.RevokedReason.Should().Be(RevocationReason.Rotated.ToString());
+        old.ReplacedByTokenId.Should().Be(winnerId, "the seq-1 revision records the guard winner");
+
+        // (c) BOTH replacements are persisted and ACTIVE — the reorder's new behaviour.
+        // The winner's is reachable (its raw value was delivered to its caller); the
+        // loser's is an UNREACHABLE orphan (raw value never returned). Under the OLD
+        // ordering the loser persisted nothing; the persist-before-guard reorder makes the
+        // loser deterministically leave a spuriously-active orphan.
+        (await store.FindByHashAsync(winnerHash, CancellationToken.None))!.RevokedAt
+            .Should().BeNull("the winner's replacement is delivered and active");
+        (await store.FindByHashAsync(loserHash, CancellationToken.None))!.RevokedAt
+            .Should().BeNull("the loser's replacement is persisted before it lost the guard → an active orphan");
+
+        // (d) BLAST RADIUS — the honest, imperfect CURRENT behaviour (pinned, not fixed).
+        // TokenService reacts to the loser's `false` by treating it as reuse and calling
+        // RevokeChainAsync over the old token. Its UNCONDITIONAL revoke-all-for-user burns
+        // EVERY active token for the user — INCLUDING the winner's just-delivered live
+        // token. So a benign concurrent double-refresh silently force-logs-out the winner
+        // on its next refresh. This is pinned so the true risk profile is visible in the
+        // suite; the fix (a wider RotateAsync contract to tell benign collision from true
+        // replay) is a design change deferred to the owner, out of PP-11 scope.
+        var burned = await store.RevokeChainAsync("old", RevocationReason.ReuseDetected, CancellationToken.None);
+        burned.Should().Be(2, "the reuse burn revokes BOTH replacements: the winner's live token AND the loser's orphan");
+
+        var winnerAfterBurn = await store.FindByHashAsync(winnerHash, CancellationToken.None);
+        winnerAfterBurn!.RevokedAt.Should().NotBeNull(
+            "COLLATERAL: the loser's reuse burn revokes the winner's already-delivered token");
+        winnerAfterBurn.RevokedReason.Should().Be(RevocationReason.ReuseDetected.ToString());
+    }
+
+    [Fact]
+    public async Task Rotate_Is_Retryable_After_A_Transient_Revoke_Old_Write_Failure()
+    {
+        // Reviewer-B rec: prove the fail-open claim end-to-end. The FIRST rotate fails on
+        // the revoke-old status write (a transient state-service blip) — the old token
+        // must stay active. A RETRY against the now-healthy KV then completes the rotation,
+        // proving the refresh is "safely retryable" rather than merely non-destructive.
+        var kv = new TransientFaultOnStatusWriteIdempotencyStore(failuresBeforeHealthy: 1);
+        var store = NewStore(kv);
+        await store.AddAsync(Token("old", "u-retry", "hash-old"), CancellationToken.None);
+
+        // First attempt: the revoke-old status write throws; the old token survives.
+        await store
+            .Invoking(s => s.RotateAsync("old", Token("new", "u-retry", "hash-new"), CancellationToken.None))
+            .Should().ThrowAsync<InvalidOperationException>("the first revoke-old write hits the transient fault");
+        (await store.FindByHashAsync("hash-old", CancellationToken.None))!.RevokedAt
+            .Should().BeNull("fail-open: the presented token survives the failed rotate and stays retryable");
+
+        // Retry on the healed KV (same old, same replacement). AddAsync is insert-once, so
+        // re-persisting the replacement is an idempotent no-op and the guard write now lands.
+        (await store.RotateAsync("old", Token("new", "u-retry", "hash-new"), CancellationToken.None))
+            .Should().BeTrue("the refresh is safely retryable once the state-service write recovers");
+
+        var oldAfter = await store.FindByHashAsync("hash-old", CancellationToken.None);
+        oldAfter!.RevokedAt.Should().NotBeNull("the retry rotates the old token");
+        oldAfter.RevokedReason.Should().Be(RevocationReason.Rotated.ToString());
+        oldAfter.ReplacedByTokenId.Should().Be("new");
+        (await store.FindByHashAsync("hash-new", CancellationToken.None))!.RevokedAt
+            .Should().BeNull("the replacement is active after the successful retry");
+    }
+
+    [Fact]
     public async Task Rotate_Missing_Old_Returns_False()
     {
         var store = NewStore(new FakeIdempotencyStore());
@@ -380,6 +476,119 @@ public sealed class StateServiceRefreshTokenStoreTests
             if (key.StartsWith(StatusKeyPrefix, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException("simulated state-service write failure on revoke-old");
+            }
+
+            var stored = _kv.GetOrAdd(key, responseBodyJson);
+            return Task.FromResult(new IdempotencyOutcome
+            {
+                Inserted = ReferenceEquals(stored, responseBodyJson),
+                StatusCode = statusCode,
+                ResponseBodyJson = stored,
+            });
+        }
+
+        public Task<IdempotencyOutcome?> GetAsync(string key, CancellationToken ct)
+            => Task.FromResult(_kv.TryGetValue(key, out var body)
+                ? new IdempotencyOutcome { Inserted = false, StatusCode = 200, ResponseBodyJson = body }
+                : null);
+
+        public Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(string prefix, CancellationToken ct)
+        {
+            IReadOnlyList<IdempotencyOutcome> rows = _kv
+                .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(kvp => new IdempotencyOutcome { Inserted = false, StatusCode = 200, ResponseBodyJson = kvp.Value })
+                .ToList();
+            return Task.FromResult(rows);
+        }
+    }
+
+    /// <summary>
+    /// Insert-once KV that RENDEZVOUS-blocks concurrent rotates at the replacement's
+    /// base-row write, so N concurrent RotateAsync calls all read the old token active and
+    /// persist their replacement BEFORE any of them writes the seq+1 guard — deterministically
+    /// exercising the reordered persist-before-guard double-rotation path (rather than the
+    /// sequential IsActive short-circuit a synchronously-completing fake would collapse to).
+    /// One-shot: once all parties arrive the gate stays open, so later single-threaded
+    /// reads/writes (the assertions' find-by-hash and the reuse-burn) pass straight through.
+    /// </summary>
+    private sealed class RendezvousOnReplacementPersistStore : IIdempotencyStore
+    {
+        // A replacement base row is "refresh-token:{id}" (colon). The status/hash/user keys
+        // start with "refresh-token-" (hyphen), so this prefix matches the base row ONLY.
+        private const string RowKeyPrefix = "refresh-token:";
+
+        private readonly ConcurrentDictionary<string, string> _kv = new(StringComparer.Ordinal);
+        private readonly int _parties;
+        private readonly ManualResetEventSlim _gate = new(false);
+        private volatile bool _armed;
+        private int _arrived;
+
+        public RendezvousOnReplacementPersistStore(int concurrentRotates) => _parties = concurrentRotates;
+
+        /// <summary>Enable the rendezvous only for the concurrent phase (setup writes run before this).</summary>
+        public void Arm() => _armed = true;
+
+        public Task<IdempotencyOutcome> PutOrGetAsync(
+            string key, int statusCode, string responseBodyJson, int ttlSeconds, CancellationToken ct)
+        {
+            // A replacement base-row write marks a rotate that has already read the old
+            // token active. Hold each until all concurrent rotates arrive, so none reaches
+            // the guard while another is still pre-guard. A 5s ceiling prevents a stuck
+            // test from hanging CI (a missing party fails an assertion instead).
+            if (_armed && key.StartsWith(RowKeyPrefix, StringComparison.Ordinal))
+            {
+                if (Interlocked.Increment(ref _arrived) >= _parties) _gate.Set();
+                _gate.Wait(TimeSpan.FromSeconds(5), ct);
+            }
+
+            var stored = _kv.GetOrAdd(key, responseBodyJson);
+            return Task.FromResult(new IdempotencyOutcome
+            {
+                Inserted = ReferenceEquals(stored, responseBodyJson),
+                StatusCode = statusCode,
+                ResponseBodyJson = stored,
+            });
+        }
+
+        public Task<IdempotencyOutcome?> GetAsync(string key, CancellationToken ct)
+            => Task.FromResult(_kv.TryGetValue(key, out var body)
+                ? new IdempotencyOutcome { Inserted = false, StatusCode = 200, ResponseBodyJson = body }
+                : null);
+
+        public Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(string prefix, CancellationToken ct)
+        {
+            IReadOnlyList<IdempotencyOutcome> rows = _kv
+                .Where(kvp => kvp.Key.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(kvp => new IdempotencyOutcome { Inserted = false, StatusCode = 200, ResponseBodyJson = kvp.Value })
+                .ToList();
+            return Task.FromResult(rows);
+        }
+    }
+
+    /// <summary>
+    /// Insert-once KV whose revoke/rotate status-chain writes (<c>refresh-token-status:</c>)
+    /// fail TRANSIENTLY: the first <c>failuresBeforeHealthy</c> such writes throw (a state-
+    /// service blip), then writes heal. Base/hash/user writes and all reads always succeed,
+    /// so a test can prove a rotate is safely RETRYABLE once the state-service recovers.
+    /// </summary>
+    private sealed class TransientFaultOnStatusWriteIdempotencyStore : IIdempotencyStore
+    {
+        private const string StatusKeyPrefix = "refresh-token-status:";
+
+        private readonly ConcurrentDictionary<string, string> _kv = new(StringComparer.Ordinal);
+        private readonly int _failuresBeforeHealthy;
+        private int _statusWriteAttempts;
+
+        public TransientFaultOnStatusWriteIdempotencyStore(int failuresBeforeHealthy)
+            => _failuresBeforeHealthy = failuresBeforeHealthy;
+
+        public Task<IdempotencyOutcome> PutOrGetAsync(
+            string key, int statusCode, string responseBodyJson, int ttlSeconds, CancellationToken ct)
+        {
+            if (key.StartsWith(StatusKeyPrefix, StringComparison.Ordinal)
+                && Interlocked.Increment(ref _statusWriteAttempts) <= _failuresBeforeHealthy)
+            {
+                throw new InvalidOperationException("simulated TRANSIENT state-service write failure on revoke-old");
             }
 
             var stored = _kv.GetOrAdd(key, responseBodyJson);
