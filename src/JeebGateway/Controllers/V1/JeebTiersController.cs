@@ -75,6 +75,7 @@ public sealed class JeebTiersController : ControllerBase
         Name = t.Name,
         SlaHours = t.SlaHours,
         RadiusKm = t.RadiusKm,
+        RequestTtlSeconds = t.RequestTtlSeconds,
         CommissionRate = t.CommissionRate,
         PriceHint = t.PriceHint,
         CreatedAt = t.CreatedAt,

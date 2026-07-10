@@ -3,7 +3,7 @@ namespace JeebGateway.Financials;
 /// <summary>
 /// Pure receipt formatter (T-backend-016 / JEEB-34). Takes a persisted
 /// <see cref="Settlement"/> and shapes the wire response — itemised
-/// goods / commission / insurance lines, totals, and a deterministic
+/// goods / commission lines, totals, and a deterministic
 /// receipt number that mobile + admin can both quote in support.
 /// </summary>
 public static class ReceiptGenerator
@@ -21,13 +21,7 @@ public static class ReceiptGenerator
         {
             new("Goods", settlement.GoodsCost),
             new($"Commission ({settlement.CommissionTier} {settlement.CommissionRate:P0})", settlement.Commission),
-            new("Insurance", settlement.Insurance),
         };
-
-        if (settlement.MinimumFeeApplied)
-        {
-            lines.Add(new ReceiptLine("Minimum-fee adjustment", 0m));
-        }
 
         return new ReceiptResponse
         {

@@ -50,7 +50,7 @@ public class DualRoleIdentityTests : IClassFixture<WebApplicationFactory<Program
         SeedUser(new UserProfile
         {
             Id = userId,
-            Phone = "+96550009999",
+            Phone = "+9613009999",
             Name = "Dual Role",
             Roles = new List<string> { Roles.Client, Roles.Jeeber },
             CreatedAt = DateTimeOffset.UtcNow,

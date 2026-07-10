@@ -16,7 +16,7 @@ namespace JeebGateway.Controllers;
 /// THIN by construction: this controller holds NO speech-to-text logic. It only
 /// (1) parses the multipart voice upload, (2) enforces the gateway preconditions
 /// that must reject BEFORE any Whisper runs (auth/role, audio size, audio format,
-/// BR-9 active-request cap), (3) maps the client <c>requestId</c> onto the generic
+/// retired BR-9 active-request cap), (3) maps the client <c>requestId</c> onto the generic
 /// <c>Idempotency-Key</c> and forces <c>language=ar</c>, then (4) delegates the
 /// transcription to the OWNING voice-transcription-service via the typed
 /// <see cref="IVoiceTranscriptionClient"/>. The transcript VALUE comes entirely from
@@ -79,7 +79,7 @@ public sealed class RequestVoiceController : ControllerBase
     // one method+path and throws SwaggerGeneratorException ("Conflicting method/path
     // combination"); at runtime ASP.NET Core already selects by content-type via [FromForm].
     [Consumes("multipart/form-data")]
-    // ADR-005 L2 §C client-only voice create: replaces [RequireRole(Roles.Client)]. BR-9 stays STATE.
+    // ADR-005 L2 §C client-only voice create: replaces [RequireRole(Roles.Client)].
     [RequireCapability(Capabilities.RequestVoiceCreate)]
     [RequireActiveUser]
     [RequestSizeLimit(8 * 1024 * 1024)]
@@ -256,7 +256,8 @@ public sealed class RequestVoiceController : ControllerBase
         }
         catch (TooManyActiveRequestsException ex)
         {
-            // (N9) BR-9 active-request cap — 409 before the draft is created.
+            // Historical BR-9 409 plumbing remains, but the route now passes
+            // RequestsController.ActiveRequestsLimit == int.MaxValue.
             return Conflict(new ProblemDetails
             {
                 Title = RequestsController.LimitExceededMessage,

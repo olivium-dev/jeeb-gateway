@@ -14,7 +14,7 @@ namespace JeebGateway.Tiers;
 /// record for delivery tiers and used to live only in process memory —
 /// evaporating on every restart / replica move back to the seeded defaults.
 /// This store persists it to the <c>tiers</c> table (migration 0029), whose
-/// seed rows mirror <see cref="InMemoryTiersStore"/>'s five defaults byte-for-byte.
+/// seed rows mirror <see cref="InMemoryTiersStore"/>'s defaults byte-for-byte.
 ///
 /// <para>Semantics are preserved exactly:
 /// <list type="bullet">
@@ -50,7 +50,7 @@ public sealed class PostgresTiersStore : ITiersStore
     {
         await using var conn = await _db.OpenAsync(ct);
         const string sql = """
-            SELECT id, name, sla_hours, radius_km, commission_rate, price_hint,
+            SELECT id, name, sla_hours, radius_km, request_ttl_seconds, commission_rate, price_hint,
                    created_by, updated_by, created_at, updated_at
             FROM tiers
             ORDER BY sla_hours ASC, LOWER(name) ASC
@@ -80,11 +80,11 @@ public sealed class PostgresTiersStore : ITiersStore
         if (await HasNameConflictAsync(conn, name, excludingId: null, ct)) throw new DuplicateTierNameException(name);
 
         const string sql = """
-            INSERT INTO tiers (id, name, sla_hours, radius_km, commission_rate, price_hint,
+            INSERT INTO tiers (id, name, sla_hours, radius_km, request_ttl_seconds, commission_rate, price_hint,
                                created_by, updated_by, created_at, updated_at)
-            VALUES (@Id, @Name, @SlaHours, @RadiusKm, @CommissionRate, @PriceHint,
+            VALUES (@Id, @Name, @SlaHours, @RadiusKm, @RequestTtlSeconds, @CommissionRate, @PriceHint,
                     @AdminUserId, @AdminUserId, now(), now())
-            RETURNING id, name, sla_hours, radius_km, commission_rate, price_hint,
+            RETURNING id, name, sla_hours, radius_km, request_ttl_seconds, commission_rate, price_hint,
                       created_by, updated_by, created_at, updated_at
             """;
         await using var cmd = new NpgsqlCommand(sql, conn);
@@ -92,6 +92,7 @@ public sealed class PostgresTiersStore : ITiersStore
         cmd.Parameters.AddWithValue("Name", name);
         cmd.Parameters.AddWithValue("SlaHours", input.SlaHours);
         cmd.Parameters.AddWithValue("RadiusKm", input.RadiusKm);
+        cmd.Parameters.AddWithValue("RequestTtlSeconds", input.RequestTtlSeconds);
         cmd.Parameters.AddWithValue("CommissionRate", input.CommissionRate);
         cmd.Parameters.AddWithValue("PriceHint", priceHint);
         cmd.Parameters.AddWithValue("AdminUserId", adminUserId);
@@ -128,12 +129,13 @@ public sealed class PostgresTiersStore : ITiersStore
                SET name            = @Name,
                    sla_hours       = @SlaHours,
                    radius_km       = @RadiusKm,
+                   request_ttl_seconds = @RequestTtlSeconds,
                    commission_rate = @CommissionRate,
                    price_hint      = @PriceHint,
                    updated_by      = @AdminUserId,
                    updated_at      = now()
              WHERE id = @Id
-            RETURNING id, name, sla_hours, radius_km, commission_rate, price_hint,
+            RETURNING id, name, sla_hours, radius_km, request_ttl_seconds, commission_rate, price_hint,
                       created_by, updated_by, created_at, updated_at
             """;
         await using var cmd = new NpgsqlCommand(sql, conn);
@@ -141,6 +143,7 @@ public sealed class PostgresTiersStore : ITiersStore
         cmd.Parameters.AddWithValue("Name", name);
         cmd.Parameters.AddWithValue("SlaHours", input.SlaHours);
         cmd.Parameters.AddWithValue("RadiusKm", input.RadiusKm);
+        cmd.Parameters.AddWithValue("RequestTtlSeconds", input.RequestTtlSeconds);
         cmd.Parameters.AddWithValue("CommissionRate", input.CommissionRate);
         cmd.Parameters.AddWithValue("PriceHint", priceHint);
         cmd.Parameters.AddWithValue("AdminUserId", adminUserId);
@@ -176,7 +179,7 @@ public sealed class PostgresTiersStore : ITiersStore
     private static async Task<DeliveryTier?> GetAsync(NpgsqlConnection conn, string id, CancellationToken ct)
     {
         const string sql = """
-            SELECT id, name, sla_hours, radius_km, commission_rate, price_hint,
+            SELECT id, name, sla_hours, radius_km, request_ttl_seconds, commission_rate, price_hint,
                    created_by, updated_by, created_at, updated_at
             FROM tiers
             WHERE id = @Id
@@ -227,6 +230,7 @@ public sealed class PostgresTiersStore : ITiersStore
         Name           = r.GetString(r.GetOrdinal("name")),
         SlaHours       = r.GetInt32(r.GetOrdinal("sla_hours")),
         RadiusKm       = r.GetDouble(r.GetOrdinal("radius_km")),
+        RequestTtlSeconds = r.GetInt32(r.GetOrdinal("request_ttl_seconds")),
         CommissionRate = r.GetDouble(r.GetOrdinal("commission_rate")),
         PriceHint      = r.GetString(r.GetOrdinal("price_hint")),
         CreatedBy      = r.IsDBNull(r.GetOrdinal("created_by")) ? null : r.GetString(r.GetOrdinal("created_by")),

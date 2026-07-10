@@ -110,20 +110,14 @@ public class JeebReviewsProjectionTests
     [Fact]
     public void ProjectStatus_Revealed_Exposes_Counterparty_Rating_Row()
     {
-        // CONTRACT DRIFT — UPDATED (iter5). The blind-reveal projection (PR #221) now
-        // distinguishes a MUTUAL reveal ("revealed", both sides rated → SubmittedCount >= 2)
-        // from a unilateral time-window auto-reveal ("auto-revealed", SubmittedCount < 2,
-        // which fires the jeeb.rating_auto_revealed notification). This fixture models a
-        // genuine MUTUAL reveal (both Self and Counterparty submitted), so it must set
-        // SubmittedCount = 2 — previously omitted, so it defaulted to 0 and the projection
-        // (correctly) classified it as "auto-revealed". The auto-reveal branch is covered
-        // separately; here we assert the mutual-reveal "revealed" state.
+        // Mutual reveal requires both sides to rate and the named Q-030 scalar
+        // gate to report two submissions.
         var upstream = new BlindRevealStateResponse
         {
             CorrelationId = "jeeb:delivery:d-4",
             Revealed = true,
             RevealedAt = DateTimeOffset.UtcNow,
-            SubmittedCount = 2, // both sides rated → mutual reveal, not a window auto-reveal
+            SubmittedCount = 2,
             Self = Submitted(4, "mine"),
             Counterparty = Submitted(3, "theirs"),
         };
@@ -138,29 +132,44 @@ public class JeebReviewsProjectionTests
     }
 
     [Fact]
-    public void ProjectStatus_AutoRevealed_When_Window_Expired_With_One_Side_Rated()
+    public void ProjectStatus_Does_Not_Reveal_When_SubmittedCount_Is_Under_Two()
     {
-        // PR #221 blind-reveal: when the time window expires with fewer than 2
-        // submissions, the system auto-reveals unilaterally → "auto-revealed"
-        // (the server-side trigger for the jeeb.rating_auto_revealed notification).
-        // Only the counterparty rated here (SubmittedCount = 1), and their row is
-        // still exposed because the state is revealed.
+        var upstream = new BlindRevealStateResponse
+        {
+            CorrelationId = "jeeb:delivery:d-4b",
+            Revealed = true,
+            RevealedAt = DateTimeOffset.UtcNow,
+            SubmittedCount = 1,
+            Self = Submitted(4, "mine"),
+            Counterparty = Submitted(3, "theirs"),
+        };
+
+        var view = JeebReviewsProjection.ProjectStatus("d-4b", upstream);
+
+        view.State.Should().Be(JeebReviewsProjection.StatusCodes.LockedNoRating);
+        view.RatedCount.Should().Be(2);
+        view.Ratings.Should().BeEmpty("the Q-030 submittedCount gate keeps the pair blind below two submissions");
+    }
+
+    [Fact]
+    public void ProjectStatus_LockedNoRating_When_Window_Expired_With_One_Side_Rated()
+    {
+        // No one-sided auto-reveal: a genuine one-sided window close stays blind
+        // and exposes no rating rows.
         var upstream = new BlindRevealStateResponse
         {
             CorrelationId = "jeeb:delivery:d-5",
             Revealed = true,
             RevealedAt = DateTimeOffset.UtcNow,
-            SubmittedCount = 1, // window expired with only one side rated → auto-reveal
+            SubmittedCount = 1,
             Self = NotSubmitted(),
-            Counterparty = Submitted(2, "theirs-auto"),
+            Counterparty = Submitted(2, "theirs-never-revealed"),
         };
 
         var view = JeebReviewsProjection.ProjectStatus("d-5", upstream);
 
-        view.State.Should().Be(JeebReviewsProjection.StatusCodes.AutoRevealed);
+        view.State.Should().Be(JeebReviewsProjection.StatusCodes.LockedNoRating);
         view.RatedCount.Should().Be(1);
-        view.Ratings.Should().HaveCount(1);
-        view.Ratings[0].Score.Should().Be(2);
-        view.Ratings[0].Comment.Should().Be("theirs-auto");
+        view.Ratings.Should().BeEmpty();
     }
 }

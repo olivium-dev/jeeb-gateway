@@ -56,13 +56,13 @@ public sealed class Settlement
 
 /// <summary>
 /// POST /deliveries/{id}/settle body. The Jeeber records the cash they
-/// collected at hand-off; the gateway re-computes commission + insurance
-/// from <see cref="GoodsCost"/> and the row's tier — the caller never
-/// gets to choose the rate.
+/// collected at hand-off. The gateway re-computes the flat commission from
+/// the delivery row's accepted-offer amount and tier; the caller never gets to
+/// choose the commission base or rate.
 /// </summary>
 public sealed class SettleDeliveryRequest
 {
-    /// <summary>Cash value of the goods the Jeeber collected, in LBP.</summary>
+    /// <summary>Cash value of the accepted offer amount the Jeeber collected, in USD.</summary>
     public decimal GoodsCost { get; set; }
 
     /// <summary>

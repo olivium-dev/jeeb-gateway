@@ -6,7 +6,7 @@ namespace JeebGateway.Tiers;
 /// <para>The gateway historically carried TWO tier taxonomies:</para>
 /// <list type="bullet">
 ///   <item><description>the CATALOG taxonomy (<see cref="ITiersStore"/>, seeded
-///     {urgent, same-day, scheduled, economy, on-the-way}) — what clients see at
+///     {urgent, same-day, scheduled}) — what clients see at
 ///     <c>GET /v1/tiers</c> and what <c>NewRequestPushNotifier</c> resolves display
 ///     names from; and</description></item>
 ///   <item><description>the LEGACY taxonomy ({flash, express, standard, on_the_way,
@@ -19,22 +19,23 @@ namespace JeebGateway.Tiers;
 /// accepted at create time and resolves to a human display name in push bodies. The
 /// mapping was chosen from the two seeds' semantics (SLA / commission / price-hint):</para>
 /// <list type="bullet">
-///   <item><description><c>flash</c> (30 min, premium 15%) → <c>urgent</c> (1 h SLA,
+///   <item><description><c>flash</c> (30 min) → <c>urgent</c> (1 h SLA,
 ///     "Premium — fastest dispatch") — both are the fastest premium tier.</description></item>
-///   <item><description><c>express</c> (60 min, premium 15%) → <c>urgent</c> (1 h SLA)
+///   <item><description><c>express</c> (60 min) → <c>urgent</c> (1 h SLA)
 ///     — an EXACT SLA match; the catalog has no second sub-hour tier.</description></item>
 ///   <item><description><c>standard</c> (3 h, default tier — the voice surface's
-///     fallback) → <c>same-day</c> (8 h, price hint literally "Standard same-day
+///     fallback) → <c>same-day</c> (2 h TTL, price hint literally "Standard same-day
 ///     rate") — the mid-tier default in both taxonomies.</description></item>
 ///   <item><description><c>on_the_way</c> (no SLA, jeeber already routed nearby) →
-///     <c>on-the-way</c> — the same product concept, snake_case vs kebab-case.</description></item>
-///   <item><description><c>eco</c> (24 h, lowest 10% take-rate) → <c>economy</c>
-///     (48 h, "Lowest price — best for non-urgent items") — the budget tier in both.</description></item>
+///     <c>same-day</c> — the compact three-tier catalog no longer has a separate
+///     routed-nearby tier, so this remains on the mid tier.</description></item>
+///   <item><description><c>eco</c> (24 h, lowest 10% take-rate) →
+///     <c>scheduled</c> (24 h TTL) — the slowest tier in both taxonomies.</description></item>
 /// </list>
 ///
-/// <para><c>scheduled</c> has NO legacy alias on purpose: client-chosen delivery
-/// windows are a catalog-only concept (the legacy create expressed scheduling via the
-/// orthogonal <c>scheduledAt</c> field, not a tier code).</para>
+/// <para>The catalog still keeps scheduling as an orthogonal <c>scheduledAt</c>
+/// field; the <c>scheduled</c> tier id here only names the slowest TTL/radius
+/// tier.</para>
 ///
 /// <para>Lookups are case-insensitive, matching the catalog store's id semantics
 /// (<see cref="InMemoryTiersStore"/> keys ids OrdinalIgnoreCase).</para>
@@ -47,8 +48,8 @@ public static class LegacyTierCodes
             ["flash"] = "urgent",
             ["express"] = "urgent",
             ["standard"] = "same-day",
-            ["on_the_way"] = "on-the-way",
-            ["eco"] = "economy",
+            ["on_the_way"] = "same-day",
+            ["eco"] = "scheduled",
         };
 
     /// <summary>

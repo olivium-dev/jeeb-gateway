@@ -17,7 +17,7 @@ public interface IRequestExpiryNotifier
 
     /// <summary>
     /// Fired when a request is terminally expired (no accepted offer
-    /// inside <see cref="RequestExpiryOptions.ExpiryWindow"/>). Mobile
+    /// inside the selected tier's request TTL). Mobile
     /// renders the "Request expired — tap to re-request" notification.
     /// </summary>
     Task NotifyExpiredAsync(string clientId, string requestId, DateTimeOffset at, CancellationToken ct);

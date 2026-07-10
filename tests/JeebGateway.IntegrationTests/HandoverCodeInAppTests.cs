@@ -85,7 +85,7 @@ public class HandoverCodeInAppTests
 
         const string owner = "client-owner";
         const string jeeber = "jeeber-win";
-        var requestId = await SeedRequestAsync(factory, owner, recipientPhone: "+962799123456");
+        var requestId = await SeedRequestAsync(factory, owner, recipientPhone: "+9613123456");
         SeedRouting(factory, "offer-e2e", requestId, jeeber);
 
         // (a) OWNER accepts -> reads the handover code in-app.

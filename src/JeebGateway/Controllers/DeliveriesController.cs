@@ -1249,7 +1249,7 @@ public class DeliveriesController : ControllerBase
         // PR review B6 (JEB-628): the recipient phone must come from the
         // delivery row, not a hardcoded placeholder. Reject the request
         // when the field is unset so production traffic never silently
-        // ships OTPs to a placeholder Jordanian number.
+        // ships OTPs to a placeholder Lebanon number.
         if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
         {
             _log.LogWarning(
@@ -2244,9 +2244,9 @@ public class DeliveriesController : ControllerBase
     /// upgraded to a fully-computed settlement row when the Jeeber calls
     /// POST /deliveries/{id}/settle via <see cref="ISettlementStore.ReplacePendingAsync"/>.
     ///
-    /// Commission is pre-computed at minimum-fee (GoodsCost=0) so the pipeline
-    /// record is structurally complete from the moment the window opens; the Jeeber's
-    /// actual goods cost replaces these numbers at settle time.
+    /// Commission is pre-computed at zero (GoodsCost=0) so the pipeline record is
+    /// structurally complete from the moment the window opens; the Jeeber's actual
+    /// accepted offer amount replaces these numbers at settle time.
     /// </summary>
     private async Task TryEnqueuePendingSettlementAsync(DeliveryRequest req, CancellationToken ct)
     {
@@ -2269,7 +2269,7 @@ public class DeliveriesController : ControllerBase
                 Insurance       = breakdown.Insurance,
                 Total           = breakdown.Total,
                 MinimumFeeApplied = breakdown.MinimumFeeApplied,
-                Currency        = SettlementService.CurrencyLbp,
+                Currency        = SettlementService.CurrencyUsd,
                 PaymentMethod   = SettlementService.PaymentMethodCash,
                 State           = SettlementState.PendingSettlement,
                 SettledAt       = _clock.GetUtcNow(),
@@ -2468,7 +2468,7 @@ public class DeliveriesController : ControllerBase
                 Insurance       = 0m,
                 Total           = 0m,
                 MinimumFeeApplied = false,
-                Currency        = SettlementService.CurrencyLbp,
+                Currency        = SettlementService.CurrencyUsd,
                 PaymentMethod   = SettlementService.PaymentMethodCash,
                 State           = SettlementState.PendingSettlement,
                 CodState        = CodSettlementState.Recorded,

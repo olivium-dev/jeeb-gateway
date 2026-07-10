@@ -110,11 +110,11 @@ public class JeebOffersAcceptDeliveryLegTests
         deliveryFake.Calls.Should().NotContain(c => c.JeeberId != null);
     }
 
-    // F2 / BR-10 (gateway-flow-correctness-audit) — the /v1 accept route must enforce
-    // the per-jeeber active-delivery cap BEFORE forwarding the accept saga.
+    // Retired BR-10 active-delivery cap — the /v1 accept route must not pre-count
+    // delivery-service active rows before forwarding the accept saga.
 
     [Fact]
-    public async Task Accept_WhenWinningJeeberAtCap_Returns409_AndDoesNotForwardSaga()
+    public async Task Accept_WhenWinningJeeberHasTwoActiveDeliveries_ProceedsHttp200()
     {
         var offerFake = AcceptedFake("offer-cap", "jeeber-busy");
         var deliveryFake = new RecordingDeliveryClient { ActiveDeliveryCount = 2 };
@@ -126,18 +126,14 @@ public class JeebOffersAcceptDeliveryLegTests
         var resp = await ClientActor(factory, "client-owner")
             .PostAsync("/v1/offers/offer-cap/accept", content: null);
 
-        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
-        var problem = await resp.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/too-many-active-deliveries");
-
-        deliveryFake.LastCountedJeeberId.Should().Be("jeeber-busy");
-        // The cap short-circuits BEFORE the accept saga — no third delivery is created.
-        offerFake.AcceptCallCount.Should().Be(0);
-        deliveryFake.Calls.Should().NotContain(c => c.JeeberId != null);
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        deliveryFake.LastCountedJeeberId.Should().BeNull();
+        offerFake.AcceptCallCount.Should().Be(1);
+        deliveryFake.Calls.Should().Contain(c => c.JeeberId == "jeeber-busy");
     }
 
     [Fact]
-    public async Task Accept_WhenWinningJeeberUnderCap_ProceedsHttp200()
+    public async Task Accept_WhenWinningJeeberHasOneActiveDelivery_ProceedsHttp200()
     {
         var offerFake = AcceptedFake("offer-under", "jeeber-ok");
         var deliveryFake = new RecordingDeliveryClient { ActiveDeliveryCount = 1 };
@@ -150,7 +146,7 @@ public class JeebOffersAcceptDeliveryLegTests
             .PostAsync("/v1/offers/offer-under/accept", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        deliveryFake.LastCountedJeeberId.Should().Be("jeeber-ok");
+        deliveryFake.LastCountedJeeberId.Should().BeNull();
         offerFake.AcceptCallCount.Should().Be(1);
     }
 

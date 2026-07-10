@@ -32,7 +32,7 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public class S03FlagOnTerminalProjectionTests
 {
-    private const string RecipientPhone = "+962799123456";
+    private const string RecipientPhone = "+9613123456";
     private const string TenantApplicationId = "17f6f47f-4047-4f1e-bac2-632a5eaa9a46";
     private const string ValidCode = "1234";
 

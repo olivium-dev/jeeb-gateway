@@ -54,9 +54,9 @@ points at a host whose name contains `prod`, `production`, or `live`. Set
 ### Seed contents
 
 * **Delivery tiers** (`delivery_tiers`) — five rows keyed by `code`:
-  `flash` (30 min / 3 km / 15%), `express` (60 min / 7 km / 15%),
-  `standard` (180 min / 15 km / 12%), `on_the_way` (no SLA / 25 km / 10%),
-  `eco` (1440 min / 25 km / 10%). Commission rates encode BR-2.
+  `flash` (30 min / 3 km / 10%), `express` (60 min / 7 km / 10%),
+  `standard` (180 min / 15 km / 10%), `on_the_way` (no SLA / 25 km / 10%),
+  `eco` (1440 min / 25 km / 10%). Commission rates encode the flat USD policy.
 * **Prohibited items** (`prohibited_items`) — 15 starter rows across the
   five categories called out in FR-17.1 (weapons, drugs, alcohol,
   prescription medication, hazardous materials), plus a small `other`

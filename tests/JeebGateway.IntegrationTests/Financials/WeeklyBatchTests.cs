@@ -39,7 +39,7 @@ public class WeeklyBatchTests
         DateTimeOffset? settledAt = null)
     {
         var at         = settledAt ?? MidWindow;
-        var commission = Math.Max(1_000m, Math.Round(grossAmount * 0.15m, 2, MidpointRounding.AwayFromZero));
+        var commission = Math.Round(grossAmount * 0.10m, 2, MidpointRounding.AwayFromZero);
         var settlement = new Settlement
         {
             Id                = Guid.NewGuid().ToString(),
@@ -49,12 +49,12 @@ public class WeeklyBatchTests
             TierId            = "standard",
             GoodsCost         = grossAmount,
             CommissionTier    = CommissionTier.Standard,
-            CommissionRate    = 0.15m,
+            CommissionRate    = 0.10m,
             Commission        = commission,
             Insurance         = 0m,
             Total             = grossAmount,
             MinimumFeeApplied = false,
-            Currency          = "LBP",
+            Currency          = "USD",
             PaymentMethod     = "cod",
             // A batchable COD row is a TRULY-settled settlement: SettlementService writes
             // State=Settled once the Jeeber records the cash (SettlementService.cs). The prior
@@ -145,12 +145,12 @@ public class WeeklyBatchTests
 
         var expectedGross      = amounts.Sum();
         var expectedCommission = amounts.Sum(a =>
-            Math.Max(1_000m, Math.Round(a * 0.15m, 2, MidpointRounding.AwayFromZero)));
+            Math.Round(a * 0.10m, 2, MidpointRounding.AwayFromZero));
         var expectedNet = expectedGross - expectedCommission;
 
-        Assert.Equal(expectedGross,      batch.TotalGrossLbp,      precision: 2);
-        Assert.Equal(expectedCommission, batch.TotalCommissionLbp,  precision: 2);
-        Assert.Equal(expectedNet,        batch.TotalNetLbp,          precision: 2);
+        Assert.Equal(expectedGross,      batch.TotalGrossUsd,      precision: 2);
+        Assert.Equal(expectedCommission, batch.TotalCommissionUsd,  precision: 2);
+        Assert.Equal(expectedNet,        batch.TotalNetUsd,          precision: 2);
         Assert.Equal(amounts.Length,     batch.SettlementCount);
     }
 
@@ -234,12 +234,12 @@ public class WeeklyBatchTests
     public void AC6_CommissionMath_PureDecimal_NoFloat()
     {
         const decimal gross = 333_333m;
-        var commission = Math.Max(1_000m, Math.Round(gross * 0.15m, 2, MidpointRounding.AwayFromZero));
+        var commission = Math.Round(gross * 0.10m, 2, MidpointRounding.AwayFromZero);
         var net = gross - commission;
 
-        // 333,333 × 0.15 = 49,999.95
-        Assert.Equal(49_999.95m, commission);
-        Assert.Equal(283_333.05m, net);
+        // 333,333 × 0.10 = 33,333.30
+        Assert.Equal(33_333.30m, commission);
+        Assert.Equal(299_999.70m, net);
     }
 
     // ── AC7 — One batch per Jeeber per window ─────────────────────────────────
@@ -260,7 +260,7 @@ public class WeeklyBatchTests
         Assert.Single(bB);
         Assert.Equal(2,         aB[0].SettlementCount);
         Assert.Equal(1,         bB[0].SettlementCount);
-        Assert.Equal(150_000m,  aB[0].TotalGrossLbp);
-        Assert.Equal(200_000m,  bB[0].TotalGrossLbp);
+        Assert.Equal(150_000m,  aB[0].TotalGrossUsd);
+        Assert.Equal(200_000m,  bB[0].TotalGrossUsd);
     }
 }

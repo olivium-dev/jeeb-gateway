@@ -36,8 +36,8 @@ namespace JeebGateway.Controllers;
 [Route("offers")]
 public class OffersController : ControllerBase
 {
-    /// <summary>BR-10: per-Jeeber maximum of concurrent active deliveries.</summary>
-    public const int ActiveDeliveriesLimit = 2;
+    /// <summary>Retired BR-10 cap: active deliveries are unlimited.</summary>
+    public const int ActiveDeliveriesLimit = int.MaxValue;
 
     /// <summary>
     /// JEB-1474 — the Jeeb offer edit cap. This is a PRODUCT policy owned by the
@@ -47,11 +47,11 @@ public class OffersController : ControllerBase
     public const int OfferEditCap = 2;
 
     /// <summary>
-    /// Mobile-app renders this verbatim in the error banner when the cap
-    /// is hit — matches the wording used for the BR-9 sibling rule.
+    /// Historical BR-10 409 plumbing remains reachable only if a lower layer
+    /// raises <see cref="TooManyActiveDeliveriesException"/> unexpectedly.
     /// </summary>
     internal const string LimitExceededMessage =
-        "Maximum 2 active deliveries. Complete a delivery before accepting another.";
+        "Active delivery concurrency is unlimited.";
 
     private readonly IPendingOffersStore _offers;
     private readonly IRequestsStore _requests;
@@ -563,55 +563,8 @@ public class OffersController : ControllerBase
             });
         }
 
-        // BR-10 pre-forward cap (gateway-owned composition rule). A jeeber may hold
-        // at most ActiveDeliveriesLimit (default 2) concurrent ACTIVE deliveries.
-        // Accepting an offer assigns the delivery to the OFFER'S jeeber (the bidder),
-        // NOT the accepting client — so the cap is checked against offerJeeberId, the
-        // recorded bidder, exactly mirroring the legacy in-memory path which keys the
-        // cap on offer.JeeberId. delivery-service owns the authoritative active count
-        // (status NOT IN terminal); the gateway short-circuits to 409 here BEFORE
-        // forwarding the saga so no third delivery is ever created.
-        //
-        // Why pre-forward (not just rely on offer-service): offer-service does not
-        // enforce BR-10 today (6 successive accepts all returned 200 on the live
-        // fleet — the baseline N7 red), so the gateway BFF is the enforcement point.
-        //
-        // Degrade-don't-fail: a delivery-service blip on the count read must NEVER
-        // turn an otherwise-valid accept into a 5xx (that would regress S01-S06 happy
-        // accepts). On a fault we LOG and treat the jeeber as under-cap, letting the
-        // accept proceed; the offer-service Conflict mapping (OfferAcceptStatus.
-        // Conflict -> 409) remains the backstop. The cap is best-effort-at-gateway.
-        if (offerJeeberId is not null)
-        {
-            var limit = _deliveryOptions.ActiveDeliveriesLimit;
-            int? activeCount = null;
-            try
-            {
-                activeCount = await _deliveryService.CountActiveDeliveriesByJeeberAsync(offerJeeberId, ct);
-            }
-            catch (Exception ex)
-            {
-                // delivery-service unreachable / non-2xx: do not block the accept.
-                _logger.LogWarning(ex,
-                    "BR-10 active-delivery count for jeeber {JeeberId} (offer {OfferId}) failed; " +
-                    "treating as under cap and forwarding the accept (offer-service Conflict is the backstop).",
-                    offerJeeberId, offerId);
-            }
-
-            if (activeCount is int count && count >= limit)
-            {
-                _logger.LogInformation(
-                    "BR-10: rejecting accept of offer {OfferId} — jeeber {JeeberId} already holds {Count} active deliveries (limit {Limit}); no third delivery created.",
-                    offerId, offerJeeberId, count, limit);
-                return Conflict(new ProblemDetails
-                {
-                    Title = LimitExceededMessage,
-                    Detail = $"Jeeber has {count} active deliveries (limit {limit}).",
-                    Status = StatusCodes.Status409Conflict,
-                    Type = "https://jeeb.dev/errors/too-many-active-deliveries"
-                });
-            }
-        }
+        // Retired BR-10 active-delivery cap: do not pre-count delivery-service
+        // assignments here. Offer-service still owns real accept conflicts below.
 
         // Server-minted Idempotency-Key (>= 8 chars) so the offer-service can
         // dedupe accept retries. Deterministic per (actor, offer) so a client
@@ -786,17 +739,14 @@ public class OffersController : ControllerBase
         // delivery-service status transition here: the canonical Go SM
         // (Ordered → Picked → InTransit → AtDoor → Done) has no accept-time edge.
         //
-        // S07 N7 / BR-10 — ASSIGN THE WINNING JEEBER ONTO THE DELIVERY ROW. The seed
+        // S07 N7 — ASSIGN THE WINNING JEEBER ONTO THE DELIVERY ROW. The seed
         // row was created BEFORE any jeeber was known, so its jeeber_id is NULL and
         // it does not yet count against the winner's active-delivery cap. Here we
         // re-POST the SAME delivery id carrying jeeber_id = winningJeeberId; the
         // idempotent /api/v1/deliveries upsert assigns the jeeber ONLY when the row is
         // still unassigned (delivery-service guards `WHERE jeeber_id IS NULL`, never
-        // steals), so the accepted delivery now counts toward BR-10 and the NEXT
-        // accept of a 3rd offer for the same jeeber is short-circuited to 409 by the
-        // pre-forward cap above. The id/tier/pickup come from the synced ledger row
-        // (the same data the create-seed used). DEGRADE-DON'T-FAIL: a delivery-service
-        // blip here only means the cap can't see this delivery yet — it must never
+        // steals). The id/tier/pickup come from the synced ledger row (the same data
+        // the create-seed used). DEGRADE-DON'T-FAIL: this assignment mirror must never
         // turn a committed accept into a 5xx, so every failure is logged and swallowed.
         // No row read-back is asserted; this is a best-effort assignment mirror.
         if (synced is not null && !string.IsNullOrWhiteSpace(synced.Id))
@@ -817,14 +767,14 @@ public class OffersController : ControllerBase
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
-                    "Post-accept BR-10 delivery-assignment for request {RequestId} (jeeber {JeeberId}) failed; accept stays 200 — the delivery will not count toward the jeeber's active-delivery cap until reconciled.",
+                    "Post-accept delivery-assignment for request {RequestId} (jeeber {JeeberId}) failed; accept stays 200.",
                     requestId, winningJeeberId);
             }
         }
         else
         {
             _logger.LogInformation(
-                "Post-accept BR-10 delivery-assignment for request {RequestId}: ledger row not synced locally; skipping the jeeber-assignment mirror (the offer-service accept still committed; cap visibility deferred).",
+                "Post-accept delivery-assignment for request {RequestId}: ledger row not synced locally; skipping the jeeber-assignment mirror (the offer-service accept still committed).",
                 requestId);
         }
 

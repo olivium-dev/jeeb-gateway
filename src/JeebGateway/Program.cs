@@ -936,8 +936,8 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 // Track per-controller migrations against GATEWAY-REMEDIATION-PLAN.md.
 // ===========================================================================
 
-// JEB-56: JeebPricingOptions — makes commission rates and floor config-overridable.
-// Defaults match CommissionCalculator constants (Standard=15%, Express=20%, etc.).
+// JEB-56: JeebPricingOptions — makes commission rates config-overridable.
+// Defaults match CommissionCalculator constants (all tiers flat 10%).
 builder.Services.Configure<JeebPricingOptions>(
     builder.Configuration.GetSection(JeebPricingOptions.SectionName));
 
@@ -949,8 +949,8 @@ builder.Services.Configure<JeebPricingOptions>(
 // connection string is absent (local dev / CI without Postgres), the in-memory
 // fallback keeps the vertical exercisable.
 //
-// SettlementService re-computes the Jeeb fee (commission % per tier +
-// 2% insurance, min 1000 LBP) from the row's tier and posts a single
+// SettlementService re-computes the Jeeb fee (flat 10% commission,
+// no insurance or floor) from the row's tier and posts a single
 // best-effort ledger entry via ISettlementLedgerClient. The settlement row
 // is the gateway-side system of record; the ledger post is idempotent on the
 // settlement id. Cash settlement is a Jeeb product concern and keeps its own
@@ -1410,8 +1410,8 @@ builder.Services.AddSingleton<ICancellationService, CancellationService>();
 // Mutual-blind ratings (T-backend-020 / JEEB-38).
 //
 // Reveal logic is pure (BlindRevealPolicy): both parties' ratings stay
-// blind until both sides submit OR the 7-day window closes (after which
-// the row is locked as no-rating, with whatever exists already visible).
+// blind until both sides submit. If the 7-day window closes first, the
+// row is locked as no-rating without revealing one-sided ratings.
 // The mutual-blind pairing store is the record-of-truth. Default is in-memory;
 // when FeatureFlags:UseUpstream:Ratings is ON the store is swapped for
 // FeedbackServiceRatingStore (persists/reads via the NSwag ServiceFeedbackClient).
@@ -1445,11 +1445,20 @@ if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
             "refused connection to the placeholder host.");
     }
 
-    builder.Services.AddSingleton<IRatingStore, JeebGateway.Ratings.FeedbackServiceRatingStore>();
+    builder.Services.AddSingleton<JeebGateway.Ratings.FeedbackServiceRatingStore>();
+    builder.Services.AddSingleton<IRatingStore>(
+        sp => sp.GetRequiredService<JeebGateway.Ratings.FeedbackServiceRatingStore>());
+    // Fail-closed honesty guard: feedback-service currently exposes submit/reveal
+    // only, not the list-expired-windows + mark-revealed/closed operations needed
+    // for the gateway-owned 7-day sweep. Register an explicit extended adapter so
+    // RatingRevealJob does not silently skip the upstream path.
+    builder.Services.AddSingleton<IRatingStoreExtended, JeebGateway.Ratings.UnsupportedUpstreamRatingStoreExtended>();
 }
 else
 {
-    builder.Services.AddSingleton<IRatingStore, InMemoryRatingStore>();
+    builder.Services.AddSingleton<InMemoryRatingStore>();
+    builder.Services.AddSingleton<IRatingStore>(sp => sp.GetRequiredService<InMemoryRatingStore>());
+    builder.Services.AddSingleton<IRatingStoreExtended>(sp => sp.GetRequiredService<InMemoryRatingStore>());
 }
 builder.Services.AddSingleton<IRatingService, RatingService>();
 
@@ -1509,9 +1518,9 @@ builder.Services.AddSingleton<JeebGateway.Requests.OtpHandover.IHandoverCodeStor
 
 // Delivery tier catalog (T-backend-009).
 // Admins CRUD via /admin/tiers and changes take effect on the next request
-// (each List/Get reads fresh). Five default tiers (Urgent, Same-Day, Scheduled,
-// Economy, On-the-Way) are seeded either by migration 0029 (Postgres path) or
-// the in-memory store's constructor (dev/CI fallback).
+// (each List/Get reads fresh). Three default tiers (Urgent, Same-Day,
+// Scheduled) are seeded either by migration 0029 + 0036 (Postgres path) or the
+// in-memory store's constructor (dev/CI fallback).
 //
 // Durability register (JEBV4-125, AUDIT-A IN-MEM-LIVE) — the admin tier catalog
 // used to live ONLY in gateway process memory, so an admin's tier edits reverted
@@ -1530,11 +1539,11 @@ else
 }
 
 // Request expiry + no-offer nudge (T-backend-028).
-// 10-min "try expanding tier" prompt and 30-min terminal expiry. The
-// in-memory notifier records calls so integration tests can assert
-// delivery; production swap proxies to notification-service via the
-// BFF NSwag-generated client. The sweeper drives both windows from a
-// single periodic scan against IRequestsStore.
+// 10-min "try expanding tier" prompt and per-tier terminal expiry. The
+// in-memory notifier records calls so integration tests can assert delivery;
+// production swap proxies to notification-service via the BFF NSwag-generated
+// client. The sweeper drives both windows from a single periodic scan against
+// IRequestsStore.
 builder.Services.Configure<RequestExpiryOptions>(builder.Configuration.GetSection(RequestExpiryOptions.SectionName));
 builder.Services.AddSingleton<InMemoryRequestExpiryNotifier>();
 builder.Services.AddSingleton<IRequestExpiryNotifier>(sp => sp.GetRequiredService<InMemoryRequestExpiryNotifier>());
@@ -2378,6 +2387,12 @@ builder.Services.AddExceptionHandler<JeebGateway.Infrastructure.UpstreamExceptio
 
 var app = builder.Build();
 
+if (app.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
+{
+    app.Logger.LogCritical(
+        "FeatureFlags:UseUpstream:Ratings is ON, but feedback-service does not expose list-expired-windows or mark-revealed/closed rating APIs; the gateway reveal sweep is registered fail-closed and will not fabricate upstream reveal state.");
+}
+
 // AUDIT-A (FIX-1) — fail-closed durability gate. Refuses to start a prod-like gateway whose
 // money/identity/audit/legal/security stores silently fell back to in-memory because a durability
 // selector env var was dropped/typo'd (the "green health, corrupt state" class this program closes).
@@ -2400,7 +2415,7 @@ var weeklyBatch = app.Services.GetRequiredService<JeebGateway.Financials.WeeklyS
 testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
 {
     Name = "rating-reveal",
-    Description = "Reveal ratings past the 7-day blind window (RatingRevealJob.SweepOnceAsync).",
+    Description = "Reveal mutually rated windows and close one-sided windows past the 7-day blind window (RatingRevealJob.SweepOnceAsync).",
     RunAsync = ct => ratingRevealJob.SweepOnceAsync(ct)
 });
 testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob

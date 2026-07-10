@@ -51,12 +51,11 @@ public static class JeebReviewsProjection
         public const string PendingCounter = "pending_counter";
         public const string Revealed = "revealed";
         /// <summary>
-        /// The system auto-revealed the ratings after the time window elapsed without
-        /// both parties submitting. Fires when <c>jeeb.rating_auto_revealed</c> is
-        /// delivered. Detected by: upstream <c>revealed == true</c> AND
-        /// <c>submittedCount &lt; 2</c> (only one side rated before the window closed).
+        /// Legacy wire value retained for parser compatibility. New gateway policy
+        /// never emits it because one-sided expiry closes without reveal.
         /// </summary>
         public const string AutoRevealed = "auto-revealed";
+        public const string LockedNoRating = "locked_no_rating";
     }
 
     /// <summary>
@@ -202,15 +201,8 @@ public static class JeebReviewsProjection
     /// <summary>
     /// Project the generic two-party reveal state into the mobile
     /// <c>{ deliveryId, state, ratings, ratedCount }</c> status envelope. The
-    /// counterparty <c>ratings</c> row is only emitted once revealed (blind
-    /// otherwise); the caller's own submitted row is always included once they have
-    /// rated, so <c>ratedCount</c> reflects both parties.
-    ///
-    /// <para>
-    /// When the upstream is revealed with fewer than 2 submissions (auto-reveal),
-    /// <c>state</c> is <c>auto-revealed</c> and any counterparty rating that WAS
-    /// submitted before the window closed is still included in <c>ratings</c>.
-    /// </para>
+    /// counterparty <c>ratings</c> row is only emitted after both sides are revealed;
+    /// one-sided expiry closes as <c>locked_no_rating</c> with no rating rows.
     /// </summary>
     public static JeebRatingStatusEnvelope ProjectStatus(string deliveryId, BlindRevealStateResponse upstream)
     {
@@ -223,10 +215,11 @@ public static class JeebReviewsProjection
         var theirsSubmitted = theirs?.Submitted == true;
 
         var rows = new List<JeebRatingRow>();
-        if (upstream.Revealed)
+        var mutuallySubmitted = selfSubmitted && theirsSubmitted;
+        var submittedCountComplete = upstream.SubmittedCount >= 2;
+
+        if (upstream.Revealed && submittedCountComplete && mutuallySubmitted)
         {
-            // Revealed (mutual or auto) → expose any counterparty rating that was submitted.
-            // For auto-revealed the counterparty may not have rated, so the guard is required.
             if (theirs is { Submitted: true })
             {
                 rows.Add(new JeebRatingRow { Score = theirs.Score ?? 0, Comment = theirs.Comment });
@@ -246,11 +239,9 @@ public static class JeebReviewsProjection
     /// Generic→Jeeb status mapping for the mobile reveal parser. Mirrors the
     /// in-gateway lattice (the shared primitive has no Jeeb 7-day window concept):
     /// <list type="bullet">
-    ///   <item>both submitted AND revealed → <c>revealed</c></item>
-    ///   <item>revealed but fewer than 2 submitted → <c>auto-revealed</c> (time-window
-    ///     expiry: one side — or neither — rated before the window closed and the system
-    ///     auto-revealed; this is the server-side trigger for the
-    ///     <c>jeeb.rating_auto_revealed</c> notification)</item>
+    ///   <item>both submitted, submittedCount >= 2, AND revealed → <c>revealed</c></item>
+    ///   <item>revealed but not mutually submitted -> <c>locked_no_rating</c>
+    ///     (defensive compatibility for stale upstream auto-reveal state)</item>
     ///   <item>only the viewer submitted → <c>pending_counter</c> (waiting on them)</item>
     ///   <item>only the counterparty submitted → <c>pending_self</c> (waiting on you)</item>
     ///   <item>neither submitted → <c>pending_both</c></item>
@@ -258,16 +249,17 @@ public static class JeebReviewsProjection
     /// </summary>
     public static string StateCode(BlindRevealStateResponse upstream)
     {
-        if (upstream.Revealed)
-        {
-            // Auto-reveal fires when the time window expires with fewer than 2 submissions.
-            // SubmittedCount < 2 means the system revealed unilaterally (one-sided or empty).
-            if (upstream.SubmittedCount < 2) return StatusCodes.AutoRevealed;
-            return StatusCodes.Revealed;
-        }
-
         var selfSubmitted = upstream.Self?.Submitted == true;
         var theirsSubmitted = upstream.Counterparty?.Submitted == true;
+        var mutuallySubmitted = selfSubmitted && theirsSubmitted;
+        var submittedCountComplete = upstream.SubmittedCount >= 2;
+
+        if (upstream.Revealed)
+        {
+            if (!submittedCountComplete) return StatusCodes.LockedNoRating;
+            if (!mutuallySubmitted) return StatusCodes.LockedNoRating;
+            return StatusCodes.Revealed;
+        }
 
         if (selfSubmitted) return StatusCodes.PendingCounter;   // you rated; waiting on them
         if (theirsSubmitted) return StatusCodes.PendingSelf;    // they rated; waiting on you

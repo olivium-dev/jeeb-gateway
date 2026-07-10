@@ -221,26 +221,25 @@ public class NewRequestPushNotifierTests
     }
 
     [Fact]
-    public async Task JsonCreate_OverCap_Returns409_AndPublishesNothingForTheBlockedRequest()
+    public async Task JsonCreate_FourthActiveRequest_Returns201_AndPublishes()
     {
         var push = new RecordingTopicPushClient();
         using var factory = NewFactory(push);
         var client = ClientFor(factory, $"client-{Guid.NewGuid()}");
 
-        // BR-9: the first three succeed (three topic publishes)...
+        // The first three succeed (three topic publishes)...
         for (var i = 0; i < 3; i++)
         {
             var ok = await client.PostAsJsonAsync("/v1/requests", ValidPayload($"req {i}"));
-            ok.StatusCode.Should().Be(HttpStatusCode.Created, $"creation {i} should succeed under the cap");
+            ok.StatusCode.Should().Be(HttpStatusCode.Created, $"creation {i} should succeed");
         }
 
-        push.Sends.Should().HaveCount(3, "one publish per accepted create under the cap");
+        push.Sends.Should().HaveCount(3, "one publish per accepted create");
 
-        // ...the fourth is blocked with 409 BEFORE the row is created — no extra publish.
-        var blocked = await client.PostAsJsonAsync("/v1/requests", ValidPayload("fourth"));
-        blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var fourth = await client.PostAsJsonAsync("/v1/requests", ValidPayload("fourth"));
+        fourth.StatusCode.Should().Be(HttpStatusCode.Created);
 
-        push.Sends.Should().HaveCount(3, "a blocked (409) create never reaches the push hook");
+        push.Sends.Should().HaveCount(4, "the fourth create is accepted after cap removal");
     }
 
     // ---------------------------------------------------------------------

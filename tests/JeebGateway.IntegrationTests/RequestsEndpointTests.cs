@@ -10,13 +10,12 @@ using Xunit;
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// BR-9 (T-backend-049 + T-backend-007): a Client may have at most 3
-/// active (non-delivered) delivery requests. Request creation must return
-/// 409 once the cap is hit.
+/// BR-9 (T-backend-049 + T-backend-007): the active-request cap is retired.
+/// Clients may create more than 3 active delivery requests.
 ///
 /// T-backend-007 added tier + structured location fields as required on
 /// the create body — the <see cref="ValidPayload"/> helper builds the
-/// minimum valid payload so each test stays focused on the BR-9 contract
+/// minimum valid payload so each test stays focused on request creation
 /// rather than the new field-level validators (covered separately in
 /// <see cref="DeliveryRequestCreationTests"/>).
 ///
@@ -73,26 +72,22 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
     }
 
     [Fact]
-    public async Task Fourth_Active_Request_Returns_409_With_BR9_Message()
+    public async Task Fourth_Active_Request_Succeeds()
     {
         var client = ClientFor("br9-cap");
 
         for (var i = 0; i < 3; i++)
         {
             var ok = await client.PostAsJsonAsync("/requests", ValidPayload($"req {i}"));
-            ok.StatusCode.Should().Be(HttpStatusCode.Created, $"creation {i} should succeed under the cap");
+            ok.StatusCode.Should().Be(HttpStatusCode.Created, $"creation {i} should succeed");
         }
 
-        var blocked = await client.PostAsJsonAsync("/requests", ValidPayload("fourth"));
-        blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
-
-        var problem = await blocked.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Title.Should().Be("Maximum 3 active requests. Complete or cancel an existing request.");
-        problem.Status.Should().Be((int)HttpStatusCode.Conflict);
+        var fourth = await client.PostAsJsonAsync("/requests", ValidPayload("fourth"));
+        fourth.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
     [Fact]
-    public async Task Active_Cap_Is_Per_Client()
+    public async Task More_Than_Three_Active_Requests_Are_Allowed_Per_Client()
     {
         var alice = ClientFor("br9-alice");
         var bob = ClientFor("br9-bob");
@@ -103,12 +98,11 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
                 .StatusCode.Should().Be(HttpStatusCode.Created);
         }
 
-        // Alice is now at the cap; Bob is unaffected.
         var bobResp = await bob.PostAsJsonAsync("/requests", ValidPayload("bob 1"));
         bobResp.StatusCode.Should().Be(HttpStatusCode.Created);
 
-        var aliceBlocked = await alice.PostAsJsonAsync("/requests", ValidPayload("alice 4"));
-        aliceBlocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var aliceFourth = await alice.PostAsJsonAsync("/requests", ValidPayload("alice 4"));
+        aliceFourth.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
     [Fact]
@@ -125,8 +119,8 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
             created.Add(dto!.Id);
         }
 
-        // Flip the first one to a terminal post-delivered state. This must
-        // free a slot — only states strictly before 'delivered' count.
+        // Flip the first one to a terminal post-delivered state. Creation should
+        // still succeed now that active-request concurrency is unlimited.
         await MoveToStatus(created[0], "delivered");
 
         var fourth = await client.PostAsJsonAsync("/requests", ValidPayload("now allowed"));
@@ -134,7 +128,7 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
     }
 
     [Fact]
-    public async Task Cancelled_Request_Does_Not_Count_Toward_Cap()
+    public async Task Cancelled_Request_Does_Not_Block_Additional_Create()
     {
         var client = ClientFor("br9-cancelled-frees-slot");
 
@@ -159,7 +153,7 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
     [InlineData("accepted")]
     [InlineData("picked_up")]
     [InlineData("heading_off")]
-    public async Task Status_Strictly_Before_Delivered_Still_Counts_As_Active(string activeStatus)
+    public async Task Status_Strictly_Before_Delivered_Does_Not_Block_Additional_Create(string activeStatus)
     {
         var client = ClientFor($"br9-active-{activeStatus}");
 
@@ -172,12 +166,12 @@ public class RequestsEndpointTests : IClassFixture<WebApplicationFactory<Program
             created.Add(dto!.Id);
         }
 
-        // Move one request through a still-active state — the cap must
-        // still apply because that state is strictly before 'delivered'.
+        // Move one request through a still-active state. Additional creates
+        // should still succeed because the active-request cap is retired.
         await MoveToStatus(created[0], activeStatus);
 
-        var blocked = await client.PostAsJsonAsync("/requests", ValidPayload("should be blocked"));
-        blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var fourth = await client.PostAsJsonAsync("/requests", ValidPayload("fourth active"));
+        fourth.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
     // -----------------------------------------------------------------

@@ -83,8 +83,8 @@ public class AdminUsersEndpointTests
     public async Task Search_As_Admin_Returns_Paged_Roster()
     {
         using var factory = NewFactory();
-        SeedUser(factory, "u-alice", "Alice", "+962700000001", email: "alice@example.com");
-        SeedUser(factory, "u-bob", "Bob", "+962700000002");
+        SeedUser(factory, "u-alice", "Alice", "+9613000001", email: "alice@example.com");
+        SeedUser(factory, "u-bob", "Bob", "+9613000002");
 
         var admin = AdminClient(factory);
         var resp = await admin.GetAsync("/admin/users/search");
@@ -103,8 +103,8 @@ public class AdminUsersEndpointTests
     public async Task Search_Filters_By_Name_Case_Insensitively()
     {
         using var factory = NewFactory();
-        SeedUser(factory, "u-alice", "Alice", "+962700000001");
-        SeedUser(factory, "u-bob", "Bob", "+962700000002");
+        SeedUser(factory, "u-alice", "Alice", "+9613000001");
+        SeedUser(factory, "u-bob", "Bob", "+9613000002");
 
         var admin = AdminClient(factory);
         var resp = await admin.GetAsync("/admin/users/search?name=ali");
@@ -134,7 +134,7 @@ public class AdminUsersEndpointTests
     public async Task Suspend_Without_Admin_Role_Returns_403()
     {
         using var factory = NewFactory();
-        SeedUser(factory, "u-carol", "Carol", "+962700000003");
+        SeedUser(factory, "u-carol", "Carol", "+9613000003");
         var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "non-admin");
 
@@ -148,7 +148,7 @@ public class AdminUsersEndpointTests
     public async Task Suspend_As_Admin_Flags_User_And_Revokes_Tokens()
     {
         using var factory = NewFactory();
-        SeedUser(factory, "u-carol", "Carol", "+962700000003");
+        SeedUser(factory, "u-carol", "Carol", "+9613000003");
 
         // Give the user a live refresh token so the revocation sweep has something
         // to revoke — proves suspend terminates live sessions (8.3 acceptance).
@@ -193,7 +193,7 @@ public class AdminUsersEndpointTests
     public async Task Unsuspend_As_Admin_Lifts_Suspension()
     {
         using var factory = NewFactory();
-        SeedUser(factory, "u-dave", "Dave", "+962700000004");
+        SeedUser(factory, "u-dave", "Dave", "+9613000004");
         var admin = AdminClient(factory);
 
         var suspend = await admin.PatchAsJsonAsync(
@@ -214,7 +214,7 @@ public class AdminUsersEndpointTests
     public async Task Unsuspend_Without_Admin_Role_Returns_403()
     {
         using var factory = NewFactory();
-        SeedUser(factory, "u-dave", "Dave", "+962700000004");
+        SeedUser(factory, "u-dave", "Dave", "+9613000004");
         var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "non-admin");
 

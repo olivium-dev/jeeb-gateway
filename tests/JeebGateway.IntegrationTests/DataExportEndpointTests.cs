@@ -231,7 +231,7 @@ public class DataExportEndpointTests
         users.Seed(new JeebGateway.Users.UserProfile
         {
             Id = userId,
-            Phone = "+96550001234",
+            Phone = "+9613001234",
             Name = "Lina",
             Email = "lina@example.com",
             CreatedAt = DateTimeOffset.UtcNow.AddDays(-90),

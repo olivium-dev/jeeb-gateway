@@ -98,19 +98,17 @@ public sealed class JeebRatingRow
 /// the exact shape the mobile <c>RatingStatus.fromJson</c> reads:
 /// <c>{ deliveryId, state, ratings:[{score,comment}], ratedCount }</c>. <c>state</c>
 /// is one of <c>pending_both | pending_self | pending_counter | revealed |
-/// auto-revealed</c> (the mobile parser also accepts the legacy
+/// locked_no_rating</c> (the mobile parser also accepts the legacy
 /// <c>pending_mine</c>/<c>pending_theirs</c> codes). The counterparty <c>ratings</c>
-/// row is only populated once revealed (blind until both submit or the time window
-/// elapses). <c>auto-revealed</c> is emitted when the system revealed unilaterally
-/// after the time window — fewer than 2 parties had submitted before expiry (this
-/// is the server-side trigger for the <c>jeeb.rating_auto_revealed</c> notification).
+/// row is only populated once both sides submit and the pair is revealed.
+/// One-sided expiry closes as <c>locked_no_rating</c> with no rating rows.
 /// </summary>
 public sealed class JeebRatingStatusEnvelope
 {
     [JsonPropertyName("deliveryId")]
     public string DeliveryId { get; set; } = string.Empty;
 
-    /// <summary>pending_both | pending_self | pending_counter | revealed | auto-revealed.</summary>
+    /// <summary>pending_both | pending_self | pending_counter | revealed | locked_no_rating.</summary>
     [JsonPropertyName("state")]
     public string State { get; set; } = string.Empty;
 

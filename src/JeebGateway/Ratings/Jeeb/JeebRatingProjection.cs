@@ -29,16 +29,17 @@ public static class JeebRatingProjection
 
         var self = upstream.Self;
         var theirs = upstream.Counterparty;
+        var mutuallyRevealed = IsMutuallyRevealed(upstream);
 
         return new JeebRatingStatusResponse
         {
             DeliveryId = deliveryId,
             Role = callerRole == JeebRatingRole.Sami ? "sami" : "kamal",
             State = StateCode(upstream),
-            Revealed = upstream.Revealed,
-            RevealedAt = upstream.RevealedAt,
-            Mine = ToParty(self),
-            Theirs = ToParty(theirs),
+            Revealed = mutuallyRevealed,
+            RevealedAt = mutuallyRevealed ? upstream.RevealedAt : null,
+            Mine = ToParty(self, mutuallyRevealed),
+            Theirs = ToParty(theirs, mutuallyRevealed),
         };
     }
 
@@ -55,17 +56,36 @@ public static class JeebRatingProjection
     public static string StateCode(BlindRevealStateResponse upstream)
     {
         if (upstream.Revealed)
-            return RatingStateCodes.Revealed;
+            return IsMutuallyRevealed(upstream) ? RatingStateCodes.Revealed : RatingStateCodes.LockedNoRating;
 
         var selfSubmitted = upstream.Self?.Submitted == true;
         return selfSubmitted ? RatingStateCodes.PendingTheirs : RatingStateCodes.PendingMine;
     }
 
-    private static JeebRatingPartyView ToParty(BlindRatingPartyState party)
+    private static bool IsMutuallyRevealed(BlindRevealStateResponse upstream)
+    {
+        var selfSubmitted = upstream.Self?.Submitted == true;
+        var theirsSubmitted = upstream.Counterparty?.Submitted == true;
+        var mutuallySubmitted = selfSubmitted && theirsSubmitted;
+        var submittedCountComplete = upstream.SubmittedCount >= 2;
+
+        return upstream.Revealed && submittedCountComplete && mutuallySubmitted;
+    }
+
+    private static JeebRatingPartyView ToParty(BlindRatingPartyState party, bool revealDetails)
     {
         if (party is null || !party.Submitted)
         {
             return new JeebRatingPartyView { Submitted = false };
+        }
+
+        if (!revealDetails)
+        {
+            return new JeebRatingPartyView
+            {
+                Submitted = true,
+                SubmittedAt = party.SubmittedAt,
+            };
         }
 
         return new JeebRatingPartyView

@@ -49,7 +49,7 @@
             "description": "ISO currency code",
             "enum": [
               "KWD",
-              "SAR",
+              "USD",
               "AED",
               "BHD",
               "QAR",
@@ -503,7 +503,7 @@
         "example": {
           "currencies": [
             "KWD",
-            "SAR"
+            "USD"
           ],
           "name": "myfatoorah",
           "payment_methods": [

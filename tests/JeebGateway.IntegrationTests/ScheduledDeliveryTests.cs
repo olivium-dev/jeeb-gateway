@@ -139,25 +139,24 @@ public class ScheduledDeliveryTests
     }
 
     [Fact]
-    public async Task Cancel_Scheduled_Request_Returns_204_And_Frees_BR9_Slot()
+    public async Task Cancel_Scheduled_Request_Returns_204_And_Allows_Future_Create()
     {
         var factory = NewFactory(out var clock);
         var client = ClientFor(factory, "sched-cancel-client");
 
         var scheduledAt = clock.GetUtcNow() + TimeSpan.FromHours(3);
 
-        // Saturate the BR-9 cap with scheduled requests, then cancel one
-        // and prove a fresh request is now accepted. Mirrors the immediate-
-        // delivery cancellation parity AC.
+        // Caps are retired: scheduled requests remain creatable before and
+        // after cancelling one. Mirrors the immediate-delivery cancellation parity AC.
         var ids = new List<string>();
         for (var i = 0; i < 3; i++)
         {
             ids.Add(await CreateScheduled(client, $"sched {i}", scheduledAt));
         }
 
-        var blocked = await client.PostAsJsonAsync("/requests",
-            ValidBody("blocked-by-cap", scheduledAt));
-        blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var fourthCreate = await client.PostAsJsonAsync("/requests",
+            ValidBody("fourth-create", scheduledAt));
+        fourthCreate.StatusCode.Should().Be(HttpStatusCode.Created);
 
         var cancel = await client.DeleteAsync($"/requests/{ids[0]}");
         cancel.StatusCode.Should().Be(HttpStatusCode.NoContent);
@@ -202,7 +201,7 @@ public class ScheduledDeliveryTests
     }
 
     [Fact]
-    public async Task Scheduled_Request_Counts_Toward_BR9_Active_Cap()
+    public async Task More_Than_Three_Scheduled_Requests_Are_Allowed()
     {
         var factory = NewFactory(out var clock);
         var client = ClientFor(factory, "sched-br9-client");
@@ -215,15 +214,9 @@ public class ScheduledDeliveryTests
                 ValidBody($"sched {i}", scheduledAt))).StatusCode.Should().Be(HttpStatusCode.Created);
         }
 
-        // Fourth scheduled MUST hit the BR-9 cap exactly like an immediate
-        // request would — scheduled is in the ActiveStates set.
-        var blocked = await client.PostAsJsonAsync("/requests",
+        var fourth = await client.PostAsJsonAsync("/requests",
             ValidBody("fourth scheduled", scheduledAt));
-        blocked.StatusCode.Should().Be(HttpStatusCode.Conflict);
-
-        var problem = await blocked.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Title.Should().Be(
-            "Maximum 3 active requests. Complete or cancel an existing request.");
+        fourth.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
     // -----------------------------------------------------------------

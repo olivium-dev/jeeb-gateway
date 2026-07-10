@@ -210,7 +210,7 @@ public class DeliveryRequest
 
     /// <summary>
     /// When the request was terminally expired by the sweeper. Null until
-    /// the 30-min window elapses without an accepted offer.
+    /// the selected tier's request TTL elapses without an accepted offer.
     /// </summary>
     public DateTimeOffset? ExpiredAt { get; set; }
 
@@ -498,7 +498,7 @@ public class DeliveryRequestDto
     public string? OtpEscalationId { get; init; }
 
     /// <summary>
-    /// PR-G3 (S09): gross fee (in the offer's currency units, LBP) of the ACCEPTED
+    /// PR-G3 (S09): gross fee (in the offer's currency units, USD) of the ACCEPTED
     /// offer for this delivery — the amount the client agreed to pay the jeeber.
     /// Resolved on the single-read (<c>GET /v1/deliveries/{id}</c>) from the
     /// pending-offers store's accepted offer. ADDITIVE and nullable: it is
