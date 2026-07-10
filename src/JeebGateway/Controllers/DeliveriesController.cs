@@ -1979,7 +1979,14 @@ public class DeliveriesController : ControllerBase
         try
         {
             var previousStatus = delivery.Status;
-            delivery.Status = result.Status ?? RequestStatus.Delivered;
+            // S03: stamp the gateway-LOCAL terminal vocab (RequestStatus.Delivered ==
+            // "delivered"), never delivery-service's raw upstream token (result.Status,
+            // e.g. CanonicalDeliveryStatus.Done == "Done"). `delivery` is the LIVE store
+            // instance (GetAsync returns it with no defensive copy), so a raw-token write
+            // here silently clobbers the _store.SetStatusAsync(..., Delivered) projection
+            // above — bypassing the terminal-state guard — and leaks "Done" into both the
+            // request read-model and the counterparty push copy.
+            delivery.Status = RequestStatus.Delivered;
             await NotifyOtherPartyAsync(delivery, previousStatus, ct);
         }
         catch (Exception ex)
