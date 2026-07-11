@@ -215,13 +215,19 @@ public class UserPreferencesEndpointTests
 
         var resp = await client.GetAsync("/api/UserPreferences/preferences");
 
-        // JEBV4-63: no more bare "Internal server error: {ex.Message}" string leak —
-        // the upstream 500 is relayed as an RFC7807 ProblemDetails body.
+        // JEBV4-249 (residual of JEBV4-63): the upstream 500 is relayed as a SANITIZED RFC 7807
+        // ProblemDetails. The upstream ex.Message/body is NO LONGER echoed in `detail` (logged
+        // server-side only). This test previously asserted Detail was populated, which implicitly
+        // pinned the leak; it now asserts the leak is gone.
         resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
         resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
         var problem = await resp.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
         problem!.Status.Should().Be((int)HttpStatusCode.InternalServerError);
-        problem.Detail.Should().NotBeNullOrWhiteSpace();
+        problem.Title.Should().Be("Upstream user-preferences error");
+        problem.Detail.Should().BeNullOrEmpty(
+            "JEBV4-249: the upstream ex.Message must not be echoed as the response detail");
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().NotContain("boom", "the upstream response body must not leak to the client");
     }
 
     [Fact]

@@ -25,7 +25,6 @@ namespace JeebGateway.Controllers
     /// </summary>
     [ApiController]
     [Route("api/[controller]")]
-    [Produces("application/json")]
     public class UserController : ControllerBase
     {
         private readonly ServiceUserManagementClient _serviceUserManagementClient;
@@ -210,14 +209,31 @@ namespace JeebGateway.Controllers
             return Ok(new { users = roster });
         }
 
-        private ActionResult HandleUpstreamException(UserManagementApiException ex)
+        /// <summary>
+        /// JEBV4-249 (residual of JEBV4-63) — map a caught upstream user-management
+        /// <see cref="UserManagementApiException"/> to a sanitized RFC 7807 ProblemDetails.
+        /// The upstream status is preserved (clamped to a valid 4xx/5xx; anything else →
+        /// 502 Bad Gateway), but the upstream exception message / response body is NEVER
+        /// echoed to the caller — it is logged server-side only. The prior JEBV4-63 partial
+        /// fix wrapped the leak in an RFC 7807 envelope but still forwarded the raw upstream
+        /// <c>ex.Message</c> as the response <c>detail</c>; that information-disclosure leak
+        /// is removed here. Mirrors the JEBV4-242 <c>ChatController.UpstreamProblem</c> idiom.
+        /// </summary>
+        private ActionResult UpstreamProblem(UserManagementApiException ex)
         {
-            if (ex.StatusCode == 404)
-                return Problem(statusCode: 404, detail: ex.Message, title: "Not Found");
-            // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) — a
-            // non-ProblemDetails string body. Route every upstream user-management
-            // failure through the same RFC7807 envelope as the 404 branch above.
-            return Problem(statusCode: ex.StatusCode, detail: ex.Message, title: "Upstream user-management error");
+            var status = ex.StatusCode is >= 400 and < 600
+                ? ex.StatusCode
+                : StatusCodes.Status502BadGateway;
+
+            _logger.LogWarning(ex,
+                "User BFF: user-management call failed on {Method} {Path} → {Status}.",
+                Request.Method, Request.Path, status);
+
+            return Problem(
+                statusCode: status,
+                title: status == StatusCodes.Status404NotFound
+                    ? "Not Found"
+                    : "Upstream user-management error");
         }
 
         private ActionResult<(string userId, bool isValid)> ValidateUserAndServices()
@@ -264,7 +280,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -292,7 +308,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -330,7 +346,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -370,7 +386,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -410,7 +426,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -439,7 +455,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -520,7 +536,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -596,7 +612,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -636,7 +652,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -673,7 +689,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -710,7 +726,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -729,7 +745,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -767,7 +783,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -811,7 +827,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -843,7 +859,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -971,7 +987,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -1006,7 +1022,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -1043,7 +1059,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -1081,7 +1097,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -1118,7 +1134,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -1155,7 +1171,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -1187,7 +1203,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
 
@@ -1227,7 +1243,7 @@ namespace JeebGateway.Controllers
             }
             catch (UserManagementApiException ex)
             {
-                return HandleUpstreamException(ex);
+                return UpstreamProblem(ex);
             }
         }
     }
