@@ -76,15 +76,38 @@ public class AutoOfflineSweeper : BackgroundService
             var watermark = record.LastInteractionAt ?? record.LastSeenAt;
             if (watermark is null || watermark > cutoff) continue;
 
-            var result = await store.GoOfflineAsync(record.UserId, GoOfflineReason.AutoOfflineInactive, ct);
-            if (result.WasOnline)
+            try
             {
-                await notifier.NotifyAutoOfflineAsync(record.UserId, now, ct);
-                _logger.LogInformation(
-                    "Jeeber {UserId} auto-offlined after {WindowMinutes}m of inactivity ({Withdrawn} offers withdrawn)",
-                    record.UserId,
-                    window.TotalMinutes,
-                    result.WithdrawnOffers);
+                var result = await store.GoOfflineAsync(record.UserId, GoOfflineReason.AutoOfflineInactive, ct);
+                if (result.WasOnline)
+                {
+                    await notifier.NotifyAutoOfflineAsync(record.UserId, now, ct);
+                    _logger.LogInformation(
+                        "Jeeber {UserId} auto-offlined after {WindowMinutes}m of inactivity ({Withdrawn} offers withdrawn)",
+                        record.UserId,
+                        window.TotalMinutes,
+                        result.WithdrawnOffers);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Shutdown / sweep cancellation — propagate so ExecuteAsync can
+                // break the loop, never treat it as a per-record miss.
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Per-record resilience (mirrors the N13 best-effort mirror in
+                // AvailabilityController.TryGoOfflineMirrorAsync): one Jeeber's
+                // offline write faulting — e.g. the live-upstream
+                // UpstreamPendingOffersStore.WithdrawForJeeberAsync throwing
+                // NotSupportedException at Offer=true — must NOT abort the whole
+                // sweep. Log and skip so the remaining stale Jeebers still get
+                // flipped offline this cycle.
+                _logger.LogWarning(
+                    ex,
+                    "Auto-offline for jeeber {UserId} faulted; skipping this record and continuing the sweep.",
+                    record.UserId);
             }
         }
     }
