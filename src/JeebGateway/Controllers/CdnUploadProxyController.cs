@@ -1,6 +1,9 @@
+using JeebGateway.Auth.Capabilities;
+using JeebGateway.Security;
 using JeebGateway.Services.Cdn;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace JeebGateway.Controllers;
 
@@ -30,6 +33,18 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [AllowAnonymous]
+// ADR-005 Layer 2 — EXPLICIT public opt-out. [AllowAnonymous] (above) opts out of
+// L1 authn; [PublicEndpoint] opts out of L2 capability AND satisfies the
+// CapabilityCoverageGuard default-deny scan. This route is public BY DESIGN: the
+// signed-PUT URL is bearer-free, the HMAC signature in the query IS the
+// authorization (cdn validates it). Mirrors EarningsController's signed-token PDF
+// endpoint. NOTE: [AllowAnonymous] is a DIFFERENT concern from this marker — the
+// guard requires this attribute specifically; do not conflate the two.
+[PublicEndpoint("KYC signed-PUT upload proxy — bearer-free by design (the HMAC sig in the query IS the authz); ADR-005 §A public opt-out.")]
+// CWE-770 / API4:2023 — this endpoint is anonymous AND accepts up to 15 MB per
+// request. A dedicated per-IP fixed-window budget (on top of the global per-IP
+// limiter) bounds how much an unauthenticated source can push through it.
+[EnableRateLimiting(RateLimitingExtensions.CdnUploadPolicy)]
 [Route("api/cdn")]
 public sealed class CdnUploadProxyController : ControllerBase
 {
@@ -66,11 +81,18 @@ public sealed class CdnUploadProxyController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> PutSigned(string objectPath, CancellationToken ct)
     {
-        // SSRF guard: objectPath is appended to cdn's FIXED signed-PUT prefix; a
-        // "../" segment could otherwise redirect the proxied PUT at a different,
-        // unsigned cdn endpoint. Reject traversal (and an empty ref) up front.
+        // SSRF guard (belt): objectPath is appended to cdn's FIXED signed-PUT prefix;
+        // a traversal segment could otherwise redirect the proxied PUT at a different,
+        // unsigned cdn endpoint. Reject an empty ref, a literal ".." token, AND the raw
+        // encodings a double-encoded traversal arrives as. Kestrel SINGLE-decodes the
+        // route value, so a "%252e%252e" attack surfaces here as the literal "%2e%2e"
+        // (still carrying '%'), which the plain ".." check misses; a '\' can normalise
+        // to '/' inside System.Uri. This is defence-in-depth — the authoritative check
+        // is IsOnSignedPutPrefix on the CANONICALIZED sink below (see CWE-22/918).
         if (string.IsNullOrWhiteSpace(objectPath)
-            || objectPath.Contains("..", StringComparison.Ordinal))
+            || objectPath.Contains("..", StringComparison.Ordinal)
+            || objectPath.Contains('%')
+            || objectPath.Contains('\\'))
         {
             return Problem(
                 title: "Invalid upload path",
@@ -94,6 +116,27 @@ public sealed class CdnUploadProxyController : ControllerBase
         var relative = CdnUploadUrlResolver.ToCdnPutSignedPath(objectPath) + Request.QueryString.Value;
         var upstreamUri = new Uri(client.BaseAddress, relative);
 
+        // SSRF / path-traversal fail-closed on the CANONICALIZED SINK (CWE-22/918).
+        // The early guard inspected the PRE-decode route value; System.Uri percent-
+        // decodes ("%2e" -> ".") and collapses dot-segments when this target is built,
+        // so validate the URI that will ACTUALLY be dialed — it must stay on cdn's own
+        // scheme/host/port AND under the fixed signed-PUT prefix. Anything else (an
+        // off-prefix path escaped via traversal, a different host) is rejected before
+        // any bytes are streamed. Validate the sink, not the raw route string.
+        if (!CdnUploadUrlResolver.IsOnSignedPutPrefix(upstreamUri, client.BaseAddress))
+        {
+            _logger.LogWarning(
+                "KYC upload proxy: rejected off-prefix upstream target for objectRef {ObjectPath} "
+                + "(resolved path {ResolvedPath}).", objectPath, upstreamUri.AbsolutePath);
+            return Problem(
+                title: "Invalid upload path",
+                detail: "The upload object reference resolves outside the permitted upload path.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        // PUT-only by design: cdn's signed-upload contract is always PUT and the route
+        // is [HttpPut]. Deliberately not generalized to other verbs (YAGNI — cdn
+        // returns a PUT upload_url).
         using var upstreamRequest = new HttpRequestMessage(HttpMethod.Put, upstreamUri)
         {
             // STREAM the client body straight through — no MemoryStream, no byte[] of

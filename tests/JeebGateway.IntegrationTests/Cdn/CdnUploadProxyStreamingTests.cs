@@ -141,6 +141,36 @@ public sealed class CdnUploadProxyStreamingTests
         capture.WasCalled.Should().BeFalse("a ../-bearing objectRef must be rejected before any upstream dial");
     }
 
+    [Theory]
+    // CWE-22/918 (PoC-confirmed). A double-encoded "%252e%252e" survives Kestrel's
+    // SINGLE percent-decode as the literal "%2e%2e" — slipping the naive ".." check —
+    // and System.Uri then decodes ("%2e"->".") + collapses dot-segments when the
+    // upstream target is built, escaping cdn's FIXED signed-PUT prefix onto an
+    // arbitrary (unsigned) cdn path. Every case MUST fail closed: 400, and the
+    // upstream cdn is NEVER dialed off-prefix.
+    [InlineData("/api/cdn/put-signed/%252e%252e/admin?exp=1&sig=a")]
+    [InlineData("/api/cdn/put-signed/%252e%252e/%252e%252e/api/ImageUpload/upload?sig=a")]
+    // Backslash (percent-encoded) variant — '\' decodes then normalises to '/'.
+    [InlineData("/api/cdn/put-signed/OBJ%5c..%5cadmin?sig=a")]
+    public async Task Put_Signed_Rejects_Encoded_Traversal_FailClosed(string maliciousPath)
+    {
+        var capture = new CapturingHandler(HttpStatusCode.OK, "{}");
+        using var factory = ProxyFactory(capture);
+        var client = factory.CreateClient();
+
+        var content = new ByteArrayContent(JpegBytes);
+        content.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
+        var request = new HttpRequestMessage(HttpMethod.Put, maliciousPath) { Content = content };
+
+        var response = await client.SendAsync(request);
+
+        // Fail closed: rejected 400 by the proxy's own guard...
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        // ...and — the security invariant — cdn was NEVER dialed for the escaped target.
+        capture.WasCalled.Should().BeFalse(
+            "an encoded traversal that would escape cdn's signed-PUT prefix must be rejected before any upstream dial");
+    }
+
     // ----- helpers -----
 
     private static WebApplicationFactory<Program> ProxyFactory(CapturingHandler handler) =>

@@ -105,6 +105,32 @@ public static class CdnUploadUrlResolver
     public static string ToCdnPutSignedPath(string objectPath) =>
         CdnPutSignedPathPrefix + objectPath;
 
+    /// <summary>
+    /// SSRF / path-traversal fail-closed check on the CANONICALIZED upstream target
+    /// (CWE-22 / CWE-918). The streaming proxy builds its cdn target with
+    /// <c>new Uri(cdnBase, "api/ImageUpload/put-signed/{objectPath}{?query}")</c>;
+    /// <see cref="System.Uri"/> percent-decodes (<c>%2e</c> → <c>.</c>) and collapses
+    /// dot-segments at that point, so a double-encoded traversal
+    /// (<c>%252e%252e</c> → Kestrel single-decodes to <c>%2e%2e</c> → Uri decodes+collapses
+    /// to <c>..</c>) can escape the fixed prefix onto an arbitrary cdn path — bypassing
+    /// a guard that only inspected the pre-decode route value. This validates the URI
+    /// that will ACTUALLY be dialed: it must share the cdn base's scheme, host and port
+    /// (no redirected authority) AND its path must stay under the signed-PUT prefix.
+    /// Pure function (no I/O, no ASP.NET types) so the exact canonicalization is unit
+    /// tested directly, mirroring <see cref="Resolve"/>.
+    /// </summary>
+    /// <param name="upstreamUri">The fully-built target, <c>new Uri(cdnBase, relative)</c>.</param>
+    /// <param name="cdnBase">The cdn-proxy client's configured <c>BaseAddress</c>.</param>
+    /// <returns><c>true</c> only when the target stays on cdn's own origin and under the signed-PUT prefix.</returns>
+    public static bool IsOnSignedPutPrefix(Uri upstreamUri, Uri cdnBase) =>
+        string.Equals(upstreamUri.Scheme, cdnBase.Scheme, StringComparison.Ordinal)
+        && string.Equals(upstreamUri.Host, cdnBase.Host, StringComparison.OrdinalIgnoreCase)
+        && upstreamUri.Port == cdnBase.Port
+        // Leading '/' anchors the check to cdn's own path prefix (AbsolutePath is always
+        // rooted). Derived from CdnPutSignedPathPrefix so the guard can never drift from
+        // the path the proxy actually mirrors.
+        && upstreamUri.AbsolutePath.StartsWith("/" + CdnPutSignedPathPrefix, StringComparison.Ordinal);
+
     private static string RewriteToGatewayProxy(string cdnPathAndQuery, string gatewayPublicBase)
     {
         var trimmed = cdnPathAndQuery.TrimStart('/');

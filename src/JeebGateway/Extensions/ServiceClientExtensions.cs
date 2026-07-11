@@ -265,6 +265,15 @@ public static class ServiceClientExtensions
         {
             BindBaseAddress(http, config, "Services:Cdn");
             http.Timeout = TimeSpan.FromSeconds(100);
+        })
+        // CWE-918 (SSRF): pin the primary handler to NOT follow redirects. This proxy
+        // dials a FIXED signed-PUT path on the internal cdn; if cdn ever returned a 3xx
+        // the default AllowAutoRedirect=true would have the gateway chase the Location
+        // to an arbitrary host. A redirect must be RELAYED to the client verbatim (the
+        // proxy is a dumb pipe), never chased server-side. Scoped to THIS client only.
+        .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
         });
 
         // thin-BFF wire — kyc-service (S03 / ADR-0004): the OWNING microservice for
