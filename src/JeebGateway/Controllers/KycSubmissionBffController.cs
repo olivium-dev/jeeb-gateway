@@ -8,6 +8,7 @@ using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
@@ -43,20 +44,32 @@ public sealed class KycSubmissionBffController : ControllerBase
 {
     private const string IdempotencyHeader = "Idempotency-Key";
 
+    // JEBV4-8 — when FeatureFlags:Kyc:AutoApprove is ON (default ON only on MSI
+    // dev/staging via appsettings.Production.json) a fresh KYC submission is
+    // adjudicated Verified + role-granted inline with NO admin step and NO re-login.
+    private const string AutoApproveFlagKey = "FeatureFlags:Kyc:AutoApprove";
+    private const string AutoApproveReviewerId = "system:kyc-auto-approve";
+
     private readonly IKycBffSeam _kyc;
     private readonly IContractSigningServiceClient _contractSigning;
+    private readonly IUserManagementDualRoleClient _userManagement;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
+    private readonly IConfiguration _config;
     private readonly ILogger<KycSubmissionBffController> _log;
 
     public KycSubmissionBffController(
         IKycBffSeam kyc,
         IContractSigningServiceClient contractSigning,
+        IUserManagementDualRoleClient userManagement,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
+        IConfiguration config,
         ILogger<KycSubmissionBffController> log)
     {
         _kyc = kyc;
         _contractSigning = contractSigning;
+        _userManagement = userManagement;
         _flags = flags;
+        _config = config;
         _log = log;
     }
 
@@ -297,10 +310,29 @@ public sealed class KycSubmissionBffController : ControllerBase
             return KycUpstreamDisabled();
         }
 
+        // JEBV4-8 — AUTO-APPROVE (kills the admin blocker). When
+        // FeatureFlags:Kyc:AutoApprove is ON, a first-time submission is
+        // adjudicated Verified via the SAME kyc-service review seam the admin path
+        // uses, the jeeber role is granted in user-management (kyc-service never
+        // calls UM — ADR-0004), and the submit RESPONSE returns state="Verified" so
+        // the app renders 'approved' (and the JeeberRoleActivator fires) with NO
+        // re-login. Best-effort: the submit already committed, so an approve/grant
+        // blip is logged and never rolls the submit back (mirrors AdminKyc N14). A
+        // replay (200) is skipped — the original submit already auto-approved.
+        var state = result.State;
+        if (!result.Replayed && _config.GetValue<bool>(AutoApproveFlagKey))
+        {
+            var verifiedState = await TryAutoApproveAsync(result.SubmissionId, ct);
+            if (!string.IsNullOrWhiteSpace(verifiedState))
+            {
+                state = verifiedState!;
+            }
+        }
+
         var payload = new KycSubmitJsonResponse
         {
             SubmissionId = result.SubmissionId,
-            State = result.State,
+            State = state,
             IdType = body.IdType,
             IdDocumentFrontUrl = body.IdDocumentFrontUrl,
             IdDocumentBackUrl = body.IdDocumentBackUrl,
@@ -314,6 +346,94 @@ public sealed class KycSubmissionBffController : ControllerBase
         return result.Replayed
             ? Ok(payload)
             : StatusCode(StatusCodes.Status201Created, payload);
+    }
+
+    /// <summary>
+    /// JEBV4-8 auto-approve. Adjudicates the just-submitted package via the SAME
+    /// kyc-service review seam the admin path uses (Approve → Verified), then
+    /// composes the jeeber role grant in user-management. Returns the new upstream
+    /// status ("Verified") on success, or null when the flow could not complete —
+    /// in which case the caller keeps the submitted state and the submit is NEVER
+    /// rolled back (an admin can still approve manually). Fully best-effort: every
+    /// upstream fault (503 disabled, 409 conflict, invalid-role, UM blip) is
+    /// swallowed and logged so a fresh submit can never hard-fail on auto-approve.
+    /// </summary>
+    private async Task<string?> TryAutoApproveAsync(string submissionId, CancellationToken ct)
+    {
+        try
+        {
+            var outcome = await _kyc.ReviewAsync(submissionId, new KycBffReviewInput
+            {
+                Action = KycReviewAction.Approve,
+                ReviewerId = AutoApproveReviewerId,
+                Reason = "auto-approved (FeatureFlags:Kyc:AutoApprove)",
+            }, ct);
+
+            // CP-C / H8 role grant — kyc-service decides the grant INTENT
+            // (GrantsRole = "jeeber"); the GATEWAY composes the UM append.
+            if (!string.IsNullOrWhiteSpace(outcome.GrantsRole))
+            {
+                await ComposeRoleGrantAsync(outcome.UserId, outcome.GrantsRole!, submissionId, ct);
+            }
+
+            _log.LogInformation(
+                "kyc auto-approve ok: submission {SubmissionId} → {Status}", submissionId, outcome.Status);
+            return outcome.Status;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "kyc auto-approve failed for submission {SubmissionId}; submit committed, approval left to admin",
+                submissionId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Composes the user-management jeeber-role append for the auto-approve outcome,
+    /// mirroring <c>AdminKycController.ComposeRoleGrantAsync</c>: translate the Jeeb
+    /// contract role → opaque (jeeber → driver) and append to available_roles
+    /// (set-semantics). kyc-service never calls UM (ARCH LAW). Non-fatal: an unknown
+    /// role or a UM blip is logged; the approve already committed.
+    /// </summary>
+    private async Task ComposeRoleGrantAsync(
+        string? subjectUserId, string contractRole, string submissionId, CancellationToken ct)
+    {
+        var opaqueRole = JeebRoleTranslator.ToOpaque(contractRole);
+        if (opaqueRole is null)
+        {
+            _log.LogWarning(
+                "kyc auto-approve {SubmissionId}: grant role '{Role}' is not a Jeeb contract role; grant skipped",
+                submissionId, contractRole);
+            return;
+        }
+
+        // Interim path (UM upstream off): the seam already granted the role locally.
+        if (!_flags.CurrentValue.UserManagement)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(subjectUserId))
+        {
+            _log.LogWarning(
+                "kyc auto-approve {SubmissionId}: review outcome carried no owner; role grant skipped", submissionId);
+            return;
+        }
+
+        try
+        {
+            var grant = await _userManagement.AppendAvailableRoleAsync(subjectUserId, opaqueRole, ct);
+            _log.LogInformation(
+                "kyc auto-approve {SubmissionId}: granted opaque role '{Role}' (added={Added})",
+                submissionId, opaqueRole, grant.Added);
+        }
+        catch (UserManagementCallException ex)
+        {
+            _log.LogWarning(ex,
+                "kyc auto-approve {SubmissionId}: user-management role append failed (status {Status}); "
+                + "approve committed, role grant deferred", submissionId, ex.StatusCode);
+        }
     }
 
     /// <summary>
