@@ -260,6 +260,53 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
         return await ReadListAsync(cmd, ct);
     }
 
+    /// <summary>
+    /// JEBV4-248: durable by-id read. Same column projection + <see cref="MapRow"/>
+    /// as the owner-list queries, filtered to the single mirror row. The native id
+    /// is a UUID column, so a non-UUID id has no mirror row (returns null). Used as
+    /// the by-id backstop so a row visible in the owner-list is also resolvable by id.
+    /// </summary>
+    public async Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct)
+    {
+        if (!Guid.TryParse(requestId, out var id)) return null;
+
+        await using var conn = await _db.OpenAsync(ct);
+
+        const string sql = """
+            SELECT
+                id,
+                client_id,
+                COALESCE(gw_status, status::text)  AS status,
+                description,
+                transcription,
+                audio_url,
+                gw_tier_code,
+                ST_Y(pickup_location::geometry)     AS pickup_lat,
+                ST_X(pickup_location::geometry)     AS pickup_lng,
+                ST_Y(dropoff_location::geometry)    AS dropoff_lat,
+                ST_X(dropoff_location::geometry)    AS dropoff_lng,
+                pickup_address,
+                dropoff_address,
+                gw_recipient_phone,
+                created_at,
+                scheduled_at,
+                gw_jeeber_id,
+                gw_accepted_fee,
+                gw_conversation_id,
+                gw_cancelled_by,
+                gw_cancellation_reason,
+                gw_cancelled_at
+            FROM delivery_requests
+            WHERE id = @Id AND gw_mirror = TRUE
+            LIMIT 1
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("Id", id);
+        var rows = await ReadListAsync(cmd, ct);
+        return rows.Count > 0 ? rows[0] : null;
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private static async Task<List<DeliveryRequest>> ReadListAsync(NpgsqlCommand cmd, CancellationToken ct)
