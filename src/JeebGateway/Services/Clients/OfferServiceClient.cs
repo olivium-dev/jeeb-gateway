@@ -177,9 +177,14 @@ public sealed class OfferServiceClient : IOfferServiceClient
             $"api/v1/requests/{Uri.EscapeDataString(requestId)}/offers/{Uri.EscapeDataString(offerId)}/accept");
         SetUser(request, actingUserId);
         request.Headers.TryAddWithoutValidation(IdempotencyHeader, idempotencyKey);
-        // Empty JSON body — accept takes no required payload (confirm_high_fee
-        // is optional and defaults false).
-        request.Content = JsonContent.Create(new { }, options: JsonOptions);
+        // JEBV4-120: send confirm_high_fee=true so offer-service's accept-saga
+        // high-fee gate (fee_cents > high_fee_threshold_cents, default $50) does
+        // NOT return 409 high_fee_confirmation_required. In Jeeb's UX the customer
+        // accepts a SPECIFIC, fee-visible offer ("Pay $X cash on delivery"), so the
+        // accept tap IS the confirmation — the shared service's separate high-fee
+        // confirmation is redundant here. Without it every offer priced above $50
+        // deterministically 409s.
+        request.Content = JsonContent.Create(new AcceptBody { ConfirmHighFee = true }, options: JsonOptions);
 
         using var response = await _http.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
@@ -212,7 +217,10 @@ public sealed class OfferServiceClient : IOfferServiceClient
             $"api/v1/requests/{Uri.EscapeDataString(requestId)}/offers/{Uri.EscapeDataString(offerId)}/accept");
         SetUser(request, actingUserId);
         request.Headers.TryAddWithoutValidation(IdempotencyHeader, idempotencyKey);
-        request.Content = JsonContent.Create(new { }, options: JsonOptions);
+        // JEBV4-120: send confirm_high_fee=true (see AcceptAsync) so the accept
+        // saga's high-fee gate never 409s a >$50 offer — the fee-visible accept
+        // tap IS the confirmation in Jeeb's UX.
+        request.Content = JsonContent.Create(new AcceptBody { ConfirmHighFee = true }, options: JsonOptions);
 
         using var response = await _http.SendAsync(request, ct);
 
@@ -657,6 +665,25 @@ public sealed class OfferServiceClient : IOfferServiceClient
         [JsonPropertyName("request_id")] public string RequestId { get; init; } = string.Empty;
         [JsonPropertyName("client_id")] public string ClientId { get; init; } = string.Empty;
         [JsonPropertyName("status")] public string Status { get; init; } = "open";
+    }
+
+    /// <summary>
+    /// JEBV4-120 accept body. offer-service's accept saga applies a high-fee gate:
+    /// if <c>fee_cents &gt; high_fee_threshold_cents</c> (default 5000 = $50) and the
+    /// request body does not carry <c>confirm_high_fee=true</c>, it returns
+    /// <c>:high_fee_confirmation_required</c> → HTTP 409. The gateway sends
+    /// <c>confirm_high_fee=true</c> because in Jeeb's UX the customer accepts a
+    /// specific, fee-visible offer — the accept tap IS the confirmation.
+    /// <para>
+    /// The wire key MUST be the snake_case literal <c>confirm_high_fee</c>:
+    /// <c>offer_controller.ex</c> reads that exact key. The explicit
+    /// <see cref="JsonPropertyNameAttribute"/> pins the wire name regardless of the
+    /// serializer naming policy (mirrors <see cref="SubmitBody"/> / <see cref="EditBody"/>).
+    /// </para>
+    /// </summary>
+    private sealed class AcceptBody
+    {
+        [JsonPropertyName("confirm_high_fee")] public bool ConfirmHighFee { get; init; }
     }
 
     /// <summary>GAP-2 — the jeeber-offers feed serializer wire shape (contract-freeze §4.2).</summary>
