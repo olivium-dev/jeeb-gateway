@@ -474,12 +474,47 @@ public sealed class DurableRequestsStore : IRequestsStore
         catch (Exception ex)
         {
             // GetDeliveryAsync throws on 404 (EnsureSuccessStatusCode) and on any
-            // transport fault; a miss/blip is an unknown-id → null (== today).
+            // transport fault; fall through to the durable mirror before giving up.
             _logger.LogDebug(ex,
-                "requests-durable: delivery-service read-through miss for {RequestId}; returning null (unknown-id).",
+                "requests-durable: delivery-service read-through miss for {RequestId}; trying the durable mirror.",
                 requestId);
-            return null;
         }
+
+        // JEBV4-248: delivery-service miss/fault — fall back to the gateway Postgres
+        // mirror, the SAME durable source the owner-list (ListForClientAsync) reads.
+        // Without this the by-id read resolved ONLY through delivery-service, so a row
+        // present in the mirror but unresolvable upstream (expired/purged there, or a
+        // transient delivery-service blip) 404'd on GET /v1/requests/{id} and
+        // GET /v1/offers?requestId=… while the SAME row still listed 200 on
+        // GET /requests — the get-vs-list divergence that stalls the offer-review
+        // screen. Consulting the mirror here guarantees get ⊇ list. delivery-service
+        // still WINS when it answers (freshest canonical status); the mirror is only
+        // the backstop on a miss. DEGRADE-DON'T-FAIL: a mirror fault degrades to null
+        // (== today's unknown-id → 404), never a 5xx. A null mirror (no Postgres
+        // wired) is byte-for-byte today's behaviour.
+        if (_mirror is not null)
+        {
+            try
+            {
+                var mirrored = await _mirror.GetAsync(requestId, ct);
+                if (mirrored is not null)
+                {
+                    return mirrored;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "requests-durable: durable mirror by-id read for {RequestId} failed; returning null (unknown-id).",
+                    requestId);
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

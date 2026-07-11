@@ -84,4 +84,23 @@ public interface IDurableRequestsMirror
     /// jeeber has no mirrored rows.
     /// </summary>
     Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct);
+
+    /// <summary>
+    /// JEBV4-248: durable SINGLE-ROW read by id (mirror rows only) — the by-id
+    /// counterpart of <see cref="ListForClientAsync"/>.
+    ///
+    /// <para>Without it, <see cref="DurableRequestsStore.GetAsync"/> resolves a single
+    /// row on an in-memory miss ONLY through delivery-service, while the owner-list
+    /// (<see cref="ListForClientAsync"/>) is served from THIS mirror. Those two durable
+    /// sources can disagree: a row present in the mirror but not resolvable via
+    /// delivery-service (expired/purged upstream, or a transient delivery-service
+    /// fault) returns 404 on <c>GET /v1/requests/{id}</c> and
+    /// <c>GET /v1/offers?requestId=…</c> while the SAME row still lists 200 on
+    /// <c>GET /requests</c> — the get-vs-list divergence that blocks the offer-review
+    /// screen (JEBV4-248). Reading the mirror on the by-id path guarantees anything the
+    /// owner-list can surface is also resolvable by id (get ⊇ list).</para>
+    ///
+    /// Returns <see langword="null"/> when the id is not a UUID or has no mirrored row.
+    /// </summary>
+    Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct);
 }

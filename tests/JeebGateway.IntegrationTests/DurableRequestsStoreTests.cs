@@ -400,6 +400,81 @@ public sealed class DurableRequestsStoreTests
     }
 
     [Fact]
+    public async Task Get_falls_back_to_the_durable_mirror_when_delivery_service_misses()
+    {
+        // JEBV4-248 (get-vs-list divergence): a row that lives ONLY in the durable
+        // Postgres mirror — not in the in-memory model (bounce) and not resolvable via
+        // delivery-service (expired/purged upstream, or a transient delivery-service
+        // fault) — was surfaced by the owner-LIST (which reads the mirror) but 404'd on
+        // the by-id GET (which read ONLY delivery-service). GET /v1/offers?requestId=…
+        // and GET /v1/requests/{id} therefore 404'd for a request the client could
+        // still see in GET /requests. GetAsync must now consult the mirror so anything
+        // listable is also gettable (get ⊇ list).
+        var store = BuildWithMirror(out _, out var delivery, out var mirror);
+
+        var requestId = Guid.NewGuid().ToString();
+        var mirrorRow = new DeliveryRequest
+        {
+            Id = requestId,
+            ClientId = "client-248",
+            Status = RequestStatus.Pending,
+            Description = "listable but previously not gettable",
+            CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-3),
+        };
+        mirror.Rows.Add(mirrorRow);
+        // delivery.UpstreamRow left null → GetDeliveryAsync throws (simulated upstream
+        // miss/fault); the in-memory inner never held the row (post-bounce cold state).
+
+        // Precondition — the row IS visible on the owner-list (reads the mirror).
+        var list = await store.ListForClientAsync("client-248", CancellationToken.None);
+        list.Should().ContainSingle(r => r.Id == requestId);
+
+        // The fix — the SAME row is now resolvable by id (was null before: divergence).
+        var got = await store.GetAsync(requestId, CancellationToken.None);
+
+        got.Should().NotBeNull("a row visible on the owner-list must also be resolvable by id (get ⊇ list)");
+        got!.Id.Should().Be(requestId);
+        got.ClientId.Should().Be("client-248");
+        got.Status.Should().Be(RequestStatus.Pending);
+        // delivery-service was tried FIRST (it stays the canonical, freshest source);
+        // the mirror is only the backstop consulted after that miss.
+        delivery.GetDeliveryCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Get_prefers_delivery_service_over_the_mirror_when_upstream_answers()
+    {
+        // The mirror is a BACKSTOP, not an override: when delivery-service resolves the
+        // row (warm canonical read) its freshest status wins and the mirror is never
+        // consulted — the mirror can hold a staler snapshot.
+        var store = BuildWithMirror(out _, out var delivery, out var mirror);
+
+        var requestId = Guid.NewGuid().ToString();
+        delivery.UpstreamRow = new DeliveryRequestUpstream
+        {
+            Id = requestId,
+            ClientId = "client-248",
+            Status = RequestStatus.HeadingOff, // fresh canonical status
+            Description = "canonical row",
+            TierId = "flash",
+        };
+        mirror.Rows.Add(new DeliveryRequest
+        {
+            Id = requestId,
+            ClientId = "client-248",
+            Status = RequestStatus.Pending, // stale mirror snapshot — must NOT win
+            Description = "stale mirror snapshot",
+            CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-3),
+        });
+
+        var got = await store.GetAsync(requestId, CancellationToken.None);
+
+        got.Should().NotBeNull();
+        got!.Status.Should().Be(RequestStatus.HeadingOff, "delivery-service is the canonical winner when it answers");
+        delivery.GetDeliveryCalls.Should().Be(1);
+    }
+
+    [Fact]
     public async Task Create_mirrors_the_row_into_the_owner_list_mirror()
     {
         // The durable owner-list is backed by the gateway Postgres mirror; the
@@ -704,6 +779,9 @@ public sealed class DurableRequestsStoreTests
                 .ToList();
             return Task.FromResult(rows);
         }
+
+        public Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct)
+            => Task.FromResult(Rows.FirstOrDefault(r => string.Equals(r.Id, requestId, StringComparison.Ordinal)));
     }
 
     private sealed class RecordingBundleRecorder : ISagaBundleRecorder
