@@ -1,5 +1,6 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
+using JeebGateway.Services.Cdn;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -97,13 +98,19 @@ public sealed class CdnController : ControllerBase
 
     private readonly ICDNServiceClient _cdn;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
+    private readonly IConfiguration _config;
+    private readonly ILogger<CdnController> _logger;
 
     public CdnController(
         ICDNServiceClient cdn,
-        IOptionsMonitor<UpstreamFeatureFlags> flags)
+        IOptionsMonitor<UpstreamFeatureFlags> flags,
+        IConfiguration config,
+        ILogger<CdnController> logger)
     {
         _cdn = cdn;
         _flags = flags;
+        _config = config;
+        _logger = logger;
     }
 
     /// <summary>
@@ -175,11 +182,50 @@ public sealed class CdnController : ControllerBase
             ? ticket.ExpiresInSeconds
             : MaxUploadUrlTtlSeconds;
 
+        // JEBV4-259 — ABSOLUTIZE the upload_url (approach B). cdn-service's Local
+        // provider mints a relative, host-less signed-PUT URL the client cannot
+        // reach (cdn is internal-only, no edge route). Rewrite it to the gateway's
+        // absolute streaming-proxy route so the client PUTs to a reachable URL and
+        // the gateway streams the bytes to cdn (CdnUploadProxyController). An
+        // already-public absolute URL (future S3 / approach A) passes through.
+        var gatewayPublicBase = $"{Request.Scheme}://{Request.Host}{Request.PathBase}";
+        Uri.TryCreate(_config["Services:Cdn:BaseUrl"], UriKind.Absolute, out var cdnInternalBase);
+        string uploadUrl;
+        try
+        {
+            uploadUrl = CdnUploadUrlResolver.Resolve(ticket.UploadUrl, cdnInternalBase, gatewayPublicBase);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogError(ex, "CDN broker: cdn-service returned an unusable upload_url for slot {Slot}.", slot);
+            return Problem(
+                title: "Upload broker failed",
+                detail: "The asset store returned an upload target the gateway cannot make reachable.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        // JEBV4-259 — stop DROPPING method + requiredHeaders. Relay cdn's method
+        // (default PUT) and requiredHeaders, and GUARANTEE a Content-Type so the
+        // mobile client's dedicated, interceptor-free Dio sends the right media
+        // type (the shared-Dio JSON default is exactly what corrupted the body).
+        var method = string.IsNullOrWhiteSpace(ticket.Method) ? "PUT" : ticket.Method;
+        var requiredHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var header in ticket.RequiredHeaders)
+        {
+            requiredHeaders[header.Key] = header.Value;
+        }
+        if (!requiredHeaders.ContainsKey("Content-Type"))
+        {
+            requiredHeaders["Content-Type"] = contentType;
+        }
+
         return Ok(new CdnUploadTicketResponse
         {
-            UploadUrl = ticket.UploadUrl,
+            UploadUrl = uploadUrl,
             ObjectRef = ticket.ObjectRef,
             ExpiresIn = expiresIn,
+            Method = method,
+            RequiredHeaders = requiredHeaders,
         });
     }
 
@@ -290,4 +336,20 @@ public sealed class CdnUploadTicketResponse
 
     [System.Text.Json.Serialization.JsonPropertyName("expires_in")]
     public required int ExpiresIn { get; init; }
+
+    /// <summary>
+    /// JEBV4-259 — the HTTP method the client must use for the signed upload
+    /// ("PUT"). Previously dropped; the client had to assume the verb.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("method")]
+    public required string Method { get; init; }
+
+    /// <summary>
+    /// JEBV4-259 — headers the client must send on the signed upload PUT (always
+    /// includes <c>Content-Type</c>). Previously dropped; the client fell back to
+    /// its shared-Dio JSON default and corrupted the binary body. The mobile fix
+    /// applies these verbatim on a dedicated, interceptor-free Dio.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("required_headers")]
+    public required IReadOnlyDictionary<string, string> RequiredHeaders { get; init; }
 }

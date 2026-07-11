@@ -251,6 +251,22 @@ public static class ServiceClientExtensions
             services.AddHttpClient<ICDNServiceClient, CDNServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Cdn")));
 
+        // JEBV4-259 (approach B) — a SEPARATE named client for the KYC-photo
+        // streaming PUT proxy (CdnUploadProxyController). Deliberately carries
+        // NEITHER the resilience/retry handler (a retried request cannot rewind the
+        // client's upload body stream — retrying a stream mid-upload is always
+        // wrong) NOR the bearer / X-Service-Auth handlers (the signed-PUT URL is
+        // bearer-free; the HMAC sig in the query is the authorization cdn
+        // validates). Just the cdn BaseAddress + a generous timeout for a photo
+        // upload over a slow mobile link. Lazy/safe base binding (BindBaseAddress
+        // leaves BaseAddress null for a placeholder host; the proxy 502s rather
+        // than dialing an unroutable address).
+        services.AddHttpClient(JeebGateway.Services.Cdn.CdnUploadUrlResolver.ProxyHttpClientName, http =>
+        {
+            BindBaseAddress(http, config, "Services:Cdn");
+            http.Timeout = TimeSpan.FromSeconds(100);
+        });
+
         // thin-BFF wire — kyc-service (S03 / ADR-0004): the OWNING microservice for
         // the KYC domain (SM-6 state machine, submission aggregate, ToS-acceptance
         // record, Idempotency-Key dedup, role-grant DECISION). Per ARCH LAW

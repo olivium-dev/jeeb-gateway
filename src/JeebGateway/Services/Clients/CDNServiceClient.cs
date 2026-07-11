@@ -119,6 +119,11 @@ public sealed class CDNServiceClient : ICDNServiceClient
             UploadUrl = payload.UploadUrl!,
             ObjectRef = payload.ObjectRef!,
             ExpiresInSeconds = expiresInSeconds,
+            // JEBV4-259: propagate method + requiredHeaders instead of dropping them.
+            Method = string.IsNullOrWhiteSpace(payload.Method) ? "PUT" : payload.Method!,
+            RequiredHeaders = payload.RequiredHeaders is { Count: > 0 }
+                ? new Dictionary<string, string>(payload.RequiredHeaders, StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
         };
     }
 
@@ -148,5 +153,11 @@ public sealed class CDNServiceClient : ICDNServiceClient
         public DateTimeOffset? ExpiresAt { get; set; }
         public int ExpiresInSeconds { get; set; }
         public int ExpiresIn { set => ExpiresInSeconds = value; }
+
+        // JEBV4-259: cdn-service returns { method, requiredHeaders } on presign-put;
+        // these used to be dropped here. Bind them so the broker can relay them to
+        // the client (and default Content-Type when the upstream omits it).
+        public string? Method { get; set; }
+        public Dictionary<string, string>? RequiredHeaders { get; set; }
     }
 }
