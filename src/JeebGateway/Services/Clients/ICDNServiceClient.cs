@@ -191,4 +191,20 @@ public sealed class CdnUploadTicket
 
     /// <summary>Seconds until the signed PUT URL expires (≤ 300, BR-2).</summary>
     public int ExpiresInSeconds { get; init; }
+
+    /// <summary>
+    /// HTTP method the client must use for the signed upload. cdn-service returns
+    /// "PUT"; JEBV4-259 — the gateway used to DROP this and the client had to
+    /// assume the verb. Defaults to <c>PUT</c> when the upstream omits it.
+    /// </summary>
+    public string Method { get; init; } = "PUT";
+
+    /// <summary>
+    /// Headers cdn-service requires the client to send on the signed upload (e.g.
+    /// <c>Content-Type</c>). JEBV4-259 — the gateway used to DROP these, so the
+    /// mobile client fell back to its shared-Dio JSON default and corrupted the
+    /// binary body. May be empty; the broker guarantees at least <c>Content-Type</c>.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> RequiredHeaders { get; init; }
+        = new Dictionary<string, string>();
 }

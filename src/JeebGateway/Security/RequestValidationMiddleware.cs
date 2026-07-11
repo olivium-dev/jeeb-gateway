@@ -10,6 +10,21 @@ namespace JeebGateway.Security;
 /// </summary>
 public class RequestValidationMiddleware
 {
+    /// <summary>
+    /// JEBV4-259 — the KYC-photo streaming upload proxy
+    /// (<see cref="JeebGateway.Controllers.CdnUploadProxyController"/>, route
+    /// <c>PUT /api/cdn/put-signed/{**objectPath}</c>) legitimately receives raw
+    /// image/pdf bytes that are (a) not in this middleware's JSON-oriented
+    /// content-type allowlist and (b) larger than the 1 MB body cap tuned for the
+    /// JSON API surface. That endpoint enforces its OWN 15 MB
+    /// <c>[RequestSizeLimit]</c> and streams straight to cdn-service (which
+    /// validates the signed-URL HMAC), so it is exempt from the content-type +
+    /// body-size checks here. URL-length and header-size checks still apply.
+    /// Before this exemption the KYC PUT was rejected with the exact 415
+    /// "request content type is not supported" wall the JEBV4-259 RCA describes.
+    /// </summary>
+    private static readonly PathString BinaryUploadProxyPathPrefix = new("/api/cdn/put-signed");
+
     private readonly RequestDelegate _next;
     private readonly IOptionsMonitor<SecurityOptions> _options;
 
@@ -52,7 +67,13 @@ public class RequestValidationMiddleware
             }
         }
 
-        if (HasBody(request))
+        // JEBV4-259: the dedicated binary upload proxy self-limits (15 MB) and
+        // streams image/pdf bytes to cdn-service — exempt it from the JSON-oriented
+        // content-type allowlist + 1 MB body cap below (see field doc).
+        var isBinaryUploadProxy = request.Path.StartsWithSegments(
+            BinaryUploadProxyPathPrefix, StringComparison.OrdinalIgnoreCase);
+
+        if (HasBody(request) && !isBinaryUploadProxy)
         {
             if (request.ContentLength > opts.MaxBodySizeBytes)
             {

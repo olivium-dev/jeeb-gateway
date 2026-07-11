@@ -103,6 +103,19 @@ public class SecurityOptions
 
         /// <summary>Fixed window: window duration in seconds for sensitive endpoints.</summary>
         public int SensitiveEndpointWindowSeconds { get; set; } = 60;
+
+        /// <summary>
+        /// Fixed window: per-IP permit count for the ANONYMOUS KYC-photo upload proxy
+        /// (CWE-770 / API4:2023). The signed-PUT streaming endpoint is bearer-free and
+        /// accepts up to 15 MB per request, so a tight per-IP budget caps how much an
+        /// unauthenticated source can push (default 20 uploads/min/IP — comfortable for a
+        /// human doing a multi-photo KYC pass with retries, ~50× tighter than the global
+        /// per-IP limiter). Applied on TOP of the global limiter.
+        /// </summary>
+        public int CdnUploadPermitsPerWindow { get; set; } = 20;
+
+        /// <summary>Fixed window: window duration in seconds for the CDN upload proxy limiter.</summary>
+        public int CdnUploadWindowSeconds { get; set; } = 60;
     }
 
     public class SecurityHeadersConfig

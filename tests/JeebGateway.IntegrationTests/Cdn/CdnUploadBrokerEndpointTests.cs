@@ -61,6 +61,87 @@ public sealed class CdnUploadBrokerEndpointTests
     }
 
     [Fact]
+    public async Task BrokerUploadUrl_Relative_UploadUrl_Is_Absolutized_To_Gateway_Proxy_Preserving_Query()
+    {
+        // JEBV4-259 — the actual production bug: cdn's Local provider mints a
+        // relative, host-less signed-PUT URL. The broker must rewrite it to the
+        // absolute gateway streaming-proxy route (query preserved), not leak it raw.
+        var stub = new StubCdn
+        {
+            UploadUrlOverride = "/api/ImageUpload/put-signed/OBJ123?exp=1720000000&ct=image/jpeg&sig=abc",
+        };
+        using var factory = CdnEnabledFactory(stub);
+        var client = ClientFor(factory, "s03-cdn-relative");
+
+        var resp = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "id_document_front",
+            content_type = "image/jpeg",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = await ReadJsonAsync(resp);
+        var uploadUrl = json.GetProperty("upload_url").GetString();
+        uploadUrl.Should().StartWith("http://localhost/api/cdn/put-signed/OBJ123");
+        uploadUrl.Should().Contain("exp=1720000000");
+        uploadUrl.Should().Contain("sig=abc");
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Returns_Method_And_RequiredHeaders_From_Upstream()
+    {
+        // JEBV4-259 — method + requiredHeaders were previously DROPPED. Relay them.
+        var stub = new StubCdn
+        {
+            TicketMethod = "PUT",
+            TicketRequiredHeaders = new Dictionary<string, string>
+            {
+                ["Content-Type"] = "image/png",
+                ["x-amz-acl"] = "private",
+            },
+        };
+        using var factory = CdnEnabledFactory(stub);
+        var client = ClientFor(factory, "s03-cdn-headers");
+
+        var resp = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "id_document_front",
+            content_type = "image/png",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("method").GetString().Should().Be("PUT");
+        var headers = json.GetProperty("required_headers");
+        headers.GetProperty("Content-Type").GetString().Should().Be("image/png");
+        headers.GetProperty("x-amz-acl").GetString().Should().Be("private");
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Guarantees_ContentType_When_Upstream_Omits_RequiredHeaders()
+    {
+        // JEBV4-259 — even if cdn returns no requiredHeaders, the broker guarantees
+        // Content-Type (from the requested content_type) so the mobile client's
+        // dedicated interceptor-free Dio sends the right media type — never the
+        // shared-Dio application/json default that corrupted the body.
+        var stub = new StubCdn(); // empty requiredHeaders
+        using var factory = CdnEnabledFactory(stub);
+        var client = ClientFor(factory, "s03-cdn-ct-default");
+
+        var resp = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "selfie_with_liveness",
+            content_type = "image/webp",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("method").GetString().Should().Be("PUT");
+        json.GetProperty("required_headers").GetProperty("Content-Type").GetString()
+            .Should().Be("image/webp");
+    }
+
+    [Fact]
     public async Task BrokerUploadUrl_Unknown_Slot_Returns_400()
     {
         using var factory = CdnEnabledFactory(new StubCdn());
@@ -138,12 +219,25 @@ public sealed class CdnUploadBrokerEndpointTests
     {
         public int ExpiresInSeconds { get; init; } = 300;
 
+        /// <summary>JEBV4-259: when set, the stub returns this upload_url (e.g. the
+        /// relative Local-provider shape) instead of the default absolute one.</summary>
+        public string? UploadUrlOverride { get; init; }
+
+        /// <summary>JEBV4-259: the method the upstream advertises (default PUT).</summary>
+        public string TicketMethod { get; init; } = "PUT";
+
+        /// <summary>JEBV4-259: the requiredHeaders the upstream advertises (default empty).</summary>
+        public IReadOnlyDictionary<string, string> TicketRequiredHeaders { get; init; }
+            = new Dictionary<string, string>();
+
         public Task<CdnUploadTicket> MintUploadUrlAsync(CdnUploadUrlRequest request, CancellationToken ct)
             => Task.FromResult(new CdnUploadTicket
             {
-                UploadUrl = $"https://cdn.jeeb.lb/put/{request.Slot}?sig=abc",
+                UploadUrl = UploadUrlOverride ?? $"https://cdn.jeeb.lb/put/{request.Slot}?sig=abc",
                 ObjectRef = $"cdn://obj/{request.Slot}/{Guid.NewGuid():N}",
                 ExpiresInSeconds = ExpiresInSeconds,
+                Method = TicketMethod,
+                RequiredHeaders = TicketRequiredHeaders,
             });
 
         public Task<CdnAsset> UploadAsync(CdnUploadRequest request, CancellationToken ct)

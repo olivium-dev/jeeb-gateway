@@ -17,6 +17,7 @@ namespace JeebGateway.Security;
 ///   Named policies (applied via [EnableRateLimiting] on controller / endpoint groups):
 ///   - "auth_token_bucket" — token bucket for auth routes (brute-force protection)
 ///   - "sensitive_fixed"   — fixed window for sensitive endpoints (login, OTP)
+///   - "cdn_upload"        — fixed window for the anonymous 15 MB KYC upload proxy (CWE-770)
 ///
 /// A single request consumes one permit in each applicable partition; if any
 /// is exhausted the request rejects with 429 + Retry-After.
@@ -27,6 +28,7 @@ public static class RateLimitingExtensions
     public const string IpPartition = "ip";
     public const string AuthTokenBucketPolicy = "auth_token_bucket";
     public const string SensitiveFixedPolicy = "sensitive_fixed";
+    public const string CdnUploadPolicy = "cdn_upload";
 
     public static IServiceCollection AddJeebRateLimiting(this IServiceCollection services)
     {
@@ -97,6 +99,34 @@ public static class RateLimitingExtensions
                     {
                         PermitLimit = opts.SensitiveEndpointPermitsPerWindow,
                         Window = TimeSpan.FromSeconds(opts.SensitiveEndpointWindowSeconds),
+                        QueueLimit = 0,
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                        AutoReplenishment = true
+                    });
+            });
+
+            // Named policy: fixed window for the ANONYMOUS KYC-photo upload proxy
+            // (CWE-770 / API4:2023). CdnUploadProxyController is [AllowAnonymous] and
+            // streams up to 15 MB per request; a tight per-IP budget bounds how much an
+            // unauthenticated source can push through it, layered on TOP of the global
+            // per-IP limiter. Partitioned by the trusted connection IP (ResolveClientIp
+            // — never the raw X-Forwarded-For, per SEC-H1).
+            options.AddPolicy(CdnUploadPolicy, httpContext =>
+            {
+                var opts = httpContext.RequestServices
+                    .GetRequiredService<IOptionsMonitor<SecurityOptions>>()
+                    .CurrentValue.RateLimit;
+
+                if (!opts.Enabled)
+                    return RateLimitPartition.GetNoLimiter("disabled");
+
+                var ip = ResolveClientIp(httpContext) ?? "unknown";
+                return RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: $"cdn_upload_fw:{ip}",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = opts.CdnUploadPermitsPerWindow,
+                        Window = TimeSpan.FromSeconds(opts.CdnUploadWindowSeconds),
                         QueueLimit = 0,
                         QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                         AutoReplenishment = true
