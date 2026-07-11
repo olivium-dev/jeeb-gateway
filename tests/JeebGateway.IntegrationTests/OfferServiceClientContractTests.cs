@@ -175,6 +175,45 @@ public class OfferServiceClientContractTests
     }
 
     [Fact]
+    public async Task AcceptAsync_Sends_ConfirmHighFee_True_With_SnakeCase_WireKey()
+    {
+        // JEBV4-120: offer-service's accept saga 409s (high_fee_confirmation_required)
+        // for any offer priced above high_fee_threshold_cents (default $50) unless the
+        // body carries confirm_high_fee=true. The empty "{}" body the gateway used to
+        // send deterministically blocked >$50 offers (the on-device $100 COD offer).
+        // The wire key MUST be the snake_case literal offer_controller.ex reads.
+        string? body = null;
+        var client = ClientCapturing(
+            HttpStatusCode.OK,
+            $$"""{"accepted_offer":{"id":"{{OfferId}}","actor_id":"{{UserId}}"},"rejected_offer_ids":[]}""",
+            (_, b) => body = b);
+
+        await client.AcceptAsync(UserId, RequestId, OfferId, "idem-key-12345678", CancellationToken.None);
+
+        body.Should().NotBeNull();
+        body!.Should().Contain("\"confirm_high_fee\":true");
+        // Guard the exact wire contract: the serializer must NOT camelCase the key.
+        body.Should().NotContain("confirmHighFee");
+    }
+
+    [Fact]
+    public async Task AcceptWithStatusAsync_Sends_ConfirmHighFee_True_With_SnakeCase_WireKey()
+    {
+        // Same JEBV4-120 fix on the status-forwarding accept path used by the BFF.
+        string? body = null;
+        var client = ClientCapturing(
+            HttpStatusCode.OK,
+            $$"""{"accepted_offer":{"id":"{{OfferId}}","actor_id":"{{UserId}}"},"rejected_offer_ids":[]}""",
+            (_, b) => body = b);
+
+        await client.AcceptWithStatusAsync(UserId, RequestId, OfferId, "idem-key-12345678", CancellationToken.None);
+
+        body.Should().NotBeNull();
+        body!.Should().Contain("\"confirm_high_fee\":true");
+        body.Should().NotContain("confirmHighFee");
+    }
+
+    [Fact]
     public async Task AcceptWithStatusAsync_Maps_200_To_Accepted_With_Envelope()
     {
         HttpRequestMessage? captured = null;
