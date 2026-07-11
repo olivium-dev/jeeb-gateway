@@ -7,6 +7,7 @@ using JeebGateway.StateService.Idempotency;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 namespace JeebGateway.Controllers;
 
@@ -51,11 +52,16 @@ public sealed class JeebSupportController : ControllerBase
 {
     private readonly IJeebSupportTicketStore _store;
     private readonly TimeProvider _clock;
+    private readonly ILogger<JeebSupportController> _log;
 
-    public JeebSupportController(IJeebSupportTicketStore store, TimeProvider clock)
+    public JeebSupportController(
+        IJeebSupportTicketStore store,
+        TimeProvider clock,
+        ILogger<JeebSupportController> log)
     {
         _store = store;
         _clock = clock;
+        _log = log;
     }
 
     /// <summary>
@@ -95,10 +101,7 @@ public sealed class JeebSupportController : ControllerBase
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Problem(
-                title: "The support-ticket store (jeeb-state-service) rejected the create.",
-                detail: ex.Message,
-                statusCode: StatusCodes.Status502BadGateway);
+            return UpstreamProblem(ex);
         }
 
         var dto = JeebSupportProjection.ProjectTicket(row);
@@ -128,10 +131,7 @@ public sealed class JeebSupportController : ControllerBase
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Problem(
-                title: "The support-ticket store (jeeb-state-service) rejected the read.",
-                detail: ex.Message,
-                statusCode: StatusCodes.Status502BadGateway);
+            return UpstreamProblem(ex);
         }
 
         // STATE: the caller may only read their OWN ticket; a foreign/unknown id is a 404
@@ -168,10 +168,7 @@ public sealed class JeebSupportController : ControllerBase
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Problem(
-                title: "The support-ticket store (jeeb-state-service) rejected the list.",
-                detail: ex.Message,
-                statusCode: StatusCodes.Status502BadGateway);
+            return UpstreamProblem(ex);
         }
     }
 
@@ -196,4 +193,23 @@ public sealed class JeebSupportController : ControllerBase
         Status = StatusCodes.Status400BadRequest,
         Type = "https://jeeb.dev/errors/invalid-support-ticket",
     };
+
+    /// <summary>
+    /// JEBV4-249 — map a jeeb-state-service store failure to a sanitized RFC 7807
+    /// ProblemDetails. The store exception (which may wrap connection / driver detail
+    /// or an upstream body) is logged server-side ONLY and never echoed to the caller;
+    /// the client always sees a generic 502 Bad Gateway. (Was
+    /// the raw <c>ex.Message</c> in the response detail at the create/read/list store
+    /// catches — an information-disclosure leak.)
+    /// </summary>
+    private IActionResult UpstreamProblem(Exception ex)
+    {
+        _log.LogWarning(ex,
+            "Support BFF: jeeb-state-service call failed on {Method} {Path}.",
+            Request.Method, Request.Path);
+
+        return Problem(
+            title: "The support request could not be completed.",
+            statusCode: StatusCodes.Status502BadGateway);
+    }
 }
