@@ -159,7 +159,7 @@ public class LocationController : ControllerBase
         // the device-latest fix and backs the SSE tracking read path
         // (GET /deliveries/{id}/tracking), which has no upstream equivalent in
         // S06 scope.
-        var result = _store.Record(jeeberId, points);
+        var result = await _store.RecordAsync(jeeberId, points, ct);
 
         var latest = result.Latest is null ? null : new GpsPointDto
         {
@@ -312,7 +312,7 @@ public class LocationController : ControllerBase
     private async Task WritePolylineSnapshotAsync(DeliveryParticipants participants, CancellationToken ct)
     {
         var jeeberId = participants.JeeberId ?? string.Empty;
-        var latest = string.IsNullOrEmpty(jeeberId) ? null : _store.GetLatest(jeeberId);
+        var latest = string.IsNullOrEmpty(jeeberId) ? null : await _store.GetLatestAsync(jeeberId, ct);
         var polyline = Polyline.StraightLine(latest, participants.DropoffLocation);
 
         var dto = new TrackingPolylineDto
@@ -415,7 +415,7 @@ public class LocationController : ControllerBase
     private async Task EmitFrameAsync(DeliveryParticipants delivery, CancellationToken ct)
     {
         var jeeberId = delivery.JeeberId ?? string.Empty;
-        var latest = string.IsNullOrEmpty(jeeberId) ? null : _store.GetLatest(jeeberId);
+        var latest = string.IsNullOrEmpty(jeeberId) ? null : await _store.GetLatestAsync(jeeberId, ct);
         var now = _clock.GetUtcNow();
 
         double? sinceSec = latest is null

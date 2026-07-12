@@ -29,7 +29,7 @@ public sealed class GeoServiceLocationStoreTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    private static GeoServiceLocationStore BuildStore(StubHandler handler, TrackingOptions? options = null)
+    private static GeoServiceLocationStore BuildStore(HttpMessageHandler handler, TrackingOptions? options = null)
     {
         var http = new HttpClient(handler) { BaseAddress = new Uri("http://geo.test/") };
         var client = new GeolocationServiceClient(http);
@@ -38,7 +38,7 @@ public sealed class GeoServiceLocationStoreTests
     }
 
     [Fact]
-    public void Record_Posts_LocationUpdate_And_Maps_Latest()
+    public async Task Record_Posts_LocationUpdate_And_Maps_Latest()
     {
         string? capturedBody = null;
         string? capturedPath = null;
@@ -63,7 +63,7 @@ public sealed class GeoServiceLocationStoreTests
 
         var store = BuildStore(handler);
         var now = DateTimeOffset.Parse("2026-06-13T10:00:00Z");
-        var result = store.Record("jeeber-1", new[]
+        var result = await store.RecordAsync("jeeber-1", new[]
         {
             new GpsPointDto { Lat = 24.711, Lng = 46.671, Accuracy = 8.0, Timestamp = now.AddSeconds(-5) },
             new GpsPointDto { Lat = 24.712, Lng = 46.672, Accuracy = 6.5, Timestamp = now },
@@ -91,7 +91,7 @@ public sealed class GeoServiceLocationStoreTests
     }
 
     [Fact]
-    public void GetLatest_Reads_UserLocation_And_Maps_Position()
+    public async Task GetLatest_Reads_UserLocation_And_Maps_Position()
     {
         string? capturedPath = null;
         var handler = new StubHandler((req, _) =>
@@ -113,7 +113,7 @@ public sealed class GeoServiceLocationStoreTests
         });
 
         var store = BuildStore(handler);
-        var latest = store.GetLatest("jeeber-1");
+        var latest = await store.GetLatestAsync("jeeber-1");
 
         capturedPath.Should().Be("/locations/user/jeeber-1");
         latest.Should().NotBeNull();
@@ -122,18 +122,18 @@ public sealed class GeoServiceLocationStoreTests
     }
 
     [Fact]
-    public void GetLatest_Returns_Null_On_Upstream_404()
+    public async Task GetLatest_Returns_Null_On_Upstream_404()
     {
         var handler = new StubHandler((_, _) => new HttpResponseMessage(HttpStatusCode.NotFound));
         var store = BuildStore(handler);
 
-        var latest = store.GetLatest("jeeber-unknown");
+        var latest = await store.GetLatestAsync("jeeber-unknown");
 
         latest.Should().BeNull("a 404 from /locations/user/{id} means no fix, not an error");
     }
 
     [Fact]
-    public void GetLatest_Returns_Null_When_Upstream_Fix_Is_Older_Than_Ttl()
+    public async Task GetLatest_Returns_Null_When_Upstream_Fix_Is_Older_Than_Ttl()
     {
         var handler = new StubHandler((_, _) =>
         {
@@ -153,7 +153,51 @@ public sealed class GeoServiceLocationStoreTests
         });
 
         var store = BuildStore(handler, new TrackingOptions { PositionTtl = TimeSpan.FromMinutes(5) });
-        store.GetLatest("jeeber-1").Should().BeNull("a stale upstream fix maps to 'no current fix', matching the in-memory TTL contract");
+        (await store.GetLatestAsync("jeeber-1")).Should().BeNull("a stale upstream fix maps to 'no current fix', matching the in-memory TTL contract");
+    }
+
+    [Fact]
+    public async Task RecordAsync_Holds_N_Concurrent_Upstream_Calls_Without_Blocking_Threads() // JEBV4-57 AC#3
+    {
+        // A gated async handler suspends every upstream call until released. With
+        // the sync-over-async bridge GONE, all N in-flight RecordAsync calls are
+        // truly suspended (awaiting) at once — a blocking bridge would instead pin
+        // N thread-pool threads. We launch N from a single caller and assert all N
+        // are concurrently in-flight yet none has completed, proving non-blocking.
+        using var gate = new SemaphoreSlim(0);
+        var inFlight = 0;
+        var handler = new AsyncGateHandler(async ct =>
+        {
+            Interlocked.Increment(ref inFlight);
+            await gate.WaitAsync(ct);
+            const string json = """
+            { "accepted": 1, "rejected": 0, "online": true, "latest": { "lat": 1, "lng": 2, "timestamp": "2026-06-13T10:00:00Z" } }
+            """;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+        });
+
+        var store = BuildStore(handler);
+        const int n = 64;
+        var point = new[] { new GpsPointDto { Lat = 1, Lng = 2, Accuracy = 5, Timestamp = DateTimeOffset.UtcNow } };
+
+        var tasks = Enumerable.Range(0, n)
+            .Select(i => store.RecordAsync($"jeeber-{i}", point))
+            .ToArray();
+
+        // Wait until all N upstream calls have entered the (suspended) handler.
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+        while (Volatile.Read(ref inFlight) < n && DateTimeOffset.UtcNow < deadline)
+            await Task.Delay(10);
+
+        Volatile.Read(ref inFlight).Should().Be(n, "all N upstream calls are concurrently in-flight");
+        tasks.Should().OnlyContain(t => !t.IsCompleted, "each in-flight call is awaiting, not blocking a thread");
+
+        gate.Release(n);
+        var results = await Task.WhenAll(tasks);
+        results.Should().OnlyContain(r => r.Accepted == 1);
     }
 
     [Fact]
@@ -200,6 +244,17 @@ public sealed class GeoServiceLocationStoreTests
             string? body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
             return _responder(request, body);
         }
+    }
+
+    private sealed class AsyncGateHandler : HttpMessageHandler
+    {
+        private readonly Func<CancellationToken, Task<HttpResponseMessage>> _responder;
+
+        public AsyncGateHandler(Func<CancellationToken, Task<HttpResponseMessage>> responder)
+            => _responder = responder;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => _responder(cancellationToken);
     }
 
     private sealed class StaticOptionsMonitor : IOptionsMonitor<TrackingOptions>

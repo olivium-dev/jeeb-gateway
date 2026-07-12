@@ -81,7 +81,7 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
 
         // The store retained the most-recent (by device timestamp) point.
         var store = _factory.Services.GetRequiredService<ILocationStore>();
-        var latest = store.GetLatest(jeeberId);
+        var latest = await store.GetLatestAsync(jeeberId);
         latest.Should().NotBeNull();
         latest!.Lat.Should().Be(24.7120);
     }
@@ -105,7 +105,7 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
         });
 
         var store = _factory.Services.GetRequiredService<ILocationStore>();
-        var latest = store.GetLatest(jeeberId);
+        var latest = await store.GetLatestAsync(jeeberId);
         latest!.Lat.Should().Be(24.0, "device-newer point wins over an out-of-order older delivery");
     }
 
@@ -179,7 +179,9 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
             var id = $"throughput-jeeber-{w}";
             for (var i = 0; i < perWriter; i++)
             {
-                store.Record(id, new[]
+                // In-memory store (flag-OFF): RecordAsync completes synchronously
+                // (Task.FromResult), so this throughput smoke stays valid.
+                store.RecordAsync(id, new[]
                 {
                     new GpsPointDto
                     {
@@ -188,7 +190,7 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
                         Accuracy = 5,
                         Timestamp = now.AddMilliseconds(i)
                     }
-                });
+                }).GetAwaiter().GetResult();
             }
         });
 
@@ -211,7 +213,7 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
 
         // Pre-record a position so the very first SSE frame carries data.
         var store = _factory.Services.GetRequiredService<ILocationStore>();
-        store.Record(seed.JeeberId, new[]
+        await store.RecordAsync(seed.JeeberId, new[]
         {
             new GpsPointDto { Lat = 24.7000, Lng = 46.7000, Accuracy = 5, Timestamp = DateTimeOffset.UtcNow }
         });
@@ -255,7 +257,7 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
             dropoffLat: 24.8, dropoffLng: 46.8, factory: factory);
 
         var store = factory.Services.GetRequiredService<ILocationStore>();
-        store.Record(seed.JeeberId, new[]
+        await store.RecordAsync(seed.JeeberId, new[]
         {
             new GpsPointDto { Lat = 24.7, Lng = 46.7, Accuracy = 5, Timestamp = DateTimeOffset.UtcNow }
         });

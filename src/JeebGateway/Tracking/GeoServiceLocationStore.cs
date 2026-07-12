@@ -31,13 +31,15 @@ namespace JeebGateway.Tracking;
 ///   see identical "stale == no current fix" behaviour regardless of the flag.</item>
 /// </list>
 ///
-/// <para><b>Sync-over-async.</b> <see cref="ILocationStore"/> is synchronous (the hot
-/// read path was designed lock-free for the 50k-updates/min budget). The generated
-/// client is async, so the two delegating methods bridge with
-/// <c>GetAwaiter().GetResult()</c>. This is acceptable only because the typed
-/// HttpClient is configured with a bounded timeout + resilience pipeline in
-/// <c>ServiceClientExtensions</c>; a future change to an async ILocationStore would
-/// remove the bridge. The bridge is isolated to this flag-OFF-by-default path.</para>
+/// <para><b>Fully async (JEBV4-57 / GW12-PERF-1).</b> <see cref="ILocationStore"/>
+/// is now async, so both delegating methods <c>await</c> the generated client
+/// directly. The previous <c>GetAwaiter().GetResult()</c> sync-over-async bridge is
+/// GONE: on the GPS hot path (50k updates/min budget) a blocking bridge would pin an
+/// ASP.NET thread-pool thread per in-flight upstream call, so a GPS fan-out storm
+/// with <c>UseUpstream:Geolocation</c> flipped on could starve unrelated request
+/// handling. Awaiting frees the thread during the network round-trip; the typed
+/// HttpClient still carries the bounded timeout + resilience pipeline from
+/// <c>ServiceClientExtensions</c>.</para>
 /// </summary>
 public sealed class GeoServiceLocationStore : ILocationStore
 {
@@ -58,12 +60,12 @@ public sealed class GeoServiceLocationStore : ILocationStore
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
-    public LocationStoreUpdateResult Record(string jeeberId, IReadOnlyList<GpsPointDto> points)
+    public async Task<LocationStoreUpdateResult> RecordAsync(string jeeberId, IReadOnlyList<GpsPointDto> points, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(jeeberId)) throw new ArgumentException("jeeberId required", nameof(jeeberId));
         if (points is null || points.Count == 0)
         {
-            return new LocationStoreUpdateResult(0, 0, GetLatest(jeeberId));
+            return new LocationStoreUpdateResult(0, 0, await GetLatestAsync(jeeberId, ct).ConfigureAwait(false));
         }
 
         var body = new Generated.LocationUpdateRequest
@@ -79,19 +81,17 @@ public sealed class GeoServiceLocationStore : ILocationStore
                 .ToList(),
         };
 
-        // sync-over-async bridge — see class banner.
-        var response = _client.UpdateLocationAsync(body).GetAwaiter().GetResult();
+        var response = await _client.UpdateLocationAsync(body, ct).ConfigureAwait(false);
 
         var latest = MapLatest(response.Latest);
         return new LocationStoreUpdateResult(response.Accepted, response.Rejected, latest);
     }
 
-    public StoredPosition? GetLatest(string jeeberId)
+    public async Task<StoredPosition?> GetLatestAsync(string jeeberId, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(jeeberId)) return null;
 
-        // sync-over-async bridge — see class banner.
-        var upstream = _client.GetUserLocationAsync(jeeberId).GetAwaiter().GetResult();
+        var upstream = await _client.GetUserLocationAsync(jeeberId, ct).ConfigureAwait(false);
         if (upstream is null)
         {
             // 404 from /locations/user/{id} == no fix, not an error.

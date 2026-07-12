@@ -112,18 +112,18 @@ public sealed class LocationEndpointUpstreamTests
         public string? RecordedJeeberId { get; private set; }
         public int RecordedPointCount { get; private set; }
 
-        public LocationStoreUpdateResult Record(string jeeberId, IReadOnlyList<GpsPointDto> points)
+        public Task<LocationStoreUpdateResult> RecordAsync(string jeeberId, IReadOnlyList<GpsPointDto> points, CancellationToken ct = default)
         {
             RecordedJeeberId = jeeberId;
             RecordedPointCount = points.Count;
             var newest = points[^1];
             var latest = new StoredPosition(newest.Lat, newest.Lng, newest.Accuracy, newest.Timestamp, DateTimeOffset.UtcNow);
-            return new LocationStoreUpdateResult(points.Count, 0, latest);
+            return Task.FromResult(new LocationStoreUpdateResult(points.Count, 0, latest));
         }
 
-        public StoredPosition? GetLatest(string jeeberId) =>
-            RecordedJeeberId == jeeberId && RecordedPointCount > 0
+        public Task<StoredPosition?> GetLatestAsync(string jeeberId, CancellationToken ct = default) =>
+            Task.FromResult(RecordedJeeberId == jeeberId && RecordedPointCount > 0
                 ? new StoredPosition(0, 0, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)
-                : null;
+                : null);
     }
 }
