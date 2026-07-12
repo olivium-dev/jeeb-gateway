@@ -26,6 +26,18 @@ public sealed class RemoteUserPreferencesNotificationPreferencesStore : INotific
 {
     private const string BlobKey = "jeeb.notification_prefs";
 
+    // JEBV4-30 (AC#4, gateway latency): the remote-user-preferences named client
+    // (:10067) carries the org-standard resilience pipeline (3 retries x 10s
+    // per-attempt timeout, 30s HttpClient cap). On a slow/erroring upstream that
+    // let a fail-open READ burn ~13s and a read-modify-write PATCH exceed the
+    // mobile client's 15s write timeout (toggle reverts, nothing persists).
+    // These per-call budgets cap the WHOLE store operation so GET/PATCH complete
+    // well under 2s on a healthy upstream and fail fast on a slow one instead of
+    // spinning the retry pipeline. Notification preferences are a low-stakes
+    // fail-open surface, so a short deadline is the right trade.
+    private static readonly TimeSpan UpstreamReadBudget = TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan UpstreamWriteBudget = TimeSpan.FromMilliseconds(2000);
+
     private static readonly JsonSerializerOptions SerializerOptions =
         new(JsonSerializerDefaults.Web) { WriteIndented = false };
 
@@ -42,28 +54,11 @@ public sealed class RemoteUserPreferencesNotificationPreferencesStore : INotific
 
     public async Task<UserNotificationPreferences> GetAsync(string userId, CancellationToken ct)
     {
-        try
-        {
-            using var scope = _scopeFactory.CreateScope();
-            var client = scope.ServiceProvider.GetRequiredService<ServiceRemoteUserPreferencesClient>();
-            var pref = await client.Data_GetSinglePreferenceAsync(userId, BlobKey, ct);
-            if (pref?.Value is { } json)
-            {
-                var blob = JsonSerializer.Deserialize<NotificationPreferencesBlob>(json, SerializerOptions);
-                if (blob is not null)
-                    return FromBlob(userId, blob);
-            }
-        }
-        catch (ApiException ex) when (ex.StatusCode == 404)
-        {
-            // First access: no prefs stored yet — fall through to defaults.
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Failed to read notification preferences for user {UserId}; using defaults (fail-open)", userId);
-        }
-        return NotificationPreferencesDefaults.NewDefault(userId);
+        // Fail-open READ: on any upstream error OR our budget expiring, return
+        // defaults FAST (<=UpstreamReadBudget) rather than spinning the retry
+        // pipeline for up to ~30s.
+        var (_, prefs) = await ReadInternalAsync(userId, ct);
+        return prefs;
     }
 
     public async Task<UserNotificationPreferences> UpdateAsync(
@@ -71,20 +66,91 @@ public sealed class RemoteUserPreferencesNotificationPreferencesStore : INotific
         NotificationPreferencesPatch patch,
         CancellationToken ct)
     {
-        var current = await GetAsync(userId, ct);
+        // The remote store only supports whole-blob get/set, so PATCH is a
+        // read-modify-write: a full upstream READ followed by a WRITE. Bound the
+        // WHOLE operation with one deadline so a slow upstream fails fast instead
+        // of two stacked retry-pipeline round-trips blowing the client's 15s write
+        // timeout.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(UpstreamWriteBudget);
+
+        var (answered, current) = await ReadInternalAsync(userId, budget.Token);
+        // If the pre-read did NOT genuinely come back from upstream, abort the
+        // write: blindly persisting merged-defaults would clobber the user's real
+        // stored preferences. Surface a fast timeout the controller maps to 504.
+        if (!answered)
+            throw new TimeoutException(
+                "remote-user-preferences did not respond within the read budget; aborting the " +
+                "notification-preferences write to avoid overwriting stored preferences with defaults.");
+
         ApplyPatch(current, patch);
         var json = JsonSerializer.Serialize(ToBlob(current), SerializerOptions);
         using var scope = _scopeFactory.CreateScope();
         var client = scope.ServiceProvider.GetRequiredService<ServiceRemoteUserPreferencesClient>();
         try
         {
-            await client.Data_UpdatePreferenceAsync(userId, BlobKey, new PreferenceValue { Value = json }, ct);
+            try
+            {
+                await client.Data_UpdatePreferenceAsync(userId, BlobKey, new PreferenceValue { Value = json }, budget.Token);
+            }
+            catch (ApiException ex) when (ex.StatusCode == 404)
+            {
+                await client.Data_SetSinglePreferenceAsync(userId, BlobKey, new PreferenceValue { Value = json }, budget.Token);
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Our write budget expired (not a caller cancellation) — fail fast.
+            throw new TimeoutException(
+                "remote-user-preferences did not accept the notification-preferences write within the budget.");
+        }
+        return current;
+    }
+
+    /// <summary>
+    /// Reads the preference blob under a bounded deadline. Returns
+    /// <c>answered=true</c> when the upstream produced a definitive answer
+    /// (a blob, an empty/absent blob, or a 404 "no prefs yet"), and
+    /// <c>answered=false</c> when the call errored or exceeded
+    /// <see cref="UpstreamReadBudget"/> — in which case callers still get
+    /// safe defaults but know the value is NOT authoritative. A genuine caller
+    /// cancellation is propagated.
+    /// </summary>
+    private async Task<(bool answered, UserNotificationPreferences prefs)> ReadInternalAsync(string userId, CancellationToken ct)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(UpstreamReadBudget);
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var client = scope.ServiceProvider.GetRequiredService<ServiceRemoteUserPreferencesClient>();
+            var pref = await client.Data_GetSinglePreferenceAsync(userId, BlobKey, budget.Token);
+            if (pref?.Value is { } json)
+            {
+                var blob = JsonSerializer.Deserialize<NotificationPreferencesBlob>(json, SerializerOptions);
+                if (blob is not null)
+                    return (true, FromBlob(userId, blob));
+            }
+            // 200 with an empty/unparseable body: treat as "no prefs yet".
+            return (true, NotificationPreferencesDefaults.NewDefault(userId));
         }
         catch (ApiException ex) when (ex.StatusCode == 404)
         {
-            await client.Data_SetSinglePreferenceAsync(userId, BlobKey, new PreferenceValue { Value = json }, ct);
+            // First access: no prefs stored yet — a definitive answer.
+            return (true, NotificationPreferencesDefaults.NewDefault(userId));
         }
-        return current;
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The CALLER aborted (not our budget) — propagate.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "notification-preferences read for {UserId} failed or exceeded {BudgetMs}ms; failing open to defaults",
+                userId, UpstreamReadBudget.TotalMilliseconds);
+            return (false, NotificationPreferencesDefaults.NewDefault(userId));
+        }
     }
 
     private static void ApplyPatch(UserNotificationPreferences prefs, NotificationPreferencesPatch patch)

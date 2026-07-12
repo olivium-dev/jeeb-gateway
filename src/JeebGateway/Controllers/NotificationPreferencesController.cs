@@ -38,6 +38,7 @@ public class NotificationPreferencesController : ControllerBase
     [ProducesResponseType(typeof(NotificationPreferencesResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status504GatewayTimeout)]
     public async Task<IActionResult> Patch([FromBody] NotificationPreferencesPatchRequest body, CancellationToken ct)
     {
         if (!TryGetUserId(out var userId, out var problem)) return problem;
@@ -71,8 +72,25 @@ public class NotificationPreferencesController : ControllerBase
             Settlements = body.Settlements
         };
 
-        var updated = await _store.UpdateAsync(userId, patch, ct);
-        return Ok(ToResponse(updated));
+        try
+        {
+            var updated = await _store.UpdateAsync(userId, patch, ct);
+            return Ok(ToResponse(updated));
+        }
+        catch (TimeoutException)
+        {
+            // JEBV4-30 (AC#4): the preferences upstream (remote-user-preferences)
+            // did not answer within the store's write budget. Fail FAST with a
+            // clean 504 (~2s) instead of letting the mobile client hit its 15s
+            // write timeout with a null response and a silently reverted toggle.
+            return StatusCode(StatusCodes.Status504GatewayTimeout, new ProblemDetails
+            {
+                Title = "Notification preferences service timed out.",
+                Detail = "The preferences service did not respond in time. Please try again.",
+                Status = StatusCodes.Status504GatewayTimeout,
+                Type = "https://jeeb.dev/errors/upstream-timeout"
+            });
+        }
     }
 
     // SEC-C1 (Leg-11): identity derives from the validated JWT principal; the raw
