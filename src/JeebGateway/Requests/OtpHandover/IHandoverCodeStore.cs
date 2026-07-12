@@ -59,6 +59,17 @@ public interface IHandoverCodeStore
     /// code keeps working unchanged. The submitted code is never logged.
     /// </summary>
     Task<bool> TryMatchAsync(string deliveryId, string submittedCode, CancellationToken ct);
+
+    /// <summary>
+    /// JEBV4-83 (F7) — invalidate the delivery's stored handover code after a
+    /// SUCCESSFUL handover so the Gap-G4 in-app secret does not live out its full
+    /// 24h TTL as a stale, still-matchable code. DEGRADE-DON'T-FAIL: the handover
+    /// already verified and transitioned upstream, so a cache-infrastructure fault
+    /// here must never fail the response — the code then self-heals via its own TTL.
+    /// Idempotent and no-op when nothing is stored (never issued / already cleared).
+    /// The code is never logged.
+    /// </summary>
+    Task InvalidateAsync(string deliveryId, CancellationToken ct);
 }
 
 /// <summary>
@@ -155,6 +166,28 @@ public sealed class DistributedCacheHandoverCodeStore : IHandoverCodeStore
         // FixedTimeEquals is constant-time for equal-length inputs and safely
         // returns false (no throw, no data-dependent early-out) on a length mismatch.
         return CryptographicOperations.FixedTimeEquals(stored, submitted);
+    }
+
+    public async Task InvalidateAsync(string deliveryId, CancellationToken ct)
+    {
+        // JEBV4-83 (F7) — degrade-don't-fail, mirroring TryMatchAsync's fail-open
+        // precedent. A Redis blip on this post-verify cleanup must never fail the
+        // already-committed, already-verified handover response; the stale code then
+        // self-heals via its own 24h TTL instead of an explicit clear.
+        try
+        {
+            await _cache.RemoveAsync(CacheKey(deliveryId), ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (IsCacheInfrastructureFault(ex))
+        {
+            _log?.LogWarning(ex,
+                "handover_code.cache_fault deliveryId={DeliveryId} op=invalidate; code will self-heal via TTL",
+                deliveryId);
+        }
     }
 
     /// <summary>

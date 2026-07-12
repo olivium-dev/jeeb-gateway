@@ -143,8 +143,35 @@ public sealed class JeebOffersController : ControllerBase
         // Retired BR-10 active-delivery cap: do not pre-count delivery-service
         // assignments here. Offer-service still owns real accept conflicts below.
 
+        // JEBV4-83 (F5) — BR-1 self-offer guard (defense-in-depth), porting the legacy
+        // route's check (OffersController.AcceptViaUpstreamAsync:553-564) so the two live
+        // accept surfaces cannot diverge. BR-1 forbids a user acting as BOTH Client and
+        // Jeeber on one delivery; the actor here is the request-OWNING client, so the only
+        // legitimate violation is a genuine SELF-OFFER: the accepting client is also the
+        // jeeber who bid THIS offer. We compare the actor against the offer's recorded
+        // bidder (never request.ClientId, which trips on every valid accept). When the
+        // bidder is unknown (cold reconciliation returned no jeeber id) we do NOT assert a
+        // violation — the offer-service request-scoped accept guard remains the
+        // authoritative owner of dual-role self-dealing, so we let the saga decide.
+        if (!string.IsNullOrWhiteSpace(winningJeeberId)
+            && string.Equals(winningJeeberId, actorId, StringComparison.Ordinal))
+        {
+            return Conflict(new ProblemDetails
+            {
+                Title = "Cannot accept your own delivery request (BR-1).",
+                Detail = "A user cannot act as both Client and Jeeber on the same delivery.",
+                Status = StatusCodes.Status409Conflict,
+                Type = "https://jeeb.dev/errors/same-delivery-role-violation"
+            });
+        }
+
+        // JEBV4-83 (F6) — deterministic Idempotency-Key fallback. When the client does
+        // not send the header, fall back to a stable per-(actor, offer) key (matching
+        // OffersController.AcceptViaUpstreamAsync:572) so a retry replays the SAME key and
+        // offer-service dedupes it — instead of a fresh Guid per attempt that re-runs the
+        // accept side-effects (delivery-leg assign, push fan-out, handover-code issue).
         var key = string.IsNullOrWhiteSpace(idempotencyKey)
-            ? Guid.NewGuid().ToString("N")
+            ? $"accept-{actorId}-{offerId}"
             : idempotencyKey;
 
         var result = await _offerService.AcceptWithStatusAsync(actorId, requestId, offerId, key, ct);

@@ -1699,6 +1699,12 @@ public class DeliveriesController : ControllerBase
             await TryRemoveCacheAsync(AttemptsCacheKey(deliveryId), "clear_attempts", deliveryId, ct);
             await TryRemoveCacheAsync(LockoutCacheKey(deliveryId), "clear_lockout", deliveryId, ct);
 
+            // JEBV4-83 (F7): invalidate the Gap-G4 in-app handover code now that the
+            // handover verified — otherwise the raw code lingers its full 24h TTL as a
+            // stale, still-matchable secret. Degrade-don't-fail (self-heals via TTL on a
+            // cache-infra fault), so it can never turn this committed 200 into a 5xx.
+            await _handoverCodes.InvalidateAsync(deliveryId, ct);
+
             // FT-07: enqueue the pending-settlement placeholder so the
             // financial pipeline has a record at handover-complete.
             // Re-read the updated row so its status reflects Delivered.
@@ -2111,6 +2117,12 @@ public class DeliveriesController : ControllerBase
                 + "reconciled. correlationId {CorrelationId}",
                 deliveryId, correlationId);
         }
+
+        // JEBV4-83 (F7): invalidate the Gap-G4 in-app handover code now that
+        // delivery-service confirmed the handover — otherwise the raw code lingers its
+        // full 24h TTL as a stale, still-matchable secret. Degrade-don't-fail (self-heals
+        // via TTL on a cache-infra fault), so it can never turn this committed 200 into a 5xx.
+        await _handoverCodes.InvalidateAsync(deliveryId, ct);
 
         activity?.SetTag("otp.verified", "true");
 
