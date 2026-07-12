@@ -507,6 +507,33 @@ public sealed class KycSubmissionBffController : ControllerBase
     private static readonly System.Text.RegularExpressions.Regex NationalIdRegex =
         new(@"^[0-9]{12}\z", System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    // JEBV4-256 — per-id_type id_number shape validation. Mirrors the
+    // form-builder jeeb_jeeber_v1 flavor patterns so the server-enforced
+    // contract matches the client-declared one for ALL id_types (previously
+    // only national_id was shape-checked; passport/residency accepted any
+    // non-blank string, letting a non-conforming id_number reach kyc-service):
+    //   national_id -> ^\d{12}$        (unchanged, via NationalIdRegex above)
+    //   passport    -> ^[A-Z0-9]{6,9}$   (passport.json id_number)
+    //   residency   -> ^[A-Z0-9]{6,12}$  (residency.json id_number)
+    // Hardened the same way as NationalIdRegex (JEBV4-258): explicit ASCII
+    // char class (no \d Unicode Nd surprises) and \z true end-of-string anchor
+    // (not $, which also matches before a trailing \n). Reject-not-normalize,
+    // consistent with the national_id policy — the client already normalizes.
+    private static readonly System.Text.RegularExpressions.Regex PassportRegex =
+        new(@"^[A-Z0-9]{6,9}\z", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static readonly System.Text.RegularExpressions.Regex ResidencyRegex =
+        new(@"^[A-Z0-9]{6,12}\z", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    // id_type -> (shape regex, human-readable shape description for the 400).
+    private static readonly IReadOnlyDictionary<string, (System.Text.RegularExpressions.Regex Regex, string Message)> IdNumberShapeByType =
+        new Dictionary<string, (System.Text.RegularExpressions.Regex, string)>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["national_id"] = (NationalIdRegex, "id_number must be exactly 12 ASCII digits (0-9)."),
+            ["passport"] = (PassportRegex, "id_number must be 6-9 uppercase letters or digits (A-Z, 0-9)."),
+            ["residency"] = (ResidencyRegex, "id_number must be 6-12 uppercase letters or digits (A-Z, 0-9)."),
+        };
+
     // Accepted ID variants per owner decision Q-042 / the E3 DoD
     // (WORK-ORDER-2026-07-07 Lane E, E3): the BFF enumerates EXACTLY
     // national_id | passport | residency — "no more" — and any other value is
@@ -540,13 +567,19 @@ public sealed class KycSubmissionBffController : ControllerBase
             return FieldProblem("id_number", "id_number is required.");
         }
 
-        // AC6 — the national-ID 12-digit shape rule (^\d{12}$) stays SCOPED to
-        // id_type == national_id (JEBV4-113 §3.1): passport / residency numbers
-        // carry a different shape and must not be blocked by a national-ID rule.
-        if (string.Equals(body.IdType, "national_id", StringComparison.OrdinalIgnoreCase)
-            && !NationalIdRegex.IsMatch(body.IdNumber!))
+        // JEBV4-256 — id_number shape is validated PER id_type against the
+        // form-builder flavor patterns (national_id ^\d{12}$, passport
+        // ^[A-Z0-9]{6,9}$, residency ^[A-Z0-9]{6,12}$). Previously only
+        // national_id was shape-checked, so passport/residency accepted any
+        // non-blank string — the BFF was strictly more permissive than the
+        // client's own form contract. id_type is already validated against
+        // AllowedIdTypes above, so a lookup miss is not expected; if a mapping
+        // is ever absent we intentionally do NOT block (presence already
+        // enforced) rather than reject a valid submission on a config gap.
+        if (IdNumberShapeByType.TryGetValue(body.IdType!, out var shape)
+            && !shape.Regex.IsMatch(body.IdNumber!))
         {
-            return FieldProblem("id_number", "id_number must be exactly 12 ASCII digits (0-9).");
+            return FieldProblem("id_number", shape.Message);
         }
 
         // AC8 — tos_accepted_version must cross-link to a known ToS template

@@ -157,9 +157,8 @@ public sealed class KycTosCeremonyAndValidationTests
     }
 
     // ----- E3 (owner decision Q-039: "Id number is a must") -----
-    // id_number is now REQUIRED for every id_type. The national_id 12-digit shape
-    // rule stays scoped to national_id; passport/residency numbers are free-form
-    // but must still be present.
+    // id_number is REQUIRED for every id_type. (Per-id_type shape validation for
+    // passport/residency was added later in JEBV4-256 — see the tests below.)
 
     [Fact]
     public async Task SubmitJson_NationalId_Missing_IdNumber_Returns_400_Field_ProblemDetails()
@@ -193,21 +192,60 @@ public sealed class KycTosCeremonyAndValidationTests
         json.GetProperty("field").GetString().Should().Be("id_number");
     }
 
+    // ----- JEBV4-256: passport/residency id_number ARE shape-validated -----
+    // The BFF now mirrors the form-builder jeeb_jeeber_v1 flavor patterns for
+    // EVERY id_type, closing the gap where passport/residency accepted any
+    // non-blank string (strictly more permissive than the client's own form):
+    //   passport  -> ^[A-Z0-9]{6,9}$   (passport.json id_number)
+    //   residency -> ^[A-Z0-9]{6,12}$  (residency.json id_number)
+
     [Theory]
-    [InlineData("passport", "P1234567")]
-    [InlineData("residency", "RP-2024-55")] // Q-042 ratified vocab accepted end-to-end
-    public async Task SubmitJson_NonNationalId_With_FreeForm_IdNumber_Is_Not_Shape_Gated_Returns_201(
+    [InlineData("passport", "P1234567")]   // 8 chars, in 6-9 range
+    [InlineData("passport", "ABC123")]     // 6 chars, lower bound
+    [InlineData("passport", "AB1234567")]  // 9 chars, upper bound
+    [InlineData("residency", "RP202455")]  // 8 chars, in 6-12 range
+    [InlineData("residency", "RES001")]    // 6 chars, lower bound
+    [InlineData("residency", "ABC123DEF456")] // 12 chars, upper bound
+    public async Task SubmitJson_NonNationalId_With_Conforming_IdNumber_Returns_201_PerJEBV4_256(
         string idType, string idNumber)
     {
         _factory.ContractSigning.Reset();
-        var client = ClientFor($"e3-nonnational-ok-{idType}-user");
+        var client = ClientFor($"jebv4-256-ok-{idType}-{idNumber}-user");
         var resp = await PostJsonAsync(
             client, "/v1/kyc/submit", Package(idType: idType, idNumber: idNumber), Guid.NewGuid().ToString("N"));
 
-        // Non-national id_numbers are free-form: present but NOT subject to the
-        // national-ID ^\d{12}$ rule. passport and residency (the ratified vocab)
-        // both clear the vocab check and reach 201.
+        // A shape-conforming passport/residency id_number clears the new per-type
+        // gate and reaches 201 (regression guard: the tightening must not reject
+        // values the form-builder pattern accepts).
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
+    }
+
+    [Theory]
+    // passport ^[A-Z0-9]{6,9}$
+    [InlineData("passport", "AB123")]       // 5 chars, too short
+    [InlineData("passport", "AB12345678")]  // 10 chars, too long
+    [InlineData("passport", "RP-2024-5")]   // hyphen not in [A-Z0-9]
+    [InlineData("passport", "abc1234")]     // lowercase not in [A-Z0-9]
+    [InlineData("passport", "P1234567\n")]  // trailing newline (\z anchor)
+    // residency ^[A-Z0-9]{6,12}$
+    [InlineData("residency", "RES12")]           // 5 chars, too short
+    [InlineData("residency", "ABC123DEF4567")]   // 13 chars, too long
+    [InlineData("residency", "RP-2024-55")]      // hyphens not in [A-Z0-9]
+    [InlineData("residency", "res00123")]        // lowercase not in [A-Z0-9]
+    public async Task SubmitJson_NonNationalId_With_NonConforming_IdNumber_Returns_400_PerJEBV4_256(
+        string idType, string idNumber)
+    {
+        _factory.ContractSigning.Reset();
+        var client = ClientFor($"jebv4-256-bad-{idType}-{idNumber.GetHashCode():X}-user");
+        var resp = await PostJsonAsync(
+            client, "/v1/kyc/submit", Package(idType: idType, idNumber: idNumber), Guid.NewGuid().ToString("N"));
+
+        // A non-conforming passport/residency id_number now yields a field-scoped
+        // 400 on id_number instead of silently reaching kyc-service — the
+        // server-enforced contract matches the client-declared form contract.
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("field").GetString().Should().Be("id_number");
     }
 
     [Fact]
