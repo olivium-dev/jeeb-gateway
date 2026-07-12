@@ -1647,20 +1647,29 @@ public class DeliveriesController : ControllerBase
 
         if (verified)
         {
-            // PR review B3 + AC2: the canonical state-machine writer is the
-            // upstream delivery-service. The gateway hands the transition
-            // off so commission settlement (T-BE-020) keys off the same
-            // record. Local store mirrors the flip only after the upstream
-            // call succeeds.
+            // JEBV4-268: the canonical state-machine writer is the upstream
+            // delivery-service, reached via the CANONICAL SM-1 transition
+            // (POST api/v1/deliveries/{id}/transition) — the same contract the
+            // PATCH-status and cancel-propagation paths already use (:660/:970).
+            // The prior forward here PATCHed the RETIRED jeeb/deliveries/{id}/status
+            // route, which delivery-service no longer serves, so this in-memory
+            // (flag-OFF) path 404/502'd on Done instead of completing. Hand the
+            // transition off canonically so commission settlement (T-BE-020) keys
+            // off the same record; the local store mirrors the flip only after the
+            // upstream call succeeds. X-Actor-* carry the gateway-resolved caller
+            // identity delivery-service's extractActor needs (it has no JWKS).
+            var partySource = CanonicalDeliveryVocab.PartySourceFor(HttpContext);
+            var actorRole   = CanonicalDeliveryVocab.ActorRoleFor(HttpContext);
             try
             {
-                await _deliveryClient.StatusTransitionAsync(deliveryId, RequestStatus.Delivered, ct);
+                await _deliveryClient.CanonicalTransitionAsync(
+                    deliveryId, CanonicalDeliveryStatus.Done, partySource, callerId, actorRole, ct);
             }
-            catch (ApiException apiEx)
+            catch (DeliveryTransitionException dte)
             {
                 _log.LogError(
-                    "Upstream status transition failed after successful OTP verify for delivery {DeliveryId}: upstream status {UpstreamStatus}, correlationId {CorrelationId}",
-                    deliveryId, apiEx.StatusCode, correlationId);
+                    "Upstream canonical transition failed after successful OTP verify for delivery {DeliveryId}: upstream status {UpstreamStatus}, correlationId {CorrelationId}",
+                    deliveryId, dte.StatusCode, correlationId);
                 return Problem(
                     title:      "OTP verified but status transition failed",
                     detail:     "Please retry; the OTP remains valid.",
@@ -1669,7 +1678,7 @@ public class DeliveriesController : ControllerBase
             catch (HttpRequestException hreq)
             {
                 _log.LogError(
-                    "Upstream status transition network failure after successful OTP verify for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
+                    "Upstream canonical transition network failure after successful OTP verify for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
                     deliveryId, hreq.GetType().Name, correlationId);
                 return Problem(
                     title:      "OTP verified but status transition failed",

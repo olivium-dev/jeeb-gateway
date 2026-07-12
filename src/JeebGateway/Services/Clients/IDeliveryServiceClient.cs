@@ -48,16 +48,6 @@ public interface IDeliveryServiceClient
     Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct);
 
     /// <summary>
-    /// T-BE-019 (JEB-55): canonical status transition. Delegates the
-    /// status flip to the source-of-truth delivery-service so handover-OTP
-    /// success can mark the delivery as 'done' there (commission settlement
-    /// in T-BE-020 keys off the upstream record). The gateway must NEVER
-    /// write status directly to its local store on the OTP-verified path —
-    /// that splits the canonical write between two systems.
-    /// </summary>
-    Task<DeliveryRequestUpstream> StatusTransitionAsync(string deliveryId, string status, CancellationToken ct);
-
-    /// <summary>
     /// Canonical SM-1 transition (JEB-45 / T-BE-009, design §2.2). Forwards to
     /// the delivery-service RESTful surface <c>POST /api/v1/deliveries/{id}/transition</c>
     /// with the body <c>{ to, trigger }</c> — where <c>trigger</c> is the PARTY

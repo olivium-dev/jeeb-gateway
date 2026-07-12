@@ -117,8 +117,12 @@ public class HandoverCodeInAppTests
             .PostAsJsonAsync($"/v1/deliveries/{requestId}/otp/verify", new { code = handoverCode });
         verifyResp.StatusCode.Should().Be(HttpStatusCode.OK);
         (await ReadBoolPropAsync(verifyResp, "verified")).Should().BeTrue();
-        delivery.StatusTransitionCalls.Should().Contain(c =>
-            c.DeliveryId == requestId && c.Status == RequestStatus.Delivered);
+        // JEBV4-268: completion drives the canonical SM-1 transition (to=Done), never
+        // the retired PATCH jeeb/deliveries/{id}/status forward.
+        delivery.CanonicalTransitionCalls.Should().Contain(c =>
+            c.DeliveryId == requestId && c.To == CanonicalDeliveryStatus.Done);
+        delivery.StatusTransitionCalls.Should().BeEmpty(
+            "the retired status-PATCH route must never be forwarded to (JEBV4-268)");
 
         // (e) A WRONG code still fails (falls through to one-time-password, which rejects).
         var wrongResp = await Actor(factory, jeeber, "driver")
@@ -286,7 +290,11 @@ public class HandoverCodeInAppTests
     private sealed class FakeHandoverDeliveryClient : IDeliveryServiceClient
     {
         public ConcurrentQueue<CreateDeliveryRowUpstream> CreateCalls { get; } = new();
+        // JEBV4-268 sentinel: the retired PATCH jeeb/deliveries/{id}/status forward
+        // must NEVER fire (interface no longer declares StatusTransitionAsync).
         public List<(string DeliveryId, string Status)> StatusTransitionCalls { get; } = new();
+        // Canonical SM-1 transition is the sole upstream completion writer now.
+        public List<(string DeliveryId, string To)> CanonicalTransitionCalls { get; } = new();
 
         public Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct)
         {
@@ -313,7 +321,17 @@ public class HandoverCodeInAppTests
         public Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct) => throw new NotSupportedException();
         public Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct) => throw new NotSupportedException();
         public Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
-            string deliveryId, string to, string partySource, string actorId, string actorRole, CancellationToken ct) => throw new NotSupportedException();
+            string deliveryId, string to, string partySource, string actorId, string actorRole, CancellationToken ct)
+        {
+            CanonicalTransitionCalls.Add((deliveryId, to));
+            return Task.FromResult(new DeliveryTransitionUpstream
+            {
+                DeliveryId     = deliveryId,
+                Status         = to,
+                TransitionId   = Guid.NewGuid().ToString(),
+                TransitionedAt = DateTimeOffset.UtcNow
+            });
+        }
         public Task<DeliveryReadUpstream?> GetCanonicalDeliveryAsync(string deliveryId, CancellationToken ct) => throw new NotSupportedException();
         public Task<DeliveryHandoverIssueResult> IssueHandoverOtpAsync(string deliveryId, string? codeHash, CancellationToken ct) => throw new NotSupportedException();
         public Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(
