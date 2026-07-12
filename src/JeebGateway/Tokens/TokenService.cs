@@ -107,8 +107,46 @@ public class TokenService : ITokenService
         var rotated = await _store.RotateAsync(existing.TokenId, replacement, ct);
         if (!rotated)
         {
-            // Lost the race; another caller already rotated this token →
-            // treat as reuse.
+            // Lost the race: another caller rotated this token between our load
+            // (RevokedAt was null above) and our RotateAsync.
+            //
+            // JEBV4-260 — bounded rotation grace window. Distinguish a BENIGN
+            // concurrent double-refresh (a client that does not single-flight;
+            // queued duplicate refresh calls after an access-token expiry) from
+            // genuine stale-token reuse/theft. Re-read the presented token's
+            // CURRENT state: if it was rotated normally (RevocationReason.Rotated)
+            // within RefreshRotationGraceSeconds, treat the loser's request as a
+            // benign no-op and do NOT burn the family — the concurrent winner's
+            // freshly-issued token stays valid, so the session is preserved
+            // instead of being silently logged out on its next refresh.
+            //
+            // Safety: true stale-token replay is already caught earlier (the
+            // RevokedAt-set-at-load path returns ReuseDetected before we get
+            // here), so this window does NOT weaken detection of a replayed spent
+            // token. It only softens the extremely narrow "thief races the
+            // legitimate holder inside the rotation window" case — the standard,
+            // accepted OAuth rotation-leeway trade-off. Any rotation older than
+            // the window, or revoked for a non-rotation reason (theft/logout),
+            // still burns the chain. The comparison uses wall-clock (UtcNow)
+            // because the store stamps RevokedAt with UtcNow, keeping both sides
+            // in one clock domain.
+            var graceSeconds = _options.RefreshRotationGraceSeconds;
+            if (graceSeconds > 0)
+            {
+                var current = await _store.FindByHashAsync(hash, ct);
+                if (current?.RevokedAt is not null
+                    && string.Equals(current.RevokedReason, RevocationReason.Rotated.ToString(), StringComparison.Ordinal)
+                    && (DateTimeOffset.UtcNow - current.RevokedAt.Value) <= TimeSpan.FromSeconds(graceSeconds))
+                {
+                    BusinessOutcomeTelemetry.RefreshConcurrentGraceAccepted.Add(1);
+                    // Benign duplicate: the winner already delivered a fresh pair
+                    // to the client; this queued duplicate simply fails soft
+                    // (401) without destroying the winner's session.
+                    return new RefreshResult { Outcome = RefreshOutcome.Revoked };
+                }
+            }
+
+            // Outside the grace window (or grace disabled) → treat as reuse.
             await _store.RevokeChainAsync(existing.TokenId, RevocationReason.ReuseDetected, ct);
             BusinessOutcomeTelemetry.RefreshReuseDetected.Add(1);
             return new RefreshResult { Outcome = RefreshOutcome.ReuseDetected };

@@ -24,6 +24,10 @@ public static class BusinessOutcomeTelemetry
         Meter.CreateCounter<long>("auth.refresh.reuse_detected",
             description: "Number of refresh-token reuse detections observed by the gateway.");
 
+    public static readonly Counter<long> RefreshConcurrentGraceAccepted =
+        Meter.CreateCounter<long>("auth.refresh.concurrent_grace_accepted",
+            description: "Number of benign concurrent refresh double-uses accepted within the rotation grace window (JEBV4-260) — the loser's request did NOT burn the token family, so the concurrent winner's session was preserved. Watch this vs auth.refresh.reuse_detected to gauge benign-collision frequency.");
+
     public static readonly Counter<long> HandoverEscalations =
         Meter.CreateCounter<long>("handover.escalations",
             description: "Number of admin handover escalations triggered by the gateway.");
