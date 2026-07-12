@@ -252,8 +252,10 @@ public sealed class KycBffController : ControllerBase
         return false;
     }
 
-    // Picks the media url matching the caller's preferred locale; falls back to
-    // the first media entry, then to a stable cdn:// ref. The signed-PDF mint
+    // Picks the media url whose locale matches the caller's preferred locale;
+    // falls back to the first media entry. The upstream contract-signing MediaRef
+    // schema carries the locale tag on "label" (seeded "en"/"ar"), so match that,
+    // falling back to a legacy "locale" field if ever present. The signed-PDF mint
     // (https + expires_in<=300) is owned by cdn-service which is not yet wired
     // for ToS docs — the document_url here is the upstream's record-of-truth ref.
     private static string? ResolveDocumentUrl(JsonElement template, string locale)
@@ -268,7 +270,7 @@ public sealed class KycBffController : ControllerBase
         {
             var url = ReadString(entry, "url");
             firstUrl ??= url;
-            var entryLocale = ReadString(entry, "locale");
+            var entryLocale = ReadString(entry, "label") ?? ReadString(entry, "locale");
             if (string.Equals(entryLocale, locale, StringComparison.OrdinalIgnoreCase))
             {
                 return url;
