@@ -60,7 +60,7 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
     {
         var seed = await SeedAsync(status: RequestStatus.HeadingOff, dropoffLat: 24.8, dropoffLng: 46.8);
         var store = _factory.Services.GetRequiredService<ILocationStore>();
-        store.Record(seed.JeeberId, new[]
+        await store.RecordAsync(seed.JeeberId, new[]
         {
             new GpsPointDto { Lat = 24.70, Lng = 46.70, Accuracy = 5, Timestamp = DateTimeOffset.UtcNow }
         });
@@ -121,7 +121,7 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
     {
         var seed = await SeedAsync(status: RequestStatus.HeadingOff, dropoffLat: 24.80, dropoffLng: 46.80);
         var store = _factory.Services.GetRequiredService<ILocationStore>();
-        store.Record(seed.JeeberId, new[]
+        await store.RecordAsync(seed.JeeberId, new[]
         {
             new GpsPointDto { Lat = 24.70, Lng = 46.70, Accuracy = 5, Timestamp = DateTimeOffset.UtcNow }
         });
@@ -145,7 +145,7 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
     {
         var seed = await SeedAsync(status: RequestStatus.HeadingOff, dropoffLat: 24.80, dropoffLng: 46.80);
         var store = _factory.Services.GetRequiredService<ILocationStore>();
-        store.Record(seed.JeeberId, new[]
+        await store.RecordAsync(seed.JeeberId, new[]
         {
             new GpsPointDto { Lat = 24.70, Lng = 46.70, Accuracy = 5, Timestamp = DateTimeOffset.UtcNow }
         });
@@ -223,7 +223,7 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
         body.Latest!.Lat.Should().Be(24.71);
 
         var store = _factory.Services.GetRequiredService<ILocationStore>();
-        store.GetLatest(seed.JeeberId)!.Lng.Should().Be(46.71);
+        (await store.GetLatestAsync(seed.JeeberId))!.Lng.Should().Be(46.71);
     }
 
     [Fact] // legacy batch shape (no deliveryId) is unchanged — no gate

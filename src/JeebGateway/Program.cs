@@ -2059,6 +2059,10 @@ builder.Services.Configure<TrackingOptions>(builder.Configuration.GetSection(Tra
 // FeatureFlags:UseUpstream:Geolocation is ON, the record-of-truth is the shared
 // geolocation-service via GeoServiceLocationStore (NSwag client); default OFF keeps
 // the in-memory store so neither the controller nor the SSE loop branch on the flag.
+// JEBV4-57 (GW12-PERF-1): flipping this flag ON is now SAFE — ILocationStore is
+// async end-to-end, so GeoServiceLocationStore awaits the geolocation-service client
+// with NO sync-over-async bridge. There is no longer a blocking hot path that a GPS
+// fan-out storm could use to starve the shared ASP.NET thread pool.
 if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Geolocation"))
 {
     builder.Services.AddSingleton<ILocationStore, JeebGateway.Tracking.GeoServiceLocationStore>();

@@ -29,7 +29,16 @@ public class InMemoryLocationStore : ILocationStore
         _clock = clock;
     }
 
-    public LocationStoreUpdateResult Record(string jeeberId, IReadOnlyList<GpsPointDto> points)
+    // JEBV4-57: async seam over the lock-free in-memory core. The work is
+    // synchronous and non-blocking, so we return an already-completed task —
+    // zero thread-pool cost on the flag-OFF default path.
+    public Task<LocationStoreUpdateResult> RecordAsync(string jeeberId, IReadOnlyList<GpsPointDto> points, CancellationToken ct = default)
+        => Task.FromResult(Record(jeeberId, points));
+
+    public Task<StoredPosition?> GetLatestAsync(string jeeberId, CancellationToken ct = default)
+        => Task.FromResult(GetLatest(jeeberId));
+
+    private LocationStoreUpdateResult Record(string jeeberId, IReadOnlyList<GpsPointDto> points)
     {
         if (string.IsNullOrEmpty(jeeberId)) throw new ArgumentException("jeeberId required", nameof(jeeberId));
         if (points is null || points.Count == 0) return new LocationStoreUpdateResult(0, 0, GetLatest(jeeberId));

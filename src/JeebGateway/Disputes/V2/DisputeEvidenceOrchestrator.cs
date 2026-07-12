@@ -99,7 +99,7 @@ public sealed class DisputeEvidenceOrchestrator : IDisputeEvidenceOrchestrator
             var jeeberId = request.JeeberId ?? delivery?.JeeberId;
             if (!string.IsNullOrEmpty(jeeberId))
             {
-                var latest = _location.GetLatest(jeeberId);
+                var latest = await _location.GetLatestAsync(jeeberId, linked.Token).ConfigureAwait(false);
                 if (latest is not null)
                 {
                     points.Add(new[] { latest.Lat, latest.Lng });

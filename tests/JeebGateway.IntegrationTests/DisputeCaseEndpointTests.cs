@@ -661,7 +661,8 @@ public class DisputeCaseEndpointTests
     private static void SeedJeeberLocation(WebApplicationFactory<Program> factory, string jeeberId, double lat, double lng)
     {
         var store = factory.Services.GetRequiredService<ILocationStore>();
-        store.Record(jeeberId, new[]
+        // In-memory store (flag-OFF) completes synchronously; keep this seed helper sync.
+        store.RecordAsync(jeeberId, new[]
         {
             new GpsPointDto
             {
@@ -670,7 +671,7 @@ public class DisputeCaseEndpointTests
                 Accuracy = 5.0,
                 Timestamp = DateTimeOffset.UtcNow
             }
-        });
+        }).GetAwaiter().GetResult();
     }
 }
 
