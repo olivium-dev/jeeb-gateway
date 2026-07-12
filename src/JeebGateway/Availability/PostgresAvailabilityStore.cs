@@ -1,6 +1,7 @@
 using JeebGateway.Infrastructure;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 
 namespace JeebGateway.Availability;
 
@@ -117,7 +118,7 @@ public sealed class PostgresAvailabilityStore : IAvailabilityStore
             ) VALUES (
                 @UserId, TRUE, @VehicleType::jeeber_vehicle_type, @Zone,
                 CASE WHEN @Longitude IS NULL OR @Latitude IS NULL THEN NULL
-                     ELSE ST_SetSRID(ST_MakePoint(@Longitude, @Latitude), 4326)::geography END,
+                     ELSE ST_SetSRID(ST_MakePoint(@Longitude::double precision, @Latitude::double precision), 4326)::geography END,
                 @Now, @Now, now(), now()
             )
             ON CONFLICT (user_id) DO UPDATE SET
@@ -144,8 +145,22 @@ public sealed class PostgresAvailabilityStore : IAvailabilityStore
             cmd.Parameters.AddWithValue("UserId", userGuid);
             cmd.Parameters.AddWithValue("VehicleType", request.VehicleType.ToWire());
             cmd.Parameters.AddWithValue("Zone", request.Zone);
-            cmd.Parameters.AddWithValue("Longitude", (object?)request.Longitude ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("Latitude", (object?)request.Latitude ?? DBNull.Value);
+            // Explicit NpgsqlDbType.Double (not AddWithValue): when Longitude/Latitude
+            // are null, AddWithValue(..., DBNull.Value) has no CLR type to infer from
+            // and Npgsql sends the parameter as "unknown", which Postgres cannot
+            // resolve inside ST_MakePoint(@Longitude, @Latitude) — surfaces as a
+            // thrown Npgsql 42P08 (ambiguous parameter) that AvailabilityController's
+            // best-effort mirror wrapper swallows, silently leaving is_online stuck
+            // at its previous value. Pinning the wire type removes the ambiguity
+            // regardless of whether the value is present or DBNull.
+            cmd.Parameters.Add(new NpgsqlParameter("Longitude", NpgsqlDbType.Double)
+            {
+                Value = (object?)request.Longitude ?? DBNull.Value
+            });
+            cmd.Parameters.Add(new NpgsqlParameter("Latitude", NpgsqlDbType.Double)
+            {
+                Value = (object?)request.Latitude ?? DBNull.Value
+            });
             cmd.Parameters.AddWithValue("Now", now);
 
             await using var reader = await cmd.ExecuteReaderAsync(ct);
