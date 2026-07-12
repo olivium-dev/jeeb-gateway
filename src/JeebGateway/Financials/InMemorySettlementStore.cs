@@ -77,6 +77,21 @@ public sealed class InMemorySettlementStore : ISettlementStore
         }
     }
 
+    public Task<IReadOnlyList<Settlement>> ListUnpostedLedgerAsync(int limit, CancellationToken ct)
+    {
+        // JEBV4-47: settled rows whose ledger post never landed. Stable order
+        // (settled_at, id) so successive bounded pages are deterministic.
+        var rows = _byId.Values
+            .Where(s => string.IsNullOrEmpty(s.LedgerEntryId)
+                     && (s.State == SettlementState.Settled || s.State == SettlementState.ReceiptGenerated))
+            .OrderBy(s => s.SettledAt)
+            .ThenBy(s => s.Id, StringComparer.Ordinal)
+            .Take(limit)
+            .Select(Clone)
+            .ToList();
+        return Task.FromResult<IReadOnlyList<Settlement>>(rows);
+    }
+
     public Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, DateTimeOffset at, CancellationToken ct)
     {
         lock (_writeLock)

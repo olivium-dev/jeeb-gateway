@@ -1014,6 +1014,18 @@ else
 
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
 
+// JEBV4-47 (M3/R7): the settlement -> UPG generic-settlement ledger post is
+// best-effort; when UPG is down at settle time the row persists with
+// ledger_entry_id NULL. This hosted reconciler periodically replays those unposted
+// rows (idempotent on the settlement id) so the gateway settlement rows and the UPG
+// ledger reconverge instead of diverging silently forever. Safe defaults; a no-op
+// when there are no unposted rows.
+builder.Services.Configure<JeebGateway.Financials.SettlementLedgerReconcilerOptions>(
+    builder.Configuration.GetSection(JeebGateway.Financials.SettlementLedgerReconcilerOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Financials.SettlementLedgerReconciler>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Financials.SettlementLedgerReconciler>());
+
 // ===========================================================================
 // Wallet integration — EXACT mirror of the salehly-gateway sibling.
 //

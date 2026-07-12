@@ -31,4 +31,16 @@ public static class BusinessOutcomeTelemetry
     public static readonly Counter<long> DurableWriteFailures =
         Meter.CreateCounter<long>("durable.write_failures",
             description: "Number of handled durable writer failures, tagged by bounded store name.");
+
+    // JEBV4-47 (M3/R7): the settlement -> UPG generic-settlement ledger post is
+    // best-effort. When it fails at settle time the row persists but the ledger
+    // diverges until the SettlementLedgerReconciler replays it. These counters make
+    // that divergence observable (ties into JEBV4-59 business counters).
+    public static readonly Counter<long> SettlementLedgerPostFailures =
+        Meter.CreateCounter<long>("settlement.ledger.post_failures",
+            description: "Number of settlement UPG ledger posts that failed at settle time and were left for the reconciler.");
+
+    public static readonly Counter<long> SettlementLedgerReconciled =
+        Meter.CreateCounter<long>("settlement.ledger.reconciled",
+            description: "Number of previously-unposted settlement ledger entries the reconciler successfully replayed.");
 }
