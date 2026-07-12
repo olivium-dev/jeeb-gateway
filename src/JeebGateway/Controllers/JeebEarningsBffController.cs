@@ -36,8 +36,11 @@ namespace JeebGateway.Controllers;
 /// <c>GET /v1/wallet/jeeb/earnings</c>, but wallet-service does not own COD settlements — the
 /// gateway does — so that relay returned an empty summary and the Earnings screen showed
 /// commission 0 / "No earnings yet" despite recorded settlements. It now reads the gateway's
-/// own aggregation (which the config flag <c>FeatureFlags:UseUpstream:Earnings</c> never
-/// touched on this path), so recorded COD earnings surface immediately.
+/// OWN settlement aggregation (<see cref="EarningsAggregationService"/>) DIRECTLY — the concrete
+/// service, NOT the flag-swapped <see cref="IEarningsAggregationService"/> — so recorded COD
+/// earnings surface even when <c>FeatureFlags:UseUpstream:Earnings=true</c> routes that interface
+/// to <see cref="WalletEarningsAggregationService"/> (which reads wallet gross credit-revenue,
+/// NOT the gateway's COD settlement commission, and returns empty for a COD-only jeeber).
 /// </para>
 ///
 /// <para>
@@ -60,12 +63,12 @@ public sealed class JeebEarningsBffController : ControllerBase
     /// </summary>
     public const string WalletHttpClientName = "JeebEarningsWalletClient";
 
-    private readonly IEarningsAggregationService _earnings;
+    private readonly EarningsAggregationService _earnings;
     private readonly IEarningsPdfGenerator _pdf;
     private readonly TimeProvider _clock;
 
     public JeebEarningsBffController(
-        IEarningsAggregationService earnings,
+        EarningsAggregationService earnings,
         IEarningsPdfGenerator pdf,
         TimeProvider clock)
     {
@@ -79,12 +82,12 @@ public sealed class JeebEarningsBffController : ControllerBase
     /// caller's earnings summary, scoped to the bearer's own jeeber id.
     ///
     /// <para>
-    /// JEBV4-283: serves the GATEWAY's OWN settlement aggregation — the same
-    /// <see cref="IEarningsAggregationService"/> and earned-COD states
-    /// (<see cref="CodSettlementState.EarningsStates"/>, which INCLUDE <c>recorded</c>) that the
-    /// <c>/v1/jeebers/me/earnings</c> read (<see cref="JeebEarningsController"/>) uses — instead of
-    /// relaying to wallet-service (which does not own COD settlements and returned an empty summary,
-    /// making the Earnings screen show commission 0 / "No earnings yet"). The returned
+    /// JEBV4-283: serves the GATEWAY's OWN settlement aggregation
+    /// (<see cref="EarningsAggregationService"/>, injected as the CONCRETE type and read directly so
+    /// it is independent of the <c>FeatureFlags:UseUpstream:Earnings</c> flag) with the earned-COD
+    /// states (<see cref="CodSettlementState.EarningsStates"/>, which INCLUDE <c>recorded</c>) —
+    /// instead of relaying to wallet-service (which does not own COD settlements and returned an
+    /// empty summary, making the Earnings screen show commission 0 / "No earnings yet"). The returned
     /// <see cref="EarningsProjection"/> carries the flat <c>totalCommission</c>/<c>totalEarnings</c>
     /// + <c>deliveryCount</c> + <c>entries[]</c> keys the mobile <c>EarningsSummary.fromJson</c>
     /// (<c>DioEarningsRepository</c>) parses.
