@@ -274,10 +274,14 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         body!.Verified.Should().BeTrue();
         body.Status.Should().Be(RequestStatus.Delivered);
 
-        // B3 / AC2: upstream delivery-service was the transition writer
-        delivery.StatusTransitionCalls.Should().ContainSingle();
-        delivery.StatusTransitionCalls[0].DeliveryId.Should().Be(seed.Id);
-        delivery.StatusTransitionCalls[0].Status.Should().Be(RequestStatus.Delivered);
+        // B3 / AC2 + JEBV4-268: completion routes EXCLUSIVELY through the canonical
+        // SM-1 transition (POST api/v1/deliveries/{id}/transition, to=Done) — NEVER
+        // the retired PATCH jeeb/deliveries/{id}/status forward (404/502 on Done).
+        delivery.CanonicalTransitionCalls.Should().ContainSingle();
+        delivery.CanonicalTransitionCalls[0].DeliveryId.Should().Be(seed.Id);
+        delivery.CanonicalTransitionCalls[0].To.Should().Be(CanonicalDeliveryStatus.Done);
+        delivery.StatusTransitionCalls.Should().BeEmpty(
+            "the retired jeeb/deliveries/{id}/status route must never be forwarded to (JEBV4-268)");
 
         // AC6: handover.verified event with deliveryId
         logCapture.Records.Should().Contain(r =>
@@ -306,6 +310,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
 
         // B3: status MUST NOT have been transitioned upstream on a wrong-code
+        delivery.CanonicalTransitionCalls.Should().BeEmpty();
         delivery.StatusTransitionCalls.Should().BeEmpty();
 
         // AC5: the wrong code must NEVER appear in a log line
@@ -357,6 +362,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         row.OtpAttemptCount.Should().Be(3);
 
         // No status transition fired on any wrong path
+        delivery.CanonicalTransitionCalls.Should().BeEmpty();
         delivery.StatusTransitionCalls.Should().BeEmpty();
     }
 
