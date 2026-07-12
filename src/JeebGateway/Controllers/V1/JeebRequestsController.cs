@@ -50,6 +50,7 @@ public sealed class JeebRequestsController : ControllerBase
     private readonly UpstreamFeatureFlags _flags;
     private readonly string _tenantId;
     private readonly INewRequestPushNotifier _newRequestPush;
+    private readonly CreateModerationEvaluator _moderationEvaluator;
     private readonly ILogger<JeebRequestsController> _logger;
 
     public JeebRequestsController(
@@ -61,6 +62,7 @@ public sealed class JeebRequestsController : ControllerBase
         IOptions<UpstreamFeatureFlags> flags,
         IConfiguration config,
         INewRequestPushNotifier newRequestPush,
+        CreateModerationEvaluator moderationEvaluator,
         ILogger<JeebRequestsController> logger)
     {
         _requests = requests;
@@ -71,6 +73,7 @@ public sealed class JeebRequestsController : ControllerBase
         _flags = flags.Value;
         _tenantId = config["Services:Delivery:TenantId"] ?? DefaultTenantId;
         _newRequestPush = newRequestPush;
+        _moderationEvaluator = moderationEvaluator;
         _logger = logger;
     }
 
@@ -122,6 +125,16 @@ public sealed class JeebRequestsController : ControllerBase
                 Status = StatusCodes.Status400BadRequest
             });
         }
+
+        // JEBV4-212 (E17): gateway-owned create-time prohibited-items moderation gate.
+        // The mobile app creates via THIS route (POST /v1/requests), so the gate — which
+        // previously ran only on the legacy /requests path — must run here too, else a
+        // prohibited item ("arak"/"knife") would slip through unblocked. Shared evaluator
+        // ⇒ byte-identical block (409) / requires-ack (409) / fail-closed (503) semantics
+        // with the legacy path. No-op (returns null) when the gate flag is OFF. Runs BEFORE
+        // the insert so a blocked request is never persisted.
+        var moderation = await _moderationEvaluator.EvaluateAsync(clientId, body.Description, ct);
+        if (moderation is not null) return moderation;
 
         // feat/tier-unify-names: the V1 path previously accepted ANY tierId verbatim,
         // which let unknown/divergent codes flow through to matching + push (where the

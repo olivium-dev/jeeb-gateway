@@ -62,9 +62,7 @@ public class RequestsController : ControllerBase
     private readonly ITiersStore _tiers;
     private readonly TimeProvider _clock;
     private readonly ScheduledDeliveryOptions _scheduledOptions;
-    private readonly IProhibitedItemScanner _scanner;
-    private readonly IProhibitedItemsStore _prohibited;
-    private readonly CreateModerationOptions _moderation;
+    private readonly CreateModerationEvaluator _moderationEvaluator;
     private readonly ILogger<RequestsController> _logger;
 
     public RequestsController(
@@ -72,18 +70,14 @@ public class RequestsController : ControllerBase
         ITiersStore tiers,
         TimeProvider clock,
         IOptions<ScheduledDeliveryOptions> scheduledOptions,
-        IProhibitedItemScanner scanner,
-        IProhibitedItemsStore prohibited,
-        IOptions<CreateModerationOptions> moderation,
+        CreateModerationEvaluator moderationEvaluator,
         ILogger<RequestsController> logger)
     {
         _store = store;
         _tiers = tiers;
         _clock = clock;
         _scheduledOptions = scheduledOptions.Value;
-        _scanner = scanner;
-        _prohibited = prohibited;
-        _moderation = moderation.Value;
+        _moderationEvaluator = moderationEvaluator;
         _logger = logger;
     }
 
@@ -519,73 +513,11 @@ public class RequestsController : ControllerBase
     ///   </list>
     /// No-op (returns null) when the gate flag is OFF — today's green path.
     /// </summary>
-    private async Task<IActionResult?> EvaluateModerationAsync(string clientId, string description, CancellationToken ct)
-    {
-        if (!_moderation.Enabled) return null;
-
-        // JEB-1504 / WS-06 fail-closed gate: if the lexicon cannot be loaded (0 active
-        // items) we must NOT allow the request through silently. A 503 is surfaced so
-        // callers know the moderation service is temporarily unavailable and can retry.
-        // This guards against seeder failures, store outages, or a fresh startup race
-        // before the lexicon is seeded. The load + fail-closed + scan + version logic is
-        // shared with the standalone POST /moderation/jeeb/check endpoint via ModerationGate
-        // so the two paths can never drift on what counts as "unavailable".
-        ModerationGateOutcome outcome;
-        try
-        {
-            outcome = await new ModerationGate(_prohibited, _scanner).EvaluateAsync(description, ct);
-        }
-        catch (LexiconUnavailableException ex)
-        {
-            _logger.LogError(ex, "Prohibited-items lexicon unavailable while moderation gate is enabled; failing closed with 503.");
-            return StatusCode(StatusCodes.Status503ServiceUnavailable, new Microsoft.AspNetCore.Mvc.ProblemDetails
-            {
-                Status = StatusCodes.Status503ServiceUnavailable,
-                Title = "Moderation service temporarily unavailable",
-                Detail = ex.Message
-            });
-        }
-
-        var severity = outcome.GatingSeverity;
-        if (severity is null) return null;
-
-        var matchDtos = outcome.Scan.Matches
-            .Select(m => new ModerationMatchDto(m.ItemName, m.Category, m.Severity.ToString().ToLowerInvariant()))
-            .ToList();
-
-        if (severity == ProhibitedSeverity.Block)
-        {
-            // AC1 / AC7: block is a hard reject; prohibited_ack must NOT override.
-            return Conflict(new ProhibitedItemProblemDetails
-            {
-                Title = "This request contains a prohibited item and cannot be created.",
-                Status = StatusCodes.Status409Conflict,
-                Type = "https://jeeb.dev/errors/prohibited-item-blocked",
-                Reason = "prohibited_item_blocked",
-                Matches = matchDtos
-            });
-        }
-
-        // Warn severity: allowed only once the caller has acknowledged the
-        // CURRENT lexicon version. Re-using the same version semantics as
-        // GET /prohibited-items + POST /prohibited-items/acknowledge so the ack
-        // the mobile ack-dialog records is the one that clears this gate.
-        // (version computed by ModerationGate above — no second round-trip needed.)
-        var currentVersion = outcome.Version;
-        var ack = await _prohibited.GetAcknowledgmentAsync(clientId, ct);
-        var acknowledged = ack is not null && string.Equals(ack.Version, currentVersion, StringComparison.Ordinal);
-
-        if (acknowledged) return null;
-
-        return Conflict(new ProhibitedItemProblemDetails
-        {
-            Title = "This request contains an item that requires acknowledgment before it can be created.",
-            Status = StatusCodes.Status409Conflict,
-            Type = "https://jeeb.dev/errors/prohibited-item-requires-ack",
-            Reason = "prohibited_item_requires_ack",
-            Matches = matchDtos
-        });
-    }
+    // JEBV4-212 (E17): delegates to the shared CreateModerationEvaluator so this legacy
+    // create path and the V1 JeebRequestsController.Create path enforce byte-identical
+    // block/warn/fail-closed moderation semantics and can never drift.
+    private Task<IActionResult?> EvaluateModerationAsync(string clientId, string description, CancellationToken ct)
+        => _moderationEvaluator.EvaluateAsync(clientId, description, ct);
 
     private static DeliveryRequestDto ToDto(DeliveryRequest r) => new()
     {

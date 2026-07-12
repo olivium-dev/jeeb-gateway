@@ -1614,6 +1614,13 @@ else
 builder.Services.Configure<JeebGateway.Requests.CreateModerationOptions>(
     builder.Configuration.GetSection(JeebGateway.Requests.CreateModerationOptions.SectionName));
 
+// JEBV4-212 (E17): the shared create-time moderation evaluator. Both the legacy
+// RequestsController.Create and the V1 JeebRequestsController.Create (the route the
+// mobile app uses) route through this one gate so prohibited-items screening is
+// enforced identically on BOTH create paths and can never drift. Singleton: all its
+// deps (scanner, store, options) are singletons and it holds no per-request state.
+builder.Services.AddSingleton<JeebGateway.Requests.CreateModerationEvaluator>();
+
 // When the moderation gate is ON, seed a minimal default lexicon so the live
 // gate has terms to match (the gate is inert against an empty lexicon). Default
 // is ON: the seeder registers UNLESS the flag is explicitly false, mirroring
