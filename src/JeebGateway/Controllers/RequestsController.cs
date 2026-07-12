@@ -33,30 +33,10 @@ public class RequestsController : ControllerBase
     internal const string LimitExceededMessage =
         "Active request concurrency is unlimited.";
 
-    /// <summary>T-backend-007: MVP cap on attached photos per request.</summary>
-    public const int MaxPhotos = 10;
-
-    /// <summary>
-    /// audio_url / photos[] entries must look like absolute URLs. Mirrors
-    /// the DB CHECK <c>delivery_requests_audio_url_format</c> in 0004 —
-    /// gateway-side validation here so a bad URL never reaches the store.
-    /// </summary>
-    private static readonly System.Text.RegularExpressions.Regex UrlShape =
-        new(@"^(https?|s3)://[^\s]+$", System.Text.RegularExpressions.RegexOptions.Compiled);
-
-    /// <summary>
-    /// JEB-45 (S05 N5): the only INITIAL statuses a create may legally land on.
-    /// The server picks <c>pending</c> (immediate) or <c>scheduled</c> (when a
-    /// future <c>scheduledAt</c> is supplied); any other client-supplied status
-    /// is an illegal initial transition and is rejected with 422. Compared
-    /// case-insensitively.
-    /// </summary>
-    private static readonly IReadOnlySet<string> LegalInitialStatuses =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            RequestStatus.Pending,
-            RequestStatus.Scheduled
-        };
+    // JEBV4-65: MaxPhotos, the URL-shape regex, the legal-initial-status set, and
+    // the description/tier/status/url/photo validation envelopes now live in the
+    // shared RequestCreateValidation (single source of truth across the three
+    // create surfaces; the JEBV4-62 tier-not-found coupling point).
 
     private readonly IRequestsStore _store;
     private readonly ITiersStore _tiers;
@@ -151,11 +131,8 @@ public class RequestsController : ControllerBase
 
         if (body is null || string.IsNullOrWhiteSpace(body.Description))
         {
-            return BadRequest(new ProblemDetails
-            {
-                Title = "description is required.",
-                Status = StatusCodes.Status400BadRequest
-            });
+            // JEBV4-65: shared description-required envelope (single source of truth).
+            return BadRequest(RequestCreateValidation.DescriptionRequiredProblem());
         }
 
         // JEB-45 (S05 N5): create-time initial-transition guard. The status is
@@ -164,16 +141,9 @@ public class RequestsController : ControllerBase
         // (pending / scheduled) is an illegal initial transition: 422
         // transition_not_allowed, no row persisted. A legal value (or none) is a
         // no-op and falls through to the normal server-assigned status.
-        if (!string.IsNullOrWhiteSpace(body.Status) && !LegalInitialStatuses.Contains(body.Status))
-        {
-            return UnprocessableEntity(new ProblemDetails
-            {
-                Title = "Illegal initial status for a new request.",
-                Detail = $"A request may only be created in 'pending' or 'scheduled'; got '{body.Status}'.",
-                Status = StatusCodes.Status422UnprocessableEntity,
-                Type = "https://jeeb.dev/errors/transition-not-allowed"
-            });
-        }
+        // JEBV4-65: shared status-legality validation (single source of truth).
+        var statusProblem = RequestCreateValidation.ValidateInitialStatus(body.Status);
+        if (statusProblem is not null) return UnprocessableEntity(statusProblem);
 
         if (body.ScheduledAt is { } scheduledAt)
         {
@@ -233,50 +203,17 @@ public class RequestsController : ControllerBase
                 Type = "https://jeeb.dev/errors/tier-required"
             });
         }
-        if (!await _tiers.ExistsAsync(body.TierId, ct))
-        {
-            return NotFound(new ProblemDetails
-            {
-                Title = "tierId does not match any active delivery tier.",
-                Detail = $"tierId={body.TierId}",
-                Status = StatusCodes.Status404NotFound,
-                Type = "https://jeeb.dev/errors/tier-not-found"
-            });
-        }
+        // JEBV4-65: shared tier-exists validation (single source of truth; the
+        // JEBV4-62 tier-not-found status coupling point). fieldLabel "tierId"
+        // preserves this surface's exact Title/Detail wording.
+        var tierProblem = await RequestCreateValidation.ValidateTierExistsAsync(_tiers, body.TierId, "tierId", ct);
+        if (tierProblem is not null) return NotFound(tierProblem);
 
-        if (!string.IsNullOrEmpty(body.AudioUrl) && !UrlShape.IsMatch(body.AudioUrl))
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = "audioUrl must be an absolute http(s):// or s3:// URL.",
-                Status = StatusCodes.Status400BadRequest,
-                Type = "https://jeeb.dev/errors/audio-url-invalid"
-            });
-        }
-
+        // JEBV4-65: shared audio/photo URL-shape + photo-count validation (single
+        // source of truth). Preserves the exact order and envelopes.
         var photos = body.Photos ?? new List<string>();
-        if (photos.Count > MaxPhotos)
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = $"Too many photos attached (max {MaxPhotos}).",
-                Detail = $"received={photos.Count}",
-                Status = StatusCodes.Status400BadRequest,
-                Type = "https://jeeb.dev/errors/photos-too-many"
-            });
-        }
-        foreach (var photo in photos)
-        {
-            if (string.IsNullOrWhiteSpace(photo) || !UrlShape.IsMatch(photo))
-            {
-                return BadRequest(new ProblemDetails
-                {
-                    Title = "Every photos[] entry must be an absolute http(s):// or s3:// URL.",
-                    Status = StatusCodes.Status400BadRequest,
-                    Type = "https://jeeb.dev/errors/photo-url-invalid"
-                });
-            }
-        }
+        var urlProblem = RequestCreateValidation.ValidateUrlAndPhotos(body.AudioUrl, photos);
+        if (urlProblem is not null) return BadRequest(urlProblem);
 
         // JEB-63 (S05 N1 / A1.1): gateway-owned create-time prohibited-items
         // moderation gate. Flag-gated (default OFF) so today's green path is

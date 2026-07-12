@@ -116,11 +116,8 @@ public sealed class JeebRequestsController : ControllerBase
 
         if (body is null || string.IsNullOrWhiteSpace(body.Description))
         {
-            return BadRequest(new ProblemDetails
-            {
-                Title = "description is required.",
-                Status = StatusCodes.Status400BadRequest
-            });
+            // JEBV4-65: shared description-required envelope (single source of truth).
+            return BadRequest(RequestCreateValidation.DescriptionRequiredProblem());
         }
 
         // feat/tier-unify-names: the V1 path previously accepted ANY tierId verbatim,
@@ -131,16 +128,13 @@ public sealed class JeebRequestsController : ControllerBase
         // this surface (a tier-less create is still allowed; it simply skips the
         // delivery-row seed), so only a present-but-unknown id is rejected. Same
         // envelope (tier-not-found type URI) as the legacy create surfaces.
-        if (!string.IsNullOrWhiteSpace(body.TierId)
-            && !await _tiers.ExistsAsync(body.TierId, ct))
+        // JEBV4-65: shared tier-exists validation (single source of truth; the
+        // JEBV4-62 tier-not-found status coupling point). tierId stays OPTIONAL on
+        // this surface — only a present-but-unknown id is rejected.
+        if (!string.IsNullOrWhiteSpace(body.TierId))
         {
-            return NotFound(new ProblemDetails
-            {
-                Title = "tierId does not match any active delivery tier.",
-                Detail = $"tierId={body.TierId}",
-                Status = StatusCodes.Status404NotFound,
-                Type = "https://jeeb.dev/errors/tier-not-found"
-            });
+            var tierProblem = await RequestCreateValidation.ValidateTierExistsAsync(_tiers, body.TierId, "tierId", ct);
+            if (tierProblem is not null) return NotFound(tierProblem);
         }
 
         DeliveryRequest created;
