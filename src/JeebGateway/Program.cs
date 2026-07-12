@@ -2110,6 +2110,15 @@ builder.Services.AddHostedService(sp =>
 // wallet-service (Transaction/holder/{holderId}/credit-revenue) instead of
 // summing the in-memory settlement rows (which are always zero on a cold start).
 // Default-OFF: flip to true in Production once wallet-service is confirmed healthy.
+// JEBV4-283: ALWAYS register the gateway's OWN settlement aggregation as a concrete service so
+// the jeeber COD-earnings READ (the app's /v1/jeeb/earnings via JeebEarningsBffController) reads
+// gateway-owned settlement rows DIRECTLY, independent of the UseUpstream:Earnings flag below. That
+// flag only selects which IEarningsAggregationService the legacy/admin earnings surfaces bind; when
+// it is ON it routes the interface to WalletEarningsAggregationService (wallet gross credit-revenue),
+// which does NOT include COD settlement commission — so the app must not depend on the interface for
+// recorded COD earnings.
+builder.Services.AddSingleton<JeebGateway.Financials.EarningsAggregationService>();
+
 if (banFlags.Earnings)
 {
     builder.Services.AddScoped<JeebGateway.Financials.IEarningsAggregationService,
@@ -2117,8 +2126,9 @@ if (banFlags.Earnings)
 }
 else
 {
-    builder.Services.AddSingleton<JeebGateway.Financials.IEarningsAggregationService,
-        JeebGateway.Financials.EarningsAggregationService>();
+    // Bind the interface to the SAME concrete singleton registered above (one instance).
+    builder.Services.AddSingleton<JeebGateway.Financials.IEarningsAggregationService>(
+        sp => sp.GetRequiredService<JeebGateway.Financials.EarningsAggregationService>());
 }
 
 // T-backend-019 / S10 H6 (JEB-59): Earnings PDF statement generation.
