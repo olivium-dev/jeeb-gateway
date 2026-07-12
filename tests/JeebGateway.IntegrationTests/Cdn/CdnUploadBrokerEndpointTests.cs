@@ -142,6 +142,25 @@ public sealed class CdnUploadBrokerEndpointTests
     }
 
     [Fact]
+    public async Task BrokerUploadUrl_Proof_Of_Delivery_Slot_Returns_200()
+    {
+        // JEBV4-200 — companion to jeeb-mobile PR #117: the proof-photo slot must
+        // be accepted by the signed-PUT broker like the existing KYC slots.
+        using var factory = CdnEnabledFactory(new StubCdn());
+        var client = ClientFor(factory, "s03-cdn-pod");
+
+        var resp = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "proof_of_delivery",
+            content_type = "image/jpeg",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("upload_url").GetString().Should().StartWith("https://");
+    }
+
+    [Fact]
     public async Task BrokerUploadUrl_Unknown_Slot_Returns_400()
     {
         using var factory = CdnEnabledFactory(new StubCdn());

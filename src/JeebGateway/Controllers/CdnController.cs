@@ -73,9 +73,11 @@ public sealed class CdnController : ControllerBase
     // is the record-of-truth for the actual expiry it stamps).
     private const int MaxUploadUrlTtlSeconds = 300;
 
-    // The KYC document slots the signed-PUT broker accepts (DEC1, S03 H2/H3).
-    // Generic vocab; the Jeeb-specific field-name mapping lives in the KYC submit
-    // BFF, not here.
+    // The upload slots the signed-PUT broker accepts: the KYC document slots
+    // (DEC1, S03 H2/H3) plus proof_of_delivery (JEBV4-200, companion to
+    // jeeb-mobile PR #117 — the delivery-proof photo slot). Generic vocab; the
+    // Jeeb-specific field-name mapping lives in the respective submit BFFs, not
+    // here.
     private static readonly IReadOnlySet<string> AllowedUploadSlots =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -83,6 +85,7 @@ public sealed class CdnController : ControllerBase
             "id_document_back",
             "vehicle_registration",
             "selfie_with_liveness",
+            "proof_of_delivery",
         };
 
     private static readonly IReadOnlySet<string> AllowedUploadContentTypes =
