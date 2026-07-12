@@ -633,6 +633,87 @@ public sealed class DurableRequestsStoreTests
         mirror.Cancels[0].GwStatus.Should().Be(RequestStatus.Cancelled);
     }
 
+    // -- JEBV4-40 (PP-9): durable cancel is terminal on the single-read + sweep ----
+
+    [Fact]
+    public async Task Get_returns_cancelled_from_the_marker_even_when_delivery_service_says_active()
+    {
+        // PP-9 core: after a gateway restart the in-memory row is gone. The
+        // read-through resolves the row from delivery-service, which STILL reports it
+        // active (the cancel was never propagated upstream). The durable cancel
+        // marker in the mirror must WIN so the request never resurrects as active.
+        var store = BuildWithMirror(out _, out var delivery, out var mirror);
+        var requestId = Guid.NewGuid().ToString();
+
+        // delivery-service answers "active" (HeadingOff) for this id...
+        delivery.UpstreamRow = new DeliveryRequestUpstream
+        {
+            Id = requestId,
+            ClientId = "client-9",
+            Status = RequestStatus.HeadingOff,
+            Description = "resurrected-as-active upstream",
+            TierId = "flash",
+        };
+        // ...but the durable mirror carries the terminal cancel marker.
+        mirror.Rows.Add(new DeliveryRequest
+        {
+            Id = requestId,
+            ClientId = "client-9",
+            Status = RequestStatus.Cancelled,
+            CancelledBy = "client",
+            CancellationReason = "changed my mind",
+            Description = "durable cancel marker",
+            CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-5),
+        });
+
+        var got = await store.GetAsync(requestId, CancellationToken.None);
+
+        got.Should().NotBeNull();
+        got!.Status.Should().Be(RequestStatus.Cancelled,
+            "a durable cancel is terminal and must win over the still-active delivery-service view");
+        got.CancelledBy.Should().Be("client");
+        // delivery-service was still tried first (canonical), then the marker overrode it.
+        delivery.GetDeliveryCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Sweeper_read_skips_a_durably_cancelled_row_that_upstream_still_reports_ordered()
+    {
+        // PP-9: the durable expiry-sweep read overlays delivery-service 'Ordered'
+        // shipments after a restart. A durably-cancelled row is still 'Ordered'
+        // upstream (cancel not propagated), so without the marker check the sweeper
+        // would re-expire a terminal cancel. It must be skipped.
+        var store = BuildWithMirror(out _, out var delivery, out var mirror);
+        var cutoff = DateTimeOffset.UtcNow;
+        var cancelledId = Guid.NewGuid().ToString();
+        var liveId = Guid.NewGuid().ToString();
+
+        delivery.OrderedShipments.Add(new ShipmentDetailDto
+        {
+            Id = cancelledId, CurrentStage = "Ordered", TierId = "flash",
+            CreatedAt = cutoff.AddMinutes(-10),
+        });
+        delivery.OrderedShipments.Add(new ShipmentDetailDto
+        {
+            Id = liveId, CurrentStage = "Ordered", TierId = "flash",
+            CreatedAt = cutoff.AddMinutes(-10),
+        });
+
+        // Only the first row carries a durable cancel marker.
+        mirror.Rows.Add(new DeliveryRequest
+        {
+            Id = cancelledId, ClientId = "client-9", Status = RequestStatus.Cancelled,
+            Description = "durably cancelled", CreatedAt = cutoff.AddMinutes(-10),
+        });
+
+        var candidates = await store.ListPendingCreatedAtOrBeforeAsync(cutoff, CancellationToken.None);
+
+        candidates.Should().NotContain(r => r.Id == cancelledId,
+            "a durably-cancelled row must not be re-swept into the lifecycle");
+        candidates.Should().Contain(r => r.Id == liveId,
+            "a genuinely live Ordered row is still a sweep candidate");
+    }
+
     [Fact]
     public async Task SetStatus_mirrors_the_new_status_into_the_owner_list_mirror()
     {
@@ -728,6 +809,13 @@ public sealed class DurableRequestsStoreTests
             }
             throw new InvalidOperationException("simulated delivery-service 404 / transport fault");
         }
+
+        /// <summary>JEBV4-40: canned 'Ordered' shipments returned by the durable
+        /// sweep read so the sweeper's post-restart overlay can be exercised.</summary>
+        public List<ShipmentDetailDto> OrderedShipments { get; } = new();
+
+        public override Task<ShipmentsListDto> ListShipmentsAsync(string? orderId, string? stage, int? limit, CancellationToken ct)
+            => Task.FromResult(new ShipmentsListDto { Shipments = OrderedShipments, Count = OrderedShipments.Count });
     }
 
     /// <summary>
@@ -846,7 +934,7 @@ public sealed class DurableRequestsStoreTests
         public Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct) => throw new NotImplementedException();
 
         public Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct) => throw new NotImplementedException();
-        public Task<ShipmentsListDto> ListShipmentsAsync(string? orderId, string? stage, int? limit, CancellationToken ct) => throw new NotImplementedException();
+        public virtual Task<ShipmentsListDto> ListShipmentsAsync(string? orderId, string? stage, int? limit, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct) => throw new NotImplementedException();
         public virtual Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct) => throw new NotImplementedException();

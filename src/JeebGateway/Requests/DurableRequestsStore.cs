@@ -398,6 +398,12 @@ public sealed class DurableRequestsStore : IRequestsStore
                 if (s.CreatedAt > cutoff) continue;
                 if (knownIds.Contains(s.Id)) continue;
 
+                // JEBV4-40 (PP-9): a durably-cancelled row is still 'Ordered' in
+                // delivery-service (the cancel was never propagated upstream). Skip it
+                // so the sweeper never re-expires a terminal cancel back into the
+                // lifecycle after a restart — the terminal cancel marker wins.
+                if (await TryReadCancelledMarkerAsync(s.Id, ct) is not null) continue;
+
                 // Row exists in delivery-service but not in local mirror (post-restart).
                 // Build a minimal DeliveryRequest from the canonical data so the sweeper
                 // can expire it. Fields not available from the shipment are left empty.
@@ -465,7 +471,15 @@ public sealed class DurableRequestsStore : IRequestsStore
         try
         {
             var upstream = await _delivery.GetDeliveryAsync(requestId, ct);
-            return MapUpstream(upstream);
+            var mapped = MapUpstream(upstream);
+            // JEBV4-40 (PP-9): a durable cancel is TERMINAL and must never resurrect.
+            // The gateway does NOT propagate cancels to delivery-service (see
+            // TryCancelAsync), so on a post-restart read-through delivery-service
+            // still reports the row ACTIVE. Consult the durable cancel marker — a
+            // cancelled marker WINS over the upstream active view. delivery-service
+            // still wins for every non-terminal status (it is the freshest canonical
+            // source); only a terminal cancel overrides it.
+            return await TryReadCancelledMarkerAsync(requestId, ct) ?? mapped;
         }
         catch (OperationCanceledException)
         {
@@ -514,6 +528,42 @@ public sealed class DurableRequestsStore : IRequestsStore
             }
         }
 
+        return null;
+    }
+
+    /// <summary>
+    /// JEBV4-40 (PP-9): reads the durable cancel terminal marker from the gateway
+    /// Postgres mirror. Cancellation is a terminal state that is NOT propagated to
+    /// delivery-service (see <see cref="TryCancelAsync"/>), so a post-restart
+    /// read-through resolves a cancelled row as still-active upstream and the expiry
+    /// sweeper re-reads it as Ordered. Returns the mirror's cancelled row when a
+    /// durable <see cref="RequestStatus.Cancelled"/> marker exists (terminal — never
+    /// resurrects); otherwise <see langword="null"/>. DEGRADE-DON'T-FAIL: no mirror
+    /// wired / no row / a non-terminal status / a mirror fault all yield null, which
+    /// leaves the caller's existing behaviour (upstream view / candidate) intact.
+    /// </summary>
+    private async Task<DeliveryRequest?> TryReadCancelledMarkerAsync(string requestId, CancellationToken ct)
+    {
+        if (_mirror is null) return null;
+        try
+        {
+            var mirrored = await _mirror.GetAsync(requestId, ct);
+            if (mirrored is not null
+                && string.Equals(mirrored.Status, RequestStatus.Cancelled, StringComparison.Ordinal))
+            {
+                return mirrored;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "requests-durable: durable cancel-marker read for {RequestId} failed; not overriding the read-through/sweep.",
+                requestId);
+        }
         return null;
     }
 
