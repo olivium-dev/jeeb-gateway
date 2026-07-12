@@ -74,8 +74,9 @@ public class SettlementBatchesCanonicalShapeTests
             (await ScalarStringAsync(conn, "SELECT total_gross_usd::text FROM settlement_batches WHERE jeeber_id = 'jeeber-x'"))
                 .Should().Be("1500000.0000", "the numeric magnitude must be preserved under the renamed column");
 
-            // The guard migration must PASS on the converged shape.
+            // The guard migrations must PASS on the converged shape.
             await ExecFileAsync(conn, MigrationPath("0038_assert_settlement_batches_canonical_usd.sql"));
+            await ExecFileAsync(conn, MigrationPath("0039_harden_settlement_batches_sentinel.sql"));
         }
         finally
         {
@@ -127,6 +128,7 @@ public class SettlementBatchesCanonicalShapeTests
             (await ColumnExistsAsync(conn, "payout_method")).Should().BeFalse("the retired UPG payout_method column must be dropped");
 
             await ExecFileAsync(conn, MigrationPath("0038_assert_settlement_batches_canonical_usd.sql"));
+            await ExecFileAsync(conn, MigrationPath("0039_harden_settlement_batches_sentinel.sql"));
         }
         finally
         {
@@ -156,6 +158,69 @@ public class SettlementBatchesCanonicalShapeTests
             Func<Task> act = () => ExecFileAsync(conn, MigrationPath("0038_assert_settlement_batches_canonical_usd.sql"));
             (await act.Should().ThrowAsync<PostgresException>())
                 .Which.MessageText.Should().Contain("settlement-shape guard (0038)");
+        }
+        finally
+        {
+            await ResetAsync(conn);
+        }
+    }
+
+    [Fact]
+    public async Task Guard0039_Throws_WhenStatusDefaultRevertsToRetiredPending()
+    {
+        var conn = await TryOpenAsync();
+        if (conn is null) return; // opt-in only; not run in CI
+        await using var _ = conn;
+
+        try
+        {
+            await ResetAsync(conn);
+
+            // Start canonical, then pass the 0038 sentinel (both must hold first).
+            await ExecFileAsync(conn, MigrationPath("0037_converge_settlement_batches_usd.sql"));
+            await AssertCanonicalShapeAsync(conn);
+            await ExecFileAsync(conn, MigrationPath("0038_assert_settlement_batches_canonical_usd.sql"));
+
+            // Gap A regression: status default flipped back to the retired-UPG value.
+            // This still passes 0038 clean (it only checks a column named `status` exists).
+            await ExecAsync(conn, "ALTER TABLE settlement_batches ALTER COLUMN status SET DEFAULT 'pending';");
+
+            // 0039 MUST fail the migration run on the reverted default.
+            Func<Task> act = () => ExecFileAsync(conn, MigrationPath("0039_harden_settlement_batches_sentinel.sql"));
+            (await act.Should().ThrowAsync<PostgresException>())
+                .Which.MessageText.Should().Contain("settlement-shape guard (0039)");
+        }
+        finally
+        {
+            await ResetAsync(conn);
+        }
+    }
+
+    [Fact]
+    public async Task Guard0039_Throws_WhenUsdColumnPrecisionNarrows()
+    {
+        var conn = await TryOpenAsync();
+        if (conn is null) return; // opt-in only; not run in CI
+        await using var _ = conn;
+
+        try
+        {
+            await ResetAsync(conn);
+
+            // Start canonical, then pass the 0038 sentinel (both must hold first).
+            await ExecFileAsync(conn, MigrationPath("0037_converge_settlement_batches_usd.sql"));
+            await AssertCanonicalShapeAsync(conn);
+            await ExecFileAsync(conn, MigrationPath("0038_assert_settlement_batches_canonical_usd.sql"));
+
+            // Gap B regression: a _usd money column silently narrowed from
+            // NUMERIC(20,4) to NUMERIC(12,2). This still passes 0038 clean
+            // (it only asserts the column exists by name).
+            await ExecAsync(conn, "ALTER TABLE settlement_batches ALTER COLUMN total_gross_usd TYPE NUMERIC(12,2);");
+
+            // 0039 MUST fail the migration run on the narrowed precision.
+            Func<Task> act = () => ExecFileAsync(conn, MigrationPath("0039_harden_settlement_batches_sentinel.sql"));
+            (await act.Should().ThrowAsync<PostgresException>())
+                .Which.MessageText.Should().Contain("settlement-shape guard (0039)");
         }
         finally
         {
