@@ -2,6 +2,7 @@ using System.Text.Json;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
+using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 
@@ -179,17 +180,72 @@ public class ContractSigningController : ControllerBase
     /// <c>GET /v1/contracts/{contractId}</c>.
     /// </summary>
     [HttpGet("contracts/{contractId}")]
-    [PublicEndpoint("Contract read — ADR-005 §A L2-public; L1 fallback preserved.")]
+    [PublicEndpoint("Contract read — ADR-005 §A L2-public (no capability gate); GW12-SEC-2 (JEBV4-84) adds in-action participant scoping so the by-id read is not an unscoped BOLA.")]
     [ProducesResponseType(typeof(Contract), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> GetContract(string contractId, CancellationToken ct = default)
     {
         if (!IsValidId(contractId)) return InvalidId("contract id");
         if (!_flags.CurrentValue.ContractSigning) return UpstreamDisabled();
 
+        // GW12-SEC-2 (JEBV4-84) — scope this by-id read to a participant. Without
+        // this check any authenticated user could read another party's contract
+        // (parties, signatures, partyRef) by guessing/harvesting an opaque id —
+        // an unscoped object read (OWASP API1:2023 BOLA). The caller must be a
+        // party on the contract (party_ref == their userId) or an admin. Caller
+        // identity is derived from UserIdentity (JWT sub/sid, or the edge-trusted
+        // X-User-Id), NEVER from a client-supplied parameter.
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized))
+        {
+            return unauthorized;
+        }
+
         var contract = await _contractSigning.GetContractAsync(contractId, ct);
+
+        if (!UserIdentity.IsAdmin(HttpContext) && !CallerIsContractParty(contract, userId))
+        {
+            return Problem(
+                title: "Forbidden",
+                detail: "You are not a party on this contract.",
+                statusCode: StatusCodes.Status403Forbidden,
+                type: "https://jeeb.dev/errors/contract-not-participant");
+        }
+
         return Ok(contract);
+    }
+
+    /// <summary>
+    /// GW12-SEC-2 (JEBV4-84) — true when <paramref name="userId"/> is a party on
+    /// the contract. Parties live in the upstream contract payload
+    /// (<see cref="Contract.Document"/>) as <c>parties[].party_ref</c> (the Jeeb
+    /// ToS ceremony records <c>party_ref = userId</c>). Fails closed: a missing/
+    /// malformed document, or no matching party, yields false.
+    /// </summary>
+    private static bool CallerIsContractParty(Contract? contract, string userId)
+    {
+        if (contract is null || string.IsNullOrWhiteSpace(userId)) return false;
+
+        var doc = contract.Document;
+        if (doc.ValueKind != JsonValueKind.Object) return false;
+        if (!doc.TryGetProperty("parties", out var parties) || parties.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (var party in parties.EnumerateArray())
+        {
+            if (party.ValueKind == JsonValueKind.Object
+                && party.TryGetProperty("party_ref", out var partyRef)
+                && partyRef.ValueKind == JsonValueKind.String
+                && string.Equals(partyRef.GetString(), userId, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
