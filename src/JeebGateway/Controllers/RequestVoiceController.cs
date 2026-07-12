@@ -172,16 +172,11 @@ public sealed class RequestVoiceController : ControllerBase
         }
 
         var tierId = string.IsNullOrWhiteSpace(tier) ? "standard" : tier.Trim();
-        if (!await _tiers.ExistsAsync(tierId, ct))
-        {
-            return NotFound(new ProblemDetails
-            {
-                Title = "tier does not match any active delivery tier.",
-                Detail = $"tier={tierId}",
-                Status = StatusCodes.Status404NotFound,
-                Type = "https://jeeb.dev/errors/tier-not-found"
-            });
-        }
+        // JEBV4-65: shared tier-exists validation (single source of truth; the
+        // JEBV4-62 tier-not-found status coupling point). fieldLabel "tier"
+        // preserves this surface's exact Title/Detail wording.
+        var tierProblem = await RequestCreateValidation.ValidateTierExistsAsync(_tiers, tierId, "tier", ct);
+        if (tierProblem is not null) return NotFound(tierProblem);
 
         byte[] bytes;
         await using (var stream = audio.OpenReadStream())
