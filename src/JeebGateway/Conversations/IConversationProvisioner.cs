@@ -85,4 +85,41 @@ public interface IConversationProvisioner
         string winningJeeberId,
         IReadOnlyList<string> losingMemberIds,
         CancellationToken ct);
+
+    /// <summary>
+    /// E22 / I3 (JEBV4-241, cross-ref JEBV4-217; Q-036): auto-close the conversation
+    /// that backs a delivery once that delivery <b>completes</b>. Round-3 (2026-07-07)
+    /// SETTLED disposition: the close is routed through the <b>consumed</b> chat-service's
+    /// OWN API — the Lane-I consumption path — via the channel-deactivate verb it already
+    /// exposes (<c>PATCH /api/channels/{id}/deactivate</c>, the NSwag
+    /// <c>ServiceChatClient.DeactivateAsync</c>). It is NOT a gateway store write (GR-3)
+    /// and NOT a Firestore direct edit (GR-1); the gateway holds no conversation state and
+    /// only composes one existing typed-client call.
+    ///
+    /// <para>MECHANISM RECONCILIATION (the round-3 "AdvancePhase closed vs DeactivateAsync"
+    /// sweep flag): driving the S08 <em>conversation aggregate</em> to a NEW <c>closed</c>
+    /// phase (<c>IJeebConversationClient.AdvancePhaseAsync</c>,
+    /// <c>PATCH /api/conversations/{id}/phase</c>) is NOT taken here — the aggregate's phase
+    /// vocabulary is <c>broadcasting | accepted | direct</c> (see
+    /// <c>AdvanceJeebPhaseRequest</c> / <c>JeebConversationResponse</c>), so <c>closed</c>
+    /// is a chat-service capability that does NOT exist yet. Per the E22 ruling, a
+    /// not-yet-existing chat-service capability goes through the non-breaking extension
+    /// protocol + per-change owner approval (GR-1) and is NOT implemented gateway-side. The
+    /// existing channel-deactivate verb IS the consumed chat-service's close operation and
+    /// needs no chat-service change, so it is the ONE writer for the agent-scoped close.</para>
+    ///
+    /// <para>DEGRADE-DON'T-FAIL: a chat blip / disabled auto-create flag / null-or-empty
+    /// conversation id is a silent no-op — a chat outage must NEVER turn a committed,
+    /// settled delivery completion into a 5xx (mirrors
+    /// <see cref="AdvanceToAcceptedAsync"/>). Idempotent: deactivating an already-closed
+    /// channel is a no-op upstream. Default no-op implementation so existing
+    /// <see cref="IConversationProvisioner"/> fakes need no change (additive-first).</para>
+    /// </summary>
+    /// <param name="conversationId">
+    /// The channel id minted at create time and stamped on the delivery row
+    /// (<c>DeliveryRequest.ConversationId</c>). When null/empty the method is a no-op (the
+    /// order never got a broadcasting conversation).
+    /// </param>
+    Task CloseConversationAsync(string? conversationId, CancellationToken ct)
+        => Task.CompletedTask;
 }
