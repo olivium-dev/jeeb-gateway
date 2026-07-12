@@ -1,0 +1,61 @@
+# gateway-db-seam-allowlist.txt — GR-3 RATCHET allowlist (JEBV4-193 / D4).
+#
+# Every repo-relative path below is an EXISTING jeeb-gateway source file that
+# opens/uses a database (raw Npgsql, or EF DbContext/UseNpgsql). These are the
+# standing GR-3 violations inventoried by D1 (JEBV4-190):
+#   docs/project-understanding/lanes/D1-gateway-store-matrix.md
+#
+# check-stateless-gateway.sh enforces a RATCHET against this list:
+#   - Any DB-seam file NOT on this list => HARD CI FAIL (a NEW seam was added,
+#     or a seam that was removed under D5 reappeared).
+#   - This list may ONLY SHRINK. Each D5 (JEBV4-194) store elimination MUST
+#     delete that store's line here in the same PR.
+#   - When this file becomes empty, the ratchet enforces absolute zero: ANY DB
+#     seam in the gateway then hard-fails CI. Emptying this list is the FINAL
+#     step of D5 (Q-010 RATIFIED / GR-3 absolute).
+#
+# Do NOT add lines to this file. Adding a new gateway DB seam violates GR-3.
+# The 25 D1 seams map to 24 distinct files (PostgresHealthCheck.cs backs both
+# the GatewayPostgres and WalletPostgres readiness probes — D1 rows 24 & 25).
+#
+# Blank lines and lines starting with '#' are ignored.
+
+# --- Infrastructure seams (D1 rows 23, 24, 25) ---
+src/JeebGateway/Infrastructure/INpgsqlConnectionFactory.cs
+src/JeebGateway/Infrastructure/PostgresHealthCheck.cs
+
+# --- Money / settlement stores (D1 rows 2, 3, 21, 17) — gateway-owned per JEB-1476 ---
+src/JeebGateway/Financials/PostgresSettlementStore.cs
+src/JeebGateway/Financials/PostgresSettlementEnqueueStore.cs
+src/JeebGateway/Financials/WeeklySettlementBatch.cs
+src/JeebGateway/Users/PostgresFinancialLedger.cs
+
+# --- Wallet ledger direct read (D1 row 6) -> wallet-service ---
+src/JeebGateway/JeebWallet/JeebWalletLedgerReader.cs
+
+# --- Notification / push stores (D1 rows 7, 8, 9, 10) -> notification-service ---
+src/JeebGateway/Push/PostgresDeviceTokenStore.cs
+src/JeebGateway/Push/PostgresPushRetryQueue.cs
+src/JeebGateway/Push/PostgresPushDeliveryTracker.cs
+src/JeebGateway/Services/Dispatch/PostgresNotificationDispatchOutbox.cs
+
+# --- Delivery / presence / moderation stores (D1 rows 4, 12, 13, 14, 20) -> delivery-service ---
+src/JeebGateway/Requests/PostgresDurableRequestsMirror.cs
+src/JeebGateway/Tiers/PostgresTiersStore.cs
+src/JeebGateway/ProhibitedItems/PostgresProhibitedItemsStore.cs
+src/JeebGateway/ProhibitedItems/FlaggedRequests/PostgresFlaggedRequestStore.cs
+src/JeebGateway/Availability/PostgresAvailabilityStore.cs
+
+# --- User-scoped state (D1 rows 5, 18, 19) -> remote-user-preferences ---
+src/JeebGateway/Users/SavedLocations/PostgresSavedLocationStore.cs
+src/JeebGateway/Users/PostgresAccountDeletionStore.cs
+src/JeebGateway/Users/DataExport/PostgresDataExportStore.cs
+
+# --- Admin escalation (D1 row 11) -> one-time-password ---
+src/JeebGateway/Requests/OtpHandover/PostgresAdminEscalationStore.cs
+
+# --- RAISE-FLAG seams (D1 rows 1, 15, 16, 22) — owner ruling pending on owning service ---
+src/JeebGateway/Cms/PostgresCmsSurfaceStore.cs
+src/JeebGateway/Admin/PostgresAdminAuditLog.cs
+src/JeebGateway/Users/PostgresUserProjectionStore.cs
+src/JeebGateway/Whisper/PostgresTranscriptionFallbackQueue.cs
