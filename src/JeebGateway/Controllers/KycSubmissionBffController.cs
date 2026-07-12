@@ -494,8 +494,18 @@ public sealed class KycSubmissionBffController : ControllerBase
 
     // S03 N2 / N3 input-contract validation (JEB-40 AC6 / AC8). Returns a
     // field-scoped 400 ProblemDetails on the first violation, or null when valid.
+    // JEBV4-258 hardening: use [0-9] (not \d) and \z (not $).
+    //  - \d without RegexOptions.ECMAScript matches the whole Unicode Nd category,
+    //    so Arabic-Indic (U+0660-0669) and Farsi (U+06F0-06F9) digits satisfied
+    //    \d{12} server-side even though the mobile client normalizes them to ASCII
+    //    before submit — a client/server asymmetry. [0-9] restricts to ASCII 0-9,
+    //    matching the strict "exactly 12 ASCII digits" policy (owner-flagged as
+    //    reject-not-normalize; safe because the client already normalizes+trims).
+    //  - $ (without Multiline) also matches immediately before a single trailing
+    //    \n, so "123456789012\n" was accepted. \z anchors the true end-of-string,
+    //    closing that loophole regardless of the digit policy.
     private static readonly System.Text.RegularExpressions.Regex NationalIdRegex =
-        new(@"^\d{12}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+        new(@"^[0-9]{12}\z", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     // Accepted ID variants per owner decision Q-042 / the E3 DoD
     // (WORK-ORDER-2026-07-07 Lane E, E3): the BFF enumerates EXACTLY
@@ -536,7 +546,7 @@ public sealed class KycSubmissionBffController : ControllerBase
         if (string.Equals(body.IdType, "national_id", StringComparison.OrdinalIgnoreCase)
             && !NationalIdRegex.IsMatch(body.IdNumber!))
         {
-            return FieldProblem("id_number", "id_number must be exactly 12 digits (^\\d{12}$).");
+            return FieldProblem("id_number", "id_number must be exactly 12 ASCII digits (0-9).");
         }
 
         // AC8 — tos_accepted_version must cross-link to a known ToS template

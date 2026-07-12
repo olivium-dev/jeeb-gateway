@@ -108,6 +108,54 @@ public sealed class KycTosCeremonyAndValidationTests
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
+    // ----- JEBV4-258 NationalIdRegex hardening (^[0-9]{12}\z) -----
+    // The national-ID shape rule must accept EXACTLY 12 ASCII digits — non-ASCII
+    // Unicode digits (Arabic-Indic / Farsi) and a trailing newline are rejected.
+
+    [Theory]
+    [InlineData("١٢٣٤٥٦٧٨٩٠١٢")] // Arabic-Indic ١٢٣٤٥٦٧٨٩٠١٢
+    [InlineData("۱۲۳۴۵۶۷۸۹۰۱۲")] // Farsi ۱۲۳۴۵۶۷۸۹۰۱۲
+    public async Task SubmitJson_NationalId_UnicodeDigits_Returns_400_PerJEBV4_258(string idNumber)
+    {
+        _factory.ContractSigning.Reset();
+        var client = ClientFor($"jebv4-258-unicode-{idNumber.GetHashCode():X}-user");
+        var resp = await PostJsonAsync(
+            client, "/v1/kyc/submit", Package(idType: "national_id", idNumber: idNumber), Guid.NewGuid().ToString("N"));
+
+        // [0-9] (not \d) restricts to ASCII 0-9, so 12 non-ASCII Unicode digits no
+        // longer satisfy the national-ID shape rule.
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("field").GetString().Should().Be("id_number");
+    }
+
+    [Fact]
+    public async Task SubmitJson_NationalId_TrailingNewline_Returns_400_PerJEBV4_258()
+    {
+        _factory.ContractSigning.Reset();
+        var client = ClientFor("jebv4-258-trailing-newline-user");
+        var resp = await PostJsonAsync(
+            client, "/v1/kyc/submit", Package(idType: "national_id", idNumber: "123456789012\n"), Guid.NewGuid().ToString("N"));
+
+        // \z (not $) anchors the true end-of-string, so "12 digits + \n" no longer
+        // slips through the national-ID shape rule.
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var json = await ReadJsonAsync(resp);
+        json.GetProperty("field").GetString().Should().Be("id_number");
+    }
+
+    [Fact]
+    public async Task SubmitJson_NationalId_PlainTwelveAsciiDigits_Returns_201_PerJEBV4_258()
+    {
+        _factory.ContractSigning.Reset();
+        var client = ClientFor("jebv4-258-plain-ascii-user");
+        var resp = await PostJsonAsync(
+            client, "/v1/kyc/submit", Package(idType: "national_id", idNumber: "123456789012"), Guid.NewGuid().ToString("N"));
+
+        // Regression guard: the hardening must NOT reject a valid 12 ASCII-digit ID.
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+    }
+
     // ----- E3 (owner decision Q-039: "Id number is a must") -----
     // id_number is now REQUIRED for every id_type. The national_id 12-digit shape
     // rule stays scoped to national_id; passport/residency numbers are free-form
