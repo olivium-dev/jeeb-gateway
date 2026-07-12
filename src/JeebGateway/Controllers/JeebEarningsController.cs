@@ -23,8 +23,18 @@ namespace JeebGateway.Controllers;
 [RequireCapability(Capabilities.EarningsReadOwn)]
 public sealed class JeebEarningsController : ControllerBase
 {
-    /// <summary>COD states that count as earnings (not 'recorded' = pending batch).</summary>
-    private static readonly string[] EarningsCodStates = [CodSettlementState.Batched, CodSettlementState.Paid];
+    /// <summary>
+    /// JEBV4-283: COD states that count as EARNED commission for the jeeber. <c>recorded</c>
+    /// IS included — the jeeber earns the commission the moment COD is collected at delivery
+    /// completion, independent of the platform-side settlement lifecycle (<c>recorded →
+    /// batched → paid</c>). Excluding it made the earnings projection structurally empty on
+    /// every environment where the weekly settlement-batch loop has not yet produced a batch
+    /// (on MSI settlement_batches=0), so jeebers never saw the commission they had already
+    /// earned. Batching/paying is a downstream payout concern, not a precondition for the
+    /// earning to be shown.
+    /// </summary>
+    private static readonly string[] EarningsCodStates =
+        [CodSettlementState.Recorded, CodSettlementState.Batched, CodSettlementState.Paid];
 
     private readonly IEarningsAggregationService _earnings;
     private readonly IMemoryCache _cache;

@@ -936,7 +936,9 @@ public class DeliveriesController : ControllerBase
     /// pair when applicable; the canonical "other party" for a Jeeber
     /// action is the Client and vice versa.
     /// </summary>
-    private async Task NotifyOtherPartyAsync(
+    // JEBV4-281: the `ct` parameter is deliberately NOT forwarded to the push send —
+    // see the fire-and-forget block below (the push MUST outlive the request scope).
+    private Task NotifyOtherPartyAsync(
         DeliveryRequest req, string previousStatus, CancellationToken ct, string? pushStatus = null)
     {
         // pushStatus decouples the PUSH-facing status vocabulary from the request
@@ -970,30 +972,53 @@ public class DeliveriesController : ControllerBase
         var title = "Delivery status updated";
         var bodyText = $"Status changed from {previousStatus} to {effectiveStatus}.";
 
-        foreach (var userId in recipients)
-        {
-            try
-            {
-                var request = new PushNotificationRequest(
-                    UserId: userId,
-                    Trigger: NotificationTrigger.StatusChange,
-                    Title: title,
-                    Body: bodyText,
-                    Data: data,
-                    IdempotencyKey: $"{req.Id}:{effectiveStatus}:{userId}");
+        // Build the per-recipient push requests SYNCHRONOUSLY so every value is captured
+        // from `req` now — the caller mutates/returns the row the instant this returns.
+        var deliveryId = req.Id;
+        var pushRequests = recipients
+            .Select(userId => new PushNotificationRequest(
+                UserId: userId,
+                Trigger: NotificationTrigger.StatusChange,
+                Title: title,
+                Body: bodyText,
+                Data: data,
+                IdempotencyKey: $"{deliveryId}:{effectiveStatus}:{userId}"))
+            .ToList();
 
-                await _push.SendAsync(request, ct);
-            }
-            catch (Exception ex)
+        // JEBV4-281 — FIRE-AND-FORGET. The status-change push MUST NOT block the
+        // transition / OTP-verify response. The push pipeline resolves the counterparty
+        // channel via remote-user-preferences (192.168.2.50:10067), which is unreachable
+        // on the MSI network; each SendAsync then burns ~10-15s of Polly retries. Awaiting
+        // it on the request path made every delivery transition + OTP verify time out
+        // client-side ("No internet connection") and the UI revert — even though the
+        // backend state had already committed. So detach the send loop onto a background
+        // task with its OWN short-timeout token (NOT the request `ct`, which is cancelled
+        // the instant the response completes) and swallow+log failures as warnings.
+        // `_push` (IPushNotificationService) is a DI SINGLETON (Program.cs), so it is safe
+        // to use after the request scope ends. The transition/OTP endpoints now return in
+        // <1s regardless of push reachability; when the push IS reachable it delivers
+        // exactly as before (same request shape + idempotency key).
+        _ = Task.Run(async () =>
+        {
+            using var pushCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            foreach (var pushRequest in pushRequests)
             {
-                // Push delivery is best-effort; the state transition has
-                // already committed. Log so observability picks it up but
-                // do not bubble the failure back to the caller.
-                _log.LogWarning(ex,
-                    "Status-change push failed for delivery {DeliveryId} user {UserId}",
-                    req.Id, userId);
+                try
+                {
+                    await _push.SendAsync(pushRequest, pushCts.Token);
+                }
+                catch (Exception ex)
+                {
+                    // Best-effort; the state transition already committed. Log for
+                    // observability, never surface to the (already-returned) caller.
+                    _log.LogWarning(ex,
+                        "Status-change push failed for delivery {DeliveryId} user {UserId}",
+                        deliveryId, pushRequest.UserId);
+                }
             }
-        }
+        });
+
+        return Task.CompletedTask;
     }
 
     /// <summary>
