@@ -33,8 +33,7 @@ public sealed class JeebEarningsController : ControllerBase
     /// earned. Batching/paying is a downstream payout concern, not a precondition for the
     /// earning to be shown.
     /// </summary>
-    private static readonly string[] EarningsCodStates =
-        [CodSettlementState.Recorded, CodSettlementState.Batched, CodSettlementState.Paid];
+    private static readonly string[] EarningsCodStates = CodSettlementState.EarningsStates;
 
     private readonly IEarningsAggregationService _earnings;
     private readonly IMemoryCache _cache;

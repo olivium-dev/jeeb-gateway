@@ -1,6 +1,7 @@
 using JeebGateway.Infrastructure;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 
 namespace JeebGateway.Financials;
 
@@ -121,8 +122,20 @@ public sealed class PostgresSettlementStore : ISettlementStore
 
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("JeeberId", jeeberId);
-        cmd.Parameters.AddWithValue("From", (object?)from ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("To", (object?)to ?? DBNull.Value);
+        // JEBV4-283: type the window bounds explicitly as timestamptz. AddWithValue on a
+        // DBNull carries NO type, so on the lifetime path (from/to == null) Postgres cannot
+        // infer the parameter type for the `@From IS NULL` / `@To IS NULL` predicates and the
+        // query fails with 42P08 "could not determine data type of parameter $2". An explicit
+        // NpgsqlDbType.TimestampTz makes the null strongly-typed; a real DateTimeOffset value is
+        // sent as timestamptz either way (matches the settled_at column type).
+        cmd.Parameters.Add(new NpgsqlParameter("From", NpgsqlDbType.TimestampTz)
+        {
+            Value = (object?)from ?? DBNull.Value,
+        });
+        cmd.Parameters.Add(new NpgsqlParameter("To", NpgsqlDbType.TimestampTz)
+        {
+            Value = (object?)to ?? DBNull.Value,
+        });
         if (codStates is { Count: > 0 })
             cmd.Parameters.AddWithValue("CodStates", codStates.ToArray());
 

@@ -1,5 +1,4 @@
 using System;
-using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using JeebGateway.Auth.Capabilities;
@@ -25,17 +24,27 @@ namespace JeebGateway.Controllers;
 /// exposed <c>/v1/jeebers/me/earnings</c> (<see cref="JeebEarningsController"/>) and
 /// <c>/api/earnings/*</c> (<c>EarningsController</c>) — so the app's path 404'd. This
 /// controller adds the missing mobile-contract path, wired to the OWNING surfaces:
-/// the SUMMARY relays wallet-service's <c>GET /v1/wallet/jeeb/earnings</c> (the jeeberearnings
-/// read, bound to <c>WalletServiceApi:BaseUrl</c>); the EXPORT reuses the gateway's existing
+/// the SUMMARY serves the gateway's OWN settlement aggregation
+/// (<see cref="IEarningsAggregationService"/>, the SAME service + earned-COD states
+/// <see cref="JeebEarningsController"/> uses); the EXPORT reuses the gateway's existing
 /// <see cref="IEarningsPdfGenerator"/> (the same generator <c>EarningsController</c> serves),
 /// since wallet-service exposes no PDF statement endpoint.
 /// </para>
 ///
 /// <para>
+/// JEBV4-283: the SUMMARY previously RELAYED wallet-service's
+/// <c>GET /v1/wallet/jeeb/earnings</c>, but wallet-service does not own COD settlements — the
+/// gateway does — so that relay returned an empty summary and the Earnings screen showed
+/// commission 0 / "No earnings yet" despite recorded settlements. It now reads the gateway's
+/// own aggregation (which the config flag <c>FeatureFlags:UseUpstream:Earnings</c> never
+/// touched on this path), so recorded COD earnings surface immediately.
+/// </para>
+///
+/// <para>
 /// ADR-0001 (STATELESS &amp; THIN): authenticates, scopes the read to the caller's OWN jeeber
-/// id from the bearer (a client-supplied <c>jeeberId</c> query is NOT trusted), and relays the
-/// upstream response (summary) / generates the statement (export). It holds NO state, NO
-/// persistence and NO domain rules.
+/// id from the bearer (a client-supplied <c>jeeberId</c> query is NOT trusted), and returns the
+/// gateway's canonical earnings projection (summary) / generates the statement (export). It
+/// holds NO state and NO persistence beyond the settlement rows the aggregation reads.
 /// </para>
 /// </summary>
 [ApiController]
@@ -43,36 +52,48 @@ namespace JeebGateway.Controllers;
 [RequireCapability(Capabilities.EarningsReadOwn)]
 public sealed class JeebEarningsBffController : ControllerBase
 {
-    /// <summary>Named HttpClient bound to WalletServiceApi:BaseUrl (registered in Program.cs).</summary>
+    /// <summary>
+    /// Named HttpClient bound to WalletServiceApi:BaseUrl (registered in Program.cs). RETAINED
+    /// for the JEBV4-58/PP-7 resilience registration and its regression guard
+    /// (<c>UpstreamClientResiliencePipelineTests</c>): the named money-read client keeps its
+    /// resilience pipeline even though the summary read below no longer relays to it (JEBV4-283).
+    /// </summary>
     public const string WalletHttpClientName = "JeebEarningsWalletClient";
 
-    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IEarningsAggregationService _earnings;
     private readonly IEarningsPdfGenerator _pdf;
     private readonly TimeProvider _clock;
-    private readonly ILogger<JeebEarningsBffController> _log;
 
     public JeebEarningsBffController(
-        IHttpClientFactory httpClientFactory,
+        IEarningsAggregationService earnings,
         IEarningsPdfGenerator pdf,
-        TimeProvider clock,
-        ILogger<JeebEarningsBffController> log)
+        TimeProvider clock)
     {
-        _httpClientFactory = httpClientFactory;
+        _earnings = earnings;
         _pdf = pdf;
         _clock = clock;
-        _log = log;
     }
 
     /// <summary>
-    /// GET /v1/jeeb/earnings?jeeberId=&amp;period={today|week|month} — the caller's earnings
-    /// summary, relayed VERBATIM from wallet-service's <c>/v1/wallet/jeeb/earnings</c>
-    /// (status + body), scoped to the bearer's own jeeber id.
+    /// GET /v1/jeeb/earnings?period={today|week|month} (or explicit <c>from</c>/<c>to</c>) — the
+    /// caller's earnings summary, scoped to the bearer's own jeeber id.
+    ///
+    /// <para>
+    /// JEBV4-283: serves the GATEWAY's OWN settlement aggregation — the same
+    /// <see cref="IEarningsAggregationService"/> and earned-COD states
+    /// (<see cref="CodSettlementState.EarningsStates"/>, which INCLUDE <c>recorded</c>) that the
+    /// <c>/v1/jeebers/me/earnings</c> read (<see cref="JeebEarningsController"/>) uses — instead of
+    /// relaying to wallet-service (which does not own COD settlements and returned an empty summary,
+    /// making the Earnings screen show commission 0 / "No earnings yet"). The returned
+    /// <see cref="EarningsProjection"/> carries the flat <c>totalCommission</c>/<c>totalEarnings</c>
+    /// + <c>deliveryCount</c> + <c>entries[]</c> keys the mobile <c>EarningsSummary.fromJson</c>
+    /// (<c>DioEarningsRepository</c>) parses.
+    /// </para>
     /// </summary>
     [HttpGet]
-    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(EarningsProjection), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> GetEarnings(
         [FromQuery] string? period,
         [FromQuery] string? from,
@@ -83,55 +104,14 @@ public sealed class JeebEarningsBffController : ControllerBase
             return unauthorized;
 
         // Own-scoping (ADR-0001): always read the CALLER's own earnings, never a query id.
-        var query = $"?jeeberId={Uri.EscapeDataString(jeeberId)}";
-        if (!string.IsNullOrWhiteSpace(period)) query += $"&period={Uri.EscapeDataString(period)}";
-        if (!string.IsNullOrWhiteSpace(from)) query += $"&from={Uri.EscapeDataString(from)}";
-        if (!string.IsNullOrWhiteSpace(to)) query += $"&to={Uri.EscapeDataString(to)}";
+        // Map the mobile period vocabulary ({today|week|month}) — or an explicit custom
+        // from/to — to the same UTC window the export uses.
+        var (windowStart, windowEnd) = ResolveWindow(period, from, to);
 
-        var client = _httpClientFactory.CreateClient(WalletHttpClientName);
-        if (client.BaseAddress is null)
-        {
-            _log.LogWarning("v1/jeeb/earnings: wallet upstream base address not configured (WalletServiceApi:BaseUrl).");
-            return Problem(
-                title: "Earnings upstream not configured.",
-                statusCode: StatusCodes.Status502BadGateway,
-                type: "https://jeeb.dev/errors/earnings-upstream-unconfigured");
-        }
+        var projection = await _earnings.GetProjectionWithStatesAsync(
+            jeeberId, windowStart, windowEnd, CodSettlementState.EarningsStates, ct);
 
-        HttpResponseMessage upstream;
-        try
-        {
-            using var req = new HttpRequestMessage(HttpMethod.Get, "v1/wallet/jeeb/earnings" + query);
-            var auth = Request.Headers["Authorization"].ToString();
-            if (!string.IsNullOrWhiteSpace(auth))
-                req.Headers.TryAddWithoutValidation("Authorization", auth);
-
-            upstream = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "v1/jeeb/earnings: wallet upstream call failed.");
-            return Problem(
-                title: "Earnings upstream call failed.",
-                statusCode: StatusCodes.Status502BadGateway,
-                type: "https://jeeb.dev/errors/earnings-upstream-fault");
-        }
-
-        using (upstream)
-        {
-            var bytes = await upstream.Content.ReadAsByteArrayAsync(ct);
-            var contentType = upstream.Content.Headers.ContentType?.ToString() ?? "application/json";
-
-            // Relay the upstream STATUS + body verbatim (thin BFF; the wallet owns the shape).
-            // The mobile DioEarningsRepository distinguishes network-vs-server by status, so
-            // the real upstream status must survive — not be flattened to 200.
-            return new ContentResult
-            {
-                Content = System.Text.Encoding.UTF8.GetString(bytes),
-                ContentType = contentType,
-                StatusCode = (int)upstream.StatusCode,
-            };
-        }
+        return Ok(projection);
     }
 
     /// <summary>
