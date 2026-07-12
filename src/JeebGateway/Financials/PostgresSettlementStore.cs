@@ -194,6 +194,26 @@ public sealed class PostgresSettlementStore : ISettlementStore
         return await cmd.ExecuteNonQueryAsync(ct) > 0;
     }
 
+    public async Task<IReadOnlyList<Settlement>> ListUnpostedLedgerAsync(int limit, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // JEBV4-47 (M3/R7): truly-settled rows whose ledger post never landed
+        // (ledger_entry_id IS NULL). A pending_settlement placeholder has no ledger
+        // post by design, so we POSITIVELY require a completed settlement state.
+        // Stable ORDER BY (settled_at, id) + LIMIT so a large backlog pages
+        // deterministically and cannot wedge a sweep (GW12-F1 bounded-sweep lesson).
+        const string sql = """
+            SELECT * FROM settlements
+            WHERE ledger_entry_id IS NULL
+              AND state IN ('settled', 'receipt_generated')
+            ORDER BY settled_at ASC, id ASC
+            LIMIT @Limit
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("Limit", limit);
+        return await ReadListAsync(cmd, ct);
+    }
+
     public async Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, DateTimeOffset at, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);

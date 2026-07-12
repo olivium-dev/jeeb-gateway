@@ -1,3 +1,4 @@
+using JeebGateway.Observability;
 using JeebGateway.Requests;
 using Microsoft.Extensions.Logging;
 
@@ -284,12 +285,18 @@ public sealed class SettlementService : ISettlementService
         }
         catch (Exception ex)
         {
-            // wallet-service is best-effort at the gateway boundary: the
-            // settlement row is the system of record on the gateway side
-            // and the wallet client is idempotent on the settlement id,
-            // so the background ledger reconciler can replay the post.
+            // JEBV4-47 (M3/R7): the UPG generic-settlement ledger post is best-effort
+            // at the gateway boundary — the settlement row is the gateway-side system
+            // of record and the ledger client is idempotent on the settlement id
+            // (IdempotencyKey = row.Id). The row is left with ledger_entry_id NULL and
+            // the SettlementLedgerReconciler (BackgroundService) replays the post on its
+            // next tick via ISettlementStore.ListUnpostedLedgerAsync, so the gateway
+            // settlement rows and the UPG ledger reconverge automatically. The failure
+            // is counted so the (transient) divergence is observable, not silent.
+            BusinessOutcomeTelemetry.SettlementLedgerPostFailures.Add(1);
             _log.LogWarning(ex,
-                "Wallet ledger post failed for settlement {SettlementId} (delivery {DeliveryId}); row persisted, will replay.",
+                "Settlement ledger post failed for settlement {SettlementId} (delivery {DeliveryId}); "
+                + "row persisted with ledger_entry_id NULL, SettlementLedgerReconciler will replay.",
                 row.Id, row.DeliveryId);
         }
 

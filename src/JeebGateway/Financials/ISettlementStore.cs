@@ -56,6 +56,17 @@ public interface ISettlementStore
     Task<bool> SetLedgerEntryAsync(string settlementId, string ledgerEntryId, CancellationToken ct);
 
     /// <summary>
+    /// JEBV4-47 (M3/R7): returns truly-settled rows whose ledger post never landed
+    /// (<see cref="Settlement.LedgerEntryId"/> IS NULL, state IN
+    /// (<c>settled</c>, <c>receipt_generated</c>)) — the divergence the
+    /// SettlementLedgerReconciler heals. Bounded page (LIMIT + stable
+    /// <c>ORDER BY settled_at, id</c> — GW12-F1 lesson) so a large backlog cannot
+    /// wedge a sweep. A <c>pending_settlement</c> placeholder has no ledger post by
+    /// design and is deliberately excluded.
+    /// </summary>
+    Task<IReadOnlyList<Settlement>> ListUnpostedLedgerAsync(int limit, CancellationToken ct);
+
+    /// <summary>
     /// Flips the row from <see cref="SettlementState.Settled"/> to
     /// <see cref="SettlementState.ReceiptGenerated"/> on first receipt
     /// read. Idempotent — repeat calls do not advance the timestamp.
