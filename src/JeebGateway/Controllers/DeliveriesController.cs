@@ -237,12 +237,20 @@ public class DeliveriesController : ControllerBase
             // this legacy surface too. A shipment whose orderId is absent from the set —
             // or whose orderId is null — is dropped (cannot prove participation → fail
             // closed). This is authorization scoping, not a fabricated dataset.
+            // JEBV4-280: read the caller's OWN durable owner-list rows (client-created +
+            // jeeber-assigned). The jeeber-assigned rows are the accepted deliveries — the
+            // offer-accept stamps them (SetJeeberIdAsync → gateway Postgres mirror), the same
+            // acceptance that seeds the delivery-service `deliveries` table. We keep the full
+            // rows (not just their ids) so they can be surfaced below.
+            var ownedClient = await _store.ListForClientAsync(userId, ct);
+            var ownedJeeber = await _store.ListForJeeberAsync(userId, ct);
+
             var ownedOrderIds = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var owned in await _store.ListForClientAsync(userId, ct))
+            foreach (var owned in ownedClient)
             {
                 ownedOrderIds.Add(owned.Id);
             }
-            foreach (var assigned in await _store.ListForJeeberAsync(userId, ct))
+            foreach (var assigned in ownedJeeber)
             {
                 ownedOrderIds.Add(assigned.Id);
             }
@@ -252,7 +260,54 @@ public class DeliveriesController : ControllerBase
                 .Where(s => !activeBucket || IsActiveStage(s.CurrentStage))
                 .ToList();
 
-            return Ok(new ShipmentsListDto { Shipments = scoped, Count = scoped.Count });
+            // JEBV4-280: the upstream `shipments` store is a SEPARATE workflow store that only
+            // holds a stale seed — it never receives the accepted-delivery rows the accept writes
+            // to the `deliveries` store. Intersecting that stale feed with the owner-list (above)
+            // therefore dropped every accepted delivery, so a jeeber whose canonical Delivery tab
+            // reads this legacy GET /deliveries surface saw "no orders yet" forever after an
+            // accept. Surface the jeeber's OWN assigned deliveries from the durable owner-list as
+            // shipment rows too (keyed by request id == order id), so an accepted delivery appears
+            // here exactly as it does on GET /v1/deliveries?role=jeeber — filtered to the same
+            // active statuses (Ordered/Picked/InTransit/AtDoor). STRICTLY ADDITIVE and jeeber-only:
+            // the upstream scoped rows are unchanged, an owner-list row is added ONLY for an order
+            // id the upstream feed did not already return, and only the JEEBER-assigned rows are
+            // considered — so a pure customer's response is byte-for-byte identical to before.
+            var upstreamOrderIds = new HashSet<string>(
+                scoped.Where(s => s.OrderId is not null).Select(s => s.OrderId!),
+                StringComparer.Ordinal);
+
+            // Match the upstream stage gate: the active bucket (stage=active / absent) keeps any
+            // in-flight row; an explicit canonical stage token keeps that exact stage; a terminal
+            // explicit stage can never leak a terminal row into an active surface.
+            var wantedStage = activeBucket || string.IsNullOrWhiteSpace(stage)
+                ? null
+                : DeliveryStatusAlias.ToCanonical(stage) ?? stage;
+
+            var jeeberShipments = ownedJeeber
+                .Where(r => !upstreamOrderIds.Contains(r.Id))
+                .Select(r => new { Row = r, Stage = DeliveryStatusAlias.ToCanonical(r.Status) ?? r.Status })
+                .Where(x => wantedStage is null
+                    ? IsActiveStage(x.Stage)
+                    : string.Equals(x.Stage, wantedStage, StringComparison.OrdinalIgnoreCase))
+                .Select(x => new ShipmentDetailDto
+                {
+                    Id = x.Row.Id,
+                    TenantId = null,
+                    OrderId = x.Row.Id,
+                    TierId = x.Row.TierId,
+                    WorkflowId = null,
+                    WorkflowVersion = 0,
+                    CurrentStage = x.Stage,
+                    StageEnteredAt = x.Row.CreatedAt,
+                    CarrierName = null,
+                    CarrierTrackingId = null,
+                    CreatedAt = x.Row.CreatedAt,
+                    UpdatedAt = x.Row.CreatedAt,
+                })
+                .ToList();
+
+            var merged = scoped.Concat(jeeberShipments).ToList();
+            return Ok(new ShipmentsListDto { Shipments = merged, Count = merged.Count });
         }
         catch (Exception ex)
         {
