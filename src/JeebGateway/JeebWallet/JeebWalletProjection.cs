@@ -36,7 +36,7 @@ public static class JeebWalletProjection
     /// (mobile maps anything &gt; 0 and &lt; this to the "low" state). Presentation
     /// threshold only — NOT a domain rule (no money moves on it).
     /// </summary>
-    private const double LowBalanceThreshold = 20.0;
+    private const decimal LowBalanceThreshold = 20.0m;
 
     /// <summary>
     /// Project the generic holder-wallets read into the Jeeb wallet balance the
@@ -49,7 +49,14 @@ public static class JeebWalletProjection
         var wallets = holder?.Wallets ?? new List<service.ServiceWallet.Wallet>();
         var active = wallets.Where(w => w is { IsActive: true }).ToList();
 
-        var available = active.Sum(w => w.Amount);
+        // JEBV4-49 (M4): the generic wallet-service primitive exposes Amount as a
+        // double (NSwag-generated client — a reusable-service boundary the gateway
+        // must not change), so convert ONCE at this projection boundary and keep
+        // decimal end-to-end for the Jeeb display contract. Realistic LBP balances
+        // (millions) are well within double's exact-integer range, so the boundary
+        // conversion is lossless; keeping the DTO decimal stops the value from
+        // being re-serialized as a double with fractional artifacts.
+        var available = (decimal)active.Sum(w => w.Amount);
         var currency = ResolveCurrency(active);
 
         return new JeebWalletBalanceResponse
@@ -66,7 +73,7 @@ public static class JeebWalletProjection
     /// Derive the mobile affordability bucket from the available balance. This is a
     /// presentation derivation (which copy/CTA the hub shows), not a state mutation.
     /// </summary>
-    private static string ResolveAffordability(double available)
+    private static string ResolveAffordability(decimal available)
     {
         if (available <= 0) return Affordability.Empty;
         if (available < LowBalanceThreshold) return Affordability.Low;

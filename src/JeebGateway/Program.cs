@@ -936,10 +936,12 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 // Track per-controller migrations against GATEWAY-REMEDIATION-PLAN.md.
 // ===========================================================================
 
-// JEB-56: JeebPricingOptions — makes commission rates config-overridable.
-// Defaults match CommissionCalculator constants (all tiers flat 10%).
-builder.Services.Configure<JeebPricingOptions>(
-    builder.Configuration.GetSection(JeebPricingOptions.SectionName));
+// JEBV4-49 (M5): the JeebPricingOptions "config-overridable rates" affordance was
+// DEAD — SettlementService calls the static CommissionCalculator directly, so a
+// JeebPricing appsettings override never reached settlement math (quotes and
+// settlement could silently diverge). Removed the options class and this dead
+// registration; CommissionCalculator's flat-10% constants are the single source
+// of truth (JEBV4-43's CommissionAgreementTests guards that policy).
 
 // Cash settlement + receipt API (T-backend-016 / JEEB-34 → JEB-56).
 //
