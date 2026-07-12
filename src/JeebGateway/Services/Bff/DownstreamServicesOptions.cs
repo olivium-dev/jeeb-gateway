@@ -51,11 +51,14 @@ public sealed class DownstreamServicesOptions
     // (consumed directly by the NSwag ServicePushNotificationClient in Program.cs)
     // and is no longer a Services:* nested downstream client, so this
     // Services:{section}:BaseUrl validator does not cover it.
+    // NOTE: "Matching" is intentionally NOT listed here. The standalone
+    // matching-service read path was retired (JEBV4-220 / E25, Q-020): nothing
+    // dials Services:Matching, so a production boot must NOT fail closed on a
+    // missing matching key. Courier matching lives in delivery-service.
     public List<string> Required { get; set; } = new()
     {
         "Auth",
         "UserManagement",
-        "Matching",
         "Geolocation",
         "Delivery",
     };

@@ -89,11 +89,16 @@ public static class ServiceClientExtensions
         // WalletServiceApi:BaseUrl) + scoped ServiceWalletClient typed client,
         // not via this generic named-downstream helper.
 
-        // matching (FastAPI) — DB-backed read of a user's match preferences
-        //   (GET /api/v1/matches/{user_id}), consumed by MatchingController's
-        //   GetMatchingUsers. Courier matching /run was relocated to
-        //   delivery-service; see IDeliveryServiceClient.RunMatchingAsync.
-        AddNamedDownstreamClient(services, config, "matching", "Services:Matching:BaseUrl");
+        // matching-service — RETIRED (JEBV4-220 / E25, Q-020). The standalone
+        //   Python FastAPI matching-service and its DB-backed read
+        //   (GET /api/v1/matches/{user_id}, formerly consumed by
+        //   MatchingController.GetMatchingUsers) are decommissioned. Courier
+        //   matching relocated to delivery-service (POST /matching/run forwards
+        //   to IDeliveryServiceClient.RunMatchingAsync). The "matching" named
+        //   client, the typed IMatchingServiceClient, and the Services:Matching
+        //   config wire are gone. NOTE: FeatureFlags:UseUpstream:Matching is a
+        //   DIFFERENT wire — it gates the delivery-service matching kick-off
+        //   (JeebRequestsController) — and is intentionally KEPT.
 
         // notification-service — registered separately as the salehly-style named
         //   client "ServiceNotificationClient" (ServiceNotificationClient:BaseUrl)
@@ -153,9 +158,9 @@ public static class ServiceClientExtensions
         AttachStandardPipeline(
             services.AddHttpClient<IDeliveryServiceClient, DeliveryServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Delivery")));
-        AttachStandardPipeline(
-            services.AddHttpClient<IMatchingServiceClient, MatchingServiceClient>(http =>
-                BindBaseAddress(http, config, "Services:Matching")));
+        // IMatchingServiceClient typed registration — REMOVED (JEBV4-220 / E25).
+        // The standalone matching-service read path is retired; nothing dials
+        // Services:Matching anymore.
 
         // geolocation typed client — the SINGLE registration is the NSwag-generated
         // Services.Generated.GeolocationService.IGeolocationServiceClient below.

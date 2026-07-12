@@ -75,7 +75,8 @@ public static class HealthCheckExtensions
         // All of these serve GET /health -> 200 on the swarm (verified). A real
         // failure here is fatal to readiness (Unhealthy -> /health/ready = 503).
         AddDownstreamProbe(checks, config, "wallet-service",          "WalletServiceApi:BaseUrl",         healthPath: "health");
-        AddDownstreamProbe(checks, config, "matching",                "Services:Matching:BaseUrl",        healthPath: "health");
+        // matching-service readiness probe REMOVED (JEBV4-220 / E25) — the
+        // standalone matching-service read path is retired; nothing dials it.
         AddDownstreamProbe(checks, config, "notification-service",    "ServiceNotificationClient:BaseUrl", healthPath: "health");
         AddDownstreamProbe(checks, config, "push-notification",       "PushNotificationServiceApi:BaseUrl", healthPath: "health");
         AddDownstreamProbe(checks, config, "delivery-service",        "Services:Delivery:BaseUrl",        healthPath: "health");

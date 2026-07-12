@@ -31,7 +31,10 @@ public class TypedClientPipelineTests
     {
         new object[] { "IAuthServiceClient" },
         new object[] { "IDeliveryServiceClient" },
-        new object[] { "IMatchingServiceClient" },
+        // IMatchingServiceClient — REMOVED (JEBV4-220 / E25, Q-020). The
+        // standalone matching-service read path is retired; its typed client and
+        // the "matching" named client are gone. Courier matching lives in
+        // delivery-service (POST /matching/run -> IDeliveryServiceClient).
         new object[] { "IGeolocationServiceClient" },
         // IScoreServiceClient — REMOVED. score-taking-service was deleted completely
         // (owner directive: never use). Its typed + named registrations are gone.

@@ -46,18 +46,15 @@ public sealed class MatchingController : ControllerBase
     private const string DefaultTenantId = "default";
 
     private readonly IDeliveryServiceClient _delivery;
-    private readonly IMatchingServiceClient _matchesRead;
     private readonly IDeliveryRowMirror _rowMirror;
     private readonly string _tenantId;
 
     public MatchingController(
         IDeliveryServiceClient delivery,
-        IMatchingServiceClient matchesRead,
         IDeliveryRowMirror rowMirror,
         IConfiguration config)
     {
         _delivery = delivery;
-        _matchesRead = matchesRead;
         _rowMirror = rowMirror;
         _tenantId = config["Services:Delivery:TenantId"] ?? DefaultTenantId;
     }
@@ -157,88 +154,13 @@ public sealed class MatchingController : ControllerBase
         });
     }
 
-    /// <summary>
-    /// Returns paginated match candidates for the given user, sourced
-    /// directly from the matching-service Postgres DB.
-    ///
-    /// Gateway route : GET /matching/users/{userId}?skip=0&amp;limit=10
-    /// Upstream route: GET /api/v1/matches/{user_id}?skip=…&amp;limit=…
-    ///   (matching/app/api/endpoints/matches.py)
-    ///
-    /// The caller must be authenticated (any role). The upstream 404 surface
-    /// when no preference rows exist for the user is forwarded as 404 + ProblemDetails.
-    /// </summary>
-    [HttpGet("users/{userId}")]
-    [Authorize]
-    // ADR-005 L2: this read is "authenticated, ANY role" (no user-type restriction) per its
-    // contract. There is no narrower user-type gate here, so it is an explicit L2 public opt-out
-    // (L1 [Authorize] is preserved above — this is NOT [AllowAnonymous]). Marking it preserves the
-    // any-authenticated behaviour exactly and satisfies the default-deny coverage guard.
-    [PublicEndpoint("Authenticated any-role match-candidate read; no L2 user-type gate (L1 auth preserved).")]
-    [ProducesResponseType(typeof(MatchingUsersResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
-    public async Task<IActionResult> GetMatchingUsers(
-        string userId,
-        [FromQuery] int skip = 0,
-        [FromQuery] int limit = 10,
-        CancellationToken ct = default)
-    {
-        if (string.IsNullOrWhiteSpace(userId))
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = "userId is required.",
-                Status = StatusCodes.Status400BadRequest,
-                Type = "https://jeeb.dev/errors/missing-user-id"
-            });
-        }
-
-        if (skip < 0 || limit < 1 || limit > 500)
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = "skip must be >= 0 and limit must be between 1 and 500.",
-                Status = StatusCodes.Status400BadRequest,
-                Type = "https://jeeb.dev/errors/invalid-pagination"
-            });
-        }
-
-        MatchingServiceMatchesResponse upstream;
-        try
-        {
-            upstream = await _matchesRead.GetMatchesAsync(userId, skip, limit, ct);
-        }
-        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
-        {
-            return NotFound(new ProblemDetails
-            {
-                Title = "No matching preferences found for user.",
-                Detail = $"userId={userId}. Ensure the user has completed preference setup in matching-service.",
-                Status = StatusCodes.Status404NotFound,
-                Type = "https://jeeb.dev/errors/matching-preferences-not-found"
-            });
-        }
-        catch (HttpRequestException ex)
-        {
-            return StatusCode(StatusCodes.Status502BadGateway, new ProblemDetails
-            {
-                Title = "matching-service is unavailable.",
-                Detail = ex.Message,
-                Status = StatusCodes.Status502BadGateway,
-                Type = "https://jeeb.dev/errors/upstream-unavailable"
-            });
-        }
-
-        return Ok(new MatchingUsersResponse
-        {
-            UserId = userId,
-            Matches = upstream.Matches,
-            Total = upstream.Total,
-            Skip = skip,
-            Limit = limit
-        });
-    }
+    // GET /matching/users/{userId} — RETIRED (JEBV4-220 / E25, Q-020).
+    // The standalone matching-service (Python FastAPI) read path
+    // (GET /api/v1/matches/{user_id}) has been decommissioned: the courier
+    // matching engine relocated to delivery-service and V3 static per-tier
+    // radius is bound directly (POST /matching/run, above). The read-through
+    // endpoint had no live client — its typed IMatchingServiceClient, the
+    // "matching" named downstream client, the Services:Matching config wire,
+    // and the readiness probe are all removed. The live/prod decommission of
+    // the matching-service deploy topology remains OWNER-GO.
 }
