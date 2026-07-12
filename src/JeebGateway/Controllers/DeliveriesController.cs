@@ -257,7 +257,7 @@ public class DeliveriesController : ControllerBase
 
             var scoped = result.Shipments
                 .Where(s => s.OrderId is { } oid && ownedOrderIds.Contains(oid))
-                .Where(s => !activeBucket || IsActiveStage(s.CurrentStage))
+                .Where(s => StageMatchesBucket(s.CurrentStage, stage, activeBucket))
                 .ToList();
 
             // JEBV4-280: the upstream `shipments` store is a SEPARATE workflow store that only
@@ -276,19 +276,19 @@ public class DeliveriesController : ControllerBase
                 scoped.Where(s => s.OrderId is not null).Select(s => s.OrderId!),
                 StringComparer.Ordinal);
 
-            // Match the upstream stage gate: the active bucket (stage=active / absent) keeps any
-            // in-flight row; an explicit canonical stage token keeps that exact stage; a terminal
-            // explicit stage can never leak a terminal row into an active surface.
-            var wantedStage = activeBucket || string.IsNullOrWhiteSpace(stage)
-                ? null
-                : DeliveryStatusAlias.ToCanonical(stage) ?? stage;
-
+            // JEBV4-280 (regression fix): resolve the mobile Delivery-tab bucket the SAME way
+            // JeebOrdersListController.ListDeliveries does (see StageMatchesBucket). The prior code
+            // only special-cased the 'active' bucket and treated EVERY other token as an exact
+            // canonical stage — so the 'completed' bucket token (which resolves to no canonical
+            // stage) matched nothing and a jeeber's Done delivery vanished from the Completed tab
+            // (it is also excluded from Active because it is terminal → invisible on BOTH tabs).
+            // The active bucket (stage=active / absent) keeps in-flight rows; completed|delivered|
+            // done → canonical Done; cancelled|canceled → canonical Cancelled; an explicit
+            // canonical stage token keeps its exact (case-insensitive) match.
             var jeeberShipments = ownedJeeber
                 .Where(r => !upstreamOrderIds.Contains(r.Id))
                 .Select(r => new { Row = r, Stage = DeliveryStatusAlias.ToCanonical(r.Status) ?? r.Status })
-                .Where(x => wantedStage is null
-                    ? IsActiveStage(x.Stage)
-                    : string.Equals(x.Stage, wantedStage, StringComparison.OrdinalIgnoreCase))
+                .Where(x => StageMatchesBucket(x.Stage, stage, activeBucket))
                 .Select(x => new ShipmentDetailDto
                 {
                     Id = x.Row.Id,
@@ -323,7 +323,9 @@ public class DeliveriesController : ControllerBase
                 ex,
                 "GET /deliveries upstream call faulted ({Type}); degrading to an empty ShipmentsListDto 200 so the list surface does not dead-end.",
                 ex.GetType().Name);
-            return Ok(new ShipmentsListDto());
+            // Explicit clean-empty envelope: 200 {"shipments":[],"count":0} so the mobile
+            // Delivery tab renders "no orders yet" and never the "Something went wrong" toast.
+            return Ok(new ShipmentsListDto { Shipments = Array.Empty<ShipmentDetailDto>(), Count = 0 });
         }
     }
 
@@ -444,6 +446,51 @@ public class DeliveriesController : ControllerBase
 
         return !CanonicalDeliveryStatus.IsTerminal(canonical)
             && !string.Equals(canonical, CanonicalDeliveryStatus.Expired, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// JEBV4-280 (regression fix): resolve the mobile Delivery-tab <c>stage</c> bucket the SAME way
+    /// <see cref="V1.JeebOrdersListController"/>.<c>ListDeliveries</c> (MatchesBucket) resolves its
+    /// <c>status</c> bucket, so the jeeber's Active AND Completed (and Cancelled) tabs behave
+    /// identically on this legacy <c>GET /deliveries</c> surface.
+    ///
+    /// <list type="bullet">
+    ///   <item><c>active</c> / absent → in-flight only (<see cref="IsActiveStage"/>) — UNCHANGED,
+    ///     preserving the proven client-home path byte-for-byte.</item>
+    ///   <item><c>completed|delivered|done</c> → canonical <see cref="CanonicalDeliveryStatus.Done"/>
+    ///     (the jeeber Completed tab). This is the regressed case: the prior code treated
+    ///     <c>completed</c> as an exact canonical stage token, which resolves to NOTHING, so a Done
+    ///     delivery matched neither the active bucket (terminal) nor the "completed" token and
+    ///     disappeared from BOTH tabs.</item>
+    ///   <item><c>cancelled|canceled</c> → canonical <see cref="CanonicalDeliveryStatus.Cancelled"/>.</item>
+    ///   <item>an explicit canonical stage token (Ordered/Picked/InTransit/AtDoor/…) keeps its exact
+    ///     (case-insensitive) match, preserving the prior behaviour for stage-specific callers.</item>
+    /// </list>
+    /// </summary>
+    private static bool StageMatchesBucket(string? rowStage, string? requestedStage, bool activeBucket)
+    {
+        if (activeBucket || string.IsNullOrWhiteSpace(requestedStage))
+        {
+            return IsActiveStage(rowStage);
+        }
+
+        var rowCanonical = DeliveryStatusAlias.ToCanonical(rowStage) ?? rowStage;
+
+        if (requestedStage.Equals("completed", StringComparison.OrdinalIgnoreCase)
+            || requestedStage.Equals("delivered", StringComparison.OrdinalIgnoreCase)
+            || requestedStage.Equals("done", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Equals(rowCanonical, CanonicalDeliveryStatus.Done, StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (requestedStage.Equals("cancelled", StringComparison.OrdinalIgnoreCase)
+            || requestedStage.Equals("canceled", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Equals(rowCanonical, CanonicalDeliveryStatus.Cancelled, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var wanted = DeliveryStatusAlias.ToCanonical(requestedStage) ?? requestedStage;
+        return string.Equals(rowCanonical, wanted, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
