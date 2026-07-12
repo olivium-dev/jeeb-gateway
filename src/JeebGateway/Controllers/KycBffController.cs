@@ -239,6 +239,23 @@ public sealed class KycBffController : ControllerBase
             return false;
         }
 
+        // Contract-signing templates are create-once/disable-only (a new version is
+        // a new row + the old one disabled), so a disabled same-named row earlier in
+        // enumeration order must not shadow the ACTIVE one (JEBV4-257). Pass 1 prefers
+        // the ACTIVE name-match; pass 2 falls back to the first name-match so we stay
+        // fail-open when upstream leaves status unpopulated.
+        foreach (var item in items.EnumerateArray())
+        {
+            var name = ReadString(item, "name");
+            var status = ReadString(item, "status");
+            if (string.Equals(name, JeebTosTemplateName, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(status, "ACTIVE", StringComparison.OrdinalIgnoreCase))
+            {
+                template = item;
+                return true;
+            }
+        }
+
         foreach (var item in items.EnumerateArray())
         {
             var name = ReadString(item, "name");

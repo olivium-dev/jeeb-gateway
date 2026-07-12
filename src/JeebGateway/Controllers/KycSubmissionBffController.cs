@@ -597,26 +597,46 @@ public sealed class KycSubmissionBffController : ControllerBase
             return null;
         }
 
+        // Contract-signing templates are create-once/disable-only, so a disabled
+        // same-named row earlier in enumeration order must not shadow the ACTIVE one
+        // (JEBV4-257). Pass 1 prefers the ACTIVE name-match; pass 2 falls back to the
+        // first name-match so we stay fail-open when status is unpopulated.
+        var fallbackName = (string?)null;
         foreach (var item in items.EnumerateArray())
         {
-            var name = item.ValueKind == JsonValueKind.Object
-                && item.TryGetProperty("name", out var n)
-                && n.ValueKind == JsonValueKind.String
-                    ? n.GetString()
-                    : null;
-            if (string.Equals(name, JeebTosTemplateName, StringComparison.OrdinalIgnoreCase))
+            var name = ReadString(item, "name");
+            if (!string.Equals(name, JeebTosTemplateName, StringComparison.OrdinalIgnoreCase))
             {
-                // Trailing "_vN" segment is the stable version marker (jeeb_tos_v1
-                // -> "v1"), mirroring KycBffController.TemplateVersionFor so the
-                // cross-link compares against the SAME value the mobile client is
-                // handed by GET /v1/kyc/contract-template.
-                var idx = name!.LastIndexOf("_v", StringComparison.OrdinalIgnoreCase);
-                return idx >= 0 ? name[(idx + 1)..] : name;
+                continue;
+            }
+
+            fallbackName ??= name;
+            var status = ReadString(item, "status");
+            if (string.Equals(status, "ACTIVE", StringComparison.OrdinalIgnoreCase))
+            {
+                return VersionMarkerFor(name!);
             }
         }
 
-        return null;
+        return fallbackName is null ? null : VersionMarkerFor(fallbackName);
     }
+
+    // Trailing "_vN" segment is the stable version marker (jeeb_tos_v1 -> "v1"),
+    // mirroring KycBffController.TemplateVersionFor so the cross-link compares
+    // against the SAME value the mobile client is handed by
+    // GET /v1/kyc/contract-template.
+    private static string VersionMarkerFor(string name)
+    {
+        var idx = name.LastIndexOf("_v", StringComparison.OrdinalIgnoreCase);
+        return idx >= 0 ? name[(idx + 1)..] : name;
+    }
+
+    private static string? ReadString(JsonElement element, string property) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 
     private IActionResult FieldProblem(string field, string detail)
     {
