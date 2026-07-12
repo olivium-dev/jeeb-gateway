@@ -107,7 +107,11 @@ public sealed class PostgresJeebWalletLedgerReader : IJeebWalletLedgerReader
                 {
                     Id = reader.GetString(0),
                     Type = reader.GetString(1),
-                    Amount = (double)reader.GetDecimal(2),
+                    // JEBV4-49 (M4): keep money as decimal end-to-end — read the
+                    // NUMERIC column straight into the decimal DTO, no (double) cast
+                    // (a double cast can lose integer precision past 2^53 and
+                    // reintroduce fractional artifacts on large LBP amounts).
+                    Amount = reader.GetDecimal(2),
                     Sign = reader.GetInt32(3),
                     Ref = reader.GetString(4),
                     Ts = reader.GetFieldValue<DateTime>(5).ToUniversalTime().ToString("o"),

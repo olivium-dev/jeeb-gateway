@@ -12,13 +12,13 @@ namespace JeebGateway.JeebWallet;
 public sealed class JeebWalletBalanceResponse
 {
     [JsonPropertyName("availableBalance")]
-    public double AvailableBalance { get; set; }
+    public decimal AvailableBalance { get; set; }
 
     [JsonPropertyName("reservedNow")]
-    public double ReservedNow { get; set; }
+    public decimal ReservedNow { get; set; }
 
     [JsonPropertyName("giftCredit")]
-    public double GiftCredit { get; set; }
+    public decimal GiftCredit { get; set; }
 
     /// <summary>One of enough | low | empty | all_reserved (mobile enum).</summary>
     [JsonPropertyName("affordabilityState")]
@@ -47,7 +47,7 @@ public sealed class JeebWalletLedgerEntry
     public string Type { get; set; } = string.Empty;
 
     [JsonPropertyName("amount")]
-    public double Amount { get; set; }
+    public decimal Amount { get; set; }
 
     /// <summary>+1 credit / -1 debit.</summary>
     [JsonPropertyName("sign")]
