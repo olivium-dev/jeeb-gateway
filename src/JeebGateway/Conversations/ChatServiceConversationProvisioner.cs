@@ -233,4 +233,41 @@ public sealed class ChatServiceConversationProvisioner : IConversationProvisione
             return null;
         }
     }
+
+    /// <inheritdoc />
+    public async Task CloseConversationAsync(string? conversationId, CancellationToken ct)
+    {
+        // Auto-create disabled ⇒ this order never got a conversation to close.
+        if (!_options.Enabled) return;
+
+        // No broadcasting conversation was provisioned for this order (chat was down
+        // at create, or ConversationAutoCreate was off then). Nothing to close.
+        if (string.IsNullOrWhiteSpace(conversationId)) return;
+
+        try
+        {
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var chat = scope.ServiceProvider.GetRequiredService<ServiceChatClient>();
+
+            // E22 / I3 (Q-036): drive the conversation to closed via the CONSUMED
+            // chat-service's EXISTING channel-deactivate verb
+            // (PATCH /api/channels/{id}/deactivate). The channel id IS the delivery
+            // row's ConversationId minted at create time. This consumes chat-service's
+            // own API — no gateway store write (GR-3), no Firestore edit (GR-1), and no
+            // chat-service change (the verb already exists, so no owner-approval gate).
+            // Deactivating an already-closed channel is an upstream no-op (idempotent),
+            // so a duplicate completion signal cannot corrupt state.
+            await chat.DeactivateAsync(conversationId, ct);
+        }
+        catch (Exception ex)
+        {
+            // A chat-service outage must NEVER turn a committed, settled delivery
+            // completion into a 5xx. Degrade: the conversation is left in its prior
+            // state and the completion still returns 200 — mirrors the create/advance
+            // contract. A reconcile/sweep is the backstop for a missed close.
+            _logger.LogWarning(ex,
+                "Delivery-complete close for conversation {ConversationId} unavailable; the completion stays committed, the conversation may close on retry/reconcile.",
+                conversationId);
+        }
+    }
 }

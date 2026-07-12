@@ -1,5 +1,6 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
+using JeebGateway.Conversations;
 using JeebGateway.Financials;
 using JeebGateway.Observability;
 using JeebGateway.Push;
@@ -70,6 +71,11 @@ public class DeliveriesController : ControllerBase
     private readonly IOptions<JeebGateway.Auth.OtpSignIn.OtpSignInOptions> _otpSignInOptions;
     private readonly IServiceOTPClient _otpClient;
     private readonly IDeliveryServiceClient _deliveryClient;
+    // E22/I3 (JEBV4-241): the SOLE chat caller used to auto-close a delivery's
+    // conversation on completion (via the consumed chat-service; see
+    // CreditJeeberOnCompletionAsync). Degrade-don't-fail — a chat blip never fails
+    // a committed completion.
+    private readonly IConversationProvisioner _conversations;
     private readonly IDistributedCache _cache;
     private readonly IHandoverCodeStore _handoverCodes;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
@@ -166,6 +172,7 @@ public class DeliveriesController : ControllerBase
         IOptions<JeebGateway.Auth.OtpSignIn.OtpSignInOptions> otpSignInOptions,
         IServiceOTPClient otpClient,
         IDeliveryServiceClient deliveryClient,
+        IConversationProvisioner conversations,
         IDistributedCache cache,
         IHandoverCodeStore handoverCodes,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
@@ -184,6 +191,7 @@ public class DeliveriesController : ControllerBase
         _otpSignInOptions = otpSignInOptions;
         _otpClient = otpClient;
         _deliveryClient = deliveryClient;
+        _conversations = conversations;
         _cache = cache;
         _handoverCodes = handoverCodes;
         _flags = flags;
@@ -2203,6 +2211,28 @@ public class DeliveriesController : ControllerBase
             _log.LogError(ex,
                 "settlement.on_complete_failed deliveryId={DeliveryId} correlationId={CorrelationId}; "
                 + "the handover stays complete, the jeeber credit will be reconciled/retried.",
+                deliveryId, correlationId);
+        }
+
+        // E22 / I3 (JEBV4-241, cross-ref JEBV4-217; Q-036): a COMPLETED delivery
+        // auto-closes its chat conversation. Fired from the SAME single completion
+        // convergence point as the settlement above, so it runs exactly once per
+        // completion for BOTH legs (OTP verify → Done AND customer PATCH → Done) —
+        // ONE writer, no second call site. The close is routed through the CONSUMED
+        // chat-service (channel deactivate) by IConversationProvisioner; the gateway
+        // holds no conversation state and writes no store/Firestore seam. STRICTLY
+        // best-effort: a chat blip / missing conversation id must NEVER turn a
+        // committed, settled completion into a 5xx.
+        try
+        {
+            var row = await _store.GetAsync(deliveryId, ct);
+            await _conversations.CloseConversationAsync(row?.ConversationId, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "settlement.on_complete conversation auto-close failed deliveryId={DeliveryId} correlationId={CorrelationId}; "
+                + "the completion stays committed, the conversation may close on reconcile.",
                 deliveryId, correlationId);
         }
     }
