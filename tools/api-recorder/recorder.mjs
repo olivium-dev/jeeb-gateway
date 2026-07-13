@@ -110,6 +110,30 @@ function redactAuth(authHeader) {
   return `${scheme} …${tail}`;
 }
 
+// SECURITY: never persist full credentials. Returns a shallow copy of a Node
+// headers object with every sensitive header redacted BEFORE it is stringified
+// into SQLite (and thus before it can be served over /__logs). Authorization is
+// reduced to scheme + last-6; cookie/proxy-authorization/set-cookie are masked
+// entirely. Header keys from node:http are already lowercased, but we match
+// case-insensitively to be safe.
+function redactHeaders(headers) {
+  if (!headers) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    const lk = k.toLowerCase();
+    if (lk === 'authorization') {
+      out[k] = redactAuth(v);
+    } else if (lk === 'proxy-authorization') {
+      out[k] = redactAuth(v);
+    } else if (lk === 'cookie' || lk === 'set-cookie') {
+      out[k] = '[redacted]';
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
 function firstForwardedHop(xff, remote) {
   if (xff) {
     const first = String(xff).split(',')[0].trim();
@@ -294,9 +318,9 @@ async function handleProxy(clientReq, clientRes) {
     try {
       insertStmt.run(
         id, ts, arrivedMs, clientIp, userAgent, authRedacted,
-        clientReq.method, path, query, JSON.stringify(clientReq.headers),
+        clientReq.method, path, query, JSON.stringify(redactHeaders(clientReq.headers)),
         reqStore.blob, reqStore.size, reqStore.truncated,
-        status ?? null, resHeaders ? JSON.stringify(resHeaders) : null,
+        status ?? null, resHeaders ? JSON.stringify(redactHeaders(resHeaders)) : null,
         resStore.blob, resStore.size, resStore.truncated,
         durationMs, error ?? null,
       );
