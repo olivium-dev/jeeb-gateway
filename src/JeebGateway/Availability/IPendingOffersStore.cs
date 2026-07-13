@@ -142,6 +142,46 @@ public interface IPendingOffersStore
         string requestId, CancellationToken ct);
 
     /// <summary>
+    /// F4 (JEBV4-301) — batched offer-count lookup for the client Orders list. Returns a
+    /// map <c>requestId → total offer count (any status)</c> for exactly the requested ids,
+    /// so <c>GET /v1/requests?role=client</c> can decorate every row's <c>offersCount</c> in
+    /// ONE store round-trip instead of an N+1 <see cref="ListForRequestAsync"/> loop (which
+    /// was N upstream HTTP calls on the offer-service path). A requestId with no offers is
+    /// present in the map with value <c>0</c> (never absent), so the caller reads a total for
+    /// every row it asked about.
+    ///
+    /// <para>NON-BREAKING EXTENSION (same pattern as <see cref="ListForJeeberAsync"/> /
+    /// <see cref="ExpireForRequestAsync"/>): a default interface method so existing
+    /// implementers / fakes compile unchanged. The default fans out to the existing
+    /// <see cref="ListForRequestAsync"/> per id — byte-identical counts to the old inline
+    /// loop, just relocated behind the store seam. The in-memory store overrides it with a
+    /// single grouped scan (one pass, one lock-free snapshot) for a true batch.</para>
+    ///
+    /// <para>DEGRADE-DON'T-FAIL: a per-id resolution blip contributes <c>0</c> for that id
+    /// (never throws), so a decoration hiccup can never fail the Orders list.</para>
+    /// </summary>
+    async Task<IReadOnlyDictionary<string, int>> CountForRequestsAsync(
+        IReadOnlyCollection<string> requestIds, CancellationToken ct)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var id in requestIds)
+        {
+            if (string.IsNullOrEmpty(id) || counts.ContainsKey(id)) continue;
+            try
+            {
+                var offers = await ListForRequestAsync(id, ct);
+                counts[id] = offers.Count;
+            }
+            catch
+            {
+                // Best-effort decoration only; a missing count never fails the list.
+                counts[id] = 0;
+            }
+        }
+        return counts;
+    }
+
+    /// <summary>
     /// fix/offer-visibility (run-23 CHECK C) — every offer <paramref name="jeeberId"/>
     /// has submitted, in ANY status (pending / accepted / superseded / withdrawn),
     /// newest-first. This is the jeeber "my-offers" read: after the customer accepts a

@@ -343,6 +343,30 @@ public class InMemoryPendingOffersStore : IPendingOffersStore
         return Task.FromResult<IReadOnlyList<PendingOffer>>(snapshot);
     }
 
+    /// <summary>
+    /// F4 (JEBV4-301) — true batch: one pass over the offer snapshot tallies the count for
+    /// every requested id, instead of the default interface fan-out's N separate scans.
+    /// Every requested id is present in the result (0 when it has no offers), matching the
+    /// interface contract.
+    /// </summary>
+    public Task<IReadOnlyDictionary<string, int>> CountForRequestsAsync(
+        IReadOnlyCollection<string> requestIds, CancellationToken ct)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var id in requestIds)
+        {
+            if (!string.IsNullOrEmpty(id)) counts[id] = 0; // seed so absent-offer ids read 0
+        }
+
+        foreach (var offer in _offers.Values)
+        {
+            if (counts.ContainsKey(offer.RequestId))
+                counts[offer.RequestId]++;
+        }
+
+        return Task.FromResult<IReadOnlyDictionary<string, int>>(counts);
+    }
+
     public Task<IReadOnlyList<PendingOffer>> ListForJeeberAsync(
         string jeeberId, CancellationToken ct)
     {
