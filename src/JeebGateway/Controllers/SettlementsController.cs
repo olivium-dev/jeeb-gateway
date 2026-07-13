@@ -145,6 +145,27 @@ public class SettlementsController : ControllerBase
         var settlement = await _settlements.GetByDeliveryAsync(deliveryId, ct);
         if (settlement is null)
         {
+            // Self-heal the receipt 404-after-settlement gap. Settlement is
+            // fired SERVER-SIDE the moment the handover completes (OTP verify →
+            // Done, or the customer's PATCH → Done) — there is no manual
+            // "record cash" step in the apps. BOTH completion legs fire that
+            // settlement strictly BEST-EFFORT and SWALLOW every fault (a
+            // settlement/ledger hiccup must never turn a committed handover into
+            // a 5xx), so a transient miss leaves a completed delivery with NO
+            // settlement row and the receipt read 404s even though the money
+            // moved. Drive the same idempotent, server-authoritative completion
+            // settlement here on read so the receipt materialises. Exactly-once
+            // is preserved: SettleOnCompletionAsync short-circuits an
+            // already-settled row and never double-posts the ledger; when the
+            // delivery is genuinely not settle-able (unknown / not Done / no
+            // assigned Jeeber) no row is created and the read still 404s, which
+            // is the correct answer.
+            await _settlements.SettleOnCompletionAsync(deliveryId, ct);
+            settlement = await _settlements.GetByDeliveryAsync(deliveryId, ct);
+        }
+
+        if (settlement is null)
+        {
             return NotFound();
         }
 
