@@ -982,12 +982,10 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
     // Postgres the mirror stays null and the durable owner-list degrades to the in-memory model.
     builder.Services.AddSingleton<JeebGateway.Requests.IDurableRequestsMirror,
         JeebGateway.Requests.PostgresDurableRequestsMirror>();
-
-    // Durability register #11 — saved-locations. Registered BEFORE AddSavedLocations()
-    // (whose TryAddSingleton InMemory fallback then no-ops), so the durable Postgres store
-    // (saved_locations, migration 0016) wins whenever Postgres is configured.
-    builder.Services.AddSingleton<JeebGateway.Users.SavedLocations.ISavedLocationStore,
-        JeebGateway.Users.SavedLocations.PostgresSavedLocationStore>();
+    // NOTE: saved-locations is no longer a gateway-Postgres store. It was migrated
+    // to its owning service (remote-user-preferences) under JEBV4-165 / JEBV4-194 D5
+    // (D1 matrix row 5) and is now registered flag-gated next to AddSavedLocations()
+    // below, independent of GatewayPostgres. The gateway-Postgres seam is deleted.
 }
 else
 {
@@ -1167,7 +1165,20 @@ else
     builder.Services.AddSingleton<INotificationPreferencesStore, InMemoryNotificationPreferencesStore>();
 }
 
-// WS-02 — Saved Locations BFF (ACCT-04 / REQ-02). Net-new, gateway-thin, in-memory store.
+// WS-02 — Saved Locations BFF (ACCT-04 / REQ-02).
+// JEBV4-165 / JEBV4-194 D5 (D1 matrix row 5): saved locations moved off the gateway's
+// own Postgres (deleted PostgresSavedLocationStore / saved_locations table) onto its
+// owning service, the generic remote-user-preferences service (Rust, :10067) — the same
+// GR-2/GR-3-compliant path as notification preferences. The per-user collection is stored
+// as one opaque JSON blob under key "jeeb.saved_locations" (the shared service stays
+// Jeeb-agnostic). Registered BEFORE AddSavedLocations() so its TryAddSingleton InMemory
+// fallback no-ops; when the upstream flag is OFF (local dev without the service) that
+// fallback provides the in-memory store.
+if (builder.Configuration.GetValue("FeatureFlags:UseUpstream:RemoteUserPreferences", true))
+{
+    builder.Services.AddSingleton<JeebGateway.Users.SavedLocations.ISavedLocationStore,
+        JeebGateway.Users.SavedLocations.RemoteUserPreferencesSavedLocationStore>();
+}
 builder.Services.AddSavedLocations();
 
 // Push notification pipeline (T-backend-022).
