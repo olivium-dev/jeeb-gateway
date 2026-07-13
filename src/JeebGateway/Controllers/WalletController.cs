@@ -168,8 +168,9 @@ namespace JeebGateway.Controllers
 
         [HttpGet("holder/wallets")]
         [Authorize]
-        // ADR-005 L2 §H–J: the caller's OWN wallets — wallet.read.own {client, jeeber} (overrides the
-        // class-level admin cap). Scoping to the caller's id stays STATE in-action.
+        // ADR-005 L2 §H–J: the caller's OWN wallets — wallet.read.own {jeeber} (overrides the
+        // class-level admin cap). [F7] JEBV4-303 aligned this cap to {jeeber} to match
+        // earnings.read.own (jeeber-earnings surface). Scoping to the caller's id stays STATE in-action.
         [RequireCapability(Capabilities.WalletReadOwn)]
         [ProducesResponseType(typeof(GetHolderWallets), StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]

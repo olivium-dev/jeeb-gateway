@@ -114,21 +114,25 @@ public sealed class JeebOrdersListController : ControllerBase
             .Take(sz)
             .ToList();
 
-        var items = new List<OrderListItem>(window.Count);
-        foreach (var r in window)
+        // F4 (JEBV4-301): decorate every row's offersCount in ONE batched store lookup
+        // instead of an N+1 per-row ListForRequestAsync loop (which was N upstream HTTP
+        // calls on the offer-service path). Degrade-don't-fail: a batch blip yields an
+        // empty map ⇒ every row reads 0, the list never errors.
+        IReadOnlyDictionary<string, int> offerCounts;
+        try
         {
-            int offersCount = 0;
-            try
-            {
-                var offers = await _offers.ListForRequestAsync(r.Id, ct);
-                offersCount = offers.Count;
-            }
-            catch
-            {
-                // Best-effort decoration only; a missing offer count never fails the list.
-            }
-            items.Add(ToOrderItem(r, offersCount));
+            offerCounts = await _offers.CountForRequestsAsync(
+                window.Select(r => r.Id).ToList(), ct);
         }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "v1/requests offersCount decoration failed; serving 0 counts");
+            offerCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        }
+
+        var items = window
+            .Select(r => ToOrderItem(r, offerCounts.TryGetValue(r.Id, out var c) ? c : 0))
+            .ToList();
 
         return Ok(PagedListResponse<OrderListItem>.Of(items, pg, sz, total));
     }
@@ -284,6 +288,11 @@ public sealed class JeebOrdersListController : ControllerBase
         Title = r.Description,
         Tier = r.TierId,
         OffersCount = offersCount,
+        // F4 (JEBV4-301): stateless "there are bids awaiting your decision" signal — true
+        // only while the request has offers AND no jeeber has been accepted yet. Once a
+        // jeeber is bound (JeeberId set) the auction is closed, so it flips false. This lets
+        // the client delete its polling probe and badge the row directly off the list read.
+        HasNewOffers = offersCount > 0 && string.IsNullOrEmpty(r.JeeberId),
         ConversationId = r.ConversationId,
         JeeberId = r.JeeberId,
         Pickup = new AddressBlock { Address = r.PickupAddress },
@@ -349,6 +358,11 @@ public sealed class OrderListItem
 
     [JsonPropertyName("offersCount")]
     public int OffersCount { get; init; }
+
+    /// <summary>F4 (JEBV4-301): true when the row has bids awaiting the client's decision
+    /// (offersCount &gt; 0 and no jeeber accepted yet). Additive — old clients ignore it.</summary>
+    [JsonPropertyName("hasNewOffers")]
+    public bool HasNewOffers { get; init; }
 
     [JsonPropertyName("conversationId")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

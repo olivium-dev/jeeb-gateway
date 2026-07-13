@@ -125,7 +125,13 @@ public static class CapabilityRolePolicy
             // H–J. Misc participant caps {client, jeeber}
             [Capabilities.ProhibitedAck] = Participant,
             [Capabilities.ProhibitedScan] = Participant,
-            [Capabilities.WalletReadOwn] = Participant,         // STATE: scoping (OPEN-2)
+            // [F7] JEBV4-303: wallet.read.own aligned to {jeeber} to MATCH earnings.read.own
+            // (same jeeber-earnings surface, one policy). Previously {client, jeeber}, which left
+            // /v1/jeeb/wallet half-open — a pure CUSTOMER got 200 on a wallet the product only
+            // ever populates for jeebers (flat-10% COD settlement credits the jeeber's wallet;
+            // customers have no wallet). Closing the seam so the wallet read matches the earnings
+            // read exactly. A real customer wallet would be a NEW deliberate surface, not this.
+            [Capabilities.WalletReadOwn] = JeeberOnly,          // STATE: ownership (was Participant; OPEN-2 closed)
             [Capabilities.FeedbackSubmit] = Participant,
             [Capabilities.TranscriptionRequest] = Participant,
             [Capabilities.CdnBroker] = Participant,

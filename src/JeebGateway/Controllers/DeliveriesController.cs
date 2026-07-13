@@ -374,42 +374,57 @@ public class DeliveriesController : ControllerBase
         using var activity = ActivitySource.StartActivity("get_delivery_by_id");
         activity?.SetTag("delivery.id", deliveryId);
 
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
 
         // ---- Canonical read-through (FeatureFlags:UseUpstream:Delivery) ----------
         // delivery-service owns the canonical row + its SM-1 status vocab
         // (Ordered/Picked/InTransit/AtDoor/Done). The gateway reads it through so
         // the surfaced $.status is canonical, not the gateway's legacy snake_case
-        // mirror. Unknown id ⇒ 404 (NOT 500 — preserves the S13 E5 contract). A
-        // transport blip degrades to the local mirror so a read never hard-fails.
+        // mirror. A transport blip degrades to the local mirror so a read never
+        // hard-fails; a null (genuinely-missing) canonical row ALSO degrades to the
+        // mirror (F8) so a delivery the caller can otherwise see is never a 404
+        // dead-end.
         if (_flags.CurrentValue.Delivery)
         {
             try
             {
                 var canonical = await _deliveryClient.GetCanonicalDeliveryAsync(deliveryId, ct);
-                if (canonical is null)
+                if (canonical is not null)
                 {
-                    return NotFound();
+                    var canonicalDto = new DeliveryRequestDto
+                    {
+                        Id = canonical.DeliveryId,
+                        ClientId = canonical.ClientId ?? string.Empty,
+                        Status = canonical.Status,
+                        Description = string.Empty,
+                        TierId = canonical.TierId,
+                        JeeberId = canonical.JeeberId,
+                        CreatedAt = canonical.CreatedAt
+                    };
+                    // fix/client-visibility (run-22 P1): the local mirror row carries the
+                    // accept-time fee snapshot the enrichment falls back to when the live
+                    // offers lookup cannot resolve the accepted offer (jeeber-party reads,
+                    // post-terminal offer-state collapse). Best-effort — a mirror miss just
+                    // means no snapshot.
+                    var mirror = await _store.GetAsync(deliveryId, ct);
+                    await EnrichWithOfferAndJeeberAsync(
+                        canonicalDto, deliveryId, canonical.JeeberId, mirror?.AcceptedFee, ct);
+                    return Ok(canonicalDto);
                 }
-                var canonicalDto = new DeliveryRequestDto
-                {
-                    Id = canonical.DeliveryId,
-                    ClientId = canonical.ClientId ?? string.Empty,
-                    Status = canonical.Status,
-                    Description = string.Empty,
-                    TierId = canonical.TierId,
-                    JeeberId = canonical.JeeberId,
-                    CreatedAt = canonical.CreatedAt
-                };
-                // fix/client-visibility (run-22 P1): the local mirror row carries the
-                // accept-time fee snapshot the enrichment falls back to when the live
-                // offers lookup cannot resolve the accepted offer (jeeber-party reads,
-                // post-terminal offer-state collapse). Best-effort — a mirror miss just
-                // means no snapshot.
-                var mirror = await _store.GetAsync(deliveryId, ct);
-                await EnrichWithOfferAndJeeberAsync(
-                    canonicalDto, deliveryId, canonical.JeeberId, mirror?.AcceptedFee, ct);
-                return Ok(canonicalDto);
+
+                // F8 (JEBV4 live-tracking dead-end): the canonical read returned NULL,
+                // which is NOT a transport fault — the upstream `deliveries` row is
+                // genuinely absent, almost always because the best-effort seed at
+                // create/accept never landed upstream. The gateway's OWN mirror still
+                // holds the row — the SAME row GET /deliveries lists and the working
+                // chat surface resolves — so a hard 404 here is the S921B/A33
+                // "Delivery not found" inconsistency that dead-ends the customer's
+                // track step. Fall through to the local mirror below (served under the
+                // SAME participant scoping the list applies) instead of a permanent 404.
+                _log.LogInformation(
+                    "Canonical delivery {DeliveryId} missing upstream (null read); falling back to the local mirror so the caller's own delivery is not a 404 dead-end (F8).",
+                    deliveryId);
+                // fall through to the local mirror below
             }
             catch (HttpRequestException hre)
             {
@@ -427,10 +442,39 @@ public class DeliveriesController : ControllerBase
             return NotFound();
         }
 
+        // F8 participant scoping: the local-mirror fallback surfaces a row the
+        // canonical read did not authorise, so it MUST carry the same visibility rule
+        // the list surfaces (IRequestsStore.ListForClientAsync ∪ ListForJeeberAsync):
+        // the caller must be this delivery's client OR its assigned jeeber. A
+        // non-party caller gets the same clean 404 an unknown id yields, so the
+        // fallback never widens read access into an unscoped read-any-delivery-by-id
+        // surface (guards the role-bleed/privacy invariant).
+        if (!CallerParticipatesInDelivery(delivery, callerId))
+        {
+            _log.LogInformation(
+                "Delivery {DeliveryId} mirror read denied: caller is neither the client nor the assigned jeeber; returning 404 (F8 scoping).",
+                deliveryId);
+            return NotFound();
+        }
+
         var dto = ToDto(delivery);
         await EnrichWithOfferAndJeeberAsync(dto, deliveryId, delivery.JeeberId, delivery.AcceptedFee, ct);
         return Ok(dto);
     }
+
+    /// <summary>
+    /// F8: participant-visibility gate for the local-mirror fallback of
+    /// GET /deliveries/{id}. A caller may read the mirror row only when they are the
+    /// delivery's client or its assigned jeeber — the exact union the caller-scoped
+    /// list surfaces (<see cref="IRequestsStore.ListForClientAsync"/> ∪
+    /// <see cref="IRequestsStore.ListForJeeberAsync"/>). This keeps the mirror
+    /// fallback from becoming an unscoped read-any-delivery-by-id surface while still
+    /// resolving the live-tracking 404 dead-end for a delivery the caller owns.
+    /// </summary>
+    private static bool CallerParticipatesInDelivery(DeliveryRequest delivery, string callerId)
+        => string.Equals(delivery.ClientId, callerId, StringComparison.Ordinal)
+           || (!string.IsNullOrWhiteSpace(delivery.JeeberId)
+               && string.Equals(delivery.JeeberId, callerId, StringComparison.Ordinal));
 
     /// <summary>
     /// fix/client-visibility (run-22 P0 hardening): a shipment stage counts as ACTIVE
