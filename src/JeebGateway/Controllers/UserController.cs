@@ -33,6 +33,8 @@ namespace JeebGateway.Controllers
         private readonly GwDualRoleClient _userManagement;
         private readonly IOptions<DemoUsersOptions> _demoUsers;
         private readonly IOptions<SuperLoginOptions> _superLogin;
+        private readonly JeebGateway.Users.IAccountDeletionStore _accountDeletion;
+        private readonly JeebGateway.Requests.IRequestsStore _requests;
         private readonly ILogger<UserController> _logger;
 
         public UserController(
@@ -42,6 +44,8 @@ namespace JeebGateway.Controllers
             GwDualRoleClient userManagement,
             IOptions<DemoUsersOptions> demoUsers,
             IOptions<SuperLoginOptions> superLogin,
+            JeebGateway.Users.IAccountDeletionStore accountDeletion,
+            JeebGateway.Requests.IRequestsStore requests,
             ILogger<UserController> logger)
         {
             _serviceUserManagementClient = serviceUserManagementClient;
@@ -50,6 +54,8 @@ namespace JeebGateway.Controllers
             _userManagement = userManagement;
             _demoUsers = demoUsers;
             _superLogin = superLogin;
+            _accountDeletion = accountDeletion;
+            _requests = requests;
             _logger = logger;
         }
 
@@ -935,12 +941,12 @@ namespace JeebGateway.Controllers
         [HttpDelete("profile")]
         [Authorize]
         [RequireCapability(Capabilities.ProfileWriteSelf)] // ADR-005 §B self (ownership = STATE)
-        [ProducesResponseType(typeof(DeleteUserProfileResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(JeebGateway.Users.AccountDeletionResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
-        public async Task<ActionResult<DeleteUserProfileResponse>> DeleteProfile([FromQuery] string? userId = null)
+        public async Task<ActionResult<JeebGateway.Users.AccountDeletionResponse>> DeleteProfile([FromQuery] string? userId = null)
         {
             try
             {
@@ -982,8 +988,13 @@ namespace JeebGateway.Controllers
                     };
                 }
 
-                var response = await _serviceUserManagementClient.DeleteAsync(targetUserId);
-                return Ok(response);
+                // JEBV4-215 (E20) — SOFT delete: flip the account status through the
+                // remote-user-preferences-backed account-deletion store (NOT user-management),
+                // which records the request durably, revokes sessions, and starts the 30-day
+                // purge SLA. The scheduled purge worker later hard-deletes PII. Returns the
+                // concrete server-computed purge date so the client renders it server-driven.
+                var record = await RequestAccountDeletionAsync(targetUserId);
+                return Ok(ToDeletionResponse(record));
             }
             catch (UserManagementApiException ex)
             {
@@ -994,9 +1005,9 @@ namespace JeebGateway.Controllers
         [HttpDelete("profile/delete")]
         [Authorize]
         [RequireCapability(Capabilities.ProfileWriteSelf)] // ADR-005 §B self (ownership = STATE)
-        [ProducesResponseType(typeof(DeleteUserProfileResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(JeebGateway.Users.AccountDeletionResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]
-        public async Task<ActionResult<DeleteUserProfileResponse>> DeleteProfileByToken()
+        public async Task<ActionResult<JeebGateway.Users.AccountDeletionResponse>> DeleteProfileByToken()
         {
             try
             {
@@ -1017,14 +1028,57 @@ namespace JeebGateway.Controllers
                     return Unauthorized();
                 }
 
-                var response = await _serviceUserManagementClient.DeleteAsync(userId);
-                return Ok(response);
+                // JEBV4-215 (E20) — SOFT delete via the remote-user-preferences-backed store
+                // (NOT user-management); same soft status-flip + 30-day purge SLA as DELETE /profile.
+                var record = await RequestAccountDeletionAsync(userId);
+                return Ok(ToDeletionResponse(record));
             }
             catch (UserManagementApiException ex)
             {
                 return UpstreamProblem(ex);
             }
         }
+
+        /// <summary>
+        /// JEBV4-215 (E20) — shared soft-delete seam. Records the account-deletion request via the
+        /// remote-user-preferences-backed <see cref="JeebGateway.Users.IAccountDeletionStore"/>
+        /// (never user-management). The store starts the 30-day purge SLA immediately UNLESS the
+        /// user still has an in-flight delivery, in which case the purge clock waits (the client
+        /// then sees <c>pending_active_delivery</c> and the purge worker advances it once the
+        /// delivery clears). Active-delivery detection is best-effort: a transient count-read
+        /// fault degrades to "no active delivery" so a read blip never blocks the user's own
+        /// deletion — the worker re-checks the active count before it ever purges.
+        /// </summary>
+        private async Task<JeebGateway.Users.AccountDeletionRequest> RequestAccountDeletionAsync(string targetUserId)
+        {
+            var ct = HttpContext.RequestAborted;
+            var hasActiveDelivery = false;
+            try
+            {
+                hasActiveDelivery = await _requests.CountActiveForClientAsync(targetUserId, ct) > 0;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "account-deletion active-delivery pre-check failed for {UserId}; treating as no active delivery (the purge worker re-checks before purging).",
+                    targetUserId);
+            }
+
+            return await _accountDeletion.RequestAsync(targetUserId, hasActiveDelivery, ct);
+        }
+
+        private static JeebGateway.Users.AccountDeletionResponse ToDeletionResponse(JeebGateway.Users.AccountDeletionRequest record)
+            => new()
+            {
+                Success = true,
+                UserId = record.UserId,
+                Status = record.Status,
+                RequestedAt = record.RequestedAt,
+                ScheduledPurgeAt = record.ScheduledPurgeAt,
+                CompletedAt = record.CompletedAt,
+                // Single source of truth for the grace window (mirrors the client's kAccountPurgeGraceDays=30).
+                GraceDays = (int)JeebGateway.Users.InMemoryAccountDeletionStore.PurgeDelay.TotalDays,
+            };
 
         /// <summary>
         /// Delete users by email addresses (bulk operation)

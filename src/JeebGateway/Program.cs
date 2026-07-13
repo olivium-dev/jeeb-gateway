@@ -1835,22 +1835,55 @@ else
     builder.Services.AddSingleton<IFinancialLedgerAnonymizer>(sp => sp.GetRequiredService<InMemoryFinancialLedger>());
 }
 builder.Services.AddSingleton<InMemoryAccountDeletionStore>();
-// Durability register #15 — account-deletion (GDPR 30-day purge SLA). Postgres-backed
-// (account_deletions, migration 0010) + the AccountDeletionPurgeWorker background sweeper
-// when GatewayPostgres is configured, so a queued deletion and its purge deadline survive a
-// restart. In-memory fallback (no worker) for dev/CI/test — today's behaviour.
+// Durability register #15 — account-deletion (GDPR 30-day purge SLA). The authoritative
+// gateway-local store is Postgres-backed (account_deletions, migration 0010) when
+// GatewayPostgres is configured, else the in-memory fallback (dev/CI/test).
 if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 {
-    builder.Services.AddSingleton<IAccountDeletionStore,
-        JeebGateway.Users.PostgresAccountDeletionStore>();
-    builder.Services.AddSingleton<JeebGateway.Users.AccountDeletionPurgeWorker>();
-    builder.Services.AddHostedService(sp =>
-        sp.GetRequiredService<JeebGateway.Users.AccountDeletionPurgeWorker>());
+    builder.Services.AddSingleton<JeebGateway.Users.PostgresAccountDeletionStore>();
+}
+
+// JEBV4-215 (E20) — route the account-deletion soft status-flip THROUGH remote-user-preferences
+// (Q-079 / GR-2 DoD: the flip persists via remote-user-preferences, NOT user-management),
+// mirroring the notification-prefs store's flag-gated registration above. The
+// RemoteUserPreferencesAccountDeletionStore DECORATES the authoritative gateway-local store:
+// it best-effort mirrors the status blob to the shared remote-user-preferences service
+// (key "jeeb.account_deletion") on top of the durable local record + 30-day SLA + state machine.
+// The remote-user-preferences upstream is DEAD on MSI (env still points at the decommissioned
+// 192.168.2.50:10067; owner declined the env flip), so the mirror fails open there and the
+// gateway-local persistence path is the real durable fallback — exactly the fail-open-then-local
+// shape notification-prefs took post-#274. When the flag is off, the local store is used directly.
+if (builder.Configuration.GetValue("FeatureFlags:UseUpstream:RemoteUserPreferences", true))
+{
+    builder.Services.AddSingleton<IAccountDeletionStore>(sp =>
+    {
+        IAccountDeletionStore inner = !string.IsNullOrWhiteSpace(gatewayPostgresCs)
+            ? sp.GetRequiredService<JeebGateway.Users.PostgresAccountDeletionStore>()
+            : sp.GetRequiredService<InMemoryAccountDeletionStore>();
+        return new JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore(
+            inner,
+            sp.GetRequiredService<IServiceScopeFactory>(),
+            sp.GetRequiredService<ILogger<JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore>>());
+    });
+}
+else if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<IAccountDeletionStore>(sp =>
+        sp.GetRequiredService<JeebGateway.Users.PostgresAccountDeletionStore>());
 }
 else
 {
     builder.Services.AddSingleton<IAccountDeletionStore>(sp => sp.GetRequiredService<InMemoryAccountDeletionStore>());
 }
+
+// The scheduled purge worker sweeps every open deletion (pending_active_delivery → scheduled →
+// completed hard-delete once the 30-day SLA is due). It is now ALWAYS scheduled — the soft-delete
+// flip (UserController.DeleteProfile) writes to the store in every environment, so its purge must
+// run everywhere, not only when Postgres is configured. It resolves IAccountDeletionStore per tick
+// and drives AdvanceAsync on the inner state machine through the decorator (additive).
+builder.Services.AddSingleton<JeebGateway.Users.AccountDeletionPurgeWorker>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Users.AccountDeletionPurgeWorker>());
 
 // Data-export pipeline (T-backend-042, GDPR-like right of access).
 // POST /users/me/data-export queues a full export (profile, orders,
