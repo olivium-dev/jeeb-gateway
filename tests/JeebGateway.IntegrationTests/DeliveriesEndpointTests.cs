@@ -257,23 +257,26 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
     }
 
     [Fact]
-    public async Task TriggerOtp_WithoutRecipientPhone_Returns400_PhoneMissing()
+    public async Task TriggerOtp_WithoutRecipientPhone_Returns200_InAppOnly_NoSms()
     {
         var otp        = new FakeServiceOtpClient();
         var delivery   = new FakeDeliveryServiceClient();
         var logCapture = new CapturingLoggerProvider();
         await using var factory = ExternalOtpFactory(otp, delivery, logCapture);
 
-        // Seed at_door but WITHOUT a recipient phone — the endpoint must reject
-        // rather than ship an OTP to a hardcoded placeholder (B6).
+        // BUG B (fix/bugb-otp-phone-contract): recipient phone is OPTIONAL at create, so
+        // a phone-less at_door delivery must NOT 400. The in-app handover code channel is
+        // phone-independent — the endpoint returns 200 with Triggered=false and simply
+        // skips the SMS dispatch (B6 still holds: no OTP is shipped to a placeholder).
         var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: null);
         var http = AuthClient(factory, seed.JeeberId);
 
         var resp = await http.GetAsync($"/deliveries/{seed.Id}/otp");
 
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/recipient-phone-missing");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<OtpTriggerResponseDto>();
+        body!.DeliveryId.Should().Be(seed.Id);
+        body.Triggered.Should().BeFalse("no SMS is sent when there is no recipient phone");
         otp.SendOtpCalls.Should().BeEmpty("no OTP should be sent without a recipient phone");
     }
 

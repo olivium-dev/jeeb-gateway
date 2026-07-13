@@ -204,12 +204,15 @@ public class S09RecipientPhonePlumbingTests : IClassFixture<WebApplicationFactor
     }
 
     /// <summary>
-    /// Negative path: a delivery created WITHOUT a recipientPhone still rejects
-    /// the at-door OTP with 400 recipient-phone-missing — the documented guard
-    /// that prevents shipping an OTP to a hardcoded placeholder. No SMS is sent.
+    /// BUG B (fix/bugb-otp-phone-contract): recipient phone is OPTIONAL at create, so a
+    /// delivery created WITHOUT a recipientPhone must NOT 400 at the at-door OTP — that
+    /// was the contract mismatch that blocked the in-app handover for every phone-less
+    /// COD/on-my-behalf delivery. The in-app handover code channel is phone-independent,
+    /// so the endpoint returns 200 (Triggered=false) and simply skips the SMS dispatch.
+    /// B6 still holds: no OTP is ever shipped to a placeholder — no SMS is sent at all.
     /// </summary>
     [Fact]
-    public async Task Create_Without_RecipientPhone_Then_AtDoor_Otp_Returns400_PhoneMissing()
+    public async Task Create_Without_RecipientPhone_Then_AtDoor_Otp_Returns200_InAppOnly_NoSms()
     {
         var otp = new RecordingOtpClient();
         await using var factory = FactoryWithFakeOtp(otp);
@@ -231,9 +234,7 @@ public class S09RecipientPhonePlumbingTests : IClassFixture<WebApplicationFactor
         var jeeber = ClientFor(factory, jeeberId, role: "driver");
         var resp = await jeeber.GetAsync($"/deliveries/{deliveryId}/otp");
 
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/recipient-phone-missing");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
         otp.SendOtpCalls.Should().BeEmpty("no OTP may be dispatched without a recipient phone");
     }
 
