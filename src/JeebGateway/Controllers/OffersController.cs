@@ -748,7 +748,16 @@ public class OffersController : ControllerBase
         // steals). The id/tier/pickup come from the synced ledger row (the same data
         // the create-seed used). DEGRADE-DON'T-FAIL: this assignment mirror must never
         // turn a committed accept into a 5xx, so every failure is logged and swallowed.
-        // No row read-back is asserted; this is a best-effort assignment mirror.
+        // JEBV4-300 — the assignment mirror is DURABLE-BEFORE-RETURN. The upsert alone
+        // is fire-and-forget against a delivery-service that may be read-replica-lagged;
+        // until the row carries jeeber_id its authorise() 403s BOTH parties, so a PATCH
+        // /deliveries/{id}/status fired within seconds of accept fails with wrong_party.
+        // After the upsert we read the canonical row back and bounded-retry until
+        // jeeber_id == winningJeeberId, so the 200 we return is a promise the delivery
+        // is assignable. The OUTER swallow is retained so a committed offer-service
+        // accept NEVER turns into a 5xx (that invariant is load-bearing) — a read-back
+        // that never confirms only logs; DeliveriesController's PATCH-status re-mirror
+        // (leg b) self-heals the residual race.
         if (synced is not null && !string.IsNullOrWhiteSpace(synced.Id))
         {
             try
@@ -763,6 +772,8 @@ public class OffersController : ControllerBase
                     PickupLat = synced.PickupLocation?.Lat ?? 0d,
                     PickupLng = synced.PickupLocation?.Lng ?? 0d,
                 }, ct);
+
+                await ConfirmDeliveryAssignmentVisibleAsync(synced.Id, winningJeeberId!, ct);
             }
             catch (Exception ex)
             {
@@ -847,6 +858,61 @@ public class OffersController : ControllerBase
                 requestId);
             return null;
         }
+    }
+
+    // JEBV4-300 — read-back budget for the post-accept assignment mirror. Bounded so a
+    // genuinely-stuck upstream can never hang the accept: at most 3 canonical reads, the
+    // first fired immediately after the upsert, the rest ~200ms apart (≈400ms worst case).
+    private const int AssignmentReadBackAttempts = 3;
+    private static readonly TimeSpan AssignmentReadBackDelay = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>
+    /// JEBV4-300 (assignment-mirror race). After the idempotent post-accept upsert seeds
+    /// <c>jeeber_id = winningJeeberId</c>, confirm it is DURABLY VISIBLE on the canonical
+    /// delivery-service row before the accept returns — reading
+    /// <see cref="IDeliveryServiceClient.GetCanonicalDeliveryAsync"/> and bounded-retrying
+    /// (<see cref="AssignmentReadBackAttempts"/> × <see cref="AssignmentReadBackDelay"/>)
+    /// until the row's <c>jeeber_id</c> equals the winner. Until that is visible,
+    /// delivery-service's authorise() 403s BOTH parties, so a PATCH /status fired seconds
+    /// after accept would race the mirror. NEVER throws on a non-confirming read: the outer
+    /// caller's swallow keeps a committed accept at 200, and leg (b) self-heals the residual.
+    /// </summary>
+    private async Task ConfirmDeliveryAssignmentVisibleAsync(
+        string deliveryId, string winningJeeberId, CancellationToken ct)
+    {
+        for (var attempt = 1; attempt <= AssignmentReadBackAttempts; attempt++)
+        {
+            DeliveryReadUpstream? row = null;
+            try
+            {
+                row = await _deliveryService.GetCanonicalDeliveryAsync(deliveryId, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return; // caller cancelled — nothing to confirm; accept response already shaped.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Post-accept assignment read-back for delivery {DeliveryId} attempt {Attempt}/{Max} faulted; retrying.",
+                    deliveryId, attempt, AssignmentReadBackAttempts);
+            }
+
+            if (row is not null && string.Equals(row.JeeberId, winningJeeberId, StringComparison.Ordinal))
+            {
+                return; // durably assigned — a status transition by either party will authorise.
+            }
+
+            if (attempt < AssignmentReadBackAttempts)
+            {
+                await Task.Delay(AssignmentReadBackDelay, ct);
+            }
+        }
+
+        _logger.LogWarning(
+            "Post-accept assignment read-back for delivery {DeliveryId} did not observe jeeber_id={JeeberId} "
+            + "after {Max} attempts; accept stays 200 and the PATCH-status re-mirror (leg b) self-heals the race.",
+            deliveryId, winningJeeberId, AssignmentReadBackAttempts);
     }
 
     /// <summary>

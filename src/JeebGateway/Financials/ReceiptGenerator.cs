@@ -33,6 +33,13 @@ public static class ReceiptGenerator
             TierId = settlement.TierId,
             CommissionTier = settlement.CommissionTier.ToString(),
             Lines = lines,
+            CodAmount = settlement.GoodsCost,
+            Commission = settlement.Commission,
+            CommissionRate = settlement.CommissionRate,
+            // The Jeeber keeps the COD minus the platform commission. Rounded to
+            // cents to match the persisted breakdown (GoodsCost / Commission are
+            // already 2-dp) so the receipt never shows a fractional-cent payout.
+            Payout = Math.Round(settlement.GoodsCost - settlement.Commission, 2, MidpointRounding.AwayFromZero),
             Total = settlement.Total,
             Currency = settlement.Currency,
             PaymentMethod = settlement.PaymentMethod,

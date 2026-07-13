@@ -730,6 +730,15 @@ public sealed class JeebOffersController : ControllerBase
                 PickupLat = request.PickupLocation.Lat,
                 PickupLng = request.PickupLocation.Lng,
             }, ct);
+
+            // JEBV4-300 — DURABLE-BEFORE-RETURN. The upsert above is fire-and-forget
+            // against a possibly read-replica-lagged delivery-service; until its row
+            // carries jeeber_id its authorise() 403s BOTH parties, so a PATCH /status
+            // fired seconds after accept races the mirror. Confirm the assignment is
+            // visible on the canonical row before the accept returns. NEVER throws on a
+            // non-confirming read — the outer swallow keeps a committed accept at 200 and
+            // DeliveriesController's PATCH-status re-mirror (leg b) self-heals the residual.
+            await ConfirmDeliveryAssignmentVisibleAsync(request.Id, winningJeeberId, ct);
         }
         catch (OperationCanceledException)
         {
@@ -743,6 +752,59 @@ public sealed class JeebOffersController : ControllerBase
                 + "cap until reconciled.",
                 request.Id, winningJeeberId);
         }
+    }
+
+    // JEBV4-300 — read-back budget for the post-accept assignment mirror. Bounded so a
+    // genuinely-stuck upstream can never hang the accept: at most 3 canonical reads, the
+    // first fired immediately after the upsert, the rest ~200ms apart (≈400ms worst case).
+    private const int AssignmentReadBackAttempts = 3;
+    private static readonly TimeSpan AssignmentReadBackDelay = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>
+    /// JEBV4-300 (assignment-mirror race). After the idempotent post-accept upsert seeds
+    /// <c>jeeber_id = winningJeeberId</c>, confirm it is DURABLY VISIBLE on the canonical
+    /// delivery-service row before the accept returns — reading
+    /// <see cref="IDeliveryServiceClient.GetCanonicalDeliveryAsync"/> and bounded-retrying
+    /// (<see cref="AssignmentReadBackAttempts"/> × <see cref="AssignmentReadBackDelay"/>)
+    /// until the row's <c>jeeber_id</c> equals the winner. NEVER throws on a non-confirming
+    /// read: the caller's swallow keeps a committed accept at 200 and leg (b) self-heals.
+    /// </summary>
+    private async Task ConfirmDeliveryAssignmentVisibleAsync(
+        string deliveryId, string winningJeeberId, CancellationToken ct)
+    {
+        for (var attempt = 1; attempt <= AssignmentReadBackAttempts; attempt++)
+        {
+            DeliveryReadUpstream? row = null;
+            try
+            {
+                row = await _deliveryService.GetCanonicalDeliveryAsync(deliveryId, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return; // caller cancelled — nothing to confirm; accept response already shaped.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Post-accept assignment read-back for delivery {DeliveryId} attempt {Attempt}/{Max} faulted; retrying.",
+                    deliveryId, attempt, AssignmentReadBackAttempts);
+            }
+
+            if (row is not null && string.Equals(row.JeeberId, winningJeeberId, StringComparison.Ordinal))
+            {
+                return; // durably assigned — a status transition by either party will authorise.
+            }
+
+            if (attempt < AssignmentReadBackAttempts)
+            {
+                await Task.Delay(AssignmentReadBackDelay, ct);
+            }
+        }
+
+        _logger.LogWarning(
+            "Post-accept assignment read-back for delivery {DeliveryId} did not observe jeeber_id={JeeberId} "
+            + "after {Max} attempts; accept stays 200 and the PATCH-status re-mirror (leg b) self-heals the race.",
+            deliveryId, winningJeeberId, AssignmentReadBackAttempts);
     }
 
     // -----------------------------------------------------------------------
