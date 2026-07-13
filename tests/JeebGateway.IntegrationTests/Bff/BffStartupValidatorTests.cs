@@ -179,6 +179,80 @@ public class BffStartupValidatorTests
         validator.Validate(); // does not throw — phantom Services:UserManagement key not needed
     }
 
+    [Fact]
+    public void Throws_When_Otp_Enabled_But_ApplicationId_Empty()
+    {
+        // JEBV4 OTP-502 regression: the exact production misconfig that caused the
+        // 2026-07-12 phone-OTP login outage — OTP enabled, ApplicationId not injected.
+        var config = BuildConfig(new Dictionary<string, string?>
+        {
+            // All required downstream BaseUrls present, so the ONLY verdict under
+            // test is the OTP ApplicationId guard.
+            ["Services:Auth:BaseUrl"] = "http://auth.test",
+            ["UserManagementServiceApi:BaseUrl"] = "http://user-management.test",
+            ["Services:Matching:BaseUrl"] = "http://matching.test",
+            ["Services:Geolocation:BaseUrl"] = "http://geo.test",
+            ["Services:Delivery:BaseUrl"] = "http://delivery.test",
+            ["FeatureFlags:UseUpstream:Otp"] = "true",
+            ["Auth:Otp:ApplicationId"] = "", // empty placeholder never overridden at deploy
+        });
+
+        var validator = new BffStartupValidator(
+            Options.Create(new DownstreamServicesOptions()),
+            config,
+            new HostEnv("Production"));
+
+        var act = () => validator.Validate();
+
+        act.Should().Throw<StartupConfigurationException>()
+            .Which.Message.Should().ContainAll("Auth:Otp:ApplicationId", "Auth__Otp__ApplicationId");
+    }
+
+    [Fact]
+    public void Passes_When_Otp_Enabled_And_ApplicationId_Set()
+    {
+        var config = BuildConfig(new Dictionary<string, string?>
+        {
+            ["Services:Auth:BaseUrl"] = "http://auth.test",
+            ["UserManagementServiceApi:BaseUrl"] = "http://user-management.test",
+            ["Services:Matching:BaseUrl"] = "http://matching.test",
+            ["Services:Geolocation:BaseUrl"] = "http://geo.test",
+            ["Services:Delivery:BaseUrl"] = "http://delivery.test",
+            ["FeatureFlags:UseUpstream:Otp"] = "true",
+            ["Auth:Otp:ApplicationId"] = "17f6f47f-4047-4f1e-bac2-632a5eaa9a46",
+        });
+
+        var validator = new BffStartupValidator(
+            Options.Create(new DownstreamServicesOptions()),
+            config,
+            new HostEnv("Production"));
+
+        validator.Validate(); // does not throw
+    }
+
+    [Fact]
+    public void Skips_Otp_Guard_When_Otp_Disabled()
+    {
+        // OTP off → empty ApplicationId is harmless (no /v1/auth/otp/* traffic).
+        var config = BuildConfig(new Dictionary<string, string?>
+        {
+            ["Services:Auth:BaseUrl"] = "http://auth.test",
+            ["UserManagementServiceApi:BaseUrl"] = "http://user-management.test",
+            ["Services:Matching:BaseUrl"] = "http://matching.test",
+            ["Services:Geolocation:BaseUrl"] = "http://geo.test",
+            ["Services:Delivery:BaseUrl"] = "http://delivery.test",
+            ["FeatureFlags:UseUpstream:Otp"] = "false",
+            ["Auth:Otp:ApplicationId"] = "",
+        });
+
+        var validator = new BffStartupValidator(
+            Options.Create(new DownstreamServicesOptions()),
+            config,
+            new HostEnv("Production"));
+
+        validator.Validate(); // does not throw
+    }
+
     private static IConfiguration BuildConfig(IDictionary<string, string?> values)
     {
         return new ConfigurationBuilder()
