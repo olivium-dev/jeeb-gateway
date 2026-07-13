@@ -85,6 +85,81 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
+    // -------- F8: canonical-miss (null upstream) mirror fallback --------------
+    //
+    // Live-tracking dead-end (S921B/A33): with FeatureFlags:UseUpstream:Delivery
+    // ON the read-through calls delivery-service. A GENUINELY-MISSING upstream row
+    // (the best-effort seed-at-create/accept never landed) makes
+    // GetCanonicalDeliveryAsync return null. The prior code turned that null into a
+    // permanent 404 even though the gateway's OWN mirror still held the row (the
+    // same row GET /deliveries lists and the working chat surface resolves). The
+    // fix degrades a NULL read to the local mirror — under the SAME participant
+    // scoping the list applies — instead of a 404 dead-end.
+
+    [Fact]
+    public async Task GetById_FlagOn_CanonicalMissing_FallsBackToLocalMirror_ForParty_Returns200()
+    {
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient { CanonicalReadReturnsNull = true };
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var seed = await SeedAsync(factory, RequestStatus.Accepted);
+
+        // The assigned jeeber is a party to THIS delivery.
+        var http = AuthClient(factory, seed.JeeberId);
+        var resp = await http.GetAsync($"/v1/deliveries/{seed.Id}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "a null canonical read must degrade to the local mirror, never a permanent 404 (F8)");
+        var dto = await resp.Content.ReadFromJsonAsync<DeliveryDto>();
+        dto!.Id.Should().Be(seed.Id);
+        dto.ClientId.Should().Be(seed.ClientId);
+        dto.JeeberId.Should().Be(seed.JeeberId);
+        dto.Status.Should().Be(RequestStatus.Accepted, "the mirror row's status is surfaced on the fallback");
+
+        // The canonical read WAS attempted (this exercises the null-branch, not the
+        // HttpRequestException transport-fault branch).
+        delivery.CanonicalReadCalls.Should().Contain(seed.Id);
+    }
+
+    [Fact]
+    public async Task GetById_FlagOn_CanonicalMissing_NonParty_Returns404_NoMirrorLeak()
+    {
+        // F8 scoping: the mirror fallback surfaces a row the canonical read did not
+        // authorise, so it MUST carry the list's participant scoping. A caller who is
+        // neither the client nor the assigned jeeber must NOT read the delivery.
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient { CanonicalReadReturnsNull = true };
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var seed = await SeedAsync(factory, RequestStatus.Accepted);
+        var stranger = AuthClient(factory, $"jeeber-stranger-{Guid.NewGuid()}");
+
+        var resp = await stranger.GetAsync($"/v1/deliveries/{seed.Id}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound,
+            "a non-party must not read another delivery via the mirror fallback (F8 scoping)");
+    }
+
+    [Fact]
+    public async Task GetById_FlagOn_CanonicalMissing_AndNoMirrorRow_Returns404()
+    {
+        // A truly unknown id (no upstream row AND no mirror row) is still a clean 404,
+        // never a 500 — the S13 E5 contract is preserved through the F8 fall-through.
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient { CanonicalReadReturnsNull = true };
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var http = AuthClient(factory, "jeeber-404");
+        var resp = await http.GetAsync($"/v1/deliveries/unknown-{Guid.NewGuid()}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        ((int)resp.StatusCode).Should().BeLessThan(500, "unknown id is a 404, never a server error (S13 E5)");
+    }
+
     // -------- PATCH /deliveries/{id}/status (canonical forward) ---------------
     //
     // JEB-1479 cut-over: the legacy in-gateway linear state-machine PATCH tests
