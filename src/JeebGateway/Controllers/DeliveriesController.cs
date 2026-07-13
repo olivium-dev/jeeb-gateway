@@ -71,6 +71,10 @@ public class DeliveriesController : ControllerBase
     private readonly IOptions<JeebGateway.Auth.OtpSignIn.OtpSignInOptions> _otpSignInOptions;
     private readonly IServiceOTPClient _otpClient;
     private readonly IDeliveryServiceClient _deliveryClient;
+    // JEBV4-300 leg (b): tenant the gateway scopes delivery-service rows under, so the
+    // 403-recovery assignment re-mirror re-POSTs under the SAME (id, tenant_id) the row
+    // was seeded with. Mirrors OffersController/DeliveryRowMirror resolution.
+    private readonly DeliveryClientOptions _deliveryOptions;
     // E22/I3 (JEBV4-241): the SOLE chat caller used to auto-close a delivery's
     // conversation on completion (via the consumed chat-service; see
     // CreditJeeberOnCompletionAsync). Degrade-don't-fail — a chat blip never fails
@@ -172,6 +176,7 @@ public class DeliveriesController : ControllerBase
         IOptions<JeebGateway.Auth.OtpSignIn.OtpSignInOptions> otpSignInOptions,
         IServiceOTPClient otpClient,
         IDeliveryServiceClient deliveryClient,
+        IOptions<DeliveryClientOptions> deliveryOptions,
         IConversationProvisioner conversations,
         IDistributedCache cache,
         IHandoverCodeStore handoverCodes,
@@ -191,6 +196,7 @@ public class DeliveriesController : ControllerBase
         _otpSignInOptions = otpSignInOptions;
         _otpClient = otpClient;
         _deliveryClient = deliveryClient;
+        _deliveryOptions = deliveryOptions.Value;
         _conversations = conversations;
         _cache = cache;
         _handoverCodes = handoverCodes;
@@ -709,8 +715,40 @@ public class DeliveriesController : ControllerBase
 
         try
         {
-            var upstream = await _deliveryClient.CanonicalTransitionAsync(
-                deliveryId, canonicalTo, partySource, callerId, actorRole, ct);
+            DeliveryTransitionUpstream upstream;
+            try
+            {
+                upstream = await _deliveryClient.CanonicalTransitionAsync(
+                    deliveryId, canonicalTo, partySource, callerId, actorRole, ct);
+            }
+            catch (DeliveryTransitionException dte)
+                when (dte.StatusCode == StatusCodes.Status403Forbidden)
+            {
+                // JEBV4-300 leg (b): a 403 wrong_party immediately after accept is the
+                // assignment-mirror race — delivery-service's row does not yet carry
+                // jeeber_id, so its authorise() rejects the legitimately-assigned party.
+                // Re-run the IDEMPOTENT assignment mirror (delivery-service upserts jeeber_id
+                // only WHERE jeeber_id IS NULL — it never steals an already-assigned row)
+                // from the gateway's local ledger row, then retry the transition ONCE. If the
+                // re-mirror cannot help (no local row / unknown winner / genuine wrong-party),
+                // the original 403 is surfaced unchanged.
+                if (!await TryRepairAssignmentMirrorAsync(deliveryId, ct))
+                {
+                    return MapTransitionException(dte, deliveryId);
+                }
+
+                try
+                {
+                    upstream = await _deliveryClient.CanonicalTransitionAsync(
+                        deliveryId, canonicalTo, partySource, callerId, actorRole, ct);
+                }
+                catch (DeliveryTransitionException retryDte)
+                {
+                    // Still rejected after the re-mirror — this was a genuine wrong-party
+                    // (or another SM verdict), not the race. Surface it verbatim.
+                    return MapTransitionException(retryDte, deliveryId);
+                }
+            }
 
             // Best-effort mirror so a subsequent GET (legacy fall-through, or a
             // replica that has not read-through yet) is not stale. delivery-service
@@ -786,6 +824,73 @@ public class DeliveriesController : ControllerBase
                 title: "Delivery service unavailable.",
                 detail: "Unable to reach delivery-service to apply the transition.",
                 statusCode: StatusCodes.Status502BadGateway);
+        }
+    }
+
+    /// <summary>
+    /// JEBV4-300 leg (b): re-run the IDEMPOTENT post-accept assignment mirror from the
+    /// gateway's local ledger row, so a transition that just 403'd wrong_party (because
+    /// delivery-service's row does not yet carry <c>jeeber_id</c> — the accept-time mirror
+    /// lost the propagation race) can be retried. Reads the local <see cref="IRequestsStore"/>
+    /// row (which the accept saga stamped with the winning jeeber + tier + pickup) and
+    /// re-POSTs <c>POST /api/v1/deliveries</c> with <c>jeeber_id</c>. delivery-service
+    /// upserts the jeeber ONLY <c>WHERE jeeber_id IS NULL</c> (late-assignment, never steals),
+    /// so this is safe to replay and a no-op once the row is already assigned.
+    /// </summary>
+    /// <returns><c>true</c> when the re-mirror ran (a retry of the transition is worth
+    /// attempting); <c>false</c> when there was nothing to re-mirror (no local row, no known
+    /// winner, missing tier/pickup, or the upsert itself faulted) — the caller then surfaces
+    /// the original 403 unchanged.</returns>
+    private async Task<bool> TryRepairAssignmentMirrorAsync(string deliveryId, CancellationToken ct)
+    {
+        DeliveryRequest? row;
+        try
+        {
+            row = await _store.GetAsync(deliveryId, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Assignment-mirror repair: local ledger read failed for delivery {DeliveryId}; "
+                + "surfacing the original 403.", deliveryId);
+            return false;
+        }
+
+        // Without a locally-known winner + the matching-resolve columns there is nothing to
+        // re-mirror: either this instance never saw the accept, or the 403 is a GENUINE
+        // wrong-party (not the race). Fail closed to the original verdict.
+        if (row is null
+            || string.IsNullOrWhiteSpace(row.JeeberId)
+            || row.PickupLocation is null
+            || string.IsNullOrWhiteSpace(row.TierId))
+        {
+            return false;
+        }
+
+        try
+        {
+            await _deliveryClient.CreateDeliveryRowAsync(new CreateDeliveryRowUpstream
+            {
+                Id = row.Id,
+                TenantId = _deliveryOptions.TenantId,
+                ClientId = row.ClientId,
+                JeeberId = row.JeeberId,
+                TierId = row.TierId!,
+                PickupLat = row.PickupLocation.Lat,
+                PickupLng = row.PickupLocation.Lng,
+            }, ct);
+
+            _log.LogInformation(
+                "Assignment-mirror repair for delivery {DeliveryId} (jeeber {JeeberId}) re-POSTed after a "
+                + "403 wrong_party; retrying the transition once.", deliveryId, row.JeeberId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Assignment-mirror repair upsert failed for delivery {DeliveryId} (jeeber {JeeberId}); "
+                + "surfacing the original 403.", deliveryId, row.JeeberId);
+            return false;
         }
     }
 
