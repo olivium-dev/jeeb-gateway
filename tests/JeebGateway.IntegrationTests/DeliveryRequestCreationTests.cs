@@ -373,6 +373,122 @@ public class InMemoryTiersStoreTests
 }
 
 /// <summary>
+/// F1 / JEBV4-300 — pure unit tests for the create-time tier-existence probe with
+/// <c>FeatureFlags:UseUpstream:Delivery</c> ON. The delivery client is the REAL
+/// <see cref="DeliveryServiceClient"/> over a stub handler that serves the SAME
+/// upstream tier catalog shape the live delivery-service returns (UUIDv5 ids +
+/// Flash/Express/Standard names). Proves the probe accepts BOTH the faithful
+/// UUIDv5 id the tier-picker submits AND a legacy/Dart-enum tier CODE an older
+/// client may still POST (flash/FLASH/express/standard/onTheWay), while genuine
+/// garbage still returns false → the 404 launch-blocker is closed without opening
+/// an accept-anything hole.
+/// </summary>
+public class CatalogBackedTiersStoreUpstreamOnTests
+{
+    // The live delivery-service Standard tier id (UUIDv5), exactly as
+    // GET /api/v1/tiers returns it and the mobile tier-picker submits it.
+    private const string UpstreamStandardTierId = "2bd0d5df-db76-5d14-9e4d-741d60b2fa12";
+
+    private static CatalogBackedTiersStore UpstreamOnStore()
+        => new(
+            new JeebGateway.Tiers.InMemoryTiersStore(),
+            new DeliveryServiceClient(
+                new HttpClient(new UpstreamTiersHandler())
+                {
+                    BaseAddress = new Uri("http://upstream-delivery.test/")
+                }),
+            new StaticFlagsMonitor(new UpstreamFeatureFlags { Delivery = true }));
+
+    [Theory]
+    // The faithful UUIDv5 id the tier-picker rendered from and the app submits.
+    [InlineData(UpstreamStandardTierId)]
+    // Legacy tier CODES an older client may still POST instead of the UUID —
+    // upstream names Flash/Express/Standard align 1:1 with these.
+    [InlineData("flash")]
+    [InlineData("express")]
+    [InlineData("standard")]
+    // Case-insensitive (matches the id/name comparison semantics).
+    [InlineData("FLASH")]
+    // Dart-enum spelling of on_the_way the RequestTier enum serializes as.
+    [InlineData("onTheWay")]
+    public async Task ExistsAsync_UpstreamOn_Accepts_Ids_And_Legacy_Codes(string tierId)
+    {
+        var store = UpstreamOnStore();
+        (await store.ExistsAsync(tierId, CancellationToken.None)).Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("platinum_super_fast")]
+    [InlineData("nope")]
+    [InlineData("00000000-0000-0000-0000-000000000000")]
+    public async Task ExistsAsync_UpstreamOn_Rejects_Garbage(string tierId)
+    {
+        var store = UpstreamOnStore();
+        (await store.ExistsAsync(tierId, CancellationToken.None)).Should().BeFalse();
+    }
+
+    // Serves the delivery-service tier catalog (UUIDv5 ids + Flash/Express/Standard
+    // names, exactly like the live upstream) at GET /api/v1/tiers.
+    private sealed class UpstreamTiersHandler : HttpMessageHandler
+    {
+        private static readonly System.Text.Json.JsonSerializerOptions Json =
+            new(System.Text.Json.JsonSerializerDefaults.Web);
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Get
+                && path.EndsWith("/api/v1/tiers", StringComparison.Ordinal))
+            {
+                var tiers = new[]
+                {
+                    new JeebGateway.Tiers.DeliveryTierDto
+                    {
+                        Id = "1a2b3c4d-5e6f-5a1b-8c2d-3e4f5a6b7c8d", Name = "Flash", SlaHours = 1,
+                        RadiusKm = 8.0, CommissionRate = 0.10, PriceHint = "Fastest dispatch",
+                        CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
+                    },
+                    new JeebGateway.Tiers.DeliveryTierDto
+                    {
+                        Id = "9f1c0e6b-1b2a-5c3d-8e4f-0a1b2c3d4e5f", Name = "Express", SlaHours = 4,
+                        RadiusKm = 8.0, CommissionRate = 0.10, PriceHint = "Faster dispatch",
+                        CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
+                    },
+                    new JeebGateway.Tiers.DeliveryTierDto
+                    {
+                        Id = UpstreamStandardTierId, Name = "Standard", SlaHours = 24,
+                        RadiusKm = 5.0, CommissionRate = 0.10, PriceHint = "Standard rate",
+                        CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
+                    },
+                };
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        System.Text.Json.JsonSerializer.Serialize(tiers, Json),
+                        System.Text.Encoding.UTF8, "application/json"),
+                });
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json"),
+            });
+        }
+    }
+
+    private sealed class StaticFlagsMonitor : IOptionsMonitor<UpstreamFeatureFlags>
+    {
+        public StaticFlagsMonitor(UpstreamFeatureFlags value) => CurrentValue = value;
+        public UpstreamFeatureFlags CurrentValue { get; }
+        public UpstreamFeatureFlags Get(string? name) => CurrentValue;
+        public IDisposable? OnChange(Action<UpstreamFeatureFlags, string?> listener) => null;
+    }
+}
+
+/// <summary>
 /// Pure unit tests for the WGS84 validator on <see cref="GeoPoint"/>.
 /// Bounds-only logic kept here rather than in the integration test so it
 /// runs as a fast feedback loop on every build.
