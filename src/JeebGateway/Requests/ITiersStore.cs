@@ -41,10 +41,15 @@ public interface ITiersStore
 /// (delivery-service <c>GET /api/v1/tiers</c>). This is the list the mobile
 /// tier-picker rendered from, so the UUIDv5 id the app faithfully submits (e.g.
 /// Standard = <c>2bd0d5df-db76-5d14-9e4d-741d60b2fa12</c>) resolves. A tierId is
-/// valid iff it matches (case-insensitive) an upstream tier id. <b>This closes the
-/// P0</b>: before this branch existed the probe consulted ONLY the gateway-local
-/// slug catalog (urgent/same-day/…) and 400'd every upstream id → no customer could
-/// create a request while Delivery upstream was live.</para>
+/// valid iff it matches (case-insensitive) an upstream tier id, OR — F1 /
+/// JEBV4-300 — it is a legacy/Dart-enum tier CODE (flash/express/standard/
+/// onTheWay/…) whose <see cref="JeebGateway.Tiers.LegacyTierCodes"/> canonical form
+/// equals the canonical form of an upstream tier NAME (upstream Flash/Express/
+/// Standard align 1:1 with the legacy codes). <b>This closes the P0</b>: before this
+/// branch existed the probe consulted ONLY the gateway-local slug catalog
+/// (urgent/same-day/…) and 400'd every upstream id → no customer could create a
+/// request while Delivery upstream was live; the code fallback additionally keeps
+/// older clients that still POST a tier code (not the UUID) from 404'ing.</para>
 ///
 /// <para><b>Delivery upstream OFF.</b> Unchanged legacy behavior — existence is
 /// delegated to the runtime-mutable gateway-local catalog
@@ -87,8 +92,30 @@ public class CatalogBackedTiersStore : ITiersStore
         {
             var trimmed = tierCode.Trim();
             var upstreamTiers = await _upstream.ListTiersAsync(ct);
-            return upstreamTiers.Any(t =>
-                string.Equals(t.Id, trimmed, StringComparison.OrdinalIgnoreCase));
+
+            // (a) The faithful path: the mobile tier-picker submits the exact
+            // UUIDv5 id GET /v1/tiers rendered. Case-insensitive id match.
+            if (upstreamTiers.Any(t =>
+                    string.Equals(t.Id, trimmed, StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+
+            // (b) F1 / JEBV4-300 — legacy/Dart-enum tier CODE fallback so an older
+            // client that submits a code (flash/express/standard/onTheWay/…) instead
+            // of the UUID no longer 404s at create time. The upstream catalog NAMES
+            // (Flash/Express/Standard) align 1:1 with the legacy codes, so we fold
+            // BOTH the submitted code and each upstream tier name through the SAME
+            // LegacyTierCodes alias table and compare the canonical results: e.g.
+            // "standard"/"onTheWay" -> "same-day" matches upstream name
+            // "Standard" -> "same-day"; "flash"/"express" -> "urgent" matches
+            // "Flash"/"Express" -> "urgent". Unknown codes canonicalize to
+            // themselves, so genuine garbage still finds no match and 404s.
+            var canonicalCode = JeebGateway.Tiers.LegacyTierCodes.Canonicalize(trimmed);
+            return upstreamTiers.Any(t => string.Equals(
+                JeebGateway.Tiers.LegacyTierCodes.Canonicalize(t.Name),
+                canonicalCode,
+                StringComparison.OrdinalIgnoreCase));
         }
 
         // Delivery upstream off: local catalog + LegacyTierCodes canonicalization.

@@ -49,6 +49,12 @@ public static class LegacyTierCodes
             ["express"] = "urgent",
             ["standard"] = "same-day",
             ["on_the_way"] = "same-day",
+            // Dart-enum spelling the mobile client actually emits for the same tier.
+            // The `RequestTier` enum serializes as camelCase (`onTheWay`), so a
+            // legacy client that sends the enum name — not the snake_case code —
+            // must resolve to the SAME catalog/upstream tier as `on_the_way`
+            // rather than 404 at create time (F1 / JEBV4-300).
+            ["onTheWay"] = "same-day",
             ["eco"] = "scheduled",
         };
 
