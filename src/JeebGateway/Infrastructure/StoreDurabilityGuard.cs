@@ -53,7 +53,13 @@ internal static class StoreDurabilityGuard
         (typeof(JeebGateway.Availability.IOfferRequestIndex),               new[] { typeof(JeebGateway.StateService.Durable.StateServiceOfferRequestIndex) }),
         (typeof(JeebGateway.Requests.IRequestsStore),                       new[] { typeof(JeebGateway.Requests.DurableRequestsStore) }),
         (typeof(JeebGateway.Admin.IAdminAuditLog),                          new[] { typeof(JeebGateway.Admin.PostgresAdminAuditLog) }),
-        (typeof(JeebGateway.Users.IAccountDeletionStore),                   new[] { typeof(JeebGateway.Users.PostgresAccountDeletionStore) }),
+        // JEBV4-215 (E20): the account-deletion flip now routes through remote-user-preferences
+        // (RemoteUserPreferencesAccountDeletionStore) which DECORATES the durable
+        // PostgresAccountDeletionStore — in a prod-like env GatewayPostgres is set, so the inner
+        // is Postgres and the decorated store is durable. Both the bare Postgres store (flag off)
+        // and the decorator (flag on, default) are approved durable resolutions. Mirrors the
+        // INotificationPreferencesStore → RemoteUserPreferences* treatment below.
+        (typeof(JeebGateway.Users.IAccountDeletionStore),                   new[] { typeof(JeebGateway.Users.PostgresAccountDeletionStore), typeof(JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore) }),
         (typeof(JeebGateway.Users.DataExport.IDataExportStore),             new[] { typeof(JeebGateway.Users.DataExport.PostgresDataExportStore) }),
         (typeof(JeebGateway.Requests.OtpHandover.IAdminEscalationStore),    new[] { typeof(JeebGateway.Requests.OtpHandover.PostgresAdminEscalationStore) }),
         (typeof(JeebGateway.ProhibitedItems.FlaggedRequests.IFlaggedRequestStore), new[] { typeof(JeebGateway.ProhibitedItems.FlaggedRequests.PostgresFlaggedRequestStore) }),

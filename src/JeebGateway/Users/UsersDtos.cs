@@ -163,6 +163,20 @@ public class AccountDeletionResponse
     public required DateTimeOffset RequestedAt { get; init; }
     public DateTimeOffset? ScheduledPurgeAt { get; init; }
     public DateTimeOffset? CompletedAt { get; init; }
+
+    /// <summary>
+    /// JEBV4-215 (E20) — preserved from the legacy user-management delete shape
+    /// (<c>DeleteUserProfileResponse.success</c>) so existing DELETE /api/User/profile clients
+    /// keep reading <c>success</c> after the flip moved off user-management.
+    /// </summary>
+    public bool Success { get; init; } = true;
+
+    /// <summary>
+    /// JEBV4-215 (E20) — the purge grace window in whole days (30). The single server-side source
+    /// of truth the mobile client's <c>kAccountPurgeGraceDays</c> mirrors, so the "deleted on
+    /// {date}" copy is rendered server-driven and a legal change to the window moves both.
+    /// </summary>
+    public int GraceDays { get; init; }
 }
 
 /// <summary>
