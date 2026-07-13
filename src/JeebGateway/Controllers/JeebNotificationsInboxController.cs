@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Linq;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.JeebNotifications;
 using JeebGateway.Users;
@@ -133,7 +134,27 @@ public sealed class JeebNotificationsInboxController : ControllerBase
                     ct);
 
             var (rows, total) = ExtractRows(response);
-            return Ok(JeebNotificationsProjection.ProjectPage(rows, safePage, safeSize, total));
+
+            // F5 (JEBV4-302) PRIVACY FILTER — the "finding jeebers" new-request broadcast
+            // is fanned to the jeeb_jeebers FCM topic (see NewRequestPushNotifier). A
+            // downstream relay defect resolves that topic send to ALL users and persists a
+            // receiver row per user, so a pure-customer caller's inbox can surface a
+            // new_request row carrying ANOTHER customer's order text. Until the relay/
+            // notification-service is fixed to scope topic delivery to actual subscribers
+            // (jeebers only) — escalated as a separate infra ticket — the gateway drops
+            // jeeber-only broadcast rows for any caller who does NOT hold the jeeber
+            // ("driver") role in their available_roles. A dual-role user (customer +
+            // jeeber) keeps the rows because GetRoles returns the FULL available-role set.
+            // This closes the customer-facing READ path of the leak deterministically.
+            var isJeeber = UserIdentity.HasRole(HttpContext, Roles.Jeeber);
+            var (visibleRows, dropped) = FilterJeeberBroadcasts(rows, isJeeber);
+
+            // When rows were dropped the upstream grand total is no longer authoritative
+            // for this caller; fall back to the on-page count so the projected total does
+            // not advertise notifications the caller can never see. (Mobile tolerates a
+            // total derived from the page — same cold-start path.)
+            var effectiveTotal = dropped > 0 ? (int?)null : total;
+            return Ok(JeebNotificationsProjection.ProjectPage(visibleRows, safePage, safeSize, effectiveTotal));
         }
         catch (NotificationApiException ex) when (ex.StatusCode is 401 or 403)
         {
@@ -189,6 +210,53 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         {
             return UpstreamProblem(ex);
         }
+    }
+
+    /// <summary>
+    /// F5 (JEBV4-302). Notification <c>type</c> values that are jeeber-only broadcasts —
+    /// pushed to the <c>jeeb_jeebers</c> topic for the reverse-auction "finding jeebers"
+    /// flow and NEVER meant for a customer's inbox. A caller lacking the jeeber
+    /// ("driver") role must not see these rows (they carry other customers' order text).
+    /// Matched case-insensitively; kept as a set so sibling jeeber-broadcast types can be
+    /// added without touching the filter logic.
+    /// </summary>
+    private static readonly HashSet<string> JeeberBroadcastTypes =
+        new(StringComparer.OrdinalIgnoreCase) { "new_request" };
+
+    /// <summary>
+    /// Drop jeeber-only broadcast rows (see <see cref="JeeberBroadcastTypes"/>) for a
+    /// caller who is not a jeeber. When <paramref name="callerIsJeeber"/> is true the rows
+    /// pass through untouched. Returns the visible rows and how many were dropped so the
+    /// caller can decide whether the upstream total is still trustworthy. Pure and
+    /// null-tolerant — a null/empty input yields an empty list.
+    /// </summary>
+    internal static (IReadOnlyList<UpstreamNotificationRow> Visible, int Dropped) FilterJeeberBroadcasts(
+        IReadOnlyList<UpstreamNotificationRow>? rows, bool callerIsJeeber)
+    {
+        if (rows is null || rows.Count == 0)
+        {
+            return (Array.Empty<UpstreamNotificationRow>(), 0);
+        }
+
+        if (callerIsJeeber)
+        {
+            return (rows, 0);
+        }
+
+        var visible = new List<UpstreamNotificationRow>(rows.Count);
+        var dropped = 0;
+        foreach (var row in rows)
+        {
+            var type = row?.Type?.Trim();
+            if (type is not null && JeeberBroadcastTypes.Contains(type))
+            {
+                dropped++;
+                continue;
+            }
+            if (row is not null) visible.Add(row);
+        }
+
+        return (visible, dropped);
     }
 
     /// <summary>

@@ -114,6 +114,20 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                 ["body"] = BuildBody(description, tierLabel),
                 ["type"] = "new_request",
                 ["category"] = "delivery",
+                // F5 (JEBV4-302) AUDIENCE SCOPE HINT — this new-request broadcast is for
+                // JEEBERS ONLY (the reverse-auction "finding jeebers" fan-out). It is
+                // published to the jeeb_jeebers FCM topic, but a relay/notification-service
+                // defect resolves that topic send to ALL users and persists a receiver row
+                // per user, leaking one customer's order text into other customers' inboxes.
+                // These FLAT hints let a FIXED relay scope persisted-receiver rows + delivery
+                // to the jeeber audience (and drop non-jeeber receivers) without any further
+                // gateway change — additive and forward-compatible, exactly like the
+                // `priority` hint above; it never degrades today's delivery and lights up as
+                // soon as the relay honours it. The authoritative customer-facing fix is the
+                // gateway inbox filter in JeebNotificationsInboxController (drops these rows
+                // for non-jeeber callers); the relay membership bug is escalated to infra.
+                ["audience"] = "jeebers",
+                ["audience_role"] = JeebGateway.Users.Roles.Jeeber,
                 // High-priority delivery hint. A new-request "finding jeebers" push is
                 // time-sensitive (the reverse auction is open only briefly), so it must
                 // wake the device rather than be batched. NOTE: this is a FLAT hint the
