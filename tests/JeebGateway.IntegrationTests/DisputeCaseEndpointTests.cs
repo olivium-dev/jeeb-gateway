@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -712,5 +714,141 @@ public class DisputeCaseStateMachineTests
     public void IsResolved_Classifies_Terminal_States(string state, bool expected)
     {
         DisputeCaseState.IsResolved(state).Should().Be(expected);
+    }
+}
+
+/// <summary>
+/// JEBV4-182 (B4 / Q-032) — canonical dispute-status enum guard. The DoD
+/// requires that <b>every</b> dispute record uses ONLY the standing Q-032
+/// canonical status enum
+/// <c>{open, under_review, resolved_refund, resolved_no_action, closed}</c>
+/// (as declared in <see cref="DisputeCaseState"/>), that the full
+/// create → review → resolve → close lifecycle only ever lands on exactly
+/// one of those five values, and that any out-of-enum status — including the
+/// legacy v1 <see cref="JeebGateway.Disputes.DisputeState"/> vocabulary
+/// (<c>filed / resolved / dismissed</c>) that JEBV4-182 retires — is rejected
+/// by the transition machine. These are pure-logic assertions (no host / no
+/// Postgres) so they run without the integration Docker dependency.
+/// </summary>
+public class DisputeCaseCanonicalStatusGuardTests
+{
+    // The Q-032 canonical five. Hard-coded here (NOT sourced from
+    // DisputeCaseState) so a rename/add/remove in the production enum is a
+    // deliberate, reviewed break rather than a silent drift.
+    private static readonly string[] Q032Canonical =
+    {
+        "open",
+        "under_review",
+        "resolved_refund",
+        "resolved_no_action",
+        "closed"
+    };
+
+    // Statuses that must NEVER be a valid dispute-case status: the retired v1
+    // vocabulary plus common spoof / typo values.
+    public static IEnumerable<object[]> OutOfEnumStatuses() => new[]
+    {
+        new object[] { "filed" },          // legacy v1 DisputeState
+        new object[] { "resolved" },       // legacy v1 (v2 splits refund/no_action)
+        new object[] { "dismissed" },      // legacy v1 DisputeState
+        new object[] { "escalated" },
+        new object[] { "pending" },
+        new object[] { "refunded" },
+        new object[] { "reopened" },
+        new object[] { "Open" },           // wrong casing is not canonical
+        new object[] { "resolved-refund" },// wrong separator
+        new object[] { "" }
+    };
+
+    [Fact]
+    public void All_Is_Exactly_The_Five_Q032_Canonical_Values()
+    {
+        DisputeCaseState.All.Should().BeEquivalentTo(
+            Q032Canonical,
+            "the dispute-status enum is frozen to the Q-032 canonical set; any "
+            + "add/remove/rename must be a reviewed, deliberate change");
+    }
+
+    [Fact]
+    public void Every_Landed_Transition_Stays_Inside_The_Canonical_Enum()
+    {
+        // Cross the full canonical set with itself PLUS the out-of-enum probes,
+        // then assert that any pair the machine accepts has BOTH endpoints
+        // inside the canonical five — the machine can never land a record on a
+        // non-canonical status.
+        var probes = Q032Canonical
+            .Concat(OutOfEnumStatuses().Select(o => (string)o[0]))
+            .Distinct()
+            .ToArray();
+
+        foreach (var from in probes)
+        foreach (var to in probes)
+        {
+            if (DisputeCaseState.CanTransition(from, to))
+            {
+                DisputeCaseState.All.Should().Contain(from,
+                    $"transition '{from}'→'{to}' was accepted, so '{from}' must be canonical");
+                DisputeCaseState.All.Should().Contain(to,
+                    $"transition '{from}'→'{to}' was accepted, so '{to}' must be canonical");
+            }
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(OutOfEnumStatuses))]
+    public void Out_Of_Enum_Statuses_Are_Rejected_As_Source_And_Target(string bad)
+    {
+        DisputeCaseState.All.Should().NotContain(bad);
+
+        foreach (var canonical in Q032Canonical)
+        {
+            DisputeCaseState.CanTransition(bad, canonical).Should().BeFalse(
+                $"'{bad}' is not a canonical status and must never be a legal transition source");
+            DisputeCaseState.CanTransition(canonical, bad).Should().BeFalse(
+                $"'{bad}' is not a canonical status and must never be a legal transition target");
+        }
+    }
+
+    [Fact]
+    public void Full_Lifecycle_Create_Review_Resolve_Close_Only_Touches_Canonical_Values()
+    {
+        // create → open ; review → under_review ; resolve → resolved_refund ;
+        // close → closed (the archival seal). Every state the record passes
+        // through is one of the five canonical values.
+        var lifecycle = new[]
+        {
+            DisputeCaseState.Open,           // create (POST /v1/deliveries/{id}/escalate)
+            DisputeCaseState.UnderReview,    // review (POST /admin/v1/disputes/{id}/review)
+            DisputeCaseState.ResolvedRefund, // resolve (POST /admin/v1/disputes/{id}/resolve)
+            DisputeCaseState.Closed          // close (automatic archival seal)
+        };
+
+        lifecycle.Should().OnlyContain(s => DisputeCaseState.All.Contains(s));
+
+        // The verb-driven hops are legal on the machine …
+        DisputeCaseState.CanTransition(DisputeCaseState.Open, DisputeCaseState.UnderReview).Should().BeTrue();
+        DisputeCaseState.CanTransition(DisputeCaseState.UnderReview, DisputeCaseState.ResolvedRefund).Should().BeTrue();
+
+        // … and the resolved→closed hop is the store's automatic seal, NOT a
+        // client-reachable transition: once resolved, the record is terminal
+        // for CanTransition and the seal is applied out-of-band.
+        DisputeCaseState.IsResolved(DisputeCaseState.ResolvedRefund).Should().BeTrue();
+        DisputeCaseState.CanTransition(DisputeCaseState.ResolvedRefund, DisputeCaseState.Closed).Should().BeFalse();
+        DisputeCaseState.IsResolved(DisputeCaseState.Closed).Should().BeTrue();
+
+        // closed is fully terminal — no onward transition to any canonical value.
+        foreach (var to in Q032Canonical)
+        {
+            DisputeCaseState.CanTransition(DisputeCaseState.Closed, to).Should().BeFalse();
+        }
+    }
+
+    [Fact]
+    public void The_No_Action_Resolution_Is_Also_A_Canonical_Value()
+    {
+        DisputeCaseState.All.Should().Contain(DisputeCaseState.ResolvedNoAction);
+        DisputeCaseState.CanTransition(DisputeCaseState.Open, DisputeCaseState.ResolvedNoAction).Should().BeTrue();
+        DisputeCaseState.CanTransition(DisputeCaseState.UnderReview, DisputeCaseState.ResolvedNoAction).Should().BeTrue();
+        DisputeCaseState.IsResolved(DisputeCaseState.ResolvedNoAction).Should().BeTrue();
     }
 }
