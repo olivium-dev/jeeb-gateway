@@ -110,6 +110,28 @@ public sealed class ReceiptResponse
     public required string TierId { get; init; }
     public required string CommissionTier { get; init; }
     public required IReadOnlyList<ReceiptLine> Lines { get; init; }
+
+    /// <summary>
+    /// The COD cash the Jeeber collected at hand-off (the accepted-offer amount).
+    /// Explicit top-level field so mobile/admin can render the receipt header
+    /// without re-parsing the itemised <see cref="Lines"/>. Equal to the
+    /// settlement's goods cost.
+    /// </summary>
+    public required decimal CodAmount { get; init; }
+
+    /// <summary>The flat commission the platform charged (COD × <see cref="CommissionRate"/>).</summary>
+    public required decimal Commission { get; init; }
+
+    /// <summary>The commission rate applied — flat 10% for every Jeeb tier.</summary>
+    public required decimal CommissionRate { get; init; }
+
+    /// <summary>
+    /// What the Jeeber nets from the COD after the platform commission is
+    /// deducted (<see cref="CodAmount"/> − <see cref="Commission"/>). This is the
+    /// payout the Jeeber keeps against the cash they already hold.
+    /// </summary>
+    public required decimal Payout { get; init; }
+
     public required decimal Total { get; init; }
     public required string Currency { get; init; }
     public required string PaymentMethod { get; init; }
