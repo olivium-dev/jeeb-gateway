@@ -66,7 +66,12 @@ internal static class StoreDurabilityGuard
         (typeof(JeebGateway.ProhibitedItems.IProhibitedItemsStore),         new[] { typeof(JeebGateway.ProhibitedItems.PostgresProhibitedItemsStore) }),
         (typeof(JeebGateway.Availability.IAvailabilityStore),               new[] { typeof(JeebGateway.Availability.PostgresAvailabilityStore) }),
         (typeof(JeebGateway.Push.IDeviceTokenStore),                        new[] { typeof(JeebGateway.Push.PostgresDeviceTokenStore) }),
-        (typeof(JeebGateway.Users.SavedLocations.ISavedLocationStore),      new[] { typeof(JeebGateway.Users.SavedLocations.PostgresSavedLocationStore) }),
+        // JEBV4-165 / JEBV4-194 D5 (D1 matrix row 5): saved locations migrated off the gateway's
+        // own Postgres (PostgresSavedLocationStore / saved_locations table DELETED) to its owning
+        // service, remote-user-preferences (blob key "jeeb.saved_locations"). In a prod-like env it
+        // MUST resolve to the remote-backed store, never the InMemory fallback — same treatment as
+        // INotificationPreferencesStore -> RemoteUserPreferencesNotificationPreferencesStore.
+        (typeof(JeebGateway.Users.SavedLocations.ISavedLocationStore),      new[] { typeof(JeebGateway.Users.SavedLocations.RemoteUserPreferencesSavedLocationStore) }),
         (typeof(JeebGateway.Ratings.IRatingStore),                          new[] { typeof(JeebGateway.Ratings.FeedbackServiceRatingStore) }),
         (typeof(JeebGateway.NotificationPreferences.INotificationPreferencesStore), new[] { typeof(JeebGateway.NotificationPreferences.RemoteUserPreferencesNotificationPreferencesStore) }),
         (typeof(JeebGateway.Requests.Cancellation.IJeeberRestrictionStore), new[] { typeof(JeebGateway.Requests.Cancellation.BanServiceJeeberRestrictionStore) }),

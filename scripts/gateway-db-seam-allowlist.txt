@@ -15,8 +15,10 @@
 #     step of D5 (Q-010 RATIFIED / GR-3 absolute).
 #
 # Do NOT add lines to this file. Adding a new gateway DB seam violates GR-3.
-# The 25 D1 seams map to 24 distinct files (PostgresHealthCheck.cs backs both
-# the GatewayPostgres and WalletPostgres readiness probes — D1 rows 24 & 25).
+# The original 25 D1 seams mapped to 24 distinct files (PostgresHealthCheck.cs backs
+# both the GatewayPostgres and WalletPostgres readiness probes — D1 rows 24 & 25).
+# D1 row 5 (saved-locations) was ELIMINATED under JEBV4-165 / JEBV4-194 D5 (migrated to
+# remote-user-preferences), so the ratchet now holds 23 files.
 #
 # Blank lines and lines starting with '#' are ignored.
 
@@ -46,8 +48,10 @@ src/JeebGateway/ProhibitedItems/PostgresProhibitedItemsStore.cs
 src/JeebGateway/ProhibitedItems/FlaggedRequests/PostgresFlaggedRequestStore.cs
 src/JeebGateway/Availability/PostgresAvailabilityStore.cs
 
-# --- User-scoped state (D1 rows 5, 18, 19) -> remote-user-preferences ---
-src/JeebGateway/Users/SavedLocations/PostgresSavedLocationStore.cs
+# --- User-scoped state (D1 rows 18, 19) -> remote-user-preferences ---
+# D1 row 5 (saved-locations) ELIMINATED under JEBV4-165 / JEBV4-194 D5: migrated to
+# remote-user-preferences (RemoteUserPreferencesSavedLocationStore); the gateway-Postgres
+# PostgresSavedLocationStore.cs is deleted, so its allowlist line is pruned (ratchet shrinks).
 src/JeebGateway/Users/PostgresAccountDeletionStore.cs
 src/JeebGateway/Users/DataExport/PostgresDataExportStore.cs
 
