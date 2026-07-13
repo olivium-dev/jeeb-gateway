@@ -1425,21 +1425,32 @@ public class DeliveriesController : ControllerBase
             });
         }
 
-        // PR review B6 (JEB-628): the recipient phone must come from the
-        // delivery row, not a hardcoded placeholder. Reject the request
-        // when the field is unset so production traffic never silently
-        // ships OTPs to a placeholder Lebanon number.
+        // BUG B (JEBV4 fix/bugb-otp-phone-contract): recipient phone is OPTIONAL on
+        // create (POST /v1/requests) but was REQUIRED here — a contract mismatch that
+        // 400'd the completion handover for every phone-less delivery. The in-app
+        // handover code (minted at offer-accept, held in _handoverCodes and echoed to
+        // the OWNER via ReadOwnerHandoverCodeAsync) is a self-contained channel that
+        // does NOT depend on SMS. So a missing recipient phone must NOT block the
+        // handover: we simply skip the (Twilio-broken) SMS leg and return the in-app
+        // code. Triggered=false signals "no SMS sent". When a phone IS present we still
+        // dispatch the SMS exactly as before (PR review B6: from the row, never a
+        // placeholder). This decouples the in-app handover OTP from the SMS path.
         if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
         {
-            _log.LogWarning(
-                "OTP trigger rejected: recipient phone missing for delivery {DeliveryId}, correlationId {CorrelationId}",
+            _log.LogInformation(
+                "Handover OTP: no recipient phone for delivery {DeliveryId}; skipping SMS, returning in-app handover code only. correlationId {CorrelationId}",
                 deliveryId, correlationId);
-            return BadRequest(new ProblemDetails
+
+            activity?.SetTag("otp.triggered", "false");
+            activity?.SetTag("otp.channel", "in_app_only");
+
+            return Ok(new OtpTriggerResponse
             {
-                Title = "Recipient phone is missing on the delivery row.",
-                Detail = "An OTP cannot be dispatched without a recipient phone number.",
-                Status = StatusCodes.Status400BadRequest,
-                Type = "https://jeeb.dev/errors/recipient-phone-missing"
+                DeliveryId = deliveryId,
+                Triggered  = false,
+                Message    = "In-app handover code only — no recipient phone on file, so no SMS was sent.",
+                // Gap G4 store-miss fallback: echo the accept-issued code to the OWNER only.
+                Code       = await ReadOwnerHandoverCodeAsync(callerId, delivery, ct)
             });
         }
 
@@ -1596,19 +1607,14 @@ public class DeliveriesController : ControllerBase
             });
         }
 
-        // PR review B6: recipient phone must come from the row, not a placeholder.
-        if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
-        {
-            _log.LogWarning(
-                "OTP verify rejected: recipient phone missing for delivery {DeliveryId}, correlationId {CorrelationId}",
-                deliveryId, correlationId);
-            return BadRequest(new ProblemDetails
-            {
-                Title  = "Recipient phone is missing on the delivery row.",
-                Status = StatusCodes.Status400BadRequest,
-                Type   = "https://jeeb.dev/errors/recipient-phone-missing"
-            });
-        }
+        // BUG B (fix/bugb-otp-phone-contract): the phone-missing 400 that used to sit
+        // here is GONE. The in-app handover code (matched first, below, via
+        // _handoverCodes.TryMatchAsync) needs no phone, so blocking verify up-front
+        // broke the phone-less handover. The SMS-code fallback (ValidateOTPAsync) DOES
+        // need a phone; that leg is now individually guarded below so a phone-less row
+        // simply has no SMS channel and a non-matching code fails as a normal wrong
+        // code (attempt++/401), never a 400. PR review B6 still holds where a phone is
+        // present (the SMS validate uses the row's phone, never a placeholder).
 
         // PR review B4: cross-replica safe — IDistributedCache (Redis in prod,
         // in-memory in tests) replaces the static Dictionary. Lockout has a
@@ -1654,6 +1660,15 @@ public class DeliveriesController : ControllerBase
         {
             verified = true;
             activity?.SetTag("otp.match_source", "gateway_minted");
+        }
+        else if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
+        {
+            // BUG B: no recipient phone → the SMS-code channel never existed for this
+            // delivery, so the in-app code above was the only valid code. A miss here
+            // is a wrong/absent code and is handled exactly like a failed SMS verify
+            // (attempt++/401 below) — NOT a 400 that blocks the whole handover.
+            activity?.SetTag("otp.match_source", "in_app_only_no_sms");
+            verified = false;
         }
         else
         {
@@ -1897,22 +1912,14 @@ public class DeliveriesController : ControllerBase
         Activity? activity,
         CancellationToken ct)
     {
-        // Gateway still owns the SMS round-trip, so it still needs the
-        // recipient phone. The local store row carries it (the gateway is the
-        // V2-name adapter); reject rather than ship to a placeholder (AC1/B6).
-        if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
-        {
-            _log.LogWarning(
-                "OTP trigger rejected (upstream path): recipient phone missing for delivery {DeliveryId}, correlationId {CorrelationId}",
-                deliveryId, correlationId);
-            return BadRequest(new ProblemDetails
-            {
-                Title  = "Recipient phone is missing on the delivery row.",
-                Detail = "An OTP cannot be dispatched without a recipient phone number.",
-                Status = StatusCodes.Status400BadRequest,
-                Type   = "https://jeeb.dev/errors/recipient-phone-missing"
-            });
-        }
+        // BUG B (fix/bugb-otp-phone-contract): recipient phone is OPTIONAL at create, so
+        // do NOT reject a phone-less delivery here. The at_door gate below still runs
+        // (state is enforced server-side regardless), and the in-app handover code
+        // (minted at offer-accept) is returned to the OWNER as a phone-independent
+        // channel. We only perform the SMS round-trip when a phone is on file (B6: the
+        // row's phone, never a placeholder). This keeps the handover working when SMS is
+        // unavailable, matching the in-memory (production-live) path above.
+        var hasRecipientPhone = !string.IsNullOrWhiteSpace(delivery.RecipientPhone);
 
         // 1) Durable at_door gate in delivery-service. The raw code never
         //    leaves the gateway, so we forward no code_hash here (the code does
@@ -1938,43 +1945,50 @@ public class DeliveriesController : ControllerBase
 
         // 2) SMS round-trip — gateway↔one-time-password hop. Reuse the same
         //    one-time-password client + applicationId convention as the legacy
-        //    path so the SMS template is identical.
+        //    path so the SMS template is identical. Skipped entirely when the
+        //    delivery has no recipient phone (in-app handover code only).
         // JEB-1516: GUID sent upstream; delivery_handover_{id} kept for traces only.
         var applicationId = ResolveOtpApplicationId();
         var handoverTrace = HandoverOtpTrace(deliveryId);
-        try
+        if (hasRecipientPhone)
         {
-            await _otpClient.SendOTPAsync(new SendOTPRequestUserID
+            try
             {
-                PhoneNumber   = delivery.RecipientPhone,
-                ApplicationId = applicationId
-            }, ct);
-        }
-        catch (ApiException apiEx)
-        {
-            // Never log apiEx.Message — it embeds the upstream body (B5/AC5).
-            _log.LogWarning(
-                "Handover OTP issue (upstream path) one-time-password failure for delivery {DeliveryId}: upstream status {UpstreamStatus}, correlationId {CorrelationId}",
-                deliveryId, apiEx.StatusCode, correlationId);
-            return Problem(
-                title:      "Failed to send OTP",
-                detail:     "Unable to trigger OTP via the one-time-password service.",
-                statusCode: StatusCodes.Status502BadGateway);
+                await _otpClient.SendOTPAsync(new SendOTPRequestUserID
+                {
+                    PhoneNumber   = delivery.RecipientPhone,
+                    ApplicationId = applicationId
+                }, ct);
+            }
+            catch (ApiException apiEx)
+            {
+                // Never log apiEx.Message — it embeds the upstream body (B5/AC5).
+                _log.LogWarning(
+                    "Handover OTP issue (upstream path) one-time-password failure for delivery {DeliveryId}: upstream status {UpstreamStatus}, correlationId {CorrelationId}",
+                    deliveryId, apiEx.StatusCode, correlationId);
+                return Problem(
+                    title:      "Failed to send OTP",
+                    detail:     "Unable to trigger OTP via the one-time-password service.",
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
         }
 
         _log.LogInformation(
-            "Handover OTP issued (upstream path) for delivery {DeliveryId} with handover {HandoverTrace}, correlationId {CorrelationId}",
-            deliveryId, handoverTrace, correlationId);
+            "Handover OTP issued (upstream path) for delivery {DeliveryId} with handover {HandoverTrace}, smsSent={SmsSent}, correlationId {CorrelationId}",
+            deliveryId, handoverTrace, hasRecipientPhone, correlationId);
 
-        activity?.SetTag("otp.triggered", "true");
+        activity?.SetTag("otp.triggered", hasRecipientPhone ? "true" : "false");
         activity?.SetTag("otp.path", "upstream");
+        activity?.SetTag("otp.channel", hasRecipientPhone ? "sms" : "in_app_only");
         activity?.SetTag("otp.application_id", handoverTrace);
 
         return Ok(new OtpTriggerResponse
         {
             DeliveryId = deliveryId,
-            Triggered  = true,
-            Message    = "4-digit OTP sent to the delivery recipient.",
+            Triggered  = hasRecipientPhone,
+            Message    = hasRecipientPhone
+                ? "4-digit OTP sent to the delivery recipient."
+                : "In-app handover code only — no recipient phone on file, so no SMS was sent.",
             // Gap G4 store-miss fallback: echo the accept-issued code to the OWNER only.
             Code       = await ReadOwnerHandoverCodeAsync(callerId, delivery, ct)
         });
@@ -1998,18 +2012,13 @@ public class DeliveriesController : ControllerBase
         Activity? activity,
         CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
-        {
-            _log.LogWarning(
-                "OTP verify rejected (upstream path): recipient phone missing for delivery {DeliveryId}, correlationId {CorrelationId}",
-                deliveryId, correlationId);
-            return BadRequest(new ProblemDetails
-            {
-                Title  = "Recipient phone is missing on the delivery row.",
-                Status = StatusCodes.Status400BadRequest,
-                Type   = "https://jeeb.dev/errors/recipient-phone-missing"
-            });
-        }
+        // BUG B (fix/bugb-otp-phone-contract): the phone-missing 400 that used to sit
+        // here is GONE. The in-app handover code (matched first, below) needs no phone;
+        // only the SMS-code fallback does, and that leg is now guarded individually so a
+        // phone-less delivery has no SMS channel and a non-matching code fails as a
+        // normal wrong code (success=false → delivery-service maps it to 401), never a
+        // blanket 400. B6 still holds where a phone is present (SMS validate uses the
+        // row's phone, never a placeholder).
 
         // JEB-1516: forward the configured tenant GUID, not the non-GUID
         // delivery_handover_{id} label (which made the upstream Guid.Parse throw → 502).
@@ -2031,6 +2040,14 @@ public class DeliveriesController : ControllerBase
         {
             success = true;
             activity?.SetTag("otp.match_source", "gateway_minted");
+        }
+        else if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
+        {
+            // BUG B: no recipient phone → no SMS-code channel ever existed, so the in-app
+            // code above was the only valid code. A miss is a wrong code (success=false),
+            // handled like any failed verify — NOT a 400 that blocks the handover.
+            activity?.SetTag("otp.match_source", "in_app_only_no_sms");
+            success = false;
         }
         else
         {
