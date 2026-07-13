@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
@@ -92,12 +93,46 @@ public sealed class BffStartupValidator : IHostedService
             }
         }
 
+        // Collect every distinct boot-time misconfig so a single round-trip to
+        // ops resolves all of them (same rationale as the missing-key list).
+        var problems = new List<string>();
+
         if (missing.Count > 0)
         {
-            throw new StartupConfigurationException(
-                $"jeeb-gateway boot failed — required downstream BaseUrl(s) missing in environment '{_env.EnvironmentName}': "
+            problems.Add(
+                $"required downstream BaseUrl(s) missing in environment '{_env.EnvironmentName}': "
                 + string.Join(", ", missing)
                 + ". Set the listed config keys (env vars or appsettings) before starting the gateway.");
+        }
+
+        // JEBV4 OTP-502 guard — the phone-OTP login outage of 2026-07-12.
+        //
+        // AuthOtpController forwards Auth:Otp:ApplicationId (the Jeeb tenant's
+        // registered application id) as `applicationId` on every SendOTP /
+        // ValidateOTP to the shared one-time-password service, which REQUIRES a
+        // non-empty, registered id and 400s otherwise. The committed value is an
+        // intentionally-empty placeholder injected at deploy via the env var
+        // Auth__Otp__ApplicationId. If OTP is enabled (FeatureFlags:UseUpstream:Otp)
+        // but that injection is missing, the gateway silently POSTs an empty
+        // applicationId → upstream 400 → gateway 502 → EVERY phone-OTP login fails
+        // on ALL devices. Fail the boot LOUDLY here instead of serving 502s while
+        // operators chase the outage (the orchestrator restarts / surfaces a
+        // crash-loop; a live 502-storm is invisible to it).
+        var otpEnabled = _config.GetValue<bool>("FeatureFlags:UseUpstream:Otp");
+        if (otpEnabled && string.IsNullOrWhiteSpace(_config["Auth:Otp:ApplicationId"]))
+        {
+            problems.Add(
+                "Auth:Otp:ApplicationId is empty while OTP sign-in is enabled "
+                + "(FeatureFlags:UseUpstream:Otp=true). The gateway would POST an empty applicationId "
+                + "to the one-time-password service and every /v1/auth/otp/* call would 502 — a total "
+                + "phone-OTP login outage. Set env Auth__Otp__ApplicationId to the Jeeb tenant's "
+                + "registered one-time-password application id before starting the gateway.");
+        }
+
+        if (problems.Count > 0)
+        {
+            throw new StartupConfigurationException(
+                "jeeb-gateway boot failed — " + string.Join(" | ", problems));
         }
     }
 }
