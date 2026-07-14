@@ -305,8 +305,49 @@ public sealed class DurableRequestsStore : IRequestsStore
         if (ok)
         {
             await MirrorLifecycleAsync(requestId, gwStatus: status, gwJeeberId: null, gwAcceptedFee: null, ct);
+            return ok;
+        }
+
+        // JEBV4-306: the in-memory row is GONE (a gateway restart mid-delivery wiped it,
+        // or this replica never held it) but the DURABLE owner-list mirror may still hold
+        // it. A completion status write (e.g. → Done/Delivered) must still land on the
+        // mirror so the post-restart owner LIST reflects the terminal state instead of
+        // stranding at the stale pre-restart status (AtDoor) — the LIST-projection half of
+        // the settlement-durability gap. Only when the durable row actually exists, so this
+        // never invents a row and stays a strict superset of the prior behaviour (no mirror
+        // / no durable row ⇒ unchanged no-op). The return value is left as the in-memory
+        // result so no caller's control flow changes; only the durable projection is healed.
+        if (_mirror is not null && await MirrorHasRowAsync(requestId, ct))
+        {
+            await MirrorLifecycleAsync(requestId, gwStatus: status, gwJeeberId: null, gwAcceptedFee: null, ct);
         }
         return ok;
+    }
+
+    /// <summary>
+    /// JEBV4-306: true when the durable owner-list mirror holds a row for
+    /// <paramref name="requestId"/>. Best-effort — a mirror fault / no mirror / no row all
+    /// yield false so the caller simply skips the durable heal (never throws into a
+    /// mutation path).
+    /// </summary>
+    private async Task<bool> MirrorHasRowAsync(string requestId, CancellationToken ct)
+    {
+        if (_mirror is null) return false;
+        try
+        {
+            return await _mirror.GetAsync(requestId, ct) is not null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "requests-durable: durable mirror existence probe for {RequestId} failed; skipping the durable status heal.",
+                requestId);
+            return false;
+        }
     }
 
     /// <summary>F4: jeeber assignment mirrored to the durable owner-list (best-effort).</summary>

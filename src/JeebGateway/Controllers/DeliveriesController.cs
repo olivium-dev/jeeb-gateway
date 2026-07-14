@@ -789,6 +789,18 @@ public class DeliveriesController : ControllerBase
                     deliveryId, upstream.Status);
             }
 
+            // JEBV4-306: on the canonical transition INTO AtDoor, durably snapshot the
+            // server-authoritative COD amount so a restart before the customer's
+            // PATCH → Done (or the OTP verify) cannot strand the completion at $0. This
+            // is the PATCH-leg counterpart of the OTP-issue snapshot.
+            if (string.Equals(
+                    DeliveryStatusAlias.ToCanonical(upstream.Status),
+                    CanonicalDeliveryStatus.AtDoor,
+                    StringComparison.Ordinal))
+            {
+                await SnapshotPendingCodBestEffortAsync(deliveryId, ct);
+            }
+
             // fix/status-change-push (AUDIT-B #1): the transition committed (200 is
             // authoritative) — fan the StatusChange push to the counterparty, mirroring
             // exactly what the retired in-memory VerifyOtp branch did via
@@ -2082,6 +2094,11 @@ public class DeliveriesController : ControllerBase
                 statusCode: StatusCodes.Status502BadGateway);
         }
 
+        // JEBV4-306: the at_door gate passed, so the delivery is AtDoor and the accepted
+        // fee is on the live row — durably snapshot the COD amount NOW so a restart before
+        // the imminent verify→Done cannot strand the completion at $0.
+        await SnapshotPendingCodBestEffortAsync(deliveryId, ct);
+
         // 2) SMS round-trip — gateway↔one-time-password hop. Reuse the same
         //    one-time-password client + applicationId convention as the legacy
         //    path so the SMS template is identical. Skipped entirely when the
@@ -2456,6 +2473,36 @@ public class DeliveriesController : ControllerBase
                 "settlement.on_complete conversation auto-close failed deliveryId={DeliveryId} correlationId={CorrelationId}; "
                 + "the completion stays committed, the conversation may close on reconcile.",
                 deliveryId, correlationId);
+        }
+    }
+
+    /// <summary>
+    /// JEBV4-306: durably snapshot the server-authoritative COD amount the moment the
+    /// delivery reaches AtDoor (the last checkpoint before completion where the accepted
+    /// fee is on the live row), so a gateway restart mid-handover cannot strip the amount
+    /// and settle the completed delivery for $0. Delegates to the idempotent, no-throw
+    /// <see cref="ISettlementService.TrySnapshotPendingCodAsync"/>. STRICTLY best-effort:
+    /// any fault is swallowed so it can never turn an AtDoor transition / OTP-issue into a
+    /// 5xx (the completion settlement still recovers via the canonical delivered-decision
+    /// even if this snapshot never lands).
+    /// </summary>
+    private async Task SnapshotPendingCodBestEffortAsync(string deliveryId, CancellationToken ct)
+    {
+        try
+        {
+            var snapshotted = await _settlements.TrySnapshotPendingCodAsync(deliveryId, ct);
+            if (snapshotted)
+            {
+                _log.LogInformation(
+                    "settlement.cod_snapshot deliveryId={DeliveryId} durable pending COD amount recorded at AtDoor.",
+                    deliveryId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "settlement.cod_snapshot_failed deliveryId={DeliveryId}; the handover proceeds, the completion "
+                + "settlement still derives Done from the canonical state.", deliveryId);
         }
     }
 

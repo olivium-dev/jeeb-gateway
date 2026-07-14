@@ -1,5 +1,6 @@
 using JeebGateway.Observability;
 using JeebGateway.Requests;
+using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Logging;
 
 namespace JeebGateway.Financials;
@@ -18,6 +19,7 @@ public sealed class SettlementService : ISettlementService
     private readonly ISettlementStore _store;
     private readonly IRequestsStore _requests;
     private readonly ISettlementLedgerClient _wallet;
+    private readonly IDeliveryServiceClient _deliveryClient;
     private readonly TimeProvider _clock;
     private readonly ILogger<SettlementService> _log;
 
@@ -25,12 +27,14 @@ public sealed class SettlementService : ISettlementService
         ISettlementStore store,
         IRequestsStore requests,
         ISettlementLedgerClient wallet,
+        IDeliveryServiceClient deliveryClient,
         TimeProvider clock,
         ILogger<SettlementService> log)
     {
         _store = store;
         _requests = requests;
         _wallet = wallet;
+        _deliveryClient = deliveryClient;
         _clock = clock;
         _log = log;
     }
@@ -107,7 +111,9 @@ public sealed class SettlementService : ISettlementService
         }
 
         var breakdown = CommissionCalculator.Calculate(codAmount, tier);
-        var settlement = BuildSettlement(delivery, existing?.Id, breakdown, paymentMethod, SettlementState.Settled);
+        var settlement = BuildSettlement(
+            delivery.Id, delivery.ClientId, delivery.JeeberId!, delivery.TierId,
+            existing?.Id, breakdown, paymentMethod, SettlementState.Settled);
 
         return await PersistAndCreditAsync(settlement, ct);
     }
@@ -135,31 +141,21 @@ public sealed class SettlementService : ISettlementService
     /// </summary>
     public async Task<SettlementResult> SettleOnCompletionAsync(string deliveryId, CancellationToken ct)
     {
+        // The volatile in-memory request projection is the FAST path, not the source
+        // of truth. A gateway restart mid-delivery wipes the row (and a multi-replica
+        // deploy leaves a replica that never handled the completion holding a stale
+        // pre-Done status), so neither the delivered-decision NOR the amount may key
+        // off it alone — that is JEBV4-306 (a truly-Done COD delivery settling
+        // NotDelivered/$0). Below, the delivered-decision derives from the CANONICAL
+        // delivery-service state and the amount from a DURABLE store when the in-memory
+        // row cannot answer.
         var delivery = await _requests.GetAsync(deliveryId, ct);
-        if (delivery is null)
-        {
-            return new SettlementResult(SettlementOutcome.DeliveryNotFound, null, null);
-        }
-
-        if (string.IsNullOrWhiteSpace(delivery.JeeberId))
-        {
-            return new SettlementResult(SettlementOutcome.NotAuthorized, null,
-                "No assigned jeeber to credit on completion.");
-        }
-
-        // Settle-ability keys off the CANONICAL handover-complete state (Done, or the
-        // legacy delivered/rated aliases) — mirrors SettleAsync's gate.
-        if (!string.Equals(
-                DeliveryStatusAlias.ToCanonical(delivery.Status),
-                CanonicalDeliveryStatus.Done,
-                StringComparison.Ordinal))
-        {
-            return new SettlementResult(SettlementOutcome.NotDelivered, null,
-                $"Delivery is in '{delivery.Status}'; completion settlement requires the handover-complete state '{CanonicalDeliveryStatus.Done}'.");
-        }
 
         // Exactly-once: an already-settled row means the jeeber is already credited —
-        // never re-post the ledger, never double-credit.
+        // never re-post the ledger, never double-credit. Resolved FIRST so it also
+        // short-circuits before any canonical read-through. A pending-settlement
+        // placeholder (State == PendingSettlement) does NOT short-circuit — it is the
+        // durable COD snapshot we finish crediting below.
         var existing = await _store.GetByDeliveryAsync(deliveryId, ct);
         if (existing is not null
             && !string.Equals(existing.State, SettlementState.PendingSettlement, StringComparison.Ordinal))
@@ -167,16 +163,54 @@ public sealed class SettlementService : ISettlementService
             return new SettlementResult(SettlementOutcome.AlreadySettled, existing, null);
         }
 
-        var tier = CommissionCalculator.ResolveTier(delivery.TierId);
+        // ---- Durable delivered-decision -------------------------------------
+        // The in-memory row settles it when present AND already canonical-Done (the
+        // fast, no-network path). Otherwise consult the canonical delivery-service row:
+        // a restart-wiped (null) OR stale non-terminal in-memory row must NOT strand a
+        // delivery delivery-service already advanced to Done.
+        var delivered = IsCanonicalDone(delivery?.Status);
+        DeliveryReadUpstream? canonical = null;
+        if (!delivered)
+        {
+            canonical = await TryReadCanonicalAsync(deliveryId, ct);
+            delivered = IsCanonicalDone(canonical?.Status);
+        }
 
-        // Q-011 / BR-16: server-authoritative amount from the delivery row (the
-        // accepted offer fee the client owes the jeeber), NEVER a caller body.
-        var codAmount = delivery.AcceptedFee ?? 0m;
+        if (!delivered)
+        {
+            var observed = delivery?.Status ?? canonical?.Status ?? "(unknown)";
+            return new SettlementResult(SettlementOutcome.NotDelivered, null,
+                $"Delivery is in '{observed}'; completion settlement requires the handover-complete state '{CanonicalDeliveryStatus.Done}'.");
+        }
+
+        // ---- Durable jeeber + amount ----------------------------------------
+        // Identity fields come from the freshest available durable source: the live
+        // in-memory row, else the canonical row, else the durable settlement snapshot.
+        var jeeberId = FirstNonEmpty(delivery?.JeeberId, canonical?.JeeberId, existing?.JeeberId);
+        if (string.IsNullOrWhiteSpace(jeeberId))
+        {
+            return new SettlementResult(SettlementOutcome.NotAuthorized, null,
+                "No assigned jeeber to credit on completion.");
+        }
+
+        var clientId = FirstNonEmpty(delivery?.ClientId, canonical?.ClientId, existing?.ClientId) ?? string.Empty;
+        var tierId = FirstNonEmpty(delivery?.TierId, canonical?.TierId, NullIfEmpty(existing?.TierId));
+        var tier = CommissionCalculator.ResolveTier(tierId);
+
+        // Q-011 / BR-16: the COD amount is SERVER-AUTHORITATIVE — the live row's
+        // accepted-offer fee when present, else the DURABLE pending-settlement
+        // snapshot's recorded goods cost (stamped at the AtDoor checkpoint via
+        // TrySnapshotPendingCodAsync, which survives a restart). NEVER a caller body.
+        var codAmount = (delivery?.AcceptedFee ?? 0m) > 0m
+            ? delivery!.AcceptedFee!.Value
+            : (existing?.GoodsCost ?? 0m);
+
         if (codAmount <= 0m)
         {
-            // No authoritative amount yet: enqueue the pending-settlement placeholder
-            // (goodsCost=0, NO ledger post) so the COD record/batch and a later manual
-            // settle can still complete against a real row instead of 404ing.
+            // No authoritative amount anywhere: enqueue the pending-settlement
+            // placeholder (goodsCost=0, NO ledger post) so the COD record/batch and a
+            // later manual settle can still complete against a real row instead of
+            // 404ing — never credit a bogus amount.
             if (existing is not null)
             {
                 return new SettlementResult(SettlementOutcome.AlreadySettled, existing,
@@ -184,7 +218,7 @@ public sealed class SettlementService : ISettlementService
             }
 
             var pending = BuildSettlement(
-                delivery, existingId: null,
+                deliveryId, clientId, jeeberId, tierId, existingId: null,
                 CommissionCalculator.Calculate(0m, tier),
                 PaymentMethodCash, SettlementState.PendingSettlement);
             var (pendingRow, pendingInserted) = await _store.TryInsertAsync(pending, ct);
@@ -194,20 +228,118 @@ public sealed class SettlementService : ISettlementService
         }
 
         var breakdown = CommissionCalculator.Calculate(codAmount, tier);
-        var settlement = BuildSettlement(delivery, existing?.Id, breakdown, PaymentMethodCash, SettlementState.Settled);
+        var settlement = BuildSettlement(
+            deliveryId, clientId, jeeberId, tierId, existing?.Id, breakdown,
+            PaymentMethodCash, SettlementState.Settled);
         return await PersistAndCreditAsync(settlement, ct);
     }
+
+    /// <summary>
+    /// JEBV4-306: durably snapshots the SERVER-AUTHORITATIVE COD amount into the
+    /// settlement store as a <see cref="SettlementState.PendingSettlement"/> placeholder
+    /// BEFORE the handover completes, so that if the gateway restarts (or a settling
+    /// replica never held the in-memory row) the completion settlement can still recover
+    /// the amount from a durable store rather than crediting $0.
+    ///
+    /// <para>Called best-effort from the AtDoor checkpoints (OTP issue + the canonical
+    /// PATCH → AtDoor), where the accepted-offer fee is already stamped on the live row.
+    /// A pending placeholder is MONEY-SAFE: it carries no ledger post and is positively
+    /// excluded from the weekly batch and the earnings/reconciler queries (they require
+    /// state IN (settled, receipt_generated)). It is finished into a real settled row by
+    /// <see cref="SettleOnCompletionAsync"/> via <c>ReplacePendingAsync</c> — exactly-once.</para>
+    ///
+    /// <para>Idempotent + degrade-don't-fail: a no-op when there is no live row, no
+    /// assigned jeeber, no positive fee, or a settlement row already exists; returns
+    /// <c>false</c> (never throws to the caller path) so it can never turn an AtDoor
+    /// transition into a 5xx.</para>
+    /// </summary>
+    public async Task<bool> TrySnapshotPendingCodAsync(string deliveryId, CancellationToken ct)
+    {
+        var delivery = await _requests.GetAsync(deliveryId, ct);
+        if (delivery is null || string.IsNullOrWhiteSpace(delivery.JeeberId))
+        {
+            return false;
+        }
+
+        var fee = delivery.AcceptedFee ?? 0m;
+        if (fee <= 0m)
+        {
+            return false;
+        }
+
+        // Don't clobber an existing row (pending snapshot already taken, or already
+        // settled) — TryInsertAsync is idempotent on delivery id, but short-circuit to
+        // avoid the needless commission compute.
+        var existing = await _store.GetByDeliveryAsync(deliveryId, ct);
+        if (existing is not null)
+        {
+            return false;
+        }
+
+        var tier = CommissionCalculator.ResolveTier(delivery.TierId);
+        var breakdown = CommissionCalculator.Calculate(fee, tier);
+        var pending = BuildSettlement(
+            delivery.Id, delivery.ClientId, delivery.JeeberId!, delivery.TierId,
+            existingId: null, breakdown, PaymentMethodCash, SettlementState.PendingSettlement);
+
+        var (_, inserted) = await _store.TryInsertAsync(pending, ct);
+        return inserted;
+    }
+
+    /// <summary>Reads the canonical delivery-service row, degrading a 404/transport fault
+    /// to <see langword="null"/> so the completion path never turns a real Done into a 5xx.</summary>
+    private async Task<DeliveryReadUpstream?> TryReadCanonicalAsync(string deliveryId, CancellationToken ct)
+    {
+        try
+        {
+            return await _deliveryClient.GetCanonicalDeliveryAsync(deliveryId, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "settlement.on_complete canonical read-through failed for delivery {DeliveryId}; "
+                + "falling back to the in-memory/durable projection.", deliveryId);
+            return null;
+        }
+    }
+
+    private static bool IsCanonicalDone(string? status) =>
+        string.Equals(DeliveryStatusAlias.ToCanonical(status), CanonicalDeliveryStatus.Done, StringComparison.Ordinal);
+
+    private static string? FirstNonEmpty(params string?[] candidates)
+    {
+        foreach (var candidate in candidates)
+        {
+            if (!string.IsNullOrWhiteSpace(candidate))
+            {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static string? NullIfEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
 
     public Task<Settlement?> GetByDeliveryAsync(string deliveryId, CancellationToken ct) =>
         _store.GetByDeliveryAsync(deliveryId, ct);
 
     /// <summary>
-    /// Projects a delivery + a computed fee breakdown into a settlement row. Shared
-    /// by the caller-authenticated <see cref="SettleAsync"/> and the server-driven
-    /// <see cref="SettleOnCompletionAsync"/> so both produce a byte-identical row.
+    /// Projects a delivery identity + a computed fee breakdown into a settlement row.
+    /// Shared by the caller-authenticated <see cref="SettleAsync"/> and the server-driven
+    /// <see cref="SettleOnCompletionAsync"/> so both produce a byte-identical row. Takes
+    /// the identity fields as primitives (not a <see cref="DeliveryRequest"/>) so the
+    /// completion path can build the row from a DURABLE source when the in-memory request
+    /// projection has been wiped by a restart (JEBV4-306).
     /// </summary>
     private Settlement BuildSettlement(
-        DeliveryRequest delivery,
+        string deliveryId,
+        string clientId,
+        string jeeberId,
+        string? tierId,
         string? existingId,
         CommissionBreakdown breakdown,
         string paymentMethod,
@@ -215,10 +347,10 @@ public sealed class SettlementService : ISettlementService
         => new()
         {
             Id = existingId ?? Guid.NewGuid().ToString(),
-            DeliveryId = delivery.Id,
-            ClientId = delivery.ClientId,
-            JeeberId = delivery.JeeberId!,
-            TierId = delivery.TierId ?? string.Empty,
+            DeliveryId = deliveryId,
+            ClientId = clientId,
+            JeeberId = jeeberId,
+            TierId = tierId ?? string.Empty,
             GoodsCost = breakdown.GoodsCost,
             CommissionTier = breakdown.Tier,
             CommissionRate = breakdown.CommissionRate,
