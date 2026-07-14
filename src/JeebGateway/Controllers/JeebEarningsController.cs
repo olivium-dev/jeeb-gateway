@@ -37,16 +37,19 @@ public sealed class JeebEarningsController : ControllerBase
 
     private readonly IEarningsAggregationService _earnings;
     private readonly IMemoryCache _cache;
+    private readonly IEarningsCacheInvalidator _cacheInvalidator;
     private readonly TimeProvider _clock;
 
     public JeebEarningsController(
         IEarningsAggregationService earnings,
         IMemoryCache cache,
+        IEarningsCacheInvalidator cacheInvalidator,
         TimeProvider clock)
     {
-        _earnings = earnings;
-        _cache    = cache;
-        _clock    = clock;
+        _earnings         = earnings;
+        _cache            = cache;
+        _cacheInvalidator = cacheInvalidator;
+        _clock            = clock;
     }
 
     /// <summary>
@@ -129,11 +132,17 @@ public sealed class JeebEarningsController : ControllerBase
             jeeberId, windowStart, windowEnd, EarningsCodStates, ct);
 
         var ttl = ResolveTtl(windowEnd, now);
-        _cache.Set(cacheKey, projection, new MemoryCacheEntryOptions
+        var entryOptions = new MemoryCacheEntryOptions
         {
             AbsoluteExpirationRelativeToNow = ttl,
             Size = 1,
-        });
+        };
+        // JEBV4-302: link the entry to the jeeber's invalidation token so that when a
+        // settlement is recorded (SettlementService credits the jeeber), every cached
+        // earnings window for this jeeber is evicted immediately instead of a
+        // pre-settlement 0 serving for the remaining TTL.
+        entryOptions.AddExpirationToken(_cacheInvalidator.GetChangeToken(jeeberId));
+        _cache.Set(cacheKey, projection, entryOptions);
 
         return Ok(projection);
     }

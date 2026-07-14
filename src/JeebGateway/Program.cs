@@ -1012,6 +1012,13 @@ else
     builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
 }
 
+// JEBV4-302: shared per-jeeber earnings-cache invalidation registry. Singleton so the
+// read side (JeebEarningsController links each cache entry to the jeeber's change token)
+// and the write side (SettlementService trips it when a settlement is recorded) share one
+// registry, evicting a pre-settlement cached 0 the moment the jeeber is credited.
+builder.Services.AddSingleton<JeebGateway.Financials.IEarningsCacheInvalidator,
+    JeebGateway.Financials.EarningsCacheInvalidator>();
+
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
 
 // JEBV4-47 (M3/R7): the settlement -> UPG generic-settlement ledger post is

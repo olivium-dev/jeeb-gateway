@@ -203,7 +203,7 @@ public class SettlementDurabilityOnCompleteTests
 
     private static SettlementService NewService(
         ISettlementStore store, IRequestsStore requests, ISettlementLedgerClient wallet, IDeliveryServiceClient delivery)
-        => new(store, requests, wallet, delivery, TimeProvider.System, NullLogger<SettlementService>.Instance);
+        => new(store, requests, wallet, delivery, new EarningsCacheInvalidator(), TimeProvider.System, NullLogger<SettlementService>.Instance);
 
     /// <summary>Delivery-service double: only the canonical single-read is used here; every
     /// other hop is loud so an unexpected call fails the test rather than silently passing.</summary>
