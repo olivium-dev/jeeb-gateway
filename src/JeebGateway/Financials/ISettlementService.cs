@@ -35,5 +35,15 @@ public interface ISettlementService
     /// </summary>
     Task<SettlementResult> SettleOnCompletionAsync(string deliveryId, CancellationToken ct);
 
+    /// <summary>
+    /// JEBV4-306: durably snapshots the server-authoritative COD amount into the
+    /// settlement store as a pending-settlement placeholder BEFORE completion, so a
+    /// gateway restart mid-delivery cannot strip the amount and settle $0. Called
+    /// best-effort at the AtDoor checkpoints; idempotent and a no-op when there is no
+    /// live row / no assigned jeeber / no positive fee / a settlement row already exists.
+    /// Returns true only when a fresh pending snapshot was inserted.
+    /// </summary>
+    Task<bool> TrySnapshotPendingCodAsync(string deliveryId, CancellationToken ct);
+
     Task<Settlement?> GetByDeliveryAsync(string deliveryId, CancellationToken ct);
 }
