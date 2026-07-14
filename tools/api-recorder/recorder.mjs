@@ -300,6 +300,20 @@ async function handleProxy(clientReq, clientRes) {
   if (reqBody.length > 0) upstreamHeaders['content-length'] = String(reqBody.length);
   // Propagate correlation id upstream too (harmless, useful for cross-log tracing).
   upstreamHeaders['x-request-id'] = id;
+  // X-Forwarded-For (FIX-B): append THIS proxy's view of the immediate client —
+  // the real device socket IP — to any existing chain, so the gateway attributes
+  // per-IP rate limits per DEVICE instead of collapsing every device onto the
+  // proxy's own socket address. Standard XFF semantics: each hop appends the
+  // address it received the request from; any client-supplied chain is preserved
+  // and extended (never dropped, never trusted for auth — the gateway only honors
+  // XFF from its KnownProxies allowlist). No credentials are placed in this header.
+  const socketIp = clientReq.socket.remoteAddress;
+  if (socketIp) {
+    const priorXff = clientReq.headers['x-forwarded-for'];
+    upstreamHeaders['x-forwarded-for'] = priorXff
+      ? `${String(priorXff).trim()}, ${socketIp}`
+      : socketIp;
+  }
 
   const options = {
     protocol: targetUrl.protocol,
