@@ -183,10 +183,24 @@ public static class RateLimitingExtensions
                 return RateLimitPartition.GetNoLimiter("disabled");
             }
 
-            var ip = ResolveClientIp(httpContext) ?? "unknown";
+            // FIX-B (per-device attribution behind the recorder proxy): every device
+            // behind the trusted LAN proxy (192.168.2.33) shares one proxy socket, so
+            // without help the per-IP limiter collapses all of them into ONE bucket and
+            // 429s the whole fleet. Two layers fix this: (1) ForwardedHeaders KnownProxies
+            // now trusts the proxy, so UseForwardedHeaders promotes the per-device
+            // X-Forwarded-For (set by the recorder) into RemoteIpAddress and ResolveClientIp
+            // yields a per-device key; (2) as a belt-and-braces guard, PREFER the
+            // authenticated user as the partition key when a bearer is present, so a
+            // signed-in device is never lumped into a shared-IP bucket even if XFF
+            // resolution is imperfect. Anonymous traffic falls back to the (now
+            // XFF-resolved) client IP. This is attribution only — the limits are unchanged.
+            var userId = ResolveUserId(httpContext);
+            var partitionKey = !string.IsNullOrWhiteSpace(userId)
+                ? $"{IpPartition}:user:{userId}"
+                : $"{IpPartition}:{ResolveClientIp(httpContext) ?? "unknown"}";
 
             return RateLimitPartition.GetSlidingWindowLimiter(
-                partitionKey: $"{IpPartition}:{ip}",
+                partitionKey: partitionKey,
                 factory: _ => new SlidingWindowRateLimiterOptions
                 {
                     PermitLimit = opts.IpPermitsPerMinute,
