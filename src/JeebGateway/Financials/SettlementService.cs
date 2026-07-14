@@ -20,6 +20,7 @@ public sealed class SettlementService : ISettlementService
     private readonly IRequestsStore _requests;
     private readonly ISettlementLedgerClient _wallet;
     private readonly IDeliveryServiceClient _deliveryClient;
+    private readonly IEarningsCacheInvalidator _earningsCache;
     private readonly TimeProvider _clock;
     private readonly ILogger<SettlementService> _log;
 
@@ -28,6 +29,7 @@ public sealed class SettlementService : ISettlementService
         IRequestsStore requests,
         ISettlementLedgerClient wallet,
         IDeliveryServiceClient deliveryClient,
+        IEarningsCacheInvalidator earningsCache,
         TimeProvider clock,
         ILogger<SettlementService> log)
     {
@@ -35,6 +37,7 @@ public sealed class SettlementService : ISettlementService
         _requests = requests;
         _wallet = wallet;
         _deliveryClient = deliveryClient;
+        _earningsCache = earningsCache;
         _clock = clock;
         _log = log;
     }
@@ -394,6 +397,14 @@ public sealed class SettlementService : ISettlementService
         {
             return new SettlementResult(SettlementOutcome.AlreadySettled, row, null);
         }
+
+        // JEBV4-302: a fresh settled row just became visible to the earnings projection
+        // (CodState=recorded ∈ EarningsStates). Evict this jeeber's cached earnings
+        // windows so the /v1/jeebers/me/earnings 5-min cache cannot keep serving the
+        // pre-settlement 0 for the rest of the TTL. Keyed off the settlement store row,
+        // not the wallet ledger post, so the eviction stands even if the (best-effort)
+        // ledger post below fails and is later replayed by the reconciler.
+        _earningsCache.Invalidate(row.JeeberId);
 
         try
         {
