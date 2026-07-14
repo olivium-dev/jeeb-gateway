@@ -140,6 +140,31 @@ public class DeliveriesController : ControllerBase
     }
 
     /// <summary>
+    /// JEBV4 fix/otp-handover-502-tolerant: owner-scoped mint-or-return of the delivery's
+    /// in-app handover code. Unlike the read-only <see cref="ReadOwnerHandoverCodeAsync"/>,
+    /// this GUARANTEES a usable code for the OWNER even when the accept-issued code has
+    /// TTL-expired (or was never minted) — via the idempotent
+    /// <see cref="IHandoverCodeStore.IssueAsync"/>, which returns the SAME code if one is
+    /// already stored and mints one otherwise. This makes the durable at_door handover work
+    /// with jeeb-otp/Twilio (SMS) down: the trigger always returns a code the owner can read
+    /// and the jeeber can enter (verify already matches it first via TryMatchAsync). Minting
+    /// is entirely gateway-local (IDistributedCache) with NO jeeb-otp dependency. A jeeber /
+    /// non-owner caller keeps <c>Code = null</c> by design (owner-scoped secret). Never logs
+    /// the code.
+    /// </summary>
+    private async Task<string?> EnsureOwnerHandoverCodeAsync(
+        string callerId, DeliveryRequest delivery, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(callerId)
+            || !string.Equals(callerId, delivery.ClientId, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return await _handoverCodes.IssueAsync(delivery.Id, ct);
+    }
+
+    /// <summary>
     /// F1/F3/F4 (sprint-009 gateway-flow-correctness-audit): the class capability is the
     /// coarse <c>{client, jeeber}</c> role — i.e. ANY client or ANY jeeber on the platform,
     /// not a party to <em>this</em> delivery. The money-terminating handover steps
@@ -1564,6 +1589,14 @@ public class DeliveriesController : ControllerBase
         var applicationId  = ResolveOtpApplicationId();
         var handoverTrace  = HandoverOtpTrace(deliveryId);
 
+        // JEBV4 fix/otp-handover-502-tolerant: the SMS dispatch is BEST-EFFORT. The in-app
+        // handover code (gateway-local, minted at offer-accept in _handoverCodes) is a
+        // self-contained channel that does NOT depend on jeeb-otp/Twilio, and verify already
+        // matches it FIRST (TryMatchAsync). So a jeeb-otp/SMS 502 (or any failure) must NOT
+        // abort the handover: we swallow it, mark smsSent=false, and STILL return 200 with a
+        // usable owner-scoped code. Only OperationCanceledException on a real request abort
+        // is rethrown (client hung up). This is a decouple, not a Twilio repair.
+        var smsSent = true;
         try
         {
             await _otpClient.SendOTPAsync(new SendOTPRequestUserID
@@ -1577,48 +1610,49 @@ public class DeliveriesController : ControllerBase
             _log.LogInformation(
                 "Handover OTP triggered for delivery {DeliveryId} with handover {HandoverTrace}, correlationId {CorrelationId}",
                 deliveryId, handoverTrace, correlationId);
-
-            activity?.SetTag("otp.triggered", "true");
-            activity?.SetTag("otp.application_id", handoverTrace);
-
-            return Ok(new OtpTriggerResponse
-            {
-                DeliveryId = deliveryId,
-                Triggered  = true,
-                Message    = "4-digit OTP sent to the delivery recipient.",
-                // Gap G4 store-miss fallback: echo the accept-issued code to the OWNER only.
-                Code       = await ReadOwnerHandoverCodeAsync(callerId, delivery, ct)
-            });
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Genuine request abort — propagate, don't mask as a handover code.
+            throw;
         }
         catch (ApiException apiEx)
         {
             // PR review B5: do NOT pass apiEx (or its Message) to ILogger —
             // ApiException.Message embeds the upstream response body, which
             // may contain the submitted code. Log only StatusCode + a
-            // sanitized marker.
+            // sanitized marker. Best-effort: fall through to the in-app code.
             _log.LogWarning(
-                "Handover OTP trigger upstream failure for delivery {DeliveryId}: upstream status {UpstreamStatus}, correlationId {CorrelationId}",
+                "Handover OTP SMS dispatch failed for delivery {DeliveryId}: upstream status {UpstreamStatus}; returning in-app handover code only, correlationId {CorrelationId}",
                 deliveryId, apiEx.StatusCode, correlationId);
-
-            return Problem(
-                title:      "Failed to send OTP",
-                detail:     "Unable to trigger OTP via the one-time-password service.",
-                statusCode: StatusCodes.Status502BadGateway);
+            smsSent = false;
         }
         catch (Exception ex)
         {
-            // Non-ApiException: a network/timeout/cancellation failure
-            // before we even reached the upstream. Safe to log the type
-            // and message — no upstream body is involved.
-            _log.LogError(
-                "Handover OTP trigger failed for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
+            // Network/timeout/transport failure before or during the upstream
+            // hop. Log the type only (no upstream body) and degrade to the
+            // in-app code rather than failing the money-terminating handover.
+            _log.LogWarning(
+                "Handover OTP SMS dispatch failed for delivery {DeliveryId}: {ExceptionType}; returning in-app handover code only, correlationId {CorrelationId}",
                 deliveryId, ex.GetType().Name, correlationId);
-
-            return Problem(
-                title:      "Failed to send OTP",
-                detail:     "Unable to trigger OTP via the one-time-password service.",
-                statusCode: StatusCodes.Status500InternalServerError);
+            smsSent = false;
         }
+
+        activity?.SetTag("otp.triggered", smsSent ? "true" : "false");
+        activity?.SetTag("otp.channel", smsSent ? "sms" : "in_app_only");
+        activity?.SetTag("otp.application_id", handoverTrace);
+
+        return Ok(new OtpTriggerResponse
+        {
+            DeliveryId = deliveryId,
+            Triggered  = smsSent,
+            Message    = smsSent
+                ? "4-digit OTP sent to the delivery recipient."
+                : "In-app handover code only — SMS dispatch failed/unavailable.",
+            // Owner-scoped mint-or-return so a TTL-expired store can never yield a null code
+            // for the OWNER with SMS down; jeeber/non-owner callers keep Code=null by design.
+            Code       = await EnsureOwnerHandoverCodeAsync(callerId, delivery, ct)
+        });
     }
 
     /// <summary>
@@ -2055,6 +2089,13 @@ public class DeliveriesController : ControllerBase
         // JEB-1516: GUID sent upstream; delivery_handover_{id} kept for traces only.
         var applicationId = ResolveOtpApplicationId();
         var handoverTrace = HandoverOtpTrace(deliveryId);
+        // JEBV4 fix/otp-handover-502-tolerant: the at_door gate above (IssueHandoverOtpAsync)
+        // KEEPS its 409/502 semantics — that is a different dependency (delivery-service) and
+        // is intentionally hard-gated. Only the jeeb-otp SMS leg below is BEST-EFFORT: a 502
+        // (or any failure) must NOT abort the handover, because the in-app handover code is
+        // gateway-local and verify matches it first. We degrade smsSent=false and fall through
+        // to the same 200. OperationCanceledException on a real abort is still rethrown.
+        var smsSent = hasRecipientPhone;
         if (hasRecipientPhone)
         {
             try
@@ -2065,37 +2106,52 @@ public class DeliveriesController : ControllerBase
                     ApplicationId = applicationId
                 }, ct);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (ApiException apiEx)
             {
                 // Never log apiEx.Message — it embeds the upstream body (B5/AC5).
                 _log.LogWarning(
-                    "Handover OTP issue (upstream path) one-time-password failure for delivery {DeliveryId}: upstream status {UpstreamStatus}, correlationId {CorrelationId}",
+                    "Handover OTP SMS dispatch (upstream path) failed for delivery {DeliveryId}: upstream status {UpstreamStatus}; returning in-app handover code only, correlationId {CorrelationId}",
                     deliveryId, apiEx.StatusCode, correlationId);
-                return Problem(
-                    title:      "Failed to send OTP",
-                    detail:     "Unable to trigger OTP via the one-time-password service.",
-                    statusCode: StatusCodes.Status502BadGateway);
+                smsSent = false;
+            }
+            catch (Exception ex)
+            {
+                // Transport/timeout failure — log type only (no upstream body) and degrade to
+                // the in-app code rather than 500-ing the money-terminating handover.
+                _log.LogWarning(
+                    "Handover OTP SMS dispatch (upstream path) failed for delivery {DeliveryId}: {ExceptionType}; returning in-app handover code only, correlationId {CorrelationId}",
+                    deliveryId, ex.GetType().Name, correlationId);
+                smsSent = false;
             }
         }
 
         _log.LogInformation(
             "Handover OTP issued (upstream path) for delivery {DeliveryId} with handover {HandoverTrace}, smsSent={SmsSent}, correlationId {CorrelationId}",
-            deliveryId, handoverTrace, hasRecipientPhone, correlationId);
+            deliveryId, handoverTrace, smsSent, correlationId);
 
-        activity?.SetTag("otp.triggered", hasRecipientPhone ? "true" : "false");
+        activity?.SetTag("otp.triggered", smsSent ? "true" : "false");
         activity?.SetTag("otp.path", "upstream");
-        activity?.SetTag("otp.channel", hasRecipientPhone ? "sms" : "in_app_only");
+        activity?.SetTag("otp.channel", smsSent ? "sms" : "in_app_only");
         activity?.SetTag("otp.application_id", handoverTrace);
 
         return Ok(new OtpTriggerResponse
         {
             DeliveryId = deliveryId,
-            Triggered  = hasRecipientPhone,
-            Message    = hasRecipientPhone
+            Triggered  = smsSent,
+            Message    = smsSent
                 ? "4-digit OTP sent to the delivery recipient."
-                : "In-app handover code only — no recipient phone on file, so no SMS was sent.",
-            // Gap G4 store-miss fallback: echo the accept-issued code to the OWNER only.
-            Code       = await ReadOwnerHandoverCodeAsync(callerId, delivery, ct)
+                : hasRecipientPhone
+                    // Phone on file but jeeb-otp/SMS failed (502/timeout) — decoupled fall-through.
+                    ? "In-app handover code only — SMS dispatch failed/unavailable."
+                    // BUG B: no recipient phone on file — SMS deliberately skipped (unchanged).
+                    : "In-app handover code only — no recipient phone on file, so no SMS was sent.",
+            // Owner-scoped mint-or-return so a TTL-expired store can never yield a null code
+            // for the OWNER with SMS down; jeeber/non-owner callers keep Code=null by design.
+            Code       = await EnsureOwnerHandoverCodeAsync(callerId, delivery, ct)
         });
     }
 

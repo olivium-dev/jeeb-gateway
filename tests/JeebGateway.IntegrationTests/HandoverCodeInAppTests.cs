@@ -138,6 +138,60 @@ public class HandoverCodeInAppTests
             "the handover code must never appear in a log line");
     }
 
+    // ----- 2b) Phone-present + SMS/jeeb-otp 502 -> trigger 200 + in-app code ----
+    //           -> verify 200 -> delivery Done (fix/otp-handover-502-tolerant) ---
+
+    [Fact]
+    public async Task Trigger_WithPhone_WhenSmsUpstream502_Returns200_WithInAppCode_ThenVerifies_ToDone()
+    {
+        var offer = AcceptedOfferFake("offer-502", "jeeber-win");
+        var delivery = new FakeHandoverDeliveryClient();
+        // SMS send throws a 502 (jeeb-otp/Twilio down). Verify still succeeds ONLY via the
+        // gateway-local in-app code — RejectAll makes one-time-password reject every code, so
+        // a green verify proves the decoupled gateway code is what worked.
+        var otp = new FakeHandoverOtpClient { Fail502OnSend = true, RejectAll = true };
+        using var factory = NewFactory(offer, delivery, otp);
+
+        const string owner = "client-owner";
+        const string jeeber = "jeeber-win";
+        // A recipient phone IS on file, so the trigger takes the SMS (phone-present) path —
+        // the exact path that used to 502 before the code was returned.
+        var requestId = await SeedRequestAsync(factory, owner, recipientPhone: "+9613123456");
+        SeedRouting(factory, "offer-502", requestId, jeeber);
+
+        // OWNER accepts -> mints the gateway-local handover code.
+        var acceptResp = await Actor(factory, owner, "customer")
+            .PostAsync("/v1/offers/offer-502/accept", content: null);
+        acceptResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var handoverCode = await ReadPropAsync(acceptResp, "handoverCode");
+        handoverCode.Should().NotBeNullOrEmpty();
+
+        // Advance to the at-door handover step.
+        var store = factory.Services.GetRequiredService<IRequestsStore>();
+        (await store.SetStatusAsync(requestId, RequestStatus.AtDoor, CancellationToken.None))
+            .Should().BeTrue();
+
+        // TRIGGER with phone present while SMS upstream 502s: must STILL return 200 with a
+        // usable in-app code and Triggered=false (SMS failed but handover is not blocked).
+        var triggerResp = await Actor(factory, owner, "customer")
+            .GetAsync($"/v1/deliveries/{requestId}/otp");
+        triggerResp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "a jeeb-otp/SMS 502 on the phone-present path must NOT abort the handover");
+        (await ReadBoolPropAsync(triggerResp, "triggered")).Should().BeFalse(
+            "Triggered=false signals the SMS leg failed");
+        (await ReadPropAsync(triggerResp, "code")).Should().Be(handoverCode,
+            "the owner must still receive the durable in-app handover code with SMS down");
+
+        // VERIFY with the in-app code -> 200 and the canonical Done transition fires.
+        var verifyResp = await Actor(factory, jeeber, "driver")
+            .PostAsJsonAsync($"/v1/deliveries/{requestId}/otp/verify", new { code = handoverCode });
+        verifyResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await ReadBoolPropAsync(verifyResp, "verified")).Should().BeTrue();
+        delivery.CanonicalTransitionCalls.Should().Contain(c =>
+            c.DeliveryId == requestId && c.To == CanonicalDeliveryStatus.Done,
+            "the SMS-down handover must still complete the delivery to Done");
+    }
+
     // ----- 3) GET /v1/requests/{id} echoes the description (run-24 CHECK A) -----
 
     [Fact]
@@ -353,8 +407,24 @@ public class HandoverCodeInAppTests
     {
         public bool RejectAll { get; init; }
 
-        public Task SendOTPAsync(SendOTPRequestUserID? body) => Task.CompletedTask;
-        public Task SendOTPAsync(SendOTPRequestUserID? body, CancellationToken cancellationToken) => Task.CompletedTask;
+        // fix/otp-handover-502-tolerant: simulate jeeb-otp/Twilio (SMS) being down —
+        // SendOTP throws a 502 ApiException, exactly as the broken upstream does.
+        public bool Fail502OnSend { get; init; }
+
+        public Task SendOTPAsync(SendOTPRequestUserID? body) => SendOTPAsync(body, CancellationToken.None);
+        public Task SendOTPAsync(SendOTPRequestUserID? body, CancellationToken cancellationToken)
+        {
+            if (Fail502OnSend)
+            {
+                throw new ApiException(
+                    message: "Bad Gateway",
+                    statusCode: 502,
+                    response: "{\"error\":\"sms_provider_unavailable\"}",
+                    headers: new Dictionary<string, IEnumerable<string>>(),
+                    innerException: null);
+            }
+            return Task.CompletedTask;
+        }
 
         public Task ValidateOTPAsync(ValidateOTPRequestModel? body) => ValidateOTPAsync(body, CancellationToken.None);
         public Task ValidateOTPAsync(ValidateOTPRequestModel? body, CancellationToken cancellationToken)
