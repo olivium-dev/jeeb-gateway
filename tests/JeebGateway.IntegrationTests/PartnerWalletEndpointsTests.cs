@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
+using JeebGateway.Partner.JeeberSearch;
 using JeebGateway.service.ServiceWallet;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -312,6 +313,7 @@ public sealed class PartnerWalletEndpointsTests
     [InlineData("GET", "/v1/partner/wallet/balance")]
     [InlineData("GET", "/v1/partner/wallet/ledger")]
     [InlineData("GET", "/v1/partner/jeebers/22222222-2222-2222-2222-222222222222/wallet-target")]
+    [InlineData("GET", "/v1/partner/jeebers/search?query=ab")]
     [InlineData("POST", "/v1/admin/partners/11111111-1111-1111-1111-111111111111/wallet/credits")]
     public async Task Frozen_Partner_Routes_Exist(string method, string path)
     {
@@ -459,7 +461,180 @@ public sealed class PartnerWalletEndpointsTests
             "a gateway-minted partner token must pass the ADR-005 partner capability gate");
     }
 
+    // ── PP-3: free-text jeeber search (GET /v1/partner/jeebers/search) ────────────────
+    //
+    // The user-management typed client (IPartnerJeeberSearchClient) is swapped for a fake, so the
+    // whole BFF path — the ADR-005 partner capability gate, query/limit validation, phone masking,
+    // and upstream-failure mapping — runs fully offline (no user-management, no Docker). Negative
+    // paths (401/403/400) are deterministic and never reach the fake.
+
+    private static WebApplicationFactory<Program> FactoryWithFakeSearch(FakeJeeberSearchClient fake)
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureTestServices(s => s.AddScoped<IPartnerJeeberSearchClient>(_ => fake)));
+
+    [Fact]
+    public async Task Partner_Search_Without_Auth_Is_401()
+    {
+        await using var factory = FactoryWithFakeSearch(new FakeJeeberSearchClient());
+        using var client = factory.CreateClient(); // no identity headers
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=nour");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Partner_Search_With_Wrong_Role_Is_403()
+    {
+        await using var factory = FactoryWithFakeSearch(new FakeJeeberSearchClient());
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", JeeberId);
+        client.DefaultRequestHeaders.Add("X-User-Roles", "driver"); // jeeber, not partner
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=nour");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+    }
+
+    [Fact]
+    public async Task Partner_Search_Short_Query_Is_400_ProblemDetails()
+    {
+        var fake = new FakeJeeberSearchClient();
+        await using var factory = FactoryWithFakeSearch(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=a"); // trimmed length 1 < 2
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        // RFC 7807 ProblemDetails body (the partner module serves it under application/json via the
+        // class-level [Produces], like every other PartnerControllerBase error).
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("status").GetInt32().Should().Be(400);
+        problem.GetProperty("title").GetString().Should().NotBeNullOrEmpty();
+        fake.CallCount.Should().Be(0, "a too-short query must be rejected BEFORE any user-management call");
+    }
+
+    [Fact]
+    public async Task Partner_Search_Missing_Query_Is_400()
+    {
+        var fake = new FakeJeeberSearchClient();
+        await using var factory = FactoryWithFakeSearch(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search"); // no query at all
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        fake.CallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Partner_Search_Returns_Shape_With_Masked_Phone()
+    {
+        var fake = new FakeJeeberSearchClient
+        {
+            Hits = new List<PartnerJeeberSearchHit>
+            {
+                new(JeeberId, "Nour Q", "+970791234567"),
+                new("33333333-3333-3333-3333-333333333333", "Sara M", "0788887654"),
+            },
+        };
+        await using var factory = FactoryWithFakeSearch(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=no");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var items = await resp.Content.ReadFromJsonAsync<List<SearchItemDto>>();
+        items.Should().NotBeNull();
+        items!.Should().HaveCount(2);
+
+        items[0].JeeberId.Should().Be(JeeberId);
+        items[0].DisplayName.Should().Be("Nour Q");
+        items[0].Phone.Should().Be("***4567", "phone is masked to the last four digits");
+        items[1].Phone.Should().Be("***7654");
+
+        // The full number never leaves the gateway.
+        items[0].Phone.Should().NotContain("970");
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().NotContain("791234567");
+
+        // Trimmed query forwarded verbatim; omitted limit defaults to 10 (frozen contract).
+        fake.LastQuery.Should().Be("no");
+        fake.LastLimit.Should().Be(10);
+    }
+
+    [Fact]
+    public async Task Partner_Search_No_Match_Returns_Empty_Array()
+    {
+        await using var factory = FactoryWithFakeSearch(new FakeJeeberSearchClient()); // no hits
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=zzzznomatch");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var items = await resp.Content.ReadFromJsonAsync<List<SearchItemDto>>();
+        items.Should().NotBeNull();
+        items!.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Partner_Search_Limit_Is_Clamped_To_Max_20()
+    {
+        var fake = new FakeJeeberSearchClient();
+        await using var factory = FactoryWithFakeSearch(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=nour&limit=999");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        fake.LastLimit.Should().Be(20, "limit is clamped to the frozen contract maximum of 20");
+    }
+
+    [Fact]
+    public async Task Partner_Search_Upstream_Failure_Is_502_Sanitized_ProblemDetails()
+    {
+        // user-management down (503) → clean RFC 7807 502; the upstream status is NEVER echoed.
+        var fake = new FakeJeeberSearchClient { Throw = new PartnerJeeberSearchUpstreamException(503) };
+        await using var factory = FactoryWithFakeSearch(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=nour");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+
+        // RFC 7807 ProblemDetails body, sanitized — status 502, gateway-authored title, no upstream leak.
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("status").GetInt32().Should().Be(502);
+        problem.GetProperty("title").GetString().Should().Be("The jeeber search could not be completed.");
+
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().NotContain("503", "the upstream status must not leak to the caller");
+    }
+
     // ── DTOs + fake ───────────────────────────────────────────────────────────────────
+
+    private sealed record SearchItemDto(string JeeberId, string DisplayName, string Phone);
+
+    /// <summary>Offline fake user-management search client — records the forwarded query/limit and
+    /// returns canned hits (or throws a canned upstream fault).</summary>
+    private sealed class FakeJeeberSearchClient : IPartnerJeeberSearchClient
+    {
+        public IReadOnlyList<PartnerJeeberSearchHit> Hits { get; init; } = Array.Empty<PartnerJeeberSearchHit>();
+        public Exception? Throw { get; init; }
+
+        public int CallCount { get; private set; }
+        public string? LastQuery { get; private set; }
+        public int LastLimit { get; private set; }
+
+        public Task<IReadOnlyList<PartnerJeeberSearchHit>> SearchJeebersAsync(string query, int limit, CancellationToken ct)
+        {
+            CallCount++;
+            LastQuery = query;
+            LastLimit = limit;
+            if (Throw is not null) throw Throw;
+            return Task.FromResult(Hits);
+        }
+    }
 
     private sealed record LoginDto(string? Token, string? AccessToken, string? RefreshToken, PartnerDto? Partner);
     private sealed record PartnerDto(Guid PartnerId, string? Login, string? DisplayName, string? Role);

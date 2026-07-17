@@ -109,3 +109,18 @@ public sealed class PartnerJeeberTargetResponse
     public bool HasWallet { get; init; }
     public string? JeeberName { get; init; }
 }
+
+/// <summary>
+/// One PP-3 free-text jeeber search result (GET v1/partner/jeebers/search). The frozen contract
+/// shape: <c>{ jeeberId, displayName, phone }</c> where <see cref="Phone"/> is MASKED server-side to
+/// the last four digits (e.g. <c>"***1234"</c>) — a partner never sees a full jeeber phone number.
+/// <see cref="JeeberId"/> is a string (a user-management user id) per the frozen contract.
+/// </summary>
+public sealed class PartnerJeeberSearchItem
+{
+    public string JeeberId { get; init; } = string.Empty;
+    public string DisplayName { get; init; } = string.Empty;
+
+    /// <summary>Masked phone (keep-last-4, e.g. <c>"***1234"</c>); empty when the hit carries no phone.</summary>
+    public string Phone { get; init; } = string.Empty;
+}
