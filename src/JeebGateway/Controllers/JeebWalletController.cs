@@ -117,7 +117,9 @@ public sealed class JeebWalletController : ControllerBase
         // no money moves (ADR-0001 spirit). A no-data holder / DB blip degrades to the
         // empty, correctly-shaped page the mobile ledger parser tolerates (see
         // PostgresJeebWalletLedgerReader) — never a 5xx.
-        var items = await _ledger.ReadLedgerAsync(holderId, safePage, safeSize, ct);
+        // Consumer jeeb wallet ledger: no filters (type/from/to = null) — the PP-8 filter
+        // params are partner-portal-only; passing null keeps this read unchanged.
+        var items = await _ledger.ReadLedgerAsync(holderId, safePage, safeSize, type: null, from: null, to: null, ct);
 
         // The page-count is best-effort over the returned page: the mobile parser only
         // needs items + a >=1 totalPages; a full COUNT(*) round-trip is unnecessary

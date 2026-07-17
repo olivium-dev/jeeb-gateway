@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using JeebGateway.JeebWallet;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 
 namespace JeebGateway.JeebWallet;
 
@@ -34,8 +35,15 @@ public interface IJeebWalletLedgerReader
     /// EMPTY list when the holder has no wallet / no transactions (never throws on a
     /// no-data holder).
     /// </summary>
+    /// <param name="type">
+    /// OPTIONAL exact operation-type filter, matched against the SAME string surfaced as each
+    /// row's <c>type</c> (e.g. <c>partner-topup</c> / <c>partner-cash-credit</c>). <c>null</c> → no
+    /// type filter; an unknown value naturally yields an empty page (a miss, never an error).
+    /// </param>
+    /// <param name="from">OPTIONAL inclusive lower bound (UTC calendar date); <c>null</c> → unbounded below.</param>
+    /// <param name="to">OPTIONAL inclusive upper bound (UTC calendar date, the whole day); <c>null</c> → unbounded above.</param>
     Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
-        Guid holderId, int page, int pageSize, CancellationToken ct);
+        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to, CancellationToken ct);
 }
 
 /// <summary>
@@ -58,16 +66,27 @@ public sealed class PostgresJeebWalletLedgerReader : IJeebWalletLedgerReader
     }
 
     public async Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
-        Guid holderId, int page, int pageSize, CancellationToken ct)
+        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to, CancellationToken ct)
     {
         var safePage = page < 1 ? 1 : page;
         var safeSize = pageSize is < 1 or > 200 ? 20 : pageSize;
         var offset = (safePage - 1) * safeSize;
 
+        // Normalize an empty/whitespace type to "no filter" (defensive — the controller
+        // already collapses it) so ?type= behaves identically to an absent param.
+        var typeFilter = string.IsNullOrWhiteSpace(type) ? null : type.Trim();
+
         // The holder's transactions = every transactiondetails row whose source OR
         // destination wallet belongs to the holder. sign is derived per-row: +1 when
         // the holder is the DESTINATION (credit / money in), -1 when the SOURCE
         // (debit / money out). type/ref/ts come from the transaction header.
+        //
+        // PP-8 server-side filters (all OPTIONAL, applied in this same read path — no
+        // extra round-trip, no new table). Each is a null-guarded predicate so an absent
+        // filter binds DBNull and the WHERE reduces to the exact pre-PP-8 query (backward
+        // compatible): type matches the SAME projected string surfaced as each row's `type`
+        // (so an unknown value is a natural empty result, not an error); from/to compare the
+        // UTC calendar date and are BOTH inclusive (>= from-day, <= to-day / whole to-day).
         const string sql = """
             SELECT
                 d.txid::text                                         AS id,
@@ -78,8 +97,11 @@ public sealed class PostgresJeebWalletLedgerReader : IJeebWalletLedgerReader
                 h.createdat                                          AS ts
             FROM transactiondetails d
             JOIN transactionheader  h ON h.txid = d.txheaderid
-            WHERE d.sourcewalletid = ANY(@WalletIds)
-               OR d.destinationwalletid = ANY(@WalletIds)
+            WHERE (d.sourcewalletid = ANY(@WalletIds)
+                OR d.destinationwalletid = ANY(@WalletIds))
+              AND (@Type IS NULL OR COALESCE(NULLIF(h.tag, ''), 'transaction') = @Type)
+              AND (@FromDate IS NULL OR h.createdat::date >= @FromDate)
+              AND (@ToDate   IS NULL OR h.createdat::date <= @ToDate)
             ORDER BY h.createdat DESC, d.txid
             LIMIT @Limit OFFSET @Offset
             """;
@@ -98,6 +120,10 @@ public sealed class PostgresJeebWalletLedgerReader : IJeebWalletLedgerReader
             cmd.Parameters.AddWithValue("WalletIds", walletIds.ToArray());
             cmd.Parameters.AddWithValue("Limit", safeSize);
             cmd.Parameters.AddWithValue("Offset", offset);
+            // Null-guarded PP-8 filters — typed so DBNull resolves the (@Param IS NULL) branch.
+            cmd.Parameters.Add(new NpgsqlParameter("Type", NpgsqlDbType.Text) { Value = (object?)typeFilter ?? DBNull.Value });
+            cmd.Parameters.Add(new NpgsqlParameter("FromDate", NpgsqlDbType.Date) { Value = (object?)from ?? DBNull.Value });
+            cmd.Parameters.Add(new NpgsqlParameter("ToDate", NpgsqlDbType.Date) { Value = (object?)to ?? DBNull.Value });
 
             var items = new List<JeebWalletLedgerEntry>();
             await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -154,6 +180,6 @@ public sealed class PostgresJeebWalletLedgerReader : IJeebWalletLedgerReader
 public sealed class NullJeebWalletLedgerReader : IJeebWalletLedgerReader
 {
     public Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
-        Guid holderId, int page, int pageSize, CancellationToken ct)
+        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to, CancellationToken ct)
         => Task.FromResult<IReadOnlyList<JeebWalletLedgerEntry>>(Array.Empty<JeebWalletLedgerEntry>());
 }

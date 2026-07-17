@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -104,6 +105,32 @@ public abstract class PartnerControllerBase : ControllerBase
         }
         problem = null!;
         return true;
+    }
+
+    /// <summary>
+    /// Parse an OPTIONAL ISO-8601 (<c>yyyy-MM-dd</c>) ledger-filter date. An absent/blank value is a
+    /// valid "no bound" (returns <c>true</c>, <c>value = null</c>). A malformed value is rejected with a
+    /// sanitized RFC 7807 400 (<c>type = .../invalid-ledger-date</c>) — never a framework binding page or
+    /// a 500. The bound is a UTC calendar date; the reader applies it inclusively (from-day .. to-day).
+    /// Strict invariant-culture parse so the result is deterministic regardless of server culture.
+    /// </summary>
+    protected bool TryParseLedgerDate(string? raw, string field, out DateOnly? value, out IActionResult problem)
+    {
+        value = null;
+        problem = null!;
+        if (string.IsNullOrWhiteSpace(raw)) return true;
+
+        if (DateOnly.TryParseExact(raw.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+        {
+            value = parsed;
+            return true;
+        }
+
+        problem = Problem(
+            title: $"'{field}' must be an ISO-8601 date (yyyy-MM-dd).",
+            statusCode: StatusCodes.Status400BadRequest,
+            type: "https://jeeb.dev/errors/invalid-ledger-date");
+        return false;
     }
 
     // ── PP-7 OTP step-up (RFC 7807) ──────────────────────────────────────────────────────────

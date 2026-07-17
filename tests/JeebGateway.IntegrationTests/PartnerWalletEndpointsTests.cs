@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -10,6 +11,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
+using JeebGateway.JeebWallet;
 using JeebGateway.Partner.JeeberSearch;
 using JeebGateway.service.ServiceWallet;
 using Microsoft.AspNetCore.Hosting;
@@ -17,6 +19,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 using SwServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
 
@@ -867,7 +870,227 @@ public sealed class PartnerWalletEndpointsTests
         fake.ExecuteCount.Should().Be(1);
     }
 
+    // ── PP-8: ledger filters (type / from / to) ───────────────────────────────────────
+    //
+    // The IJeebWalletLedgerReader is swapped for a fake that (a) records the filter args the
+    // controller parsed + forwarded and (b) applies the SAME predicate the PostgresJeebWalletLedgerReader
+    // applies in SQL (exact type equality; from/to inclusive on the UTC calendar date). So the frozen
+    // PP-8 contract — no-params-unchanged, type match/miss, inclusive date boundaries, malformed→400,
+    // unknown-type→empty-200 — is proven fully offline (no Postgres, no Docker). The real server-side
+    // filtering lives in the SQL WHERE (JeebWalletLedgerReader.cs); this fake mirrors its intent.
+
+    private static WebApplicationFactory<Program> FactoryWithFakeLedger(FakeLedgerReader ledger)
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureTestServices(s =>
+            {
+                s.RemoveAll<IJeebWalletLedgerReader>();
+                s.AddSingleton<IJeebWalletLedgerReader>(ledger);
+            }));
+
+    private static JeebWalletLedgerEntry LedgerRow(string id, string type, string ts)
+        => new() { Id = id, Type = type, Amount = 10m, Sign = 1, Ref = "ref-" + id, Ts = ts };
+
+    /// <summary>Three canonical rows: two <c>partner-topup</c> (07-10, 07-20) + one <c>partner-cash-credit</c> (07-15).</summary>
+    private static List<JeebWalletLedgerEntry> SampleLedgerRows() => new()
+    {
+        LedgerRow("a-1", "partner-topup", "2026-07-10T12:00:00Z"),
+        LedgerRow("b-2", "partner-cash-credit", "2026-07-15T12:00:00Z"),
+        LedgerRow("c-3", "partner-topup", "2026-07-20T12:00:00Z"),
+    };
+
+    private static async Task<LedgerPageDto> GetLedgerPageAsync(HttpClient client, string query = "")
+    {
+        var resp = await client.GetAsync("/v1/partner/wallet/ledger" + query);
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        return (await resp.Content.ReadFromJsonAsync<LedgerPageDto>())!;
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_No_Filters_Returns_All_And_Forwards_Null_Filters()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client);
+
+        page.Items.Should().HaveCount(3, "no filter params → the full ledger, unchanged (backward compatible)");
+        page.Page.Should().Be(1);
+        fake.LastType.Should().BeNull("no type param is forwarded as a null filter");
+        fake.LastFrom.Should().BeNull();
+        fake.LastTo.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Type_Filter_Matches_Only_That_Type()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?type=partner-topup");
+
+        page.Items.Should().HaveCount(2, "only the two partner-topup rows match");
+        page.Items.Should().OnlyContain(i => i.Type == "partner-topup");
+        fake.LastType.Should().Be("partner-topup", "the exact type string is forwarded to the read path");
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Unknown_Type_Is_Empty_200_Not_Error()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        // GetLedgerPageAsync asserts the 200 — an unknown type is a natural MISS, never a 4xx/5xx.
+        var page = await GetLedgerPageAsync(client, "?type=does-not-exist");
+
+        page.Items.Should().BeEmpty("an unknown type yields an empty result set, not an error");
+        fake.LastType.Should().Be("does-not-exist");
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Blank_Type_Is_Treated_As_No_Filter()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?type=%20"); // ?type=<space> → collapses to no filter
+
+        page.Items.Should().HaveCount(3, "an empty/whitespace type is normalized to 'no filter', not a miss");
+        fake.LastType.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_From_Is_Inclusive_Lower_Bound()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?from=2026-07-15");
+
+        page.Items.Select(i => i.Id).Should().BeEquivalentTo(new[] { "b-2", "c-3" },
+            "from is INCLUSIVE: the 07-15 row is kept, the 07-10 row dropped");
+        fake.LastFrom.Should().Be(new DateOnly(2026, 7, 15), "the ISO date is parsed and forwarded exactly");
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_To_Is_Inclusive_Upper_Bound()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?to=2026-07-15");
+
+        page.Items.Select(i => i.Id).Should().BeEquivalentTo(new[] { "a-1", "b-2" },
+            "to is INCLUSIVE: the 07-15 row is kept, the 07-20 row dropped");
+        fake.LastTo.Should().Be(new DateOnly(2026, 7, 15));
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_From_And_To_Single_Day_Is_Inclusive_Both_Ends()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?from=2026-07-15&to=2026-07-15");
+
+        page.Items.Select(i => i.Id).Should().BeEquivalentTo(new[] { "b-2" },
+            "a single-day inclusive window returns exactly that day's row");
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Type_And_Date_Filters_Compose()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?type=partner-topup&from=2026-07-15");
+
+        page.Items.Select(i => i.Id).Should().BeEquivalentTo(new[] { "c-3" },
+            "type + date AND together: a topup on/after 07-15 → only the 07-20 row");
+        fake.LastType.Should().Be("partner-topup");
+        fake.LastFrom.Should().Be(new DateOnly(2026, 7, 15));
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Malformed_From_Is_400_ProblemDetails_Before_Any_Read()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/wallet/ledger?from=not-a-date");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("status").GetInt32().Should().Be(400);
+        problem.GetProperty("title").GetString().Should().NotBeNullOrEmpty();
+        problem.GetProperty("type").GetString().Should().Contain("invalid-ledger-date");
+        fake.CallCount.Should().Be(0, "a malformed date is rejected BEFORE the ledger is read");
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Malformed_To_Is_400_ProblemDetails()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        // 13th month / 40th day: correct yyyy-MM-dd shape but not a real calendar date.
+        var resp = await client.GetAsync("/v1/partner/wallet/ledger?to=2026-13-40");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("status").GetInt32().Should().Be(400);
+        problem.GetProperty("type").GetString().Should().Contain("invalid-ledger-date");
+        fake.CallCount.Should().Be(0);
+    }
+
     // ── DTOs + fake ───────────────────────────────────────────────────────────────────
+
+    private sealed record LedgerPageDto(List<LedgerItemDto> Items, int Page, int TotalPages);
+    private sealed record LedgerItemDto(string Id, string Type, decimal Amount, int Sign, string Ref, string Ts);
+
+    /// <summary>
+    /// Offline fake ledger reader — records the filter args the controller forwarded and returns canned
+    /// rows using the SAME predicate PostgresJeebWalletLedgerReader applies in SQL (exact type equality;
+    /// from/to inclusive on the UTC calendar date). Proves the PP-8 pass-through + boundary contract with
+    /// no Postgres; the real server-side filter is the SQL WHERE in JeebWalletLedgerReader.cs.
+    /// </summary>
+    private sealed class FakeLedgerReader : IJeebWalletLedgerReader
+    {
+        public IReadOnlyList<JeebWalletLedgerEntry> Rows { get; init; } = Array.Empty<JeebWalletLedgerEntry>();
+
+        public int CallCount { get; private set; }
+        public string? LastType { get; private set; }
+        public DateOnly? LastFrom { get; private set; }
+        public DateOnly? LastTo { get; private set; }
+
+        public Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
+            Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to, CancellationToken ct)
+        {
+            CallCount++;
+            LastType = type;
+            LastFrom = from;
+            LastTo = to;
+
+            IEnumerable<JeebWalletLedgerEntry> q = Rows;
+            if (type is not null) q = q.Where(e => e.Type == type);
+            if (from is DateOnly f) q = q.Where(e => DateOnly.FromDateTime(ParseUtc(e.Ts)) >= f);
+            if (to is DateOnly t) q = q.Where(e => DateOnly.FromDateTime(ParseUtc(e.Ts)) <= t);
+
+            return Task.FromResult<IReadOnlyList<JeebWalletLedgerEntry>>(q.ToList());
+        }
+
+        private static DateTime ParseUtc(string iso)
+            => DateTimeOffset.Parse(iso, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind).UtcDateTime;
+    }
 
     private sealed record SearchItemDto(string JeeberId, string DisplayName, string Phone);
 

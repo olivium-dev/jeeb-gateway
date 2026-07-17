@@ -92,22 +92,41 @@ public sealed class PartnerWalletController : PartnerControllerBase
         }
     }
 
-    /// <summary>GET /v1/partner/wallet/ledger — the caller partner's own paginated transaction ledger.</summary>
+    /// <summary>
+    /// GET /v1/partner/wallet/ledger — the caller partner's own paginated transaction ledger.
+    ///
+    /// <para>PP-8 OPTIONAL server-side filters, applied in the read path (no new table, no money math):
+    /// <c>type</c> (exact operation-type string as surfaced in ledger rows, e.g. <c>partner-topup</c> /
+    /// <c>partner-cash-credit</c>; an unknown value is a natural empty result, NOT an error),
+    /// <c>from</c> / <c>to</c> (ISO-8601 <c>yyyy-MM-dd</c>, inclusive, interpreted UTC; a malformed value
+    /// is a 400 RFC 7807). Sending no filter params leaves the behaviour unchanged (backward compatible).</para>
+    /// </summary>
     [HttpGet("ledger")]
     [ProducesResponseType(typeof(JeebWalletLedgerPageResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> GetLedger(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
+        [FromQuery] string? type = null,
+        [FromQuery] string? from = null,
+        [FromQuery] string? to = null,
         CancellationToken ct = default)
     {
         if (!TryResolveCallerId(out var partnerId, out var failure)) return failure;
 
+        // Validate the OPTIONAL date bounds BEFORE any read; a malformed value is a clean 400 (never a 5xx).
+        if (!TryParseLedgerDate(from, "from", out var fromDate, out var fromProblem)) return fromProblem;
+        if (!TryParseLedgerDate(to, "to", out var toDate, out var toProblem)) return toProblem;
+
         var safePage = page < 1 ? 1 : page;
         var safeSize = pageSize is < 1 or > 200 ? 20 : pageSize;
 
-        var items = await _ledger.ReadLedgerAsync(partnerId, safePage, safeSize, ct);
+        // Collapse an empty/whitespace type to "no filter" so ?type= is treated as absent (not a miss).
+        var typeFilter = string.IsNullOrWhiteSpace(type) ? null : type.Trim();
+
+        var items = await _ledger.ReadLedgerAsync(partnerId, safePage, safeSize, typeFilter, fromDate, toDate, ct);
         var totalPages = items.Count >= safeSize ? safePage + 1 : safePage;
 
         return Ok(new JeebWalletLedgerPageResponse
