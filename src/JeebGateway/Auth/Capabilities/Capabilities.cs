@@ -148,6 +148,27 @@ public static class Capabilities
     // ── N. Notification dispatch (JEB-1494) — operator-triggered outbound notification ──
     public const string NotificationDispatch = "notification.dispatch"; // {admin}
 
+    // ── O. Jeeb Partner Portal wallet (partner-wallet-bff) ─────────────────────────────
+    // Cash-only top-up model: a Partner (shop/agent) accepts cash offline and moves it to a
+    // jeeber's wallet through the portal. All money moves through the reused wallet-service
+    // transaction saga (predict → initiate → execute/abort); the gateway invents NO money math.
+    //
+    // A partner reading its OWN wallet balance/ledger. Own-scoping (a partner reads only its
+    // own holder) is STATE, enforced in the action from the caller's token — mirroring
+    // wallet.read.own / earnings.read.own.
+    public const string PartnerWalletReadOwn = "partner.wallet.read.own";     // {partner}; STATE: own-holder
+    // Resolving/validating a jeeber as a top-up destination (does the jeeber have a wallet?).
+    // Read-only lookup a partner performs before choosing an amount.
+    public const string PartnerJeeberLookup = "partner.jeeber.lookup";        // {partner}
+    // Predicting fees for, and executing, a partner→jeeber top-up. Predict is the safe preview
+    // leg of the SAME partner action, so it shares this capability; the request amount is the
+    // caller's, the fees are wallet-service's (Predict), and the move is the wallet-service saga.
+    public const string PartnerTopupExecute = "partner.topup.execute";        // {partner}; STATE: source=own wallet
+    // Admin records offline cash handed over by a partner and CREDITS the partner wallet
+    // (evidence note + audit trail required). Admin-only money-in event; the credit itself is a
+    // wallet-service saga move (system/revenue → partner), never a gateway-computed balance write.
+    public const string PartnerWalletCredit = "partner.wallet.credit";        // {admin}
+
     /// <summary>
     /// The ASP.NET Core policy name for a capability. One named policy is registered per
     /// capability at startup (see Program.cs); <see cref="RequireCapabilityAttribute"/> sets

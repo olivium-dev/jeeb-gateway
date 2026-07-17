@@ -27,6 +27,10 @@ public static class CapabilityRolePolicy
     private static string[] ClientOnly => new[] { JeebRoleTranslator.ContractClient };
     private static string[] JeeberOnly => new[] { JeebRoleTranslator.ContractJeeber };
     private static string[] AdminOnly => new[] { Roles.Admin };
+    // Jeeb Partner Portal (partner-wallet-bff): the partner user type. The opaque `partner`
+    // role passes through JeebRoleTranslator.ToContract verbatim (non-{customer,driver}),
+    // so the handler intersects it against this set unchanged. Additive — no existing entry moves.
+    private static string[] PartnerOnly => new[] { Roles.Partner };
     private static string[] Participant => new[] { JeebRoleTranslator.ContractClient, JeebRoleTranslator.ContractJeeber };
     // S09 (JEB-54) BR-TRK-1: the live-track READ surface is held by both delivery
     // parties + admin (admin live-ops needs a participant-equivalent map view for
@@ -163,6 +167,14 @@ public static class CapabilityRolePolicy
 
             // N. Notification dispatch (JEB-1494): render + push a notification to a user — admin only.
             [Capabilities.NotificationDispatch] = AdminOnly,
+
+            // O. Jeeb Partner Portal wallet (partner-wallet-bff). Partner-initiated surfaces are
+            // {partner}; the admin cash-credit event is {admin}. Own-holder / source-wallet scoping
+            // is STATE, enforced in the action from the caller's token — never expressed here.
+            [Capabilities.PartnerWalletReadOwn] = PartnerOnly,   // STATE: own-holder
+            [Capabilities.PartnerJeeberLookup] = PartnerOnly,
+            [Capabilities.PartnerTopupExecute] = PartnerOnly,    // STATE: source = own wallet
+            [Capabilities.PartnerWalletCredit] = AdminOnly,      // admin records offline cash
         };
 
     /// <summary>All capability names in the map — drives the startup policy-registration loop.</summary>
