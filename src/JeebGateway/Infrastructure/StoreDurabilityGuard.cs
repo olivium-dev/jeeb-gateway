@@ -130,6 +130,13 @@ internal static class StoreDurabilityGuard
         // (partner_wallet_operations, migration 0040); in a prod-like env it MUST resolve to
         // PostgresPartnerWalletOperationStore, never InMemoryPartnerWalletOperationStore.
         (typeof(JeebGateway.Partner.IPartnerWalletOperationStore),          new[] { typeof(JeebGateway.Partner.PostgresPartnerWalletOperationStore) }),
+        // partner-wallet-bff PP-7: the OTP step-up challenge store (Partner/IPartnerOtpChallengeStore).
+        // A money-authorization control — its whole contract is a SHA-256-hashed, single-use step-up
+        // code whose consumption is recorded DURABLY, so an in-memory fallback would let a spent or
+        // expired code re-authorize a high-value move across a restart. Postgres-backed
+        // (partner_otp_challenges, migration 0041); in a prod-like env it MUST resolve to
+        // PostgresPartnerOtpChallengeStore, never InMemoryPartnerOtpChallengeStore.
+        (typeof(JeebGateway.Partner.IPartnerOtpChallengeStore),             new[] { typeof(JeebGateway.Partner.PostgresPartnerOtpChallengeStore) }),
     };
 
     /// <summary>

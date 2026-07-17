@@ -34,10 +34,26 @@ public sealed class PartnerWalletEndpointsTests
 {
     private const string PartnerId = "11111111-1111-1111-1111-111111111111";
     private const string JeeberId = "22222222-2222-2222-2222-222222222222";
+    private const string OtherJeeberId = "44444444-4444-4444-4444-444444444444";
 
     private static WebApplicationFactory<Program> FactoryWithFakeWallet(FakeWalletClient fake)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
             b.ConfigureTestServices(s => s.AddScoped<SwServiceWalletClient>(_ => fake)));
+
+    /// <summary>
+    /// As <see cref="FactoryWithFakeWallet"/> but with <c>Features:DevEndpoints:Enabled=true</c>, so the
+    /// PP-7 challenge endpoint surfaces the raw code as <c>devCode</c> — the only offline way a test can
+    /// learn the cryptographically-random code to drive the valid-OTP / consume / exhaust paths.
+    /// </summary>
+    private static WebApplicationFactory<Program> FactoryWithFakeWalletDevOtp(FakeWalletClient fake)
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Features:DevEndpoints:Enabled"] = "true",
+            }));
+            b.ConfigureTestServices(s => s.AddScoped<SwServiceWalletClient>(_ => fake));
+        });
 
     private static HttpClient AsPartner(WebApplicationFactory<Program> f)
     {
@@ -309,6 +325,7 @@ public sealed class PartnerWalletEndpointsTests
     [Theory]
     [InlineData("POST", "/v1/partner/wallet/transfers")]
     [InlineData("POST", "/v1/partner/wallet/transfers/predict")]
+    [InlineData("POST", "/v1/partner/wallet/transfers/otp/challenge")]
     [InlineData("GET", "/v1/partner/wallet")]
     [InlineData("GET", "/v1/partner/wallet/balance")]
     [InlineData("GET", "/v1/partner/wallet/ledger")]
@@ -609,6 +626,245 @@ public sealed class PartnerWalletEndpointsTests
 
         var raw = await resp.Content.ReadAsStringAsync();
         raw.Should().NotContain("503", "the upstream status must not leak to the caller");
+    }
+
+    // ── PP-7: OTP step-up on high-value top-ups ───────────────────────────────────────
+    //
+    // Threshold defaults to 50 (PartnerWallet:OtpStepUpThreshold). An amount at/below 50 flows
+    // unchanged (backward compatible — the existing 34 tests use amounts ≤ 50). An amount above 50
+    // requires a challenge (step 1) + the code echoed on the confirm (step 2). The offline fake wallet
+    // proves no money moves when the OTP gate rejects (ExecuteCount stays 0).
+
+    private const double AboveThreshold = 75.0;
+
+    private sealed record OtpChallengeDto(string ChallengeId, int ExpiresInSeconds, string? DevCode);
+
+    private static async Task<OtpChallengeDto> IssueChallengeAsync(
+        HttpClient client, double amount = AboveThreshold, string jeeberId = JeeberId)
+    {
+        var resp = await client.PostAsJsonAsync(
+            "/v1/partner/wallet/transfers/otp/challenge", new { jeeberId, amount });
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        return (await resp.Content.ReadFromJsonAsync<OtpChallengeDto>())!;
+    }
+
+    private static Task<HttpResponseMessage> TransferWithOtpAsync(
+        HttpClient client, double amount, string idempotencyKey, string otpChallengeId, string otpCode,
+        string jeeberId = JeeberId)
+        => client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId,
+            amount,
+            idempotencyKey,
+            otpChallengeId,
+            otpCode,
+        });
+
+    /// <summary>A 6-digit code guaranteed to differ from <paramref name="realCode"/> (no 1-in-a-million flake).</summary>
+    private static string WrongCodeFor(string realCode) => realCode == "000000" ? "111111" : "000000";
+
+    private static async Task<string> OtpTypeAsync(HttpResponseMessage resp)
+    {
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        return problem.GetProperty("type").GetString() ?? string.Empty;
+    }
+
+    [Fact]
+    public async Task Partner_Otp_Challenge_At_Or_Below_Threshold_Is_400_OtpNotRequired()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        using var client = AsPartner(factory);
+
+        // Amount == threshold (50) → not required (the boundary is inclusive of "no OTP").
+        var resp = await client.PostAsJsonAsync(
+            "/v1/partner/wallet/transfers/otp/challenge", new { jeeberId = JeeberId, amount = 50.0 });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await OtpTypeAsync(resp)).Should().Contain("otp-not-required");
+    }
+
+    [Fact]
+    public async Task Partner_Otp_Challenge_Above_Threshold_Returns_ChallengeId_And_Null_DevCode_Without_Flag()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient()); // dev flag OFF
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client);
+
+        Guid.TryParse(challenge.ChallengeId, out _).Should().BeTrue("challengeId is a GUID string");
+        challenge.ExpiresInSeconds.Should().Be(300, "the frozen 5-minute validity window");
+        challenge.DevCode.Should().BeNull("devCode is surfaced ONLY when Features:DevEndpoints:Enabled=true");
+    }
+
+    [Fact]
+    public async Task Partner_Otp_Challenge_Above_Threshold_Surfaces_Six_Digit_DevCode_When_Flag_On()
+    {
+        await using var factory = FactoryWithFakeWalletDevOtp(new FakeWalletClient()); // dev flag ON
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client);
+
+        challenge.DevCode.Should().NotBeNullOrEmpty();
+        challenge.DevCode.Should().MatchRegex("^[0-9]{6}$", "the code is a zero-padded 6-digit number");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_Without_Otp_Is_403_OtpRequired()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWallet(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId = JeeberId,
+            amount = AboveThreshold,
+            idempotencyKey = "otp-missing-abcd01",
+            // no OtpChallengeId / OtpCode → step-up required
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("type").GetString().Should().Contain("otp-required");
+        problem.GetProperty("otpRequired").GetBoolean().Should().BeTrue("the portal keys on this extension");
+        fake.ExecuteCount.Should().Be(0, "no money moves without a valid step-up code");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_Wrong_Code_Is_403_OtpInvalid_And_Decrements_Attempts()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWalletDevOtp(fake);
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client);
+        var wrong = WrongCodeFor(challenge.DevCode!);
+
+        var r1 = await TransferWithOtpAsync(client, AboveThreshold, "wrong-1-abcdef", challenge.ChallengeId, wrong);
+        r1.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var p1 = await r1.Content.ReadFromJsonAsync<JsonElement>();
+        p1.GetProperty("type").GetString().Should().Contain("otp-invalid");
+        p1.GetProperty("attemptsRemaining").GetInt32().Should().Be(4, "one of five guesses spent");
+
+        var r2 = await TransferWithOtpAsync(client, AboveThreshold, "wrong-2-abcdef", challenge.ChallengeId, wrong);
+        var p2 = await r2.Content.ReadFromJsonAsync<JsonElement>();
+        p2.GetProperty("attemptsRemaining").GetInt32().Should().Be(3, "the wrong-guess counter decrements durably");
+
+        fake.ExecuteCount.Should().Be(0, "a wrong code never moves money");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_Exhausts_After_Five_Wrong_Codes()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWalletDevOtp(fake);
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client);
+        var wrong = WrongCodeFor(challenge.DevCode!);
+
+        for (var i = 0; i < 5; i++)
+        {
+            var r = await TransferWithOtpAsync(client, AboveThreshold, $"exhaust-{i}-abcdef", challenge.ChallengeId, wrong);
+            r.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+            (await OtpTypeAsync(r)).Should().Contain("otp-invalid", "the first five wrong guesses are invalid, not exhausted");
+        }
+
+        // The sixth submission is past the ceiling → hard-expired, even the CORRECT code no longer works.
+        var sixth = await TransferWithOtpAsync(client, AboveThreshold, "exhaust-6-abcdef", challenge.ChallengeId, challenge.DevCode!);
+        sixth.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await OtpTypeAsync(sixth)).Should().Contain("otp-exhausted");
+
+        fake.ExecuteCount.Should().Be(0, "an exhausted challenge never authorizes a move");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_With_Valid_Code_Executes_Then_Replay_Is_403_OtpConsumed()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWalletDevOtp(fake);
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client);
+
+        // Step 2 with the correct code → the money moves once.
+        var first = await TransferWithOtpAsync(client, AboveThreshold, "consume-1-abcdef", challenge.ChallengeId, challenge.DevCode!);
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        var move = await first.Content.ReadFromJsonAsync<MoveDto>();
+        move!.Amount.Should().Be(AboveThreshold);
+
+        // Replaying the SAME (now consumed) challenge with a fresh idempotency key must NOT move money
+        // again — single-use is enforced by the OTP gate, independently of the transfer idempotency key.
+        var replay = await TransferWithOtpAsync(client, AboveThreshold, "consume-2-abcdef", challenge.ChallengeId, challenge.DevCode!);
+        replay.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await OtpTypeAsync(replay)).Should().Contain("otp-consumed");
+
+        fake.ExecuteCount.Should().Be(1, "one challenge authorizes exactly one money move");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_Amount_Or_Jeeber_Mismatch_Is_403_OtpInvalid()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWalletDevOtp(fake);
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client, AboveThreshold, JeeberId);
+
+        // Same challenge + correct code, but a DIFFERENT amount (still above threshold) → mismatch.
+        var amountMismatch = await TransferWithOtpAsync(client, 80.0, "mismatch-amt-abc", challenge.ChallengeId, challenge.DevCode!);
+        amountMismatch.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await OtpTypeAsync(amountMismatch)).Should().Contain("otp-invalid");
+
+        // Same challenge + correct code + right amount, but a DIFFERENT jeeber → mismatch.
+        var jeeberMismatch = await TransferWithOtpAsync(client, AboveThreshold, "mismatch-jbr-abc", challenge.ChallengeId, challenge.DevCode!, OtherJeeberId);
+        jeeberMismatch.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await OtpTypeAsync(jeeberMismatch)).Should().Contain("otp-invalid");
+
+        fake.ExecuteCount.Should().Be(0, "a challenge only authorizes the exact (jeeber, amount) it was minted for");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_Another_Partners_Challenge_Is_403_OtpInvalid()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWalletDevOtp(fake);
+
+        // Partner A mints a challenge.
+        using var partnerA = AsPartner(factory);
+        var challenge = await IssueChallengeAsync(partnerA);
+
+        // Partner B (a different holder id, same role) tries to use A's challenge id + code.
+        using var partnerB = factory.CreateClient();
+        partnerB.DefaultRequestHeaders.Add("X-User-Id", "55555555-5555-5555-5555-555555555555");
+        partnerB.DefaultRequestHeaders.Add("X-User-Roles", "partner");
+
+        var resp = await TransferWithOtpAsync(partnerB, AboveThreshold, "cross-partner-abc", challenge.ChallengeId, challenge.DevCode!);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await OtpTypeAsync(resp)).Should().Contain("otp-invalid", "a challenge is bound to the partner that minted it");
+        fake.ExecuteCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Partner_Topup_At_Or_Below_Threshold_Ignores_Otp_Fields_And_Executes()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWallet(fake);
+        using var client = AsPartner(factory);
+
+        // Amount == threshold (50) with GARBAGE OTP fields → still executes (fields ignored below/at threshold).
+        var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId = JeeberId,
+            amount = 50.0,
+            idempotencyKey = "below-thr-abcdef",
+            otpChallengeId = "not-a-guid",
+            otpCode = "000000",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK, "at/below threshold the OTP gate does not engage (backward compatible)");
+        fake.ExecuteCount.Should().Be(1);
     }
 
     // ── DTOs + fake ───────────────────────────────────────────────────────────────────

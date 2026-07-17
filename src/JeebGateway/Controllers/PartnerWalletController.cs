@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.JeebWallet;
 using JeebGateway.Partner;
+using JeebGateway.Security;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -35,17 +36,23 @@ public sealed class PartnerWalletController : PartnerControllerBase
 {
     private readonly IPartnerWalletService _partner;
     private readonly IJeebWalletLedgerReader _ledger;
+    private readonly IPartnerOtpChallengeService _otp;
+    private readonly IOptionsMonitor<DevEndpointOptions> _devEndpoints;
     private readonly PartnerWalletOptions _options;
     private readonly ILogger<PartnerWalletController> _log;
 
     public PartnerWalletController(
         IPartnerWalletService partner,
         IJeebWalletLedgerReader ledger,
+        IPartnerOtpChallengeService otp,
+        IOptionsMonitor<DevEndpointOptions> devEndpoints,
         IOptions<PartnerWalletOptions> options,
         ILogger<PartnerWalletController> log)
     {
         _partner = partner;
         _ledger = ledger;
+        _otp = otp;
+        _devEndpoints = devEndpoints;
         _options = options.Value;
         _log = log;
     }
@@ -139,6 +146,47 @@ public sealed class PartnerWalletController : PartnerControllerBase
         }
     }
 
+    /// <summary>
+    /// POST /v1/partner/wallet/transfers/otp/challenge (PP-7 step 1) — mint a one-time step-up code for
+    /// a partner→jeeber top-up ABOVE the OTP threshold. Below/at the threshold this returns 400
+    /// otp-not-required so the portal never shows a step it does not need. The 6-digit code is
+    /// surfaced in-app (<c>devCode</c>) ONLY under the dev-endpoints flag; production returns null.
+    /// Same partner capability marker as the transfer it gates (ADR-005).
+    /// </summary>
+    [HttpPost("transfers/otp/challenge")]
+    [RequireCapability(Capabilities.PartnerTopupExecute)]
+    [ProducesResponseType(typeof(PartnerOtpChallengeResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> RequestOtpChallenge(
+        [FromBody] PartnerOtpChallengeRequest body, CancellationToken ct)
+    {
+        if (!TryResolveCallerId(out var partnerId, out var failure)) return failure;
+        if (!TryValidateAmount(body.Amount, out var amountProblem)) return amountProblem;
+
+        // A step-up code is only meaningful ABOVE the threshold; refuse it otherwise so the caller
+        // knows to skip the OTP step (the transfer confirm below ignores OTP fields at/below threshold).
+        if (body.Amount <= _options.OtpStepUpThreshold)
+        {
+            return OtpNotRequiredProblem(_options.OtpStepUpThreshold);
+        }
+
+        var issued = await _otp.IssueAsync(partnerId, body.JeeberId, body.Amount, ct);
+
+        // devCode is the in-app dev pattern: surfaced ONLY when Features__DevEndpoints__Enabled=true,
+        // read live from IOptionsMonitor. Production path returns null (SMS delivery is a documented
+        // TODO — no Twilio in this cut). The raw code is never logged.
+        var devCode = _devEndpoints.CurrentValue.Enabled ? issued.RawCode : null;
+
+        return Ok(new PartnerOtpChallengeResponse
+        {
+            ChallengeId = issued.ChallengeId.ToString(),
+            ExpiresInSeconds = issued.ExpiresInSeconds,
+            DevCode = devCode,
+        });
+    }
+
     /// <summary>POST /v1/partner/wallet/transfers — execute a partner→jeeber top-up (idempotency-keyed).</summary>
     [HttpPost("transfers")]
     [RequireCapability(Capabilities.PartnerTopupExecute)]
@@ -152,6 +200,30 @@ public sealed class PartnerWalletController : PartnerControllerBase
     {
         if (!TryResolveCallerId(out var partnerId, out var failure)) return failure;
         if (!TryValidateAmount(body.Amount, out var amountProblem)) return amountProblem;
+
+        // PP-7 OTP step-up gate. Engages ONLY above the threshold; at-or-below flows unchanged
+        // (backward compatible — existing clients that never send OtpChallengeId/OtpCode are
+        // unaffected). The challenge is consumed ATOMICALLY (single-use) here, BEFORE any money move,
+        // so one code authorizes at most one transfer even under concurrent double-submit. Slots in
+        // BEFORE _partner.ExecuteTopupAsync — the wallet-service saga (money) is never touched.
+        if (body.Amount > _options.OtpStepUpThreshold)
+        {
+            if (string.IsNullOrWhiteSpace(body.OtpChallengeId) || string.IsNullOrWhiteSpace(body.OtpCode))
+            {
+                return OtpRequiredProblem();
+            }
+            if (!Guid.TryParse(body.OtpChallengeId, out var challengeId))
+            {
+                return OtpInvalidProblem(null);
+            }
+
+            var verdict = await _otp.VerifyAsync(
+                challengeId, partnerId, body.JeeberId, body.Amount, body.OtpCode!, ct);
+            if (TryOtpFailureProblem(verdict, out var otpProblem))
+            {
+                return otpProblem;
+            }
+        }
 
         try
         {

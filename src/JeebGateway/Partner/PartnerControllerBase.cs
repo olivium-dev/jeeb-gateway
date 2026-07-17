@@ -105,4 +105,88 @@ public abstract class PartnerControllerBase : ControllerBase
         problem = null!;
         return true;
     }
+
+    // ── PP-7 OTP step-up (RFC 7807) ──────────────────────────────────────────────────────────
+    //
+    // The frozen problem types: otp-not-required (challenge below threshold), otp-required (an
+    // above-threshold confirm arrived without a code), otp-invalid (unknown/mismatched/expired/wrong
+    // code), otp-exhausted (too many wrong guesses), otp-consumed (single-use challenge replayed).
+    // Built as ProblemDetails + application/problem+json so the {otpRequired}/{attemptsRemaining}
+    // extensions the portal keys on serialize as top-level members (ProblemDetails.Extensions).
+
+    /// <summary>Challenge endpoint refusal: an amount at or below the threshold needs no step-up code.</summary>
+    protected IActionResult OtpNotRequiredProblem(double threshold)
+        => OtpProblem(
+            StatusCodes.Status400BadRequest,
+            "https://jeeb.dev/errors/otp-not-required",
+            $"A step-up code is not required for an amount at or below the OTP threshold ({threshold}).");
+
+    /// <summary>Confirm gate: an above-threshold transfer arrived without an OTP challenge id + code.</summary>
+    protected IActionResult OtpRequiredProblem()
+        => OtpProblem(
+            StatusCodes.Status403Forbidden,
+            "https://jeeb.dev/errors/otp-required",
+            "A one-time step-up code is required for a transfer above the OTP threshold.",
+            ("otpRequired", true));
+
+    /// <summary>Wrong / unknown / mismatched / expired code. Carries attempts-remaining when known.</summary>
+    protected IActionResult OtpInvalidProblem(int? attemptsRemaining)
+        => attemptsRemaining is int remaining
+            ? OtpProblem(
+                StatusCodes.Status403Forbidden,
+                "https://jeeb.dev/errors/otp-invalid",
+                "The step-up code is invalid.",
+                ("attemptsRemaining", remaining))
+            : OtpProblem(
+                StatusCodes.Status403Forbidden,
+                "https://jeeb.dev/errors/otp-invalid",
+                "The step-up code is invalid.");
+
+    /// <summary>Too many wrong guesses — the challenge is hard-expired; the partner must request a new one.</summary>
+    protected IActionResult OtpExhaustedProblem()
+        => OtpProblem(
+            StatusCodes.Status403Forbidden,
+            "https://jeeb.dev/errors/otp-exhausted",
+            "Too many incorrect attempts; request a new step-up code.");
+
+    /// <summary>The challenge was already used by a prior successful confirm (single-use replay).</summary>
+    protected IActionResult OtpConsumedProblem()
+        => OtpProblem(
+            StatusCodes.Status403Forbidden,
+            "https://jeeb.dev/errors/otp-consumed",
+            "This step-up code has already been used; request a new one.");
+
+    /// <summary>
+    /// Map an OTP verdict to its RFC 7807 refusal, or return <c>false</c> (no problem) when the verdict
+    /// is <see cref="PartnerOtpOutcome.Valid"/> and the transfer may proceed.
+    /// </summary>
+    protected bool TryOtpFailureProblem(PartnerOtpValidation verdict, out IActionResult problem)
+    {
+        problem = verdict.Outcome switch
+        {
+            PartnerOtpOutcome.Valid => null!,
+            PartnerOtpOutcome.WrongCode => OtpInvalidProblem(verdict.AttemptsRemaining),
+            PartnerOtpOutcome.Exhausted => OtpExhaustedProblem(),
+            PartnerOtpOutcome.Consumed => OtpConsumedProblem(),
+            // NotFound / Mismatch / Expired all read to the caller as an invalid code (no oracle).
+            _ => OtpInvalidProblem(null),
+        };
+        return verdict.Outcome != PartnerOtpOutcome.Valid;
+    }
+
+    private IActionResult OtpProblem(
+        int status, string type, string title, params (string Key, object? Value)[] extensions)
+    {
+        var problem = new ProblemDetails { Status = status, Title = title, Type = type };
+        foreach (var (key, value) in extensions)
+        {
+            problem.Extensions[key] = value;
+        }
+
+        return new ObjectResult(problem)
+        {
+            StatusCode = status,
+            ContentTypes = { "application/problem+json" },
+        };
+    }
 }

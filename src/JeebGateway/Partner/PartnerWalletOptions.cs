@@ -48,6 +48,19 @@ public sealed class PartnerWalletOptions
     [Range(0.01, double.MaxValue)]
     public double MaxTransferAmount { get; init; } = 100_000d;
 
+    /// <summary>
+    /// PP-7 OTP step-up threshold (config key <c>PartnerWallet__OtpStepUpThreshold</c>). A
+    /// partner→jeeber top-up whose gross Amount is STRICTLY ABOVE this value requires a one-time
+    /// step-up code (challenge → verify) before it executes; an amount AT OR BELOW it flows unchanged
+    /// (backward compatible — an existing client that never sends the OTP fields is unaffected).
+    /// Default 50 is an owner-gated assumption (surfaced, not decided). Amounts compared here are the
+    /// transfer's gross Amount in the partner wallet currency. Same <see cref="RangeAttribute"/>
+    /// fail-fast style as <see cref="MaxTransferAmount"/> so a mis-configured threshold fails the host
+    /// loudly at startup rather than at first high-value move (dotnet-options-pattern skill).
+    /// </summary>
+    [Range(0.01, double.MaxValue)]
+    public double OtpStepUpThreshold { get; init; } = 50d;
+
     // ── BOPLA / target-type guard (OWASP API3) ──────────────────────────────────────────────
     //
     // A partner's top-up destination and an admin credit's target are resolved from a caller-supplied

@@ -41,6 +41,39 @@ public sealed class PartnerTopupExecuteRequest
     /// <summary>Optional free-text note the partner attaches (receipt reference, etc.).</summary>
     [MaxLength(280)]
     public string? Note { get; init; }
+
+    /// <summary>
+    /// PP-7 OTP step-up. OPTIONAL: consulted only when the gross <see cref="Amount"/> is ABOVE
+    /// <see cref="PartnerWalletOptions.OtpStepUpThreshold"/>. The challenge id returned by
+    /// POST v1/partner/wallet/transfers/otp/challenge. Ignored for at-or-below-threshold transfers
+    /// (backward compatible — no <c>[Required]</c>, so an existing client that never sends it is
+    /// unaffected). A missing value on an above-threshold transfer yields 403 <c>otp-required</c>.
+    /// </summary>
+    public string? OtpChallengeId { get; init; }
+
+    /// <summary>
+    /// PP-7 OTP step-up. OPTIONAL: the 6-digit code the partner received for the challenge. Same
+    /// consulted-only-above-threshold / backward-compatible semantics as <see cref="OtpChallengeId"/>.
+    /// </summary>
+    public string? OtpCode { get; init; }
+}
+
+/// <summary>
+/// PP-7 step 1: request a one-time step-up code for a partner→jeeber top-up above the OTP threshold
+/// (POST v1/partner/wallet/transfers/otp/challenge). The gross <see cref="Amount"/> and
+/// <see cref="JeeberId"/> must match the subsequent transfer EXACTLY, or verification fails
+/// (403 otp-invalid). An amount at or below the threshold is refused here (400 otp-not-required) so
+/// the portal never shows an OTP step it does not need.
+/// </summary>
+public sealed class PartnerOtpChallengeRequest
+{
+    /// <summary>The destination jeeber's wallet-holder id (their user GUID) the code will authorize.</summary>
+    [Required]
+    public Guid JeeberId { get; init; }
+
+    /// <summary>The gross amount the code will authorize (must match the confirm's Amount exactly).</summary>
+    [Range(0.01, double.MaxValue, ErrorMessage = "amount must be greater than 0.")]
+    public double Amount { get; init; }
 }
 
 /// <summary>
@@ -91,6 +124,24 @@ public sealed class PartnerTopupPreviewResponse
     public double Fees { get; init; }
     public double NetToJeeber { get; init; }
     public string? Summary { get; init; }
+}
+
+/// <summary>
+/// PP-7 challenge issued (200 from POST v1/partner/wallet/transfers/otp/challenge).
+/// <see cref="DevCode"/> is populated ONLY when <c>Features__DevEndpoints__Enabled=true</c> (the
+/// in-app dev pattern); the production path returns <c>null</c> and future SMS delivery stays a
+/// documented TODO (no Twilio, no real SMS in this cut). The raw code is never logged nor stored.
+/// </summary>
+public sealed class PartnerOtpChallengeResponse
+{
+    /// <summary>Opaque challenge id (a GUID as a string) to echo back on the confirm.</summary>
+    public string ChallengeId { get; init; } = string.Empty;
+
+    /// <summary>Seconds until the challenge expires (the frozen 5-minute validity window: 300).</summary>
+    public int ExpiresInSeconds { get; init; }
+
+    /// <summary>The 6-digit code, surfaced in-app ONLY under the dev-endpoints flag; else <c>null</c>.</summary>
+    public string? DevCode { get; init; }
 }
 
 /// <summary>Result of an executed partner→jeeber top-up or admin cash credit.</summary>
