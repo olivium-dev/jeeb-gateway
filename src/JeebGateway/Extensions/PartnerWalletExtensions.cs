@@ -22,6 +22,23 @@ public static class PartnerWalletExtensions
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
+        // Money-safety idempotency / dedup + immutable cash-in audit store. MONEY: its whole contract
+        // is "a retried confirm never double-moves money", so an in-memory fallback is a data-loss
+        // hole on a money path and is refused fail-closed in prod-like envs
+        // (StoreDurabilityGuard.Critical). Postgres-backed (partner_wallet_operations, migration 0040)
+        // whenever GatewayPostgres is configured — reusing the already-registered
+        // INpgsqlConnectionFactory (see Program.cs) — exactly like ISettlementEnqueueStore; in-memory
+        // fallback for dev/CI/test only. Singleton so the claim state persists across scoped requests.
+        var gatewayPostgresCs = config["GatewayPostgres:ConnectionString"];
+        if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+        {
+            services.AddSingleton<IPartnerWalletOperationStore, PostgresPartnerWalletOperationStore>();
+        }
+        else
+        {
+            services.AddSingleton<IPartnerWalletOperationStore, InMemoryPartnerWalletOperationStore>();
+        }
+
         // Scoped: depends on the scoped ServiceWalletClient.
         services.AddScoped<IPartnerWalletService, PartnerWalletService>();
 

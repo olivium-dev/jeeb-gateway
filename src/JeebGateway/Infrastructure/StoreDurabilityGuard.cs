@@ -122,6 +122,14 @@ internal static class StoreDurabilityGuard
         // delivery_id PK + INSERT ON CONFLICT DO NOTHING); in a prod-like env it MUST resolve
         // to PostgresSettlementEnqueueStore, never InMemorySettlementEnqueueStore.
         (typeof(JeebGateway.Financials.ISettlementEnqueueStore),            new[] { typeof(JeebGateway.Financials.PostgresSettlementEnqueueStore) }),
+        // partner-wallet-bff money-safety blocker set: the Partner Portal's idempotency dedup +
+        // immutable cash-in/move audit store (Partner/IPartnerWalletOperationStore). MONEY — its
+        // whole contract is "a retried confirm never double-moves money" (the wallet-service
+        // TransactionRequest has no idempotency field), so an in-memory fallback risks a
+        // double-spend on restart exactly like the settlement-enqueue store above. Postgres-backed
+        // (partner_wallet_operations, migration 0040); in a prod-like env it MUST resolve to
+        // PostgresPartnerWalletOperationStore, never InMemoryPartnerWalletOperationStore.
+        (typeof(JeebGateway.Partner.IPartnerWalletOperationStore),          new[] { typeof(JeebGateway.Partner.PostgresPartnerWalletOperationStore) }),
     };
 
     /// <summary>
