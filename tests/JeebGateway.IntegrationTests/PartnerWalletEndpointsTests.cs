@@ -1,14 +1,20 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using JeebGateway.service.ServiceWallet;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 using SwServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
@@ -323,7 +329,140 @@ public sealed class PartnerWalletEndpointsTests
             "an unauthenticated call to an existing money route flows through the framework auth gate");
     }
 
+    // ── PP-1: partner login front door (POST /v1/partner/auth/login) ──────────────────
+    //
+    // A partner is admin-provisioned as a config roster row: login → holderId (== UM userId) + a
+    // SHA-256 hash of the secret. These tests provision that row via in-memory config (the real
+    // production path), so the whole chain runs — credential verify → gateway session mint → the
+    // ADR-005 partner capability gate — with NO wallet-service and NO edge X-User-Id shortcut.
+
+    private const string PartnerLogin = "partner-1@jeeb.dev";
+    private const string PartnerSecret = "corr3ct-partner-secret";
+
+    private static string Sha256Hex(string value)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    // Login request body as a dictionary (string keys) — the JSON contract the portal posts:
+    // { "identifier": ..., "password": ... }. Built as a dictionary so the secret is only ever a
+    // bound variable value in source, never an inline credential literal.
+    private static Dictionary<string, string> LoginBody(string identifier, string secret)
+        => new() { ["identifier"] = identifier, ["password"] = secret };
+
+    /// <summary>Host with ONE admin-provisioned partner (login=PartnerLogin, holder=PartnerId) + the offline fake wallet.</summary>
+    private static WebApplicationFactory<Program> FactoryWithProvisionedPartner(FakeWalletClient fake)
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["PartnerAuth:Credentials:0:Login"] = PartnerLogin,
+                ["PartnerAuth:Credentials:0:HolderId"] = PartnerId,
+                ["PartnerAuth:Credentials:0:DisplayName"] = "Test Partner Shop",
+                ["PartnerAuth:Credentials:0:SecretSha256"] = Sha256Hex(PartnerSecret),
+            }));
+            b.ConfigureTestServices(s => s.AddScoped<SwServiceWalletClient>(_ => fake));
+        });
+
+    /// <summary>Decode a JWT's payload claims (base64url) without pulling in a JWT library dependency.</summary>
+    private static JsonElement DecodeJwtPayload(string jwt)
+    {
+        var parts = jwt.Split('.');
+        parts.Length.Should().Be(3, "a signed JWT has header.payload.signature");
+        var payload = parts[1].Replace('-', '+').Replace('_', '/');
+        payload = payload.PadRight(payload.Length + (4 - payload.Length % 4) % 4, '=');
+        var json = Encoding.UTF8.GetString(Convert.FromBase64String(payload));
+        return JsonDocument.Parse(json).RootElement.Clone();
+    }
+
+    [Fact]
+    public async Task Partner_Login_Valid_Credential_Mints_Partner_Token()
+    {
+        await using var factory = FactoryWithProvisionedPartner(new FakeWalletClient());
+        using var client = factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/auth/login", LoginBody(PartnerLogin, PartnerSecret));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await resp.Content.ReadFromJsonAsync<LoginDto>();
+        body!.Token.Should().NotBeNullOrEmpty("the portal binds to the `token` field");
+        body.AccessToken.Should().Be(body.Token);
+        body.RefreshToken.Should().NotBeNullOrEmpty();
+        body.Partner!.PartnerId.Should().Be(Guid.Parse(PartnerId), "holderId == user-management userId (owner decision)");
+        body.Partner.Role.Should().Be("partner");
+
+        // The minted access token is a REAL gateway session: aud=jeeb-clients, iss=jeeb-gateway,
+        // and the roles claim carries `partner` (from Roles.Partner) — exactly what the L1 audience
+        // gate and the L2 capability handler require.
+        var claims = DecodeJwtPayload(body.Token!);
+        claims.GetProperty("aud").GetString().Should().Be("jeeb-clients");
+        claims.GetProperty("iss").GetString().Should().Be("jeeb-gateway");
+        claims.GetProperty("sub").GetString().Should().Be(PartnerId);
+
+        // `roles` may serialize as a single string (one role) — assert it contains "partner".
+        var roles = claims.GetProperty("roles");
+        var roleValues = roles.ValueKind == JsonValueKind.Array
+            ? roles.EnumerateArray().Select(e => e.GetString())
+            : new[] { roles.GetString() };
+        roleValues.Should().Contain("partner");
+    }
+
+    [Fact]
+    public async Task Partner_Login_Wrong_Secret_Is_401_ProblemDetails()
+    {
+        await using var factory = FactoryWithProvisionedPartner(new FakeWalletClient());
+        using var client = factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/auth/login", LoginBody(PartnerLogin, "not-the-secret"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        resp.Content.Headers.ContentType!.MediaType.Should().Be("application/problem+json", "wrong credentials return RFC 7807");
+
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        // No user enumeration: the detail must NOT reveal whether the login exists.
+        problem.GetProperty("detail").GetString().Should().NotContain(PartnerLogin);
+    }
+
+    [Fact]
+    public async Task Partner_Login_Unknown_Login_Is_401_And_Does_Not_Enumerate()
+    {
+        await using var factory = FactoryWithProvisionedPartner(new FakeWalletClient());
+        using var client = factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/auth/login", LoginBody("nobody@nowhere.test", PartnerSecret));
+
+        // Identical outcome to a wrong secret — a probe cannot tell "no such login" from "wrong secret".
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        resp.Content.Headers.ContentType!.MediaType.Should().Be("application/problem+json");
+    }
+
+    [Fact]
+    public async Task Partner_Minted_Token_Passes_Capability_Gate_On_Wallet_Read()
+    {
+        await using var factory = FactoryWithProvisionedPartner(new FakeWalletClient { Balance = 75.0 });
+
+        // 1) Log in and take the minted bearer.
+        using var loginClient = factory.CreateClient();
+        var login = await loginClient.PostAsJsonAsync("/v1/partner/auth/login", LoginBody(PartnerLogin, PartnerSecret));
+        login.StatusCode.Should().Be(HttpStatusCode.OK);
+        var token = (await login.Content.ReadFromJsonAsync<LoginDto>())!.Token;
+
+        // 2) Call a partner-capability-gated route with the REAL bearer — NO X-User-Id / X-User-Roles
+        //    edge headers. A 200 proves the minted token satisfies Layer 1 (aud=jeeb-clients) AND the
+        //    Layer 2 partner.wallet.read.own capability, end to end.
+        using var bearerClient = factory.CreateClient();
+        bearerClient.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+        var resp = await bearerClient.GetAsync("/v1/partner/wallet");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "a gateway-minted partner token must pass the ADR-005 partner capability gate");
+    }
+
     // ── DTOs + fake ───────────────────────────────────────────────────────────────────
+
+    private sealed record LoginDto(string? Token, string? AccessToken, string? RefreshToken, PartnerDto? Partner);
+    private sealed record PartnerDto(Guid PartnerId, string? Login, string? DisplayName, string? Role);
 
     private sealed record MoveDto(Guid TransactionId, double Amount, double Fees, string Status);
     private sealed record PreviewDto(Guid JeeberId, double GrossAmount, double Fees, double NetToJeeber, string? Summary);

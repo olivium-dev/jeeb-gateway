@@ -1,4 +1,8 @@
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
 using JeebGateway.Partner;
+using JeebGateway.Partner.Auth;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -42,6 +46,31 @@ public static class PartnerWalletExtensions
         // Scoped: depends on the scoped ServiceWalletClient.
         services.AddScoped<IPartnerWalletService, PartnerWalletService>();
 
+        // ── PP-1: partner login front door (POST /v1/partner/auth/login) ──────────────────────
+        // Admin-provisioned credential roster (no secrets recoverable — SHA-256 hashes only). Validate
+        // the top-level section AND each present row at startup (ValidateOnStart) so a malformed roster
+        // fails the host loudly, not at first login (dotnet-options-pattern). An EMPTY roster is valid
+        // (dev/CI seed the store at runtime through the [DevOnly] hook).
+        services
+            .AddOptions<PartnerAuthOptions>()
+            .Bind(config.GetSection(PartnerAuthOptions.SectionName))
+            .Validate(ValidatePartnerAuthRows, "PartnerAuth: one or more provisioned credential rows are invalid.")
+            .ValidateOnStart();
+
+        // Singleton so a [DevOnly]-seeded credential persists across scoped requests within a host.
+        services.AddSingleton<IPartnerCredentialStore, PartnerCredentialStore>();
+
         return services;
     }
+
+    /// <summary>
+    /// Row-level DataAnnotations validation over the partner credential roster (the top-level
+    /// <c>.ValidateDataAnnotations()</c> does not recurse into list items). Empty roster passes.
+    /// </summary>
+    private static bool ValidatePartnerAuthRows(PartnerAuthOptions options)
+        => options.Credentials.All(row =>
+        {
+            var ctx = new ValidationContext(row);
+            return Validator.TryValidateObject(row, ctx, new List<ValidationResult>(), validateAllProperties: true);
+        });
 }
