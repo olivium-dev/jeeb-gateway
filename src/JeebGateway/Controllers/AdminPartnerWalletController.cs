@@ -6,6 +6,7 @@ using JeebGateway.Partner;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using WalletApiException = JeebGateway.service.ServiceWallet.ApiException;
 
 namespace JeebGateway.Controllers;
@@ -31,11 +32,16 @@ namespace JeebGateway.Controllers;
 public sealed class AdminPartnerWalletController : PartnerControllerBase
 {
     private readonly IPartnerWalletService _partner;
+    private readonly PartnerWalletOptions _options;
     private readonly ILogger<AdminPartnerWalletController> _log;
 
-    public AdminPartnerWalletController(IPartnerWalletService partner, ILogger<AdminPartnerWalletController> log)
+    public AdminPartnerWalletController(
+        IPartnerWalletService partner,
+        IOptions<PartnerWalletOptions> options,
+        ILogger<AdminPartnerWalletController> log)
     {
         _partner = partner;
+        _options = options.Value;
         _log = log;
     }
 
@@ -52,16 +58,40 @@ public sealed class AdminPartnerWalletController : PartnerControllerBase
         [FromBody] PartnerCashCreditRequest body,
         CancellationToken ct)
     {
-        // Resolve the acting admin for the audit trail (Layer 1/2 already enforced admin capability).
-        UserIdentity.TryGetUserId(HttpContext, out var operatorId, out _);
+        // FAIL CLOSED on operator attribution: this path CREATES money (system→partner). The admin
+        // capability gate can pass on the roles claim/header alone, so an edge that sends admin roles
+        // without a user id would otherwise resolve an EMPTY operator and still mint money with no
+        // attributable actor. Refuse (401) unless the acting admin resolves to a valid holder id — a
+        // money-in audit entry may never be written with an empty operator.
+        if (!TryResolveCallerId(out var operatorId, out var identityFailure))
+        {
+            return identityFailure;
+        }
+
+        // Fat-finger / abuse ceiling on the money-CREATION path (was absent — an unbounded credit was
+        // accepted). Cheap 400 before any wallet-service call; authoritative limits stay wallet-service's.
+        if (!TryEnforceAmountCeiling(body.Amount, _options.MaxTransferAmount, out var amountProblem))
+        {
+            return amountProblem;
+        }
+
         _log.LogInformation(
             "Admin partner cash-credit request: operator={OperatorId} partner={PartnerId} amount={Amount} evidence={Evidence}",
             operatorId, partnerId, body.Amount, body.EvidenceNote);
 
         try
         {
-            var result = await _partner.CreditPartnerFromCashAsync(partnerId, body.Amount, body.EvidenceNote, ct);
+            var result = await _partner.CreditPartnerFromCashAsync(
+                partnerId, operatorId, body.Amount, body.IdempotencyKey, body.EvidenceNote, ct);
             return Ok(result);
+        }
+        catch (PartnerWalletInFlightException ex)
+        {
+            return InFlightProblem(ex);
+        }
+        catch (PartnerWalletUncertainException ex)
+        {
+            return UncertainProblem(ex, _log);
         }
         catch (PartnerWalletException ex)
         {

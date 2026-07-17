@@ -50,8 +50,14 @@ public sealed class PartnerWalletController : PartnerControllerBase
         _log = log;
     }
 
-    /// <summary>GET /v1/partner/wallet — the caller partner's own wallet balance/summary.</summary>
+    /// <summary>
+    /// GET /v1/partner/wallet (and the documented alias /v1/partner/wallet/balance) — the caller
+    /// partner's own wallet balance/summary. Both routes resolve the SAME action so a consumer coding
+    /// to either the shipped surface or the BUILD-REPORT §3.1 documented path never 404s (contract
+    /// drift fix; pinned by PartnerWalletRouteContractTests).
+    /// </summary>
     [HttpGet]
+    [HttpGet("balance")]
     [ProducesResponseType(typeof(PartnerWalletBalanceResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
@@ -153,6 +159,14 @@ public sealed class PartnerWalletController : PartnerControllerBase
                 partnerId, body.JeeberId, body.Amount, body.IdempotencyKey, body.Note, ct);
             return Ok(result);
         }
+        catch (PartnerWalletInFlightException ex)
+        {
+            return InFlightProblem(ex);
+        }
+        catch (PartnerWalletUncertainException ex)
+        {
+            return UncertainProblem(ex, _log);
+        }
         catch (PartnerWalletException ex)
         {
             return PartnerProblem(ex);
@@ -163,21 +177,7 @@ public sealed class PartnerWalletController : PartnerControllerBase
         }
     }
 
-    /// <summary>
-    /// Cheap fat-finger guardrail: reject an amount above the configured ceiling BEFORE any
-    /// wallet-service call. The authoritative limits (balance, fees, BR caps) stay wallet-service's.
-    /// </summary>
+    /// <summary>Reject an amount above the configured ceiling BEFORE any wallet-service call.</summary>
     private bool TryValidateAmount(double amount, out IActionResult problem)
-    {
-        if (amount > _options.MaxTransferAmount)
-        {
-            problem = Problem(
-                title: $"amount exceeds the maximum permitted per operation ({_options.MaxTransferAmount}).",
-                statusCode: StatusCodes.Status400BadRequest,
-                type: "https://jeeb.dev/errors/amount-too-large");
-            return false;
-        }
-        problem = null!;
-        return true;
-    }
+        => TryEnforceAmountCeiling(amount, _options.MaxTransferAmount, out problem);
 }

@@ -47,4 +47,30 @@ public sealed class PartnerWalletOptions
     /// </summary>
     [Range(0.01, double.MaxValue)]
     public double MaxTransferAmount { get; init; } = 100_000d;
+
+    // ── BOPLA / target-type guard (OWASP API3) ──────────────────────────────────────────────
+    //
+    // A partner's top-up destination and an admin credit's target are resolved from a caller-supplied
+    // holder GUID. Without a type check a partner could direct their own money into ANY provisioned
+    // wallet (another partner, a customer, an admin), and the route/DTO name "jeeber" would misstate
+    // the enforced constraint. When ENABLED, a move is rejected unless the destination/source holder's
+    // wallet-service HolderType is in the configured set for its role.
+
+    /// <summary>
+    /// When <c>true</c>, enforce that a top-up destination is a jeeber and an admin-credit target is a
+    /// partner (verified against wallet-service <c>WalletHolder.HolderType</c>). DEFAULT <c>false</c>:
+    /// the enforced vocabulary depends on wallet-service's holder-type tokens, which are pending owner
+    /// confirmation (Q5). Until then the "any provisioned wallet" trust boundary is documented and
+    /// accepted; flip this on (and set the token lists below) once Q5 is answered. Enforcement only
+    /// ever REJECTS a confirmed-mismatch holder — an empty/unknown HolderType degrades open with a log.
+    /// </summary>
+    public bool EnforceHolderType { get; init; } = false;
+
+    /// <summary>Comma-separated wallet-service <c>HolderType</c> tokens that count as a jeeber (top-up destination).</summary>
+    [Required, MinLength(1), MaxLength(128)]
+    public string JeeberHolderTypes { get; init; } = "jeeber";
+
+    /// <summary>Comma-separated wallet-service <c>HolderType</c> tokens that count as a partner (admin-credit target).</summary>
+    [Required, MinLength(1), MaxLength(128)]
+    public string PartnerHolderTypes { get; init; } = "partner";
 }

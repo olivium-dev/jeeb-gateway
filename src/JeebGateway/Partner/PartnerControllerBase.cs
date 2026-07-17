@@ -61,4 +61,48 @@ public abstract class PartnerControllerBase : ControllerBase
             title: ex.Message,
             statusCode: StatusCodes.Status409Conflict,
             type: "https://jeeb.dev/errors/partner-wallet-precondition");
+
+    /// <summary>
+    /// Map an idempotency-dedup refusal (a matching money move is already pending or awaiting
+    /// reconciliation) to a 409 — the caller must NOT retry; money never moves twice.
+    /// </summary>
+    protected IActionResult InFlightProblem(PartnerWalletInFlightException ex)
+        => Problem(
+            title: ex.Message,
+            statusCode: StatusCodes.Status409Conflict,
+            type: "https://jeeb.dev/errors/partner-wallet-in-flight");
+
+    /// <summary>
+    /// Map an ambiguous, possibly-committed wallet move to a 502. Logged server-side as an error (the
+    /// key is locked for operator reconciliation); the caller is told not to blindly resubmit.
+    /// </summary>
+    protected IActionResult UncertainProblem(PartnerWalletUncertainException ex, ILogger log)
+    {
+        log.LogError(ex,
+            "Partner wallet move outcome UNCERTAIN on {Method} {Path}; key locked for reconciliation.",
+            Request.Method, Request.Path);
+        return Problem(
+            title: ex.Message,
+            statusCode: StatusCodes.Status502BadGateway,
+            type: "https://jeeb.dev/errors/partner-wallet-uncertain");
+    }
+
+    /// <summary>
+    /// Cheap fat-finger guardrail shared by every money-moving action: reject an amount above the
+    /// configured ceiling BEFORE any wallet-service call (a 400, NOT a fee rule — the authoritative
+    /// limits stay wallet-service's). Applied on the admin cash-CREATE path too (money creation).
+    /// </summary>
+    protected bool TryEnforceAmountCeiling(double amount, double maxAmount, out IActionResult problem)
+    {
+        if (amount > maxAmount)
+        {
+            problem = Problem(
+                title: $"amount exceeds the maximum permitted per operation ({maxAmount}).",
+                statusCode: StatusCodes.Status400BadRequest,
+                type: "https://jeeb.dev/errors/amount-too-large");
+            return false;
+        }
+        problem = null!;
+        return true;
+    }
 }

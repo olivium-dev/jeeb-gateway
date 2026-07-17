@@ -60,6 +60,14 @@ public sealed class PartnerCashCreditRequest
     /// </summary>
     [Required, MinLength(4), MaxLength(280)]
     public string EvidenceNote { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Client-supplied idempotency key so a double-submitted / retried cash-credit does not
+    /// DOUBLE-CREATE money for a single physical cash handover. Enforced as a real dedup key
+    /// (gateway-side, before the wallet-service saga) — REQUIRED on this money-creation path.
+    /// </summary>
+    [Required, MinLength(8), MaxLength(128)]
+    public string IdempotencyKey { get; init; } = string.Empty;
 }
 
 // ── Responses ───────────────────────────────────────────────────────────────────────────

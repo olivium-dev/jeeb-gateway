@@ -34,8 +34,12 @@ public interface IPartnerWalletService
 
     /// <summary>
     /// Credit a partner wallet with cash an admin recorded offline: a system-wallet → partner-wallet
-    /// saga move. Evidence note is carried onto the wallet-service transaction.
+    /// saga move. Idempotency-keyed (a double-submit never double-creates money), evidence note is
+    /// carried onto the wallet-service transaction, and a durable, immutable admin cash-in audit row is
+    /// written (operator, partner, amount, evidence, txId) — a money-creation event may never be
+    /// un-attributed, so <paramref name="operatorId"/> is a hard precondition resolved by the caller.
     /// </summary>
     Task<PartnerWalletMoveResponse> CreditPartnerFromCashAsync(
-        Guid partnerId, double amount, string evidenceNote, CancellationToken ct);
+        Guid partnerId, Guid operatorId, double amount, string idempotencyKey, string evidenceNote,
+        CancellationToken ct);
 }
