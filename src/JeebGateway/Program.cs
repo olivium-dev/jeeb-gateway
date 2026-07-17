@@ -1110,6 +1110,12 @@ builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient
     return new JeebGateway.service.ServiceWallet.ServiceWalletClient(baseUrl, client);
 });
 
+// Jeeb Partner Portal wallet BFF (partner-wallet-bff) — validated options + the thin
+// saga-orchestration service. Reuses the scoped ServiceWalletClient registered above and the
+// IJeebWalletLedgerReader wired below; adds no new HttpClient (all partner money moves flow through
+// the same reused wallet-service saga). See Extensions/PartnerWalletExtensions.cs.
+builder.Services.AddPartnerWallet(builder.Configuration);
+
 // REALAPP fix — GET /v1/jeeb/wallet/ledger reads the holder's OWN transactions
 // directly from the wallet DB (transactionheader + transactiondetails, joined via
 // wallets.holderid), because the generic wallet-service exposes no ledger LIST
