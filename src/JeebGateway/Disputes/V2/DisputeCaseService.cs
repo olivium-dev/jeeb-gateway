@@ -101,7 +101,27 @@ public sealed class DisputeCaseService : IDisputeCaseService
 
         // One active case per delivery — the admin queue cannot
         // accumulate duplicates from a frustrated user mashing escalate.
-        var active = await _store.GetActiveForDeliveryAsync(input.DeliveryId, ct).ConfigureAwait(false);
+        // Fail-open (JEBV4-39 state-service-fail-open precedent): this dedup is
+        // backed by a state-service prefix-scan (GetActiveForDeliveryAsync →
+        // FindByPrefix). When that prefix-scan is unavailable on the deployed
+        // state-service it must NOT sink a legitimate escalate — degrade to
+        // "no active case" and proceed to create. The durable single-key
+        // Idempotency-Key replay guard above (dispute-{deliveryId}) remains the
+        // real dedup, so a double-tap still returns the existing case instead of
+        // opening a duplicate.
+        DisputeCase? active;
+        try
+        {
+            active = await _store.GetActiveForDeliveryAsync(input.DeliveryId, ct).ConfigureAwait(false);
+        }
+        catch (JeebStateServiceApiException ex)
+        {
+            _log.LogWarning(ex,
+                "event=dispute.dedup.degraded delivery_id={DeliveryId} reason=state_service_prefix_scan_unavailable proceeding_to_create=true",
+                input.DeliveryId);
+            active = null;
+        }
+
         if (active is not null)
         {
             return new EscalateResult(EscalateOutcome.AlreadyEscalated, active);
