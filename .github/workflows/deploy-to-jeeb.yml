@@ -1,243 +1,63 @@
-# Deploy to Jeeb — zero-downtime Docker Swarm deploy over the Cloudflare tunnel.
-#
-# Follows the olivium per-service deploy-to-<server>.yml pattern (workflow_dispatch
-# + cloudflared SSH + ghcr image + docker service), hardened per the locked deploy
-# policy (olivium-deployment/README.md):
-#   * zero-downtime: docker service UPDATE (rollback-on-failure);
-#     CREATE only when the service is absent  -- NEVER `service rm` + `service create`
-#   * update/rollback order = stop-first: the published port uses mode=host on a
-#     single-node swarm, so start-first deadlocks ("host-mode port already in use
-#     on 1 node") because the old task still holds the host port. stop-first frees
-#     the port first (brief blip), which is correct for host-mode single node.
-#   * key-only SSH from a secret (fail-closed; no password in YAML, unlike legacy)
-#   * registry creds via GitHub secrets, never inlined (no demo-password literals)
-#   * HTTP health gate after deploy, with auto-rollback to the previous image
-#
-# This service is the Jeeb gateway: a JWT BFF that aggregates downstream services
-# via Services__*__BaseUrl config injected on first create. It also owns a Postgres
-# schema (db/migrations/) for KYC, users, disputes, and financial ledger. Migrations
-# are applied via db/apply.sh before the docker service update (JEB-1490); the
-# required DATABASE_URL credential is injected from the JEEB_DATABASE_URL secret.
-#
-# Required secrets (set org-selected to the Jeeb repos, or per-repo):
-#   JEEB_SSH_PRIVATE_KEY    -- deploy private key authorized on the Jeeb swarm host
-#   JEEB_JWT_SIGNING_KEY    -- gateway JWT signing key (injected as env on first create)
-#   JEEB_JWT_PHONE_PEPPER   -- gateway phone-pepper secret (injected on first create)
-#   JEEB_PUSH_INTERNAL_API_KEY -- required X-Api-Key used by the gateway's typed
-#                              topic client when calling push-notification-service.
-#                              Injected as PushNotificationServiceApi__InternalApiKey
-#                              on both update and first create; never printed.
-#   JEEB_TOKEN_MINT_KEY     -- F3: privileged-caller key gating POST /auth/tokens.
-#                              OPTIONAL — when unset, the gate falls back to the JWT
-#                              signing key (a caller holding that key can already
-#                              forge tokens, so reusing it adds no new attack surface
-#                              while closing the *unauthenticated* mint hole). Set a
-#                              dedicated value to rotate the mint credential
-#                              independently of the JWT key. Injected via env-add on
-#                              every deploy so the running gateway picks it up.
-#   UMJWT_SIGNING_KEY       -- H-B5: the key user-management SIGNS its re-issued
-#                              role-switch tokens with (UM Jwt:Key, iss=user-management).
-#                              The gateway's "UserManagement" JwtBearer scheme VERIFIES
-#                              UM-issued tokens with this key. Without it the gateway's
-#                              UmJwt:SigningKey falls back to its OWN mint key (a DIFFERENT
-#                              key), so every UM-issued token 401s (split-signer gap).
-#                              Injected via env-add (UmJwt__SigningKey) on update + create.
-#                              This is the leaked shared fleet key (known-debt #6); a
-#                              fleet-wide rotation is tracked separately — do NOT reuse it
-#                              as the gateway's own mint key (JeebJwt__SigningKey).
+# DEV Jeeb gateway deployment. The gateway is the sole public ingress; all
+# credentials are materialized in a versioned Swarm secret mounted directly as
+# ASP.NET Core's appsettings.Production.json.
 
 name: Deploy to Jeeb
 
 on:
   workflow_dispatch:
     inputs:
-      # `registry` is a fixed constant (always ghcr.io); it is set as a job-level env
-      # (REGISTRY) rather than a workflow_dispatch input so the dispatch input count
-      # stays at GitHub's hard limit of 25 after `durable_requests` was added (PR #105).
-      # 26 inputs makes the workflow un-dispatchable (HTTP 422 at dispatch time).
-      #
-      # FeatureFlags spine flags are NOT added as one-input-per-flag (that path hit the cap).
-      # They are consolidated into the single generic `feature_flags` Key=Value map input
-      # (declared below), parsed in the deploy job into FeatureFlags__* env vars. This added
-      # ConversationAutoCreate (S05 H7/H9b) AND every future spine flag with ZERO new inputs —
-      # the workflow can never re-hit the 25-input cap on flag growth. The former dedicated
-      # `use_upstream_kyc`/`use_upstream_cdn` boolean inputs were folded into the map (net -2 +1),
-      # leaving 24 inputs (one slot spare).
-      service_name:    { description: 'Swarm service name',              required: true, default: 'jeeb-gateway' }
-      internal_port:   { description: 'Container port',                  required: true, default: '8080' }
-      external_port:   { description: 'Published host port (Jeeb swarm)',required: true, default: '10000' }
-      health_path:     { description: 'HTTP health path',                required: true, default: '/api/health' }
-      server_hostname: { description: 'Cloudflare tunnel hostname',      required: true, default: 'jeeb-ssh.fds-1.com' }
-      server_user:     { description: 'SSH user',                        required: true, default: 'ec2-user' }
-      jwt_issuer:                  { description: 'JWT issuer',                       required: true, default: 'https://jeeb.fds-1.com' }
-      jwt_audience:                { description: 'JWT audience',                     required: true, default: 'jeeb-mobile' }
-      chat_base_url:               { description: 'Chat service base URL',            required: true, default: 'http://192.168.2.50:10028' }
-      user_management_base_url:    { description: 'User-management service base URL',  required: true, default: 'http://192.168.2.50:10001' }
-      wallet_base_url:             { description: 'Wallet service base URL',          required: true, default: 'http://192.168.2.50:10014' }
-      notification_base_url:       { description: 'Notification service base URL',     required: true, default: 'http://192.168.2.50:10026' }
-      push_notification_base_url:  { description: 'Push-notification service base URL',required: true, default: 'http://192.168.2.50:10040' }
-      otp_base_url:                { description: 'OTP service base URL',             required: true, default: 'http://192.168.2.50:10037' }
-      matching_base_url:           { description: 'Matching service base URL (native host)', required: true, default: 'http://192.168.2.50:10025' }
-      delivery_base_url:           { description: 'Delivery service base URL (live Jeeb swarm publishes on :10055 — S07 H6c accept->delivery-create)', required: true, default: 'http://192.168.2.50:10055' }
-      # Auth:Otp:ApplicationId — the Jeeb tenant's ApplicationRef GUID in the SHARED
-      # one-time-password service (JEB-1516). AuthOtpController forwards it on every
-      # SendOTP/ValidateOTP (reads OtpSignInOptions.ApplicationId at AuthOtpController.cs:96/148).
-      # appsettings.Production.json:26 commits an intentionally-empty placeholder, documented to
-      # be injected at deploy time per fleet law (live config via GHA, not committed). Without it
-      # the gateway forwards an empty Guid => 502 on /v1/auth/otp/request + 401 on verify. Plain
-      # (non-secret) GUID, so it is a workflow input, NOT a GitHub secret. Default = b05, the same
-      # value seeded into jeeb-otpdb by the OTP deploy, so a no-arg dispatch wires the spine.
-      otp_application_id:          { description: 'Auth__Otp__ApplicationId — Jeeb ApplicationRef in shared one-time-password', required: true, default: '0d51afe1-499f-4a29-a55a-36d2dd223b05' }
-      # S03 / ADR-0004 — KYC + CDN BFF seam. The gateway is the only aggregator;
-      # it proxies/composes the OWNING kyc-service (own jeeb_kyc PG, no sibling
-      # calls) and the cdn-service signed-PUT broker, and on approve appends the
-      # jeeber role in user-management. Default-on against the LIVE swarm hosts.
-      # These are plain (non-secret) base URLs + boolean flags, so workflow inputs,
-      # not GitHub secrets. The values are also baked into appsettings.Production.json;
-      # injecting them here makes the flag/host operator-controllable on every deploy.
-      kyc_base_url:                { description: 'Services__Kyc__BaseUrl — owning kyc-service (live swarm host)',  required: true, default: 'http://192.168.2.50:10074' }
-      cdn_base_url:                { description: 'Services__Cdn__BaseUrl — cdn-service signed-PUT broker (live swarm host)', required: true, default: 'http://192.168.2.50:10072' }
-      # ── GENERIC FeatureFlags map (the spine flag overlay) ──────────────────────────
-      # GitHub caps workflow_dispatch at 25 inputs; this workflow already hit that cap once
-      # (the fixed `registry` constant was moved to a job-level env to claw a slot back —
-      # see line ~48). To keep adding spine FeatureFlags without ever re-hitting the cap, the
-      # per-flag boolean inputs are CONSOLIDATED into this ONE generic map instead of one
-      # input per flag. `feature_flags` is a comma-separated list of `Key=Value` pairs whose
-      # Key is the LAST segment of a `FeatureFlags:<...>:Enabled` (or `FeatureFlags:UseUpstream:<...>`)
-      # config path; the deploy job maps each to its full `FeatureFlags__*` env var and injects
-      # it via --env-add on the SAME zero-downtime service update (and --env on first create).
-      #
-      # This input REPLACES the former dedicated `use_upstream_kyc` / `use_upstream_cdn`
-      # boolean inputs (net -2 +1 = 24 inputs, one slot spare). It is ADDITIVE and
-      # backward-compatible:
-      #   * Empty (DEFAULT '') => emit NO map-driven flag mutation. On `docker service update
-      #     --image ...` every unlisted env var is PRESERVED, so a no-arg deploy leaves all
-      #     FeatureFlags exactly as the running service had them. On a FRESH create the gateway
-      #     reads appsettings.Production.json, which already bakes UseUpstream.Kyc=true and
-      #     UseUpstream.Cdn=true — so dropping the two dedicated inputs changes NOTHING for a
-      #     default deploy (same true values, just sourced from committed config not an input).
-      #   * Recognised keys (case-insensitive), each mapping to its env var:
-      #       ConversationAutoCreate=<bool> -> FeatureFlags__ConversationAutoCreate__Enabled   (S05 H7/H9b / JEB-50)
-      #       UseUpstreamKyc=<bool>         -> FeatureFlags__UseUpstream__Kyc                   (S03 / ADR-0004)
-      #       UseUpstreamCdn=<bool>         -> FeatureFlags__UseUpstream__Cdn                   (S03 / ADR-0004)
-      #       UseUpstreamOffer=<bool>       -> FeatureFlags__UseUpstream__Offer                 (S07 — auction/accept)
-      #       UseUpstreamDelivery=<bool>    -> FeatureFlags__UseUpstream__Delivery              (S09/S13/S15 — canonical delivery SM-1)
-      #     NOTE: FeatureFlags__UseUpstream__Offer AND FeatureFlags__UseUpstream__Delivery are
-      #     ALSO injected UNCONDITIONALLY =true on every deploy (see the dedicated --env-add/--env
-      #     lines in the update & create branches below), so S07 routes through
-      #     UpstreamPendingOffersStore and S09/S13/S15 route through the canonical delivery
-      #     state-machine (SM-1: Ordered/Picked/InTransit/AtDoor/Done, trigger-keyed PATCH,
-      #     AtDoor OTP handover, settlement-on-Done) even when the map keys are omitted.
-      #     Passing UseUpstreamOffer / UseUpstreamDelivery here is redundant-but-harmless
-      #     (same value, idempotent).
-      #     Future spine flags are added to the map's case table below — NO new input, NO cap risk.
-      #   * `durable_requests`, `whisper_fake`, `dev_endpoints`, `swagger_ui` keep their OWN
-      #     dedicated inputs UNCHANGED (their 3-state / secret-coupled semantics are load-bearing
-      #     and out of scope here). In particular `durable_requests` is untouched, so a deploy
-      #     that passes durable_requests=true STILL arms the durable path exactly as before —
-      #     the durable flag, currently ON in production, STAYS ON.
-      #   * Unknown keys are IGNORED with a warning (fail-open on parse, never fail the deploy
-      #     on a typo); a value other than true/false is rejected (guardrail: no silent garbage
-      #     into an env var).
-      # Example: feature_flags='ConversationAutoCreate=true' arms H7 broadcasting auto-create
-      # while leaving Kyc/Cdn at their baked-true defaults.
+      service_name:    { description: 'Swarm service name', required: true, default: 'jeeb-gateway' }
+      internal_port:   { description: 'Container port', required: true, default: '8080' }
+      external_port:   { description: 'Published DEV gateway port', required: true, default: '10000' }
+      health_path:     { description: 'HTTP health path', required: true, default: '/api/health' }
+      server_hostname: { description: 'Cloudflare tunnel hostname', required: true, default: 'jeeb-ssh.fds-1.com' }
+      server_user:     { description: 'SSH user', required: true, default: 'ec2-user' }
+      jwt_issuer:       { description: 'JWT issuer', required: true, default: 'https://jeeb.fds-1.com' }
+      jwt_audience:     { description: 'JWT audience', required: true, default: 'jeeb-mobile' }
+      chat_base_url:    { description: 'Chat base URL', required: true, default: 'http://192.168.2.50:10028' }
+      user_management_base_url: { description: 'User-management base URL', required: true, default: 'http://192.168.2.50:10001' }
+      wallet_base_url: { description: 'Wallet base URL', required: true, default: 'http://192.168.2.50:10014' }
+      notification_base_url: { description: 'Notification base URL', required: true, default: 'http://192.168.2.50:10026' }
+      push_notification_base_url: { description: 'Private push base URL', required: true, default: 'http://192.168.2.50:10040' }
+      otp_base_url: { description: 'OTP base URL', required: true, default: 'http://192.168.2.50:10037' }
+      matching_base_url: { description: 'Matching base URL', required: true, default: 'http://192.168.2.50:10025' }
+      delivery_base_url: { description: 'Delivery base URL', required: true, default: 'http://192.168.2.50:10055' }
+      otp_application_id: { description: 'Jeeb ApplicationRef', required: true, default: '0d51afe1-499f-4a29-a55a-36d2dd223b05' }
+      kyc_base_url: { description: 'KYC base URL', required: true, default: 'http://192.168.2.50:10074' }
+      cdn_base_url: { description: 'CDN base URL', required: true, default: 'http://192.168.2.50:10072' }
       feature_flags:
-        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,Heartbeat=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamDelivery, UseUpstreamChat, Heartbeat. Empty = preserve running flags (baked appsettings defaults on fresh create). NOTE: UseUpstream.Offer AND UseUpstream.Delivery are forced =true unconditionally every deploy regardless of this input (S07 / S09-S13-S15). S08: pass UseUpstreamChat=true to arm the conversation BFF (default off -> 503).'
+        description: 'DEV flag overlay: ConversationAutoCreate, UseUpstreamKyc/Cdn/Offer/Delivery/Chat, Heartbeat'
         required: false
         default: ''
-      # S04 / Track C — REAL OpenAI Whisper STT seam. The gateway selects the real
-      # WhisperClient ONLY when Whisper__FakeTranscribe=false AND Whisper__ApiKey is
-      # present; otherwise it uses the network-free FakeWhisperClient. The OpenAI key
-      # is NEVER an input or committed value — it is the GitHub secret OPENAI_API_KEY,
-      # injected below as Whisper__ApiKey. Set whisper_fake='false' to arm real STT
-      # (requires the OPENAI_API_KEY secret to be set on this repo). Default 'true'
-      # keeps the deterministic fake so a no-arg deploy never depends on the key.
       whisper_fake:
-        description: 'Whisper__FakeTranscribe. true (default) = deterministic fake STT; false = REAL OpenAI Whisper (requires OPENAI_API_KEY secret).'
+        description: 'Use deterministic fake Whisper transcription'
         required: false
         default: 'true'
         type: choice
-        options:
-          - 'true'
-          - 'false'
-      # S05 / ADR-006 — DURABLE request-create path (stateless gateway + jeeb-state-service
-      # saga_bundles ledger). The durable idempotent POST /requests path is already BUILT and
-      # deployed behind FeatureFlags:DurableRequests:Enabled, but DORMANT (flag OFF) because no
-      # workflow input could flip it and owner law forbids a hand `docker service update
-      # --env-add` from an operator shell. This input is the ONLY supported way to set
-      # FeatureFlags__DurableRequests__Enabled on the running gateway. It is injected via
-      # --env-add on EVERY deploy (update + create), mirroring whisper_fake, so the value is
-      # deterministic and operator-controllable rather than "whatever the container last had".
-      # Plain boolean (non-secret) => workflow input, NOT a GitHub secret.
-      #   'false' (DEFAULT) => FeatureFlags__DurableRequests__Enabled=false. PRESERVES the
-      #                        current behaviour: a no-arg deploy keeps the durable path DORMANT
-      #                        (gateway uses the legacy in-memory create path; A4 replay still
-      #                        returns a fresh UUID). Nothing changes unless explicitly armed.
-      #   'true'            => FeatureFlags__DurableRequests__Enabled=true. Arms the stateless
-      #                        durable create path (idempotent dedup via jeeb-state-service
-      #                        saga_bundles — A4 replay returns the SAME id). The gateway stays
-      #                        stateless: the ledger lives in jeeb-state-service, not the gateway.
+        options: ['true', 'false']
       durable_requests:
-        description: 'FeatureFlags__DurableRequests__Enabled. false (default) = legacy create path (current behaviour, flag OFF); true = stateless durable idempotent create via jeeb-state-service.'
+        description: 'Enable durable request create'
         required: false
         default: 'false'
         type: choice
-        options:
-          - 'false'
-          - 'true'
-      # DEV-ONLY seed/inspect surface (/dev/*). This input is the ONLY supported way to
-      # toggle Features__DevEndpoints__Enabled on the running gateway — never set it via a
-      # manual `docker service update --env-add/--env-rm` from an operator shell, and never
-      # commit `Features__DevEndpoints__Enabled=true` to any appsettings file. Three states:
-      #   'preserve' (DEFAULT) => the deploy emits NO dev-flag mutation, so whatever the flag
-      #                           currently is on the running service PERSISTS untouched. A
-      #                           `docker service update --image ...` keeps all unlisted env
-      #                           vars, so a normal no-arg deploy never changes /dev/*. A fresh
-      #                           prod that never set the flag stays OFF (404); an environment
-      #                           explicitly turned ON stays ON across redeploys. This is the
-      #                           prod-safe AND footgun-free default.
-      #   'true'                => env-add  Features__DevEndpoints__Enabled=true  (/dev/* ON).
-      #   'false'               => env-rm   Features__DevEndpoints__Enabled       (scrub => 404).
-      # Set 'true'/'false' ONLY when you intend to change the flag (e.g. arm/disarm the E2E
-      # seeding harness). Applied additively on the SAME zero-downtime `docker service update`
-      # that injects Security__TokenMint__*.
+        options: ['false', 'true']
       dev_endpoints:
-        description: 'DEV-only /dev/* flag (Features__DevEndpoints__Enabled). preserve (default) = leave as-is; true = enable; false = scrub (404).'
+        description: 'DEV-only /dev routes; preserve keeps the running non-secret flag'
         required: false
         default: 'preserve'
         type: choice
-        options:
-          - 'preserve'
-          - 'true'
-          - 'false'
-      # Swagger UI / OpenAPI surface (/swagger*). This input is the ONLY supported way to
-      # toggle Features__Swagger__Enabled on the running gateway — never set it via a manual
-      # `docker service update --env-add/--env-rm` from an operator shell, and never commit
-      # `Features__Swagger__Enabled=true` to any appsettings file. jeeb.fds-1.com is PUBLIC, so
-      # when ON the surface is ADMIN-ROLE-GATED in Program.cs (admin token => 200, non-admin
-      # => 404); it is NEVER the open Development/Testing branch, and this input must NEVER be
-      # used in place of flipping ASPNETCORE_ENVIRONMENT (which would open the unauthenticated
-      # /dev + Swagger surface). Three states, mirroring dev_endpoints:
-      #   'preserve' (DEFAULT) => emit NO swagger-flag mutation; whatever the running service has
-      #                           PERSISTS untouched across a `docker service update --image ...`.
-      #                           A fresh prod that never set the flag stays OFF (404).
-      #   'true'                => env-add  Features__Swagger__Enabled=true  (/swagger* ON, admin-gated).
-      #   'false'               => env-rm   Features__Swagger__Enabled       (scrub => 404).
-      # Applied additively on the SAME zero-downtime `docker service update` as dev_endpoints.
+        options: ['preserve', 'true', 'false']
       swagger_ui:
-        description: 'Swagger /swagger* flag (Features__Swagger__Enabled). preserve (default) = leave as-is; true = enable (admin-gated, non-admin 404); false = scrub (404).'
+        description: 'Admin-gated Swagger; preserve keeps the running non-secret flag'
         required: false
         default: 'preserve'
         type: choice
-        options:
-          - 'preserve'
-          - 'true'
-          - 'false'
+        options: ['preserve', 'true', 'false']
 
 permissions:
   contents: read
   packages: write
-  id-token: write
 
 concurrency:
   group: deploy-jeeb-jeeb-gateway
@@ -246,328 +66,527 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-22.04
+    environment: DEV
     env:
-      REGISTRY: ghcr.io
-      IMAGE: ghcr.io/olivium-dev/jeeb-gateway
+      DEPLOY_REGISTRY: ghcr.io
+      IMAGE_REPOSITORY: olivium-dev/jeeb-gateway
+      DEPLOY_SERVICE_NAME: ${{ inputs.service_name }}
+      DEPLOY_INTERNAL_PORT: ${{ inputs.internal_port }}
+      DEPLOY_EXTERNAL_PORT: ${{ inputs.external_port }}
+      DEPLOY_HEALTH_PATH: ${{ inputs.health_path }}
+      DEPLOY_SERVER_HOSTNAME: ${{ inputs.server_hostname }}
+      DEPLOY_SERVER_USER: ${{ inputs.server_user }}
+      JWT_ISSUER: ${{ inputs.jwt_issuer }}
+      JWT_AUDIENCE: ${{ inputs.jwt_audience }}
+      CHAT_BASE_URL: ${{ inputs.chat_base_url }}
+      USER_MANAGEMENT_BASE_URL: ${{ inputs.user_management_base_url }}
+      WALLET_BASE_URL: ${{ inputs.wallet_base_url }}
+      NOTIFICATION_BASE_URL: ${{ inputs.notification_base_url }}
+      PUSH_BASE_URL: ${{ inputs.push_notification_base_url }}
+      OTP_BASE_URL: ${{ inputs.otp_base_url }}
+      MATCHING_BASE_URL: ${{ inputs.matching_base_url }}
+      DELIVERY_BASE_URL: ${{ inputs.delivery_base_url }}
+      OTP_APPLICATION_ID: ${{ inputs.otp_application_id }}
+      KYC_BASE_URL: ${{ inputs.kyc_base_url }}
+      CDN_BASE_URL: ${{ inputs.cdn_base_url }}
+      FEATURE_FLAGS: ${{ inputs.feature_flags }}
+      WHISPER_FAKE: ${{ inputs.whisper_fake }}
+      DURABLE_REQUESTS: ${{ inputs.durable_requests }}
+      DEV_ENDPOINTS: ${{ inputs.dev_endpoints }}
+      SWAGGER_UI: ${{ inputs.swagger_ui }}
+      APPSETTINGS_SECRET_PREFIX: jeeb_gateway_appsettings
+      APPSETTINGS_SECRET_TARGET: /app/appsettings.Production.json
+      PRIVATE_PUSH_PORT: '10040'
+      DEPLOY_DB_NAME: jeeb
     steps:
+      - name: Validate locked DEV deployment inputs
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$DEPLOY_REGISTRY" == ghcr.io ]] || fail "registry is not allowlisted"
+          [[ "$IMAGE_REPOSITORY" == olivium-dev/jeeb-gateway ]] || fail "image is not allowlisted"
+          [[ "$DEPLOY_SERVICE_NAME" == jeeb-gateway ]] || fail "service_name is not allowlisted"
+          [[ "$DEPLOY_INTERNAL_PORT" == 8080 ]] || fail "internal_port is not allowlisted"
+          [[ "$DEPLOY_EXTERNAL_PORT" == 10000 ]] || fail "external_port is not allowlisted"
+          [[ "$DEPLOY_HEALTH_PATH" == /api/health ]] || fail "health_path is not allowlisted"
+          [[ "$DEPLOY_SERVER_HOSTNAME" == jeeb-ssh.fds-1.com ]] || fail "server_hostname is not allowlisted"
+          [[ "$DEPLOY_SERVER_USER" == ec2-user ]] || fail "server_user is not allowlisted"
+          [[ "$JWT_ISSUER" == https://jeeb.fds-1.com ]] || fail "jwt_issuer is not allowlisted"
+          [[ "$JWT_AUDIENCE" == jeeb-mobile ]] || fail "jwt_audience is not allowlisted"
+          [[ "$CHAT_BASE_URL" == http://192.168.2.50:10028 ]] || fail "chat_base_url is not allowlisted"
+          [[ "$USER_MANAGEMENT_BASE_URL" == http://192.168.2.50:10001 ]] || fail "user_management_base_url is not allowlisted"
+          [[ "$WALLET_BASE_URL" == http://192.168.2.50:10014 ]] || fail "wallet_base_url is not allowlisted"
+          [[ "$NOTIFICATION_BASE_URL" == http://192.168.2.50:10026 ]] || fail "notification_base_url is not allowlisted"
+          [[ "$PUSH_BASE_URL" == http://192.168.2.50:10040 ]] || fail "push_notification_base_url is not allowlisted"
+          [[ "$OTP_BASE_URL" == http://192.168.2.50:10037 ]] || fail "otp_base_url is not allowlisted"
+          [[ "$MATCHING_BASE_URL" == http://192.168.2.50:10025 ]] || fail "matching_base_url is not allowlisted"
+          [[ "$DELIVERY_BASE_URL" == http://192.168.2.50:10055 ]] || fail "delivery_base_url is not allowlisted"
+          [[ "$OTP_APPLICATION_ID" == 0d51afe1-499f-4a29-a55a-36d2dd223b05 ]] || fail "otp_application_id is not allowlisted"
+          [[ "$KYC_BASE_URL" == http://192.168.2.50:10074 ]] || fail "kyc_base_url is not allowlisted"
+          [[ "$CDN_BASE_URL" == http://192.168.2.50:10072 ]] || fail "cdn_base_url is not allowlisted"
+          [[ "$DEPLOY_DB_NAME" == jeeb ]] || fail "database name is not allowlisted"
+          [[ "$WHISPER_FAKE" == true || "$WHISPER_FAKE" == false ]] || fail "whisper_fake is invalid"
+          [[ "$DURABLE_REQUESTS" == true || "$DURABLE_REQUESTS" == false ]] || fail "durable_requests is invalid"
+          [[ "$DEV_ENDPOINTS" == preserve || "$DEV_ENDPOINTS" == true || "$DEV_ENDPOINTS" == false ]] || fail "dev_endpoints is invalid"
+          [[ "$SWAGGER_UI" == preserve || "$SWAGGER_UI" == true || "$SWAGGER_UI" == false ]] || fail "swagger_ui is invalid"
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "GITHUB_SHA is invalid"
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || fail "run identity is invalid"
+          if [[ -n "$FEATURE_FLAGS" ]]; then
+            IFS=',' read -ra pairs <<< "$FEATURE_FLAGS"
+            for pair in "${pairs[@]}"; do
+              [[ "$pair" =~ ^(ConversationAutoCreate|UseUpstreamKyc|UseUpstreamCdn|UseUpstreamOffer|UseUpstreamDelivery|UseUpstreamChat|Heartbeat)=(true|false)$ ]] \
+                || fail "feature_flags contains a non-allowlisted pair"
+            done
+          fi
+
       - uses: actions/checkout@v4
 
-      - name: Validate push internal API key is configured (no echo)
+      - name: Validate required credentials without printing values
         env:
-          PUSH_INTERNAL_API_KEY: ${{ secrets.JEEB_PUSH_INTERNAL_API_KEY }}
+          DB_HOST: ${{ secrets.JEEB_DB_HOST }}
+          DB_PORT: ${{ secrets.JEEB_DB_PORT }}
+          DB_USERNAME: ${{ secrets.JEEB_DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.JEEB_DB_PASSWORD }}
+          PUSH_KEY: ${{ secrets.JEEB_PUSH_INTERNAL_API_KEY }}
+          JWT_KEY: ${{ secrets.JEEB_JWT_SIGNING_KEY }}
+          PHONE_PEPPER: ${{ secrets.JEEB_JWT_PHONE_PEPPER }}
+          UMJWT_KEY: ${{ secrets.UMJWT_SIGNING_KEY }}
+          HEARTBEAT_KEY: ${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${PUSH_INTERNAL_API_KEY:-}" ]; then
-            echo "::error::JEEB_PUSH_INTERNAL_API_KEY secret is not set — refusing a deploy that cannot authenticate topic pushes."
-            exit 1
-          fi
-          echo "Push internal API key preflight passed (value not printed)."
+          : "${DB_HOST:?JEEB_DB_HOST is required}"
+          : "${DB_PORT:?JEEB_DB_PORT is required}"
+          : "${DB_USERNAME:?JEEB_DB_USERNAME is required}"
+          : "${DB_PASSWORD:?JEEB_DB_PASSWORD is required}"
+          : "${PUSH_KEY:?JEEB_PUSH_INTERNAL_API_KEY is required}"
+          : "${JWT_KEY:?JEEB_JWT_SIGNING_KEY is required}"
+          : "${PHONE_PEPPER:?JEEB_JWT_PHONE_PEPPER is required}"
+          : "${UMJWT_KEY:?UMJWT_SIGNING_KEY is required}"
+          : "${HEARTBEAT_KEY:?HEARTBEAT_SERVICE_AUTH_KEY is required}"
 
-      - name: Log in to GHCR (password via stdin)
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login "$DEPLOY_REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
 
-      - name: Build and push image (git-SHA tag)
+      - name: Build, push, and verify immutable image digest
         id: build
         run: |
-          TAG="${IMAGE}:sha-${GITHUB_SHA::12}"
-          docker build -t "$TAG" -t "${IMAGE}:latest" .
+          set -euo pipefail
+          IMAGE="$DEPLOY_REGISTRY/$IMAGE_REPOSITORY"
+          TAG="$IMAGE:sha-${GITHUB_SHA::12}"
+          docker build -t "$TAG" .
           docker push "$TAG"
-          docker push "${IMAGE}:latest"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          DIGEST=$(docker buildx imagetools inspect "$TAG" --format '{{.Manifest.Digest}}')
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::invalid registry digest"; exit 1; }
+          IMAGE_REF="$IMAGE@$DIGEST"
+          docker pull "$IMAGE_REF" >/dev/null
+          PULLED_REF=$(docker image inspect "$IMAGE_REF" --format '{{index .RepoDigests 0}}')
+          [[ "$PULLED_REF" == "$IMAGE_REF" ]] || { echo "::error::pulled digest differs from pushed digest"; exit 1; }
+          echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
 
-      - name: Install cloudflared + write deploy key
+      - name: Install cloudflared and configure pinned SSH identity
+        env:
+          SSH_KEY_MATERIAL: ${{ secrets.JEEB_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS_MATERIAL: ${{ secrets.JEEB_SSH_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
+          : "${SSH_KEY_MATERIAL:?JEEB_SSH_PRIVATE_KEY is required}"
+          : "${KNOWN_HOSTS_MATERIAL:?JEEB_SSH_KNOWN_HOSTS is required}"
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb || sudo apt-get install -f -y
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          KEY_MATERIAL="${{ secrets.JEEB_SSH_PRIVATE_KEY }}"
-          if printf '%s' "$KEY_MATERIAL" | grep -q '^-----BEGIN'; then
-            printf '%s\n' "$KEY_MATERIAL" > ~/.ssh/id_ed25519
+          if printf '%s' "$SSH_KEY_MATERIAL" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$SSH_KEY_MATERIAL" > ~/.ssh/id_ed25519
           else
-            printf '%s' "$KEY_MATERIAL" | base64 -d > ~/.ssh/id_ed25519
+            printf '%s' "$SSH_KEY_MATERIAL" | base64 -d > ~/.ssh/id_ed25519
           fi
           chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS_MATERIAL" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          ssh-keygen -F "$DEPLOY_SERVER_HOSTNAME" -f ~/.ssh/known_hosts >/dev/null \
+            || { echo "::error::pinned Jeeb host key is missing"; exit 1; }
           cat > ~/.ssh/config <<EOF
           Host jeeb
-            HostName ${{ inputs.server_hostname }}
-            User ${{ inputs.server_user }}
+            HostName $DEPLOY_SERVER_HOSTNAME
+            User $DEPLOY_SERVER_USER
             IdentityFile ~/.ssh/id_ed25519
             ProxyCommand cloudflared access ssh --hostname %h
-            StrictHostKeyChecking accept-new
+            HostKeyAlias $DEPLOY_SERVER_HOSTNAME
+            UserKnownHostsFile ~/.ssh/known_hosts
+            StrictHostKeyChecking yes
           EOF
           chmod 600 ~/.ssh/config
 
-      - name: Remote GHCR login (token via stdin pipe)
-        run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"
+      - name: Remote GHCR login
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | ssh jeeb docker login "$DEPLOY_REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
 
-      # JEB-1490: run database migrations BEFORE the image update so the new
-      # code never starts against an un-migrated schema.  Fail-fast: if apply.sh
-      # exits non-zero the workflow aborts here and the running service is
-      # untouched (no rollback needed because docker service update was not yet
-      # called).
-      #
-      # db/apply.sh uses psql + $DATABASE_URL; it is idempotent (re-run safe).
-      # Each migration is wrapped in IF NOT EXISTS / CREATE TABLE IF NOT EXISTS
-      # guards so replaying on a fully-migrated DB is a no-op.
-      #
-      # Required secret: JEEB_DATABASE_URL  (postgres://user:pass@host:5432/jeeb)
-      # The URL is NOT a workflow input (it is a credential, never in YAML
-      # literals) — set it once as an org/repo GitHub secret.
-      - name: Install psql client (for migration apply + readiness check)
+      - name: Capture strict rollback digest
+        id: previous
+        run: |
+          set -euo pipefail
+          RAW=$(ssh jeeb docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' "$DEPLOY_SERVICE_NAME" 2>/dev/null || true)
+          PREVIOUS_IMAGE=$(printf '%s' "$RAW" | tr -d '\r' | sed '/^[[:space:]]*$/d' | tail -n1)
+          PREVIOUS_IMAGE=${PREVIOUS_IMAGE:-none}
+          if [[ "$PREVIOUS_IMAGE" != none ]]; then
+            [[ "$PREVIOUS_IMAGE" =~ ^ghcr\.io/olivium-dev/jeeb-gateway(:sha-[0-9a-f]{12})?@sha256:[0-9a-f]{64}$ ]] \
+              || { echo "::error::running gateway is not recorded by immutable digest"; exit 1; }
+          fi
+          echo "image=$PREVIOUS_IMAGE" >> "$GITHUB_OUTPUT"
+          [[ "$PREVIOUS_IMAGE" == none ]] && echo 'service_existed=0' >> "$GITHUB_OUTPUT" || echo 'service_existed=1' >> "$GITHUB_OUTPUT"
+
+      - name: Install psql client
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client
 
-      - name: Apply DB migrations (fail-fast before image update)
+      - name: Apply idempotent migrations without credential argv
         env:
-          DATABASE_URL: ${{ secrets.JEEB_DATABASE_URL }}
+          DB_HOST: ${{ secrets.JEEB_DB_HOST }}
+          DB_PORT: ${{ secrets.JEEB_DB_PORT }}
+          DB_USERNAME: ${{ secrets.JEEB_DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.JEEB_DB_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -z "${DATABASE_URL:-}" ]; then
-            echo "::error::JEEB_DATABASE_URL secret is not set — cannot run migrations. Add it as an org/repo secret."
-            exit 1
-          fi
-          echo "==> Applying migrations via db/apply.sh ..."
-          bash db/apply.sh
-          echo "==> Migrations applied successfully."
-          echo "==> Schema readiness check (querying scheduled_delivery_settings sentinel table) ..."
-          ROW_COUNT=$(psql "$DATABASE_URL" -t -c "SELECT COUNT(*) FROM scheduled_delivery_settings;" 2>/dev/null | tr -d ' \n' || echo "-1")
-          if [ "$ROW_COUNT" = "-1" ]; then
-            echo "::warning::Schema readiness check skipped (table not yet present or DB unreachable)"
-          else
-            echo "Schema readiness check passed: scheduled_delivery_settings has ${ROW_COUNT} row(s)"
-          fi
+          : "${DB_HOST:?JEEB_DB_HOST is required}"
+          : "${DB_PORT:?JEEB_DB_PORT is required}"
+          : "${DB_USERNAME:?JEEB_DB_USERNAME is required}"
+          : "${DB_PASSWORD:?JEEB_DB_PASSWORD is required}"
+          [[ "$DB_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "::error::invalid DB host"; exit 1; }
+          [[ "$DB_PORT" =~ ^[0-9]{1,5}$ ]] || { echo "::error::invalid DB port"; exit 1; }
+          ((10#$DB_PORT >= 1 && 10#$DB_PORT <= 65535)) || { echo "::error::invalid DB port"; exit 1; }
+          DB_USERNAME_ENCODED=$(printf '%s' "$DB_USERNAME" | jq -sRr @uri)
+          DB_PASSWORD_ENCODED=$(printf '%s' "$DB_PASSWORD" | jq -sRr @uri)
+          DATABASE_URL="postgresql://${DB_USERNAME_ENCODED}:${DB_PASSWORD_ENCODED}@${DB_HOST}:${DB_PORT}/${DEPLOY_DB_NAME}"
+          unset DB_USERNAME DB_PASSWORD DB_USERNAME_ENCODED DB_PASSWORD_ENCODED
+          PGSERVICE_FILE=$(mktemp)
+          chmod 600 "$PGSERVICE_FILE"
+          cleanup() { rm -f "$PGSERVICE_FILE"; }
+          trap cleanup EXIT
+          printf '[jeeb_gateway]\ndbname=%s\n' "$DATABASE_URL" > "$PGSERVICE_FILE"
+          unset DATABASE_URL
+          export PGSERVICEFILE="$PGSERVICE_FILE"
+          shopt -s nullglob
+          migrations=(db/migrations/*.sql)
+          ((${#migrations[@]} > 0)) || { echo "::error::no migrations found"; exit 1; }
+          for migration in "${migrations[@]}"; do
+            echo "Applying $(basename "$migration")"
+            psql 'service=jeeb_gateway' -v ON_ERROR_STOP=1 -f "$migration"
+          done
+          psql 'service=jeeb_gateway' -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null
 
-      - name: Capture current image as rollback target
-        id: prev
-        run: |
-          PREV=$(ssh jeeb "docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' '${{ inputs.service_name }}' 2>/dev/null" || echo none)
-          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
-
-      - name: Zero-downtime deploy (update if exists, else create)
+      - name: Generate mode-600 native ASP.NET Core configuration
+        id: runtime_config
         env:
+          DB_HOST: ${{ secrets.JEEB_DB_HOST }}
+          DB_PORT: ${{ secrets.JEEB_DB_PORT }}
+          DB_USERNAME: ${{ secrets.JEEB_DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.JEEB_DB_PASSWORD }}
           PUSH_INTERNAL_API_KEY: ${{ secrets.JEEB_PUSH_INTERNAL_API_KEY }}
-          PUSH_BASE_URL: ${{ inputs.push_notification_base_url }}
+          TOKEN_MINT_KEY: ${{ secrets.JEEB_TOKEN_MINT_KEY }}
+          JWT_SIGNING_KEY: ${{ secrets.JEEB_JWT_SIGNING_KEY }}
+          JWT_PHONE_PEPPER: ${{ secrets.JEEB_JWT_PHONE_PEPPER }}
+          UMJWT_SIGNING_KEY: ${{ secrets.UMJWT_SIGNING_KEY }}
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+          HEARTBEAT_AUTH_KEY: ${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${PUSH_INTERNAL_API_KEY:-}" ]; then
-            echo "::error::JEEB_PUSH_INTERNAL_API_KEY secret is not set — refusing to mutate the Swarm service."
-            exit 1
-          fi
-          # Only a root HTTP(S) origin is valid here. Reject credentials, paths,
-          # query/fragment data, control-line injection, malformed DNS labels, and
-          # ports outside the TCP range before rendering the remote script.
-          if [[ "$PUSH_BASE_URL" == *$'\n'* || "$PUSH_BASE_URL" == *$'\r'* ]]; then
-            echo "::error::push_notification_base_url must be a single-line HTTP(S) origin."
-            exit 1
-          fi
-          if [[ ! "$PUSH_BASE_URL" =~ ^https?://([^/:?#]+)(:([0-9]{1,5}))?$ ]]; then
-            echo "::error::push_notification_base_url must match http[s]://host[:port] without userinfo, path, query, or fragment."
-            exit 1
-          fi
-          PUSH_HOST="${BASH_REMATCH[1]}"
-          PUSH_PORT="${BASH_REMATCH[3]:-}"
-          if [ "${#PUSH_HOST}" -gt 253 ]; then
-            echo "::error::push_notification_base_url host exceeds 253 characters."
-            exit 1
-          fi
-          IFS='.' read -ra PUSH_HOST_LABELS <<< "$PUSH_HOST"
-          for PUSH_HOST_LABEL in "${PUSH_HOST_LABELS[@]}"; do
-            if [[ ! "$PUSH_HOST_LABEL" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
-              echo "::error::push_notification_base_url contains an invalid host label."
-              exit 1
-            fi
-          done
-          if [ -n "$PUSH_PORT" ] && (( 10#$PUSH_PORT < 1 || 10#$PUSH_PORT > 65535 )); then
-            echo "::error::push_notification_base_url port must be between 1 and 65535."
-            exit 1
-          fi
-          # The remote script is transported on stdin. Shell-quote the secret into
-          # one opaque token without echoing it, and quote the validated URL through
-          # the same boundary, so neither value can alter the remote docker command.
-          printf -v PUSH_INTERNAL_API_KEY_Q '%q' "$PUSH_INTERNAL_API_KEY"
-          printf -v PUSH_BASE_URL_Q '%q' "$PUSH_BASE_URL"
-          TAG="${{ steps.build.outputs.tag }}"
-          # DEV-only /dev/* flag, controlled EXCLUSIVELY by the dev_endpoints input (3-state).
-          # preserve (DEFAULT) => emit NO dev-flag arg. `docker service update --image ...`
-          #                       preserves every unlisted env var, so the flag's current value
-          #                       PERSISTS across this deploy. A normal no-arg deploy therefore
-          #                       NEVER changes /dev/* — prod that never set it stays OFF (404),
-          #                       an env explicitly armed stays ON. (Fixes the footgun where a
-          #                       default-false deploy silently disabled /dev/*.)
-          # true  => env-add  Features__DevEndpoints__Enabled=true  (endpoints ON)
-          # false => env-rm   Features__DevEndpoints__Enabled       (scrub => endpoints OFF / 404)
-          # Idempotent: env-add overwrites if present; `docker service update --env-rm` is a
-          # no-op when the var is already absent, so an explicit false run never errors.
-          # Applied on the SAME update command as Security__TokenMint__* => one zero-downtime
-          # rollout (stop-first + rollback-on-failure), never a separate out-of-band update.
-          case "${{ inputs.dev_endpoints }}" in
-            true)
-              DEV_FLAG_ARG="--env-add Features__DevEndpoints__Enabled=true"
-              echo "dev_endpoints=true     -> $DEV_FLAG_ARG  (/dev/* will be reachable)"
-              ;;
-            false)
-              DEV_FLAG_ARG="--env-rm Features__DevEndpoints__Enabled"
-              echo "dev_endpoints=false    -> $DEV_FLAG_ARG  (/dev/* will be scrubbed -> 404)"
-              ;;
-            *)
-              DEV_FLAG_ARG=""
-              echo "dev_endpoints=preserve -> (no dev-flag mutation; existing /dev/* state persists)"
-              ;;
-          esac
-          # Swagger /swagger* flag, controlled EXCLUSIVELY by the swagger_ui input (3-state),
-          # mirroring dev_endpoints. preserve => no mutation (current state persists across the
-          # --image update). true => env-add (admin-gated /swagger* ON). false => env-rm (404).
-          # Idempotent: env-add overwrites if present; --env-rm is a no-op when already absent.
-          # Applied on the SAME zero-downtime update command as DEV_FLAG_ARG / TokenMint.
-          case "${{ inputs.swagger_ui }}" in
-            true)
-              SWAGGER_FLAG_ARG="--env-add Features__Swagger__Enabled=true"
-              echo "swagger_ui=true     -> $SWAGGER_FLAG_ARG  (/swagger* ON, admin-role-gated; non-admin 404)"
-              ;;
-            false)
-              SWAGGER_FLAG_ARG="--env-rm Features__Swagger__Enabled"
-              echo "swagger_ui=false    -> $SWAGGER_FLAG_ARG  (/swagger* will be scrubbed -> 404)"
-              ;;
-            *)
-              SWAGGER_FLAG_ARG=""
-              echo "swagger_ui=preserve -> (no swagger-flag mutation; existing /swagger* state persists)"
-              ;;
-          esac
-          # ── Generic FeatureFlags map parser ────────────────────────────────────────────
-          # Parse the `feature_flags` comma-separated Key=Value overlay into --env-add args.
-          # Each recognised key maps to its full FeatureFlags__* env var. Empty input => no
-          # args (a no-arg deploy preserves the running flags; a fresh create uses the
-          # appsettings.Production.json baked defaults). Value must be true/false. Unknown
-          # keys warn-and-skip (never fail the deploy on a typo). The SAME parsed string is
-          # used for both the update (--env-add) and create (--env) branches, so the two
-          # code paths can never drift. This REPLACES the former dedicated
-          # FeatureFlags__UseUpstream__Kyc/Cdn injections (now expressible via the map).
-          FEATURE_FLAG_ARGS=""
-          RAW_FLAGS="${{ inputs.feature_flags }}"
-          if [ -n "$RAW_FLAGS" ]; then
-            IFS=',' read -ra _PAIRS <<< "$RAW_FLAGS"
-            for _pair in "${_PAIRS[@]}"; do
-              # trim surrounding whitespace
-              _pair="$(echo "$_pair" | xargs)"
-              [ -z "$_pair" ] && continue
-              _key="${_pair%%=*}"
-              _val="${_pair#*=}"
-              _key="$(echo "$_key" | xargs)"
-              _val="$(echo "$_val" | xargs)"
-              # guardrail: value MUST be true/false (no silent garbage into an env var)
-              if [ "$_val" != "true" ] && [ "$_val" != "false" ]; then
-                echo "::error::feature_flags: '$_key' has non-boolean value '$_val' (expected true|false)"; exit 1
-              fi
-              # case-insensitive key match -> full FeatureFlags__* env var name
-              _lkey="$(echo "$_key" | tr '[:upper:]' '[:lower:]')"
-              case "$_lkey" in
-                conversationautocreate) _envvar="FeatureFlags__ConversationAutoCreate__Enabled" ;;
-                useupstreamkyc)         _envvar="FeatureFlags__UseUpstream__Kyc" ;;
-                useupstreamcdn)         _envvar="FeatureFlags__UseUpstream__Cdn" ;;
-                useupstreamoffer)       _envvar="FeatureFlags__UseUpstream__Offer" ;;
-                useupstreamdelivery)    _envvar="FeatureFlags__UseUpstream__Delivery" ;;
-                useupstreamchat)        _envvar="FeatureFlags__UseUpstream__Chat" ;;
-                heartbeat)              _envvar="FeatureFlags__Heartbeat__Enabled" ;;
-                *) echo "::warning::feature_flags: ignoring unknown key '$_key'"; continue ;;
-              esac
-              FEATURE_FLAG_ARGS="$FEATURE_FLAG_ARGS --env-add ${_envvar}=${_val}"
-              echo "feature_flags: $_key=$_val -> --env-add ${_envvar}=${_val}"
-            done
+          umask 077
+          CONFIG_FILE=$(mktemp)
+          MATERIAL_DIR=$(mktemp -d)
+          chmod 600 "$CONFIG_FILE"
+          cleanup() { rm -f "$CONFIG_FILE"; rm -rf "$MATERIAL_DIR"; }
+          trap cleanup ERR
+          : "${DB_HOST:?JEEB_DB_HOST is required}"
+          : "${DB_PORT:?JEEB_DB_PORT is required}"
+          : "${DB_USERNAME:?JEEB_DB_USERNAME is required}"
+          : "${DB_PASSWORD:?JEEB_DB_PASSWORD is required}"
+          [[ "$DB_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "::error::invalid DB host"; exit 1; }
+          [[ "$DB_PORT" =~ ^[0-9]{1,5}$ ]] || { echo "::error::invalid DB port"; exit 1; }
+          ((10#$DB_PORT >= 1 && 10#$DB_PORT <= 65535)) || { echo "::error::invalid DB port"; exit 1; }
+          DB_USERNAME_ENCODED=$(printf '%s' "$DB_USERNAME" | jq -sRr @uri)
+          DB_PASSWORD_ENCODED=$(printf '%s' "$DB_PASSWORD" | jq -sRr @uri)
+          DATABASE_URL="postgresql://${DB_USERNAME_ENCODED}:${DB_PASSWORD_ENCODED}@${DB_HOST}:${DB_PORT}/${DEPLOY_DB_NAME}"
+          unset DB_USERNAME DB_PASSWORD DB_USERNAME_ENCODED DB_PASSWORD_ENCODED
+          printf '%s' "$DATABASE_URL" > "$MATERIAL_DIR/database_url"
+          unset DATABASE_URL
+          printf '%s' "$PUSH_INTERNAL_API_KEY" > "$MATERIAL_DIR/push_key"
+          if [[ -n "$TOKEN_MINT_KEY" ]]; then
+            printf '%s' "$TOKEN_MINT_KEY" > "$MATERIAL_DIR/token_mint_key"
           else
-            echo "feature_flags=empty -> (no map-driven flag mutation; running flags / baked appsettings defaults preserved)"
+            printf '%s' "$JWT_SIGNING_KEY" > "$MATERIAL_DIR/token_mint_key"
           fi
-          # On first-create the service has no prior env to preserve, so the same map args are
-          # passed as --env (create uses --env, update uses --env-add; the FLAG token strings
-          # are identical aside from that one keyword, which we substitute below).
-          FEATURE_FLAG_CREATE_ARGS="${FEATURE_FLAG_ARGS//--env-add /--env }"
-          # Intentional client-side expansion of validated/quoted deploy args into
-          # the remote Bash script.
-          # shellcheck disable=SC2087
-          ssh jeeb bash -se <<EOF
-          set -euo pipefail
-          SVC='${{ inputs.service_name }}'; INT='${{ inputs.internal_port }}'; EXT='${{ inputs.external_port }}'
-          docker pull '$TAG'
-          if docker service ls --format '{{.Name}}' | grep -wq "\$SVC"; then
-            docker service update --image '$TAG' --with-registry-auth \
-              --update-order stop-first --update-failure-action rollback \
-              --rollback-order stop-first --update-monitor 20s \
-              --env-add Security__TokenMint__Enabled='true' \
-              --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
-              --env-add Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
-              --env-add UmJwt__SigningKey='${{ secrets.UMJWT_SIGNING_KEY }}' \
-              --env-add UmJwt__Issuer='user-management' \
-              --env-add UmJwt__Audience='user-management' \
-              --env-add Services__Kyc__BaseUrl='${{ inputs.kyc_base_url }}' \
-              --env-add Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
-              --env-add Services__Chat__BaseUrl='${{ inputs.chat_base_url }}' \
-              --env-add PushNotificationServiceApi__BaseUrl=$PUSH_BASE_URL_Q \
-              --env-add PushNotificationServiceApi__InternalApiKey=$PUSH_INTERNAL_API_KEY_Q \
-              --env-add Services__Delivery__BaseUrl='${{ inputs.delivery_base_url }}' \
-              --env-add Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
-              --env-add Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
-              --env-add FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
-              --env-add FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
-              --env-add FeatureFlags__UseUpstream__Offer='true' \
-              --env-add FeatureFlags__UseUpstream__Delivery='true' \
-              --env-add FeatureFlags__UseUpstream__Chat='true' \
-              $FEATURE_FLAG_ARGS \
-              $DEV_FLAG_ARG \
-              $SWAGGER_FLAG_ARG \
-              "\$SVC"
-          else
-            docker service create --name "\$SVC" --replicas 1 \
-              --publish published=\$EXT,target=\$INT,mode=host \
-              --with-registry-auth \
-              --env ASPNETCORE_ENVIRONMENT='Production' \
-              --env DOTNET_EnableWriteXorExecute='0' \
-              --env Security__TokenMint__Enabled='true' \
-              --env Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
-              --env JeebJwt__SigningKey='${{ secrets.JEEB_JWT_SIGNING_KEY }}' \
-              --env JeebJwt__PhonePepper='${{ secrets.JEEB_JWT_PHONE_PEPPER }}' \
-              --env JeebJwt__Issuer='${{ inputs.jwt_issuer }}' \
-              --env JeebJwt__Audience='${{ inputs.jwt_audience }}' \
-              --env UmJwt__SigningKey='${{ secrets.UMJWT_SIGNING_KEY }}' \
-              --env UmJwt__Issuer='user-management' \
-              --env UmJwt__Audience='user-management' \
-              --env Services__Chat__BaseUrl='${{ inputs.chat_base_url }}' \
-              --env Services__UserManagement__BaseUrl='${{ inputs.user_management_base_url }}' \
-              --env Services__Wallet__BaseUrl='${{ inputs.wallet_base_url }}' \
-              --env Services__Notification__BaseUrl='${{ inputs.notification_base_url }}' \
-              --env PushNotificationServiceApi__BaseUrl=$PUSH_BASE_URL_Q \
-              --env PushNotificationServiceApi__InternalApiKey=$PUSH_INTERNAL_API_KEY_Q \
-              --env UserManagementApi__BaseUrl='${{ inputs.user_management_base_url }}' \
-              --env Services__Matching__BaseUrl='${{ inputs.matching_base_url }}' \
-              --env Services__Delivery__BaseUrl='${{ inputs.delivery_base_url }}' \
-              --env ServiceOTPApi__BaseUrl='${{ inputs.otp_base_url }}' \
-              --env Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
-              --env Services__Kyc__BaseUrl='${{ inputs.kyc_base_url }}' \
-              --env Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
-              --env Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
-              --env Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
-              --env FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
-              --env FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
-              --env FeatureFlags__UseUpstream__Offer='true' \
-              --env FeatureFlags__UseUpstream__Delivery='true' \
-              --env FeatureFlags__UseUpstream__Chat='true' \
-              $FEATURE_FLAG_CREATE_ARGS \
-              --reserve-memory 256M \
-              '$TAG'
-          fi
-          EOF
+          printf '%s' "$JWT_SIGNING_KEY" > "$MATERIAL_DIR/jwt_key"
+          printf '%s' "$JWT_PHONE_PEPPER" > "$MATERIAL_DIR/phone_pepper"
+          printf '%s' "$UMJWT_SIGNING_KEY" > "$MATERIAL_DIR/umjwt_key"
+          printf '%s' "$OPENAI_KEY" > "$MATERIAL_DIR/openai_key"
+          printf '%s' "$HEARTBEAT_AUTH_KEY" > "$MATERIAL_DIR/heartbeat_key"
+          jq \
+            --rawfile database_url "$MATERIAL_DIR/database_url" \
+            --rawfile push_key "$MATERIAL_DIR/push_key" \
+            --rawfile token_mint_key "$MATERIAL_DIR/token_mint_key" \
+            --rawfile jwt_key "$MATERIAL_DIR/jwt_key" \
+            --rawfile phone_pepper "$MATERIAL_DIR/phone_pepper" \
+            --rawfile umjwt_key "$MATERIAL_DIR/umjwt_key" \
+            --rawfile openai_key "$MATERIAL_DIR/openai_key" \
+            --rawfile heartbeat_key "$MATERIAL_DIR/heartbeat_key" \
+            '. * {
+              Security: {TokenMint: {Enabled: true, Key: $token_mint_key}},
+              JeebJwt: {SigningKey: $jwt_key, PhonePepper: $phone_pepper},
+              UmJwt: {SigningKey: $umjwt_key},
+              PushNotificationServiceApi: {InternalApiKey: $push_key},
+              Whisper: {ApiKey: $openai_key},
+              FeatureFlags: {Heartbeat: {ServiceAuthKey: $heartbeat_key}},
+              GatewayPostgres: {ConnectionString: $database_url}
+            }' src/JeebGateway/appsettings.Production.json > "$CONFIG_FILE"
+          jq -e . "$CONFIG_FILE" >/dev/null
+          rm -rf "$MATERIAL_DIR"
+          echo "path=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+          trap - ERR
 
-      - name: Health gate (poll; rollback on failure)
+      - name: Create versioned appsettings Swarm secret over stdin
+        id: runtime_secret
+        env:
+          CONFIG_FILE: ${{ steps.runtime_config.outputs.path }}
         run: |
+          set -euo pipefail
+          NEW_SECRET="${APPSETTINGS_SECRET_PREFIX}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          [[ "$NEW_SECRET" =~ ^jeeb_gateway_appsettings_[0-9]+_[0-9]+$ ]] || exit 1
+          [[ -f "$CONFIG_FILE" ]] || { echo "::error::runtime config is missing"; exit 1; }
+          # shellcheck disable=SC2029 # The generated name is strictly validated.
+          ssh jeeb docker secret inspect "$NEW_SECRET" >/dev/null 2>&1 \
+            && { echo "::error::versioned secret already exists"; exit 1; }
+          created=0
+          cleanup() {
+            rm -f "$CONFIG_FILE"
+            # shellcheck disable=SC2029 # The generated name is strictly validated.
+            if [[ "$created" == 1 ]]; then ssh jeeb docker secret rm "$NEW_SECRET" >/dev/null || true; fi
+          }
+          trap cleanup ERR
+          # shellcheck disable=SC2029 # Value is stdin; only the validated name is argv.
+          ssh jeeb docker secret create "$NEW_SECRET" - < "$CONFIG_FILE" >/dev/null
+          created=1
+          rm -f "$CONFIG_FILE"
+          echo "name=$NEW_SECRET" >> "$GITHUB_OUTPUT"
+          trap - ERR
+
+      - name: In-place start-first gateway rollout
+        id: rollout
+        env:
+          IMAGE_REF: ${{ steps.build.outputs.image_ref }}
+          NEW_SECRET: ${{ steps.runtime_secret.outputs.name }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_REF" =~ ^ghcr\.io/olivium-dev/jeeb-gateway@sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$NEW_SECRET" =~ ^jeeb_gateway_appsettings_[0-9]+_[0-9]+$ ]] || exit 1
+          ssh jeeb bash -se -- \
+            "$DEPLOY_SERVICE_NAME" "$DEPLOY_INTERNAL_PORT" "$DEPLOY_EXTERNAL_PORT" \
+            "$IMAGE_REF" "$NEW_SECRET" "$JWT_ISSUER" "$JWT_AUDIENCE" \
+            "$CHAT_BASE_URL" "$USER_MANAGEMENT_BASE_URL" "$WALLET_BASE_URL" \
+            "$NOTIFICATION_BASE_URL" "$PUSH_BASE_URL" "$OTP_BASE_URL" \
+            "$MATCHING_BASE_URL" "$DELIVERY_BASE_URL" "$OTP_APPLICATION_ID" \
+            "$KYC_BASE_URL" "$CDN_BASE_URL" "$WHISPER_FAKE" "$DURABLE_REQUESTS" \
+            "$DEV_ENDPOINTS" "$SWAGGER_UI" "$FEATURE_FLAGS" <<'REMOTE'
+          set -euo pipefail
+          SVC=$1; INT=$2; EXT=$3; IMAGE_REF=$4; NEW_SECRET=$5
+          JWT_ISSUER=$6; JWT_AUDIENCE=$7; CHAT_URL=$8; USER_URL=$9; WALLET_URL=${10}
+          NOTIFICATION_URL=${11}; PUSH_URL=${12}; OTP_URL=${13}; MATCHING_URL=${14}
+          DELIVERY_URL=${15}; OTP_APP_ID=${16}; KYC_URL=${17}; CDN_URL=${18}
+          WHISPER_FAKE=${19}; DURABLE=${20}; DEV_ENDPOINTS=${21}; SWAGGER_UI=${22}; RAW_FLAGS=${23}
+          SECRET_TARGET=/app/appsettings.Production.json
+          docker pull "$IMAGE_REF"
+          docker network create --driver overlay --attachable jeeb-net 2>/dev/null || true
+          APP_UID=$(docker run --rm --entrypoint /bin/sh "$IMAGE_REF" -c 'id -u appuser')
+          APP_GID=$(docker run --rm --entrypoint /bin/sh "$IMAGE_REF" -c 'id -g appuser')
+          [[ "$APP_UID" =~ ^[0-9]+$ && "$APP_GID" =~ ^[0-9]+$ ]] || exit 1
+
+          common_env=(
+            "ASPNETCORE_ENVIRONMENT=Production"
+            "DOTNET_EnableWriteXorExecute=0"
+            "Security__TokenMint__Enabled=true"
+            "JeebJwt__Issuer=$JWT_ISSUER"
+            "JeebJwt__Audience=$JWT_AUDIENCE"
+            "UmJwt__Issuer=user-management"
+            "UmJwt__Audience=user-management"
+            "Services__Chat__BaseUrl=$CHAT_URL"
+            "Services__UserManagement__BaseUrl=$USER_URL"
+            "Services__Wallet__BaseUrl=$WALLET_URL"
+            "Services__Notification__BaseUrl=$NOTIFICATION_URL"
+            "PushNotificationServiceApi__BaseUrl=$PUSH_URL"
+            "UserManagementApi__BaseUrl=$USER_URL"
+            "Services__Matching__BaseUrl=$MATCHING_URL"
+            "Services__Delivery__BaseUrl=$DELIVERY_URL"
+            "ServiceOTPApi__BaseUrl=$OTP_URL"
+            "Auth__Otp__ApplicationId=$OTP_APP_ID"
+            "Services__Kyc__BaseUrl=$KYC_URL"
+            "Services__Cdn__BaseUrl=$CDN_URL"
+            "Whisper__FakeTranscribe=$WHISPER_FAKE"
+            "FeatureFlags__DurableRequests__Enabled=$DURABLE"
+            "FeatureFlags__UseUpstream__Offer=true"
+            "FeatureFlags__UseUpstream__Delivery=true"
+            "FeatureFlags__UseUpstream__Chat=true"
+          )
+          if [[ -n "$RAW_FLAGS" ]]; then
+            IFS=',' read -ra pairs <<< "$RAW_FLAGS"
+            for pair in "${pairs[@]}"; do
+              key=${pair%%=*}; value=${pair#*=}
+              case "$key" in
+                ConversationAutoCreate) env_key=FeatureFlags__ConversationAutoCreate__Enabled ;;
+                UseUpstreamKyc) env_key=FeatureFlags__UseUpstream__Kyc ;;
+                UseUpstreamCdn) env_key=FeatureFlags__UseUpstream__Cdn ;;
+                UseUpstreamOffer) env_key=FeatureFlags__UseUpstream__Offer ;;
+                UseUpstreamDelivery) env_key=FeatureFlags__UseUpstream__Delivery ;;
+                UseUpstreamChat) env_key=FeatureFlags__UseUpstream__Chat ;;
+                Heartbeat) env_key=FeatureFlags__Heartbeat__Enabled ;;
+                *) exit 64 ;;
+              esac
+              common_env+=("$env_key=$value")
+            done
+          fi
+
+          if docker service inspect "$SVC" >/dev/null 2>&1; then
+            mapfile -t port_rows < <(
+              docker service inspect "$SVC" --format '{{range .Endpoint.Spec.Ports}}{{println .PublishedPort .TargetPort .PublishMode}}{{end}}' \
+                | awk -v ext="$EXT" '$1 == ext {print}'
+            )
+            ((${#port_rows[@]} == 1)) || { echo "expected one gateway port mapping" >&2; exit 1; }
+            publish_args=()
+            case "${port_rows[0]}" in
+              "$EXT $INT ingress") ;;
+              "$EXT $INT host") publish_args=(--publish-rm "$INT" --publish-add "published=$EXT,target=$INT,mode=ingress") ;;
+              *) echo "unexpected gateway port mapping" >&2; exit 1 ;;
+            esac
+
+            mapfile -t old_secrets < <(
+              docker service inspect "$SVC" --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name "/app/appsettings.Production.json"}}{{println .SecretName}}{{end}}{{end}}' \
+                | sed '/^[[:space:]]*$/d'
+            )
+            ((${#old_secrets[@]} <= 1)) || { echo "multiple appsettings targets" >&2; exit 1; }
+            secret_args=(--secret-add "source=$NEW_SECRET,target=$SECRET_TARGET,uid=$APP_UID,gid=$APP_GID,mode=0400")
+            [[ -z "${old_secrets[0]:-}" ]] || secret_args=(--secret-rm "${old_secrets[0]}" "${secret_args[@]}")
+
+            current_env=$(docker service inspect "$SVC" --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')
+            env_args=()
+            sensitive_keys=(Security__TokenMint__Key JeebJwt__SigningKey JeebJwt__PhonePepper UmJwt__SigningKey PushNotificationServiceApi__InternalApiKey Whisper__ApiKey FeatureFlags__Heartbeat__ServiceAuthKey DATABASE_URL JEEB_DATABASE_URL GatewayPostgres__ConnectionString WalletPostgres__ConnectionString)
+            for key in "${sensitive_keys[@]}"; do
+              grep -q "^${key}=" <<< "$current_env" && env_args+=(--env-rm "$key")
+            done
+            for entry in "${common_env[@]}"; do env_args+=(--env-add "$entry"); done
+            case "$DEV_ENDPOINTS" in
+              true) env_args+=(--env-add Features__DevEndpoints__Enabled=true) ;;
+              false) grep -q '^Features__DevEndpoints__Enabled=' <<< "$current_env" && env_args+=(--env-rm Features__DevEndpoints__Enabled) ;;
+            esac
+            case "$SWAGGER_UI" in
+              true) env_args+=(--env-add Features__Swagger__Enabled=true) ;;
+              false) grep -q '^Features__Swagger__Enabled=' <<< "$current_env" && env_args+=(--env-rm Features__Swagger__Enabled) ;;
+            esac
+            docker service update --image "$IMAGE_REF" --with-registry-auth \
+              "${publish_args[@]}" "${secret_args[@]}" "${env_args[@]}" \
+              --update-order start-first --update-failure-action rollback \
+              --rollback-order start-first --update-monitor 20s "$SVC"
+          else
+            create_env=()
+            for entry in "${common_env[@]}"; do create_env+=(--env "$entry"); done
+            [[ "$DEV_ENDPOINTS" == true ]] && create_env+=(--env Features__DevEndpoints__Enabled=true)
+            [[ "$SWAGGER_UI" == true ]] && create_env+=(--env Features__Swagger__Enabled=true)
+            docker service create --name "$SVC" --replicas 1 --network jeeb-net \
+              --publish "published=$EXT,target=$INT,mode=ingress" --with-registry-auth \
+              --secret "source=$NEW_SECRET,target=$SECRET_TARGET,uid=$APP_UID,gid=$APP_GID,mode=0400" \
+              --update-order start-first --update-failure-action rollback --rollback-order start-first \
+              "${create_env[@]}" --reserve-memory 256M "$IMAGE_REF"
+          fi
+          REMOTE
+
+      - name: Bounded readiness and immutable-image gate
+        id: health
+        env:
+          IMAGE_REF: ${{ steps.build.outputs.image_ref }}
+        run: |
+          set -euo pipefail
           ok=false
-          for i in $(seq 1 30); do
-            if ssh jeeb "curl -fsS -m 5 http://\$(hostname -I | awk '{print \$1}'):${{ inputs.external_port }}${{ inputs.health_path }} >/dev/null 2>&1"; then ok=true; break; fi
-            echo "health attempt $i ..."; sleep 4
+          for attempt in $(seq 1 30); do
+            # shellcheck disable=SC2029 # Port and path are exact DEV allowlist values.
+            if ssh jeeb "curl -fsS --max-time 5 http://localhost:${DEPLOY_EXTERNAL_PORT}${DEPLOY_HEALTH_PATH} >/dev/null"; then
+              ok=true
+              break
+            fi
+            echo "health attempt $attempt"
+            sleep 4
           done
-          ssh jeeb "docker service ps --no-trunc '${{ inputs.service_name }}' | head -6" || true
-          if [ "$ok" != true ]; then
-            echo "Health gate RED — rolling back"
-            ssh jeeb "docker service rollback '${{ inputs.service_name }}'" || true
+          [[ "$ok" == true ]] || { echo "::error::readiness gate failed"; exit 1; }
+          ACTIVE=$(ssh jeeb docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' "$DEPLOY_SERVICE_NAME" | tr -d '\r' | tail -n1)
+          [[ "$ACTIVE" == "$IMAGE_REF" ]] || { echo "::error::active image differs from verified digest"; exit 1; }
+
+      - name: Stabilize rollback generation and recheck health
+        id: stabilization
+        env:
+          NEW_SECRET: ${{ steps.runtime_secret.outputs.name }}
+        run: |
+          set -euo pipefail
+          ssh jeeb bash -se -- stabilize "$DEPLOY_SERVICE_NAME" "$NEW_SECRET" \
+            < .github/scripts/jeeb-gateway-secret-lifecycle.sh
+          # shellcheck disable=SC2029 # Port and path are exact DEV allowlist values.
+          ssh jeeb "curl -fsS --max-time 5 http://localhost:${DEPLOY_EXTERNAL_PORT}${DEPLOY_HEALTH_PATH} >/dev/null"
+          ssh jeeb bash -se -- verify-safe "$DEPLOY_SERVICE_NAME" "$NEW_SECRET" \
+            < .github/scripts/jeeb-gateway-secret-lifecycle.sh
+
+      - name: Verify gateway is the sole public ingress
+        id: exposure
+        run: |
+          set -euo pipefail
+          evidence=$(ssh jeeb bash -se -- "$PRIVATE_PUSH_PORT" <<'REMOTE'
+          set -euo pipefail
+          port=$1
+          public_if=$(ip -4 route show default | awk 'NR == 1 {print $5}')
+          [[ "$public_if" =~ ^[A-Za-z0-9_.:-]+$ ]] || exit 1
+          first_rule=$(sudo -n iptables -S DOCKER-USER | sed -n '/^-A /{p;q}')
+          expected="-A DOCKER-USER -i $public_if -p tcp -m conntrack --ctorigdstport $port -j DROP"
+          [[ "$first_rule" == "$expected" ]] || exit 1
+          printf PRIVATE_PUSH_BLOCKED
+          REMOTE
+          )
+          [[ "$evidence" == PRIVATE_PUSH_BLOCKED ]] || { echo "::error::private push firewall policy is not proven"; exit 1; }
+          public_ip=$(ssh jeeb 'curl -fsS --max-time 5 https://api.ipify.org' | tr -d '\r\n')
+          [[ "$public_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || exit 1
+          curl -fsS --max-time 8 "http://${public_ip}:${DEPLOY_EXTERNAL_PORT}${DEPLOY_HEALTH_PATH}" >/dev/null
+          if curl --silent --show-error --max-time 5 --output /dev/null "http://${public_ip}:${PRIVATE_PUSH_PORT}/health"; then
+            echo "::error::push backend is publicly reachable"
             exit 1
           fi
-          echo "Health OK on :${{ inputs.external_port }}${{ inputs.health_path }}"
+
+      - name: Recover failed rollout to captured digest
+        if: ${{ always() }}
+        env:
+          SECRET_OUTCOME: ${{ steps.runtime_secret.outcome }}
+          ROLLOUT_OUTCOME: ${{ steps.rollout.outcome }}
+          HEALTH_OUTCOME: ${{ steps.health.outcome }}
+          STABILIZATION_OUTCOME: ${{ steps.stabilization.outcome }}
+          EXPOSURE_OUTCOME: ${{ steps.exposure.outcome }}
+          SERVICE_EXISTED: ${{ steps.previous.outputs.service_existed }}
+          PREVIOUS_IMAGE: ${{ steps.previous.outputs.image }}
+          ATTEMPTED_IMAGE: ${{ steps.build.outputs.image_ref }}
+          NEW_SECRET: ${{ steps.runtime_secret.outputs.name }}
+        run: |
+          set -euo pipefail
+          [[ "$SECRET_OUTCOME" == success ]] || exit 0
+          if [[ "$ROLLOUT_OUTCOME" == success && "$HEALTH_OUTCOME" == success && "$STABILIZATION_OUTCOME" == success && "$EXPOSURE_OUTCOME" == success ]]; then
+            exit 0
+          fi
+          [[ "$SERVICE_EXISTED" == 0 || "$SERVICE_EXISTED" == 1 ]] || exit 1
+          [[ "$NEW_SECRET" =~ ^jeeb_gateway_appsettings_[0-9]+_[0-9]+$ ]] || exit 1
+          [[ "$ATTEMPTED_IMAGE" =~ ^ghcr\.io/olivium-dev/jeeb-gateway@sha256:[0-9a-f]{64}$ ]] || exit 1
+          if [[ "$SERVICE_EXISTED" == 1 ]]; then
+            [[ "$PREVIOUS_IMAGE" =~ ^ghcr\.io/olivium-dev/jeeb-gateway(:sha-[0-9a-f]{12})?@sha256:[0-9a-f]{64}$ ]] || exit 1
+          fi
+          ssh jeeb bash -se -- finalize "$SERVICE_EXISTED" "$DEPLOY_SERVICE_NAME" \
+            "$NEW_SECRET" "$PREVIOUS_IMAGE" "$ATTEMPTED_IMAGE" \
+            < .github/scripts/jeeb-gateway-secret-lifecycle.sh
+
+      - name: Garbage-collect exact unreferenced appsettings secrets
+        if: ${{ steps.rollout.outcome == 'success' && steps.health.outcome == 'success' && steps.stabilization.outcome == 'success' && steps.exposure.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          ssh jeeb bash -se -- gc "$DEPLOY_SERVICE_NAME" \
+            < .github/scripts/jeeb-gateway-secret-lifecycle.sh

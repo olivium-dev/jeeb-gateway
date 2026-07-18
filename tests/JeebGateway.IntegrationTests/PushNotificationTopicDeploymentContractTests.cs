@@ -56,40 +56,30 @@ public sealed class PushNotificationTopicDeploymentContractTests
     }
 
     [Fact]
-    public void DeployAndCi_InjectTheConfigurationKeysConsumedByTheTypedClient()
+    public void DeployAndCi_UseTheConfigurationKeysConsumedByTheTypedClient()
     {
         var repoRoot = LocateRepoRoot();
         var deploy = File.ReadAllText(Path.Combine(repoRoot, ".github", "workflows", "deploy-to-jeeb.yml"));
         var ci = File.ReadAllText(Path.Combine(repoRoot, ".github", "workflows", "ci.yml"));
-        var updateBranch = Slice(deploy, "            docker service update --image", "          else");
-        var createBranch = Slice(deploy, "            docker service create --name", "          fi");
-
-        deploy.Should().Contain("PUSH_BASE_URL: ${{ inputs.push_notification_base_url }}",
-            "GitHub must bind the dispatch input through the step environment");
-        deploy.Should().Contain("[[ ! \"$PUSH_BASE_URL\" =~ ^https?://([^/:?#]+)(:([0-9]{1,5}))?$ ]]",
-            "the runner must reject anything beyond a root HTTP(S) origin");
-        deploy.Should().Contain("printf -v PUSH_BASE_URL_Q '%q' \"$PUSH_BASE_URL\"",
-            "the validated URL must be shell-escaped before crossing SSH");
-        updateBranch.Should().Contain(
-            "--env-add PushNotificationServiceApi__BaseUrl=$PUSH_BASE_URL_Q",
-            "an update must refresh the exact BaseUrl section consumed by Program.cs");
-        createBranch.Should().Contain(
-            "--env PushNotificationServiceApi__BaseUrl=$PUSH_BASE_URL_Q",
-            "a first create must seed the exact BaseUrl section consumed by Program.cs");
-        updateBranch.Should().NotContain("inputs.push_notification_base_url",
-            "raw workflow input expressions must not enter the remote heredoc");
-        createBranch.Should().NotContain("inputs.push_notification_base_url",
-            "raw workflow input expressions must not enter the remote heredoc");
-
-        deploy.Should().Contain("PUSH_INTERNAL_API_KEY: ${{ secrets.JEEB_PUSH_INTERNAL_API_KEY }}");
-        deploy.Should().Contain("[ -z \"${PUSH_INTERNAL_API_KEY:-}\" ]",
-            "the required secret must fail closed before any remote mutation");
-        deploy.Should().Contain("printf -v PUSH_INTERNAL_API_KEY_Q '%q' \"$PUSH_INTERNAL_API_KEY\"",
-            "the secret must be shell-escaped without being printed before crossing SSH");
-        updateBranch.Should().Contain(
-            "--env-add PushNotificationServiceApi__InternalApiKey=$PUSH_INTERNAL_API_KEY_Q");
-        createBranch.Should().Contain(
-            "--env PushNotificationServiceApi__InternalApiKey=$PUSH_INTERNAL_API_KEY_Q");
+        deploy.Should().Contain("PUSH_BASE_URL: ${{ inputs.push_notification_base_url }}");
+        deploy.Should().Contain(
+            "[[ \"$PUSH_BASE_URL\" == http://192.168.2.50:10040 ]]",
+            "the DEV dispatch must reject an operator-supplied upstream or shell fragment");
+        deploy.Should().Contain("\"PushNotificationServiceApi__BaseUrl=$PUSH_URL\"");
+        deploy.Should().Contain("--rawfile push_key");
+        deploy.Should().Contain("DB_HOST: ${{ secrets.JEEB_DB_HOST }}");
+        deploy.Should().Contain("DB_PORT: ${{ secrets.JEEB_DB_PORT }}");
+        deploy.Should().Contain("DB_USERNAME: ${{ secrets.JEEB_DB_USERNAME }}");
+        deploy.Should().Contain("DB_PASSWORD: ${{ secrets.JEEB_DB_PASSWORD }}");
+        deploy.Should().Contain("DEPLOY_DB_NAME: jeeb");
+        deploy.Should().NotContain("secrets.JEEB_DATABASE_URL",
+            "the workflow must form the DEV connection string from the existing component secrets");
+        deploy.Should().NotContain("psql \"$DATABASE_URL\"");
+        deploy.Should().Contain("PushNotificationServiceApi: {InternalApiKey: $push_key}");
+        deploy.Should().Contain("target=$SECRET_TARGET,uid=$APP_UID,gid=$APP_GID,mode=0400");
+        deploy.Should().Contain("APPSETTINGS_SECRET_TARGET: /app/appsettings.Production.json");
+        deploy.Should().NotContain("--env-add PushNotificationServiceApi__InternalApiKey=");
+        deploy.Should().NotContain("--env PushNotificationServiceApi__InternalApiKey=");
 
         deploy.Should().NotContain("Services__PushNotification__BaseUrl",
             "the obsolete namespace is ignored by the typed topic client");
@@ -99,47 +89,76 @@ public sealed class PushNotificationTopicDeploymentContractTests
             "the image smoke must exercise the production configuration contract");
     }
 
-    public static IEnumerable<object[]> ValidPushBaseUrls() =>
-    [
-        ["http://192.168.2.50:10040"],
-        ["http://push-notification:8080"],
-        ["https://push.internal.example"],
-        ["https://localhost:443"],
-    ];
-
-    [Theory]
-    [MemberData(nameof(ValidPushBaseUrls))]
-    public async Task PushBaseUrlValidation_TransportsAllowedOriginsAsOneOpaqueArgument(string input)
+    [Fact]
+    public void DeployWorkflow_HasImmutableIdentityPinnedSshAndConvergentRecovery()
     {
-        var result = await RunPushBaseUrlGuardAsync(input);
+        var repoRoot = LocateRepoRoot();
+        var deploy = File.ReadAllText(Path.Combine(repoRoot, ".github", "workflows", "deploy-to-jeeb.yml"));
+        var lifecycle = File.ReadAllText(Path.Combine(repoRoot, ".github", "scripts", "jeeb-gateway-secret-lifecycle.sh"));
 
-        result.ExitCode.Should().Be(0, result.StandardError);
-        result.StandardOutput.Should().Be($"PushNotificationServiceApi__BaseUrl={input}");
+        deploy.Should().Contain("TAG=\"$IMAGE:sha-${GITHUB_SHA::12}\"");
+        deploy.Should().Contain("docker buildx imagetools inspect \"$TAG\"");
+        deploy.Should().Contain("IMAGE_REF=\"$IMAGE@$DIGEST\"");
+        deploy.Should().Contain("StrictHostKeyChecking yes");
+        deploy.Should().Contain("KNOWN_HOSTS_MATERIAL: ${{ secrets.JEEB_SSH_KNOWN_HOSTS }}");
+        deploy.Should().Contain("--update-order start-first --update-failure-action rollback");
+        deploy.Should().Contain("mode=ingress");
+        deploy.Should().Contain("Recover failed rollout to captured digest");
+        lifecycle.Should().Contain("docker service update --image \"$previous_image\"");
+        lifecycle.Should().Contain("explicit rollback did not restore the captured digest");
+        lifecycle.Should().Contain("secret_is_referenced \"$candidate\"");
     }
 
-    public static IEnumerable<object[]> AdversarialPushBaseUrls() =>
+    public static IEnumerable<object[]> ForbiddenDeployFragments() =>
     [
-        ["ftp://push.internal:10040"],
-        ["http://user@push.internal:10040"],
-        ["http://push.internal:10040/path"],
-        ["http://push.internal:10040?key=value"],
-        ["http://push.internal:10040#fragment"],
-        ["http://push.internal:0"],
-        ["http://push.internal:65536"],
-        ["http://-push.internal:10040"],
-        ["http://push..internal:10040"],
-        ["http://push.internal:10040\n--env-add PWNED=true"],
-        ["http://push.internal:10040;docker service rm jeeb-gateway"],
+        ["StrictHostKeyChecking accept-new"],
+        ["StrictHostKeyChecking no"],
+        ["${IMAGE}:latest"],
+        ["docker push \"${IMAGE}:latest\""],
+        ["docker service rm \"$SVC\""],
+        ["psql \"$DATABASE_URL\""],
+        ["--env-add Security__TokenMint__Key="],
+        ["--env-add JeebJwt__SigningKey="],
+        ["--env-add UmJwt__SigningKey="],
+        ["--env-add Whisper__ApiKey="],
     ];
 
     [Theory]
-    [MemberData(nameof(AdversarialPushBaseUrls))]
-    public async Task PushBaseUrlValidation_RejectsInjectionAndNonOriginInputs(string input)
+    [MemberData(nameof(ForbiddenDeployFragments))]
+    public void DeployWorkflow_RejectsLegacyOrCredentialBearingPatterns(string fragment)
     {
-        var result = await RunPushBaseUrlGuardAsync(input);
+        var repoRoot = LocateRepoRoot();
+        var deploy = File.ReadAllText(Path.Combine(repoRoot, ".github", "workflows", "deploy-to-jeeb.yml"));
 
-        result.ExitCode.Should().NotBe(0);
-        result.StandardOutput.Should().BeEmpty("rejected input must never reach the rendered docker argument");
+        deploy.Should().NotContain(fragment);
+    }
+
+    public static IEnumerable<object[]> InvalidLifecycleInvocations() =>
+    [
+        ["unknown"],
+        ["gc jeeb-gateway;docker-service-rm"],
+        ["stabilize jeeb-gateway jeeb_gateway_appsettings_latest"],
+        ["stabilize other-service jeeb_gateway_appsettings_12_1"],
+        ["finalize 2 jeeb-gateway jeeb_gateway_appsettings_12_1 none none"],
+    ];
+
+    [Theory]
+    [MemberData(nameof(InvalidLifecycleInvocations))]
+    public async Task SecretLifecycle_RejectsAdversarialIdentifiersBeforeDocker(string arguments)
+    {
+        var repoRoot = LocateRepoRoot();
+        var script = Path.Combine(repoRoot, ".github", "scripts", "jeeb-gateway-secret-lifecycle.sh");
+        var startInfo = new ProcessStartInfo("/bin/bash", $"{script} {arguments}")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+
+        using var process = Process.Start(startInfo)!;
+        await process.WaitForExitAsync();
+
+        process.ExitCode.Should().NotBe(0);
     }
 
     private static string LocateRepoRoot()
@@ -157,59 +176,10 @@ public sealed class PushNotificationTopicDeploymentContractTests
         throw new DirectoryNotFoundException("Could not locate the jeeb-gateway repository root.");
     }
 
-    private static string Slice(string source, string startMarker, string endMarker)
-    {
-        var start = source.IndexOf(startMarker, StringComparison.Ordinal);
-        start.Should().BeGreaterThanOrEqualTo(0);
-        var end = source.IndexOf(endMarker, start, StringComparison.Ordinal);
-        end.Should().BeGreaterThan(start);
-        return source[start..end];
-    }
-
-    private static async Task<ProcessResult> RunPushBaseUrlGuardAsync(string input)
-    {
-        const string script = """
-            set -euo pipefail
-            if [[ "$PUSH_BASE_URL" == *$'\n'* || "$PUSH_BASE_URL" == *$'\r'* ]]; then exit 64; fi
-            if [[ ! "$PUSH_BASE_URL" =~ ^https?://([^/:?#]+)(:([0-9]{1,5}))?$ ]]; then exit 64; fi
-            PUSH_HOST="${BASH_REMATCH[1]}"
-            PUSH_PORT="${BASH_REMATCH[3]:-}"
-            if [ "${#PUSH_HOST}" -gt 253 ]; then exit 64; fi
-            IFS='.' read -ra PUSH_HOST_LABELS <<< "$PUSH_HOST"
-            for PUSH_HOST_LABEL in "${PUSH_HOST_LABELS[@]}"; do
-              if [[ ! "$PUSH_HOST_LABEL" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then exit 64; fi
-            done
-            if [ -n "$PUSH_PORT" ] && (( 10#$PUSH_PORT < 1 || 10#$PUSH_PORT > 65535 )); then exit 64; fi
-            printf -v PUSH_BASE_URL_Q '%q' "$PUSH_BASE_URL"
-            bash -se <<EOF
-            set -euo pipefail
-            set -- --env-add PushNotificationServiceApi__BaseUrl=$PUSH_BASE_URL_Q
-            test "\$#" -eq 2
-            printf '%s' "\$2"
-            EOF
-            """;
-
-        var startInfo = new ProcessStartInfo("/bin/bash", ["-c", script])
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        startInfo.Environment["PUSH_BASE_URL"] = input;
-
-        using var process = Process.Start(startInfo)!;
-        var standardOutput = await process.StandardOutput.ReadToEndAsync();
-        var standardError = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        return new ProcessResult(process.ExitCode, standardOutput, standardError);
-    }
-
     private sealed class SingleClientFactory(HttpClient client) : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => client;
     }
-
-    private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
 
     private sealed class CapturingHandler : HttpMessageHandler
     {
