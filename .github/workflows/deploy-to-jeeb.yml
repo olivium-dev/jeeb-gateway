@@ -157,7 +157,6 @@ jobs:
           DB_PASSWORD: ${{ secrets.JEEB_DB_PASSWORD }}
           PUSH_KEY: ${{ secrets.JEEB_PUSH_INTERNAL_API_KEY }}
           JWT_KEY: ${{ secrets.JEEB_JWT_SIGNING_KEY }}
-          PHONE_PEPPER: ${{ secrets.JEEB_JWT_PHONE_PEPPER }}
           UMJWT_KEY: ${{ secrets.UMJWT_SIGNING_KEY }}
           HEARTBEAT_KEY: ${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}
         run: |
@@ -168,7 +167,6 @@ jobs:
           : "${DB_PASSWORD:?JEEB_DB_PASSWORD is required}"
           : "${PUSH_KEY:?JEEB_PUSH_INTERNAL_API_KEY is required}"
           : "${JWT_KEY:?JEEB_JWT_SIGNING_KEY is required}"
-          : "${PHONE_PEPPER:?JEEB_JWT_PHONE_PEPPER is required}"
           : "${UMJWT_KEY:?UMJWT_SIGNING_KEY is required}"
           : "${HEARTBEAT_KEY:?HEARTBEAT_SERVICE_AUTH_KEY is required}"
 
@@ -337,7 +335,6 @@ jobs:
           PUSH_INTERNAL_API_KEY: ${{ secrets.JEEB_PUSH_INTERNAL_API_KEY }}
           TOKEN_MINT_KEY: ${{ secrets.JEEB_TOKEN_MINT_KEY }}
           JWT_SIGNING_KEY: ${{ secrets.JEEB_JWT_SIGNING_KEY }}
-          JWT_PHONE_PEPPER: ${{ secrets.JEEB_JWT_PHONE_PEPPER }}
           UMJWT_SIGNING_KEY: ${{ secrets.UMJWT_SIGNING_KEY }}
           OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
           HEARTBEAT_AUTH_KEY: ${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}
@@ -369,7 +366,6 @@ jobs:
             printf '%s' "$JWT_SIGNING_KEY" > "$MATERIAL_DIR/token_mint_key"
           fi
           printf '%s' "$JWT_SIGNING_KEY" > "$MATERIAL_DIR/jwt_key"
-          printf '%s' "$JWT_PHONE_PEPPER" > "$MATERIAL_DIR/phone_pepper"
           printf '%s' "$UMJWT_SIGNING_KEY" > "$MATERIAL_DIR/umjwt_key"
           printf '%s' "$OPENAI_KEY" > "$MATERIAL_DIR/openai_key"
           printf '%s' "$HEARTBEAT_AUTH_KEY" > "$MATERIAL_DIR/heartbeat_key"
@@ -378,13 +374,12 @@ jobs:
             --rawfile push_key "$MATERIAL_DIR/push_key" \
             --rawfile token_mint_key "$MATERIAL_DIR/token_mint_key" \
             --rawfile jwt_key "$MATERIAL_DIR/jwt_key" \
-            --rawfile phone_pepper "$MATERIAL_DIR/phone_pepper" \
             --rawfile umjwt_key "$MATERIAL_DIR/umjwt_key" \
             --rawfile openai_key "$MATERIAL_DIR/openai_key" \
             --rawfile heartbeat_key "$MATERIAL_DIR/heartbeat_key" \
             '. * {
               Security: {TokenMint: {Enabled: true, Key: $token_mint_key}},
-              JeebJwt: {SigningKey: $jwt_key, PhonePepper: $phone_pepper},
+              Jwt: {SigningKey: $jwt_key},
               UmJwt: {SigningKey: $umjwt_key},
               PushNotificationServiceApi: {InternalApiKey: $push_key},
               Whisper: {ApiKey: $openai_key},
@@ -456,8 +451,8 @@ jobs:
             "ASPNETCORE_ENVIRONMENT=Production"
             "DOTNET_EnableWriteXorExecute=0"
             "Security__TokenMint__Enabled=true"
-            "JeebJwt__Issuer=$JWT_ISSUER"
-            "JeebJwt__Audience=$JWT_AUDIENCE"
+            "Jwt__Issuer=$JWT_ISSUER"
+            "Jwt__Audience=$JWT_AUDIENCE"
             "UmJwt__Issuer=user-management"
             "UmJwt__Audience=user-management"
             "Services__Chat__BaseUrl=$CHAT_URL"
@@ -519,8 +514,8 @@ jobs:
 
             current_env=$(docker service inspect "$SVC" --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')
             env_args=()
-            sensitive_keys=(Security__TokenMint__Key JeebJwt__SigningKey JeebJwt__PhonePepper UmJwt__SigningKey PushNotificationServiceApi__InternalApiKey Whisper__ApiKey FeatureFlags__Heartbeat__ServiceAuthKey DATABASE_URL JEEB_DATABASE_URL GatewayPostgres__ConnectionString WalletPostgres__ConnectionString)
-            for key in "${sensitive_keys[@]}"; do
+            forbidden_env_keys=(Security__TokenMint__Key Jwt__SigningKey Jwt__PhonePepper JeebJwt__SigningKey JeebJwt__PhonePepper JeebJwt__Issuer JeebJwt__Audience UmJwt__SigningKey PushNotificationServiceApi__InternalApiKey Whisper__ApiKey FeatureFlags__Heartbeat__ServiceAuthKey DATABASE_URL JEEB_DATABASE_URL GatewayPostgres__ConnectionString WalletPostgres__ConnectionString)
+            for key in "${forbidden_env_keys[@]}"; do
               grep -q "^${key}=" <<< "$current_env" && env_args+=(--env-rm "$key")
             done
             for entry in "${common_env[@]}"; do env_args+=(--env-add "$entry"); done

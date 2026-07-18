@@ -92,6 +92,39 @@ public sealed class PushNotificationTopicDeploymentContractTests
     }
 
     [Fact]
+    public void DeployWorkflow_MountsTheExactJwtOptionsSectionAndScrubsOverrides()
+    {
+        var repoRoot = LocateRepoRoot();
+        var deploy = File.ReadAllText(Path.Combine(
+            repoRoot, ".github", "workflows", "deploy-to-jeeb.yml"));
+        var lifecycle = File.ReadAllText(Path.Combine(
+            repoRoot, ".github", "scripts", "jeeb-gateway-secret-lifecycle.sh"));
+        var jwtOptions = File.ReadAllText(Path.Combine(
+            repoRoot, "src", "JeebGateway", "Tokens", "JwtOptions.cs"));
+
+        jwtOptions.Should().Contain("public const string SectionName = \"Jwt\";");
+        jwtOptions.Should().NotContain("PhonePepper");
+        deploy.Should().Contain("Jwt: {SigningKey: $jwt_key}");
+        deploy.Should().NotContain("JeebJwt: {");
+        deploy.Should().Contain("\"Jwt__Issuer=$JWT_ISSUER\"");
+        deploy.Should().Contain("\"Jwt__Audience=$JWT_AUDIENCE\"");
+        deploy.Should().NotContain("\"JeebJwt__Issuer=$JWT_ISSUER\"");
+        deploy.Should().NotContain("\"JeebJwt__Audience=$JWT_AUDIENCE\"");
+        deploy.Should().NotContain("JEEB_JWT_PHONE_PEPPER");
+        deploy.Should().NotContain("JWT_PHONE_PEPPER");
+
+        foreach (var forbiddenKey in new[]
+                 {
+                     "Jwt__SigningKey", "Jwt__PhonePepper", "JeebJwt__SigningKey",
+                     "JeebJwt__PhonePepper", "JeebJwt__Issuer", "JeebJwt__Audience",
+                 })
+        {
+            deploy.Should().Contain(forbiddenKey, "the update must scrub stale service environment overrides");
+            lifecycle.Should().Contain(forbiddenKey, "recovery must reject or scrub the same override");
+        }
+    }
+
+    [Fact]
     public void DeployWorkflow_HasImmutableIdentityPinnedSshAndConvergentRecovery()
     {
         var repoRoot = LocateRepoRoot();
@@ -194,6 +227,8 @@ public sealed class PushNotificationTopicDeploymentContractTests
         ["docker service rm \"$SVC\""],
         ["psql \"$DATABASE_URL\""],
         ["--env-add Security__TokenMint__Key="],
+        ["--env-add Jwt__SigningKey="],
+        ["--env Jwt__SigningKey="],
         ["--env-add JeebJwt__SigningKey="],
         ["--env-add UmJwt__SigningKey="],
         ["--env-add Whisper__ApiKey="],

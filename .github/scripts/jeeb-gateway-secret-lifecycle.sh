@@ -61,9 +61,10 @@ spec_env() {
   esac
 }
 
-is_sensitive_env_key() {
+is_forbidden_env_key() {
   case "$1" in
-    Security__TokenMint__Key|JeebJwt__SigningKey|JeebJwt__PhonePepper|UmJwt__SigningKey|\
+    Security__TokenMint__Key|Jwt__SigningKey|Jwt__PhonePepper|\
+    JeebJwt__SigningKey|JeebJwt__PhonePepper|JeebJwt__Issuer|JeebJwt__Audience|UmJwt__SigningKey|\
     PushNotificationServiceApi__InternalApiKey|Whisper__ApiKey|\
     FeatureFlags__Heartbeat__ServiceAuthKey|DATABASE_URL|JEEB_DATABASE_URL|\
     GatewayPostgres__ConnectionString|WalletPostgres__ConnectionString)
@@ -86,8 +87,8 @@ assert_safe_spec() {
 
   while IFS= read -r env_entry; do
     [[ -n "$env_entry" ]] || continue
-    if is_sensitive_env_key "${env_entry%%=*}"; then
-      fail "$spec_kind spec contains a legacy sensitive environment key"
+    if is_forbidden_env_key "${env_entry%%=*}"; then
+      fail "$spec_kind spec contains a legacy or sensitive environment key"
     fi
   done < <(spec_env "$spec_kind" "$service_name")
 }
@@ -177,7 +178,7 @@ recover_existing() {
   fi
   while IFS= read -r env_entry; do
     [[ -n "$env_entry" ]] || continue
-    if is_sensitive_env_key "${env_entry%%=*}"; then
+    if is_forbidden_env_key "${env_entry%%=*}"; then
       env_args+=(--env-rm "${env_entry%%=*}")
     fi
   done < <(spec_env current "$service_name")
