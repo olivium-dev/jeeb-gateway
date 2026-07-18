@@ -138,7 +138,7 @@ jobs:
             -e Services__Matching__BaseUrl="http://matching:8080" \
             -e Services__Notification__BaseUrl="http://notification-service:8080" \
             -e Services__Geolocation__BaseUrl="http://geolocation-service:8080" \
-            -e Services__PushNotification__BaseUrl="http://push-notification:8080" \
+            -e PushNotificationServiceApi__BaseUrl="http://push-notification:8080" \
             -e Services__Delivery__BaseUrl="http://delivery-service:8080" \
             jeeb-gateway:ci-${{ github.sha }}
           sleep 5
