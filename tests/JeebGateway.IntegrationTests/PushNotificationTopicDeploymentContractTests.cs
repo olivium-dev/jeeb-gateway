@@ -1,5 +1,6 @@
 using System.Net;
 using System.Diagnostics;
+using System.Runtime.Versioning;
 using System.Text;
 using FluentAssertions;
 using JeebGateway.service.ServicePushNotification;
@@ -18,6 +19,7 @@ namespace JeebGateway.IntegrationTests;
 /// configuration section; a syntactically valid but obsolete <c>Services</c> key leaves
 /// the typed client pointed at its committed fallback and silently drops internal auth.
 /// </summary>
+[UnsupportedOSPlatform("windows")]
 public sealed class PushNotificationTopicDeploymentContractTests
 {
     private const string ConfiguredBaseUrl = "https://configured-push.test/internal-root";
@@ -234,6 +236,153 @@ public sealed class PushNotificationTopicDeploymentContractTests
 
         process.ExitCode.Should().NotBe(0);
     }
+
+    public static IEnumerable<object[]> InvalidRollbackCaptureStates() =>
+    [
+        ["transport-failure", "present"],
+        ["pass", "permission-failure"],
+        ["pass", "manager-failure"],
+        ["pass", "inspect-failure-existing"],
+        ["pass", "empty-success"],
+        ["pass", "malformed-success"],
+    ];
+
+    [Theory]
+    [MemberData(nameof(InvalidRollbackCaptureStates))]
+    public async Task RollbackCapture_FailsClosedWithoutFirstCreateSemantics(
+        string sshMode,
+        string dockerMode)
+    {
+        var result = await RunRollbackCaptureAsync(sshMode, dockerMode);
+
+        result.ExitCode.Should().NotBe(0);
+        result.Output.Should().NotContain("service_existed=0");
+        result.Output.Should().NotContain("image=none");
+    }
+
+    [Theory]
+    [InlineData("present", "service_existed=1")]
+    [InlineData("absent", "service_existed=0")]
+    public async Task RollbackCapture_EmitsExistenceOnlyForProvenStates(
+        string dockerMode,
+        string expectedOutput)
+    {
+        var result = await RunRollbackCaptureAsync("pass", dockerMode);
+
+        result.ExitCode.Should().Be(0, result.StandardError);
+        result.Output.Should().Contain(expectedOutput);
+    }
+
+    private static async Task<CaptureResult> RunRollbackCaptureAsync(
+        string sshMode,
+        string dockerMode)
+    {
+        var temp = Directory.CreateTempSubdirectory("jeeb-gateway-capture-");
+        try
+        {
+            var fakeBin = Directory.CreateDirectory(Path.Combine(temp.FullName, "bin"));
+            WriteExecutable(Path.Combine(fakeBin.FullName, "ssh"), FakeSsh);
+            WriteExecutable(Path.Combine(fakeBin.FullName, "docker"), FakeDocker);
+            var outputPath = Path.Combine(temp.FullName, "github-output");
+            var script = ExtractWorkflowStepScript("Capture strict rollback digest");
+            var startInfo = BuildCaptureStartInfo(
+                script, fakeBin.FullName, outputPath, sshMode, dockerMode);
+
+            using var process = Process.Start(startInfo)!;
+            var standardError = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            var output = File.Exists(outputPath)
+                ? await File.ReadAllTextAsync(outputPath)
+                : string.Empty;
+            return new CaptureResult(process.ExitCode, output, standardError);
+        }
+        finally
+        {
+            temp.Delete(recursive: true);
+        }
+    }
+
+    private static ProcessStartInfo BuildCaptureStartInfo(
+        string script,
+        string fakeBin,
+        string outputPath,
+        string sshMode,
+        string dockerMode)
+    {
+        var startInfo = new ProcessStartInfo("/bin/bash")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add(script);
+        startInfo.Environment["DEPLOY_SERVICE_NAME"] = "jeeb-gateway";
+        startInfo.Environment["GITHUB_OUTPUT"] = outputPath;
+        startInfo.Environment["FAKE_SSH_MODE"] = sshMode;
+        startInfo.Environment["FAKE_DOCKER_MODE"] = dockerMode;
+        startInfo.Environment["PATH"] = $"{fakeBin}:{startInfo.Environment["PATH"]}";
+        return startInfo;
+    }
+
+    private static string ExtractWorkflowStepScript(string stepName)
+    {
+        var workflow = File.ReadAllText(Path.Combine(
+            LocateRepoRoot(), ".github", "workflows", "deploy-to-jeeb.yml"));
+        var stepStart = workflow.IndexOf($"      - name: {stepName}\n", StringComparison.Ordinal);
+        stepStart.Should().BeGreaterThanOrEqualTo(0);
+        var runStart = workflow.IndexOf("        run: |\n", stepStart, StringComparison.Ordinal);
+        runStart.Should().BeGreaterThan(stepStart);
+        var bodyStart = runStart + "        run: |\n".Length;
+        var nextStep = workflow.IndexOf("\n      - ", bodyStart, StringComparison.Ordinal);
+        var body = workflow[bodyStart..(nextStep < 0 ? workflow.Length : nextStep)];
+        return string.Join('\n', body.Split('\n').Select(line =>
+            line.StartsWith("          ", StringComparison.Ordinal) ? line[10..] : line));
+    }
+
+    private static void WriteExecutable(string path, string contents)
+    {
+        File.WriteAllText(path, contents);
+        File.SetUnixFileMode(
+            path,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    private sealed record CaptureResult(int ExitCode, string Output, string StandardError);
+
+    private const string FakeSsh = """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        [[ "$FAKE_SSH_MODE" != transport-failure ]] || exit 255
+        [[ "${1:-}" == jeeb ]] || exit 64
+        shift
+        exec "$@"
+        """;
+
+    private const string FakeDocker = """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        if [[ "${1:-}" == service && "${2:-}" == inspect ]]; then
+          case "$FAKE_DOCKER_MODE" in
+            present) printf '%s\n' 'ghcr.io/olivium-dev/jeeb-gateway:sha-aaaaaaaaaaaa@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ;;
+            empty-success) exit 0 ;;
+            malformed-success) printf '%s\n' 'ghcr.io/olivium-dev/jeeb-gateway:latest' ;;
+            absent|permission-failure|manager-failure|inspect-failure-existing) exit 1 ;;
+            *) exit 64 ;;
+          esac
+          exit 0
+        fi
+        if [[ "${1:-}" == service && "${2:-}" == ls ]]; then
+          case "$FAKE_DOCKER_MODE" in
+            absent) printf '%s\n' other-service ;;
+            inspect-failure-existing) printf '%s\n' jeeb-gateway ;;
+            permission-failure|manager-failure) exit 1 ;;
+            *) exit 64 ;;
+          esac
+          exit 0
+        fi
+        exit 64
+        """;
 
     private static string LocateRepoRoot()
     {

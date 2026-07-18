@@ -235,9 +235,25 @@ jobs:
         id: previous
         run: |
           set -euo pipefail
-          RAW=$(ssh jeeb docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' "$DEPLOY_SERVICE_NAME" 2>/dev/null || true)
+          RAW=$(ssh jeeb bash -se -- "$DEPLOY_SERVICE_NAME" <<'REMOTE'
+          set -euo pipefail
+          SVC=$1
+          if IMAGE=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' "$SVC" 2>/dev/null); then
+            [[ -n "$IMAGE" ]] || { echo "running service has an empty image reference" >&2; exit 1; }
+            printf '%s\n' "$IMAGE"
+          else
+            SERVICE_NAMES=$(docker service ls --format '{{.Name}}') \
+              || { echo "could not list services after inspect failure" >&2; exit 1; }
+            if grep -Fxq "$SVC" <<< "$SERVICE_NAMES"; then
+              echo "service exists but its image could not be inspected" >&2
+              exit 1
+            fi
+            printf '%s\n' none
+          fi
+          REMOTE
+          )
           PREVIOUS_IMAGE=$(printf '%s' "$RAW" | tr -d '\r' | sed '/^[[:space:]]*$/d' | tail -n1)
-          PREVIOUS_IMAGE=${PREVIOUS_IMAGE:-none}
+          [[ -n "$PREVIOUS_IMAGE" ]] || { echo "::error::rollback capture returned no state"; exit 1; }
           if [[ "$PREVIOUS_IMAGE" != none ]]; then
             [[ "$PREVIOUS_IMAGE" =~ ^ghcr\.io/olivium-dev/jeeb-gateway(:sha-[0-9a-f]{12})?@sha256:[0-9a-f]{64}$ ]] \
               || { echo "::error::running gateway is not recorded by immutable digest"; exit 1; }
