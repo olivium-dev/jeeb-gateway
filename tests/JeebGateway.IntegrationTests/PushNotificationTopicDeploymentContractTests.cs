@@ -109,6 +109,80 @@ public sealed class PushNotificationTopicDeploymentContractTests
         lifecycle.Should().Contain("secret_is_referenced \"$candidate\"");
     }
 
+    [Fact]
+    public void GatewayOnlyExposurePreflight_PrecedesEveryRemoteMutation()
+    {
+        var repoRoot = LocateRepoRoot();
+        var deploy = File.ReadAllText(Path.Combine(repoRoot, ".github", "workflows", "deploy-to-jeeb.yml"));
+
+        var preflight = deploy.IndexOf(
+            "- name: Preflight gateway-only backend exposure (read-only)",
+            StringComparison.Ordinal);
+        var pinnedSsh = deploy.IndexOf(
+            "- name: Install cloudflared and configure pinned SSH identity",
+            StringComparison.Ordinal);
+        var priorDigest = deploy.IndexOf(
+            "- name: Capture strict rollback digest",
+            StringComparison.Ordinal);
+        var registryBuild = deploy.IndexOf(
+            "- name: Build, push, and verify immutable image digest",
+            StringComparison.Ordinal);
+        var remoteRegistryLogin = deploy.IndexOf(
+            "- name: Remote GHCR login after read-only preflights",
+            StringComparison.Ordinal);
+        var migration = deploy.IndexOf(
+            "- name: Apply idempotent migrations without credential argv",
+            StringComparison.Ordinal);
+        var secretCreate = deploy.IndexOf(
+            "ssh jeeb docker secret create \"$NEW_SECRET\" -",
+            StringComparison.Ordinal);
+        var serviceUpdate = deploy.IndexOf(
+            "docker service update --image \"$IMAGE_REF\"",
+            StringComparison.Ordinal);
+        var serviceCreate = deploy.IndexOf(
+            "docker service create --name \"$SVC\"",
+            StringComparison.Ordinal);
+
+        preflight.Should().BeGreaterThanOrEqualTo(0);
+        pinnedSsh.Should().BeLessThan(preflight);
+        preflight.Should().BeLessThan(priorDigest);
+        preflight.Should().BeLessThan(registryBuild);
+        preflight.Should().BeLessThan(remoteRegistryLogin);
+        preflight.Should().BeLessThan(migration);
+        preflight.Should().BeLessThan(secretCreate);
+        preflight.Should().BeLessThan(serviceUpdate);
+        preflight.Should().BeLessThan(serviceCreate);
+        priorDigest.Should().BeLessThan(registryBuild);
+        priorDigest.Should().BeLessThan(remoteRegistryLogin);
+        priorDigest.Should().BeLessThan(migration);
+        priorDigest.Should().BeLessThan(secretCreate);
+        priorDigest.Should().BeLessThan(serviceUpdate);
+        priorDigest.Should().BeLessThan(serviceCreate);
+        deploy.Should().Contain(
+            "expected=\"-A DOCKER-USER -i $public_if -p tcp -m conntrack --ctorigdstport $port -j DROP\"");
+        deploy.Should().Contain("\"http://${public_ip}:${PRIVATE_PUSH_PORT}/health\"");
+        deploy.LastIndexOf(
+            "- name: Verify gateway is the sole public ingress",
+            StringComparison.Ordinal).Should().BeGreaterThan(serviceUpdate,
+                "the exposure policy must also be rechecked after rollout");
+    }
+
+    [Fact]
+    public void DeployWorkflow_IsLockedToTheExpectedRepositoryBranchAndCommit()
+    {
+        var repoRoot = LocateRepoRoot();
+        var deploy = File.ReadAllText(Path.Combine(repoRoot, ".github", "workflows", "deploy-to-jeeb.yml"));
+
+        deploy.Should().Contain(
+            "expected_commit: { description: 'Exact 40-hex commit that this DEV run must deploy', required: true }");
+        deploy.Should().Contain("EXPECTED_REPOSITORY: olivium-dev/jeeb-gateway");
+        deploy.Should().Contain("EXPECTED_REF: refs/heads/codex/fix-jeeber-push-e2e-20260718");
+        deploy.Should().Contain("[[ \"$GITHUB_REPOSITORY\" == \"$EXPECTED_REPOSITORY\" ]]");
+        deploy.Should().Contain("[[ \"$GITHUB_REF\" == \"$EXPECTED_REF\" ]]");
+        deploy.Should().Contain("[[ \"$EXPECTED_COMMIT\" =~ ^[0-9a-f]{40}$ ]]");
+        deploy.Should().Contain("[[ \"$EXPECTED_COMMIT\" == \"$GITHUB_SHA\" ]]");
+    }
+
     public static IEnumerable<object[]> ForbiddenDeployFragments() =>
     [
         ["StrictHostKeyChecking accept-new"],

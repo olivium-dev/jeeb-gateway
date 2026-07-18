@@ -7,6 +7,7 @@ name: Deploy to Jeeb
 on:
   workflow_dispatch:
     inputs:
+      expected_commit: { description: 'Exact 40-hex commit that this DEV run must deploy', required: true }
       service_name:    { description: 'Swarm service name', required: true, default: 'jeeb-gateway' }
       internal_port:   { description: 'Container port', required: true, default: '8080' }
       external_port:   { description: 'Published DEV gateway port', required: true, default: '10000' }
@@ -98,12 +99,19 @@ jobs:
       APPSETTINGS_SECRET_TARGET: /app/appsettings.Production.json
       PRIVATE_PUSH_PORT: '10040'
       DEPLOY_DB_NAME: jeeb
+      EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+      EXPECTED_REPOSITORY: olivium-dev/jeeb-gateway
+      EXPECTED_REF: refs/heads/codex/fix-jeeber-push-e2e-20260718
     steps:
       - name: Validate locked DEV deployment inputs
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
           [[ "$DEPLOY_REGISTRY" == ghcr.io ]] || fail "registry is not allowlisted"
+          [[ "$GITHUB_REPOSITORY" == "$EXPECTED_REPOSITORY" ]] || fail "repository is not allowlisted"
+          [[ "$GITHUB_REF" == "$EXPECTED_REF" ]] || fail "branch is not allowlisted"
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "expected_commit is invalid"
+          [[ "$EXPECTED_COMMIT" == "$GITHUB_SHA" ]] || fail "expected_commit does not match GITHUB_SHA"
           [[ "$IMAGE_REPOSITORY" == olivium-dev/jeeb-gateway ]] || fail "image is not allowlisted"
           [[ "$DEPLOY_SERVICE_NAME" == jeeb-gateway ]] || fail "service_name is not allowlisted"
           [[ "$DEPLOY_INTERNAL_PORT" == 8080 ]] || fail "internal_port is not allowlisted"
@@ -164,27 +172,6 @@ jobs:
           : "${UMJWT_KEY:?UMJWT_SIGNING_KEY is required}"
           : "${HEARTBEAT_KEY:?HEARTBEAT_SERVICE_AUTH_KEY is required}"
 
-      - name: Log in to GHCR
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GHCR_TOKEN" | docker login "$DEPLOY_REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
-
-      - name: Build, push, and verify immutable image digest
-        id: build
-        run: |
-          set -euo pipefail
-          IMAGE="$DEPLOY_REGISTRY/$IMAGE_REPOSITORY"
-          TAG="$IMAGE:sha-${GITHUB_SHA::12}"
-          docker build -t "$TAG" .
-          docker push "$TAG"
-          DIGEST=$(docker buildx imagetools inspect "$TAG" --format '{{.Manifest.Digest}}')
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::invalid registry digest"; exit 1; }
-          IMAGE_REF="$IMAGE@$DIGEST"
-          docker pull "$IMAGE_REF" >/dev/null
-          PULLED_REF=$(docker image inspect "$IMAGE_REF" --format '{{index .RepoDigests 0}}')
-          [[ "$PULLED_REF" == "$IMAGE_REF" ]] || { echo "::error::pulled digest differs from pushed digest"; exit 1; }
-          echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
-
       - name: Install cloudflared and configure pinned SSH identity
         env:
           SSH_KEY_MATERIAL: ${{ secrets.JEEB_SSH_PRIVATE_KEY }}
@@ -218,10 +205,31 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
-      - name: Remote GHCR login
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GHCR_TOKEN" | ssh jeeb docker login "$DEPLOY_REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
+      - name: Preflight gateway-only backend exposure (read-only)
+        run: |
+          set -euo pipefail
+          evidence=$(ssh jeeb bash -se -- "$PRIVATE_PUSH_PORT" <<'REMOTE'
+          set -euo pipefail
+          port=$1
+          public_if=$(ip -4 route show default | awk 'NR == 1 {print $5}')
+          [[ "$public_if" =~ ^[A-Za-z0-9_.:-]+$ ]] || exit 1
+          first_rule=$(sudo -n iptables -S DOCKER-USER | sed -n '/^-A /{p;q}')
+          expected="-A DOCKER-USER -i $public_if -p tcp -m conntrack --ctorigdstport $port -j DROP"
+          [[ "$first_rule" == "$expected" ]] || exit 1
+          printf PRIVATE_PUSH_BLOCKED
+          REMOTE
+          )
+          [[ "$evidence" == PRIVATE_PUSH_BLOCKED ]] \
+            || { echo "::error::private push firewall policy is not proven before mutation"; exit 1; }
+          public_ip=$(ssh jeeb 'curl -fsS --max-time 5 https://api.ipify.org' | tr -d '\r\n')
+          [[ "$public_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
+            || { echo "::error::could not establish the DEV host public probe address"; exit 1; }
+          if curl --silent --show-error --max-time 5 --output /dev/null \
+            "http://${public_ip}:${PRIVATE_PUSH_PORT}/health"; then
+            echo "::error::push backend is publicly reachable before deployment mutation"
+            exit 1
+          fi
+          echo "Read-only gateway-only exposure preflight passed"
 
       - name: Capture strict rollback digest
         id: previous
@@ -236,6 +244,32 @@ jobs:
           fi
           echo "image=$PREVIOUS_IMAGE" >> "$GITHUB_OUTPUT"
           [[ "$PREVIOUS_IMAGE" == none ]] && echo 'service_existed=0' >> "$GITHUB_OUTPUT" || echo 'service_existed=1' >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR after read-only preflights
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login "$DEPLOY_REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build, push, and verify immutable image digest
+        id: build
+        run: |
+          set -euo pipefail
+          IMAGE="$DEPLOY_REGISTRY/$IMAGE_REPOSITORY"
+          TAG="$IMAGE:sha-${GITHUB_SHA::12}"
+          docker build -t "$TAG" .
+          docker push "$TAG"
+          DIGEST=$(docker buildx imagetools inspect "$TAG" --format '{{.Manifest.Digest}}')
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::invalid registry digest"; exit 1; }
+          IMAGE_REF="$IMAGE@$DIGEST"
+          docker pull "$IMAGE_REF" >/dev/null
+          PULLED_REF=$(docker image inspect "$IMAGE_REF" --format '{{index .RepoDigests 0}}')
+          [[ "$PULLED_REF" == "$IMAGE_REF" ]] || { echo "::error::pulled digest differs from pushed digest"; exit 1; }
+          echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Remote GHCR login after read-only preflights
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | ssh jeeb docker login "$DEPLOY_REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
 
       - name: Install psql client
         run: |
