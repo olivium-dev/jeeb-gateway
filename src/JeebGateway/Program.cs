@@ -1821,6 +1821,13 @@ else
     builder.Services.AddSingleton<IUsersStore>(sp => sp.GetRequiredService<InMemoryUsersStore>());
 }
 
+// JEBV4-314 — gateway-local, DEV-ONLY bridge from POST /dev/seed/user (role=admin)
+// to the POST /v1/auth/login role mint. Always registered but only ever WRITTEN by the
+// [DevOnly] SeedUser action (404 unless Features:DevEndpoints:Enabled), so it is empty
+// in production and the login consult is a no-op there. See DevSeededRoleStore.
+builder.Services.AddSingleton<JeebGateway.Users.IDevSeededRoleStore,
+    JeebGateway.Users.DevSeededRoleStore>();
+
 // Dual-role identity + BR-1 enforcement (T-backend-041).
 // Validates that a user cannot act as both Client and Jeeber simultaneously
 // in the same delivery, and that role switches are gated on having no active

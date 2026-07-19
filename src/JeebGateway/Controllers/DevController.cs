@@ -4,6 +4,8 @@ using JeebGateway.Auth.Capabilities;
 using JeebGateway.Security;
 using JeebGateway.service.ServiceUserManagement;
 using Microsoft.AspNetCore.Mvc;
+using GwRoles = JeebGateway.Users.Roles;
+using GwSeededRoles = JeebGateway.Users.IDevSeededRoleStore;
 using UserManagementApiException = JeebGateway.service.ServiceUserManagement.ApiException;
 // JEB-1472: the regenerated UserManagement NSwag client now emits a ProblemDetails
 // DTO (the bumped UM 1.1.0 contract documents RFC 7807 error bodies). Alias the bare
@@ -58,13 +60,16 @@ namespace JeebGateway.Controllers;
 public sealed class DevController : ControllerBase
 {
     private readonly ServiceUserManagementClient _userManagement;
+    private readonly GwSeededRoles _seededRoles;
     private readonly ILogger<DevController> _logger;
 
     public DevController(
         ServiceUserManagementClient userManagement,
+        GwSeededRoles seededRoles,
         ILogger<DevController> logger)
     {
         _userManagement = userManagement;
+        _seededRoles = seededRoles;
         _logger = logger;
     }
 
@@ -149,6 +154,15 @@ public sealed class DevController : ControllerBase
         try
         {
             var created = await _userManagement.RegisterAsync(registerRequest, ct);
+
+            // JEBV4-314 — user-management has no role column on the register contract, so
+            // the requested role would otherwise be dropped and a later /v1/auth/login would
+            // mint roles:customer. Record the OPAQUE roles for this seed HERE (keyed by the
+            // UM canonical userId + the login email) so the login facade's role mint reflects
+            // the seeded role (e.g. admin) and admin endpoints stop 403'ing. Dev-only: this
+            // action is [DevOnly]-gated, so the store is only ever populated in a dev env.
+            var seededRoles = MapSeedRoleToOpaque(role);
+            _seededRoles.Record(created.UserId, email, seededRoles);
 
             // Structured log — role/runId/username/email only. NEVER the password
             // or the phone (the phone is PII; only the derived handle is logged).
@@ -397,6 +411,20 @@ public sealed class DevController : ControllerBase
 
     private static DateTimeOffset TryParseDate(string? value)
         => DateTimeOffset.TryParse(value, out var parsed) ? parsed : DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// JEBV4-314 — map the seed's SEMANTIC role (<c>client</c> / <c>jeeber</c> / <c>admin</c>,
+    /// already lowercased) onto the OPAQUE gateway role set the login mint embeds in the JWT
+    /// <c>roles</c> claim. Every seed carries the base <see cref="Roles.Client"/> role (a
+    /// customer surface) plus its elevated role, matching how the capability gate reads the
+    /// multivalued roles claim. Unknown roles degrade to a plain customer.
+    /// </summary>
+    internal static IReadOnlyList<string> MapSeedRoleToOpaque(string role) => role switch
+    {
+        "admin" => new[] { GwRoles.Client, GwRoles.Admin },
+        "jeeber" or "driver" => new[] { GwRoles.Client, GwRoles.Jeeber },
+        _ => new[] { GwRoles.Client },
+    };
 }
 
 // -------------------------------------------------------------------------
