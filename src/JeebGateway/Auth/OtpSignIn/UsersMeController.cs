@@ -59,6 +59,7 @@ public sealed class UsersMeController : ControllerBase
     private readonly IMemoryCache _cache;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IUserManagementDualRoleClient _dualRole;
+    private readonly IDevSeededRoleStore _seededRoles;
     private readonly ITokenService _tokens;
     private readonly ILogger<UsersMeController> _log;
 
@@ -68,6 +69,7 @@ public sealed class UsersMeController : ControllerBase
         IMemoryCache cache,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         IUserManagementDualRoleClient dualRole,
+        IDevSeededRoleStore seededRoles,
         ITokenService tokens,
         ILogger<UsersMeController> log)
     {
@@ -76,6 +78,7 @@ public sealed class UsersMeController : ControllerBase
         _cache = cache;
         _flags = flags;
         _dualRole = dualRole;
+        _seededRoles = seededRoles;
         _tokens = tokens;
         _log = log;
     }
@@ -327,14 +330,31 @@ public sealed class UsersMeController : ControllerBase
     /// <para>Fallback chain (each step used only when the prior yields nothing, so a
     /// UM blip never hard-breaks the read): authoritative UM roles -> local
     /// projection -> the validated session claims.</para>
+    ///
+    /// <para>SELF-DRIFT FIX (JEBV4-314 companion) — after the base set is resolved, UNION any
+    /// DEV-seeded roles so this read reports the SAME effective role set THIS gateway minted at
+    /// login. <see cref="AuthEmailFacadeController.ResolveRolesAsync"/> unions the
+    /// <see cref="IDevSeededRoleStore"/> into the JWT it mints (a seeded admin logs in carrying
+    /// <c>roles:[customer,admin]</c>); without the same union here the /me read returns
+    /// user-management's authoritative set ALONE — which never learned the seed (register has no
+    /// role column), so a seeded admin resolved to <c>[customer] → [client]</c>, contradicting the
+    /// mint and gating every admin CMS surface closed (the shell derives caps from
+    /// <c>available_roles</c>). The store is ONLY ever populated by the <c>[DevOnly]</c>
+    /// <c>POST /dev/seed/user</c> action, so in production (and every non-seeded request) it
+    /// resolves to null and the union is a strict no-op — user-management stays authoritative for
+    /// real identity, and a client-only identity still surfaces exactly <c>[client]</c>. Unioned at
+    /// the OPAQUE level so <c>admin</c> passes through <see cref="JeebRoleTranslator.ToContract(string?)"/>
+    /// unchanged (the vocabulary the CMS shell's <c>capabilitiesFromRoles</c> understands).</para>
     /// </summary>
     private async Task<IReadOnlyList<string>> ResolveAvailableRolesAsync(string userId, CancellationToken ct)
     {
+        IReadOnlyList<string> baseRoles = Array.Empty<string>();
+
         // 1) AUTHORITATIVE — the persisted role set user-management owns.
         try
         {
             var um = await _dualRole.GetUserRolesAsync(userId, ct);
-            if (um is { AvailableRoles.Count: > 0 }) return um.AvailableRoles;
+            if (um is { AvailableRoles.Count: > 0 }) baseRoles = um.AvailableRoles;
         }
         catch (Exception ex)
         {
@@ -344,11 +364,24 @@ public sealed class UsersMeController : ControllerBase
         }
 
         // 2) Local UM projection (the source the OTP-mint / role-switch paths upsert).
-        var profile = await _users.GetByIdAsync(userId, ct);
-        if (profile is { Roles.Count: > 0 }) return profile.Roles;
+        if (baseRoles.Count == 0)
+        {
+            var profile = await _users.GetByIdAsync(userId, ct);
+            if (profile is { Roles.Count: > 0 }) baseRoles = profile.Roles;
+        }
 
         // 3) Last resort — the roles claim on the validated session token.
-        return UserIdentity.GetRoles(HttpContext);
+        if (baseRoles.Count == 0)
+            baseRoles = UserIdentity.GetRoles(HttpContext);
+
+        // Union the dev-seeded roles so /me matches the login mint (see summary). Dev-only store:
+        // null (a strict no-op) for every real user. Resolve by userId — the seed records both the
+        // canonical userId and the login email; the userId is the join key the bearer's sub carries.
+        var seeded = _seededRoles.Resolve(userId, email: null);
+        if (seeded is { Count: > 0 })
+            baseRoles = baseRoles.Union(seeded, StringComparer.OrdinalIgnoreCase).ToList();
+
+        return baseRoles;
     }
 
     /// <summary>
