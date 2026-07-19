@@ -2,6 +2,7 @@ using System.Text.Json;
 using JeebGateway.Infrastructure;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 
 namespace JeebGateway.Users;
 
@@ -98,11 +99,6 @@ public sealed class PostgresUserProjectionStore : IUserProjectionStore
         var page = Math.Max(query.Page, 1);
         var size = Math.Clamp(query.PageSize, 1, 100);
 
-        // Blank filters bind DBNull so the "@X IS NULL OR …" arm short-circuits.
-        object NameParam() => Wildcard(query.Name);
-        object PhoneParam() => Wildcard(query.Phone);
-        object EmailParam() => Wildcard(query.Email);
-
         const string where =
             "WHERE (@Name  IS NULL OR name        ILIKE @Name)\n" +
             "  AND (@Phone IS NULL OR phone       ILIKE @Phone)\n" +
@@ -114,9 +110,7 @@ public sealed class PostgresUserProjectionStore : IUserProjectionStore
         int total;
         await using (var countCmd = new NpgsqlCommand($"SELECT COUNT(*) FROM users\n{where}", conn))
         {
-            countCmd.Parameters.AddWithValue("Name", NameParam());
-            countCmd.Parameters.AddWithValue("Phone", PhoneParam());
-            countCmd.Parameters.AddWithValue("Email", EmailParam());
+            AddFilterParams(countCmd, query);
             total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(ct));
         }
 
@@ -125,9 +119,7 @@ public sealed class PostgresUserProjectionStore : IUserProjectionStore
             "ORDER BY created_at DESC\n" +
             "LIMIT @Limit OFFSET @Offset";
         await using var pageCmd = new NpgsqlCommand(pageSql, conn);
-        pageCmd.Parameters.AddWithValue("Name", NameParam());
-        pageCmd.Parameters.AddWithValue("Phone", PhoneParam());
-        pageCmd.Parameters.AddWithValue("Email", EmailParam());
+        AddFilterParams(pageCmd, query);
         pageCmd.Parameters.AddWithValue("Limit", size);
         pageCmd.Parameters.AddWithValue("Offset", (page - 1) * size);
 
@@ -239,8 +231,30 @@ public sealed class PostgresUserProjectionStore : IUserProjectionStore
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    private static object Wildcard(string? needle)
-        => string.IsNullOrWhiteSpace(needle) ? DBNull.Value : "%" + needle.Trim() + "%";
+    /// <summary>
+    /// Binds the three optional name/phone/email search filters with an EXPLICIT
+    /// <see cref="NpgsqlDbType.Text"/> type. A blank filter binds a text-typed NULL
+    /// so the <c>(@X IS NULL OR col ILIKE @X)</c> arm short-circuits.
+    ///
+    /// <para><b>JEBV4-313.</b> The prior binding used <c>AddWithValue(name, DBNull.Value)</c>,
+    /// which sends an UNTYPED NULL parameter. With every filter blank (the CMS "list all"
+    /// call) Postgres could not infer the parameter type from <c>$n IS NULL</c> and threw
+    /// <c>42P08 could not determine data type of parameter</c>, surfacing as a 500 on
+    /// <c>GET /admin/users/search</c>. Pinning the parameter type to <c>text</c> removes the
+    /// inference dependency (equivalent to writing <c>NULL::text</c> in raw SQL).</para>
+    /// </summary>
+    private static void AddFilterParams(NpgsqlCommand cmd, UserSearchQuery query)
+    {
+        AddTextFilter(cmd, "Name", query.Name);
+        AddTextFilter(cmd, "Phone", query.Phone);
+        AddTextFilter(cmd, "Email", query.Email);
+    }
+
+    private static void AddTextFilter(NpgsqlCommand cmd, string name, string? needle)
+        => cmd.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text)
+        {
+            Value = string.IsNullOrWhiteSpace(needle) ? DBNull.Value : "%" + needle.Trim() + "%"
+        });
 
     private static async Task<List<UserProfile>> ReadListAsync(NpgsqlCommand cmd, CancellationToken ct)
     {
