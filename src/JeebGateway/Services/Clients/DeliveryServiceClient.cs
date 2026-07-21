@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using JeebGateway.Tiers;
 
 namespace JeebGateway.Services.Clients;
@@ -24,7 +25,58 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         using var response = await _http.GetAsync("api/v1/tiers", ct);
         response.EnsureSuccessStatusCode();
         // Upstream returns a raw JSON array — not wrapped in an envelope.
-        return await DeserializeAsync<IReadOnlyList<DeliveryTierDto>>(response, ct);
+        var tiers = await DeserializeAsync<IReadOnlyList<DeliveryTierUpstream>>(response, ct);
+        return tiers.Select(ToDeliveryTierDto).ToArray();
+    }
+
+    private static DeliveryTierDto ToDeliveryTierDto(DeliveryTierUpstream tier) => new()
+    {
+        Id = tier.Id,
+        Name = tier.Name,
+        SlaHours = tier.SlaHours,
+        RadiusKm = tier.RadiusKm,
+        RequestTtlSeconds = tier.TtlSeconds > 0
+            ? tier.TtlSeconds
+            : tier.TtlMinutes > 0
+                ? checked(tier.TtlMinutes * 60)
+                : 0,
+        CommissionRate = tier.CommissionRate,
+        PriceHint = tier.PriceHint,
+        CreatedAt = tier.CreatedAt,
+        UpdatedAt = tier.UpdatedAt,
+    };
+
+    private sealed class DeliveryTierUpstream
+    {
+        [JsonPropertyName("id")]
+        public required string Id { get; init; }
+
+        [JsonPropertyName("name")]
+        public required string Name { get; init; }
+
+        [JsonPropertyName("slaHours")]
+        public required int SlaHours { get; init; }
+
+        [JsonPropertyName("radiusKm")]
+        public required double RadiusKm { get; init; }
+
+        [JsonPropertyName("ttl_seconds")]
+        public int TtlSeconds { get; init; }
+
+        [JsonPropertyName("ttl_minutes")]
+        public int TtlMinutes { get; init; }
+
+        [JsonPropertyName("commissionRate")]
+        public required double CommissionRate { get; init; }
+
+        [JsonPropertyName("priceHint")]
+        public required string PriceHint { get; init; }
+
+        [JsonPropertyName("createdAt")]
+        public required DateTimeOffset CreatedAt { get; init; }
+
+        [JsonPropertyName("updatedAt")]
+        public required DateTimeOffset UpdatedAt { get; init; }
     }
 
     /// <inheritdoc />

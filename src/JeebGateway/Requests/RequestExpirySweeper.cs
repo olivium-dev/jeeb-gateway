@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using JeebGateway.Services;
+using JeebGateway.Services.Clients;
 
 namespace JeebGateway.Requests;
 
@@ -18,20 +20,28 @@ namespace JeebGateway.Requests;
 /// </summary>
 public class RequestExpirySweeper : BackgroundService
 {
+    private static readonly TimeSpan SafeExpiryWindow = TimeSpan.FromHours(24);
+
     private readonly IServiceProvider _services;
     private readonly TimeProvider _clock;
     private readonly IOptions<RequestExpiryOptions> _options;
+    private readonly IDeliveryServiceClient _delivery;
+    private readonly IOptionsMonitor<UpstreamFeatureFlags> _upstreamFlags;
     private readonly ILogger<RequestExpirySweeper> _logger;
 
     public RequestExpirySweeper(
         IServiceProvider services,
         TimeProvider clock,
         IOptions<RequestExpiryOptions> options,
+        IDeliveryServiceClient delivery,
+        IOptionsMonitor<UpstreamFeatureFlags> upstreamFlags,
         ILogger<RequestExpirySweeper> logger)
     {
         _services = services;
         _clock = clock;
         _options = options;
+        _delivery = delivery;
+        _upstreamFlags = upstreamFlags;
         _logger = logger;
     }
 
@@ -75,13 +85,9 @@ public class RequestExpirySweeper : BackgroundService
 
         var now = _clock.GetUtcNow();
         var tierTtls = await LoadTierTtlsAsync(tiers, ct);
-        if (tierTtls.Count == 0)
-        {
-            _logger.LogError("Request expiry sweep skipped: no tier TTLs are configured");
-            return;
-        }
-
-        var shortestExpiryWindow = tierTtls.Values.Min();
+        var shortestExpiryWindow = tierTtls.Count > 0
+            ? tierTtls.Values.Min()
+            : SafeExpiryWindow;
         var scanWindow = opts.NoOfferNudgeWindow < shortestExpiryWindow
             ? opts.NoOfferNudgeWindow
             : shortestExpiryWindow;
@@ -155,13 +161,34 @@ public class RequestExpirySweeper : BackgroundService
         JeebGateway.Tiers.ITiersStore tiers,
         CancellationToken ct)
     {
-        var catalog = await tiers.ListAsync(ct);
-        return catalog
-            .Where(t => t.RequestTtlSeconds > 0)
-            .ToDictionary(
-                t => t.Id,
-                t => TimeSpan.FromSeconds(t.RequestTtlSeconds),
-                StringComparer.OrdinalIgnoreCase);
+        // Two tier-id vocabularies reach this sweeper and BOTH must resolve:
+        // the local catalog's slugs (urgent/same-day/scheduled — what
+        // `LegacyTierCodes.Canonicalize` produces for a request stamped with a
+        // legacy code like "flash") and delivery-service's UUIDs (what a
+        // request created through the upstream path carries). Loading only one
+        // of them silently pushes every request of the other shape onto the 24h
+        // safe fallback — the bug this class had for the UUID shape, which the
+        // slug shape would inherit if the upstream catalog simply replaced the
+        // local one. Seed with the local slugs, then overlay upstream so the
+        // live service stays authoritative wherever the two ever collide.
+        var merged = new Dictionary<string, TimeSpan>(StringComparer.OrdinalIgnoreCase);
+
+        var localCatalog = await tiers.ListAsync(ct);
+        foreach (var tier in localCatalog.Where(t => t.RequestTtlSeconds > 0))
+        {
+            merged[tier.Id] = TimeSpan.FromSeconds(tier.RequestTtlSeconds);
+        }
+
+        if (_upstreamFlags.CurrentValue.Delivery)
+        {
+            var upstreamCatalog = await _delivery.ListTiersAsync(ct);
+            foreach (var tier in upstreamCatalog.Where(t => t.RequestTtlSeconds > 0))
+            {
+                merged[tier.Id] = TimeSpan.FromSeconds(tier.RequestTtlSeconds);
+            }
+        }
+
+        return merged;
     }
 
     private TimeSpan ResolveExpiryWindow(
@@ -187,7 +214,7 @@ public class RequestExpirySweeper : BackgroundService
             return fallback;
         }
 
-        fallback = TimeSpan.FromHours(24);
+        fallback = SafeExpiryWindow;
         _logger.LogWarning(
             "Request {RequestId} has unknown tier {TierId}; default tier TTL is unavailable, using safe TTL {WindowMinutes}m",
             req.Id,
