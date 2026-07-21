@@ -686,6 +686,64 @@ public sealed class DurableRequestsStoreTests
             .Should().Be(RequestStatus.Expired);
     }
 
+    [Fact]
+    public async Task Expire_falls_back_to_pending_mirror_row_when_inner_is_cold()
+    {
+        var store = BuildWithMirror(out var inner, out _, out var mirror);
+        var requestId = Guid.NewGuid().ToString();
+        var expiredAt = Clock.GetUtcNow();
+        mirror.Rows.Add(MirrorRow(requestId, RequestStatus.Pending));
+
+        (await inner.GetAsync(requestId, CancellationToken.None)).Should().BeNull(
+            "a gateway restart leaves the in-memory projection empty");
+
+        (await store.TryExpireAsync(requestId, expiredAt, CancellationToken.None))
+            .Should().BeTrue("the durable pending row must transition even when memory is cold");
+
+        mirror.Rows.Single(r => r.Id == requestId).Status.Should().Be(RequestStatus.Expired);
+        mirror.Expiries.Should().ContainSingle(e => e.Id == requestId && e.ExpiredAt == expiredAt);
+    }
+
+    [Fact]
+    public async Task Expire_fallback_returns_false_on_second_call_for_same_mirror_row()
+    {
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var requestId = Guid.NewGuid().ToString();
+        mirror.Rows.Add(MirrorRow(requestId, RequestStatus.Pending));
+
+        (await store.TryExpireAsync(requestId, Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeTrue();
+        (await store.TryExpireAsync(requestId, Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeFalse("an already-expired durable row must not notify twice");
+
+        mirror.Expiries.Should().ContainSingle("only the atomic transition wins");
+    }
+
+    [Fact]
+    public async Task Expire_returns_false_when_id_is_in_neither_store()
+    {
+        var store = BuildWithMirror(out _, out _, out var mirror);
+
+        (await store.TryExpireAsync(Guid.NewGuid().ToString(), Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeFalse();
+
+        mirror.Expiries.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Expire_cold_fallback_swallows_mirror_failure()
+    {
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        mirror.Rows.Add(MirrorRow(Guid.NewGuid().ToString(), RequestStatus.Pending));
+        mirror.ThrowOnExpire = true;
+
+        var act = async () => await store.TryExpireAsync(
+            mirror.Rows[0].Id, Clock.GetUtcNow(), CancellationToken.None);
+
+        (await act.Should().NotThrowAsync()).Which.Should().BeFalse(
+            "without a committed in-memory or mirror transition there is no notification");
+    }
+
     // -- JEBV4-40 (PP-9): durable cancel is terminal on the single-read + sweep ----
 
     [Fact]
@@ -878,6 +936,8 @@ public sealed class DurableRequestsStoreTests
     /// </summary>
     private sealed class RecordingMirror : IDurableRequestsMirror
     {
+        private readonly Dictionary<string, string> _persistedStatuses = new(StringComparer.Ordinal);
+
         public List<DeliveryRequest> Upserted { get; } = new();
         public List<(string Id, string GwStatus)> Cancels { get; } = new();
         public List<(string Id, DateTimeOffset ExpiredAt)> Expiries { get; } = new();
@@ -890,6 +950,7 @@ public sealed class DurableRequestsStoreTests
         public Task UpsertOnCreateAsync(DeliveryRequest row, CancellationToken ct)
         {
             Upserted.Add(row);
+            _persistedStatuses.TryAdd(row.Id, row.Status);
             return Task.CompletedTask;
         }
 
@@ -898,6 +959,10 @@ public sealed class DurableRequestsStoreTests
             DateTimeOffset at, CancellationToken ct)
         {
             Updates.Add((requestId, gwStatus, gwJeeberId, gwAcceptedFee));
+            if (gwStatus is not null && _persistedStatuses.ContainsKey(requestId))
+            {
+                _persistedStatuses[requestId] = gwStatus;
+            }
             return Task.CompletedTask;
         }
 
@@ -906,14 +971,44 @@ public sealed class DurableRequestsStoreTests
             string? cancellationReason, DateTimeOffset at, CancellationToken ct)
         {
             Cancels.Add((requestId, gwStatus));
+            if (_persistedStatuses.ContainsKey(requestId))
+            {
+                _persistedStatuses[requestId] = gwStatus;
+            }
             return Task.CompletedTask;
         }
 
-        public Task MarkExpiredAsync(string requestId, DateTimeOffset expiredAt, CancellationToken ct)
+        public Task<bool> MarkExpiredAsync(string requestId, DateTimeOffset expiredAt, CancellationToken ct)
         {
             if (ThrowOnExpire) throw new InvalidOperationException("mirror unavailable");
+
+            var row = Rows.FirstOrDefault(r => string.Equals(r.Id, requestId, StringComparison.Ordinal));
+            string status;
+            if (row is not null)
+            {
+                status = row.Status;
+            }
+            else if (!_persistedStatuses.TryGetValue(requestId, out status!))
+            {
+                return Task.FromResult(false);
+            }
+
+            if (RequestStatus.IsTerminal(status))
+            {
+                return Task.FromResult(false);
+            }
+
             Expiries.Add((requestId, expiredAt));
-            return Task.CompletedTask;
+            if (row is not null)
+            {
+                row.Status = RequestStatus.Expired;
+                row.ExpiredAt = expiredAt;
+            }
+            else
+            {
+                _persistedStatuses[requestId] = RequestStatus.Expired;
+            }
+            return Task.FromResult(true);
         }
 
         public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct)
@@ -935,6 +1030,15 @@ public sealed class DurableRequestsStoreTests
         public Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct)
             => Task.FromResult(Rows.FirstOrDefault(r => string.Equals(r.Id, requestId, StringComparison.Ordinal)));
     }
+
+    private static DeliveryRequest MirrorRow(string requestId, string status) => new()
+    {
+        Id = requestId,
+        ClientId = "client-cold",
+        Status = status,
+        Description = "survived a gateway restart",
+        CreatedAt = Clock.GetUtcNow().AddMinutes(-10),
+    };
 
     private sealed class RecordingBundleRecorder : ISagaBundleRecorder
     {

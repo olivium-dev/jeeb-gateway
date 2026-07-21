@@ -475,38 +475,37 @@ public sealed class DurableRequestsStore : IRequestsStore
     }
 
     /// <summary>
-    /// TryExpireAsync stops being a passthrough — it writes the in-memory projection
-    /// AND the gateway Postgres mirror; it deliberately does NOT call delivery-service,
-    /// because after this design delivery-service is the AUTHOR of expiry and the
-    /// gateway only projects what it observed.
+    /// TryExpireAsync first keeps the warm in-memory projection current, then atomically
+    /// projects expiry into the gateway Postgres mirror. The mirror transition is also
+    /// the cold-path fallback after a gateway restart: a request missing from memory can
+    /// still expire exactly once and cause exactly one customer notification. This
+    /// deliberately does NOT call delivery-service, because delivery-service is the
+    /// AUTHOR of expiry and the gateway only projects what it observed.
     /// </summary>
     public async Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct)
     {
-        var expired = await _inner.TryExpireAsync(requestId, at, ct);
-        if (!expired) return false;
+        var expiredInMemory = await _inner.TryExpireAsync(requestId, at, ct);
+        if (_mirror is null) return expiredInMemory;
 
-        if (_mirror is not null)
+        try
         {
-            try
-            {
-                await _mirror.MarkExpiredAsync(requestId, at, ct);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
-                    new KeyValuePair<string, object?>("store", "postgres-requests-owner-list"));
-                _logger.LogWarning(ex,
-                    "requests-durable: owner-list mirror expiry-status update failed for {RequestId}; " +
-                    "the list may show a stale status after a bounce.",
-                    requestId);
-            }
+            var expiredInMirror = await _mirror.MarkExpiredAsync(requestId, at, ct);
+            return expiredInMemory || expiredInMirror;
         }
-
-        return true;
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "postgres-requests-owner-list"));
+            _logger.LogWarning(ex,
+                "requests-durable: owner-list mirror expiry-status update failed for {RequestId}; " +
+                "the list may show a stale status after a bounce.",
+                requestId);
+            return expiredInMemory;
+        }
     }
 
     public Task<int> AnonymizeForClientAsync(string userId, string anonymizedHash, CancellationToken ct)

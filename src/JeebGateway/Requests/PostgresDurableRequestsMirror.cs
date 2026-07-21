@@ -132,34 +132,44 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task MarkExpiredAsync(
+    public async Task<bool> MarkExpiredAsync(
         string requestId,
         DateTimeOffset expiredAt,
         CancellationToken ct)
     {
-        if (!Guid.TryParse(requestId, out var id)) return;
+        if (!Guid.TryParse(requestId, out var id)) return false;
 
         await using var conn = await _db.OpenAsync(ct);
 
         // Touch ONLY the gateway columns — the native enum status + its coupled
-        // CHECK constraints are left untouched so no constraint can fire.
+        // CHECK constraints are left untouched so no constraint can fire. The
+        // terminal-state predicate makes the transition atomic and idempotent:
+        // one overlapping observer poll can win, while every repeat returns false.
         const string sql = """
             UPDATE delivery_requests
                SET gw_status = 'expired',
                    gw_expired_at = @At,
                    gw_updated_at = now()
-             WHERE id = @Id AND gw_mirror = TRUE
+             WHERE id = @Id
+               AND gw_mirror = TRUE
+               AND COALESCE(gw_status, status::text) NOT IN
+                   ('delivered', 'rated', 'cancelled', 'expired', 'disputed')
             """;
 
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("Id", id);
         cmd.Parameters.AddWithValue("At", expiredAt);
 
-        await cmd.ExecuteNonQueryAsync(ct);
+        var transitioned = await cmd.ExecuteNonQueryAsync(ct) > 0;
 
-        _log.LogDebug(
-            "requests-durable: mirrored request {RequestId} expiry into delivery_requests (gw_status=expired).",
-            requestId);
+        if (transitioned)
+        {
+            _log.LogDebug(
+                "requests-durable: mirrored request {RequestId} expiry into delivery_requests (gw_status=expired).",
+                requestId);
+        }
+
+        return transitioned;
     }
 
     public async Task UpdateLifecycleAsync(
