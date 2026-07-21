@@ -2,6 +2,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using JeebGateway.Tiers;
+using Microsoft.Extensions.Logging;
 
 namespace JeebGateway.Services.Clients;
 
@@ -14,10 +15,14 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly HttpClient _http;
+    private readonly ILogger<DeliveryServiceClient>? _logger;
 
-    public DeliveryServiceClient(HttpClient http)
+    public DeliveryServiceClient(
+        HttpClient http,
+        ILogger<DeliveryServiceClient>? logger = null)
     {
         _http = http;
+        _logger = logger;
     }
 
     public async Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct)
@@ -263,20 +268,34 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
                 return Array.Empty<ExpiredDeliveryUpstream>();
             }
 
-            var rows = await response.Content
-                .ReadFromJsonAsync<List<ExpiredDeliveryUpstream>>(JsonOptions, ct);
-            return rows is null
+            var envelope = await response.Content
+                .ReadFromJsonAsync<ExpiredDeliveriesEnvelope>(JsonOptions, ct);
+            return envelope?.Deliveries is null
                 ? Array.Empty<ExpiredDeliveryUpstream>()
-                : rows;
+                : envelope.Deliveries;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             throw;
         }
+        catch (JsonException ex)
+        {
+            _logger?.LogWarning(
+                ex,
+                "Delivery-service expired-deliveries response for {Uri} was not a valid envelope; treating this poll as empty.",
+                uri);
+            return Array.Empty<ExpiredDeliveryUpstream>();
+        }
         catch (Exception)
         {
             return Array.Empty<ExpiredDeliveryUpstream>();
         }
+    }
+
+    private sealed class ExpiredDeliveriesEnvelope
+    {
+        [JsonPropertyName("deliveries")]
+        public List<ExpiredDeliveryUpstream>? Deliveries { get; init; }
     }
 
     public async Task<DeliveryHandoverIssueResult> IssueHandoverOtpAsync(string deliveryId, string? codeHash, CancellationToken ct)
