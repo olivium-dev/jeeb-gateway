@@ -33,10 +33,19 @@ public class RequestExpiryOptions
     public TimeSpan ObserverInterval { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
-    /// Maximum number of expired deliveries requested per observer pass. The
-    /// delivery-service client clamps this value to the range 1..1000.
+    /// How far back each stateless observer pass re-scans. Six hours covers
+    /// routine restarts and rollout pauses while remaining below delivery-service's
+    /// 24-hour maximum query window. The observer always keeps twice
+    /// <see cref="ObserverInterval"/> as a minimum overlap.
     /// </summary>
-    public int ObserverBatchLimit { get; set; } = 200;
+    public TimeSpan ObserverLookback { get; set; } = TimeSpan.FromHours(6);
+
+    /// <summary>
+    /// Maximum number of expired deliveries requested per observer pass. Use the
+    /// delivery-service ceiling by default because its expiry read has no paging
+    /// cursor; the client constrains this value to the range 1..1000.
+    /// </summary>
+    public int ObserverBatchLimit { get; set; } = 1000;
 
     /// <summary>
     /// Suppresses expiry pushes for rows whose expiry instant is earlier than

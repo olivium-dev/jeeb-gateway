@@ -127,7 +127,7 @@ public class RequestExpiryObserverTests
     }
 
     [Fact]
-    public async Task Observer_Uses_An_Overlapping_Window_Twice_The_Interval()
+    public async Task Observer_Uses_The_Default_Six_Hour_Lookback()
     {
         var clock = new FakeClock(ClockStart);
         using var services = BuildSweeperServices(clock);
@@ -147,10 +147,144 @@ public class RequestExpiryObserverTests
 
         await observer.ObserveOnceAsync(CancellationToken.None);
 
-        // The observer holds no cursor. This overlap absorbs clock skew and one missed tick.
         var call = delivery.Calls.Should().ContainSingle().Subject;
-        call.Since.Should().Be(clock.GetUtcNow() - (2 * options.ObserverInterval));
+        call.Since.Should().Be(clock.GetUtcNow() - TimeSpan.FromHours(6));
         call.Limit.Should().Be(options.ObserverBatchLimit);
+    }
+
+    [Fact]
+    public async Task Observer_Window_Honours_The_Configured_Lookback()
+    {
+        var clock = new FakeClock(ClockStart);
+        using var services = BuildSweeperServices(clock);
+        var options = new RequestExpiryOptions
+        {
+            ObserverInterval = TimeSpan.FromSeconds(45),
+            ObserverLookback = TimeSpan.FromMinutes(90),
+        };
+        var delivery = new StubExpiredDeliveryClient([]);
+        var observer = new RequestExpiryObserver(
+            services,
+            clock,
+            Options.Create(options),
+            DeliveryServiceSource(),
+            delivery,
+            new RecordingLogger<RequestExpiryObserver>());
+
+        await observer.ObserveOnceAsync(CancellationToken.None);
+
+        delivery.Calls.Should().ContainSingle().Which.Since
+            .Should().Be(clock.GetUtcNow() - options.ObserverLookback);
+    }
+
+    [Fact]
+    public async Task Observer_Window_Keeps_Twice_The_Interval_As_Its_Floor()
+    {
+        var clock = new FakeClock(ClockStart);
+        using var services = BuildSweeperServices(clock);
+        var options = new RequestExpiryOptions
+        {
+            ObserverInterval = TimeSpan.FromSeconds(45),
+            ObserverLookback = TimeSpan.FromSeconds(30),
+        };
+        var delivery = new StubExpiredDeliveryClient([]);
+        var observer = new RequestExpiryObserver(
+            services,
+            clock,
+            Options.Create(options),
+            DeliveryServiceSource(),
+            delivery,
+            new RecordingLogger<RequestExpiryObserver>());
+
+        await observer.ObserveOnceAsync(CancellationToken.None);
+
+        delivery.Calls.Should().ContainSingle().Which.Since
+            .Should().Be(clock.GetUtcNow() - (2 * options.ObserverInterval));
+    }
+
+    [Fact]
+    public async Task Expiry_Older_Than_Twice_The_Interval_But_Inside_Lookback_Is_Observed()
+    {
+        var clock = new FakeClock(ClockStart);
+        using var services = BuildSweeperServices(clock);
+        var store = services.GetRequiredService<IRequestsStore>();
+        var request = await CreateRequestAsync(store, "cold-start-orphan-client");
+        var options = new RequestExpiryOptions
+        {
+            ObserverInterval = TimeSpan.FromMinutes(1),
+            ObserverLookback = TimeSpan.FromMinutes(30),
+        };
+        var expiredAt = clock.GetUtcNow() - TimeSpan.FromMinutes(15);
+        var delivery = new StubExpiredDeliveryClient([
+            ExpiredRow(request, expiredAt),
+        ]);
+        var observer = new RequestExpiryObserver(
+            services,
+            clock,
+            Options.Create(options),
+            DeliveryServiceSource(),
+            delivery,
+            new RecordingLogger<RequestExpiryObserver>());
+
+        await observer.ObserveOnceAsync(CancellationToken.None);
+
+        expiredAt.Should().BeBefore(clock.GetUtcNow() - (2 * options.ObserverInterval));
+        (await store.GetAsync(request.Id, CancellationToken.None))!.Status
+            .Should().Be(RequestStatus.Expired,
+                "a cold start must catch an upstream expiry outside the old two-interval window");
+    }
+
+    [Fact]
+    public async Task Reobserving_An_Already_Expired_Delivery_Does_Not_Renotify()
+    {
+        var clock = new FakeClock(ClockStart);
+        using var services = BuildSweeperServices(clock);
+        var store = services.GetRequiredService<IRequestsStore>();
+        var request = await CreateRequestAsync(store, "already-expired-client");
+        var expiredAt = clock.GetUtcNow() - TimeSpan.FromMinutes(15);
+        (await store.TryExpireAsync(request.Id, expiredAt, CancellationToken.None))
+            .Should().BeTrue();
+        var delivery = new StubExpiredDeliveryClient([
+            ExpiredRow(request, expiredAt),
+        ]);
+        var observer = new RequestExpiryObserver(
+            services,
+            clock,
+            Options.Create(new RequestExpiryOptions()),
+            DeliveryServiceSource(),
+            delivery,
+            new RecordingLogger<RequestExpiryObserver>());
+
+        await observer.ObserveOnceAsync(CancellationToken.None);
+
+        services.GetRequiredService<InMemoryRequestExpiryNotifier>()
+            .Expiries.Should().BeEmpty(
+                "TryExpireAsync returning false must short-circuit repeat notification");
+    }
+
+    [Fact]
+    public async Task Observer_Warns_When_The_Upstream_Batch_May_Be_Truncated()
+    {
+        var clock = new FakeClock(ClockStart);
+        using var services = BuildSweeperServices(clock);
+        var logger = new RecordingLogger<RequestExpiryObserver>();
+        var options = new RequestExpiryOptions { ObserverBatchLimit = 2 };
+        var delivery = new StubExpiredDeliveryClient([
+            new ExpiredDeliveryUpstream { DeliveryId = " ", ExpiredAt = clock.GetUtcNow() },
+            new ExpiredDeliveryUpstream { DeliveryId = " ", ExpiredAt = clock.GetUtcNow() },
+        ]);
+        var observer = new RequestExpiryObserver(
+            services,
+            clock,
+            Options.Create(options),
+            DeliveryServiceSource(),
+            delivery,
+            logger);
+
+        await observer.ObserveOnceAsync(CancellationToken.None);
+
+        logger.Messages.Should().Contain(message =>
+            message.Contains("may be truncated", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -160,7 +294,7 @@ public class RequestExpiryObserverTests
         using var services = BuildSweeperServices(clock);
         var store = services.GetRequiredService<IRequestsStore>();
         var request = await CreateRequestAsync(store, "backfill-client");
-        var expiredAt = clock.GetUtcNow() - TimeSpan.FromDays(5);
+        var expiredAt = clock.GetUtcNow() - TimeSpan.FromHours(5);
         var options = new RequestExpiryOptions
         {
             SuppressNotifyBefore = expiredAt + TimeSpan.FromMinutes(1),
@@ -318,7 +452,11 @@ public class RequestExpiryObserverTests
             CancellationToken ct)
         {
             Calls.Add((since, limit));
-            return Task.FromResult(_rows);
+            IReadOnlyList<ExpiredDeliveryUpstream> rows = _rows
+                .Where(row => row.ExpiredAt >= since)
+                .Take(limit)
+                .ToArray();
+            return Task.FromResult(rows);
         }
     }
 

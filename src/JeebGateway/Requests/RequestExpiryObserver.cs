@@ -78,11 +78,31 @@ public class RequestExpiryObserver : BackgroundService
 
         var opts = _options.Value;
         var now = _clock.GetUtcNow();
-        var since = now - (2 * opts.ObserverInterval);
+        var minimumLookback = 2 * opts.ObserverInterval;
+        var effectiveLookback = opts.ObserverLookback >= minimumLookback
+            ? opts.ObserverLookback
+            : minimumLookback;
+        var since = now - effectiveLookback;
         var rows = await _delivery.ListExpiredDeliveriesAsync(
             since,
             opts.ObserverBatchLimit,
             ct);
+
+        // The upstream read has no cursor or offset. A full batch may therefore
+        // hide additional rows in this lookback; make that durability risk visible
+        // instead of silently treating the capped response as complete.
+        var effectiveBatchLimit = opts.ObserverBatchLimit is >= 1 and <= 1000
+            ? opts.ObserverBatchLimit
+            : 200;
+        if (rows.Count >= effectiveBatchLimit)
+        {
+            _logger.LogWarning(
+                "Request expiry observation returned the full upstream limit of {Limit} rows "
+                + "for lookback starting {Since}; the endpoint has no paging cursor, so the "
+                + "response may be truncated and additional expiries may be skipped",
+                effectiveBatchLimit,
+                since);
+        }
 
         using var scope = _services.CreateScope();
         var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
