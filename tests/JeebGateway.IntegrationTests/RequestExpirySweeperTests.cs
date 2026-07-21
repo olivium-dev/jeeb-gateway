@@ -58,11 +58,11 @@ public class RequestExpirySweeperTests
             .Which.Should().Match<InMemoryRequestExpiryNotifier.NudgeRecord>(
                 n => n.RequestId == requestId && n.ClientId == "expiry-nudge-client");
 
-        // The in-memory notifier records every dispatch attempt; production
-        // deduplication belongs to the dispatcher's request-nudge:{requestId} key.
+        // The in-memory notifier records every dispatch attempt; production deduplication
+        // belongs to the expiry notifier's request-nudge:{requestId} key.
         await NudgeOnce(factory);
         notifier.Nudges.Should().HaveCount(2,
-            "dispatcher idempotency, not the gateway nudge sweeper, deduplicates request nudges");
+            "notifier idempotency, not the gateway nudge sweeper, deduplicates request nudges");
     }
 
     [Fact]

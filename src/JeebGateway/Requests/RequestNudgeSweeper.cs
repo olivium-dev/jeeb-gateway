@@ -7,8 +7,8 @@ namespace JeebGateway.Requests;
 /// <summary>
 /// Background sweeper for the no-offer nudge. The nudge is a notification
 /// heuristic over the offer window, not a delivery-lifecycle fact, so it stays
-/// in the gateway. It is stateless because the notification dispatcher
-/// deduplicates with the <c>request-nudge:{requestId}</c> idempotency key.
+/// in the gateway. It is stateless because the expiry notifier uses the existing
+/// notification outbox to deduplicate <c>request-nudge:{requestId}</c>.
 /// </summary>
 public class RequestNudgeSweeper : BackgroundService
 {
