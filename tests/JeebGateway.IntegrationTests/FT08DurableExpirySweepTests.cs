@@ -14,7 +14,17 @@ namespace JeebGateway.IntegrationTests;
 /// <summary>
 /// FT-08: verify that <see cref="DurableRequestsStore.ListPendingCreatedAtOrBeforeAsync"/>
 /// merges rows from delivery-service when the in-memory mirror is empty (post-restart
-/// scenario) — proving that the expiry sweep is durable.
+/// scenario).
+///
+/// <para>MOTIVATION RE-POINTED: this merge originally existed so the gateway's own
+/// TTL sweeper could still expire post-restart rows. The gateway no longer OWNS
+/// request TTL — delivery-service authors expiry and
+/// <see cref="RequestExpiryObserver"/> only projects it — so that justification is
+/// gone. The merge itself is KEPT and still load-bearing, because
+/// <c>ListPendingCreatedAtOrBeforeAsync</c> has other live callers that must survive a
+/// bounce: the jeeber feed (<c>Controllers/V1/JeebFeedController.cs</c>) and the GDPR
+/// data-export packager (<c>Users/DataExport/IDataExportPackager.cs</c>). Read the
+/// assertions below as POST-RESTART FEED/EXPORT RECOVERY, not as expiry durability.</para>
 ///
 /// Key assertions:
 ///   A1. When DurableRequests:Enabled=true and the in-memory store is empty, rows
@@ -126,7 +136,6 @@ public class FT08DurableExpirySweepTests
         public Task<bool> SetJeeberIdAsync(string requestId, string jeeberId, CancellationToken ct) => Task.FromResult(true);
         public Task<bool> TrySetAcceptedFeeAsync(string requestId, decimal fee, CancellationToken ct) => Task.FromResult(true);
         public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct) => Task.FromResult<DeliveryRequest?>(null);
-        public Task<bool> MarkNudgedAsync(string requestId, DateTimeOffset at, CancellationToken ct) => Task.FromResult(true);
         public Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct) => Task.FromResult(false);
         public Task<int> AnonymizeForClientAsync(string userId, string anonymizedHash, CancellationToken ct) => Task.FromResult(0);
         public Task<IReadOnlyList<DeliveryRequest>> ListScheduledDueAsync(DateTimeOffset cutoff, CancellationToken ct) => Task.FromResult<IReadOnlyList<DeliveryRequest>>(Array.Empty<DeliveryRequest>());

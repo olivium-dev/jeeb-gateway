@@ -132,6 +132,36 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task MarkExpiredAsync(
+        string requestId,
+        DateTimeOffset expiredAt,
+        CancellationToken ct)
+    {
+        if (!Guid.TryParse(requestId, out var id)) return;
+
+        await using var conn = await _db.OpenAsync(ct);
+
+        // Touch ONLY the gateway columns — the native enum status + its coupled
+        // CHECK constraints are left untouched so no constraint can fire.
+        const string sql = """
+            UPDATE delivery_requests
+               SET gw_status = 'expired',
+                   gw_expired_at = @At,
+                   gw_updated_at = now()
+             WHERE id = @Id AND gw_mirror = TRUE
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("Id", id);
+        cmd.Parameters.AddWithValue("At", expiredAt);
+
+        await cmd.ExecuteNonQueryAsync(ct);
+
+        _log.LogDebug(
+            "requests-durable: mirrored request {RequestId} expiry into delivery_requests (gw_status=expired).",
+            requestId);
+    }
+
     public async Task UpdateLifecycleAsync(
         string requestId,
         string? gwStatus,

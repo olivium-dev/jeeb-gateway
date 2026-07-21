@@ -1,47 +1,40 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using JeebGateway.Services;
-using JeebGateway.Services.Clients;
 
 namespace JeebGateway.Requests;
 
 /// <summary>
-/// Background sweeper that fires the two delivery-request expiry events
-/// (T-backend-028):
+/// Background sweeper that handles only terminal tier-TTL expiry. The no-offer
+/// nudge lives in <see cref="RequestNudgeSweeper"/>.
 ///
-///   * <see cref="RequestExpiryOptions.NoOfferNudgeWindow"/> after creation
-///     with the request still in <c>pending</c> — sends the "Try expanding
-///     tier" prompt once.
-///   * the selected tier's request TTL after creation without an accepted
-///     offer — moves the request to <c>expired</c>
-///     and notifies the Client. Once expired the request is terminal and
-///     cannot receive new offers (enforced inside <see cref="IRequestsStore"/>).
+/// IMPORTANT: This class is the LEGACY gateway-owned TTL authority. It is kept
+/// only while <c>FeatureFlags:RequestExpiry:Source == "gateway"</c> and is deleted
+/// in the cleanup PR once delivery-service has soaked. Never run two TTL
+/// authorities at once.
 /// </summary>
 public class RequestExpirySweeper : BackgroundService
 {
-    private static readonly TimeSpan SafeExpiryWindow = TimeSpan.FromHours(24);
-
     private readonly IServiceProvider _services;
     private readonly TimeProvider _clock;
     private readonly IOptions<RequestExpiryOptions> _options;
-    private readonly IDeliveryServiceClient _delivery;
-    private readonly IOptionsMonitor<UpstreamFeatureFlags> _upstreamFlags;
+    private readonly TierExpiryWindowResolver _windows;
+    private readonly IOptionsMonitor<RequestExpirySourceOptions> _source;
     private readonly ILogger<RequestExpirySweeper> _logger;
 
     public RequestExpirySweeper(
         IServiceProvider services,
         TimeProvider clock,
         IOptions<RequestExpiryOptions> options,
-        IDeliveryServiceClient delivery,
-        IOptionsMonitor<UpstreamFeatureFlags> upstreamFlags,
+        TierExpiryWindowResolver windows,
+        IOptionsMonitor<RequestExpirySourceOptions> source,
         ILogger<RequestExpirySweeper> logger)
     {
         _services = services;
         _clock = clock;
         _options = options;
-        _delivery = delivery;
-        _upstreamFlags = upstreamFlags;
+        _windows = windows;
+        _source = source;
         _logger = logger;
     }
 
@@ -76,34 +69,28 @@ public class RequestExpirySweeper : BackgroundService
 
     public async Task SweepOnceAsync(CancellationToken ct)
     {
+        if (!_source.CurrentValue.GatewaySweeperEnabled) return;
+
         using var scope = _services.CreateScope();
         var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
         var notifier = scope.ServiceProvider.GetRequiredService<IRequestExpiryNotifier>();
         var offers = scope.ServiceProvider.GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
         var tiers = scope.ServiceProvider.GetRequiredService<JeebGateway.Tiers.ITiersStore>();
-        var opts = _options.Value;
 
         var now = _clock.GetUtcNow();
-        var tierTtls = await LoadTierTtlsAsync(tiers, ct);
+        var tierTtls = await _windows.LoadTierTtlsAsync(tiers, ct);
         var shortestExpiryWindow = tierTtls.Count > 0
             ? tierTtls.Values.Min()
-            : SafeExpiryWindow;
-        var scanWindow = opts.NoOfferNudgeWindow < shortestExpiryWindow
-            ? opts.NoOfferNudgeWindow
-            : shortestExpiryWindow;
-        var scanCutoff = now - scanWindow;
+            : TierExpiryWindowResolver.SafeExpiryWindow;
+        var scanCutoff = now - shortestExpiryWindow;
 
         var candidates = await store.ListPendingCreatedAtOrBeforeAsync(scanCutoff, ct);
 
         foreach (var req in candidates)
         {
-            var expiryWindow = ResolveExpiryWindow(req, tierTtls);
+            var expiryWindow = _windows.ResolveExpiryWindow(req, tierTtls);
             var expiryCutoff = now - expiryWindow;
 
-            // Tier TTL expiry takes precedence: if the request is past the
-            // hard window we move it to terminal and notify, then skip the
-            // nudge — the Client just got the harsher "expired" push and a
-            // simultaneous "try expanding tier" would be confusing.
             if (req.CreatedAt <= expiryCutoff)
             {
                 if (await store.TryExpireAsync(req.Id, now, ct))
@@ -136,90 +123,7 @@ public class RequestExpirySweeper : BackgroundService
                         req.Id,
                         expiryWindow.TotalMinutes);
                 }
-                continue;
-            }
-
-            // 10-min nudge: only fires while the request is still strictly
-            // pending (no Jeeber match yet). Once an offer-service candidate
-            // pool has been notified the status moves to 'matched' and the
-            // nudge is no longer relevant.
-            if (req.Status != RequestStatus.Pending) continue;
-            if (req.CreatedAt > now - opts.NoOfferNudgeWindow) continue;
-
-            if (await store.MarkNudgedAsync(req.Id, now, ct))
-            {
-                await notifier.NotifyTryExpandTierAsync(req.ClientId, req.Id, now, ct);
-                _logger.LogInformation(
-                    "Request {RequestId} hit {WindowMinutes}m no-offer mark — sent try-expanding-tier prompt",
-                    req.Id,
-                    opts.NoOfferNudgeWindow.TotalMinutes);
             }
         }
-    }
-
-    private async Task<IReadOnlyDictionary<string, TimeSpan>> LoadTierTtlsAsync(
-        JeebGateway.Tiers.ITiersStore tiers,
-        CancellationToken ct)
-    {
-        // Two tier-id vocabularies reach this sweeper and BOTH must resolve:
-        // the local catalog's slugs (urgent/same-day/scheduled — what
-        // `LegacyTierCodes.Canonicalize` produces for a request stamped with a
-        // legacy code like "flash") and delivery-service's UUIDs (what a
-        // request created through the upstream path carries). Loading only one
-        // of them silently pushes every request of the other shape onto the 24h
-        // safe fallback — the bug this class had for the UUID shape, which the
-        // slug shape would inherit if the upstream catalog simply replaced the
-        // local one. Seed with the local slugs, then overlay upstream so the
-        // live service stays authoritative wherever the two ever collide.
-        var merged = new Dictionary<string, TimeSpan>(StringComparer.OrdinalIgnoreCase);
-
-        var localCatalog = await tiers.ListAsync(ct);
-        foreach (var tier in localCatalog.Where(t => t.RequestTtlSeconds > 0))
-        {
-            merged[tier.Id] = TimeSpan.FromSeconds(tier.RequestTtlSeconds);
-        }
-
-        if (_upstreamFlags.CurrentValue.Delivery)
-        {
-            var upstreamCatalog = await _delivery.ListTiersAsync(ct);
-            foreach (var tier in upstreamCatalog.Where(t => t.RequestTtlSeconds > 0))
-            {
-                merged[tier.Id] = TimeSpan.FromSeconds(tier.RequestTtlSeconds);
-            }
-        }
-
-        return merged;
-    }
-
-    private TimeSpan ResolveExpiryWindow(
-        DeliveryRequest req,
-        IReadOnlyDictionary<string, TimeSpan> tierTtls)
-    {
-        var tierId = req.TierId ?? string.Empty;
-        var canonicalTierId = JeebGateway.Tiers.LegacyTierCodes.Canonicalize(tierId);
-
-        if (!string.IsNullOrWhiteSpace(canonicalTierId)
-            && tierTtls.TryGetValue(canonicalTierId, out var ttl))
-        {
-            return ttl;
-        }
-
-        if (tierTtls.TryGetValue(JeebGateway.Tiers.InMemoryTiersStore.DefaultExpiryTierId, out var fallback))
-        {
-            _logger.LogWarning(
-                "Request {RequestId} has unknown tier {TierId}; using default tier TTL {WindowMinutes}m",
-                req.Id,
-                string.IsNullOrWhiteSpace(tierId) ? "<empty>" : tierId,
-                fallback.TotalMinutes);
-            return fallback;
-        }
-
-        fallback = SafeExpiryWindow;
-        _logger.LogWarning(
-            "Request {RequestId} has unknown tier {TierId}; default tier TTL is unavailable, using safe TTL {WindowMinutes}m",
-            req.Id,
-            string.IsNullOrWhiteSpace(tierId) ? "<empty>" : tierId,
-            fallback.TotalMinutes);
-        return fallback;
     }
 }

@@ -26,4 +26,53 @@ public class RequestExpiryOptions
     /// the 30-second cadence; tests drive <c>SweepOnceAsync</c> directly.
     /// </summary>
     public TimeSpan SweepInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How often the gateway observer polls delivery-service for expiry facts.
+    /// </summary>
+    public TimeSpan ObserverInterval { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// Maximum number of expired deliveries requested per observer pass. The
+    /// delivery-service client clamps this value to the range 1..1000.
+    /// </summary>
+    public int ObserverBatchLimit { get; set; } = 200;
+
+    /// <summary>
+    /// Suppresses expiry pushes for rows whose expiry instant is earlier than
+    /// this cutoff. Intended for one-time historical backfill without notifying
+    /// users about stale requests; unset by default.
+    /// </summary>
+    public DateTimeOffset? SuppressNotifyBefore { get; set; }
+}
+
+/// <summary>
+/// Rollout switch enforcing a single live TTL authority. <c>gateway</c> runs
+/// the legacy <see cref="RequestExpirySweeper"/> and disables the observer;
+/// <c>delivery-service</c> runs the observer and disables the sweeper. A gap is
+/// safe because the upstream time-based sweep catches up, but an overlap is not.
+/// Delete this switch in the cleanup PR after delivery-service has soaked.
+/// </summary>
+public sealed class RequestExpirySourceOptions
+{
+    public const string SectionName = "FeatureFlags:RequestExpiry";
+
+    /// <summary>
+    /// Selects the active TTL authority: <c>gateway</c> or
+    /// <c>delivery-service</c>.
+    /// </summary>
+    public string Source { get; set; } = "gateway";
+
+    /// <summary>
+    /// Whether the stateless gateway observer should run.
+    /// </summary>
+    public bool ObserverEnabled => string.Equals(
+        Source,
+        "delivery-service",
+        StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether the legacy gateway TTL sweeper should run.
+    /// </summary>
+    public bool GatewaySweeperEnabled => !ObserverEnabled;
 }

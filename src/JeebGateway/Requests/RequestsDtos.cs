@@ -201,14 +201,6 @@ public class DeliveryRequest
     public DateTimeOffset? ActivatedAt { get; set; }
 
     /// <summary>
-    /// When the no-offer "try expanding tier" prompt was sent for this
-    /// request (T-backend-028). The expiry sweeper sets this once and
-    /// then refuses to re-fire so the Client doesn't receive a duplicate
-    /// push if the sweeper runs at a high cadence.
-    /// </summary>
-    public DateTimeOffset? NudgedAt { get; set; }
-
-    /// <summary>
     /// When the request was terminally expired by the sweeper. Null until
     /// the selected tier's request TTL elapses without an accepted offer.
     /// </summary>

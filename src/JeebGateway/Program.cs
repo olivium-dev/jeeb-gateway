@@ -1571,19 +1571,28 @@ else
 }
 
 // Request expiry + no-offer nudge (T-backend-028).
-// 10-min "try expanding tier" prompt and per-tier terminal expiry. The
-// in-memory notifier records calls so integration tests can assert delivery;
-// production swap proxies to notification-service via the BFF NSwag-generated
-// client. The sweeper drives both windows from a single periodic scan against
-// IRequestsStore.
 builder.Services.Configure<RequestExpiryOptions>(builder.Configuration.GetSection(RequestExpiryOptions.SectionName));
+builder.Services.Configure<RequestExpirySourceOptions>(builder.Configuration.GetSection(RequestExpirySourceOptions.SectionName));
 builder.Services.AddSingleton<InMemoryRequestExpiryNotifier>();
-builder.Services.AddSingleton<IRequestExpiryNotifier>(sp => sp.GetRequiredService<InMemoryRequestExpiryNotifier>());
-// JEB-1508: default to the no-op recorder; overridden by the durable
-// StateServiceRequestExpiryRecorder below when stateServiceWired == true.
-builder.Services.AddSingleton<IRequestExpiryRecorder>(NoOpRequestExpiryRecorder.Instance);
+// Until now IRequestExpiryNotifier was bound to InMemoryRequestExpiryNotifier in EVERY
+// environment including production, so NO expiry push has ever reached a device; this is the fix.
+if (!builder.Environment.IsDevelopment()
+    && !builder.Environment.IsEnvironment("Testing"))
+{
+    builder.Services.AddSingleton<IRequestExpiryNotifier, DispatchingRequestExpiryNotifier>();
+}
+else
+{
+    builder.Services.AddSingleton<IRequestExpiryNotifier>(sp =>
+        sp.GetRequiredService<InMemoryRequestExpiryNotifier>());
+}
+builder.Services.AddSingleton<TierExpiryWindowResolver>();
 builder.Services.AddSingleton<RequestExpirySweeper>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RequestExpirySweeper>());
+builder.Services.AddSingleton<RequestNudgeSweeper>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<RequestNudgeSweeper>());
+builder.Services.AddSingleton<RequestExpiryObserver>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<RequestExpiryObserver>());
 
 // Scheduled delivery activator (T-backend-046, Phase 2).
 // At ScheduledAt - MatchingBuffer the activator flips the row from
@@ -2404,13 +2413,6 @@ if (stateServiceWired)
     builder.Services.AddSingleton<JeebGateway.StateService.Strikes.IStateStrikeWriter,
         JeebGateway.StateService.Strikes.StateServiceStrikeWriter>();
 
-    // JEB-1508: durable TTL-sweep expiry recorder. Re-points IRequestExpiryRecorder at the
-    // state-service-backed implementation using the R1 idempotency KV. Overrides the no-op
-    // singleton registered above; last-wins DI semantics. A state-service blip degrades to
-    // in-memory-only (the no-op contract) rather than failing the sweep.
-    builder.Services.AddSingleton<IRequestExpiryRecorder,
-        JeebGateway.Requests.StateServiceRequestExpiryRecorder>();
-
     // R2/R3/R4/R5 — durable write-through (writes land; see contract gap note).
     builder.Services.AddSingleton<JeebGateway.StateService.Durable.IStateRefreshFamilyWriter,
         JeebGateway.StateService.Durable.StateServiceRefreshFamilyWriter>();
@@ -2503,6 +2505,8 @@ JeebGateway.Infrastructure.StoreDurabilityGuard.EnsureDurable(
 var testJobRegistry = app.Services.GetRequiredService<JeebGateway.TestControlPlane.ITestJobRegistry>();
 var ratingRevealJob = app.Services.GetRequiredService<JeebGateway.Ratings.RatingRevealJob>();
 var requestExpirySweeper = app.Services.GetRequiredService<RequestExpirySweeper>();
+var requestNudgeSweeper = app.Services.GetRequiredService<RequestNudgeSweeper>();
+var requestExpiryObserver = app.Services.GetRequiredService<RequestExpiryObserver>();
 var weeklyBatch = app.Services.GetRequiredService<JeebGateway.Financials.WeeklySettlementBatch>();
 
 testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
@@ -2514,8 +2518,20 @@ testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
 testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
 {
     Name = "request-expiry-sweep",
-    Description = "Expire overdue requests and send nudges (RequestExpirySweeper.SweepOnceAsync).",
+    Description = "Expire overdue requests using the legacy gateway TTL authority (RequestExpirySweeper.SweepOnceAsync).",
     RunAsync = ct => requestExpirySweeper.SweepOnceAsync(ct)
+});
+testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
+{
+    Name = "request-nudge-sweep",
+    Description = "Send no-offer request nudges (RequestNudgeSweeper.SweepOnceAsync).",
+    RunAsync = ct => requestNudgeSweeper.SweepOnceAsync(ct)
+});
+testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
+{
+    Name = "request-expiry-observe",
+    Description = "Project upstream-authored request expiries (RequestExpiryObserver.ObserveOnceAsync).",
+    RunAsync = ct => requestExpiryObserver.ObserveOnceAsync(ct)
 });
 // settlement-batch: placeholder; WS-A registers the real delegate during Wave 2.
 testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob

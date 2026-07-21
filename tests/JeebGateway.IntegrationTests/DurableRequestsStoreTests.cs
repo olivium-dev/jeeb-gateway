@@ -633,6 +633,59 @@ public sealed class DurableRequestsStoreTests
         mirror.Cancels[0].GwStatus.Should().Be(RequestStatus.Cancelled);
     }
 
+    [Fact]
+    public async Task Expire_mirrors_committed_expiry_into_the_mirror()
+    {
+        // THE DIVERGENCE FIX. TryExpireAsync used to be a bare passthrough to the
+        // in-memory store, so an expired request stayed 'pending' in gateway Postgres
+        // forever — the gateway said expired, its own mirror said pending, and
+        // delivery-service said Ordered (three-way divergence, request 8a84093a).
+        // A committed expiry must now project onto the durable mirror.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+        var expiredAt = Clock.GetUtcNow();
+
+        (await store.TryExpireAsync(created.Id, expiredAt, CancellationToken.None))
+            .Should().BeTrue();
+
+        mirror.Expiries.Should().ContainSingle();
+        mirror.Expiries[0].Id.Should().Be(created.Id);
+        mirror.Expiries[0].ExpiredAt.Should().Be(expiredAt);
+    }
+
+    [Fact]
+    public async Task Expire_that_does_not_commit_writes_nothing_to_the_mirror()
+    {
+        // Idempotence guard: the observer's deliberately-OVERLAPPING poll window
+        // re-observes the same upstream expiry. The second pass must not commit and
+        // must not re-write the mirror.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        (await store.TryExpireAsync(created.Id, Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeTrue();
+        (await store.TryExpireAsync(created.Id, Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeFalse("an already-terminal row is not re-expired");
+
+        mirror.Expiries.Should().ContainSingle("only the committing pass writes the mirror");
+    }
+
+    [Fact]
+    public async Task Expire_stands_even_when_the_mirror_write_throws()
+    {
+        // DEGRADE-DON'T-FAIL: the in-memory transition has already committed; a
+        // Postgres blip must never roll it back or fail the observer pass.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+        mirror.ThrowOnExpire = true;
+
+        (await store.TryExpireAsync(created.Id, Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeTrue();
+
+        (await store.GetAsync(created.Id, CancellationToken.None))!.Status
+            .Should().Be(RequestStatus.Expired);
+    }
+
     // -- JEBV4-40 (PP-9): durable cancel is terminal on the single-read + sweep ----
 
     [Fact]
@@ -827,8 +880,12 @@ public sealed class DurableRequestsStoreTests
     {
         public List<DeliveryRequest> Upserted { get; } = new();
         public List<(string Id, string GwStatus)> Cancels { get; } = new();
+        public List<(string Id, DateTimeOffset ExpiredAt)> Expiries { get; } = new();
         public List<DeliveryRequest> Rows { get; } = new();
         public List<(string Id, string? GwStatus, string? GwJeeberId, decimal? GwAcceptedFee)> Updates { get; } = new();
+
+        /// <summary>Simulates a Postgres blip on the expiry mirror write.</summary>
+        public bool ThrowOnExpire { get; set; }
 
         public Task UpsertOnCreateAsync(DeliveryRequest row, CancellationToken ct)
         {
@@ -849,6 +906,13 @@ public sealed class DurableRequestsStoreTests
             string? cancellationReason, DateTimeOffset at, CancellationToken ct)
         {
             Cancels.Add((requestId, gwStatus));
+            return Task.CompletedTask;
+        }
+
+        public Task MarkExpiredAsync(string requestId, DateTimeOffset expiredAt, CancellationToken ct)
+        {
+            if (ThrowOnExpire) throw new InvalidOperationException("mirror unavailable");
+            Expiries.Add((requestId, expiredAt));
             return Task.CompletedTask;
         }
 

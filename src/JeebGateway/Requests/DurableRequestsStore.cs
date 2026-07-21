@@ -474,11 +474,40 @@ public sealed class DurableRequestsStore : IRequestsStore
         return merged;
     }
 
-    public Task<bool> MarkNudgedAsync(string requestId, DateTimeOffset at, CancellationToken ct)
-        => _inner.MarkNudgedAsync(requestId, at, ct);
+    /// <summary>
+    /// TryExpireAsync stops being a passthrough — it writes the in-memory projection
+    /// AND the gateway Postgres mirror; it deliberately does NOT call delivery-service,
+    /// because after this design delivery-service is the AUTHOR of expiry and the
+    /// gateway only projects what it observed.
+    /// </summary>
+    public async Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct)
+    {
+        var expired = await _inner.TryExpireAsync(requestId, at, ct);
+        if (!expired) return false;
 
-    public Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct)
-        => _inner.TryExpireAsync(requestId, at, ct);
+        if (_mirror is not null)
+        {
+            try
+            {
+                await _mirror.MarkExpiredAsync(requestId, at, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                    new KeyValuePair<string, object?>("store", "postgres-requests-owner-list"));
+                _logger.LogWarning(ex,
+                    "requests-durable: owner-list mirror expiry-status update failed for {RequestId}; " +
+                    "the list may show a stale status after a bounce.",
+                    requestId);
+            }
+        }
+
+        return true;
+    }
 
     public Task<int> AnonymizeForClientAsync(string userId, string anonymizedHash, CancellationToken ct)
         => _inner.AnonymizeForClientAsync(userId, anonymizedHash, ct);

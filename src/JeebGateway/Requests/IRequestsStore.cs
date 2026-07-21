@@ -82,22 +82,12 @@ public interface IRequestsStore
     /// <summary>
     /// Returns every request whose creation timestamp is at or before
     /// <paramref name="cutoff"/> and whose status is still in the
-    /// pre-acceptance set (<c>pending</c>, <c>matched</c>). The
-    /// <see cref="RequestExpirySweeper"/> uses this to find both the
-    /// no-offer nudge candidates and the per-tier expiry candidates in a
-    /// single scan.
+    /// pre-acceptance set (<c>pending</c>, <c>matched</c>). The request
+    /// expiry and nudge sweepers use this to find candidates.
     /// </summary>
     Task<IReadOnlyList<DeliveryRequest>> ListPendingCreatedAtOrBeforeAsync(
         DateTimeOffset cutoff,
         CancellationToken ct);
-
-    /// <summary>
-    /// Records that the no-offer prompt was sent for <paramref name="requestId"/>
-    /// at <paramref name="at"/>. Returns true on first call, false on every
-    /// subsequent call — the sweeper relies on this idempotence to avoid
-    /// duplicate pushes.
-    /// </summary>
-    Task<bool> MarkNudgedAsync(string requestId, DateTimeOffset at, CancellationToken ct);
 
     /// <summary>
     /// Atomically moves <paramref name="requestId"/> to <c>expired</c>
