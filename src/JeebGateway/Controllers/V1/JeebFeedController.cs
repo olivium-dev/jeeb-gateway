@@ -36,6 +36,14 @@ namespace JeebGateway.Controllers.V1;
 /// <c>clientId</c>, <c>recipientPhone</c>, <c>audioUrl</c>, <c>transcription</c>, <c>photos</c> are
 /// NEVER exposed in discovery; they are revealed only post-acceptance on the active-delivery
 /// surface.</para>
+///
+/// <para><b>G1 sender identity (owner-approved 2026-07-21).</b> A single, deliberately narrow
+/// exception to the strip-all-identity stance: each item additionally carries a DISPLAY-SAFE
+/// sender annotation — <c>senderName</c> (given name + last initial, e.g. "Nour K.") and
+/// <c>senderAvatarUrl</c> (absolute https) — resolved from the request's client via the gateway's
+/// existing user-profile lookup so a jeeber can see who a request is from before accepting. The
+/// raw <c>clientId</c>, phone, and email are still never projected; both fields degrade to
+/// <c>null</c> (never a feed error) when the profile does not resolve.</para>
 /// </summary>
 [ApiController]
 public sealed class JeebFeedController : ControllerBase
@@ -43,6 +51,7 @@ public sealed class JeebFeedController : ControllerBase
     private readonly IRequestsStore _requests;
     private readonly IDeliveryServiceClient _delivery;
     private readonly IOfferServiceClient _offerService;
+    private readonly IUsersStore _users;
     private readonly UpstreamFeatureFlags _flags;
     private readonly TimeProvider _clock;
     private readonly ILogger<JeebFeedController> _logger;
@@ -51,6 +60,7 @@ public sealed class JeebFeedController : ControllerBase
         IRequestsStore requests,
         IDeliveryServiceClient delivery,
         IOfferServiceClient offerService,
+        IUsersStore users,
         IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         ILogger<JeebFeedController> logger)
@@ -58,6 +68,7 @@ public sealed class JeebFeedController : ControllerBase
         _requests = requests;
         _delivery = delivery;
         _offerService = offerService;
+        _users = users;
         _flags = flags.Value;
         _clock = clock;
         _logger = logger;
@@ -119,8 +130,16 @@ public sealed class JeebFeedController : ControllerBase
         // feed still returns its pending requests. Skipped entirely when the Offer upstream is off.
         var offersByRequest = await LoadMyOffersAsync(jeeberId, ct);
 
+        // (4) G1 (owner-approved 2026-07-21): annotate each item with a DISPLAY-SAFE sender identity
+        // (short name + avatar) resolved from the request's client via the gateway's EXISTING
+        // user-profile lookup (IUsersStore — the same source the post-acceptance jeeberName reveal
+        // uses). Batched over the DISTINCT client ids on this page (cache-per-request). Degrade-don't-
+        // fail: a lookup blip yields null sender fields, never a feed failure. The raw clientId / phone
+        // / email are NEVER projected — only the short display form + an absolute-https avatar.
+        var sendersByClient = await ResolveSendersAsync(visible, ct);
+
         var items = visible
-            .Select(r => ToFeedItem(r, offersByRequest))
+            .Select(r => ToFeedItem(r, offersByRequest, sendersByClient))
             .ToList();
 
         _logger.LogInformation(
@@ -189,11 +208,118 @@ public sealed class JeebFeedController : ControllerBase
     private static readonly IReadOnlyDictionary<string, JeeberFeedOffer> EmptyOffers =
         new Dictionary<string, JeeberFeedOffer>(StringComparer.Ordinal);
 
+    /// <summary>
+    /// G1 (owner-approved 2026-07-21). Resolves the DISTINCT client ids on this feed page to a
+    /// display-safe sender identity, keyed by client id. Batched — each distinct client is looked
+    /// up at most once per request (cache-per-request; <see cref="IUsersStore"/> exposes no batch
+    /// API). A client that resolves to neither a short name nor an absolute-https avatar is omitted
+    /// (its item then carries null sender fields). Never throws: a lookup blip degrades that client
+    /// to null so the feed still serves.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, FeedSenderIdentity>> ResolveSendersAsync(
+        IReadOnlyList<DeliveryRequest> requests, CancellationToken ct)
+    {
+        var map = new Dictionary<string, FeedSenderIdentity>(StringComparer.Ordinal);
+        foreach (var clientId in requests
+                     .Select(r => r.ClientId)
+                     .Where(id => !string.IsNullOrWhiteSpace(id))
+                     .Distinct(StringComparer.Ordinal))
+        {
+            var identity = await ResolveOneSenderAsync(clientId, ct);
+            if (identity is not null)
+            {
+                map[clientId] = identity;
+            }
+        }
+
+        return map;
+    }
+
+    /// <summary>
+    /// Looks up one client's profile via the gateway's existing user-profile store and projects it
+    /// to the DISPLAY-SAFE shape: a short name (given name + last initial) and an absolute-https
+    /// avatar. Degrade-don't-fail — a null profile or a lookup fault yields <c>null</c> (no sender
+    /// annotation) rather than a feed error. The raw clientId is never returned or echoed.
+    /// </summary>
+    private async Task<FeedSenderIdentity?> ResolveOneSenderAsync(string clientId, CancellationToken ct)
+    {
+        try
+        {
+            var profile = await _users.GetByIdAsync(clientId, ct);
+            if (profile is null)
+            {
+                return null;
+            }
+
+            var name = ToShortDisplayName(profile.Name);
+            var avatar = ToAbsoluteHttpsAvatar(profile.AvatarUrl);
+            return name is null && avatar is null ? null : new FeedSenderIdentity(name, avatar);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "jeeber.feed sender-identity resolve failed for client {ClientId}; degrading to null.",
+                clientId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Reduces a full profile name to the DISPLAY-SAFE short form the privacy gate permits pre-
+    /// acceptance: given name + last initial (e.g. "Nour Khaled" → "Nour K."). A single-token name
+    /// is returned as-is (already just a given name); blank → <c>null</c>. The last initial is the
+    /// first grapheme of the last token, so surrogate pairs / combining marks are not split.
+    /// </summary>
+    private static string? ToShortDisplayName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return null;
+        }
+
+        var parts = name.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 1)
+        {
+            return parts[0];
+        }
+
+        var given = parts[0];
+        var initial = System.Globalization.StringInfo.GetNextTextElement(parts[^1], 0);
+        return string.IsNullOrEmpty(initial) ? given : $"{given} {initial.ToUpperInvariant()}.";
+    }
+
+    /// <summary>
+    /// Returns the avatar URL only when it is an ABSOLUTE https URL (the shape the mobile app can
+    /// load directly); a blank, relative, or non-https value degrades to <c>null</c>.
+    /// </summary>
+    private static string? ToAbsoluteHttpsAvatar(string? avatarUrl)
+    {
+        if (string.IsNullOrWhiteSpace(avatarUrl))
+        {
+            return null;
+        }
+
+        var trimmed = avatarUrl.Trim();
+        return Uri.TryCreate(trimmed, UriKind.Absolute, out var uri)
+               && string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            ? trimmed
+            : null;
+    }
+
+    /// <summary>G1 — resolved display-safe sender identity for one client (both fields nullable).</summary>
+    private sealed record FeedSenderIdentity(string? Name, string? AvatarUrl);
+
     private static JeeberFeedItem ToFeedItem(
         DeliveryRequest request,
-        IReadOnlyDictionary<string, JeeberFeedOffer> offersByRequest)
+        IReadOnlyDictionary<string, JeeberFeedOffer> offersByRequest,
+        IReadOnlyDictionary<string, FeedSenderIdentity> sendersByClient)
     {
         offersByRequest.TryGetValue(request.Id, out var myOffer);
+        sendersByClient.TryGetValue(request.ClientId, out var sender);
 
         return new JeeberFeedItem
         {
@@ -218,6 +344,10 @@ public sealed class JeebFeedController : ControllerBase
                     Note = myOffer.Note,
                     CreatedAt = myOffer.CreatedAt,
                 },
+            // G1 (owner-approved): display-safe sender identity, or null when the client profile
+            // did not resolve. Derived from the profile — NEVER the raw clientId.
+            SenderName = sender?.Name,
+            SenderAvatarUrl = sender?.AvatarUrl,
         };
     }
 
@@ -266,6 +396,20 @@ public sealed class JeeberFeedItem
     /// <summary>This jeeber's existing offer on this request, or <c>null</c> if none (the fresh
     /// cross-able request — exactly the Gate B case).</summary>
     public FeedMyOffer? MyOffer { get; init; }
+
+    /// <summary>
+    /// G1 (owner-approved 2026-07-21) — DISPLAY-SAFE short form of the requesting client's name so
+    /// the jeeber sees WHO a request is from pre-acceptance: given name + last initial (e.g.
+    /// "Nour K."). <c>null</c> when the client profile can't be resolved (degrade-don't-fail).
+    /// Additive; the raw <c>clientId</c>, phone, and email are still NEVER exposed here (§3.4).
+    /// </summary>
+    public string? SenderName { get; init; }
+
+    /// <summary>
+    /// G1 (owner-approved) — the requesting client's avatar as an ABSOLUTE https URL, or <c>null</c>
+    /// when absent, not absolute-https, or the lookup degraded. Additive and safe to ignore.
+    /// </summary>
+    public string? SenderAvatarUrl { get; init; }
 }
 
 /// <summary>GAP-2 — pickup/dropoff summary on a feed item (contract-freeze §3.3 FeedLocation).</summary>
