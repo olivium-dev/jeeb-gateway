@@ -10,6 +10,34 @@ namespace JeebGateway.IntegrationTests;
 public class DeliveryServiceClientTierTests
 {
     [Fact]
+    public async Task GetDeliveryAsync_Uses_Canonical_Uri_And_Binds_Live_Shape()
+    {
+        var handler = new SingleResponseHandler("""
+            {
+              "delivery_id":"delivery-1",
+              "tenant_id":"tenant-1",
+              "client_id":"client-1",
+              "status":"Ordered",
+              "tier_id":"tier-1",
+              "created_at":"2026-07-21T17:33:04Z",
+              "updated_at":"2026-07-21T17:34:04Z"
+            }
+            """);
+        var http = new HttpClient(handler) { BaseAddress = new Uri("http://delivery.test/") };
+        var client = new DeliveryServiceClient(http);
+
+        var delivery = await client.GetDeliveryAsync("delivery-1", CancellationToken.None);
+
+        handler.LastMethod.Should().Be(HttpMethod.Get);
+        handler.LastRequestUri!.AbsolutePath.Should().Be("/api/v1/deliveries/delivery-1");
+        delivery.Id.Should().Be("delivery-1");
+        delivery.TenantId.Should().Be("tenant-1");
+        delivery.ClientId.Should().Be("client-1");
+        delivery.Status.Should().Be("Ordered");
+        delivery.TierId.Should().Be("tier-1");
+    }
+
+    [Fact]
     public async Task ListTiersAsync_Maps_SnakeCase_TtlSeconds()
     {
         var client = ClientReturning(
@@ -123,14 +151,21 @@ public class DeliveryServiceClientTierTests
 
         public SingleResponseHandler(string jsonBody) => _jsonBody = jsonBody;
 
+        public HttpMethod? LastMethod { get; private set; }
+        public Uri? LastRequestUri { get; private set; }
+
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
-            CancellationToken cancellationToken) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            CancellationToken cancellationToken)
+        {
+            LastMethod = request.Method;
+            LastRequestUri = request.RequestUri;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(_jsonBody, Encoding.UTF8, "application/json"),
                 RequestMessage = request,
             });
+        }
     }
 
     private sealed class RecordingLogger<T> : ILogger<T>

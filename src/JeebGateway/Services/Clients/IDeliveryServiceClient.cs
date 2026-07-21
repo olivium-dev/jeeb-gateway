@@ -567,34 +567,87 @@ public sealed class DeliveryCreateRowException : Exception
     }
 }
 
+/// <summary>
+/// Delivery-service's canonical single-read response from
+/// <c>GET /api/v1/deliveries/{id}</c>. The Go service emits snake_case, so each
+/// multi-word field is explicitly bound rather than relying on the shared
+/// camelCase web defaults.
+/// </summary>
 public sealed class DeliveryRequestUpstream
 {
+    [System.Text.Json.Serialization.JsonPropertyName("delivery_id")]
     public required string Id { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tenant_id")]
+    public string? TenantId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("client_id")]
     public required string ClientId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("status")]
     public required string Status { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("description")]
     public string? Description { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("audio_url")]
     public string? AudioUrl { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("photos")]
     public IReadOnlyList<string> Photos { get; init; } = Array.Empty<string>();
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
     public string? TierId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup")]
     public LatLngUpstream? Pickup { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("dropoff")]
     public LatLngUpstream? Dropoff { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup_address")]
     public string? PickupAddress { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("dropoff_address")]
     public string? DropoffAddress { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("jeeber_id")]
     public string? JeeberId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("accepted_at")]
     public DateTimeOffset? AcceptedAt { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("gps_tracking_active")]
     public bool GpsTrackingActive { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("otp_attempt_count")]
     public int OtpAttemptCount { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("otp_locked_at")]
     public DateTimeOffset? OtpLockedAt { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("otp_escalation_id")]
     public string? OtpEscalationId { get; init; }
 
     /// <summary>
     /// T-BE-019 (JEB-55): E.164 phone for the 4-digit handover OTP.
     /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("recipient_phone")]
     public string? RecipientPhone { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("expires_at")]
     public DateTimeOffset? ExpiresAt { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("cancelled_by")]
     public string? CancelledBy { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("cancellation_reason")]
     public string? CancellationReason { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("created_at")]
     public DateTimeOffset CreatedAt { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("updated_at")]
     public DateTimeOffset UpdatedAt { get; init; }
 }
 

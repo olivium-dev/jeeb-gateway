@@ -153,7 +153,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
 
     public async Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct)
     {
-        using var response = await _http.GetAsync($"jeeb/deliveries/{Uri.EscapeDataString(deliveryId)}", ct);
+        using var response = await _http.GetAsync($"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}", ct);
         response.EnsureSuccessStatusCode();
         return await DeserializeAsync<DeliveryRequestUpstream>(response, ct);
     }
