@@ -158,7 +158,11 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
 
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("Id", id);
-        cmd.Parameters.AddWithValue("At", expiredAt);
+        // Npgsql refuses a DateTimeOffset with a non-zero offset for timestamptz,
+        // and upstream stamps expiry in local time (+02:00) — normalise to UTC or
+        // the Bind throws and the observer projects nothing (seen live: "Observed
+        // 72 upstream expired request(s); projected 0").
+        cmd.Parameters.AddWithValue("At", expiredAt.ToUniversalTime());
 
         var transitioned = await cmd.ExecuteNonQueryAsync(ct) > 0;
 
