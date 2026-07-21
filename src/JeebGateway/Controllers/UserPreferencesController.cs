@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using System.Threading;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using System.Security.Claims;
@@ -21,6 +22,16 @@ namespace JeebGateway.Controllers
     {
         private const string PrefKeyFullName = "fullName";
         private const string PrefKeyAddress = "address";
+
+        // JEBV4 D1 fail-open (mirrors the sibling notification-preferences /
+        // saved-location UpstreamReadBudget). The "remote-user-preferences" named
+        // client carries the org-standard resilience ladder (retries x per-attempt
+        // timeout). Against a decommissioned/erroring upstream that let a READ burn
+        // ~4-9s on every app cold start and then surface a 500/502. This budget caps
+        // the WHOLE read so it completes well under 2s on a healthy upstream and fails
+        // OPEN fast on a dead one. Reads are a low-stakes surface (the client already
+        // handles the empty/not-found "nothing stored yet" answer); writes are unchanged.
+        private static readonly TimeSpan UpstreamReadBudget = TimeSpan.FromMilliseconds(1500);
 
         private readonly ServiceRemoteUserPreferencesClient _preferencesClient;
         private readonly ILogger<UserPreferencesController> _logger;
@@ -58,6 +69,58 @@ namespace JeebGateway.Controllers
                 statusCode: status);
         }
 
+        /// <summary>
+        /// JEBV4 D1 fail-open READ wrapper — mirrors the sibling
+        /// notification-preferences / saved-location <see cref="UpstreamReadBudget"/>
+        /// idiom. Runs <paramref name="read"/> under a bounded budget linked to the
+        /// request-abort token and wraps a successful result in <c>Ok</c>. A genuine
+        /// upstream HTTP response (incl. 4xx/5xx) still flows through
+        /// <see cref="UpstreamProblem"/> exactly as before, so healthy-upstream
+        /// behaviour is unchanged. Only a DEAD/slow upstream — a transport failure
+        /// (No route to host), a Polly breaker-open, or our budget expiring — fails
+        /// OPEN via <paramref name="failOpen"/>, returning the contract-legal
+        /// empty/not-found the client already handles instead of stalling the mobile
+        /// cold-start and surfacing a 500/502. A genuine caller (client) cancellation
+        /// is propagated, never masked as a fail-open.
+        /// </summary>
+        private async Task<IActionResult> ReadFailOpenAsync<T>(
+            Func<CancellationToken, Task<T>> read,
+            Func<IActionResult> failOpen,
+            string operation)
+        {
+            using var budget = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+            budget.CancelAfter(UpstreamReadBudget);
+            try
+            {
+                return Ok(await read(budget.Token));
+            }
+            catch (RemoteUserPreferencesApiException ex)
+            {
+                return UpstreamProblem(ex);
+            }
+            catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+            {
+                // The CALLER aborted (client disconnected), not our budget — propagate.
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "UserPreferences BFF: {Operation} upstream unavailable or exceeded {BudgetMs}ms; failing open to the contract-legal empty/not-found the client handles.",
+                    operation, UpstreamReadBudget.TotalMilliseconds);
+                return failOpen();
+            }
+        }
+
+        private static PaginatedResponse EmptyPaginatedResponse(int? page, int? size) => new()
+        {
+            Current_page = page ?? 1,
+            Page_size = size ?? 0,
+            Total_items = 0,
+            Total_pages = 0,
+            Items = new List<string>()
+        };
+
         private string? GetUserId()
         {
             // The gateway mints access tokens with the user id in the JWT `sub`
@@ -87,19 +150,14 @@ namespace JeebGateway.Controllers
             [FromQuery] int? size,
             [FromQuery] string? order)
         {
-            try
-            {
-                var userId = GetUserId();
-                if (string.IsNullOrEmpty(userId))
-                    return Unauthorized();
+            var userId = GetUserId();
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized();
 
-                var result = await _preferencesClient.Data_GetItemsAsync(userId, data_type, page, size, order);
-                return Ok(result);
-            }
-            catch (RemoteUserPreferencesApiException ex)
-            {
-                return UpstreamProblem(ex);
-            }
+            return await ReadFailOpenAsync(
+                ct => _preferencesClient.Data_GetItemsAsync(userId, data_type, page, size, order, ct),
+                () => Ok(EmptyPaginatedResponse(page, size)),
+                nameof(GetPaginatedItems));
         }
 
         [HttpPost("data/{data_type}")]
@@ -177,19 +235,14 @@ namespace JeebGateway.Controllers
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> GetAllItems(string data_type)
         {
-            try
-            {
-                var userId = GetUserId();
-                if (string.IsNullOrEmpty(userId))
-                    return Unauthorized();
+            var userId = GetUserId();
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized();
 
-                var result = await _preferencesClient.Data_GetAllItemsAsync(userId, data_type);
-                return Ok(result);
-            }
-            catch (RemoteUserPreferencesApiException ex)
-            {
-                return UpstreamProblem(ex);
-            }
+            return await ReadFailOpenAsync(
+                ct => _preferencesClient.Data_GetAllItemsAsync(userId, data_type, ct),
+                () => Ok(Array.Empty<string>()),
+                nameof(GetAllItems));
         }
 
         [HttpDelete("data/{data_type}/all")]
@@ -228,19 +281,14 @@ namespace JeebGateway.Controllers
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> GetNestedPreference(string pref_key)
         {
-            try
-            {
-                var userId = GetUserId();
-                if (string.IsNullOrEmpty(userId))
-                    return Unauthorized();
+            var userId = GetUserId();
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized();
 
-                var result = await _preferencesClient.Data_GetNestedPreferenceAsync(userId, pref_key);
-                return Ok(result);
-            }
-            catch (RemoteUserPreferencesApiException ex)
-            {
-                return UpstreamProblem(ex);
-            }
+            return await ReadFailOpenAsync(
+                ct => _preferencesClient.Data_GetNestedPreferenceAsync(userId, pref_key, ct),
+                () => NotFound(),
+                nameof(GetNestedPreference));
         }
 
         [HttpPost("nested-preferences/{pref_key}")]
@@ -276,19 +324,14 @@ namespace JeebGateway.Controllers
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> GetAllPreferences()
         {
-            try
-            {
-                var userId = GetUserId();
-                if (string.IsNullOrEmpty(userId))
-                    return Unauthorized();
+            var userId = GetUserId();
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized();
 
-                var result = await _preferencesClient.Data_GetPreferencesAsync(userId);
-                return Ok(result);
-            }
-            catch (RemoteUserPreferencesApiException ex)
-            {
-                return UpstreamProblem(ex);
-            }
+            return await ReadFailOpenAsync(
+                ct => _preferencesClient.Data_GetPreferencesAsync(userId, ct),
+                () => Ok(new Dictionary<string, string>()),
+                nameof(GetAllPreferences));
         }
 
         [HttpPost("preferences")]
@@ -319,19 +362,14 @@ namespace JeebGateway.Controllers
         [ProducesResponseType(StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> GetSinglePreference(string pref_key)
         {
-            try
-            {
-                var userId = GetUserId();
-                if (string.IsNullOrEmpty(userId))
-                    return Unauthorized();
+            var userId = GetUserId();
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized();
 
-                var result = await _preferencesClient.Data_GetSinglePreferenceAsync(userId, pref_key);
-                return Ok(result);
-            }
-            catch (RemoteUserPreferencesApiException ex)
-            {
-                return UpstreamProblem(ex);
-            }
+            return await ReadFailOpenAsync(
+                ct => _preferencesClient.Data_GetSinglePreferenceAsync(userId, pref_key, ct),
+                () => NotFound(),
+                nameof(GetSinglePreference));
         }
 
         [HttpPost("preferences/{pref_key}")]
