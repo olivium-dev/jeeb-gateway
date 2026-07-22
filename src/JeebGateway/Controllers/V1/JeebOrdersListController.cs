@@ -62,15 +62,21 @@ public sealed class JeebOrdersListController : ControllerBase
     [HttpGet("v1/requests", Order = 2)]
     [RequireCapability(Caps.DeliveryParticipate)] // coarse {client, jeeber}; ownership scoped in-handler
     [ProducesResponseType(typeof(PagedListResponse<OrderListItem>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> ListRequests(
         [FromQuery] string? role,
         [FromQuery] int? page,
         [FromQuery] int? pageSize,
+        [FromQuery] DateTimeOffset? fromDate,
+        [FromQuery] DateTimeOffset? toDate,
         CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauth))
             return unauth;
+
+        if (!OrderDateRangeFilter.IsValid(fromDate, toDate))
+            return InvalidDateRange();
 
         var jeeberScope = string.Equals(role, "jeeber", StringComparison.OrdinalIgnoreCase);
 
@@ -105,6 +111,10 @@ public sealed class JeebOrdersListController : ControllerBase
         {
             rows = rows.Where(IsListableActive).ToList();
         }
+
+        rows = rows
+            .Where(r => OrderDateRangeFilter.Includes(r.CreatedAt, fromDate, toDate))
+            .ToList();
 
         var (pg, sz) = NormalizePaging(page, pageSize);
         var total = rows.Count;
@@ -152,15 +162,21 @@ public sealed class JeebOrdersListController : ControllerBase
     [HttpGet("v1/deliveries")]
     [RequireCapability(Caps.DeliveryParticipate)] // {client, jeeber}
     [ProducesResponseType(typeof(PagedListResponse<OrderListItem>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> ListDeliveries(
         [FromQuery] string? status,
         [FromQuery] int? page,
         [FromQuery] int? pageSize,
+        [FromQuery] DateTimeOffset? fromDate,
+        [FromQuery] DateTimeOffset? toDate,
         CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauth))
             return unauth;
+
+        if (!OrderDateRangeFilter.IsValid(fromDate, toDate))
+            return InvalidDateRange();
 
         IReadOnlyList<DeliveryRequest> rows;
         try
@@ -199,6 +215,9 @@ public sealed class JeebOrdersListController : ControllerBase
         // predicate at the store), so only this in-handler filter gates which bucket ships.
         // totalCount reflects the filtered set per bucket.
         var listable = rows.Where(r => MatchesBucket(r, status)).ToList();
+        listable = listable
+            .Where(r => OrderDateRangeFilter.Includes(r.CreatedAt, fromDate, toDate))
+            .ToList();
 
         var (pg, sz) = NormalizePaging(page, pageSize);
         var total = listable.Count;
@@ -211,6 +230,14 @@ public sealed class JeebOrdersListController : ControllerBase
 
         return Ok(PagedListResponse<OrderListItem>.Of(window, pg, sz, total));
     }
+
+    private IActionResult InvalidDateRange() => BadRequest(new ProblemDetails
+    {
+        Type = "https://jeeb.dev/errors/invalid-date-range",
+        Title = "invalid_date_range",
+        Detail = "'toDate' must be later than 'fromDate'.",
+        Status = StatusCodes.Status400BadRequest,
+    });
 
     private static (int page, int pageSize) NormalizePaging(int? page, int? pageSize)
     {
