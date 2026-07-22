@@ -354,7 +354,7 @@ public sealed class DurableRequestsStoreTests
         {
             Id = "d-cold-1",
             ClientId = "client-9",
-            Status = RequestStatus.HeadingOff,
+            Status = CanonicalDeliveryStatus.InTransit,
             Description = "canonical row",
             TierId = "flash",
         };
@@ -367,6 +367,73 @@ public sealed class DurableRequestsStoreTests
         row.Status.Should().Be(RequestStatus.HeadingOff);
         row.Description.Should().Be("canonical row");
         delivery.GetDeliveryCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Get_translates_live_capture_Ordered_status_to_pending()
+    {
+        var store = BuildWithMirror(out _, out var delivery, out _);
+        delivery.UpstreamRow = new DeliveryRequestUpstream
+        {
+            Id = "d-live-ordered",
+            ClientId = "client-live",
+            Status = CanonicalDeliveryStatus.Ordered,
+        };
+
+        var row = await store.GetAsync("d-live-ordered", CancellationToken.None);
+
+        row.Should().NotBeNull();
+        row!.Status.Should().Be(RequestStatus.Pending);
+    }
+
+    [Theory]
+    [InlineData(CanonicalDeliveryStatus.Picked, RequestStatus.PickedUp)]
+    [InlineData(CanonicalDeliveryStatus.InTransit, RequestStatus.HeadingOff)]
+    [InlineData(CanonicalDeliveryStatus.AtDoor, RequestStatus.AtDoor)]
+    [InlineData(CanonicalDeliveryStatus.Done, RequestStatus.Delivered)]
+    [InlineData(CanonicalDeliveryStatus.Cancelled, RequestStatus.Cancelled)]
+    [InlineData(CanonicalDeliveryStatus.FailedNeedsEscalation, RequestStatus.Disputed)]
+    public async Task Get_translates_delivery_status_to_request_contract_status(
+        string deliveryStatus,
+        string requestStatus)
+    {
+        var store = BuildWithMirror(out _, out var delivery, out _);
+        delivery.UpstreamRow = new DeliveryRequestUpstream
+        {
+            Id = "d-status-map",
+            ClientId = "client-status-map",
+            Status = deliveryStatus,
+        };
+
+        var row = await store.GetAsync("d-status-map", CancellationToken.None);
+
+        row.Should().NotBeNull();
+        row!.Status.Should().Be(requestStatus);
+    }
+
+    [Fact]
+    public async Task Get_never_surfaces_an_unknown_delivery_status()
+    {
+        var store = BuildWithMirror(out _, out var delivery, out var mirror);
+        delivery.UpstreamRow = new DeliveryRequestUpstream
+        {
+            Id = "d-unknown-status",
+            ClientId = "client-unknown-status",
+            Status = "FutureDeliveryStatus",
+        };
+        mirror.Rows.Add(new DeliveryRequest
+        {
+            Id = "d-unknown-status",
+            ClientId = "client-unknown-status",
+            Status = RequestStatus.Pending,
+            Description = "safe mirror fallback",
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+
+        var row = await store.GetAsync("d-unknown-status", CancellationToken.None);
+
+        row.Should().NotBeNull();
+        row!.Status.Should().Be(RequestStatus.Pending);
     }
 
     [Fact]
@@ -454,7 +521,7 @@ public sealed class DurableRequestsStoreTests
         {
             Id = requestId,
             ClientId = "client-248",
-            Status = RequestStatus.HeadingOff, // fresh canonical status
+            Status = CanonicalDeliveryStatus.InTransit, // fresh canonical status
             Description = "canonical row",
             TierId = "flash",
         };
@@ -756,12 +823,12 @@ public sealed class DurableRequestsStoreTests
         var store = BuildWithMirror(out _, out var delivery, out var mirror);
         var requestId = Guid.NewGuid().ToString();
 
-        // delivery-service answers "active" (HeadingOff) for this id...
+        // delivery-service answers "active" (InTransit) for this id...
         delivery.UpstreamRow = new DeliveryRequestUpstream
         {
             Id = requestId,
             ClientId = "client-9",
-            Status = RequestStatus.HeadingOff,
+            Status = CanonicalDeliveryStatus.InTransit,
             Description = "resurrected-as-active upstream",
             TierId = "flash",
         };

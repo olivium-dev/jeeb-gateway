@@ -690,8 +690,8 @@ public sealed class DurableRequestsStore : IRequestsStore
     }
 
     /// <summary>
-    /// Maps a canonical delivery-service row (the gateway-vocab
-    /// <c>jeeb/deliveries/{id}</c> projection) onto a <see cref="DeliveryRequest"/>
+    /// Maps a canonical delivery-service row from <c>api/v1/deliveries/{id}</c>
+    /// onto the request-contract vocabulary exposed by <see cref="DeliveryRequest"/>
     /// for the durable read-through. Fields delivery-service does not carry
     /// (ScheduledAt / ConversationId / AcceptedFee / DeliveryOtp / …) are left at
     /// their defaults — acceptable on the cold path, which was an unresolvable
@@ -701,7 +701,17 @@ public sealed class DurableRequestsStore : IRequestsStore
     {
         Id = u.Id,
         ClientId = u.ClientId,
-        Status = u.Status,
+        Status = u.Status switch
+        {
+            CanonicalDeliveryStatus.Ordered               => RequestStatus.Pending,
+            CanonicalDeliveryStatus.Picked                => RequestStatus.PickedUp,
+            CanonicalDeliveryStatus.InTransit             => RequestStatus.HeadingOff,
+            CanonicalDeliveryStatus.AtDoor                => RequestStatus.AtDoor,
+            CanonicalDeliveryStatus.Done                  => RequestStatus.Delivered,
+            CanonicalDeliveryStatus.Cancelled             => RequestStatus.Cancelled,
+            CanonicalDeliveryStatus.FailedNeedsEscalation => RequestStatus.Disputed,
+            _ => throw new InvalidOperationException($"Unknown delivery-service status '{u.Status}'."),
+        },
         Description = u.Description ?? string.Empty,
         AudioUrl = u.AudioUrl,
         Photos = u.Photos,
