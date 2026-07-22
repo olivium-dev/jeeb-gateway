@@ -12,6 +12,7 @@ using Microsoft.Extensions.Logging;
 using GwUsersStore = JeebGateway.Users.IUsersStore;
 using GwUserProfile = JeebGateway.Users.UserProfile;
 using GwDualRoleClient = JeebGateway.Users.IUserManagementDualRoleClient;
+using GwSeededRoles = JeebGateway.Users.IDevSeededRoleStore;
 using GwRoles = JeebGateway.Users.Roles;
 using UmClient = JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient;
 using UmApiException = JeebGateway.service.ServiceUserManagement.ApiException;
@@ -64,6 +65,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
     private readonly ITokenService _tokens;
     private readonly GwUsersStore _users;
     private readonly GwDualRoleClient _userManagement;
+    private readonly GwSeededRoles _seededRoles;
     private readonly ILogger<AuthEmailFacadeController> _log;
 
     public AuthEmailFacadeController(
@@ -71,12 +73,14 @@ public sealed class AuthEmailFacadeController : ControllerBase
         ITokenService tokens,
         GwUsersStore users,
         GwDualRoleClient userManagement,
+        GwSeededRoles seededRoles,
         ILogger<AuthEmailFacadeController> log)
     {
         _um = um;
         _tokens = tokens;
         _users = users;
         _userManagement = userManagement;
+        _seededRoles = seededRoles;
         _log = log;
     }
 
@@ -222,7 +226,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
             if (string.IsNullOrWhiteSpace(res?.UserId))
                 return Problem(401, "invalid_credentials", "Social login failed", "The social token was rejected.");
 
-            var (roles, active) = await ResolveRolesAsync(res!.UserId!, ct);
+            var (roles, active) = await ResolveRolesAsync(res!.UserId!, email: null, ct);
             await ProjectAsync(res.UserId!, roles, active, ct);
             var pair = await _tokens.IssueAsync(res.UserId!, roles, ct);
             _log.LogInformation("auth.social facade minted gateway session userId={UserId} recentlyCreated={Rc}",
@@ -249,7 +253,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
         if (string.IsNullOrWhiteSpace(userId))
             return Problem(401, "invalid_credentials", "Login failed", "No user was resolved.");
 
-        var (roles, active) = await ResolveRolesAsync(userId!, ct);
+        var (roles, active) = await ResolveRolesAsync(userId!, email, ct);
         await ProjectAsync(userId!, roles, active, ct);
         var pair = await _tokens.IssueAsync(userId!, roles, ct);
         _log.LogInformation("auth.facade minted gateway session userId={UserId}", userId);
@@ -263,7 +267,8 @@ public sealed class AuthEmailFacadeController : ControllerBase
     }
 
     /// <summary>Resolve OPAQUE roles + active role from UM's persisted read; safe default 'customer'.</summary>
-    private async Task<(IReadOnlyList<string> roles, string active)> ResolveRolesAsync(string userId, CancellationToken ct)
+    private async Task<(IReadOnlyList<string> roles, string active)> ResolveRolesAsync(
+        string userId, string? email, CancellationToken ct)
     {
         IReadOnlyList<string> roles = new[] { GwRoles.Client };
         var active = GwRoles.Client;
@@ -280,6 +285,18 @@ public sealed class AuthEmailFacadeController : ControllerBase
         {
             _log.LogWarning(ex, "auth.facade UM get-roles failed for userId={UserId}; default role", userId);
         }
+
+        // JEBV4-314 — union any DEV-seeded roles (POST /dev/seed/user role=admin) so an
+        // email/password login of a seeded admin mints a JWT carrying the admin role. The
+        // store is only ever populated by the [DevOnly] seed action, so in production this
+        // resolves to null and the roles set is exactly UM's persisted read (no behaviour
+        // change for real users). user-management stays authoritative for real identity.
+        var seeded = _seededRoles.Resolve(userId, email);
+        if (seeded is { Count: > 0 })
+        {
+            roles = roles.Union(seeded, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
         if (!roles.Contains(active, StringComparer.OrdinalIgnoreCase))
             active = roles.Count > 0 ? roles[0] : GwRoles.Client;
         return (roles, active);

@@ -192,23 +192,6 @@ public class InMemoryRequestsStore : IRequestsStore
         }
     }
 
-    public Task<bool> MarkNudgedAsync(string requestId, DateTimeOffset at, CancellationToken ct)
-    {
-        lock (_writeLock)
-        {
-            if (!_requests.TryGetValue(requestId, out var existing))
-            {
-                return Task.FromResult(false);
-            }
-            if (existing.NudgedAt is not null)
-            {
-                return Task.FromResult(false);
-            }
-            existing.NudgedAt = at;
-            return Task.FromResult(true);
-        }
-    }
-
     public Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct)
     {
         lock (_writeLock)
@@ -667,7 +650,6 @@ public class InMemoryRequestsStore : IRequestsStore
                     CreatedAt = existing.CreatedAt,
                     ScheduledAt = existing.ScheduledAt,
                     ActivatedAt = existing.ActivatedAt,
-                    NudgedAt = existing.NudgedAt,
                     ExpiredAt = existing.ExpiredAt,
                     JeeberId = existing.JeeberId,
                     AcceptedAt = existing.AcceptedAt,

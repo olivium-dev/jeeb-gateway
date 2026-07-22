@@ -79,6 +79,30 @@ public interface IDeliveryServiceClient
         CancellationToken ct);
 
     /// <summary>
+    /// Runs a canonical transition with an optional audit <paramref name="reason"/>
+    /// (the delivery-service business trigger, e.g. <c>tier_ttl_elapsed</c>) and an
+    /// optional <paramref name="idempotencyKey"/>. Blank optional values are omitted
+    /// from the upstream JSON body, so an omitted reason produces a byte-identical
+    /// request to the 6-argument overload.
+    ///
+    /// <para>DEFAULT IMPLEMENTATION: delegates to the existing 6-argument overload,
+    /// dropping the two optional fields. This keeps every existing implementer
+    /// (production client and ~25 test doubles) compiling unchanged — adding the
+    /// richer surface must not be a breaking change for implementers, exactly as the
+    /// optional-parameter form would not have been for callers.</para>
+    /// </summary>
+    Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
+        string deliveryId,
+        string to,
+        string partySource,
+        string actorId,
+        string actorRole,
+        string? reason,
+        string? idempotencyKey,
+        CancellationToken ct)
+        => CanonicalTransitionAsync(deliveryId, to, partySource, actorId, actorRole, ct);
+
+    /// <summary>
     /// Canonical single-read read-through: <c>GET /api/v1/deliveries/{id}</c>
     /// (JEB-45 design §2.2). Returns the canonical projection — its <c>status</c>
     /// is the SM-1 vocab (Ordered/Picked/InTransit/AtDoor/Done) the suite asserts.
@@ -86,6 +110,23 @@ public interface IDeliveryServiceClient
     /// </summary>
     /// <returns><see cref="DeliveryReadUpstream"/> on 200; <c>null</c> on 404.</returns>
     Task<DeliveryReadUpstream?> GetCanonicalDeliveryAsync(string deliveryId, CancellationToken ct);
+
+    /// <summary>
+    /// Reads the deliveries delivery-service has terminally expired at or after
+    /// <paramref name="since"/> (<c>GET /api/v1/deliveries/expired</c>) — the read
+    /// that lets <see cref="JeebGateway.Requests.RequestExpiryObserver"/> learn about
+    /// upstream-authored expiry WITHOUT holding a cursor. Returns an empty list when
+    /// the (additive, possibly not-yet-deployed) upstream route is unavailable or
+    /// answers any non-success status: DEGRADE-DON'T-FAIL.
+    ///
+    /// <para>DEFAULT IMPLEMENTATION: an empty list — "this fake observed no upstream
+    /// expiries" — so every existing test double compiles and behaves unchanged.</para>
+    /// </summary>
+    Task<IReadOnlyList<ExpiredDeliveryUpstream>> ListExpiredDeliveriesAsync(
+        DateTimeOffset since,
+        int limit,
+        CancellationToken ct)
+        => Task.FromResult<IReadOnlyList<ExpiredDeliveryUpstream>>(Array.Empty<ExpiredDeliveryUpstream>());
 
     /// <summary>
     /// T-BE-019 (JEB-55): the durable AtDoor-gate half of the handover OTP.
@@ -526,34 +567,87 @@ public sealed class DeliveryCreateRowException : Exception
     }
 }
 
+/// <summary>
+/// Delivery-service's canonical single-read response from
+/// <c>GET /api/v1/deliveries/{id}</c>. The Go service emits snake_case, so each
+/// multi-word field is explicitly bound rather than relying on the shared
+/// camelCase web defaults.
+/// </summary>
 public sealed class DeliveryRequestUpstream
 {
+    [System.Text.Json.Serialization.JsonPropertyName("delivery_id")]
     public required string Id { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tenant_id")]
+    public string? TenantId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("client_id")]
     public required string ClientId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("status")]
     public required string Status { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("description")]
     public string? Description { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("audio_url")]
     public string? AudioUrl { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("photos")]
     public IReadOnlyList<string> Photos { get; init; } = Array.Empty<string>();
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
     public string? TierId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup")]
     public LatLngUpstream? Pickup { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("dropoff")]
     public LatLngUpstream? Dropoff { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup_address")]
     public string? PickupAddress { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("dropoff_address")]
     public string? DropoffAddress { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("jeeber_id")]
     public string? JeeberId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("accepted_at")]
     public DateTimeOffset? AcceptedAt { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("gps_tracking_active")]
     public bool GpsTrackingActive { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("otp_attempt_count")]
     public int OtpAttemptCount { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("otp_locked_at")]
     public DateTimeOffset? OtpLockedAt { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("otp_escalation_id")]
     public string? OtpEscalationId { get; init; }
 
     /// <summary>
     /// T-BE-019 (JEB-55): E.164 phone for the 4-digit handover OTP.
     /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("recipient_phone")]
     public string? RecipientPhone { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("expires_at")]
     public DateTimeOffset? ExpiresAt { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("cancelled_by")]
     public string? CancelledBy { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("cancellation_reason")]
     public string? CancellationReason { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("created_at")]
     public DateTimeOffset CreatedAt { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("updated_at")]
     public DateTimeOffset UpdatedAt { get; init; }
 }
 
@@ -703,6 +797,29 @@ public sealed class DeliveryReadUpstream
 
     [System.Text.Json.Serialization.JsonPropertyName("created_at")]
     public DateTimeOffset CreatedAt { get; init; }
+}
+
+/// <summary>
+/// One expired delivery returned by <c>GET /api/v1/deliveries/expired</c>.
+/// </summary>
+public sealed class ExpiredDeliveryUpstream
+{
+    // Not `required`: a malformed upstream row must degrade to "skipped" in the
+    // observer's blank-id guard, never throw and abort the whole poll batch.
+    [System.Text.Json.Serialization.JsonPropertyName("delivery_id")]
+    public string DeliveryId { get; init; } = string.Empty;
+
+    [System.Text.Json.Serialization.JsonPropertyName("client_id")]
+    public string? ClientId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
+    public string? TierId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("created_at")]
+    public DateTimeOffset CreatedAt { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("expired_at")]
+    public DateTimeOffset ExpiredAt { get; init; }
 }
 
 /// <summary>

@@ -1,31 +1,40 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Collections.Concurrent;
+using System.Text;
 using FluentAssertions;
 using JeebGateway.Requests;
+using JeebGateway.Services;
+using JeebGateway.Services.Clients;
 using JeebGateway.Tiers;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// T-backend-028: request expiry and no-offer timeout.
+/// T-backend-028: legacy gateway-owned request TTL authority.
 ///
-/// Two windows govern an open request:
-///   * 10-min "try expanding tier" prompt when the request still has zero
-///     offers (status == pending).
-///   * 30-min hard expiry when no offer has been accepted — the request
-///     moves to <c>expired</c>, the Client is notified, and the request
-///     can no longer receive new offers.
+/// <see cref="RequestExpirySweeper"/> is now expiry-only. The no-offer nudge
+/// lives in <see cref="RequestNudgeSweeper"/>.
+///
+/// This whole class covers the LEGACY gateway-owned TTL authority kept only
+/// while <c>FeatureFlags:RequestExpiry:Source == "gateway"</c>.
 ///
 /// Each test gets a fresh factory (and therefore a fresh in-memory store
 /// + notifier + clock) so cases don't share state.
 /// </summary>
 public class RequestExpirySweeperTests
 {
+    private const string FlashTierId = "0be308ce-01b5-5cb9-a3e8-9adb60668d9c";
+    private const string ExpressTierId = "efe0629b-0b50-555c-b182-4bd41fcd6507";
+    private const string StandardTierId = "2bd0d5df-db76-5d14-9e4d-741d60b2fa12";
+
     [Fact]
     public async Task Ten_Minutes_With_No_Offers_Sends_Try_Expanding_Tier_Prompt()
     {
@@ -34,25 +43,26 @@ public class RequestExpirySweeperTests
 
         var requestId = await CreateRequest(client, "groceries");
 
-        // Just under the 10-min nudge window — sweeper must NOT fire yet.
+        // Just under the 10-min nudge window — nudge sweeper must NOT fire yet.
         clock.Advance(TimeSpan.FromMinutes(9));
-        await SweepOnce(factory);
+        await NudgeOnce(factory);
 
         var notifier = (InMemoryRequestExpiryNotifier)factory.Services.GetRequiredService<IRequestExpiryNotifier>();
         notifier.Nudges.Should().BeEmpty();
 
         // Crossing the 10-min mark fires the nudge exactly once.
         clock.Advance(TimeSpan.FromMinutes(2));
-        await SweepOnce(factory);
+        await NudgeOnce(factory);
 
         notifier.Nudges.Should().ContainSingle()
             .Which.Should().Match<InMemoryRequestExpiryNotifier.NudgeRecord>(
                 n => n.RequestId == requestId && n.ClientId == "expiry-nudge-client");
 
-        // Idempotence — a follow-up sweep inside the window must not
-        // re-send the prompt to the same Client.
-        await SweepOnce(factory);
-        notifier.Nudges.Should().HaveCount(1);
+        // The in-memory notifier records every dispatch attempt; production deduplication
+        // belongs to the expiry notifier's request-nudge:{requestId} key.
+        await NudgeOnce(factory);
+        notifier.Nudges.Should().HaveCount(2,
+            "notifier idempotency, not the gateway nudge sweeper, deduplicates request nudges");
     }
 
     [Fact]
@@ -75,6 +85,7 @@ public class RequestExpirySweeperTests
         var requestId = await CreateRequest(client, "Groceries on normal tier");
 
         clock.Advance(TimeSpan.FromMinutes(6));
+        await NudgeOnce(factory);
         await SweepOnce(factory);
 
         var notifier = (InMemoryRequestExpiryNotifier)factory.Services.GetRequiredService<IRequestExpiryNotifier>();
@@ -182,6 +193,7 @@ public class RequestExpirySweeperTests
             .Should().BeTrue();
 
         clock.Advance(TimeSpan.FromMinutes(45));
+        await NudgeOnce(factory);
         await SweepOnce(factory);
 
         var notifier = (InMemoryRequestExpiryNotifier)factory.Services.GetRequiredService<IRequestExpiryNotifier>();
@@ -203,6 +215,7 @@ public class RequestExpirySweeperTests
         // "try expanding tier" prompt for the same request.
         clock.Advance(TimeSpan.FromMinutes(35));
         await SweepOnce(factory);
+        await NudgeOnce(factory);
 
         var notifier = (InMemoryRequestExpiryNotifier)factory.Services.GetRequiredService<IRequestExpiryNotifier>();
         notifier.Expiries.Should().ContainSingle(e => e.RequestId == requestId);
@@ -257,6 +270,114 @@ public class RequestExpirySweeperTests
                 "a request that has not expired must not have its live bids closed");
     }
 
+    [Theory]
+    [InlineData(FlashTierId, 1800)]
+    [InlineData(ExpressTierId, 7200)]
+    [InlineData(StandardTierId, 86400)]
+    public async Task Upstream_Tier_Uuid_Uses_Real_PerTier_Expiry_Window(
+        string tierId,
+        int ttlSeconds)
+    {
+        var clock = new FakeClock(new DateTimeOffset(2026, 5, 15, 12, 0, 0, TimeSpan.Zero));
+        var logger = new RecordingLogger<RequestExpirySweeper>();
+        using var services = BuildSweeperServices(clock);
+        var store = services.GetRequiredService<IRequestsStore>();
+        var sweeper = CreateSweeper(
+            services,
+            clock,
+            new StaticSourceMonitor(new RequestExpirySourceOptions { Source = "gateway" }),
+            logger);
+        var request = await store.CreateAsync(new CreateRequestInput
+        {
+            ClientId = $"expiry-{tierId}",
+            Description = "live upstream tier",
+            TierId = tierId,
+            PickupLocation = new GeoPoint { Lat = 24.7136, Lng = 46.6753 },
+            DropoffLocation = new GeoPoint { Lat = 24.6309, Lng = 46.7194 },
+        }, CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromSeconds(ttlSeconds - 1));
+        await sweeper.SweepOnceAsync(CancellationToken.None);
+
+        (await store.GetAsync(request.Id, CancellationToken.None))!.Status
+            .Should().Be(RequestStatus.Pending);
+
+        clock.Advance(TimeSpan.FromSeconds(2));
+        await sweeper.SweepOnceAsync(CancellationToken.None);
+
+        (await store.GetAsync(request.Id, CancellationToken.None))!.Status
+            .Should().Be(RequestStatus.Expired);
+        logger.Messages.Should().NotContain(message =>
+            message.Contains("unknown tier", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// With the upstream catalog live, a request still stamped with a LEGACY
+    /// SLUG tier ("flash" → canonicalised to "urgent", 30m in the local
+    /// catalog) must keep its real window. Loading only the upstream UUID
+    /// catalog would leave the slug unresolvable and silently hand it the 24h
+    /// safe fallback — the same defect being fixed here, just inverted.
+    /// </summary>
+    [Fact]
+    public async Task Legacy_Slug_Tier_Still_Resolves_When_Upstream_Catalog_Is_Live()
+    {
+        var clock = new FakeClock(new DateTimeOffset(2026, 5, 15, 12, 0, 0, TimeSpan.Zero));
+        var logger = new RecordingLogger<RequestExpirySweeper>();
+        using var services = BuildSweeperServices(clock);
+        var store = services.GetRequiredService<IRequestsStore>();
+        var sweeper = CreateSweeper(
+            services,
+            clock,
+            new StaticSourceMonitor(new RequestExpirySourceOptions { Source = "gateway" }),
+            logger);
+        var request = await store.CreateAsync(new CreateRequestInput
+        {
+            ClientId = "expiry-legacy-slug",
+            Description = "legacy slug tier",
+            TierId = "flash",
+            PickupLocation = new GeoPoint { Lat = 24.7136, Lng = 46.6753 },
+            DropoffLocation = new GeoPoint { Lat = 24.6309, Lng = 46.7194 },
+        }, CancellationToken.None);
+
+        // Well past the 30m flash window, but far short of the 24h fallback:
+        // only a correctly resolved slug expires here.
+        clock.Advance(TimeSpan.FromMinutes(31));
+        await sweeper.SweepOnceAsync(CancellationToken.None);
+
+        (await store.GetAsync(request.Id, CancellationToken.None))!.Status
+            .Should().Be(RequestStatus.Expired);
+        logger.Messages.Should().NotContain(message =>
+            message.Contains("unknown tier", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Delivery_Service_Source_Disables_Legacy_Gateway_Expiry_Sweeper()
+    {
+        var clock = new FakeClock(new DateTimeOffset(2026, 5, 15, 12, 0, 0, TimeSpan.Zero));
+        var logger = new RecordingLogger<RequestExpirySweeper>();
+        using var services = BuildSweeperServices(clock);
+        var store = services.GetRequiredService<IRequestsStore>();
+        var sweeper = CreateSweeper(
+            services,
+            clock,
+            new StaticSourceMonitor(new RequestExpirySourceOptions { Source = "delivery-service" }),
+            logger);
+        var request = await store.CreateAsync(new CreateRequestInput
+        {
+            ClientId = "expiry-delivery-service-authority",
+            Description = "delivery service owns expiry",
+            TierId = "flash",
+            PickupLocation = new GeoPoint { Lat = 24.7136, Lng = 46.6753 },
+            DropoffLocation = new GeoPoint { Lat = 24.6309, Lng = 46.7194 },
+        }, CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromHours(1));
+        await sweeper.SweepOnceAsync(CancellationToken.None);
+
+        (await store.GetAsync(request.Id, CancellationToken.None))!.Status
+            .Should().Be(RequestStatus.Pending);
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
@@ -273,6 +394,46 @@ public class RequestExpirySweeperTests
                 services.AddSingleton<TimeProvider>(theClock);
             });
         });
+    }
+
+    private static ServiceProvider BuildSweeperServices(FakeClock clock)
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<TimeProvider>(clock);
+        services.AddSingleton<InMemoryRequestsStore>();
+        services.AddSingleton<IRequestsStore>(sp => sp.GetRequiredService<InMemoryRequestsStore>());
+        services.AddSingleton<InMemoryRequestExpiryNotifier>();
+        services.AddSingleton<IRequestExpiryNotifier>(sp =>
+            sp.GetRequiredService<InMemoryRequestExpiryNotifier>());
+        services.AddSingleton<JeebGateway.Availability.InMemoryPendingOffersStore>();
+        services.AddSingleton<JeebGateway.Availability.IPendingOffersStore>(sp =>
+            sp.GetRequiredService<JeebGateway.Availability.InMemoryPendingOffersStore>());
+        services.AddSingleton<JeebGateway.Tiers.ITiersStore, InMemoryTiersStore>();
+        return services.BuildServiceProvider();
+    }
+
+    private static RequestExpirySweeper CreateSweeper(
+        IServiceProvider services,
+        FakeClock clock,
+        StaticSourceMonitor source,
+        RecordingLogger<RequestExpirySweeper> logger)
+    {
+        var delivery = new DeliveryServiceClient(new HttpClient(new UpstreamTiersHandler())
+        {
+            BaseAddress = new Uri("http://upstream-delivery.test/"),
+        });
+        var windows = new TierExpiryWindowResolver(
+            new StaticFlagsMonitor(new UpstreamFeatureFlags { Delivery = true }),
+            delivery,
+            new RecordingLogger<TierExpiryWindowResolver>(logger.Messages));
+
+        return new RequestExpirySweeper(
+            services,
+            clock,
+            Options.Create(new RequestExpiryOptions()),
+            windows,
+            source,
+            logger);
     }
 
     private static HttpClient ClientFor(WebApplicationFactory<Program> factory, string userId)
@@ -309,12 +470,98 @@ public class RequestExpirySweeperTests
         return sweeper.SweepOnceAsync(default);
     }
 
+    private static Task NudgeOnce(WebApplicationFactory<Program> factory)
+    {
+        var sweeper = factory.Services
+            .GetServices<IHostedService>()
+            .OfType<RequestNudgeSweeper>()
+            .Single();
+        return sweeper.SweepOnceAsync(default);
+    }
+
     private sealed class FakeClock : TimeProvider
     {
         private DateTimeOffset _now;
         public FakeClock(DateTimeOffset start) => _now = start;
         public override DateTimeOffset GetUtcNow() => _now;
         public void Advance(TimeSpan delta) => _now = _now.Add(delta);
+    }
+
+    private sealed class UpstreamTiersHandler : HttpMessageHandler
+    {
+        private const string CatalogJson = """
+            [
+              {
+                "id":"0be308ce-01b5-5cb9-a3e8-9adb60668d9c","name":"flash",
+                "slaHours":1,"radiusKm":3.0,"ttl_seconds":1800,"ttl_minutes":30,
+                "commissionRate":0.10,"priceHint":"flash",
+                "createdAt":"2026-07-21T00:00:00Z","updatedAt":"2026-07-21T00:00:00Z"
+              },
+              {
+                "id":"efe0629b-0b50-555c-b182-4bd41fcd6507","name":"express",
+                "slaHours":2,"radiusKm":10.0,"ttl_seconds":7200,"ttl_minutes":120,
+                "commissionRate":0.10,"priceHint":"express",
+                "createdAt":"2026-07-21T00:00:00Z","updatedAt":"2026-07-21T00:00:00Z"
+              },
+              {
+                "id":"2bd0d5df-db76-5d14-9e4d-741d60b2fa12","name":"standard",
+                "slaHours":24,"radiusKm":25.0,"ttl_seconds":86400,"ttl_minutes":1440,
+                "commissionRate":0.10,"priceHint":"standard",
+                "createdAt":"2026-07-21T00:00:00Z","updatedAt":"2026-07-21T00:00:00Z"
+              }
+            ]
+            """;
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(CatalogJson, Encoding.UTF8, "application/json"),
+                RequestMessage = request,
+            });
+    }
+
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public RecordingLogger(ConcurrentQueue<string>? messages = null) =>
+            Messages = messages ?? new ConcurrentQueue<string>();
+
+        public ConcurrentQueue<string> Messages { get; }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Messages.Enqueue(formatter(state, exception));
+    }
+
+    private sealed class StaticFlagsMonitor : IOptionsMonitor<UpstreamFeatureFlags>
+    {
+        public StaticFlagsMonitor(UpstreamFeatureFlags value) => CurrentValue = value;
+
+        public UpstreamFeatureFlags CurrentValue { get; }
+
+        public UpstreamFeatureFlags Get(string? name) => CurrentValue;
+
+        public IDisposable? OnChange(Action<UpstreamFeatureFlags, string?> listener) => null;
+    }
+
+    private sealed class StaticSourceMonitor : IOptionsMonitor<RequestExpirySourceOptions>
+    {
+        public StaticSourceMonitor(RequestExpirySourceOptions value) => CurrentValue = value;
+
+        public RequestExpirySourceOptions CurrentValue { get; }
+
+        public RequestExpirySourceOptions Get(string? name) => CurrentValue;
+
+        public IDisposable? OnChange(Action<RequestExpirySourceOptions, string?> listener) => null;
     }
 
     private sealed record RequestDto(

@@ -474,11 +474,39 @@ public sealed class DurableRequestsStore : IRequestsStore
         return merged;
     }
 
-    public Task<bool> MarkNudgedAsync(string requestId, DateTimeOffset at, CancellationToken ct)
-        => _inner.MarkNudgedAsync(requestId, at, ct);
+    /// <summary>
+    /// TryExpireAsync first keeps the warm in-memory projection current, then atomically
+    /// projects expiry into the gateway Postgres mirror. The mirror transition is also
+    /// the cold-path fallback after a gateway restart: a request missing from memory can
+    /// still expire exactly once and cause exactly one customer notification. This
+    /// deliberately does NOT call delivery-service, because delivery-service is the
+    /// AUTHOR of expiry and the gateway only projects what it observed.
+    /// </summary>
+    public async Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct)
+    {
+        var expiredInMemory = await _inner.TryExpireAsync(requestId, at, ct);
+        if (_mirror is null) return expiredInMemory;
 
-    public Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct)
-        => _inner.TryExpireAsync(requestId, at, ct);
+        try
+        {
+            var expiredInMirror = await _mirror.MarkExpiredAsync(requestId, at, ct);
+            return expiredInMemory || expiredInMirror;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "postgres-requests-owner-list"));
+            _logger.LogWarning(ex,
+                "requests-durable: owner-list mirror expiry-status update failed for {RequestId}; " +
+                "the list may show a stale status after a bounce.",
+                requestId);
+            return expiredInMemory;
+        }
+    }
 
     public Task<int> AnonymizeForClientAsync(string userId, string anonymizedHash, CancellationToken ct)
         => _inner.AnonymizeForClientAsync(userId, anonymizedHash, ct);
@@ -662,8 +690,8 @@ public sealed class DurableRequestsStore : IRequestsStore
     }
 
     /// <summary>
-    /// Maps a canonical delivery-service row (the gateway-vocab
-    /// <c>jeeb/deliveries/{id}</c> projection) onto a <see cref="DeliveryRequest"/>
+    /// Maps a canonical delivery-service row from <c>api/v1/deliveries/{id}</c>
+    /// onto the request-contract vocabulary exposed by <see cref="DeliveryRequest"/>
     /// for the durable read-through. Fields delivery-service does not carry
     /// (ScheduledAt / ConversationId / AcceptedFee / DeliveryOtp / …) are left at
     /// their defaults — acceptable on the cold path, which was an unresolvable
@@ -673,7 +701,17 @@ public sealed class DurableRequestsStore : IRequestsStore
     {
         Id = u.Id,
         ClientId = u.ClientId,
-        Status = u.Status,
+        Status = u.Status switch
+        {
+            CanonicalDeliveryStatus.Ordered               => RequestStatus.Pending,
+            CanonicalDeliveryStatus.Picked                => RequestStatus.PickedUp,
+            CanonicalDeliveryStatus.InTransit             => RequestStatus.HeadingOff,
+            CanonicalDeliveryStatus.AtDoor                => RequestStatus.AtDoor,
+            CanonicalDeliveryStatus.Done                  => RequestStatus.Delivered,
+            CanonicalDeliveryStatus.Cancelled             => RequestStatus.Cancelled,
+            CanonicalDeliveryStatus.FailedNeedsEscalation => RequestStatus.Disputed,
+            _ => throw new InvalidOperationException($"Unknown delivery-service status '{u.Status}'."),
+        },
         Description = u.Description ?? string.Empty,
         AudioUrl = u.AudioUrl,
         Photos = u.Photos,

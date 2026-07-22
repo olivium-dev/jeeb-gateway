@@ -101,7 +101,6 @@ public class DataExportPackager : IDataExportPackager
                 o.PickupAddress,
                 o.DropoffAddress,
                 o.CreatedAt,
-                o.NudgedAt,
                 o.ExpiredAt
             }),
             ratings = ratings.Select(r => new

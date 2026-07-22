@@ -4,10 +4,13 @@ namespace JeebGateway.Cms;
 
 /// <summary>
 /// MVP in-memory implementation of <see cref="ICmsSurfaceStore"/>. Seeded with
-/// the four canonical W2 surfaces (<c>ofl-cms-orders/users/wallet/kyc-mfe</c>),
-/// each with a published v1 envelope, matching the mock seed in
-/// scenario-catalog §5. Registered as a singleton so authoring state survives
-/// across requests for the lifetime of the gateway process.
+/// the five canonical CMS surfaces — the four W2 domain surfaces
+/// (<c>ofl-cms-orders/users/wallet/kyc-mfe</c>) plus the config-authoring
+/// shell's own surface (<c>ofl-cms-config-mfe</c>) — each with a published v1
+/// envelope, matching the mock seed in scenario-catalog §5. Registered as a
+/// singleton so authoring state survives across requests for the lifetime of
+/// the gateway process. This seed is a byte-for-byte mirror of the Postgres
+/// seed in migrations 0032 (four W2 surfaces) + 0042 (config surface).
 /// </summary>
 public sealed class InMemoryCmsSurfaceStore : ICmsSurfaceStore
 {
@@ -24,6 +27,10 @@ public sealed class InMemoryCmsSurfaceStore : ICmsSurfaceStore
         Seed("ofl-cms-users-mfe", "Users MFE", seededAt);
         Seed("ofl-cms-wallet-mfe", "Wallet MFE", seededAt);
         Seed("ofl-cms-kyc-mfe", "KYC MFE", seededAt);
+        // Config-authoring shell's own surface. The portal shell (ofc-cms-shell)
+        // fetches this surface's published config on mount; without it the shell's
+        // config load 404s. Mirrors migration 0042 byte-for-byte.
+        Seed("ofl-cms-config-mfe", "Config MFE", seededAt);
     }
 
     public IReadOnlyList<CmsSurface> ListSurfaces() =>

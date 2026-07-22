@@ -50,6 +50,17 @@ public interface IDurableRequestsMirror
         CancellationToken ct);
 
     /// <summary>
+    /// Atomically reflects an expiry onto the mirror by updating ONLY the gateway
+    /// columns (<c>gw_status = 'expired'</c>, <c>gw_expired_at</c>) — the native
+    /// enum/CHECK columns are left untouched so no constraint can fire. This is a
+    /// DERIVED projection of upstream truth, not an authority write. Returns
+    /// <see langword="true"/> only when a non-terminal mirror row transitioned;
+    /// missing and already-terminal rows return <see langword="false"/> so repeated
+    /// observer polls cannot trigger duplicate notifications.
+    /// </summary>
+    Task<bool> MarkExpiredAsync(string requestId, DateTimeOffset expiredAt, CancellationToken ct);
+
+    /// <summary>
     /// F4: reflects an owner-list-visible lifecycle mutation (accept / status change /
     /// jeeber assignment / accepted-fee) onto the mirror by updating ONLY the gateway
     /// columns (<c>gw_status</c> / <c>gw_jeeber_id</c> / <c>gw_accepted_fee</c>) — the

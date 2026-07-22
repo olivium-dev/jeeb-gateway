@@ -52,7 +52,7 @@ in-memory store only on a local/CI run with no live state-service:
 | Support tickets | `StateServiceSupportTicketStore` (create + get-by-id) | R1 KV `support-ticket:{id}` | **Create+get yes**; list-by-owner blocked (see below) |
 | Offer→request routing | `StateServiceOfferRequestIndex` | R1 KV | **Yes** (GET-by-key) |
 | R8 rate-limit / locks | `StateServiceRateLimitStore` / `StateServiceLockStore` | `HitRateLimit` / `Acquire/ReleaseLock` | **Yes** (keyed) |
-| Request-expiry sweep | `StateServiceRequestExpiryRecorder` | R1 KV | Writes durable; degrade-to-noop |
+| ~~Request-expiry sweep~~ | ~~`StateServiceRequestExpiryRecorder`~~ | ~~R1 KV~~ | **REMOVED (JEB-1508 superseded).** The recorder was never wired to a caller — `RequestExpirySweeper` neither injected nor invoked it — so it recorded nothing. Request expiry is no longer gateway-owned at all: delivery-service authors it and `RequestExpiryObserver` projects it onto the gateway read model + the `delivery_requests` mirror (`gw_status='expired'`, `gw_expired_at`). Durability now comes from the owning service, not a gateway KV shadow. |
 | R2 refresh families | `StateServiceRefreshFamilyWriter` | `CreateRefreshFamily` / `RotateRefreshToken` / `IsRefreshFamilyRevoked` | **Write-through** (revocation durable); read-index stays in-memory |
 | R3 KYC | `StateServiceKycWriter` | `CreateKyc` / `GetKyc` / `UpdateKyc` | Write-through; by-subject read is the gap |
 | R4 ratings | `StateServiceRatingWriter` | `SubmitRating` / `RevealRatings` | Write-through |

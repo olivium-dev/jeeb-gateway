@@ -196,6 +196,49 @@ public class DualRoleBffTests
         um.FindOrCreateCalls.Should().Be(1, "verify must orchestrate UM phone find-or-create");
     }
 
+    /// <summary>
+    /// SELF-DRIFT regression lock — GET /v1/users/me MUST report the SAME effective role set the
+    /// login mint produces. A dev-seeded admin (<c>POST /dev/seed/user</c> role=admin) records
+    /// opaque <c>[customer,admin]</c> in the <see cref="IDevSeededRoleStore"/>, and
+    /// <c>AuthEmailFacadeController.ResolveRolesAsync</c> unions that into the minted JWT
+    /// (<c>roles=[customer,admin]</c>). Before the fix, <c>/me</c> resolved roles from
+    /// user-management ALONE (which never learned the seed — register has no role column) and
+    /// returned <c>available_roles:[client]</c>, contradicting the mint and gating every admin CMS
+    /// surface closed (the shell derives capabilities from <c>available_roles</c>). This pins the
+    /// union: even when the bearer / UM read lack admin, the seeded role is surfaced — opaque
+    /// <c>admin</c> passes through the translator to contract <c>admin</c>, the vocabulary the CMS
+    /// shell's <c>capabilitiesFromRoles</c> understands.
+    /// </summary>
+    [Fact]
+    public async Task FB_GetMe_SeededAdmin_UnionsAdmin_MatchingLoginMint()
+    {
+        // StubUm.GetUserRolesAsync => null: models user-management NOT knowing the seeded role,
+        // exactly the live condition (the seed never reaches UM's persisted role set).
+        var um = new StubUm();
+        using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
+
+        // The DevSeededRoleStore is the real singleton the [DevOnly] seed action writes and the
+        // /me resolver reads. Record the seed the way POST /dev/seed/user role=admin does.
+        factory.Services.GetRequiredService<IDevSeededRoleStore>()
+            .Record("admin-1", email: null, new[] { Roles.Client, Roles.Admin });
+
+        var http = factory.CreateClient();
+        // Bearer carries ONLY client — proving admin is surfaced from the SEED union, not merely
+        // echoed from the token's role claims.
+        http.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", MintGatewayBearer(factory, "admin-1", Roles.Client));
+
+        var resp = await http.GetAsync("/v1/users/me");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        doc.RootElement.GetProperty("userId").GetString().Should().Be("admin-1");
+        doc.RootElement.GetProperty("available_roles").EnumerateArray().Select(e => e.GetString())
+            .Should().BeEquivalentTo(new[] { "client", "admin" },
+                "a dev-seeded admin's /me MUST carry the admin role the login mint minted, not UM's seed-blind [client]");
+    }
+
     [Fact]
     public async Task FB_GetMe_Unauthenticated_Returns_401()
     {

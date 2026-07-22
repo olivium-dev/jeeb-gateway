@@ -20,6 +20,16 @@ public sealed class StaticNotificationTemplateRenderer : INotificationTemplateRe
                 ["en"] = ("Request Received", "Your delivery request {requestId} has been received."),
                 ["ar"] = ("تم استلام الطلب", "تم استلام طلب التوصيل الخاص بك {requestId}.")
             },
+            ["jeeb.request.expired"] = new Dictionary<string, (string, string)>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["en"] = ("Request Expired", "Your request {requestId} expired before a Jeeber accepted it. Tap to re-request."),
+                ["ar"] = ("انتهت صلاحية الطلب", "انتهت صلاحية طلبك {requestId} قبل أن يقبله أي جيبر. اضغط لإعادة الطلب.")
+            },
+            ["jeeb.request.try_expand_tier"] = new Dictionary<string, (string, string)>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["en"] = ("Still looking", "No Jeeber has accepted {requestId} yet. Try a faster tier."),
+                ["ar"] = ("ما زلنا نبحث", "لم يقبل أي جيبر الطلب {requestId} بعد. جرّب فئة أسرع.")
+            },
             ["jeeb.offer.accepted"] = new Dictionary<string, (string, string)>(StringComparer.OrdinalIgnoreCase)
             {
                 ["en"] = ("Offer Accepted", "Your offer for request {requestId} has been accepted."),

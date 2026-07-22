@@ -354,7 +354,7 @@ public sealed class DurableRequestsStoreTests
         {
             Id = "d-cold-1",
             ClientId = "client-9",
-            Status = RequestStatus.HeadingOff,
+            Status = CanonicalDeliveryStatus.InTransit,
             Description = "canonical row",
             TierId = "flash",
         };
@@ -367,6 +367,73 @@ public sealed class DurableRequestsStoreTests
         row.Status.Should().Be(RequestStatus.HeadingOff);
         row.Description.Should().Be("canonical row");
         delivery.GetDeliveryCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Get_translates_live_capture_Ordered_status_to_pending()
+    {
+        var store = BuildWithMirror(out _, out var delivery, out _);
+        delivery.UpstreamRow = new DeliveryRequestUpstream
+        {
+            Id = "d-live-ordered",
+            ClientId = "client-live",
+            Status = CanonicalDeliveryStatus.Ordered,
+        };
+
+        var row = await store.GetAsync("d-live-ordered", CancellationToken.None);
+
+        row.Should().NotBeNull();
+        row!.Status.Should().Be(RequestStatus.Pending);
+    }
+
+    [Theory]
+    [InlineData(CanonicalDeliveryStatus.Picked, RequestStatus.PickedUp)]
+    [InlineData(CanonicalDeliveryStatus.InTransit, RequestStatus.HeadingOff)]
+    [InlineData(CanonicalDeliveryStatus.AtDoor, RequestStatus.AtDoor)]
+    [InlineData(CanonicalDeliveryStatus.Done, RequestStatus.Delivered)]
+    [InlineData(CanonicalDeliveryStatus.Cancelled, RequestStatus.Cancelled)]
+    [InlineData(CanonicalDeliveryStatus.FailedNeedsEscalation, RequestStatus.Disputed)]
+    public async Task Get_translates_delivery_status_to_request_contract_status(
+        string deliveryStatus,
+        string requestStatus)
+    {
+        var store = BuildWithMirror(out _, out var delivery, out _);
+        delivery.UpstreamRow = new DeliveryRequestUpstream
+        {
+            Id = "d-status-map",
+            ClientId = "client-status-map",
+            Status = deliveryStatus,
+        };
+
+        var row = await store.GetAsync("d-status-map", CancellationToken.None);
+
+        row.Should().NotBeNull();
+        row!.Status.Should().Be(requestStatus);
+    }
+
+    [Fact]
+    public async Task Get_never_surfaces_an_unknown_delivery_status()
+    {
+        var store = BuildWithMirror(out _, out var delivery, out var mirror);
+        delivery.UpstreamRow = new DeliveryRequestUpstream
+        {
+            Id = "d-unknown-status",
+            ClientId = "client-unknown-status",
+            Status = "FutureDeliveryStatus",
+        };
+        mirror.Rows.Add(new DeliveryRequest
+        {
+            Id = "d-unknown-status",
+            ClientId = "client-unknown-status",
+            Status = RequestStatus.Pending,
+            Description = "safe mirror fallback",
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+
+        var row = await store.GetAsync("d-unknown-status", CancellationToken.None);
+
+        row.Should().NotBeNull();
+        row!.Status.Should().Be(RequestStatus.Pending);
     }
 
     [Fact]
@@ -454,7 +521,7 @@ public sealed class DurableRequestsStoreTests
         {
             Id = requestId,
             ClientId = "client-248",
-            Status = RequestStatus.HeadingOff, // fresh canonical status
+            Status = CanonicalDeliveryStatus.InTransit, // fresh canonical status
             Description = "canonical row",
             TierId = "flash",
         };
@@ -633,6 +700,117 @@ public sealed class DurableRequestsStoreTests
         mirror.Cancels[0].GwStatus.Should().Be(RequestStatus.Cancelled);
     }
 
+    [Fact]
+    public async Task Expire_mirrors_committed_expiry_into_the_mirror()
+    {
+        // THE DIVERGENCE FIX. TryExpireAsync used to be a bare passthrough to the
+        // in-memory store, so an expired request stayed 'pending' in gateway Postgres
+        // forever — the gateway said expired, its own mirror said pending, and
+        // delivery-service said Ordered (three-way divergence, request 8a84093a).
+        // A committed expiry must now project onto the durable mirror.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+        var expiredAt = Clock.GetUtcNow();
+
+        (await store.TryExpireAsync(created.Id, expiredAt, CancellationToken.None))
+            .Should().BeTrue();
+
+        mirror.Expiries.Should().ContainSingle();
+        mirror.Expiries[0].Id.Should().Be(created.Id);
+        mirror.Expiries[0].ExpiredAt.Should().Be(expiredAt);
+    }
+
+    [Fact]
+    public async Task Expire_that_does_not_commit_writes_nothing_to_the_mirror()
+    {
+        // Idempotence guard: the observer's deliberately-OVERLAPPING poll window
+        // re-observes the same upstream expiry. The second pass must not commit and
+        // must not re-write the mirror.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        (await store.TryExpireAsync(created.Id, Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeTrue();
+        (await store.TryExpireAsync(created.Id, Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeFalse("an already-terminal row is not re-expired");
+
+        mirror.Expiries.Should().ContainSingle("only the committing pass writes the mirror");
+    }
+
+    [Fact]
+    public async Task Expire_stands_even_when_the_mirror_write_throws()
+    {
+        // DEGRADE-DON'T-FAIL: the in-memory transition has already committed; a
+        // Postgres blip must never roll it back or fail the observer pass.
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+        mirror.ThrowOnExpire = true;
+
+        (await store.TryExpireAsync(created.Id, Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeTrue();
+
+        (await store.GetAsync(created.Id, CancellationToken.None))!.Status
+            .Should().Be(RequestStatus.Expired);
+    }
+
+    [Fact]
+    public async Task Expire_falls_back_to_pending_mirror_row_when_inner_is_cold()
+    {
+        var store = BuildWithMirror(out var inner, out _, out var mirror);
+        var requestId = Guid.NewGuid().ToString();
+        var expiredAt = Clock.GetUtcNow();
+        mirror.Rows.Add(MirrorRow(requestId, RequestStatus.Pending));
+
+        (await inner.GetAsync(requestId, CancellationToken.None)).Should().BeNull(
+            "a gateway restart leaves the in-memory projection empty");
+
+        (await store.TryExpireAsync(requestId, expiredAt, CancellationToken.None))
+            .Should().BeTrue("the durable pending row must transition even when memory is cold");
+
+        mirror.Rows.Single(r => r.Id == requestId).Status.Should().Be(RequestStatus.Expired);
+        mirror.Expiries.Should().ContainSingle(e => e.Id == requestId && e.ExpiredAt == expiredAt);
+    }
+
+    [Fact]
+    public async Task Expire_fallback_returns_false_on_second_call_for_same_mirror_row()
+    {
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        var requestId = Guid.NewGuid().ToString();
+        mirror.Rows.Add(MirrorRow(requestId, RequestStatus.Pending));
+
+        (await store.TryExpireAsync(requestId, Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeTrue();
+        (await store.TryExpireAsync(requestId, Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeFalse("an already-expired durable row must not notify twice");
+
+        mirror.Expiries.Should().ContainSingle("only the atomic transition wins");
+    }
+
+    [Fact]
+    public async Task Expire_returns_false_when_id_is_in_neither_store()
+    {
+        var store = BuildWithMirror(out _, out _, out var mirror);
+
+        (await store.TryExpireAsync(Guid.NewGuid().ToString(), Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeFalse();
+
+        mirror.Expiries.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Expire_cold_fallback_swallows_mirror_failure()
+    {
+        var store = BuildWithMirror(out _, out _, out var mirror);
+        mirror.Rows.Add(MirrorRow(Guid.NewGuid().ToString(), RequestStatus.Pending));
+        mirror.ThrowOnExpire = true;
+
+        var act = async () => await store.TryExpireAsync(
+            mirror.Rows[0].Id, Clock.GetUtcNow(), CancellationToken.None);
+
+        (await act.Should().NotThrowAsync()).Which.Should().BeFalse(
+            "without a committed in-memory or mirror transition there is no notification");
+    }
+
     // -- JEBV4-40 (PP-9): durable cancel is terminal on the single-read + sweep ----
 
     [Fact]
@@ -645,12 +823,12 @@ public sealed class DurableRequestsStoreTests
         var store = BuildWithMirror(out _, out var delivery, out var mirror);
         var requestId = Guid.NewGuid().ToString();
 
-        // delivery-service answers "active" (HeadingOff) for this id...
+        // delivery-service answers "active" (InTransit) for this id...
         delivery.UpstreamRow = new DeliveryRequestUpstream
         {
             Id = requestId,
             ClientId = "client-9",
-            Status = RequestStatus.HeadingOff,
+            Status = CanonicalDeliveryStatus.InTransit,
             Description = "resurrected-as-active upstream",
             TierId = "flash",
         };
@@ -825,14 +1003,21 @@ public sealed class DurableRequestsStoreTests
     /// </summary>
     private sealed class RecordingMirror : IDurableRequestsMirror
     {
+        private readonly Dictionary<string, string> _persistedStatuses = new(StringComparer.Ordinal);
+
         public List<DeliveryRequest> Upserted { get; } = new();
         public List<(string Id, string GwStatus)> Cancels { get; } = new();
+        public List<(string Id, DateTimeOffset ExpiredAt)> Expiries { get; } = new();
         public List<DeliveryRequest> Rows { get; } = new();
         public List<(string Id, string? GwStatus, string? GwJeeberId, decimal? GwAcceptedFee)> Updates { get; } = new();
+
+        /// <summary>Simulates a Postgres blip on the expiry mirror write.</summary>
+        public bool ThrowOnExpire { get; set; }
 
         public Task UpsertOnCreateAsync(DeliveryRequest row, CancellationToken ct)
         {
             Upserted.Add(row);
+            _persistedStatuses.TryAdd(row.Id, row.Status);
             return Task.CompletedTask;
         }
 
@@ -841,6 +1026,10 @@ public sealed class DurableRequestsStoreTests
             DateTimeOffset at, CancellationToken ct)
         {
             Updates.Add((requestId, gwStatus, gwJeeberId, gwAcceptedFee));
+            if (gwStatus is not null && _persistedStatuses.ContainsKey(requestId))
+            {
+                _persistedStatuses[requestId] = gwStatus;
+            }
             return Task.CompletedTask;
         }
 
@@ -849,7 +1038,44 @@ public sealed class DurableRequestsStoreTests
             string? cancellationReason, DateTimeOffset at, CancellationToken ct)
         {
             Cancels.Add((requestId, gwStatus));
+            if (_persistedStatuses.ContainsKey(requestId))
+            {
+                _persistedStatuses[requestId] = gwStatus;
+            }
             return Task.CompletedTask;
+        }
+
+        public Task<bool> MarkExpiredAsync(string requestId, DateTimeOffset expiredAt, CancellationToken ct)
+        {
+            if (ThrowOnExpire) throw new InvalidOperationException("mirror unavailable");
+
+            var row = Rows.FirstOrDefault(r => string.Equals(r.Id, requestId, StringComparison.Ordinal));
+            string status;
+            if (row is not null)
+            {
+                status = row.Status;
+            }
+            else if (!_persistedStatuses.TryGetValue(requestId, out status!))
+            {
+                return Task.FromResult(false);
+            }
+
+            if (RequestStatus.IsTerminal(status))
+            {
+                return Task.FromResult(false);
+            }
+
+            Expiries.Add((requestId, expiredAt));
+            if (row is not null)
+            {
+                row.Status = RequestStatus.Expired;
+                row.ExpiredAt = expiredAt;
+            }
+            else
+            {
+                _persistedStatuses[requestId] = RequestStatus.Expired;
+            }
+            return Task.FromResult(true);
         }
 
         public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(string clientId, CancellationToken ct)
@@ -871,6 +1097,15 @@ public sealed class DurableRequestsStoreTests
         public Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct)
             => Task.FromResult(Rows.FirstOrDefault(r => string.Equals(r.Id, requestId, StringComparison.Ordinal)));
     }
+
+    private static DeliveryRequest MirrorRow(string requestId, string status) => new()
+    {
+        Id = requestId,
+        ClientId = "client-cold",
+        Status = status,
+        Description = "survived a gateway restart",
+        CreatedAt = Clock.GetUtcNow().AddMinutes(-10),
+    };
 
     private sealed class RecordingBundleRecorder : ISagaBundleRecorder
     {

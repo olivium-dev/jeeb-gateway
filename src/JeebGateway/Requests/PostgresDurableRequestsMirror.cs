@@ -132,6 +132,50 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task<bool> MarkExpiredAsync(
+        string requestId,
+        DateTimeOffset expiredAt,
+        CancellationToken ct)
+    {
+        if (!Guid.TryParse(requestId, out var id)) return false;
+
+        await using var conn = await _db.OpenAsync(ct);
+
+        // Touch ONLY the gateway columns — the native enum status + its coupled
+        // CHECK constraints are left untouched so no constraint can fire. The
+        // terminal-state predicate makes the transition atomic and idempotent:
+        // one overlapping observer poll can win, while every repeat returns false.
+        const string sql = """
+            UPDATE delivery_requests
+               SET gw_status = 'expired',
+                   gw_expired_at = @At,
+                   gw_updated_at = now()
+             WHERE id = @Id
+               AND gw_mirror = TRUE
+               AND COALESCE(gw_status, status::text) NOT IN
+                   ('delivered', 'rated', 'cancelled', 'expired', 'disputed')
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("Id", id);
+        // Npgsql refuses a DateTimeOffset with a non-zero offset for timestamptz,
+        // and upstream stamps expiry in local time (+02:00) — normalise to UTC or
+        // the Bind throws and the observer projects nothing (seen live: "Observed
+        // 72 upstream expired request(s); projected 0").
+        cmd.Parameters.AddWithValue("At", expiredAt.ToUniversalTime());
+
+        var transitioned = await cmd.ExecuteNonQueryAsync(ct) > 0;
+
+        if (transitioned)
+        {
+            _log.LogDebug(
+                "requests-durable: mirrored request {RequestId} expiry into delivery_requests (gw_status=expired).",
+                requestId);
+        }
+
+        return transitioned;
+    }
+
     public async Task UpdateLifecycleAsync(
         string requestId,
         string? gwStatus,

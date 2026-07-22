@@ -1,6 +1,8 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using JeebGateway.Tiers;
+using Microsoft.Extensions.Logging;
 
 namespace JeebGateway.Services.Clients;
 
@@ -13,10 +15,14 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly HttpClient _http;
+    private readonly ILogger<DeliveryServiceClient>? _logger;
 
-    public DeliveryServiceClient(HttpClient http)
+    public DeliveryServiceClient(
+        HttpClient http,
+        ILogger<DeliveryServiceClient>? logger = null)
     {
         _http = http;
+        _logger = logger;
     }
 
     public async Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct)
@@ -24,7 +30,58 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         using var response = await _http.GetAsync("api/v1/tiers", ct);
         response.EnsureSuccessStatusCode();
         // Upstream returns a raw JSON array — not wrapped in an envelope.
-        return await DeserializeAsync<IReadOnlyList<DeliveryTierDto>>(response, ct);
+        var tiers = await DeserializeAsync<IReadOnlyList<DeliveryTierUpstream>>(response, ct);
+        return tiers.Select(ToDeliveryTierDto).ToArray();
+    }
+
+    private static DeliveryTierDto ToDeliveryTierDto(DeliveryTierUpstream tier) => new()
+    {
+        Id = tier.Id,
+        Name = tier.Name,
+        SlaHours = tier.SlaHours,
+        RadiusKm = tier.RadiusKm,
+        RequestTtlSeconds = tier.TtlSeconds > 0
+            ? tier.TtlSeconds
+            : tier.TtlMinutes > 0
+                ? checked(tier.TtlMinutes * 60)
+                : 0,
+        CommissionRate = tier.CommissionRate,
+        PriceHint = tier.PriceHint,
+        CreatedAt = tier.CreatedAt,
+        UpdatedAt = tier.UpdatedAt,
+    };
+
+    private sealed class DeliveryTierUpstream
+    {
+        [JsonPropertyName("id")]
+        public required string Id { get; init; }
+
+        [JsonPropertyName("name")]
+        public required string Name { get; init; }
+
+        [JsonPropertyName("slaHours")]
+        public required int SlaHours { get; init; }
+
+        [JsonPropertyName("radiusKm")]
+        public required double RadiusKm { get; init; }
+
+        [JsonPropertyName("ttl_seconds")]
+        public int TtlSeconds { get; init; }
+
+        [JsonPropertyName("ttl_minutes")]
+        public int TtlMinutes { get; init; }
+
+        [JsonPropertyName("commissionRate")]
+        public required double CommissionRate { get; init; }
+
+        [JsonPropertyName("priceHint")]
+        public required string PriceHint { get; init; }
+
+        [JsonPropertyName("createdAt")]
+        public required DateTimeOffset CreatedAt { get; init; }
+
+        [JsonPropertyName("updatedAt")]
+        public required DateTimeOffset UpdatedAt { get; init; }
     }
 
     /// <inheritdoc />
@@ -96,7 +153,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
 
     public async Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct)
     {
-        using var response = await _http.GetAsync($"jeeb/deliveries/{Uri.EscapeDataString(deliveryId)}", ct);
+        using var response = await _http.GetAsync($"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}", ct);
         response.EnsureSuccessStatusCode();
         return await DeserializeAsync<DeliveryRequestUpstream>(response, ct);
     }
@@ -112,12 +169,32 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         return await DeserializeAsync<DeliveryOtpVerifyResult>(response, ct);
     }
 
+    public Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
+        string deliveryId,
+        string to,
+        string partySource,
+        string actorId,
+        string actorRole,
+        CancellationToken ct)
+        => CanonicalTransitionAsync(
+            deliveryId,
+            to,
+            partySource,
+            actorId,
+            actorRole,
+            reason: null,
+            idempotencyKey: null,
+            ct: ct);
+
+    /// <inheritdoc />
     public async Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
         string deliveryId,
         string to,
         string partySource,
         string actorId,
         string actorRole,
+        string? reason,
+        string? idempotencyKey,
         CancellationToken ct)
     {
         // Canonical SM-1 surface: POST /api/v1/deliveries/{id}/transition with
@@ -129,7 +206,13 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
             HttpMethod.Post,
             $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}/transition")
         {
-            Content = JsonContent.Create(new CanonicalTransitionRequest(to, partySource), options: JsonOptions)
+            Content = JsonContent.Create(
+                new CanonicalTransitionRequest(
+                    to,
+                    partySource,
+                    string.IsNullOrWhiteSpace(reason) ? null : reason,
+                    string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey),
+                options: JsonOptions)
         };
         request.Headers.TryAddWithoutValidation("X-Actor-ID", actorId);
         request.Headers.TryAddWithoutValidation("X-Actor-Role", actorRole);
@@ -161,6 +244,58 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         }
         response.EnsureSuccessStatusCode();
         return await DeserializeAsync<DeliveryReadUpstream>(response, ct);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<ExpiredDeliveryUpstream>> ListExpiredDeliveriesAsync(
+        DateTimeOffset since,
+        int limit,
+        CancellationToken ct)
+    {
+        var effectiveLimit = limit is >= 1 and <= 1000 ? limit : 200;
+        var sinceUtc = since.ToUniversalTime().ToString("o");
+        var uri = $"api/v1/deliveries/expired?since={Uri.EscapeDataString(sinceUtc)}&limit={effectiveLimit}";
+
+        // DEGRADE-DON'T-FAIL: this route is additive on delivery-service and may
+        // not be deployed yet (404), and the observer that calls it is a
+        // BackgroundService — a malformed/absent body must yield "no expiries
+        // observed this tick", never an exception that kills the poll loop.
+        try
+        {
+            using var response = await _http.GetAsync(uri, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                return Array.Empty<ExpiredDeliveryUpstream>();
+            }
+
+            var envelope = await response.Content
+                .ReadFromJsonAsync<ExpiredDeliveriesEnvelope>(JsonOptions, ct);
+            return envelope?.Deliveries is null
+                ? Array.Empty<ExpiredDeliveryUpstream>()
+                : envelope.Deliveries;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (JsonException ex)
+        {
+            _logger?.LogWarning(
+                ex,
+                "Delivery-service expired-deliveries response for {Uri} was not a valid envelope; treating this poll as empty.",
+                uri);
+            return Array.Empty<ExpiredDeliveryUpstream>();
+        }
+        catch (Exception)
+        {
+            return Array.Empty<ExpiredDeliveryUpstream>();
+        }
+    }
+
+    private sealed class ExpiredDeliveriesEnvelope
+    {
+        [JsonPropertyName("deliveries")]
+        public List<ExpiredDeliveryUpstream>? Deliveries { get; init; }
     }
 
     public async Task<DeliveryHandoverIssueResult> IssueHandoverOtpAsync(string deliveryId, string? codeHash, CancellationToken ct)
@@ -414,7 +549,11 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
 
     private sealed record CanonicalTransitionRequest(
         [property: System.Text.Json.Serialization.JsonPropertyName("to")] string To,
-        [property: System.Text.Json.Serialization.JsonPropertyName("trigger")] string Trigger);
+        [property: System.Text.Json.Serialization.JsonPropertyName("trigger")] string Trigger,
+        [property: System.Text.Json.Serialization.JsonPropertyName("reason")]
+        [property: System.Text.Json.Serialization.JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Reason,
+        [property: System.Text.Json.Serialization.JsonPropertyName("idempotency_key")]
+        [property: System.Text.Json.Serialization.JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? IdempotencyKey);
 
     private sealed record TransitionProblemBody(
         [property: System.Text.Json.Serialization.JsonPropertyName("reason")] string? Reason,
