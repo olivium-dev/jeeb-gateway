@@ -50,9 +50,10 @@ namespace JeebGateway.Controllers;
 /// NO per-jeeber reviews LIST and NO review report/moderation endpoint. Until those
 /// generic reads exist, the reviews-list route returns the correctly-shaped
 /// COLD-START EMPTY page the mobile <c>DioReviewsRepository</c> already tolerates,
-/// and the report route accepts the request (202 Accepted) rather than fabricating
-/// moderation state in the (stateless) gateway. Re-point these to the generic reads
-/// the moment feedback-service ships them — the mobile-facing contract is stable.
+/// and the report route accepts the request (202 Accepted) only after the downstream
+/// store confirms the durable report row rather than fabricating moderation state in
+/// the (stateless) gateway. Re-point these to the generic reads the moment
+/// feedback-service ships them — the mobile-facing contract is stable.
 /// </para>
 /// </summary>
 [ApiController]
@@ -155,6 +156,7 @@ public sealed class JeebReviewsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status202Accepted)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> ReportReview(string reviewId, CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var reporterId, out var unauthorized)) return unauthorized;
@@ -165,8 +167,10 @@ public sealed class JeebReviewsController : ControllerBase
         }
 
         // Durably record the report intent (opaque, idempotent) so it is not lost on a
-        // gateway bounce — a moderation worker can drain "review-report:*" later. A
-        // state-service blip never blocks the user: the report is best-effort.
+        // gateway bounce. PutOrGetAsync includes the authoritative read-back, so normal
+        // completion confirms that either this request inserted the row or the same
+        // report was already stored.
+        // TODO(owner-gated): moderation consumer for review-report:* keys.
         try
         {
             var key = $"review-report:{reviewId.Trim()}:{reporterId}";
@@ -178,13 +182,23 @@ public sealed class JeebReviewsController : ControllerBase
             });
             await _reports.PutOrGetAsync(key, statusCode: 202, body, ReportTtlSeconds, ct);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "review-report durable record failed for review {ReviewId}; accepting anyway", reviewId);
+            _log.LogError(ex, "review-report durable record failed for review {ReviewId}; rejecting acceptance", reviewId);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Title = "Review report temporarily unavailable",
+                Detail = "The report could not be durably recorded. Please retry."
+            });
         }
 
-        // No generic moderation endpoint exists; the request is accepted for later
-        // routing once feedback-service ships a report surface. No state is stored.
+        // No generic moderation endpoint exists; 202 means the downstream durable
+        // record was confirmed. The gateway itself stores no report state.
         return Accepted();
     }
 
