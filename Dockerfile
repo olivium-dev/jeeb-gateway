@@ -12,7 +12,7 @@ RUN dotnet publish src/JeebGateway/JeebGateway.csproj \
     --no-restore
 
 # ---------- runtime stage ----------
-FROM mcr.microsoft.com/dotnet/aspnet:8.0.21-alpine AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:8.0.29-alpine3.23 AS runtime
 WORKDIR /app
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
