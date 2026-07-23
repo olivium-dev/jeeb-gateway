@@ -46,14 +46,15 @@ namespace JeebGateway.Controllers;
 ///
 /// <para>
 /// Coverage note: the generic <see cref="ServiceFeedbackClient"/> exposes the
-/// two-party blind-rating submit/reveal primitive (and a per-tag AVERAGE read) but
-/// NO per-jeeber reviews LIST and NO review report/moderation endpoint. Until those
-/// generic reads exist, the reviews-list route returns the correctly-shaped
-/// COLD-START EMPTY page the mobile <c>DioReviewsRepository</c> already tolerates,
-/// and the report route accepts the request (202 Accepted) only after the downstream
-/// store confirms the durable report row rather than fabricating moderation state in
-/// the (stateless) gateway. Re-point these to the generic reads the moment
-/// feedback-service ships them — the mobile-facing contract is stable.
+/// two-party blind-rating submit/reveal primitive (and a per-tag AVERAGE read) plus,
+/// as of feedback-service PR #15, a review report/moderation endpoint
+/// (<c>POST /Review/report</c>) — but still NO per-jeeber reviews LIST. The report
+/// route now FORWARDS to that endpoint (the feedback-service owns/processes the
+/// report) while keeping an opaque durable breadcrumb as an idempotent fallback;
+/// until a generic reviews LIST exists, the reviews-list route returns the
+/// correctly-shaped COLD-START EMPTY page the mobile <c>DioReviewsRepository</c>
+/// already tolerates. Re-point the list read to the generic read the moment
+/// feedback-service ships it — the mobile-facing contract is stable.
 /// </para>
 /// </summary>
 [ApiController]
@@ -142,12 +143,16 @@ public sealed class JeebReviewsController : ControllerBase
 
     /// <summary>
     /// POST /v1/ratings/jeeb/reviews/{reviewId}/report — report a review for
-    /// moderation (D27). The generic feedback-service has no review-moderation
-    /// endpoint, so rather than a pure no-op the gateway DURABLY records the report
-    /// intent as an opaque row in jeeb-state-service (idempotent per
-    /// (reviewId, reporter)) so a moderation worker can drain the queue later, then
-    /// returns 202 Accepted. ADR-0001 preserved: the gateway holds no moderation
-    /// state in-process; the row lives downstream and survives a bounce. The mobile
+    /// moderation (D27). The SHARED feedback-service now OWNS review moderation
+    /// (feedback-service PR #15: <c>POST /Review/report</c>, idempotent per
+    /// (ReviewId, ReporterId) → 202). This action FORWARDS the report to that service
+    /// as the PRIMARY path, and additionally keeps an opaque, idempotent durable
+    /// breadcrumb (<c>review-report:{reviewId}:{reporterId}</c> in jeeb-state-service)
+    /// as a fallback so a bounce mid-forward can be reconciled/replayed. Fail-closed:
+    /// if EITHER the durable breadcrumb OR the feedback forward fails, the action
+    /// returns 5xx rather than a false 202. ADR-0001 preserved: the gateway holds no
+    /// moderation state in-process. GR2 preserved: only opaque GUIDs cross the boundary
+    /// (no product identities leak to the shared, product-agnostic service). The mobile
     /// repo only awaits a non-error response.
     /// </summary>
     [HttpPost("reviews/{reviewId}/report")]
@@ -165,18 +170,33 @@ public sealed class JeebReviewsController : ControllerBase
             return BadRequest(Problem400("reviewId is required."));
         }
 
-        // Durably record the report intent (opaque, idempotent) so it is not lost on a
-        // gateway bounce. PutOrGetAsync includes the authoritative read-back, so normal
-        // completion confirms that either this request inserted the row or the same
-        // report was already stored.
-        // TODO(owner-gated): moderation consumer for review-report:* keys.
+        // Only opaque GUIDs cross the gateway boundary into the shared, product-agnostic
+        // feedback-service (GR2 — no product identities leak). Both the reported review's
+        // id and the caller's own id (from the verified bearer token) must be well-formed
+        // GUIDs before we forward the report.
+        if (!Guid.TryParse(reviewId.Trim(), out var reviewGuid))
+        {
+            return BadRequest(Problem400("reviewId must be a valid identifier."));
+        }
+
+        if (!Guid.TryParse(reporterId, out var reporterGuid))
+        {
+            return BadRequest(Problem400("Reporter identity is not a valid identifier."));
+        }
+
+        // FALLBACK BREADCRUMB (opaque, idempotent): durably record the report intent
+        // FIRST so it is not lost on a gateway bounce and a reconciliation/replay can
+        // re-drive the forward below even if it fails. PutOrGetAsync includes the
+        // authoritative read-back, so normal completion confirms that either this request
+        // inserted the row or the same report was already stored. Fail-closed: a durable
+        // write failure rejects acceptance (503) rather than reporting a false 202.
         try
         {
-            var key = $"review-report:{reviewId.Trim()}:{reporterId}";
+            var key = $"review-report:{reviewGuid}:{reporterGuid}";
             var body = System.Text.Json.JsonSerializer.Serialize(new
             {
-                reviewId = reviewId.Trim(),
-                reporterId,
+                reviewId = reviewGuid,
+                reporterId = reporterGuid,
                 reportedAt = DateTimeOffset.UtcNow,
             });
             await _reports.PutOrGetAsync(key, statusCode: 202, body, ReportTtlSeconds, ct);
@@ -187,7 +207,7 @@ public sealed class JeebReviewsController : ControllerBase
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "review-report durable record failed for review {ReviewId}; rejecting acceptance", reviewId);
+            _log.LogError(ex, "review-report durable breadcrumb failed for review {ReviewId}; rejecting acceptance", reviewGuid);
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
             {
                 Status = StatusCodes.Status503ServiceUnavailable,
@@ -196,8 +216,33 @@ public sealed class JeebReviewsController : ControllerBase
             });
         }
 
-        // No generic moderation endpoint exists; 202 means the downstream durable
-        // record was confirmed. The gateway itself stores no report state.
+        // PRIMARY PATH: forward the report to the feedback-service, which now OWNS review
+        // moderation (feedback-service PR #15: POST /Review/report, idempotent per
+        // (ReviewId, ReporterId)). Only opaque GUIDs cross the boundary; this mobile route
+        // carries no free-text reason today, so Reason is null. Fail-closed: if the
+        // forward fails we surface 503 rather than a false 202 — the durable breadcrumb
+        // above lets a retry / reconciliation re-drive it.
+        try
+        {
+            await _feedback.ReportReviewAsync(reviewGuid, reporterGuid, reason: null, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "review-report forward to feedback-service failed for review {ReviewId}; rejecting acceptance", reviewGuid);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Title = "Review report temporarily unavailable",
+                Detail = "The report could not be forwarded for moderation. Please retry."
+            });
+        }
+
+        // 202 means the feedback-service accepted the report for moderation and the
+        // durable breadcrumb is stored. The gateway itself holds no report state.
         return Accepted();
     }
 
