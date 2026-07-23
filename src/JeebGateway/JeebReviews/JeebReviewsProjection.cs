@@ -162,7 +162,7 @@ public static class JeebReviewsProjection
     public static JeebReviewsPageResponse ProjectCommentsPage(
         string jeeberId, GetCommentsResponse upstream, int page, int pageSize)
     {
-        if (upstream is null) return EmptyReviewsPage(jeeberId, page, pageSize);
+        ArgumentNullException.ThrowIfNull(upstream);
 
         var safePage = page < 1 ? 1 : page;
         var safeSize = pageSize < 1 ? 20 : pageSize;
