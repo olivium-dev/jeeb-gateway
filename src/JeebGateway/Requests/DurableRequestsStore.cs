@@ -34,9 +34,10 @@ namespace JeebGateway.Requests;
 ///
 /// THIN ORCHESTRATION: this decorator composes existing typed clients and a slim
 /// gateway-Postgres owner-list mirror. It owns no status machine — the in-memory
-/// inner store remains the gateway's fast read/query/sweeper model, and every
-/// method not listed below delegates to it verbatim. The delivery row is the
-/// matching-resolve source of truth; the bundle is the durable saga/audit trail.
+/// inner store remains the gateway's fast read/query/sweep-candidate projection,
+/// while terminal expiry commits through Postgres before any local projection or
+/// side effect. The delivery row is the matching-resolve source of truth; the
+/// bundle is the durable saga/audit trail.
 ///
 /// requests-durable — DURABLE READS (strict superset of the in-memory behaviour):
 ///  * <see cref="GetAsync"/> reads the in-memory mirror first (warm = byte-for-byte
@@ -475,22 +476,27 @@ public sealed class DurableRequestsStore : IRequestsStore
     }
 
     /// <summary>
-    /// TryExpireAsync first keeps the warm in-memory projection current, then atomically
-    /// projects expiry into the gateway Postgres mirror. The mirror transition is also
-    /// the cold-path fallback after a gateway restart: a request missing from memory can
-    /// still expire exactly once and cause exactly one customer notification. This
-    /// deliberately does NOT call delivery-service, because delivery-service is the
-    /// AUTHOR of expiry and the gateway only projects what it observed.
+    /// Commits expiry through the gateway Postgres authority first. Only the replica
+    /// that wins that conditional transition may update its warm in-memory projection
+    /// and report success to notification/offer-close callers. A missing/unavailable
+    /// mirror fails closed: memory is never allowed to author a terminal expiry.
     /// </summary>
     public async Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct)
     {
-        var expiredInMemory = await _inner.TryExpireAsync(requestId, at, ct);
-        if (_mirror is null) return expiredInMemory;
+        if (_mirror is null)
+        {
+            _logger.LogError(
+                "requests-durable: refusing to expire {RequestId} because the Postgres expiry authority is unavailable.",
+                requestId);
+            return false;
+        }
 
         try
         {
-            var expiredInMirror = await _mirror.MarkExpiredAsync(requestId, at, ct);
-            return expiredInMemory || expiredInMirror;
+            if (!await _mirror.MarkExpiredAsync(requestId, at, ct))
+            {
+                return false;
+            }
         }
         catch (OperationCanceledException)
         {
@@ -501,11 +507,15 @@ public sealed class DurableRequestsStore : IRequestsStore
             BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
                 new KeyValuePair<string, object?>("store", "postgres-requests-owner-list"));
             _logger.LogWarning(ex,
-                "requests-durable: owner-list mirror expiry-status update failed for {RequestId}; " +
-                "the list may show a stale status after a bounce.",
+                "requests-durable: Postgres expiry authority failed for {RequestId}; refusing the in-memory transition.",
                 requestId);
-            return expiredInMemory;
+            return false;
         }
+
+        // Projection only: PostgreSQL already committed the authoritative terminal
+        // transition. A cold replica legitimately has nothing local to update.
+        await _inner.TryExpireAsync(requestId, at, ct);
+        return true;
     }
 
     public Task<int> AnonymizeForClientAsync(string userId, string anonymizedHash, CancellationToken ct)

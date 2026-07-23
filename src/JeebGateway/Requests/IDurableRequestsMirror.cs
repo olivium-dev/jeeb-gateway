@@ -17,10 +17,10 @@ namespace JeebGateway.Requests;
 /// client-scoped list to delivery-service is out of scope (the gateway must not
 /// change a reusable microservice), so the gateway owns this slim mirror.</para>
 ///
-/// <para>Every operation is BEST-EFFORT from the decorator's point of view: the
-/// decorator wraps each call so a mirror fault never fails a create/cancel and
-/// never turns a read into a 5xx. The mirror is a durability backstop, not a hard
-/// dependency.</para>
+/// <para>Create/cancel/list projection operations remain best-effort from the
+/// decorator's point of view. Expiry is the deliberate exception:
+/// <see cref="MarkExpiredAsync"/> is the hard, fail-closed commit point so memory
+/// can never author a terminal expiry.</para>
 /// </summary>
 public interface IDurableRequestsMirror
 {
@@ -50,13 +50,14 @@ public interface IDurableRequestsMirror
         CancellationToken ct);
 
     /// <summary>
-    /// Atomically reflects an expiry onto the mirror by updating ONLY the gateway
-    /// columns (<c>gw_status = 'expired'</c>, <c>gw_expired_at</c>) — the native
-    /// enum/CHECK columns are left untouched so no constraint can fire. This is a
-    /// DERIVED projection of upstream truth, not an authority write. Returns
-    /// <see langword="true"/> only when a non-terminal mirror row transitioned;
-    /// missing and already-terminal rows return <see langword="false"/> so repeated
-    /// observer polls cannot trigger duplicate notifications.
+    /// Atomically commits expiry in the gateway-owned Postgres authority by updating
+    /// ONLY the gateway columns (<c>gw_status = 'expired'</c>,
+    /// <c>gw_expired_at</c>) — the native enum/CHECK columns are left untouched so
+    /// no constraint can fire. The conditional write accepts only pre-acceptance
+    /// rows, so a stale replica can never expire a request already accepted or moved
+    /// further through the lifecycle. Returns <see langword="true"/> only for the
+    /// single replica that wins that transition; missing, non-expirable, and already
+    /// expired rows return <see langword="false"/>.
     /// </summary>
     Task<bool> MarkExpiredAsync(string requestId, DateTimeOffset expiredAt, CancellationToken ct);
 

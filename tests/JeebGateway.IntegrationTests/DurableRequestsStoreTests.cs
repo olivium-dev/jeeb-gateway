@@ -738,19 +738,36 @@ public sealed class DurableRequestsStoreTests
     }
 
     [Fact]
-    public async Task Expire_stands_even_when_the_mirror_write_throws()
+    public async Task Expire_fails_closed_when_the_Postgres_authority_throws()
     {
-        // DEGRADE-DON'T-FAIL: the in-memory transition has already committed; a
-        // Postgres blip must never roll it back or fail the observer pass.
+        // PostgreSQL is the expiry authority. A database blip must not let this
+        // replica manufacture a terminal state in memory.
         var store = BuildWithMirror(out _, out _, out var mirror);
         var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
         mirror.ThrowOnExpire = true;
 
         (await store.TryExpireAsync(created.Id, Clock.GetUtcNow(), CancellationToken.None))
-            .Should().BeTrue();
+            .Should().BeFalse();
 
         (await store.GetAsync(created.Id, CancellationToken.None))!.Status
-            .Should().Be(RequestStatus.Expired);
+            .Should().Be(RequestStatus.Pending);
+    }
+
+    [Fact]
+    public async Task Expire_does_not_trust_stale_pending_memory_when_authority_is_accepted()
+    {
+        var store = BuildWithMirror(out var inner, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+        mirror.SetPersistedStatus(created.Id, RequestStatus.Accepted);
+
+        (await inner.GetAsync(created.Id, CancellationToken.None))!.Status
+            .Should().Be(RequestStatus.Pending, "this replica intentionally has a stale projection");
+
+        (await store.TryExpireAsync(created.Id, Clock.GetUtcNow(), CancellationToken.None))
+            .Should().BeFalse("the accepted durable row vetoes the stale replica");
+
+        (await inner.GetAsync(created.Id, CancellationToken.None))!.Status
+            .Should().Be(RequestStatus.Pending, "a rejected expiry must not mutate memory");
     }
 
     [Fact]
@@ -1014,6 +1031,9 @@ public sealed class DurableRequestsStoreTests
         /// <summary>Simulates a Postgres blip on the expiry mirror write.</summary>
         public bool ThrowOnExpire { get; set; }
 
+        public void SetPersistedStatus(string requestId, string status) =>
+            _persistedStatuses[requestId] = status;
+
         public Task UpsertOnCreateAsync(DeliveryRequest row, CancellationToken ct)
         {
             Upserted.Add(row);
@@ -1060,7 +1080,7 @@ public sealed class DurableRequestsStoreTests
                 return Task.FromResult(false);
             }
 
-            if (RequestStatus.IsTerminal(status))
+            if (!RequestStatus.IsPreAcceptance(status))
             {
                 return Task.FromResult(false);
             }

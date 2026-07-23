@@ -15,6 +15,7 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <PackageReference Include="FluentAssertions" Version="6.12.1" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="8.0.21" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="3.10.0" />
 
     <!--
       JEB-471 / T-BE-001 — additional packages for the OTP sign-in

@@ -392,6 +392,7 @@ public class RequestExpirySweeperTests
             {
                 services.RemoveAll<TimeProvider>();
                 services.AddSingleton<TimeProvider>(theClock);
+                services.AddSingleton<IDurableRequestsMirror, LocalExpiryAuthority>();
             });
         });
     }
@@ -402,6 +403,7 @@ public class RequestExpirySweeperTests
         services.AddSingleton<TimeProvider>(clock);
         services.AddSingleton<InMemoryRequestsStore>();
         services.AddSingleton<IRequestsStore>(sp => sp.GetRequiredService<InMemoryRequestsStore>());
+        services.AddSingleton<IDurableRequestsMirror, LocalExpiryAuthority>();
         services.AddSingleton<InMemoryRequestExpiryNotifier>();
         services.AddSingleton<IRequestExpiryNotifier>(sp =>
             sp.GetRequiredService<InMemoryRequestExpiryNotifier>());
@@ -562,6 +564,71 @@ public class RequestExpirySweeperTests
         public RequestExpirySourceOptions Get(string? name) => CurrentValue;
 
         public IDisposable? OnChange(Action<RequestExpirySourceOptions, string?> listener) => null;
+    }
+
+    /// <summary>
+    /// Fast-test authority used only by this legacy HTTP/sizing suite. The real
+    /// cross-replica guarantees are covered against PostgreSQL in
+    /// PostgresRequestExpiryAuthorityTests.
+    /// </summary>
+    private sealed class LocalExpiryAuthority : IDurableRequestsMirror
+    {
+        private readonly InMemoryRequestsStore _rows;
+        private readonly HashSet<string> _expired = new(StringComparer.Ordinal);
+        private readonly object _lock = new();
+
+        public LocalExpiryAuthority(InMemoryRequestsStore rows) => _rows = rows;
+
+        public async Task<bool> MarkExpiredAsync(
+            string requestId,
+            DateTimeOffset expiredAt,
+            CancellationToken ct)
+        {
+            var row = await _rows.GetAsync(requestId, ct);
+            if (row is null || !RequestStatus.IsPreAcceptance(row.Status))
+            {
+                return false;
+            }
+
+            lock (_lock)
+            {
+                return _expired.Add(requestId);
+            }
+        }
+
+        public Task UpsertOnCreateAsync(DeliveryRequest row, CancellationToken ct) =>
+            Task.CompletedTask;
+
+        public Task MarkCancelledAsync(
+            string requestId,
+            string gwStatus,
+            string? cancelledBy,
+            string? cancellationReason,
+            DateTimeOffset at,
+            CancellationToken ct) =>
+            Task.CompletedTask;
+
+        public Task UpdateLifecycleAsync(
+            string requestId,
+            string? gwStatus,
+            string? gwJeeberId,
+            decimal? gwAcceptedFee,
+            DateTimeOffset at,
+            CancellationToken ct) =>
+            Task.CompletedTask;
+
+        public Task<IReadOnlyList<DeliveryRequest>> ListForClientAsync(
+            string clientId,
+            CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<DeliveryRequest>>(Array.Empty<DeliveryRequest>());
+
+        public Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(
+            string jeeberId,
+            CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<DeliveryRequest>>(Array.Empty<DeliveryRequest>());
+
+        public Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct) =>
+            Task.FromResult<DeliveryRequest?>(null);
     }
 
     private sealed record RequestDto(
