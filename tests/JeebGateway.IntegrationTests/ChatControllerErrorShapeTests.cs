@@ -43,6 +43,34 @@ public class ChatControllerErrorShapeTests
         "System.NullReferenceException: SECRET_CANARY_ce8f at ChatService.Internal.SecretRepo.Load() line 42";
 
     [Fact]
+    public async Task AddMessage_EmptyObject_Returns_BadRequest_ProblemDetails_Without_Upstream_Call()
+    {
+        var stub = new StubHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            {
+                Content = new StringContent(Canary, Encoding.UTF8, "text/plain")
+            });
+
+        using var factory = NewFactoryWithChatStub(stub);
+        var client = MintBearerClient(factory);
+
+        var resp = await client.PostAsJsonAsync(
+            "/api/Chat/channels/00000000-0000-0000-0000-000000000000/messages",
+            new { });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
+
+        var problem = await resp.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        problem.Should().NotBeNull();
+        problem!.Status.Should().Be((int)HttpStatusCode.BadRequest);
+        problem.Title.Should().Be("Invalid chat message request.");
+        problem.Detail.Should().Be("Message text is required.");
+        problem.Type.Should().NotBeNullOrWhiteSpace();
+        stub.CallCount.Should().Be(0, "invalid input must be rejected by the gateway before chat-service is called");
+    }
+
+    [Fact]
     public async Task Health_UpstreamServerError_Is_Sanitized_ProblemDetails_Not_Leaked_Message()
     {
         var stub = new StubHttpMessageHandler(_ =>
@@ -265,7 +293,10 @@ public class ChatControllerErrorShapeTests
             expires: DateTime.UtcNow.AddMinutes(30),
             signingCredentials: creds);
 
-        var client = factory.CreateClient();
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            HandleCookies = false,
+        });
         client.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", new JwtSecurityTokenHandler().WriteToken(token));
         return client;
@@ -274,8 +305,16 @@ public class ChatControllerErrorShapeTests
     private sealed class StubHttpMessageHandler : HttpMessageHandler
     {
         private readonly Func<HttpRequestMessage, HttpResponseMessage> _handler;
+        private int _callCount;
+
         public StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) => _handler = handler;
+
+        public int CallCount => Volatile.Read(ref _callCount);
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
-            => Task.FromResult(_handler(request));
+        {
+            Interlocked.Increment(ref _callCount);
+            return Task.FromResult(_handler(request));
+        }
     }
 }

@@ -1,7 +1,13 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Claims;
 using FluentAssertions;
+using JeebGateway.Controllers;
+using JeebGateway.Users.SavedLocations;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -181,13 +187,41 @@ public class SavedLocationsEndpointTests : IClassFixture<WebApplicationFactory<P
     }
 
     [Fact]
-    public async Task Delete_Unknown_Id_Returns_404()
+    public async Task Delete_Unknown_Id_Returns_404_ProblemDetails()
     {
-        var client = ClientFor("sl-delete-missing");
+        using var services = ControllerServices();
+        var store = new RecordingSavedLocationStore(deleteResult: false);
+        var controller = SavedLocationsControllerFor(store, services, "sl-delete-missing");
+        var missingId = Guid.NewGuid().ToString("N");
 
-        var resp = await client.DeleteAsync($"{BaseRoute}/nope");
+        var response = await controller.Delete(missingId, CancellationToken.None);
 
-        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        var result = response.Should().BeOfType<ObjectResult>().Subject;
+        result.StatusCode.Should().Be(StatusCodes.Status404NotFound);
+        var problem = result.Value.Should().BeOfType<ProblemDetails>().Subject;
+        problem.Status.Should().Be(StatusCodes.Status404NotFound);
+        problem.Title.Should().Be("Saved location not found.");
+        problem.Detail.Should().Contain(missingId);
+        problem.Type.Should().NotBeNullOrWhiteSpace();
+        store.DeleteCalls.Should().Be(1, "a well-formed but nonexistent ID is resolved by the store");
+    }
+
+    [Fact]
+    public async Task Delete_Malformed_Id_Returns_404_ProblemDetails_Without_Store_Call()
+    {
+        using var services = ControllerServices();
+        var store = new RecordingSavedLocationStore(deleteResult: false);
+        var controller = SavedLocationsControllerFor(store, services, "sl-delete-malformed");
+
+        var response = await controller.Delete("not-a-saved-location-id", CancellationToken.None);
+
+        var result = response.Should().BeOfType<ObjectResult>().Subject;
+        result.StatusCode.Should().Be(StatusCodes.Status404NotFound);
+        var problem = result.Value.Should().BeOfType<ProblemDetails>().Subject;
+        problem.Status.Should().Be(StatusCodes.Status404NotFound);
+        problem.Title.Should().Be("Saved location not found.");
+        problem.Type.Should().NotBeNullOrWhiteSpace();
+        store.DeleteCalls.Should().Be(0, "malformed IDs must fail fast instead of reaching the remote store");
     }
 
     [Fact]
@@ -217,4 +251,71 @@ public class SavedLocationsEndpointTests : IClassFixture<WebApplicationFactory<P
         bool IsDefault,
         DateTimeOffset CreatedAt,
         DateTimeOffset UpdatedAt);
+
+    private static ServiceProvider ControllerServices()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddControllers();
+        return services.BuildServiceProvider();
+    }
+
+    private static SavedLocationsController SavedLocationsControllerFor(
+        ISavedLocationStore store,
+        IServiceProvider services,
+        string userId)
+    {
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(
+            new[] { new Claim("sub", userId) },
+            authenticationType: "test"));
+
+        return new SavedLocationsController(store)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    RequestServices = services,
+                    User = principal,
+                },
+            },
+        };
+    }
+
+    private sealed class RecordingSavedLocationStore : ISavedLocationStore
+    {
+        private readonly bool _deleteResult;
+
+        public RecordingSavedLocationStore(bool deleteResult)
+        {
+            _deleteResult = deleteResult;
+        }
+
+        public int DeleteCalls { get; private set; }
+
+        public Task<IReadOnlyList<SavedLocation>> ListAsync(string userId, CancellationToken ct) =>
+            throw new InvalidOperationException("The store must not be called.");
+
+        public Task<SavedLocation?> GetAsync(string userId, string id, CancellationToken ct) =>
+            throw new InvalidOperationException("The store must not be called.");
+
+        public Task<SavedLocation> CreateAsync(
+            string userId,
+            CreateSavedLocationRequest request,
+            CancellationToken ct) =>
+            throw new InvalidOperationException("The store must not be called.");
+
+        public Task<SavedLocation?> UpdateAsync(
+            string userId,
+            string id,
+            UpdateSavedLocationRequest request,
+            CancellationToken ct) =>
+            throw new InvalidOperationException("The store must not be called.");
+
+        public Task<bool> DeleteAsync(string userId, string id, CancellationToken ct)
+        {
+            DeleteCalls++;
+            return Task.FromResult(_deleteResult);
+        }
+    }
 }
