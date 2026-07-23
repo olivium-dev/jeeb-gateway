@@ -241,7 +241,7 @@ public sealed class KycSubmissionBffEndpointTests : IClassFixture<KycSubmissionB
         var resp = await PostJsonAsync(client, "/v1/kyc/submit", new
         {
             id_type = "residency", // Q-042 ratified value
-            id_number = "RP-2024-77", // free-form (non-national), just present
+            id_number = "RP202477", // residency shape: 6-12 uppercase ASCII letters/digits
             id_document_front_url = "cdn://obj/front",
             id_document_back_url = "cdn://obj/back",
             selfie_with_liveness_url = "cdn://obj/selfie",

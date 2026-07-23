@@ -122,21 +122,11 @@ internal static class StoreDurabilityGuard
         // delivery_id PK + INSERT ON CONFLICT DO NOTHING); in a prod-like env it MUST resolve
         // to PostgresSettlementEnqueueStore, never InMemorySettlementEnqueueStore.
         (typeof(JeebGateway.Financials.ISettlementEnqueueStore),            new[] { typeof(JeebGateway.Financials.PostgresSettlementEnqueueStore) }),
-        // partner-wallet-bff money-safety blocker set: the Partner Portal's idempotency dedup +
-        // immutable cash-in/move audit store (Partner/IPartnerWalletOperationStore). MONEY — its
-        // whole contract is "a retried confirm never double-moves money" (the wallet-service
-        // TransactionRequest has no idempotency field), so an in-memory fallback risks a
-        // double-spend on restart exactly like the settlement-enqueue store above. Postgres-backed
-        // (partner_wallet_operations, migration 0040); in a prod-like env it MUST resolve to
-        // PostgresPartnerWalletOperationStore, never InMemoryPartnerWalletOperationStore.
-        (typeof(JeebGateway.Partner.IPartnerWalletOperationStore),          new[] { typeof(JeebGateway.Partner.PostgresPartnerWalletOperationStore) }),
-        // partner-wallet-bff PP-7: the OTP step-up challenge store (Partner/IPartnerOtpChallengeStore).
-        // A money-authorization control — its whole contract is a SHA-256-hashed, single-use step-up
-        // code whose consumption is recorded DURABLY, so an in-memory fallback would let a spent or
-        // expired code re-authorize a high-value move across a restart. Postgres-backed
-        // (partner_otp_challenges, migration 0041); in a prod-like env it MUST resolve to
-        // PostgresPartnerOtpChallengeStore, never InMemoryPartnerOtpChallengeStore.
-        (typeof(JeebGateway.Partner.IPartnerOtpChallengeStore),             new[] { typeof(JeebGateway.Partner.PostgresPartnerOtpChallengeStore) }),
+        // partner-wallet-bff money-safety state is owned by jeeb-state-service. The gateway adapter
+        // uses the shared atomic idempotency KV and holds no DB row or volatile partner-domain store.
+        (typeof(JeebGateway.Partner.IPartnerWalletOperationStore),          new[] { typeof(JeebGateway.Partner.StateServicePartnerWalletOperationStore) }),
+        // PP-7 challenge hashes, attempt reservations, and single-use markers use the same remote KV.
+        (typeof(JeebGateway.Partner.IPartnerOtpChallengeStore),             new[] { typeof(JeebGateway.Partner.StateServicePartnerOtpChallengeStore) }),
     };
 
     /// <summary>

@@ -29,41 +29,14 @@ public static class PartnerWalletExtensions
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
-        // Money-safety idempotency / dedup + immutable cash-in audit store. MONEY: its whole contract
-        // is "a retried confirm never double-moves money", so an in-memory fallback is a data-loss
-        // hole on a money path and is refused fail-closed in prod-like envs
-        // (StoreDurabilityGuard.Critical). Postgres-backed (partner_wallet_operations, migration 0040)
-        // whenever GatewayPostgres is configured — reusing the already-registered
-        // INpgsqlConnectionFactory (see Program.cs) — exactly like ISettlementEnqueueStore; in-memory
-        // fallback for dev/CI/test only. Singleton so the claim state persists across scoped requests.
-        var gatewayPostgresCs = config["GatewayPostgres:ConnectionString"];
-        if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
-        {
-            services.AddSingleton<IPartnerWalletOperationStore, PostgresPartnerWalletOperationStore>();
-        }
-        else
-        {
-            services.AddSingleton<IPartnerWalletOperationStore, InMemoryPartnerWalletOperationStore>();
-        }
-
-        // PP-7 OTP step-up challenge store. Same durability posture as the operation store above: its
-        // whole contract is a SHA-256-hashed, single-use, durably-consumed step-up code, so an
-        // in-memory fallback would silently defeat single-use across a restart (a spent code could
-        // re-authorize a high-value move). Postgres-backed (partner_otp_challenges, migration 0041)
-        // whenever GatewayPostgres is configured — reusing the same INpgsqlConnectionFactory — and
-        // guarded fail-closed in prod (StoreDurabilityGuard.Critical); in-memory for dev/CI/test only.
-        // Singleton so a challenge minted on one request is visible to the confirm on the next.
-        if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
-        {
-            services.AddSingleton<IPartnerOtpChallengeStore, PostgresPartnerOtpChallengeStore>();
-        }
-        else
-        {
-            services.AddSingleton<IPartnerOtpChallengeStore, InMemoryPartnerOtpChallengeStore>();
-        }
+        // Money-safety state belongs to jeeb-state-service, never the gateway. These adapters use
+        // the already-registered atomic IIdempotencyStore surface: production persists remotely;
+        // the gateway opens no DB and adds no partner-domain cache/dictionary/static store.
+        services.AddSingleton<IPartnerWalletOperationStore, StateServicePartnerWalletOperationStore>();
+        services.AddSingleton<IPartnerOtpChallengeStore, StateServicePartnerOtpChallengeStore>();
 
         // Crypto + orchestration for the step-up code (random 6-digit generation, SHA-256 hashing,
-        // 5-min TTL). Stateless over the singleton store; the raw code never leaves this seam except
+        // 5-min TTL). Stateless over the state-service adapter; the raw code never leaves this seam except
         // once to the controller for the dev-flag-gated devCode.
         services.AddSingleton<IPartnerOtpChallengeService, PartnerOtpChallengeService>();
 

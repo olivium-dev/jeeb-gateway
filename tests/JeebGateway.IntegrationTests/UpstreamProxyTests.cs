@@ -207,7 +207,7 @@ public class UpstreamProxyTests
         services.RemoveAll<TInterface>();
 
         var http = new HttpClient(handler) { BaseAddress = new Uri(baseUrl) };
-        var impl = (TImpl)Activator.CreateInstance(typeof(TImpl), http)!;
+        var impl = (TImpl)Activator.CreateInstance(typeof(TImpl), new object?[] { http, null })!;
         services.AddSingleton<TInterface>(impl);
     }
 
