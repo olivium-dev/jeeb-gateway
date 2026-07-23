@@ -40,7 +40,10 @@ public sealed class CapabilityCoverageGuardTests
         await using var factory = new WebApplicationFactory<Program>();
 
         // Force the host (EndpointDataSource + the hosted guard) to fully materialize.
-        using var _ = factory.CreateClient();
+        using var _ = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            HandleCookies = false,
+        });
 
         var guard = factory.Services.GetRequiredService<CapabilityCoverageGuard>();
         var uncovered = guard.FindUncoveredActions();
@@ -78,7 +81,10 @@ public sealed class CapabilityCoverageGuardTests
                         .AddApplicationPart(typeof(UnannotatedFixtureController).Assembly));
             });
 
-        using var _ = factory.CreateClient();
+        using var _ = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            HandleCookies = false,
+        });
 
         var guard = factory.Services.GetRequiredService<CapabilityCoverageGuard>();
         var uncovered = guard.FindUncoveredActions();
