@@ -29,11 +29,9 @@ namespace JeebGateway.Partner;
 ///   post-execute state; the caller must NOT run the saga (maps to 409). Never a second execute.</item>
 /// </list></para>
 ///
-/// <para>Mirrors the money-adjacent <see cref="JeebGateway.Financials.ISettlementEnqueueStore"/>
-/// idempotency store: a durable Postgres impl (DB-level <c>UNIQUE + ON CONFLICT DO NOTHING</c>) in
-/// prod, an in-memory impl for dev/CI/test, and a fail-closed
-/// <see cref="JeebGateway.Infrastructure.StoreDurabilityGuard"/> registration so a mis-provisioned
-/// prod gateway refuses to boot rather than silently double-spend from process memory.</para>
+/// <para>The implementation is a stateless gateway adapter over jeeb-state-service's atomic
+/// insert-or-return idempotency KV. The owning service holds every claim and completion record; the
+/// gateway opens no DB and keeps no in-process operation store.</para>
 /// </summary>
 public interface IPartnerWalletOperationStore
 {

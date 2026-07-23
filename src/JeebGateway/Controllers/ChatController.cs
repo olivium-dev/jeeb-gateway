@@ -18,7 +18,6 @@ namespace JeebGateway.Controllers
     /// </summary>
     [ApiController]
     [Route("api/[controller]")]
-    [Produces("application/json")]
     public class ChatController : ControllerBase
     {
         private readonly ServiceChatClient _serviceChatClient;
@@ -75,6 +74,27 @@ namespace JeebGateway.Controllers
                 title: "The chat request could not be completed.",
                 statusCode: status);
         }
+
+        private ActionResult InvalidMessageProblem(string detail) => Problem(
+            title: "Invalid chat message request.",
+            detail: detail,
+            statusCode: StatusCodes.Status400BadRequest);
+
+        private static AddMessageRequest ToUpstreamRequest(
+            string channelId,
+            AddChatMessageRequest request) => new()
+        {
+            MemberId = request.MemberId!,
+            MemberID = request.MemberId!,
+            ChannelId = channelId,
+            ChannelID = channelId,
+            SessionId = request.SessionId!,
+            SessionID = request.SessionId!,
+            Text = request.Text!,
+            Payload = request.Payload!,
+            ParentId = request.ParentId!,
+            ParentID = request.ParentId!,
+        };
 
         #region Health
 
@@ -449,25 +469,44 @@ namespace JeebGateway.Controllers
         [Authorize]
         [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
         [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status201Created)]
-        [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
-        [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
-        [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
-        public async Task<ActionResult<IdentityResponse>> AddMessage(string channelId, [FromBody] AddMessageRequest request)
+        [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<IdentityResponse>> AddMessage(
+            string channelId,
+            [FromBody] AddChatMessageRequest request)
         {
+            if (string.IsNullOrWhiteSpace(channelId))
+            {
+                return InvalidMessageProblem("Channel ID is required.");
+            }
+
+            if (request is null)
+            {
+                return InvalidMessageProblem("Request body is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.Text))
+            {
+                return InvalidMessageProblem("Message text is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.ChannelId))
+            {
+                return InvalidMessageProblem("Message channel ID is required.");
+            }
+
+            if (!string.Equals(channelId, request.ChannelId, StringComparison.Ordinal))
+            {
+                return InvalidMessageProblem("Message channel ID must match the route channel ID.");
+            }
+
             try
             {
                 ValidateService();
-                if (string.IsNullOrEmpty(channelId))
-                {
-                    throw new ChatApiException("Channel ID is required", 400, "Bad Request", new Dictionary<string, IEnumerable<string>>(), null);
-                }
-
-                if (request == null)
-                {
-                    throw new ChatApiException("Request body cannot be null", 400, "Bad Request", new Dictionary<string, IEnumerable<string>>(), null);
-                }
-
-                var response = await _serviceChatClient.MessagesPOSTAsync(channelId, request);
+                var response = await _serviceChatClient.MessagesPOSTAsync(
+                    channelId,
+                    ToUpstreamRequest(channelId, request));
 
                 // BUILD-CHAT-PUSH — notify the conversation's other party (the only missing
                 // link for real A→B chat push). Best-effort/degrade-don't-fail; never affects
@@ -1428,5 +1467,19 @@ namespace JeebGateway.Controllers
 
         #endregion
     }
-}
 
+    /// <summary>
+    /// Canonical gateway input for POST /api/Chat/channels/{channelId}/messages.
+    /// The generated chat-service DTO cannot be used for ASP.NET model binding because
+    /// it contains case-colliding property pairs such as memberId/memberID.
+    /// </summary>
+    public sealed class AddChatMessageRequest
+    {
+        public string? MemberId { get; set; }
+        public string? ChannelId { get; set; }
+        public string? SessionId { get; set; }
+        public string? Text { get; set; }
+        public string? Payload { get; set; }
+        public string? ParentId { get; set; }
+    }
+}

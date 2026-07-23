@@ -164,7 +164,7 @@ public class JeebWalletUpstreamSanitizationTests
         var token = new JwtSecurityToken(
             issuer: issuer,
             audience: audience,
-            claims: new[] { new Claim("sub", sub), new Claim("roles", "client") },
+            claims: new[] { new Claim("sub", sub), new Claim("roles", "jeeber") },
             notBefore: DateTime.UtcNow.AddMinutes(-1),
             expires: DateTime.UtcNow.AddMinutes(30),
             signingCredentials: creds);

@@ -181,7 +181,7 @@ public sealed class CapabilityAuthorizationHandlerTests
             var roles = CapabilityRolePolicy.RolesFor(cap);
             roles.Should().NotBeEmpty($"capability '{cap}' must map to at least one role");
             roles.Should().OnlyContain(
-                r => r == "client" || r == "jeeber" || r == "admin",
+                r => r == "client" || r == "jeeber" || r == "admin" || r == "partner",
                 $"capability '{cap}' must key on canonical roles only");
         }
     }

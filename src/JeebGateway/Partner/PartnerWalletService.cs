@@ -19,9 +19,9 @@ namespace JeebGateway.Partner;
 /// <summary>
 /// Default <see cref="IPartnerWalletService"/> — orchestrates the reused wallet-service saga.
 /// ADR-0001: stateless money math (amounts are the caller's, fees are wallet-service's). Money moves
-/// only inside wallet-service, but the gateway now owns the idempotency dedup + immutable audit of
-/// each move (<see cref="IPartnerWalletOperationStore"/>) so a retried confirm can never double-move
-/// real money, and every admin cash-in is durably attributed.
+/// only inside wallet-service; idempotency dedup + the immutable audit of each move are delegated
+/// through <see cref="IPartnerWalletOperationStore"/> to jeeb-state-service, so the gateway remains
+/// stateless while retried confirms cannot double-move money.
 /// </summary>
 public sealed class PartnerWalletService : IPartnerWalletService
 {

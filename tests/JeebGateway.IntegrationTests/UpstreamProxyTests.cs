@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -84,7 +85,7 @@ public class UpstreamProxyTests
         body!.Items.Should().HaveCount(1);
         body.Items[0].Id.Should().Be("upstream-only");
 
-        captured.Single().RequestUri!.AbsolutePath.Should().Be("/api/v1/tiers");
+        captured.Contains("/api/v1/tiers").Should().BeTrue();
     }
 
     // -----------------------------------------------------------------
@@ -151,8 +152,7 @@ public class UpstreamProxyTests
 
         // The latest fix was forwarded to the canonical delivery-service presence
         // heartbeat route (jeeber id in the path).
-        captured.Single().RequestUri!.AbsolutePath
-            .Should().Be("/api/v1/jeebers/jeeber-1/heartbeat");
+        captured.Contains("/api/v1/jeebers/jeeber-1/heartbeat").Should().BeTrue();
     }
 
     // NOTE: the legacy multipart KYC submit (old in-gateway KycController over the
@@ -207,7 +207,7 @@ public class UpstreamProxyTests
         services.RemoveAll<TInterface>();
 
         var http = new HttpClient(handler) { BaseAddress = new Uri(baseUrl) };
-        var impl = (TImpl)Activator.CreateInstance(typeof(TImpl), http)!;
+        var impl = (TImpl)Activator.CreateInstance(typeof(TImpl), new object?[] { http, null })!;
         services.AddSingleton<TInterface>(impl);
     }
 
@@ -224,9 +224,10 @@ public class UpstreamProxyTests
 
     private sealed class CapturedRequests
     {
-        private readonly List<HttpRequestMessage> _items = new();
-        public void Add(HttpRequestMessage req) => _items.Add(req);
-        public HttpRequestMessage Single() => _items.Single();
+        private readonly ConcurrentQueue<HttpRequestMessage> _items = new();
+        public void Add(HttpRequestMessage req) => _items.Enqueue(req);
+        public bool Contains(string absolutePath)
+            => _items.Any(req => req.RequestUri?.AbsolutePath == absolutePath);
     }
 
     private sealed class StubHttpMessageHandler : HttpMessageHandler

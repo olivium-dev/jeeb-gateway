@@ -86,6 +86,8 @@ public class SavedLocationsController : ControllerBase
     public async Task<IActionResult> Delete(string id, CancellationToken ct)
     {
         if (!TryGetUserId(out var userId, out var problem)) return problem;
+        if (!Guid.TryParseExact(id, "N", out _)) return NotFoundProblem(id);
+
         var removed = await _store.DeleteAsync(userId, id, ct);
         return removed ? NoContent() : NotFoundProblem(id);
     }
@@ -97,12 +99,10 @@ public class SavedLocationsController : ControllerBase
     private bool TryGetUserId(out string userId, out IActionResult problem)
         => UserIdentity.TryGetUserId(HttpContext, out userId, out problem);
 
-    private NotFoundObjectResult NotFoundProblem(string id) => NotFound(new ProblemDetails
-    {
-        Title = "Saved location not found.",
-        Detail = $"No saved location with id '{id}' exists for the current user.",
-        Status = StatusCodes.Status404NotFound
-    });
+    private ObjectResult NotFoundProblem(string id) => Problem(
+        title: "Saved location not found.",
+        detail: $"No saved location with id '{id}' exists for the current user.",
+        statusCode: StatusCodes.Status404NotFound);
 
     private static SavedLocationsListResponse ToListResponse(string userId, IReadOnlyList<SavedLocation> items) => new()
     {

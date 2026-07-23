@@ -14,12 +14,12 @@ namespace JeebGateway.Partner;
 /// not match all three is refused (<see cref="PartnerOtpOutcome.Mismatch"/>), so a partner cannot
 /// reuse a code minted for a different jeeber/amount and cannot use another partner's code.
 /// <list type="bullet">
-///   <item><b>Single-use.</b> <see cref="ValidateAndConsumeAsync"/> stamps consumption ATOMICALLY
-///   (a conditional <c>UPDATE ... WHERE consumed_at IS NULL RETURNING id</c>, not a read-then-write),
-///   so a concurrent double-submit or a later replay authorizes AT MOST ONE money move
-///   (<see cref="PartnerOtpOutcome.Consumed"/>) — the same DB-level guarantee the sibling
+///   <item><b>Single-use.</b> <see cref="ValidateAndConsumeAsync"/> claims a unique consumption key
+///   through jeeb-state-service's atomic insert-or-return primitive, so a concurrent double-submit
+///   or a later replay authorizes AT MOST ONE money move
+///   (<see cref="PartnerOtpOutcome.Consumed"/>) — the same remote atomic guarantee the sibling
 ///   <see cref="IPartnerWalletOperationStore"/> uses for its own no-double-spend invariant.</item>
-///   <item><b>Bounded guesses.</b> Each wrong code increments <c>attempts</c>
+///   <item><b>Bounded guesses.</b> Each validation atomically reserves one of the finite attempt keys
 ///   (<see cref="PartnerOtpOutcome.WrongCode"/>); once the
 ///   <see cref="PartnerOtpChallengePolicy.MaxAttempts"/> ceiling is reached the challenge hard-expires
 ///   (<see cref="PartnerOtpOutcome.Exhausted"/>).</item>
@@ -27,12 +27,9 @@ namespace JeebGateway.Partner;
 ///   <see cref="PartnerOtpOutcome.Expired"/>.</item>
 /// </list></para>
 ///
-/// <para>Mirrors the partner-wallet store topology: a durable Postgres impl
-/// (<see cref="PostgresPartnerOtpChallengeStore"/>, migration 0041) in prod and an in-memory impl
-/// (<see cref="InMemoryPartnerOtpChallengeStore"/>) for dev/CI/test, with a fail-closed
-/// <see cref="JeebGateway.Infrastructure.StoreDurabilityGuard"/> registration so a mis-provisioned
-/// prod gateway refuses to boot rather than let a spent/expired code re-authorize a high-value move
-/// across a restart.</para>
+/// <para>The implementation is a stateless gateway adapter over jeeb-state-service. Challenge
+/// hashes, attempt reservations, and consumption markers live in the owning service; the gateway
+/// opens no DB and keeps no in-process challenge store.</para>
 /// </summary>
 public interface IPartnerOtpChallengeStore
 {
@@ -87,7 +84,7 @@ public sealed record PartnerOtpValidation(PartnerOtpOutcome Outcome, int Attempt
 
 /// <summary>
 /// Frozen PP-7 policy constants shared by both store impls and the challenge service, so the
-/// in-memory and Postgres paths enforce the exact same ceiling / window / code shape.
+/// state-service adapter and challenge service enforce the exact same ceiling / window / code shape.
 /// </summary>
 public static class PartnerOtpChallengePolicy
 {

@@ -21,8 +21,8 @@ namespace JeebGateway.IntegrationTests;
 /// JEBV4-249 (info-leak, JeebReviews residual): the submit + reveal catches did
 /// <c>Problem(detail: ex.Message, ...)</c>, leaking the NSwag feedback-service
 /// <see cref="ApiException"/>.Message. The fix routes those two GENERAL catches through
-/// <c>UpstreamProblem(FeedbackApiException)</c>. The graceful reviews-list degrade (returns the
-/// cold-start empty page), the <c>when (404) → NotFound()</c> un-rated mapping, and the local
+/// <c>UpstreamProblem(FeedbackApiException)</c>. Reviews-list failures also fail closed through the
+/// sanitized upstream mapper; the <c>when (404) → NotFound()</c> un-rated mapping and the local
 /// <c>catch (ArgumentException) → Problem400(ex.Message)</c> tag validation are unchanged.
 /// Mirrors <see cref="ChatControllerErrorShapeTests"/>.
 /// </summary>
@@ -63,10 +63,10 @@ public class JeebReviewsUpstreamSanitizationTests
     }
 
     [Fact]
-    public async Task ListReviews_UpstreamFailure_Degrades_To_Empty_Page_Without_Leaking_Body()
+    public async Task ListReviews_UpstreamFailure_FailsClosed_Without_Leaking_Body()
     {
-        // The reviews-list catch is a deliberate graceful degrade (cold-start empty page), NOT
-        // routed through UpstreamProblem. It must stay a 200 and must not leak the upstream body.
+        // Review provenance is authoritative: an upstream outage fails closed through the sanitized
+        // mapper rather than presenting an empty page as if it were true data.
         var stub = new StubHttpMessageHandler(_ =>
             new HttpResponseMessage(HttpStatusCode.InternalServerError)
             {
@@ -78,8 +78,7 @@ public class JeebReviewsUpstreamSanitizationTests
 
         var resp = await client.GetAsync($"/v1/ratings/jeeb/reviews?jeeberId={JeeberGuid}");
 
-        resp.StatusCode.Should().Be(HttpStatusCode.OK,
-            "an upstream reviews-list failure degrades to the empty page, not a client-facing error");
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
         var raw = await resp.Content.ReadAsStringAsync();
         raw.Should().NotContain("SECRET_CANARY_review73");
     }
@@ -87,7 +86,7 @@ public class JeebReviewsUpstreamSanitizationTests
     /// <summary>
     /// Source-scan regression guard: zero LIVE <c>detail: ex.Message</c>; the two GENERAL
     /// submit/reveal <c>catch (FeedbackApiException)</c> sites route through
-    /// <c>UpstreamProblem(ex)</c>; the graceful reviews-list degrade and the 404 mapper remain.
+    /// <c>UpstreamProblem(ex)</c>; the 404 mapper remains.
     /// </summary>
     [Fact]
     public void JeebReviewsController_Source_General_Catches_Are_Sanitized()
@@ -102,11 +101,12 @@ public class JeebReviewsUpstreamSanitizationTests
         ControllerSourceScan.Count(liveCode, "catch (FeedbackApiException")
             .Should().BeGreaterThan(0, "the guard must actually see the upstream catch sites");
         ControllerSourceScan.Count(liveCode, "UpstreamProblem(ex)").Should().Be(2,
-            "the two GENERAL submit/reveal catches must route through UpstreamProblem(ex)");
+            "submit and reveal failures must route through UpstreamProblem(ex)");
+        ControllerSourceScan.Count(liveCode, "FeedbackReadProblem(ex)").Should().Be(1,
+            "the list read must use its dedicated sanitized fail-closed mapper");
 
-        // Behaviour-preserving branches must stay.
-        ControllerSourceScan.Count(liveCode, "EmptyReviewsPage").Should().BeGreaterThan(0,
-            "the reviews-list graceful cold-start degrade must remain");
+        ControllerSourceScan.Count(liveCode, "EmptyReviewsPage").Should().Be(0,
+            "review provenance must fail closed instead of fabricating an empty page");
         ControllerSourceScan.Count(liveCode, "when (ex.StatusCode == StatusCodes.Status404NotFound)")
             .Should().Be(1, "the un-rated 404 → NotFound() mapper must remain");
     }

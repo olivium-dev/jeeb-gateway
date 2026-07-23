@@ -87,9 +87,8 @@ public class PostgresAccountDeletionStoreTests
                 "no connection string is configured, so local/CI runs must keep exercising the in-memory fallback");
 
         factory.Services.GetServices<IHostedService>()
-            .Should().NotContain(s => s is AccountDeletionPurgeWorker,
-                "the purge worker only makes sense once the durable store is active — there is nothing durable to sweep otherwise, " +
-                "and nothing calls IAccountDeletionStore.AdvanceAsync for the in-memory fallback today");
+            .Should().Contain(s => s is AccountDeletionPurgeWorker,
+                "the deletion state machine is active in every environment and must keep advancing pending requests");
     }
 
     // ── Store properties (deferred to Testcontainers QV) ───────────────────
