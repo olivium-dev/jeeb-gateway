@@ -194,7 +194,14 @@ namespace JeebGateway.Controllers
                     {
                         break;
                     }
-                    skip += pageSize;
+                    // Advance by the number of rows ACTUALLY returned, not the requested
+                    // pageSize. user-management caps its own page below pageSize (≈50), so a
+                    // fixed `skip += pageSize` overshot by ~150 every iteration and silently
+                    // skipped users 50..pageSize — the full-roster picker only ever surfaced
+                    // the first ~50 (oldest) users, so freshly-seeded users were unfindable
+                    // (which also broke Super-Login-Plus search, since it filters this roster
+                    // client-side).
+                    skip += rows.Count;
                 }
             }
             catch (UserManagementApiException ex)
