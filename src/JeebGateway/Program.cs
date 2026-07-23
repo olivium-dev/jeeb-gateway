@@ -720,6 +720,10 @@ builder.Services.AddScoped<JeebGateway.service.ServiceUserManagement.ServiceUser
 // matching salehly Program.cs:254. Scoped because it depends on the scoped
 // NSwag clients above.
 builder.Services.AddScoped<JeebGateway.Services.ITechnicianReviewService, JeebGateway.Services.TechnicianReviewService>();
+// Owner-scoped offer-list projection: statelessly joins offer-service rows with
+// the existing user-management profile and feedback-service review reads.
+builder.Services.AddScoped<JeebGateway.Availability.IOfferJeeberEnricher,
+    JeebGateway.Availability.OfferJeeberEnricher>();
 
 // T-migrate-gateway-proxies (PR-A): per-service kill switches. Each
 // controller migrated in this PR checks the matching flag and falls

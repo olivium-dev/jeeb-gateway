@@ -44,6 +44,7 @@ public sealed class JeebRequestsController : ControllerBase
 
     private readonly IRequestsStore _requests;
     private readonly IPendingOffersStore _offers;
+    private readonly IOfferJeeberEnricher _offerJeeberEnricher;
     private readonly IOfferServiceClient _offerService;
     private readonly IDeliveryServiceClient _delivery;
     private readonly ITiersStore _tiers;
@@ -56,6 +57,7 @@ public sealed class JeebRequestsController : ControllerBase
     public JeebRequestsController(
         IRequestsStore requests,
         IPendingOffersStore offers,
+        IOfferJeeberEnricher offerJeeberEnricher,
         IOfferServiceClient offerService,
         IDeliveryServiceClient delivery,
         ITiersStore tiers,
@@ -67,6 +69,7 @@ public sealed class JeebRequestsController : ControllerBase
     {
         _requests = requests;
         _offers = offers;
+        _offerJeeberEnricher = offerJeeberEnricher;
         _offerService = offerService;
         _delivery = delivery;
         _tiers = tiers;
@@ -425,18 +428,7 @@ public sealed class JeebRequestsController : ControllerBase
         }
 
         var offers = await _offers.ListForRequestAsync(requestId, ct);
-        var dtos = offers.Select(o => new OfferDto
-        {
-            Id = o.Id,
-            RequestId = o.RequestId,
-            JeeberId = o.JeeberId,
-            Status = o.Status,
-            Fee = o.Fee,
-            EtaMinutes = o.EtaMinutes,
-            Note = o.Note,
-            CreatedAt = o.CreatedAt,
-            UpdatedAt = o.UpdatedAt,
-        }).ToList();
+        var dtos = await _offerJeeberEnricher.EnrichAsync(offers, ct);
 
         return Ok(new { items = dtos });
     }
