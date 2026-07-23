@@ -1,0 +1,1208 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using FluentAssertions;
+using JeebGateway.JeebWallet;
+using JeebGateway.Partner.JeeberSearch;
+using JeebGateway.service.ServiceWallet;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Xunit;
+using SwServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
+
+namespace JeebGateway.IntegrationTests;
+
+/// <summary>
+/// Jeeb Partner Portal wallet BFF (partner-wallet-bff) endpoint tests. Every partner route is
+/// exercised through the REAL host (<see cref="WebApplicationFactory{Program}"/>) with a fake
+/// <see cref="SwServiceWalletClient"/> swapped in (the generated client's methods are <c>virtual</c>),
+/// so the happy paths run fully offline — no wallet-service, no Docker. Negative paths (401/403/400)
+/// are deterministic and never reach the fake. Auth mirrors the sibling endpoint tests: the
+/// <c>X-User-Id</c>/<c>X-User-Roles</c> edge headers (trusted in the Development/Testing host).
+/// </summary>
+public sealed class PartnerWalletEndpointsTests
+{
+    private const string PartnerId = "11111111-1111-1111-1111-111111111111";
+    private const string JeeberId = "22222222-2222-2222-2222-222222222222";
+    private const string OtherJeeberId = "44444444-4444-4444-4444-444444444444";
+
+    private static WebApplicationFactory<Program> FactoryWithFakeWallet(FakeWalletClient fake)
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureTestServices(s => s.AddScoped<SwServiceWalletClient>(_ => fake)));
+
+    /// <summary>
+    /// As <see cref="FactoryWithFakeWallet"/> but with <c>Features:DevEndpoints:Enabled=true</c>, so the
+    /// PP-7 challenge endpoint surfaces the raw code as <c>devCode</c> — the only offline way a test can
+    /// learn the cryptographically-random code to drive the valid-OTP / consume / exhaust paths.
+    /// </summary>
+    private static WebApplicationFactory<Program> FactoryWithFakeWalletDevOtp(FakeWalletClient fake)
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Features:DevEndpoints:Enabled"] = "true",
+            }));
+            b.ConfigureTestServices(s => s.AddScoped<SwServiceWalletClient>(_ => fake));
+        });
+
+    private static HttpClient AsPartner(WebApplicationFactory<Program> f)
+    {
+        var c = f.CreateClient();
+        c.DefaultRequestHeaders.Add("X-User-Id", PartnerId);
+        c.DefaultRequestHeaders.Add("X-User-Roles", "partner");
+        return c;
+    }
+
+    private static HttpClient AsAdmin(WebApplicationFactory<Program> f)
+    {
+        var c = f.CreateClient();
+        c.DefaultRequestHeaders.Add("X-User-Id", "33333333-3333-3333-3333-333333333333");
+        c.DefaultRequestHeaders.Add("X-User-Roles", "admin");
+        return c;
+    }
+
+    // ── Happy paths (offline, via the fake wallet client) ─────────────────────────────
+
+    [Fact]
+    public async Task Partner_Topup_Executes_And_Returns_TransactionId()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        using var client = AsPartner(factory);
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId = JeeberId,
+            amount = 25.0,
+            idempotencyKey = "idem-key-abcdef01",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<MoveDto>();
+        body!.TransactionId.Should().NotBeEmpty();
+        body.Amount.Should().Be(25.0);
+        body.Status.Should().Be("executed");
+    }
+
+    [Fact]
+    public async Task Partner_Predict_Returns_Fees_Preview()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient { PredictFees = 2.5 });
+        using var client = AsPartner(factory);
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers/predict", new
+        {
+            jeeberId = JeeberId,
+            amount = 50.0,
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<PreviewDto>();
+        body!.Fees.Should().Be(2.5);
+        body.NetToJeeber.Should().Be(47.5);
+    }
+
+    [Fact]
+    public async Task Partner_Balance_Returns_Projection()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient { Balance = 120.0 });
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/wallet");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task Admin_CashCredit_Executes()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        using var client = AsAdmin(factory);
+
+        var resp = await client.PostAsJsonAsync($"/v1/admin/partners/{PartnerId}/wallet/credits", new
+        {
+            amount = 300.0,
+            evidenceNote = "cash handover receipt #A-1024",
+            idempotencyKey = "credit-key-abcdef01",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<MoveDto>();
+        body!.Amount.Should().Be(300.0);
+    }
+
+    // ── Balance route contract: BOTH the shipped path and the documented /balance alias ──
+
+    [Fact]
+    public async Task Partner_Balance_Documented_Alias_Route_Does_Not_404()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient { Balance = 42.0 });
+        using var client = AsPartner(factory);
+
+        // BUILD-REPORT §3.1 documents GET v1/partner/wallet/balance; the shipped class route is
+        // GET v1/partner/wallet. Both must resolve the SAME action (contract-drift fix) — neither 404s.
+        var shipped = await client.GetAsync("/v1/partner/wallet");
+        var documented = await client.GetAsync("/v1/partner/wallet/balance");
+
+        shipped.StatusCode.Should().Be(HttpStatusCode.OK);
+        documented.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    // ── Money-safety: idempotency dedup (a retried confirm moves money exactly ONCE) ──
+
+    [Fact]
+    public async Task Partner_Topup_Retried_With_Same_Key_Moves_Money_Once()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWallet(fake);
+        using var client = AsPartner(factory);
+
+        object Body() => new { jeeberId = JeeberId, amount = 25.0, idempotencyKey = "retry-key-abcdef01" };
+
+        var first = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", Body());
+        var second = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", Body());
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        second.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var a = await first.Content.ReadFromJsonAsync<MoveDto>();
+        var b = await second.Content.ReadFromJsonAsync<MoveDto>();
+        b!.TransactionId.Should().Be(a!.TransactionId, "the replay returns the SAME prior transaction");
+
+        // The saga's Execute ran exactly once across both requests — the second was a dedup replay.
+        fake.ExecuteCount.Should().Be(1, "a retried confirm with the same idempotency key must NOT re-execute");
+    }
+
+    [Fact]
+    public async Task Admin_CashCredit_Retried_With_Same_Key_Creates_Money_Once()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWallet(fake);
+        using var client = AsAdmin(factory);
+
+        object Body() => new
+        {
+            amount = 300.0,
+            evidenceNote = "cash handover receipt #A-1024",
+            idempotencyKey = "credit-retry-abcdef01",
+        };
+
+        var first = await client.PostAsJsonAsync($"/v1/admin/partners/{PartnerId}/wallet/credits", Body());
+        var second = await client.PostAsJsonAsync($"/v1/admin/partners/{PartnerId}/wallet/credits", Body());
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        second.StatusCode.Should().Be(HttpStatusCode.OK);
+        fake.ExecuteCount.Should().Be(1, "a double-submitted cash-credit must NOT double-create money");
+    }
+
+    [Fact]
+    public async Task Admin_CashCredit_Without_IdempotencyKey_Is_400()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        using var client = AsAdmin(factory);
+
+        var resp = await client.PostAsJsonAsync($"/v1/admin/partners/{PartnerId}/wallet/credits", new
+        {
+            amount = 300.0,
+            evidenceNote = "cash handover receipt #A-1024",
+            // idempotencyKey omitted → [Required] 400 (no money creation without a dedup key)
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task Admin_CashCredit_Above_Ceiling_Is_400()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        using var client = AsAdmin(factory);
+
+        var resp = await client.PostAsJsonAsync($"/v1/admin/partners/{PartnerId}/wallet/credits", new
+        {
+            amount = 1_000_000.0, // above default MaxTransferAmount (100_000) → 400 before any move
+            evidenceNote = "cash handover receipt #A-1024",
+            idempotencyKey = "credit-huge-abcdef01",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task Admin_CashCredit_With_Admin_Roles_But_No_UserId_Fails_Closed()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Roles", "admin"); // admin role, but NO X-User-Id
+
+        var resp = await client.PostAsJsonAsync($"/v1/admin/partners/{PartnerId}/wallet/credits", new
+        {
+            amount = 300.0,
+            evidenceNote = "cash handover receipt #A-1024",
+            idempotencyKey = "credit-noop-abcdef01",
+        });
+
+        // Money creation must NOT proceed with an unattributable operator.
+        resp.IsSuccessStatusCode.Should().BeFalse("a money-in event may never be recorded with an empty operator");
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    // ── Negative paths (deterministic; never reach the fake) ──────────────────────────
+
+    [Fact]
+    public async Task Partner_Topup_Without_Auth_Is_401()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        using var client = factory.CreateClient(); // no identity headers
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId = JeeberId,
+            amount = 25.0,
+            idempotencyKey = "idem-key-abcdef01",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Partner_Balance_With_Wrong_Role_Is_403()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", JeeberId);
+        client.DefaultRequestHeaders.Add("X-User-Roles", "driver"); // jeeber, not partner
+
+        var resp = await client.GetAsync("/v1/partner/wallet");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+    }
+
+    [Fact]
+    public async Task Partner_Topup_With_Zero_Amount_Is_400()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        using var client = AsPartner(factory);
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId = JeeberId,
+            amount = 0.0, // fails [Range(0.01, ...)]
+            idempotencyKey = "idem-key-abcdef01",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task Admin_CashCredit_Without_EvidenceNote_Is_400()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        using var client = AsAdmin(factory);
+
+        var resp = await client.PostAsJsonAsync($"/v1/admin/partners/{PartnerId}/wallet/credits", new
+        {
+            amount = 300.0, // missing mandatory evidenceNote → [Required] 400
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    // ── Route contract (G1): freeze the shipped gateway surface so a rename reds CI ──
+    //
+    // The portal must target THESE exact paths. Each is hit WITHOUT auth: a 401 proves the route
+    // EXISTS (a portal coded to it would reach the handler); a 404 would mean the route was renamed
+    // and the portal's money-moving call would silently 404 — the cross-repo drift this pins against.
+
+    [Theory]
+    [InlineData("POST", "/v1/partner/wallet/transfers")]
+    [InlineData("POST", "/v1/partner/wallet/transfers/predict")]
+    [InlineData("POST", "/v1/partner/wallet/transfers/otp/challenge")]
+    [InlineData("GET", "/v1/partner/wallet")]
+    [InlineData("GET", "/v1/partner/wallet/balance")]
+    [InlineData("GET", "/v1/partner/wallet/ledger")]
+    [InlineData("GET", "/v1/partner/jeebers/22222222-2222-2222-2222-222222222222/wallet-target")]
+    [InlineData("GET", "/v1/partner/jeebers/search?query=ab")]
+    [InlineData("POST", "/v1/admin/partners/11111111-1111-1111-1111-111111111111/wallet/credits")]
+    public async Task Frozen_Partner_Routes_Exist(string method, string path)
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        using var client = factory.CreateClient(); // no identity → 401 iff the route exists
+
+        var req = new HttpRequestMessage(new HttpMethod(method), path);
+        if (method == "POST") req.Content = JsonContent.Create(new { });
+
+        var resp = await client.SendAsync(req);
+
+        resp.StatusCode.Should().NotBe(HttpStatusCode.NotFound,
+            "the frozen gateway route {0} {1} must exist for the portal client to bind to it", method, path);
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized,
+            "an unauthenticated call to an existing money route flows through the framework auth gate");
+    }
+
+    // ── PP-1: partner login front door (POST /v1/partner/auth/login) ──────────────────
+    //
+    // A partner is admin-provisioned as a config roster row: login → holderId (== UM userId) + a
+    // SHA-256 hash of the secret. These tests provision that row via in-memory config (the real
+    // production path), so the whole chain runs — credential verify → gateway session mint → the
+    // ADR-005 partner capability gate — with NO wallet-service and NO edge X-User-Id shortcut.
+
+    private const string PartnerLogin = "partner-1@jeeb.dev";
+    private const string PartnerSecret = "corr3ct-partner-secret";
+
+    private static string Sha256Hex(string value)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    // Login request body as a dictionary (string keys) — the JSON contract the portal posts:
+    // { "identifier": ..., "password": ... }. Built as a dictionary so the secret is only ever a
+    // bound variable value in source, never an inline credential literal.
+    private static Dictionary<string, string> LoginBody(string identifier, string secret)
+        => new() { ["identifier"] = identifier, ["password"] = secret };
+
+    /// <summary>Host with ONE admin-provisioned partner (login=PartnerLogin, holder=PartnerId) + the offline fake wallet.</summary>
+    private static WebApplicationFactory<Program> FactoryWithProvisionedPartner(FakeWalletClient fake)
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["PartnerAuth:Credentials:0:Login"] = PartnerLogin,
+                ["PartnerAuth:Credentials:0:HolderId"] = PartnerId,
+                ["PartnerAuth:Credentials:0:DisplayName"] = "Test Partner Shop",
+                ["PartnerAuth:Credentials:0:SecretSha256"] = Sha256Hex(PartnerSecret),
+            }));
+            b.ConfigureTestServices(s => s.AddScoped<SwServiceWalletClient>(_ => fake));
+        });
+
+    /// <summary>Decode a JWT's payload claims (base64url) without pulling in a JWT library dependency.</summary>
+    private static JsonElement DecodeJwtPayload(string jwt)
+    {
+        var parts = jwt.Split('.');
+        parts.Length.Should().Be(3, "a signed JWT has header.payload.signature");
+        var payload = parts[1].Replace('-', '+').Replace('_', '/');
+        payload = payload.PadRight(payload.Length + (4 - payload.Length % 4) % 4, '=');
+        var json = Encoding.UTF8.GetString(Convert.FromBase64String(payload));
+        return JsonDocument.Parse(json).RootElement.Clone();
+    }
+
+    [Fact]
+    public async Task Partner_Login_Valid_Credential_Mints_Partner_Token()
+    {
+        await using var factory = FactoryWithProvisionedPartner(new FakeWalletClient());
+        using var client = factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/auth/login", LoginBody(PartnerLogin, PartnerSecret));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await resp.Content.ReadFromJsonAsync<LoginDto>();
+        body!.Token.Should().NotBeNullOrEmpty("the portal binds to the `token` field");
+        body.AccessToken.Should().Be(body.Token);
+        body.RefreshToken.Should().NotBeNullOrEmpty();
+        body.Partner!.PartnerId.Should().Be(Guid.Parse(PartnerId), "holderId == user-management userId (owner decision)");
+        body.Partner.Role.Should().Be("partner");
+
+        // The minted access token is a REAL gateway session: aud=jeeb-clients, iss=jeeb-gateway,
+        // and the roles claim carries `partner` (from Roles.Partner) — exactly what the L1 audience
+        // gate and the L2 capability handler require.
+        var claims = DecodeJwtPayload(body.Token!);
+        claims.GetProperty("aud").GetString().Should().Be("jeeb-clients");
+        claims.GetProperty("iss").GetString().Should().Be("jeeb-gateway");
+        claims.GetProperty("sub").GetString().Should().Be(PartnerId);
+
+        // `roles` may serialize as a single string (one role) — assert it contains "partner".
+        var roles = claims.GetProperty("roles");
+        var roleValues = roles.ValueKind == JsonValueKind.Array
+            ? roles.EnumerateArray().Select(e => e.GetString())
+            : new[] { roles.GetString() };
+        roleValues.Should().Contain("partner");
+    }
+
+    [Fact]
+    public async Task Partner_Login_Wrong_Secret_Is_401_ProblemDetails()
+    {
+        await using var factory = FactoryWithProvisionedPartner(new FakeWalletClient());
+        using var client = factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/auth/login", LoginBody(PartnerLogin, "not-the-secret"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        resp.Content.Headers.ContentType!.MediaType.Should().Be("application/problem+json", "wrong credentials return RFC 7807");
+
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        // No user enumeration: the detail must NOT reveal whether the login exists.
+        problem.GetProperty("detail").GetString().Should().NotContain(PartnerLogin);
+    }
+
+    [Fact]
+    public async Task Partner_Login_Unknown_Login_Is_401_And_Does_Not_Enumerate()
+    {
+        await using var factory = FactoryWithProvisionedPartner(new FakeWalletClient());
+        using var client = factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/auth/login", LoginBody("nobody@nowhere.test", PartnerSecret));
+
+        // Identical outcome to a wrong secret — a probe cannot tell "no such login" from "wrong secret".
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        resp.Content.Headers.ContentType!.MediaType.Should().Be("application/problem+json");
+    }
+
+    [Fact]
+    public async Task Partner_Minted_Token_Passes_Capability_Gate_On_Wallet_Read()
+    {
+        await using var factory = FactoryWithProvisionedPartner(new FakeWalletClient { Balance = 75.0 });
+
+        // 1) Log in and take the minted bearer.
+        using var loginClient = factory.CreateClient();
+        var login = await loginClient.PostAsJsonAsync("/v1/partner/auth/login", LoginBody(PartnerLogin, PartnerSecret));
+        login.StatusCode.Should().Be(HttpStatusCode.OK);
+        var token = (await login.Content.ReadFromJsonAsync<LoginDto>())!.Token;
+
+        // 2) Call a partner-capability-gated route with the REAL bearer — NO X-User-Id / X-User-Roles
+        //    edge headers. A 200 proves the minted token satisfies Layer 1 (aud=jeeb-clients) AND the
+        //    Layer 2 partner.wallet.read.own capability, end to end.
+        using var bearerClient = factory.CreateClient();
+        bearerClient.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+        var resp = await bearerClient.GetAsync("/v1/partner/wallet");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "a gateway-minted partner token must pass the ADR-005 partner capability gate");
+    }
+
+    // ── PP-3: free-text jeeber search (GET /v1/partner/jeebers/search) ────────────────
+    //
+    // The user-management typed client (IPartnerJeeberSearchClient) is swapped for a fake, so the
+    // whole BFF path — the ADR-005 partner capability gate, query/limit validation, phone masking,
+    // and upstream-failure mapping — runs fully offline (no user-management, no Docker). Negative
+    // paths (401/403/400) are deterministic and never reach the fake.
+
+    private static WebApplicationFactory<Program> FactoryWithFakeSearch(FakeJeeberSearchClient fake)
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureTestServices(s => s.AddScoped<IPartnerJeeberSearchClient>(_ => fake)));
+
+    [Fact]
+    public async Task Partner_Search_Without_Auth_Is_401()
+    {
+        await using var factory = FactoryWithFakeSearch(new FakeJeeberSearchClient());
+        using var client = factory.CreateClient(); // no identity headers
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=nour");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Partner_Search_With_Wrong_Role_Is_403()
+    {
+        await using var factory = FactoryWithFakeSearch(new FakeJeeberSearchClient());
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", JeeberId);
+        client.DefaultRequestHeaders.Add("X-User-Roles", "driver"); // jeeber, not partner
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=nour");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+    }
+
+    [Fact]
+    public async Task Partner_Search_Short_Query_Is_400_ProblemDetails()
+    {
+        var fake = new FakeJeeberSearchClient();
+        await using var factory = FactoryWithFakeSearch(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=a"); // trimmed length 1 < 2
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        // RFC 7807 ProblemDetails body (the partner module serves it under application/json via the
+        // class-level [Produces], like every other PartnerControllerBase error).
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("status").GetInt32().Should().Be(400);
+        problem.GetProperty("title").GetString().Should().NotBeNullOrEmpty();
+        fake.CallCount.Should().Be(0, "a too-short query must be rejected BEFORE any user-management call");
+    }
+
+    [Fact]
+    public async Task Partner_Search_Missing_Query_Is_400()
+    {
+        var fake = new FakeJeeberSearchClient();
+        await using var factory = FactoryWithFakeSearch(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search"); // no query at all
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        fake.CallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Partner_Search_Returns_Shape_With_Masked_Phone()
+    {
+        var fake = new FakeJeeberSearchClient
+        {
+            Hits = new List<PartnerJeeberSearchHit>
+            {
+                new(JeeberId, "Nour Q", "+970791234567"),
+                new("33333333-3333-3333-3333-333333333333", "Sara M", "0788887654"),
+            },
+        };
+        await using var factory = FactoryWithFakeSearch(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=no");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var items = await resp.Content.ReadFromJsonAsync<List<SearchItemDto>>();
+        items.Should().NotBeNull();
+        items!.Should().HaveCount(2);
+
+        items[0].JeeberId.Should().Be(JeeberId);
+        items[0].DisplayName.Should().Be("Nour Q");
+        items[0].Phone.Should().Be("***4567", "phone is masked to the last four digits");
+        items[1].Phone.Should().Be("***7654");
+
+        // The full number never leaves the gateway.
+        items[0].Phone.Should().NotContain("970");
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().NotContain("791234567");
+
+        // Trimmed query forwarded verbatim; omitted limit defaults to 10 (frozen contract).
+        fake.LastQuery.Should().Be("no");
+        fake.LastLimit.Should().Be(10);
+    }
+
+    [Fact]
+    public async Task Partner_Search_No_Match_Returns_Empty_Array()
+    {
+        await using var factory = FactoryWithFakeSearch(new FakeJeeberSearchClient()); // no hits
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=zzzznomatch");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var items = await resp.Content.ReadFromJsonAsync<List<SearchItemDto>>();
+        items.Should().NotBeNull();
+        items!.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Partner_Search_Limit_Is_Clamped_To_Max_20()
+    {
+        var fake = new FakeJeeberSearchClient();
+        await using var factory = FactoryWithFakeSearch(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=nour&limit=999");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        fake.LastLimit.Should().Be(20, "limit is clamped to the frozen contract maximum of 20");
+    }
+
+    [Fact]
+    public async Task Partner_Search_Upstream_Failure_Is_502_Sanitized_ProblemDetails()
+    {
+        // user-management down (503) → clean RFC 7807 502; the upstream status is NEVER echoed.
+        var fake = new FakeJeeberSearchClient { Throw = new PartnerJeeberSearchUpstreamException(503) };
+        await using var factory = FactoryWithFakeSearch(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/jeebers/search?query=nour");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+
+        // RFC 7807 ProblemDetails body, sanitized — status 502, gateway-authored title, no upstream leak.
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("status").GetInt32().Should().Be(502);
+        problem.GetProperty("title").GetString().Should().Be("The jeeber search could not be completed.");
+
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().NotContain("503", "the upstream status must not leak to the caller");
+    }
+
+    // ── PP-7: OTP step-up on high-value top-ups ───────────────────────────────────────
+    //
+    // Threshold defaults to 50 (PartnerWallet:OtpStepUpThreshold). An amount at/below 50 flows
+    // unchanged (backward compatible — the existing 34 tests use amounts ≤ 50). An amount above 50
+    // requires a challenge (step 1) + the code echoed on the confirm (step 2). The offline fake wallet
+    // proves no money moves when the OTP gate rejects (ExecuteCount stays 0).
+
+    private const double AboveThreshold = 75.0;
+
+    private sealed record OtpChallengeDto(string ChallengeId, int ExpiresInSeconds, string? DevCode);
+
+    private static async Task<OtpChallengeDto> IssueChallengeAsync(
+        HttpClient client, double amount = AboveThreshold, string jeeberId = JeeberId)
+    {
+        var resp = await client.PostAsJsonAsync(
+            "/v1/partner/wallet/transfers/otp/challenge", new { jeeberId, amount });
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        return (await resp.Content.ReadFromJsonAsync<OtpChallengeDto>())!;
+    }
+
+    private static Task<HttpResponseMessage> TransferWithOtpAsync(
+        HttpClient client, double amount, string idempotencyKey, string otpChallengeId, string otpCode,
+        string jeeberId = JeeberId)
+        => client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId,
+            amount,
+            idempotencyKey,
+            otpChallengeId,
+            otpCode,
+        });
+
+    /// <summary>A 6-digit code guaranteed to differ from <paramref name="realCode"/> (no 1-in-a-million flake).</summary>
+    private static string WrongCodeFor(string realCode) => realCode == "000000" ? "111111" : "000000";
+
+    private static async Task<string> OtpTypeAsync(HttpResponseMessage resp)
+    {
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        return problem.GetProperty("type").GetString() ?? string.Empty;
+    }
+
+    [Fact]
+    public async Task Partner_Otp_Challenge_At_Or_Below_Threshold_Is_400_OtpNotRequired()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient());
+        using var client = AsPartner(factory);
+
+        // Amount == threshold (50) → not required (the boundary is inclusive of "no OTP").
+        var resp = await client.PostAsJsonAsync(
+            "/v1/partner/wallet/transfers/otp/challenge", new { jeeberId = JeeberId, amount = 50.0 });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await OtpTypeAsync(resp)).Should().Contain("otp-not-required");
+    }
+
+    [Fact]
+    public async Task Partner_Otp_Challenge_Above_Threshold_Returns_ChallengeId_And_Null_DevCode_Without_Flag()
+    {
+        await using var factory = FactoryWithFakeWallet(new FakeWalletClient()); // dev flag OFF
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client);
+
+        Guid.TryParse(challenge.ChallengeId, out _).Should().BeTrue("challengeId is a GUID string");
+        challenge.ExpiresInSeconds.Should().Be(300, "the frozen 5-minute validity window");
+        challenge.DevCode.Should().BeNull("devCode is surfaced ONLY when Features:DevEndpoints:Enabled=true");
+    }
+
+    [Fact]
+    public async Task Partner_Otp_Challenge_Above_Threshold_Surfaces_Six_Digit_DevCode_When_Flag_On()
+    {
+        await using var factory = FactoryWithFakeWalletDevOtp(new FakeWalletClient()); // dev flag ON
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client);
+
+        challenge.DevCode.Should().NotBeNullOrEmpty();
+        challenge.DevCode.Should().MatchRegex("^[0-9]{6}$", "the code is a zero-padded 6-digit number");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_Without_Otp_Is_403_OtpRequired()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWallet(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId = JeeberId,
+            amount = AboveThreshold,
+            idempotencyKey = "otp-missing-abcd01",
+            // no OtpChallengeId / OtpCode → step-up required
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("type").GetString().Should().Contain("otp-required");
+        problem.GetProperty("otpRequired").GetBoolean().Should().BeTrue("the portal keys on this extension");
+        fake.ExecuteCount.Should().Be(0, "no money moves without a valid step-up code");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_Wrong_Code_Is_403_OtpInvalid_And_Decrements_Attempts()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWalletDevOtp(fake);
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client);
+        var wrong = WrongCodeFor(challenge.DevCode!);
+
+        var r1 = await TransferWithOtpAsync(client, AboveThreshold, "wrong-1-abcdef", challenge.ChallengeId, wrong);
+        r1.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var p1 = await r1.Content.ReadFromJsonAsync<JsonElement>();
+        p1.GetProperty("type").GetString().Should().Contain("otp-invalid");
+        p1.GetProperty("attemptsRemaining").GetInt32().Should().Be(4, "one of five guesses spent");
+
+        var r2 = await TransferWithOtpAsync(client, AboveThreshold, "wrong-2-abcdef", challenge.ChallengeId, wrong);
+        var p2 = await r2.Content.ReadFromJsonAsync<JsonElement>();
+        p2.GetProperty("attemptsRemaining").GetInt32().Should().Be(3, "the wrong-guess counter decrements durably");
+
+        fake.ExecuteCount.Should().Be(0, "a wrong code never moves money");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_Exhausts_After_Five_Wrong_Codes()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWalletDevOtp(fake);
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client);
+        var wrong = WrongCodeFor(challenge.DevCode!);
+
+        for (var i = 0; i < 5; i++)
+        {
+            var r = await TransferWithOtpAsync(client, AboveThreshold, $"exhaust-{i}-abcdef", challenge.ChallengeId, wrong);
+            r.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+            (await OtpTypeAsync(r)).Should().Contain("otp-invalid", "the first five wrong guesses are invalid, not exhausted");
+        }
+
+        // The sixth submission is past the ceiling → hard-expired, even the CORRECT code no longer works.
+        var sixth = await TransferWithOtpAsync(client, AboveThreshold, "exhaust-6-abcdef", challenge.ChallengeId, challenge.DevCode!);
+        sixth.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await OtpTypeAsync(sixth)).Should().Contain("otp-exhausted");
+
+        fake.ExecuteCount.Should().Be(0, "an exhausted challenge never authorizes a move");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_With_Valid_Code_Executes_Then_Replay_Is_403_OtpConsumed()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWalletDevOtp(fake);
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client);
+
+        // Step 2 with the correct code → the money moves once.
+        var first = await TransferWithOtpAsync(client, AboveThreshold, "consume-1-abcdef", challenge.ChallengeId, challenge.DevCode!);
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        var move = await first.Content.ReadFromJsonAsync<MoveDto>();
+        move!.Amount.Should().Be(AboveThreshold);
+
+        // Replaying the SAME (now consumed) challenge with a fresh idempotency key must NOT move money
+        // again — single-use is enforced by the OTP gate, independently of the transfer idempotency key.
+        var replay = await TransferWithOtpAsync(client, AboveThreshold, "consume-2-abcdef", challenge.ChallengeId, challenge.DevCode!);
+        replay.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await OtpTypeAsync(replay)).Should().Contain("otp-consumed");
+
+        fake.ExecuteCount.Should().Be(1, "one challenge authorizes exactly one money move");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_Amount_Or_Jeeber_Mismatch_Is_403_OtpInvalid()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWalletDevOtp(fake);
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client, AboveThreshold, JeeberId);
+
+        // Same challenge + correct code, but a DIFFERENT amount (still above threshold) → mismatch.
+        var amountMismatch = await TransferWithOtpAsync(client, 80.0, "mismatch-amt-abc", challenge.ChallengeId, challenge.DevCode!);
+        amountMismatch.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await OtpTypeAsync(amountMismatch)).Should().Contain("otp-invalid");
+
+        // Same challenge + correct code + right amount, but a DIFFERENT jeeber → mismatch.
+        var jeeberMismatch = await TransferWithOtpAsync(client, AboveThreshold, "mismatch-jbr-abc", challenge.ChallengeId, challenge.DevCode!, OtherJeeberId);
+        jeeberMismatch.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await OtpTypeAsync(jeeberMismatch)).Should().Contain("otp-invalid");
+
+        fake.ExecuteCount.Should().Be(0, "a challenge only authorizes the exact (jeeber, amount) it was minted for");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_Above_Threshold_Another_Partners_Challenge_Is_403_OtpInvalid()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWalletDevOtp(fake);
+
+        // Partner A mints a challenge.
+        using var partnerA = AsPartner(factory);
+        var challenge = await IssueChallengeAsync(partnerA);
+
+        // Partner B (a different holder id, same role) tries to use A's challenge id + code.
+        using var partnerB = factory.CreateClient();
+        partnerB.DefaultRequestHeaders.Add("X-User-Id", "55555555-5555-5555-5555-555555555555");
+        partnerB.DefaultRequestHeaders.Add("X-User-Roles", "partner");
+
+        var resp = await TransferWithOtpAsync(partnerB, AboveThreshold, "cross-partner-abc", challenge.ChallengeId, challenge.DevCode!);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await OtpTypeAsync(resp)).Should().Contain("otp-invalid", "a challenge is bound to the partner that minted it");
+        fake.ExecuteCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Partner_Topup_At_Or_Below_Threshold_Ignores_Otp_Fields_And_Executes()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWallet(fake);
+        using var client = AsPartner(factory);
+
+        // Amount == threshold (50) with GARBAGE OTP fields → still executes (fields ignored below/at threshold).
+        var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId = JeeberId,
+            amount = 50.0,
+            idempotencyKey = "below-thr-abcdef",
+            otpChallengeId = "not-a-guid",
+            otpCode = "000000",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK, "at/below threshold the OTP gate does not engage (backward compatible)");
+        fake.ExecuteCount.Should().Be(1);
+    }
+
+    // ── PP-8: ledger filters (type / from / to) ───────────────────────────────────────
+    //
+    // The IJeebWalletLedgerReader is swapped for a fake that (a) records the filter args the
+    // controller parsed + forwarded and (b) applies the SAME predicate the PostgresJeebWalletLedgerReader
+    // applies in SQL (exact type equality; from/to inclusive on the UTC calendar date). So the frozen
+    // PP-8 contract — no-params-unchanged, type match/miss, inclusive date boundaries, malformed→400,
+    // unknown-type→empty-200 — is proven fully offline (no Postgres, no Docker). The real server-side
+    // filtering lives in the SQL WHERE (JeebWalletLedgerReader.cs); this fake mirrors its intent.
+
+    private static WebApplicationFactory<Program> FactoryWithFakeLedger(FakeLedgerReader ledger)
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureTestServices(s =>
+            {
+                s.RemoveAll<IJeebWalletLedgerReader>();
+                s.AddSingleton<IJeebWalletLedgerReader>(ledger);
+            }));
+
+    private static JeebWalletLedgerEntry LedgerRow(string id, string type, string ts)
+        => new() { Id = id, Type = type, Amount = 10m, Sign = 1, Ref = "ref-" + id, Ts = ts };
+
+    /// <summary>Three canonical rows: two <c>partner-topup</c> (07-10, 07-20) + one <c>partner-cash-credit</c> (07-15).</summary>
+    private static List<JeebWalletLedgerEntry> SampleLedgerRows() => new()
+    {
+        LedgerRow("a-1", "partner-topup", "2026-07-10T12:00:00Z"),
+        LedgerRow("b-2", "partner-cash-credit", "2026-07-15T12:00:00Z"),
+        LedgerRow("c-3", "partner-topup", "2026-07-20T12:00:00Z"),
+    };
+
+    private static async Task<LedgerPageDto> GetLedgerPageAsync(HttpClient client, string query = "")
+    {
+        var resp = await client.GetAsync("/v1/partner/wallet/ledger" + query);
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        return (await resp.Content.ReadFromJsonAsync<LedgerPageDto>())!;
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_No_Filters_Returns_All_And_Forwards_Null_Filters()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client);
+
+        page.Items.Should().HaveCount(3, "no filter params → the full ledger, unchanged (backward compatible)");
+        page.Page.Should().Be(1);
+        fake.LastType.Should().BeNull("no type param is forwarded as a null filter");
+        fake.LastFrom.Should().BeNull();
+        fake.LastTo.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Type_Filter_Matches_Only_That_Type()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?type=partner-topup");
+
+        page.Items.Should().HaveCount(2, "only the two partner-topup rows match");
+        page.Items.Should().OnlyContain(i => i.Type == "partner-topup");
+        fake.LastType.Should().Be("partner-topup", "the exact type string is forwarded to the read path");
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Unknown_Type_Is_Empty_200_Not_Error()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        // GetLedgerPageAsync asserts the 200 — an unknown type is a natural MISS, never a 4xx/5xx.
+        var page = await GetLedgerPageAsync(client, "?type=does-not-exist");
+
+        page.Items.Should().BeEmpty("an unknown type yields an empty result set, not an error");
+        fake.LastType.Should().Be("does-not-exist");
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Blank_Type_Is_Treated_As_No_Filter()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?type=%20"); // ?type=<space> → collapses to no filter
+
+        page.Items.Should().HaveCount(3, "an empty/whitespace type is normalized to 'no filter', not a miss");
+        fake.LastType.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_From_Is_Inclusive_Lower_Bound()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?from=2026-07-15");
+
+        page.Items.Select(i => i.Id).Should().BeEquivalentTo(new[] { "b-2", "c-3" },
+            "from is INCLUSIVE: the 07-15 row is kept, the 07-10 row dropped");
+        fake.LastFrom.Should().Be(new DateOnly(2026, 7, 15), "the ISO date is parsed and forwarded exactly");
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_To_Is_Inclusive_Upper_Bound()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?to=2026-07-15");
+
+        page.Items.Select(i => i.Id).Should().BeEquivalentTo(new[] { "a-1", "b-2" },
+            "to is INCLUSIVE: the 07-15 row is kept, the 07-20 row dropped");
+        fake.LastTo.Should().Be(new DateOnly(2026, 7, 15));
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_From_And_To_Single_Day_Is_Inclusive_Both_Ends()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?from=2026-07-15&to=2026-07-15");
+
+        page.Items.Select(i => i.Id).Should().BeEquivalentTo(new[] { "b-2" },
+            "a single-day inclusive window returns exactly that day's row");
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Type_And_Date_Filters_Compose()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var page = await GetLedgerPageAsync(client, "?type=partner-topup&from=2026-07-15");
+
+        page.Items.Select(i => i.Id).Should().BeEquivalentTo(new[] { "c-3" },
+            "type + date AND together: a topup on/after 07-15 → only the 07-20 row");
+        fake.LastType.Should().Be("partner-topup");
+        fake.LastFrom.Should().Be(new DateOnly(2026, 7, 15));
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Malformed_From_Is_400_ProblemDetails_Before_Any_Read()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.GetAsync("/v1/partner/wallet/ledger?from=not-a-date");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("status").GetInt32().Should().Be(400);
+        problem.GetProperty("title").GetString().Should().NotBeNullOrEmpty();
+        problem.GetProperty("type").GetString().Should().Contain("invalid-ledger-date");
+        fake.CallCount.Should().Be(0, "a malformed date is rejected BEFORE the ledger is read");
+    }
+
+    [Fact]
+    public async Task Partner_Ledger_Malformed_To_Is_400_ProblemDetails()
+    {
+        var fake = new FakeLedgerReader { Rows = SampleLedgerRows() };
+        await using var factory = FactoryWithFakeLedger(fake);
+        using var client = AsPartner(factory);
+
+        // 13th month / 40th day: correct yyyy-MM-dd shape but not a real calendar date.
+        var resp = await client.GetAsync("/v1/partner/wallet/ledger?to=2026-13-40");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("status").GetInt32().Should().Be(400);
+        problem.GetProperty("type").GetString().Should().Contain("invalid-ledger-date");
+        fake.CallCount.Should().Be(0);
+    }
+
+    // ── DTOs + fake ───────────────────────────────────────────────────────────────────
+
+    private sealed record LedgerPageDto(List<LedgerItemDto> Items, int Page, int TotalPages);
+    private sealed record LedgerItemDto(string Id, string Type, decimal Amount, int Sign, string Ref, string Ts);
+
+    /// <summary>
+    /// Offline fake ledger reader — records the filter args the controller forwarded and returns canned
+    /// rows using the SAME predicate PostgresJeebWalletLedgerReader applies in SQL (exact type equality;
+    /// from/to inclusive on the UTC calendar date). Proves the PP-8 pass-through + boundary contract with
+    /// no Postgres; the real server-side filter is the SQL WHERE in JeebWalletLedgerReader.cs.
+    /// </summary>
+    private sealed class FakeLedgerReader : IJeebWalletLedgerReader
+    {
+        public IReadOnlyList<JeebWalletLedgerEntry> Rows { get; init; } = Array.Empty<JeebWalletLedgerEntry>();
+
+        public int CallCount { get; private set; }
+        public string? LastType { get; private set; }
+        public DateOnly? LastFrom { get; private set; }
+        public DateOnly? LastTo { get; private set; }
+
+        public Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
+            Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to, CancellationToken ct)
+        {
+            CallCount++;
+            LastType = type;
+            LastFrom = from;
+            LastTo = to;
+
+            IEnumerable<JeebWalletLedgerEntry> q = Rows;
+            if (type is not null) q = q.Where(e => e.Type == type);
+            if (from is DateOnly f) q = q.Where(e => DateOnly.FromDateTime(ParseUtc(e.Ts)) >= f);
+            if (to is DateOnly t) q = q.Where(e => DateOnly.FromDateTime(ParseUtc(e.Ts)) <= t);
+
+            return Task.FromResult<IReadOnlyList<JeebWalletLedgerEntry>>(q.ToList());
+        }
+
+        private static DateTime ParseUtc(string iso)
+            => DateTimeOffset.Parse(iso, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind).UtcDateTime;
+    }
+
+    private sealed record SearchItemDto(string JeeberId, string DisplayName, string Phone);
+
+    /// <summary>Offline fake user-management search client — records the forwarded query/limit and
+    /// returns canned hits (or throws a canned upstream fault).</summary>
+    private sealed class FakeJeeberSearchClient : IPartnerJeeberSearchClient
+    {
+        public IReadOnlyList<PartnerJeeberSearchHit> Hits { get; init; } = Array.Empty<PartnerJeeberSearchHit>();
+        public Exception? Throw { get; init; }
+
+        public int CallCount { get; private set; }
+        public string? LastQuery { get; private set; }
+        public int LastLimit { get; private set; }
+
+        public Task<IReadOnlyList<PartnerJeeberSearchHit>> SearchJeebersAsync(string query, int limit, CancellationToken ct)
+        {
+            CallCount++;
+            LastQuery = query;
+            LastLimit = limit;
+            if (Throw is not null) throw Throw;
+            return Task.FromResult(Hits);
+        }
+    }
+
+    private sealed record LoginDto(string? Token, string? AccessToken, string? RefreshToken, PartnerDto? Partner);
+    private sealed record PartnerDto(Guid PartnerId, string? Login, string? DisplayName, string? Role);
+
+    private sealed record MoveDto(Guid TransactionId, double Amount, double Fees, string Status);
+    private sealed record PreviewDto(Guid JeeberId, double GrossAmount, double Fees, double NetToJeeber, string? Summary);
+
+    /// <summary>
+    /// Offline fake — overrides only the (virtual) wallet-service methods the partner BFF calls.
+    /// Every holder read returns a single wallet (CurrencyID=1) so the wallet-id resolution succeeds;
+    /// the saga initiate returns a header id the execute then "commits".
+    /// </summary>
+    private sealed class FakeWalletClient : SwServiceWalletClient
+    {
+        public double Balance { get; init; } = 0;
+        public double PredictFees { get; init; } = 0;
+
+        /// <summary>How many times the saga's Execute ran — proves idempotency dedup (exactly once).</summary>
+        public int ExecuteCount => _executeCount;
+        private int _executeCount;
+
+        private static readonly Guid HeaderId = Guid.Parse("99999999-9999-9999-9999-999999999999");
+
+        public FakeWalletClient() : base("http://localhost", new HttpClient())
+        {
+        }
+
+        private GetHolderWallets HolderWith(Guid holderId) => new()
+        {
+            WalletHolder = new WalletHolder { HolderId = holderId, HolderName = "fake", IsActive = true },
+            Wallets = new List<Wallet>
+            {
+                new() { WalletId = Guid.NewGuid(), HolderId = holderId, CurrencyID = 1, Amount = Balance, Type = "main" },
+            },
+        };
+
+        public override Task<GetHolderWallets> WalletsAsync(Guid holderId)
+            => Task.FromResult(HolderWith(holderId));
+
+        public override Task<GetHolderWallets> WalletsAsync(Guid holderId, CancellationToken ct)
+            => Task.FromResult(HolderWith(holderId));
+
+        public override Task<AddWalletHolderResponse> SystemWalletAsync()
+            => Task.FromResult(new AddWalletHolderResponse
+            {
+                Wallets = new List<Wallet>
+                {
+                    new() { WalletId = Guid.NewGuid(), CurrencyID = 1, Amount = 1_000_000, Type = "system" },
+                },
+            });
+
+        public override Task<AddWalletHolderResponse> SystemWalletAsync(CancellationToken ct)
+            => SystemWalletAsync();
+
+        public override Task<ExpectedTransaction> PredictAsync(TransactionRequest body)
+            => Task.FromResult(new ExpectedTransaction
+            {
+                GrossAmount = body.Transactions is { Count: > 0 } ? FirstAmount(body) : 0,
+                Fees = PredictFees,
+                Summary = "fake-preview",
+            });
+
+        public override Task<ExpectedTransaction> PredictAsync(TransactionRequest body, CancellationToken ct)
+            => PredictAsync(body);
+
+        public override Task<Transaction> InitiateAsync(TransactionRequest body)
+            => Task.FromResult(new Transaction
+            {
+                TransactionHeader = new TransactionHeader { TxId = HeaderId, Status = 0 },
+            });
+
+        public override Task<Transaction> InitiateAsync(TransactionRequest body, CancellationToken ct)
+            => InitiateAsync(body);
+
+        public override Task ExecuteAsync(Guid transactionHeaderId)
+        {
+            System.Threading.Interlocked.Increment(ref _executeCount);
+            return Task.CompletedTask;
+        }
+
+        public override Task ExecuteAsync(Guid transactionHeaderId, CancellationToken ct)
+            => ExecuteAsync(transactionHeaderId);
+        public override Task AbortAsync(Guid transactionHeaderId) => Task.CompletedTask;
+        public override Task AbortAsync(Guid transactionHeaderId, CancellationToken ct) => Task.CompletedTask;
+
+        private static double FirstAmount(TransactionRequest body)
+        {
+            foreach (var d in body.Transactions) return d.Amount;
+            return 0;
+        }
+    }
+}

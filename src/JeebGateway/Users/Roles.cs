@@ -18,4 +18,18 @@ public static class Roles
 
     /// <summary>Internal operator with access to /admin/** endpoints.</summary>
     public const string Admin = "admin";
+
+    /// <summary>
+    /// Jeeb Partner (cash shop / agent) who accepts cash offline and tops up jeeber
+    /// wallets digitally through the Partner Portal (JEBV4 partner-wallet-bff).
+    ///
+    /// <para>Like <see cref="Client"/>/<see cref="Jeeber"/> this is the OPAQUE role string
+    /// as persisted by the shared user-management service; unlike them it needs no
+    /// snake_case contract translation (a partner never places delivery requests), so
+    /// <see cref="JeebRoleTranslator.ToContract"/> passes it through verbatim — exactly the
+    /// documented pass-through for any non-<c>{customer,driver}</c> role (e.g. <c>admin</c>).
+    /// Referenced only by the ADR-005 capability map for the <c>partner.*</c> capabilities;
+    /// additive, changes no existing role handling.</para>
+    /// </summary>
+    public const string Partner = "partner";
 }
