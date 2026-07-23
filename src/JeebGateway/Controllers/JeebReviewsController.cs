@@ -94,6 +94,7 @@ public sealed class JeebReviewsController : ControllerBase
     [ProducesResponseType(typeof(JeebReviewsPageResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> ListReviews(
         [FromQuery] string? jeeberId,
         [FromQuery] int page = 1,
@@ -129,15 +130,13 @@ public sealed class JeebReviewsController : ControllerBase
             var upstream = await _feedback.CommentGETAsync(id, safeSize, offset, NoRatingFilter, ct);
             return Ok(JeebReviewsProjection.ProjectCommentsPage(id, upstream, safePage, safeSize));
         }
-        catch (FeedbackApiException ex)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Graceful degrade (ADR-0001): a transient upstream fault returns the
-            // mobile-tolerated cold-start empty page rather than a 5xx — the reviews
-            // surface is non-critical and the mobile DioReviewsRepository tolerates it.
-            _log.LogWarning(
-                "reviews list for jeeber {JeeberId} degraded to empty: upstream status {Status}",
-                id, ex.StatusCode);
-            return Ok(JeebReviewsProjection.EmptyReviewsPage(id, safePage, safeSize));
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return FeedbackReadProblem(ex);
         }
     }
 
@@ -356,13 +355,31 @@ public sealed class JeebReviewsController : ControllerBase
     };
 
     /// <summary>
+    /// A feedback read failure is not an empty review set. Always surface a
+    /// sanitized gateway error so callers can distinguish downstream unavailability
+    /// from a genuine, successfully-read zero-row response.
+    /// </summary>
+    private IActionResult FeedbackReadProblem(Exception ex)
+    {
+        _log.LogWarning(
+            ex,
+            "Reviews BFF: feedback-service list read failed on {Method} {Path}; returning 502.",
+            Request.Method,
+            Request.Path);
+
+        return Problem(
+            title: "The reviews request could not be completed.",
+            statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    /// <summary>
     /// JEBV4-249 — map a caught upstream feedback-service <see cref="FeedbackApiException"/>
     /// to a sanitized RFC 7807 ProblemDetails. The upstream status is preserved (clamped to
     /// a valid 4xx/5xx; anything else → 502 Bad Gateway), but the upstream message/body is
     /// logged server-side ONLY and never echoed to the caller. Only the two GENERAL
-    /// submit/reveal catches route here; the graceful reviews-list degrade (returns the
-    /// cold-start empty page), the <c>when (404) → NotFound()</c> un-rated mapping, and the
-    /// local <c>catch (ArgumentException) → Problem400(ex.Message)</c> tag validation keep
+    /// submit/reveal catches route here; the reviews-list read has its own fail-closed
+    /// 502 mapper, while the <c>when (404) → NotFound()</c> un-rated mapping and local
+    /// <c>catch (ArgumentException) → Problem400(ex.Message)</c> tag validation keep
     /// their behaviour. (Previously echoed the raw upstream <c>ex.Message</c> in the
     /// response detail.)
     /// </summary>
