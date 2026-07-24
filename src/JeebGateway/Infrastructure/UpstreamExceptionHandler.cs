@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Polly.CircuitBreaker;
+using Polly.Timeout;
 
 namespace JeebGateway.Infrastructure;
 
@@ -41,6 +43,29 @@ public sealed class UpstreamExceptionHandler : IExceptionHandler
         var (status, title, type) = exception switch
         {
             HttpRequestException => (
+                StatusCodes.Status502BadGateway,
+                "An upstream service returned an unexpected response.",
+                "https://jeeb.dev/errors/upstream-unavailable"),
+            // JEBV4 UserPreferences-500 incident (2026-07-24): a dead/refused upstream
+            // (e.g. remote-user-preferences down) is not always seen here as a raw
+            // HttpRequestException. The org-standard resilience pipeline (the
+            // AttachStandardPipeline / AddResilienceHandler ladder in
+            // Extensions/ServiceClientExtensions.cs — Polly v8 via
+            // Microsoft.Extensions.Http.Resilience) wraps it in ITS OWN exception once
+            // a per-attempt timeout fires or the circuit breaker trips:
+            // Polly.Timeout.TimeoutRejectedException or
+            // Polly.CircuitBreaker.BrokenCircuitException, each carrying the real
+            // HttpRequestException/SocketException as InnerException. Neither matched
+            // the HttpRequestException arm above, so EVERY typed client guarded by the
+            // standard pipeline — not only UserPreferences — fell through to the
+            // generic 500 "unexpected error" below, indistinguishable from an actual
+            // gateway bug. Confirmed live on MSI: POST /api/UserPreferences/preferences
+            // threw Polly.CircuitBreaker.BrokenCircuitException ("The circuit is now
+            // open and is not allowing calls.") ---> HttpRequestException("Connection
+            // refused (127.0.0.1:10067)") ---> SocketException(111) and still surfaced
+            // as a bare 500. Route both resilience wrapper types to the same
+            // upstream-unavailable mapping as a raw HttpRequestException.
+            BrokenCircuitException or TimeoutRejectedException => (
                 StatusCodes.Status502BadGateway,
                 "An upstream service returned an unexpected response.",
                 "https://jeeb.dev/errors/upstream-unavailable"),
