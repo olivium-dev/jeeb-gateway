@@ -3,6 +3,8 @@ using FluentAssertions;
 using JeebGateway.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using Polly.CircuitBreaker;
+using Polly.Timeout;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests.Infrastructure;
@@ -65,6 +67,38 @@ public class UpstreamExceptionHandlerCorrelationTests
 
         handled.Should().BeTrue();
         logger.LastMessage.Should().Contain("(none)");
+    }
+
+    /// <summary>
+    /// JEBV4 UserPreferences-500 incident (2026-07-24): a dead upstream guarded by the
+    /// standard resilience pipeline throws <see cref="BrokenCircuitException"/> (circuit
+    /// open) or <see cref="TimeoutRejectedException"/> (per-attempt timeout) — NOT a bare
+    /// <see cref="HttpRequestException"/> — once the breaker trips. Confirmed live on MSI:
+    /// POST /api/UserPreferences/preferences against a down remote-user-preferences upstream
+    /// threw exactly <c>Polly.CircuitBreaker.BrokenCircuitException</c> wrapping
+    /// <c>HttpRequestException("Connection refused (127.0.0.1:10067)")</c>, and — before this
+    /// fix — still surfaced as an opaque 500 "unexpected error" instead of the already-designed
+    /// 502 "upstream-unavailable" mapping.
+    /// </summary>
+    [Theory]
+    [InlineData(typeof(BrokenCircuitException))]
+    [InlineData(typeof(TimeoutRejectedException))]
+    public async Task Maps_Resilience_Wrapped_Upstream_Failures_To_502_Upstream_Unavailable(Type exceptionType)
+    {
+        var logger = new RecordingLogger<UpstreamExceptionHandler>();
+        var handler = new UpstreamExceptionHandler(new FakeProblemDetailsService(), logger);
+
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Method = "POST";
+        ctx.Request.Path = "/api/UserPreferences/preferences";
+
+        var inner = new HttpRequestException("Connection refused (127.0.0.1:10067)");
+        var exception = (Exception)Activator.CreateInstance(exceptionType, "The circuit is now open and is not allowing calls.", inner)!;
+
+        var handled = await handler.TryHandleAsync(ctx, exception, CancellationToken.None);
+
+        handled.Should().BeTrue();
+        ctx.Response.StatusCode.Should().Be(StatusCodes.Status502BadGateway);
     }
 
     private sealed class FakeProblemDetailsService : IProblemDetailsService
