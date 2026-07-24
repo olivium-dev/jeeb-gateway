@@ -73,6 +73,14 @@ public class RequestExpirySweeper : BackgroundService
 
         using var scope = _services.CreateScope();
         var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
+        var authority = scope.ServiceProvider.GetService<IDurableRequestsMirror>();
+        if (authority is null)
+        {
+            _logger.LogError(
+                "Request expiry sweep skipped because the gateway Postgres expiry authority is unavailable");
+            return;
+        }
+
         var notifier = scope.ServiceProvider.GetRequiredService<IRequestExpiryNotifier>();
         var offers = scope.ServiceProvider.GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
         var tiers = scope.ServiceProvider.GetRequiredService<JeebGateway.Tiers.ITiersStore>();
@@ -93,8 +101,18 @@ public class RequestExpirySweeper : BackgroundService
 
             if (req.CreatedAt <= expiryCutoff)
             {
-                if (await store.TryExpireAsync(req.Id, now, ct))
+                // PostgreSQL is the commit point. Every replica may scan the same
+                // stale candidate, but only one conditional UPDATE can transition
+                // pending/matched -> expired. Only that winner projects locally,
+                // notifies, and closes offers.
+                if (await authority.MarkExpiredAsync(req.Id, now, ct))
                 {
+                    var projection = scope.ServiceProvider.GetService<InMemoryRequestsStore>();
+                    if (projection is not null)
+                    {
+                        await projection.TryExpireAsync(req.Id, now, ct);
+                    }
+
                     await notifier.NotifyExpiredAsync(req.ClientId, req.Id, now, ct);
 
                     // Best-effort: close any still-live bids on the now-terminal request

@@ -141,10 +141,13 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
 
         await using var conn = await _db.OpenAsync(ct);
 
-        // Touch ONLY the gateway columns — the native enum status + its coupled
-        // CHECK constraints are left untouched so no constraint can fire. The
-        // terminal-state predicate makes the transition atomic and idempotent:
-        // one overlapping observer poll can win, while every repeat returns false.
+        // Postgres is the expiry authority. Touch ONLY the gateway columns — the
+        // native enum status + its coupled CHECK constraints are left untouched so
+        // no constraint can fire. The positive pre-acceptance allow-list is
+        // deliberate: a stale replica may still hold "pending" in memory after
+        // another replica committed accepted/in-progress/completed in this row.
+        // PostgreSQL row locking plus this predicate means only one concurrent
+        // sweeper can win, and no sweep can overwrite that later lifecycle state.
         const string sql = """
             UPDATE delivery_requests
                SET gw_status = 'expired',
@@ -152,8 +155,9 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
                    gw_updated_at = now()
              WHERE id = @Id
                AND gw_mirror = TRUE
-               AND COALESCE(gw_status, status::text) NOT IN
-                   ('delivered', 'rated', 'cancelled', 'expired', 'disputed')
+               AND status::text IN ('pending', 'matched')
+               AND COALESCE(gw_status, status::text) IN ('pending', 'matched')
+               AND gw_jeeber_id IS NULL
             """;
 
         await using var cmd = new NpgsqlCommand(sql, conn);
@@ -238,6 +242,7 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
                 gw_recipient_phone,
                 created_at,
                 scheduled_at,
+                gw_expired_at,
                 gw_jeeber_id,
                 gw_accepted_fee,
                 gw_conversation_id,
@@ -288,6 +293,7 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
                 gw_recipient_phone,
                 created_at,
                 scheduled_at,
+                gw_expired_at,
                 gw_jeeber_id,
                 gw_accepted_fee,
                 gw_conversation_id,
@@ -334,6 +340,7 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
                 gw_recipient_phone,
                 created_at,
                 scheduled_at,
+                gw_expired_at,
                 gw_jeeber_id,
                 gw_accepted_fee,
                 gw_conversation_id,
@@ -395,6 +402,7 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
             RecipientPhone = Text("gw_recipient_phone"),
             CreatedAt      = r.GetFieldValue<DateTimeOffset>(r.GetOrdinal("created_at")),
             ScheduledAt    = Ts("scheduled_at"),
+            ExpiredAt      = Ts("gw_expired_at"),
             JeeberId       = Text("gw_jeeber_id"),
             AcceptedFee    = r.IsDBNull(r.GetOrdinal("gw_accepted_fee"))
                 ? null
