@@ -37,6 +37,22 @@ public static class CdnUploadUrlResolver
     public const string CdnPutSignedPathPrefix = "api/ImageUpload/put-signed/";
 
     /// <summary>
+    /// P4/P5 (b01-20260725) — cdn-service's READ route prefix
+    /// (<c>ImageUploadController.Fetch</c>). Lives beside its PUT sibling
+    /// <see cref="CdnPutSignedPathPrefix"/> so the two cdn paths the gateway
+    /// mirrors are declared in one place.
+    ///
+    /// <para><b>Single-segment encoding is load-bearing.</b> cdn's route is
+    /// <c>fetch/{fileName}</c> — <c>{fileName}</c> is ONE route segment, so a
+    /// nested objectRef (<c>chat_attachment/&lt;guid&gt;.jpg</c>) must be
+    /// percent-encoded into a single segment
+    /// (<c>chat_attachment%2F&lt;guid&gt;.jpg</c>). Verified live on MSI
+    /// 2026-07-25: encoded → 200 + bytes; a raw slash → 404 (routing miss);
+    /// basename-only → 404 (the object lives under the slot dir).</para>
+    /// </summary>
+    public const string CdnFetchPathPrefix = "api/ImageUpload/fetch/";
+
+    /// <summary>
     /// The gateway streaming-proxy path prefix the client PUTs to. Kept as a
     /// segment-for-segment mirror of <see cref="CdnPutSignedPathPrefix"/> so the
     /// forward (mint-time rewrite) and reverse (PUT-time reconstruction) mappings
@@ -130,6 +146,29 @@ public static class CdnUploadUrlResolver
         // rooted). Derived from CdnPutSignedPathPrefix so the guard can never drift from
         // the path the proxy actually mirrors.
         && upstreamUri.AbsolutePath.StartsWith("/" + CdnPutSignedPathPrefix, StringComparison.Ordinal);
+
+    /// <summary>
+    /// P4/P5 — the READ-side twin of <see cref="IsOnSignedPutPrefix"/>. SSRF /
+    /// path-traversal fail-closed check on the CANONICALIZED fetch target
+    /// (CWE-22 / CWE-918): the read proxy builds
+    /// <c>new Uri(cdnBase, "api/ImageUpload/fetch/" + Uri.EscapeDataString(objectPath))</c>
+    /// and <see cref="System.Uri"/> percent-decodes + collapses dot-segments at
+    /// that point, so the URI that will ACTUALLY be dialed is what must be
+    /// validated — it must stay on cdn's own scheme/host/port AND under the fixed
+    /// fetch prefix. Pure function (no I/O, no ASP.NET types) so the exact
+    /// canonicalization is unit tested directly.
+    /// </summary>
+    /// <param name="upstreamUri">The fully-built target, <c>new Uri(cdnBase, relative)</c>.</param>
+    /// <param name="cdnBase">The cdn-proxy client's configured <c>BaseAddress</c>.</param>
+    /// <returns><c>true</c> only when the target stays on cdn's own origin and under the fetch prefix.</returns>
+    public static bool IsOnFetchPrefix(Uri upstreamUri, Uri cdnBase) =>
+        string.Equals(upstreamUri.Scheme, cdnBase.Scheme, StringComparison.Ordinal)
+        && string.Equals(upstreamUri.Host, cdnBase.Host, StringComparison.OrdinalIgnoreCase)
+        && upstreamUri.Port == cdnBase.Port
+        // Leading '/' anchors the check to cdn's own path prefix (AbsolutePath is always
+        // rooted). Derived from CdnFetchPathPrefix so the guard can never drift from the
+        // path the read proxy actually mirrors.
+        && upstreamUri.AbsolutePath.StartsWith("/" + CdnFetchPathPrefix, StringComparison.Ordinal);
 
     private static string RewriteToGatewayProxy(string cdnPathAndQuery, string gatewayPublicBase)
     {
