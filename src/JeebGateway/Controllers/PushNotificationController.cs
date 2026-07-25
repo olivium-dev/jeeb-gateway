@@ -313,7 +313,9 @@ namespace JeebGateway.Controllers
                 var serviceRequest = new SentPayloadToDeviceRequest
                 {
                     User_id = userId,
-                    Payload = request.Payload
+                    // P45: the bound payload is an STJ JsonElement; the push client is
+                    // Newtonsoft. Bridge it or the upstream receives {"ValueKind":N}.
+                    Payload = UpstreamJsonPayload.ToNewtonsoftSafe(request.Payload)
                 };
 
                 var response = await _servicePushNotificationClient.Send_notification_to_deviceAsync(deviceId, serviceRequest);
@@ -365,7 +367,8 @@ namespace JeebGateway.Controllers
 
                 var serviceRequest = new SentPayloadToAllUsersRequest
                 {
-                    Payload = request.Payload
+                    // P45: STJ-bound JsonElement -> Newtonsoft-native token (see above).
+                    Payload = UpstreamJsonPayload.ToNewtonsoftSafe(request.Payload)
                 };
 
                 var response = await _servicePushNotificationClient.Broadcast_notification_to_all_usersAsync(serviceRequest);
@@ -423,7 +426,8 @@ namespace JeebGateway.Controllers
 
                 var serviceRequest = new SentPayloadToUserRequest
                 {
-                    Payload = request.Payload
+                    // P45: STJ-bound JsonElement -> Newtonsoft-native token (see above).
+                    Payload = UpstreamJsonPayload.ToNewtonsoftSafe(request.Payload)
                 };
 
                 var response = await _servicePushNotificationClient.Send_notification_to_userAsync(userId, serviceRequest);
