@@ -1615,6 +1615,10 @@ else
         sp.GetRequiredService<InMemoryRequestExpiryNotifier>());
 }
 builder.Services.AddSingleton<TierExpiryWindowResolver>();
+// P7 (G-J): the read-side offer-wait deadline projection. SINGLETON is required —
+// the 60 s tier-catalog cache only caches if the instance survives the request, and
+// without it every list/feed read acquires an upstream delivery-service dependency.
+builder.Services.AddSingleton<OfferDeadlineProjector>();
 builder.Services.AddSingleton<RequestExpirySweeper>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RequestExpirySweeper>());
 builder.Services.AddSingleton<RequestNudgeSweeper>();
