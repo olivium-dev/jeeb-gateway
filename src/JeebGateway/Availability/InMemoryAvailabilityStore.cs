@@ -117,6 +117,17 @@ public class InMemoryAvailabilityStore : IAvailabilityStore
         return Task.FromResult(snapshot);
     }
 
+    public Task<IReadOnlyList<JeeberAvailability>> ListKnownJeebersAsync(DateTimeOffset since, CancellationToken ct)
+    {
+        // P1 — the never-starve fallback source for the new-request fan-out. Mirrors the
+        // Postgres COALESCE(last_interaction_at, last_seen_at, updated_at) >= @Since predicate.
+        IReadOnlyList<JeeberAvailability> snapshot = _records.Values
+            .Where(r => (r.LastInteractionAt ?? r.LastSeenAt ?? r.UpdatedAt) >= since)
+            .Select(Clone)
+            .ToArray();
+        return Task.FromResult(snapshot);
+    }
+
     private static void Apply(JeeberAvailability record, GoOnlineRequest request, DateTimeOffset now)
     {
         record.IsOnline = true;

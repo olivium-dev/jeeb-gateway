@@ -389,5 +389,8 @@ public class HeartbeatPresenceWireTests
 
         public Task<IReadOnlyList<JeeberAvailability>> ListOnlineAsync(CancellationToken ct)
             => Task.FromResult<IReadOnlyList<JeeberAvailability>>(Array.Empty<JeeberAvailability>());
+
+        public Task<IReadOnlyList<JeeberAvailability>> ListKnownJeebersAsync(DateTimeOffset since, CancellationToken ct)
+            => Task.FromResult<IReadOnlyList<JeeberAvailability>>(Array.Empty<JeeberAvailability>());
     }
 }
