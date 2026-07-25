@@ -1,3 +1,4 @@
+using System.Net;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Services;
 using JeebGateway.Services.Cdn;
@@ -28,8 +29,9 @@ namespace JeebGateway.Controllers;
 /// <para>
 /// <b>JEBV4-113 §CDN fallback — ESCALATE, no Postgres-backed fallback built
 /// (decision recorded here, not implemented).</b> When the flag is OFF, ALL
-/// THREE actions below (<see cref="BrokerUploadUrl"/>, <see cref="GetAsset"/>,
-/// <see cref="GetSignedUrl"/>) 503 via <see cref="UpstreamDisabled"/> with NO
+/// FOUR actions below (<see cref="BrokerUploadUrl"/>, <see cref="GetAsset"/>,
+/// <see cref="GetSignedUrl"/>, <see cref="GetAssetContent"/>) 503 via
+/// <see cref="UpstreamDisabled"/> with NO
 /// fallback path — this is the entire current behavior, confirmed by reading
 /// this file; there is no partial/degraded mode today. A gateway-Postgres-backed
 /// asset store was considered and rejected as NOT small/clean:
@@ -86,6 +88,11 @@ public sealed class CdnController : ControllerBase
             "vehicle_registration",
             "selfie_with_liveness",
             "proof_of_delivery",
+            // P4/P5 (b01-20260725): in-chat image attachment (camera + gallery).
+            // Same brokered signed-PUT path as the KYC/POD slots — only this
+            // allowlist entry differs. cdn-service does NOT validate slots (it
+            // sanitizes + uses the value as a storage dir), so no upstream change.
+            "chat_attachment",
         };
 
     private static readonly IReadOnlySet<string> AllowedUploadContentTypes =
@@ -102,17 +109,28 @@ public sealed class CdnController : ControllerBase
     private readonly ICDNServiceClient _cdn;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IConfiguration _config;
+
+    /// <summary>
+    /// P4/P5 — used ONLY by <see cref="GetAssetContent"/> to dial cdn-service's
+    /// fetch route through the dedicated, resilience-free
+    /// <c>cdn-proxy</c> named client (<see cref="CdnUploadUrlResolver.ProxyHttpClientName"/>,
+    /// registered in ServiceClientExtensions with the cdn BaseAddress, a generous
+    /// timeout and AllowAutoRedirect=false).
+    /// </summary>
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<CdnController> _logger;
 
     public CdnController(
         ICDNServiceClient cdn,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         IConfiguration config,
+        IHttpClientFactory httpClientFactory,
         ILogger<CdnController> logger)
     {
         _cdn = cdn;
         _flags = flags;
         _config = config;
+        _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
 
@@ -291,6 +309,147 @@ public sealed class CdnController : ControllerBase
 
         var signed = await _cdn.GetSignedUrlAsync(assetId, ttl, ct);
         return Ok(signed);
+    }
+
+    /// <summary>
+    /// P4/P5 (b01-20260725) — the AUTHENTICATED read path for a brokered asset.
+    /// cdn-service is internal-only (no edge route) and exposes NO signed-download
+    /// endpoint: its surface is
+    /// <c>api/ImageUpload/{upload,fetch,presign-put,put-signed,…}</c>, so
+    /// <see cref="GetSignedUrl"/> above (which dials the non-existent
+    /// <c>api/v1/assets/{id}/signed-url</c>) can never serve a signed-PUT object.
+    /// This streams the bytes from cdn's own fetch route instead.
+    ///
+    /// <para><b>ADR-005 Layer 2 / auth.</b> Covered by the CLASS-level
+    /// <c>[RequireCapability(Capabilities.CdnBroker)]</c> — participant
+    /// {client, jeeber} (CapabilityRolePolicy) — exactly like
+    /// <see cref="GetAsset"/> and <see cref="GetSignedUrl"/>, which likewise carry
+    /// no per-action marker. The class attribute is Inherited and lands on every
+    /// action's endpoint metadata, so <c>CapabilityCoverageGuard</c> sees this
+    /// action as covered without a new attribute. This route is deliberately NOT
+    /// <c>[PublicEndpoint]</c>: unlike the signed PUT (whose HMAC query IS the
+    /// authz) a plain fetch carries no signature, so the bearer / edge identity is
+    /// the only gate — <see cref="UserIdentity.TryGetUserId"/> below is the 401.</para>
+    ///
+    /// <para><b>GR-1 dumb pipe.</b> No business logic, no durable state, body
+    /// STREAMED (<c>ResponseHeadersRead</c> + <c>File(stream)</c>) — an image is
+    /// never buffered whole in gateway memory. Mirrors
+    /// <see cref="CdnUploadProxyController"/>.</para>
+    ///
+    /// <para><b>Route precedence.</b> "content" is a literal segment and beats the
+    /// <c>{assetId}</c> parameter, so a 3+-segment path lands here; a tail-less
+    /// <c>GET /api/cdn/assets/content</c> also binds this catch-all with an empty
+    /// objectPath and fails the guard below with 400 — harmless either way, and
+    /// never a 500.</para>
+    /// </summary>
+    [HttpGet("content/{**objectPath}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> GetAssetContent(string objectPath, CancellationToken ct = default)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+
+        // SSRF / traversal fail-closed on the RAW route value — same guard shape as
+        // CdnUploadProxyController.PutSigned (CWE-22/918). The ref is appended to a
+        // FIXED cdn prefix; a traversal segment could otherwise redirect the read at
+        // a different cdn endpoint. Kestrel SINGLE-decodes the route value, so a
+        // double-encoded "%252e%252e" surfaces here as the literal "%2e%2e" (still
+        // carrying '%'), which a plain ".." check misses; a '\' can normalise to '/'
+        // inside System.Uri. cdn mints slug-only refs ("{slot}/{guid:N}{ext}"), so
+        // '%' and '\' are never legitimate here.
+        if (string.IsNullOrWhiteSpace(objectPath)
+            || objectPath.Contains("..", StringComparison.Ordinal)
+            || objectPath.Contains('%')
+            || objectPath.Contains('\\'))
+        {
+            return Problem(
+                title: "Invalid asset reference",
+                detail: "The asset object reference is missing or malformed.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (!_flags.CurrentValue.Cdn) return UpstreamDisabled();
+
+        var client = _httpClientFactory.CreateClient(CdnUploadUrlResolver.ProxyHttpClientName);
+        if (client.BaseAddress is null)
+        {
+            // cdn base unconfigured (placeholder host) — never dial an unroutable host.
+            _logger.LogError("CDN read proxy: cdn-service base address is not configured.");
+            return Problem(
+                title: "CDN upstream not configured",
+                detail: "The asset store fetch endpoint is not configured in this environment.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        // cdn's fetch route takes {fileName} as ONE segment, so the nested objectRef
+        // must be percent-encoded into a single segment (verified live on MSI: a raw
+        // slash 404s).
+        var upstreamUri = new Uri(
+            client.BaseAddress,
+            CdnUploadUrlResolver.CdnFetchPathPrefix + Uri.EscapeDataString(objectPath));
+
+        // Fail-closed on the CANONICALIZED sink: it must stay on cdn's own
+        // scheme/host/port AND under the fixed fetch prefix. Validate the sink, not
+        // just the raw route string.
+        if (!CdnUploadUrlResolver.IsOnFetchPrefix(upstreamUri, client.BaseAddress))
+        {
+            _logger.LogWarning(
+                "CDN read proxy: rejected off-prefix upstream target (resolved path {ResolvedPath}).",
+                upstreamUri.AbsolutePath);
+            return Problem(
+                title: "Invalid asset reference",
+                detail: "The asset object reference resolves outside the asset store.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        HttpResponseMessage upstream;
+        try
+        {
+            upstream = await client.GetAsync(upstreamUri, HttpCompletionOption.ResponseHeadersRead, ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+                                   || (ex is TaskCanceledException && !ct.IsCancellationRequested))
+        {
+            _logger.LogWarning(ex, "CDN read proxy: fetch from cdn-service failed.");
+            return Problem(
+                title: "CDN upstream unavailable",
+                detail: "The asset store could not be reached to serve the requested object.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        // Dispose AFTER the response body has been written (never `using` — the
+        // FileStreamResult reads the stream after this method returns).
+        HttpContext.Response.RegisterForDispose(upstream);
+
+        if (upstream.StatusCode == HttpStatusCode.NotFound)
+        {
+            return Problem(
+                title: "Asset not found",
+                detail: "The asset does not exist or has aged out of the retention window.",
+                statusCode: StatusCodes.Status404NotFound);
+        }
+
+        // NOTE: cdn's fetch documents 206 as a success status (range-capable).
+        // IsSuccessStatusCode covers 200 AND 206 and we relay bytes either way —
+        // do NOT compare against HttpStatusCode.OK.
+        if (!upstream.IsSuccessStatusCode)
+        {
+            _logger.LogWarning(
+                "CDN read proxy: cdn-service returned {Status} for an asset fetch.",
+                (int)upstream.StatusCode);
+            return Problem(
+                title: "Asset fetch failed",
+                detail: "The asset store could not serve the requested object.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        var contentType = upstream.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
+        var stream = await upstream.Content.ReadAsStreamAsync(ct);
+        return File(stream, contentType);
     }
 
     // JEBV4-113: no fallback by design — see the class-level ESCALATE note. Every
