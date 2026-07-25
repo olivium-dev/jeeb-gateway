@@ -160,6 +160,98 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         ((int)resp.StatusCode).Should().BeLessThan(500, "unknown id is a 404, never a server error (S13 E5)");
     }
 
+    // -------- P3 (b01-20260725): GetById canonical branch surfaces Description ---
+    //
+    // The canonical branch previously hard-coded Description = string.Empty
+    // (DeliveryRequestDto.Description is init-only, so EnrichWithOfferAndJeeberAsync
+    // could never patch it in afterwards). The fix hoists the ALREADY-fetched mirror
+    // row's Description onto the DTO at construction time, gated by
+    // CallerParticipatesInDelivery so a non-participant still gets "" — zero
+    // widening of read access on this canonical branch (which does not itself run
+    // participant scoping upstream).
+
+    [Fact]
+    public async Task GetById_FlagOn_Canonical_OwningClient_ReturnsRequestDescription()
+    {
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient(); // default: canonical read returns a NON-null row
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var seed = await SeedAsync(factory, RequestStatus.Accepted, description: "2 kilos apples from Spinneys");
+
+        var http = AuthClient(factory, seed.ClientId);
+        var resp = await http.GetAsync($"/v1/deliveries/{seed.Id}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var dto = await resp.Content.ReadFromJsonAsync<DeliveryDto>();
+        dto!.Description.Should().Be("2 kilos apples from Spinneys");
+
+        // Proves we are on the canonical branch, not the F8 mirror fallback.
+        delivery.CanonicalReadCalls.Should().Contain(seed.Id);
+    }
+
+    [Fact]
+    public async Task GetById_FlagOn_Canonical_AssignedJeeber_ReturnsRequestDescription()
+    {
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var seed = await SeedAsync(factory, RequestStatus.Accepted, description: "2 kilos apples from Spinneys");
+
+        var http = AuthClient(factory, seed.JeeberId);
+        var resp = await http.GetAsync($"/v1/deliveries/{seed.Id}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var dto = await resp.Content.ReadFromJsonAsync<DeliveryDto>();
+        dto!.Description.Should().Be("2 kilos apples from Spinneys");
+    }
+
+    [Fact]
+    public async Task GetById_FlagOn_Canonical_NonParticipant_DescriptionStaysEmpty()
+    {
+        // PRIVACY LOCK — must be GREEN before and after. If this ever reds, the
+        // CallerParticipatesInDelivery guard in the canonical branch was dropped;
+        // do not merge.
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var seed = await SeedAsync(factory, RequestStatus.Accepted, description: "2 kilos apples from Spinneys");
+        var stranger = AuthClient(factory, $"jeeber-stranger-{Guid.NewGuid()}");
+
+        var resp = await stranger.GetAsync($"/v1/deliveries/{seed.Id}");
+
+        // The canonical branch does not itself 404 a stranger — that scoping lives
+        // upstream — but the description must never leak to a non-participant.
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var dto = await resp.Content.ReadFromJsonAsync<DeliveryDto>();
+        dto!.Description.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task GetById_FlagOn_CanonicalMissing_MirrorFallback_StillReturnsDescription()
+    {
+        // GREEN-guard: the F8 mirror-fallback branch (ToDto) already mapped
+        // Description = r.Description before P3 and must keep doing so unchanged.
+        var otp        = new FakeServiceOtpClient();
+        var delivery   = new FakeDeliveryServiceClient { CanonicalReadReturnsNull = true };
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+
+        var seed = await SeedAsync(factory, RequestStatus.Accepted, description: "2 kilos apples from Spinneys");
+
+        var http = AuthClient(factory, seed.JeeberId);
+        var resp = await http.GetAsync($"/v1/deliveries/{seed.Id}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var dto = await resp.Content.ReadFromJsonAsync<DeliveryDto>();
+        dto!.Description.Should().Be("2 kilos apples from Spinneys");
+    }
+
     // -------- PATCH /deliveries/{id}/status (canonical forward) ---------------
     //
     // JEB-1479 cut-over: the legacy in-gateway linear state-machine PATCH tests
@@ -811,7 +903,11 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         WebApplicationFactory<Program> factory,
         string? initialStatus = null,
         bool bindJeeber = true,
-        string? recipientPhone = null)
+        string? recipientPhone = null,
+        // P3 (b01-20260725): optional distinctive description so a test can prove
+        // the initial requirement round-trips end to end. Default preserves every
+        // existing caller's seeded text unchanged.
+        string description = "Pick up the package")
     {
         var store = factory.Services.GetRequiredService<IRequestsStore>();
         var clientId = $"client-{Guid.NewGuid()}";
@@ -820,7 +916,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var created = await store.CreateAsync(new CreateRequestInput
         {
             ClientId       = clientId,
-            Description    = "Pick up the package",
+            Description    = description,
             RecipientPhone = recipientPhone
         }, CancellationToken.None);
 

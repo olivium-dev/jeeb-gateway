@@ -422,22 +422,38 @@ public class DeliveriesController : ControllerBase
                 var canonical = await _deliveryClient.GetCanonicalDeliveryAsync(deliveryId, ct);
                 if (canonical is not null)
                 {
-                    var canonicalDto = new DeliveryRequestDto
-                    {
-                        Id = canonical.DeliveryId,
-                        ClientId = canonical.ClientId ?? string.Empty,
-                        Status = canonical.Status,
-                        Description = string.Empty,
-                        TierId = canonical.TierId,
-                        JeeberId = canonical.JeeberId,
-                        CreatedAt = canonical.CreatedAt
-                    };
                     // fix/client-visibility (run-22 P1): the local mirror row carries the
                     // accept-time fee snapshot the enrichment falls back to when the live
                     // offers lookup cannot resolve the accepted offer (jeeber-party reads,
                     // post-terminal offer-state collapse). Best-effort — a mirror miss just
                     // means no snapshot.
+                    // P3 (b01-20260725): the mirror ALSO carries the client-typed request
+                    // Description, which DeliveryReadUpstream does not. Hoisted above the DTO
+                    // construction because Description is `init`-only — EnrichWithOfferAndJeeberAsync
+                    // cannot patch it after construction. SAME single read, just earlier.
                     var mirror = await _store.GetAsync(deliveryId, ct);
+
+                    // P3 PRIVACY GUARD — do not simplify away. This canonical branch delegates
+                    // row scoping to delivery-service and deliberately does NOT run
+                    // CallerParticipatesInDelivery (unlike the mirror fallback at :505-508).
+                    // Free text the customer typed is a NEW class of data on this branch, so it
+                    // is surfaced ONLY to a proven participant (the client or the assigned
+                    // jeeber). A non-participant keeps today's empty string — zero widening of
+                    // read access. Locked by GetById_FlagOn_Canonical_NonParticipant_DescriptionStaysEmpty.
+                    var description = mirror is not null && CallerParticipatesInDelivery(mirror, callerId)
+                        ? mirror.Description
+                        : string.Empty;
+
+                    var canonicalDto = new DeliveryRequestDto
+                    {
+                        Id = canonical.DeliveryId,
+                        ClientId = canonical.ClientId ?? string.Empty,
+                        Status = canonical.Status,
+                        Description = description,
+                        TierId = canonical.TierId,
+                        JeeberId = canonical.JeeberId,
+                        CreatedAt = canonical.CreatedAt
+                    };
                     await EnrichWithOfferAndJeeberAsync(
                         canonicalDto, deliveryId, canonical.JeeberId, mirror?.AcceptedFee, ct);
                     return Ok(canonicalDto);
