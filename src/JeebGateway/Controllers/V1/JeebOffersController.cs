@@ -43,6 +43,8 @@ public sealed class JeebOffersController : ControllerBase
     private readonly IHandoverCodeStore _handoverCodes;
     private readonly UpstreamFeatureFlags _flags;
     private readonly DeliveryClientOptions _deliveryOptions;
+    // P7 (G-E): the ONE clock this controller stamps DeliveryRequestDto.ServerNow from.
+    private readonly TimeProvider _clock;
     private readonly ILogger<JeebOffersController> _logger;
 
     public JeebOffersController(
@@ -56,6 +58,7 @@ public sealed class JeebOffersController : ControllerBase
         IHandoverCodeStore handoverCodes,
         IOptions<UpstreamFeatureFlags> flags,
         IOptions<DeliveryClientOptions> deliveryOptions,
+        TimeProvider clock,
         ILogger<JeebOffersController> logger)
     {
         _offers = offers;
@@ -68,6 +71,7 @@ public sealed class JeebOffersController : ControllerBase
         _handoverCodes = handoverCodes;
         _flags = flags.Value;
         _deliveryOptions = deliveryOptions.Value;
+        _clock = clock;
         _logger = logger;
     }
 
@@ -457,7 +461,7 @@ public sealed class JeebOffersController : ControllerBase
         var handoverCode = await IssueHandoverCodeSafeAsync(requestId, ct);
 
         if (req is not null)
-            return Ok(ToRequestDto(req, handoverCode));
+            return Ok(ToRequestDto(req, _clock.GetUtcNow(), handoverCode));
 
         // Request not in local store (delivery-service is the SoT).
         // Return a minimal acknowledgement so the client knows acceptance succeeded.
@@ -916,11 +920,17 @@ public sealed class JeebOffersController : ControllerBase
         // code rides ONLY this owner's accept response as `handoverCode`.
         var handoverCode = await IssueHandoverCodeSafeAsync(accepted.Id, ct);
 
-        return Ok(ToRequestDto(accepted, handoverCode));
+        return Ok(ToRequestDto(accepted, _clock.GetUtcNow(), handoverCode));
     }
 
-    private static DeliveryRequestDto ToRequestDto(DeliveryRequest r, string? handoverCode = null) => new()
+    // P7 (G-E): ServerNow is required on the DTO — ONE clock read per response.
+    // The accept surface is post-acceptance, so the offer-deadline fields stay null
+    // (IsPreAcceptance is false for an accepted row anyway).
+    private static DeliveryRequestDto ToRequestDto(
+        DeliveryRequest r, DateTimeOffset serverNow, string? handoverCode = null) => new()
     {
+        ServerNow = serverNow,
+        ExpiredAt = r.ExpiredAt,
         Id = r.Id,
         ClientId = r.ClientId,
         Status = r.Status,
