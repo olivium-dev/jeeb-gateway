@@ -96,10 +96,11 @@ public class RequestExpirySweeper : BackgroundService
 
         foreach (var req in candidates)
         {
-            var expiryWindow = _windows.ResolveExpiryWindow(req, tierTtls);
-            var expiryCutoff = now - expiryWindow;
-
-            if (req.CreatedAt <= expiryCutoff)
+            // P7 (G-D): the expiry decision goes through the ONE shared arithmetic
+            // (RequestExpiryMath) that the read-side OfferDeadlineProjector also uses,
+            // so the countdown a client is shown and the instant this sweeper acts can
+            // never drift apart. Do NOT reintroduce inline `now - window` math here.
+            if (RequestExpiryMath.IsExpiredAt(req, tierTtls, _windows, now))
             {
                 // PostgreSQL is the commit point. Every replica may scan the same
                 // stale candidate, but only one conditional UPDATE can transition
@@ -139,7 +140,7 @@ public class RequestExpirySweeper : BackgroundService
                     _logger.LogInformation(
                         "Request {RequestId} expired after {WindowMinutes}m without accepted offer",
                         req.Id,
-                        expiryWindow.TotalMinutes);
+                        _windows.ResolveExpiryWindow(req, tierTtls).TotalMinutes);
                 }
             }
         }

@@ -446,6 +446,9 @@ public class DeliveriesController : ControllerBase
 
                     var canonicalDto = new DeliveryRequestDto
                     {
+                        // P7 (G-E): ONE clock read stamped on the response.
+                        ServerNow = _clock.GetUtcNow(),
+                        ExpiredAt = mirror?.ExpiredAt,
                         Id = canonical.DeliveryId,
                         ClientId = canonical.ClientId ?? string.Empty,
                         Status = canonical.Status,
@@ -504,7 +507,7 @@ public class DeliveriesController : ControllerBase
             return NotFound();
         }
 
-        var dto = ToDto(delivery);
+        var dto = ToDto(delivery, _clock.GetUtcNow());
         await EnrichWithOfferAndJeeberAsync(dto, deliveryId, delivery.JeeberId, delivery.AcceptedFee, ct);
         return Ok(dto);
     }
@@ -877,6 +880,8 @@ public class DeliveriesController : ControllerBase
             // Surface the canonical row verbatim (status = upstream canonical vocab).
             return Ok(new DeliveryRequestDto
             {
+                // P7 (G-E): ONE clock read stamped on the response.
+                ServerNow = _clock.GetUtcNow(),
                 Id = upstream.DeliveryId,
                 ClientId = string.Empty,
                 Status = upstream.Status,
@@ -1482,7 +1487,7 @@ public class DeliveriesController : ControllerBase
 
                 return Ok(new OtpVerificationResponse
                 {
-                    Delivery = ToDto(req),
+                    Delivery = ToDto(req, _clock.GetUtcNow()),
                     AttemptsRemaining = result.AttemptsRemaining,
                     Verified = true
                 });
@@ -1525,7 +1530,7 @@ public class DeliveriesController : ControllerBase
             "Delivery {DeliveryId} flagged client-unreachable at {At} — 15-min escalation timer started",
             row.Id, row.ClientUnreachableAt);
 
-        return Ok(ToDto(row));
+        return Ok(ToDto(row, _clock.GetUtcNow()));
     }
 
     /// <summary>
@@ -2895,8 +2900,13 @@ public class DeliveriesController : ControllerBase
             : null;
     }
 
-    private static DeliveryRequestDto ToDto(DeliveryRequest r) => new()
+    // P7 (G-E): DeliveryRequestDto.ServerNow is required — ONE clock read per
+    // response. Post-acceptance surfaces leave the offer-deadline fields null
+    // (IsPreAcceptance is false for them anyway); they only stamp ServerNow.
+    private static DeliveryRequestDto ToDto(DeliveryRequest r, DateTimeOffset serverNow) => new()
     {
+        ServerNow = serverNow,
+        ExpiredAt = r.ExpiredAt,
         Id = r.Id,
         ClientId = r.ClientId,
         Status = r.Status,

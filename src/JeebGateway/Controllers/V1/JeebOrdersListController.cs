@@ -40,15 +40,23 @@ public sealed class JeebOrdersListController : ControllerBase
 
     private readonly IRequestsStore _requests;
     private readonly IPendingOffersStore _offers;
+    // P7 (G-G): the offer-wait countdown projection + the ONE clock this
+    // controller stamps every envelope's serverNow from.
+    private readonly OfferDeadlineProjector _deadlines;
+    private readonly TimeProvider _clock;
     private readonly ILogger<JeebOrdersListController> _log;
 
     public JeebOrdersListController(
         IRequestsStore requests,
         IPendingOffersStore offers,
+        OfferDeadlineProjector deadlines,
+        TimeProvider clock,
         ILogger<JeebOrdersListController> log)
     {
         _requests = requests;
         _offers = offers;
+        _deadlines = deadlines;
+        _clock = clock;
         _log = log;
     }
 
@@ -140,11 +148,31 @@ public sealed class JeebOrdersListController : ControllerBase
             offerCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         }
 
+        // P7 (G-G): ONE clock read + ONE tier-TTL resolution for the whole response.
+        // serverNow is an envelope member (never repeated per item); the per-row
+        // deadline pair is DERIVED through the same RequestExpiryMath the sweeper
+        // commits on. Degrade-don't-fail, exactly like offerCounts above: a projection
+        // blip yields null deadlines, never a 5xx (this controller NEVER 405/5xx).
+        var now = _clock.GetUtcNow();
+        Func<DeliveryRequest, (DateTimeOffset? At, int? Seconds)> project;
+        try
+        {
+            project = await _deadlines.ProjectorForAsync(now, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "v1/requests offerDeadline decoration failed; serving null deadlines");
+            project = _ => (null, null);
+        }
+
         var items = window
-            .Select(r => ToOrderItem(r, offerCounts.TryGetValue(r.Id, out var c) ? c : 0))
+            .Select(r => ToOrderItem(
+                r,
+                offerCounts.TryGetValue(r.Id, out var c) ? c : 0,
+                project(r)))
             .ToList();
 
-        return Ok(PagedListResponse<OrderListItem>.Of(items, pg, sz, total));
+        return Ok(PagedListResponse<OrderListItem>.Of(items, pg, sz, total, now));
     }
 
     /// <summary>
@@ -225,10 +253,13 @@ public sealed class JeebOrdersListController : ControllerBase
             .OrderByDescending(r => r.CreatedAt)
             .Skip((pg - 1) * sz)
             .Take(sz)
-            .Select(r => ToOrderItem(r, 0))
+            .Select(r => ToOrderItem(r, 0, (null, null)))
             .ToList();
 
-        return Ok(PagedListResponse<OrderListItem>.Of(window, pg, sz, total));
+        // P7 (G-G): the deliveries surface is post-acceptance — no countdown applies,
+        // so the items carry null deadlines. The envelope still carries serverNow so
+        // BOTH paged surfaces speak one contract.
+        return Ok(PagedListResponse<OrderListItem>.Of(window, pg, sz, total, _clock.GetUtcNow()));
     }
 
     private IActionResult InvalidDateRange() => BadRequest(new ProblemDetails
@@ -301,8 +332,15 @@ public sealed class JeebOrdersListController : ControllerBase
         return IsListableActive(r); // unknown token → safe default
     }
 
-    private static OrderListItem ToOrderItem(DeliveryRequest r, int offersCount) => new()
+    private static OrderListItem ToOrderItem(
+        DeliveryRequest r,
+        int offersCount,
+        (DateTimeOffset? At, int? Seconds) offerDeadline) => new()
     {
+        // P7 (G-G): derived offer-wait deadline; both null unless the row is
+        // pending/matched (RequestStatus.PreAcceptanceStates).
+        OfferDeadlineAt = offerDeadline.At,
+        OfferDeadlineInSeconds = offerDeadline.Seconds,
         Id = r.Id,
         // No DisplayId on the row; mobile tolerates absence. Short, stable handle derived from the id.
         DisplayId = r.Id.Length > 8 ? r.Id[..8] : r.Id,
@@ -353,13 +391,24 @@ public sealed class PagedListResponse<T>
     [JsonPropertyName("totalPages")]
     public int TotalPages { get; init; }
 
-    public static PagedListResponse<T> Of(IReadOnlyList<T> items, int page, int pageSize, int totalCount) => new()
+    /// <summary>
+    /// P7 (G-G): this response's own UTC clock reading — stamped ONCE at the envelope
+    /// level, never repeated per item. The client pairs it with its own receive instant
+    /// so handset clock skew cannot corrupt a countdown. <c>required</c> is deliberate:
+    /// it makes an unstamped envelope a compile error.
+    /// </summary>
+    [JsonPropertyName("serverNow")]
+    public required DateTimeOffset ServerNow { get; init; }
+
+    public static PagedListResponse<T> Of(
+        IReadOnlyList<T> items, int page, int pageSize, int totalCount, DateTimeOffset serverNow) => new()
     {
         Items = items,
         Page = page,
         PageSize = pageSize,
         TotalCount = totalCount,
         TotalPages = pageSize > 0 ? (int)Math.Ceiling(totalCount / (double)pageSize) : 0,
+        ServerNow = serverNow,
     };
 }
 
@@ -407,6 +456,23 @@ public sealed class OrderListItem
 
     [JsonPropertyName("createdAt")]
     public DateTimeOffset CreatedAt { get; init; }
+
+    /// <summary>
+    /// P7: absolute UTC instant the offer-wait window closes (createdAt + resolved tier
+    /// TTL). Omitted from the JSON unless the row is pending/matched. NEVER diff this
+    /// against the handset clock — anchor on <see cref="OfferDeadlineInSeconds"/>.
+    /// </summary>
+    [JsonPropertyName("offerDeadlineAt")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? OfferDeadlineAt { get; init; }
+
+    /// <summary>
+    /// P7: seconds remaining at the envelope's <c>serverNow</c>, clamped at 0. Omitted
+    /// exactly when <see cref="OfferDeadlineAt"/> is.
+    /// </summary>
+    [JsonPropertyName("offerDeadlineInSeconds")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? OfferDeadlineInSeconds { get; init; }
 }
 
 /// <summary>Nested address block the mobile reads as <c>dropoff.address</c> / <c>pickup.address</c>.</summary>

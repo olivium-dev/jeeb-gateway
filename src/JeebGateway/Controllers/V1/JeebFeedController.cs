@@ -54,6 +54,8 @@ public sealed class JeebFeedController : ControllerBase
     private readonly IUsersStore _users;
     private readonly UpstreamFeatureFlags _flags;
     private readonly TimeProvider _clock;
+    // P7 (G-H): the offer-wait countdown projection for feed cards.
+    private readonly OfferDeadlineProjector _deadlines;
     private readonly ILogger<JeebFeedController> _logger;
 
     public JeebFeedController(
@@ -63,6 +65,7 @@ public sealed class JeebFeedController : ControllerBase
         IUsersStore users,
         IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
+        OfferDeadlineProjector deadlines,
         ILogger<JeebFeedController> logger)
     {
         _requests = requests;
@@ -71,6 +74,7 @@ public sealed class JeebFeedController : ControllerBase
         _users = users;
         _flags = flags.Value;
         _clock = clock;
+        _deadlines = deadlines;
         _logger = logger;
     }
 
@@ -96,6 +100,10 @@ public sealed class JeebFeedController : ControllerBase
             return problem;
         }
 
+        // P7 (G-H): ONE clock read for the WHOLE response — the envelope's serverNow,
+        // the candidate scan window, and every item's countdown all agree on it.
+        var feedNow = _clock.GetUtcNow();
+
         // (1) Online gate (contract-freeze §1.1/§6.5): the delivery-service presence store is the
         // authority for "who is online" (written by Contract A / availability toggle). Offline OR
         // never-online (upstream null) → empty feed (200), the Gate B negative case. Degrade-safe:
@@ -103,14 +111,17 @@ public sealed class JeebFeedController : ControllerBase
         if (!await IsOnlineAsync(jeeberId, ct))
         {
             _logger.LogInformation("jeeber.feed for {JeeberId}: offline → empty feed.", jeeberId);
-            return Ok(JeeberFeedResponse.Empty);
+            return Ok(JeeberFeedResponse.EmptyAt(feedNow));
         }
 
         // (2) Primary list: project the gateway request store by status. ListPendingCreatedAtOrBefore
         // is the cross-client pending-request query; filter to the requested status (pending) and
         // exclude the jeeber's OWN client requests (visibility predicate §1.2/§1.3).
         var wanted = string.IsNullOrWhiteSpace(status) ? RequestStatus.Pending : status!.Trim();
-        var candidates = await _requests.ListPendingCreatedAtOrBeforeAsync(_clock.GetUtcNow(), ct);
+        // P7 (G-H): reuse the SAME clock read for the candidate scan so the whole
+        // response — envelope serverNow, candidate window, and every item's countdown —
+        // is consistent to one instant.
+        var candidates = await _requests.ListPendingCreatedAtOrBeforeAsync(feedNow, ct);
 
         var visible = candidates
             .Where(r => string.Equals(r.Status, wanted, StringComparison.OrdinalIgnoreCase))
@@ -138,15 +149,34 @@ public sealed class JeebFeedController : ControllerBase
         // / email are NEVER projected — only the short display form + an absolute-https avatar.
         var sendersByClient = await ResolveSendersAsync(visible, ct);
 
+        // P7 (G-H): resolve the tier-TTL projector ONCE for the whole page.
+        // Degrade-don't-fail, like every other feed annotation: a blip yields null
+        // deadlines, never a feed failure.
+        Func<DeliveryRequest, (DateTimeOffset? At, int? Seconds)> project;
+        try
+        {
+            project = await _deadlines.ProjectorForAsync(feedNow, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "jeeber.feed offerDeadline decoration failed; serving null deadlines");
+            project = _ => (null, null);
+        }
+
         var items = visible
-            .Select(r => ToFeedItem(r, offersByRequest, sendersByClient))
+            .Select(r => ToFeedItem(r, offersByRequest, sendersByClient, project(r)))
             .ToList();
 
         _logger.LogInformation(
             "jeeber.feed for {JeeberId}: {Count} pending request(s) projected (status={Status}).",
             jeeberId, items.Count, wanted);
 
-        return Ok(new JeeberFeedResponse { Items = items, TotalCount = items.Count });
+        return Ok(new JeeberFeedResponse
+        {
+            Items = items,
+            TotalCount = items.Count,
+            ServerNow = feedNow,
+        });
     }
 
     /// <summary>
@@ -316,7 +346,8 @@ public sealed class JeebFeedController : ControllerBase
     private static JeeberFeedItem ToFeedItem(
         DeliveryRequest request,
         IReadOnlyDictionary<string, JeeberFeedOffer> offersByRequest,
-        IReadOnlyDictionary<string, FeedSenderIdentity> sendersByClient)
+        IReadOnlyDictionary<string, FeedSenderIdentity> sendersByClient,
+        (DateTimeOffset? At, int? Seconds) offerDeadline)
     {
         offersByRequest.TryGetValue(request.Id, out var myOffer);
         sendersByClient.TryGetValue(request.ClientId, out var sender);
@@ -348,6 +379,11 @@ public sealed class JeebFeedController : ControllerBase
             // did not resolve. Derived from the profile — NEVER the raw clientId.
             SenderName = sender?.Name,
             SenderAvatarUrl = sender?.AvatarUrl,
+            // P7 (G-H): DERIVED offer-wait deadline — same arithmetic the sweeper
+            // commits on, so a jeeber never sees time on a card the sweeper has
+            // already decided to expire.
+            OfferDeadlineAt = offerDeadline.At,
+            OfferDeadlineInSeconds = offerDeadline.Seconds,
         };
     }
 
@@ -374,7 +410,16 @@ public sealed class JeeberFeedResponse
     /// <summary>Gate B asserts <c>&gt;= 1</c> for an online jeeber with a pending cross-able request.</summary>
     public int TotalCount { get; init; }
 
-    public static readonly JeeberFeedResponse Empty = new();
+    /// <summary>
+    /// P7: this response's own UTC clock reading — ONE read per response, stamped at
+    /// the envelope level. <c>required</c> is deliberate: an unstamped envelope is a
+    /// compile error, which is why the old <c>static readonly Empty</c> singleton was
+    /// replaced by <see cref="EmptyAt"/>.
+    /// </summary>
+    public required DateTimeOffset ServerNow { get; init; }
+
+    /// <summary>The empty feed, stamped with the caller's clock read.</summary>
+    public static JeeberFeedResponse EmptyAt(DateTimeOffset now) => new() { ServerNow = now };
 }
 
 /// <summary>
@@ -410,6 +455,19 @@ public sealed class JeeberFeedItem
     /// when absent, not absolute-https, or the lookup degraded. Additive and safe to ignore.
     /// </summary>
     public string? SenderAvatarUrl { get; init; }
+
+    /// <summary>
+    /// P7: absolute UTC instant the offer-wait window closes (createdAt + resolved tier
+    /// TTL). Null unless the row is pending/matched. NEVER diff this against the handset
+    /// clock — anchor on <see cref="OfferDeadlineInSeconds"/> plus the receive instant.
+    /// </summary>
+    public DateTimeOffset? OfferDeadlineAt { get; init; }
+
+    /// <summary>
+    /// P7: seconds remaining at the envelope's <c>serverNow</c>, clamped at 0. Null
+    /// exactly when <see cref="OfferDeadlineAt"/> is null.
+    /// </summary>
+    public int? OfferDeadlineInSeconds { get; init; }
 }
 
 /// <summary>GAP-2 — pickup/dropoff summary on a feed item (contract-freeze §3.3 FeedLocation).</summary>

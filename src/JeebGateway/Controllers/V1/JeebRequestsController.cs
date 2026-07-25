@@ -52,6 +52,10 @@ public sealed class JeebRequestsController : ControllerBase
     private readonly string _tenantId;
     private readonly INewRequestPushNotifier _newRequestPush;
     private readonly CreateModerationEvaluator _moderationEvaluator;
+    // P7 (G-F): the offer-wait countdown projection + the ONE clock this
+    // controller stamps every response with.
+    private readonly OfferDeadlineProjector _deadlines;
+    private readonly TimeProvider _clock;
     private readonly ILogger<JeebRequestsController> _logger;
 
     public JeebRequestsController(
@@ -65,6 +69,8 @@ public sealed class JeebRequestsController : ControllerBase
         IConfiguration config,
         INewRequestPushNotifier newRequestPush,
         CreateModerationEvaluator moderationEvaluator,
+        OfferDeadlineProjector deadlines,
+        TimeProvider clock,
         ILogger<JeebRequestsController> logger)
     {
         _requests = requests;
@@ -77,6 +83,8 @@ public sealed class JeebRequestsController : ControllerBase
         _tenantId = config["Services:Delivery:TenantId"] ?? DefaultTenantId;
         _newRequestPush = newRequestPush;
         _moderationEvaluator = moderationEvaluator;
+        _deadlines = deadlines;
+        _clock = clock;
         _logger = logger;
     }
 
@@ -258,7 +266,10 @@ public sealed class JeebRequestsController : ControllerBase
                 created.Id);
         }
 
-        return CreatedAtAction(nameof(Get), new { id = created.Id }, ToRequestDto(created));
+        // P7 (G-F): a freshly created pending row ships a FULL countdown so the
+        // waiting screen paints correctly on its very first frame, without a poll.
+        return CreatedAtAction(
+            nameof(Get), new { id = created.Id }, await ProjectAsync(created, ct));
     }
 
     /// <summary>
@@ -304,7 +315,7 @@ public sealed class JeebRequestsController : ControllerBase
             });
         }
 
-        return Ok(ToRequestDto(req));
+        return Ok(await ProjectAsync(req, ct));
     }
 
     /// <summary>
@@ -563,8 +574,36 @@ public sealed class JeebRequestsController : ControllerBase
                    || string.Equals(offerStatus, "edited", StringComparison.OrdinalIgnoreCase));
     }
 
-    private static DeliveryRequestDto ToRequestDto(DeliveryRequest r) => new()
+    /// <summary>
+    /// P7 (G-F) — the customer read projection. ONE clock read per response is
+    /// stamped as <c>serverNow</c>, and the offer-wait countdown is derived (never
+    /// stored) through the SAME <see cref="RequestExpiryMath"/> the sweeper commits
+    /// on. A projection blip degrades to null deadlines — it never 5xxes a read.
+    /// </summary>
+    private async Task<DeliveryRequestDto> ProjectAsync(DeliveryRequest r, CancellationToken ct)
     {
+        var now = _clock.GetUtcNow();
+        var dto = ToRequestDto(r, now);
+        try
+        {
+            var (at, secs) = await _deadlines.ProjectAsync(r, now, ct);
+            dto.OfferDeadlineAt = at;
+            dto.OfferDeadlineInSeconds = secs;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "Offer-deadline projection failed for request {RequestId}; serving null deadline fields.",
+                r.Id);
+        }
+
+        return dto;
+    }
+
+    private static DeliveryRequestDto ToRequestDto(DeliveryRequest r, DateTimeOffset serverNow) => new()
+    {
+        ServerNow = serverNow,
+        ExpiredAt = r.ExpiredAt,
         Id = r.Id,
         ClientId = r.ClientId,
         Status = r.Status,

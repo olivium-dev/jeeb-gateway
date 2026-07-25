@@ -29,11 +29,21 @@ public class AdminTiersController : ControllerBase
     private const int MaxRequestTtlSeconds = 30 * 24 * 60 * 60; // 30 days
 
     private readonly ITiersStore _store;
+    // P7 (G-I): the in-flight request set the TTL guard counts, and the clock it
+    // scans that set at.
+    private readonly JeebGateway.Requests.IRequestsStore _requests;
+    private readonly TimeProvider _clock;
     private readonly int _minRequestTtlSeconds;
 
-    public AdminTiersController(ITiersStore store, IOptions<RequestExpiryOptions> expiryOptions)
+    public AdminTiersController(
+        ITiersStore store,
+        JeebGateway.Requests.IRequestsStore requests,
+        TimeProvider clock,
+        IOptions<RequestExpiryOptions> expiryOptions)
     {
         _store = store;
+        _requests = requests;
+        _clock = clock;
         _minRequestTtlSeconds = Math.Max(
             60,
             (int)Math.Ceiling(expiryOptions.Value.NoOfferNudgeWindow.TotalSeconds));
@@ -128,6 +138,31 @@ public class AdminTiersController : ControllerBase
         if (ValidateCommission(body.CommissionRate, out err) is false) return err!;
         if (ValidatePriceHint(body.PriceHint, out err) is false) return err!;
 
+        // P7 (G-I) — RETROACTIVITY GUARD. The offer-wait deadline is DERIVED
+        // (createdAt + tier TTL), never stored, so shortening or lengthening a tier's
+        // requestTtlSeconds silently moves the countdown of every in-flight request on
+        // that tier — and the instant the sweeper will expire them. That is a real,
+        // sometimes-wanted effect, but it must be ACKNOWLEDGED, never silent. The guard
+        // fires only on an ACTUAL TTL change, and only when applyToInFlight is absent.
+        var current = await _store.GetAsync(id, ct);
+        if (current is not null
+            && body.RequestTtlSeconds!.Value != current.RequestTtlSeconds
+            && !body.ApplyToInFlight)
+        {
+            var affected = await CountInFlightOnTierAsync(id, ct);
+            var problem409 = new ProblemDetails
+            {
+                Title = "Tier TTL change affects in-flight requests",
+                Detail = $"{affected} pending request(s) would have their deadline moved. "
+                       + "Re-send with applyToInFlight=true to confirm.",
+                Status = StatusCodes.Status409Conflict,
+                Type = "https://jeeb.dev/errors/tier-ttl-affects-in-flight",
+            };
+            // Machine-readable so a caller (and T3) asserts on a number, not prose.
+            problem409.Extensions["affectedCount"] = affected;
+            return Conflict(problem409);
+        }
+
         try
         {
             var updated = await _store.ReplaceAsync(id, new DeliveryTierReplace
@@ -161,6 +196,29 @@ public class AdminTiersController : ControllerBase
         var removed = await _store.DeleteAsync(id, ct);
         if (!removed) return NotFound();
         return NoContent();
+    }
+
+    /// <summary>
+    /// P7 (G-I): how many PRE-ACCEPTANCE requests currently resolve to this tier.
+    /// Counts through <see cref="LegacyTierCodes.Canonicalize"/> so a row stamped with a
+    /// legacy code (e.g. <c>flash</c>) is counted against the canonical tier it actually
+    /// resolves to. Degrade-don't-fail: a store blip yields 0 — the guard is about the
+    /// explicit acknowledgement, and it still 409s (T3.4).
+    /// </summary>
+    private async Task<int> CountInFlightOnTierAsync(string tierId, CancellationToken ct)
+    {
+        try
+        {
+            var pending = await _requests.ListPendingCreatedAtOrBeforeAsync(_clock.GetUtcNow(), ct);
+            return pending.Count(r => string.Equals(
+                LegacyTierCodes.Canonicalize(r.TierId ?? string.Empty),
+                tierId,
+                StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            return 0;
+        }
     }
 
     private bool ValidateId(string id, out IActionResult? error)
