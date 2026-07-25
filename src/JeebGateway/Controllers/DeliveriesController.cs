@@ -754,6 +754,27 @@ public class DeliveriesController : ControllerBase
                 deliveryId);
         }
 
+        // P6/G1: AtDoor → Done has exactly ONE legal edge — `otp_verified` (DeliverySm
+        // edge 10), fired by POST /v1/deliveries/{id}/otp/verify. A jeeber's bare status
+        // PATCH is NOT that trigger, and delivery-service answers it with the generic
+        // `transition_not_allowed`, which the app renders as "That transition is not
+        // allowed" (incident 2026-07-25: five 1 ms 422s on delivery
+        // d8b010f8-7a96-4dc1-9c36-1a376af51723). Answer it here with the TYPED
+        // `otp_required` reason so the app raises the door-OTP entry it already
+        // implements — and fail fast, without the doomed upstream round-trip. Scoped to
+        // jeeber-sourced calls: the customer "received it" PATCH → Done leg and the admin
+        // `admin_resolve` leg are untouched.
+        if (string.Equals(canonicalTo, CanonicalDeliveryVocab.Done, StringComparison.Ordinal) &&
+            string.Equals(partySource, CanonicalDeliveryVocab.SourceJeeber, StringComparison.Ordinal))
+        {
+            _log.LogInformation(
+                "event=delivery.patch_done_rejected_otp_required delivery_id={DeliveryId} from={From} party=jeeber",
+                deliveryId, preTransitionRow?.Status);
+            return OtpRequiredTransitionProblem.Build(
+                preTransitionRow?.Status,
+                "AtDoor→Done is reachable only through the handover OTP verify endpoint.");
+        }
+
         try
         {
             DeliveryTransitionUpstream upstream;
