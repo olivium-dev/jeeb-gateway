@@ -1,39 +1,48 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
+using JeebGateway.Availability;
 using JeebGateway.Notifications;
 using JeebGateway.Push;
+using JeebGateway.Services;
+using JeebGateway.Services.Clients;
+using JeebGateway.Whisper;
 using JeebGateway.service.ServicePushNotification;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// BUILD-NEWREQ-PUSH — the request-created → "finding jeebers" push trigger. Two layers,
-/// mirroring <see cref="OfferPushNotifierTests"/>:
-///   • unit tests on <see cref="NewRequestPushNotifier"/> itself against a recording
-///     <see cref="ServicePushNotificationClient"/> subclass that overrides the new
-///     hand-written TOPIC seam — the FLAT new-request payload shape (type=new_request,
-///     both requestId + request_id, tierId, NO nested "data"), body trimming at 80,
-///     the target topic (<c>jeeb_jeebers</c>), degrade-don't-fail, and blank-id no-op; and
-///   • END-TO-END wiring through the REAL JSON create pipeline
-///     (<c>POST /v1/requests</c>, application/json → JeebRequestsController) with the push
-///     client replaced by a recorder — proving a clean create fires exactly ONE topic
-///     publish, that a throwing push client never breaks the 201, and that the 400
-///     (blank description) and 409 (BR-9 cap) reject paths publish NOTHING.
+/// P1 — the request-created → "finding jeebers" fan-out. A new-request push used to be ONE
+/// blast to the <c>jeeb_jeebers</c> FCM topic, which reaches every subscriber INCLUDING the
+/// customer who just created the request. P1 replaces that with a per-user fan-out over the
+/// capability-gated <c>jeeber_availability</c> roster, with the initiator removed.
+///
+/// Two layers, mirroring <see cref="OfferPushNotifierTests"/>:
+///   • unit tests on <see cref="NewRequestPushNotifier.FanOutAsync"/> against a recording
+///     push client that captures BOTH the per-user rail and the legacy topic seam (so
+///     "zero topic sends" is assertable), a settable <see cref="FakeAvailabilityStore"/>,
+///     and a capturing logger (the <c>newreq-fanout</c> line IS the acceptance evidence); and
+///   • END-TO-END wiring through the REAL create pipelines (JSON
+///     <c>POST /v1/requests</c> and the multipart voice surface) with the fan-out queue
+///     replaced by a recorder — proving what the hot path enqueues (request id, INITIATOR,
+///     pickup point), that reject paths enqueue nothing, and that the 201 is no longer on
+///     the push's critical path.
 /// </summary>
 public class NewRequestPushNotifierTests
 {
@@ -48,32 +57,100 @@ public class NewRequestPushNotifierTests
 
     // Builds the notifier over the SAME seeded tier catalog the app serves at
     // GET /v1/tiers, so "urgent" → "Urgent" resolves exactly as it does in prod.
-    private static NewRequestPushNotifier NewNotifier(RecordingTopicPushClient push)
-        => new(push, new JeebGateway.Tiers.InMemoryTiersStore(), NullLogger<NewRequestPushNotifier>.Instance);
+    private static NewRequestPushNotifier NewNotifier(
+        RecordingPushClient push,
+        FakeAvailabilityStore? availability = null,
+        NewRequestFanoutOptions? options = null,
+        INewRequestFanoutQueue? queue = null,
+        ILogger<NewRequestPushNotifier>? logger = null)
+        => new(
+            push,
+            new JeebGateway.Tiers.InMemoryTiersStore(),
+            logger ?? NullLogger<NewRequestPushNotifier>.Instance,
+            availability ?? new FakeAvailabilityStore(),
+            queue ?? new RecordingFanoutQueue(),
+            Options.Create(options ?? new NewRequestFanoutOptions()),
+            TimeProvider.System);
 
-    // ---------------------------------------------------------------------
-    // Unit — the notifier in isolation against a recording topic client.
-    // ---------------------------------------------------------------------
+    private static NewRequestNotification Job(
+        string? initiator = null,
+        string? requestId = RequestId,
+        string? tierId = TierId,
+        string? description = "Pick up a package",
+        double? lat = null,
+        double? lng = null)
+        => new(requestId!, tierId, description, initiator, lat, lng);
 
-    [Fact]
-    public async Task NewRequest_BroadcastsToJeebersTopic_WithFlatPayload()
+    // =====================================================================
+    // Unit — FanOutAsync against a recording per-user client.
+    // =====================================================================
+
+    [Fact] // G-U1 — the direct refutation of the observed defect.
+    public async Task Initiator_Is_Never_A_Recipient()
     {
-        var push = new RecordingTopicPushClient();
-        var notifier = NewNotifier(push);
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Online = new[] { P1Fanout.Jeeber("jeeberA"), P1Fanout.Jeeber("jeeberB"), P1Fanout.Jeeber("nour") }
+        };
+        var notifier = NewNotifier(push, store);
 
-        await notifier.NotifyNewRequestAsync(RequestId, TierId, "Pick up a package", CancellationToken.None);
+        await notifier.FanOutAsync(Job(initiator: "nour"), CancellationToken.None);
 
-        push.Sends.Should().ContainSingle();
-        var send = push.Sends.Single();
-        send.Topic.Should().Be("jeeb_jeebers", "the new-request push blasts the jeebers audience topic");
-        send.Topic.Should().Be(JeebPushTopicMap.JeebersTopic);
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "jeeberA", "jeeberB" },
+            "the customer who created the request must never be pushed their own request");
+        push.RecipientIds.Should().NotContain("nour");
+    }
 
-        var payload = (IDictionary<string, object?>)send.Payload;
+    [Fact] // G-U2
+    public async Task Sends_PerUser_Never_Topic()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Online = new[] { P1Fanout.Jeeber("a"), P1Fanout.Jeeber("b"), P1Fanout.Jeeber("c") }
+        };
+        var notifier = NewNotifier(push, store);
+
+        await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        push.UserSends.Should().HaveCount(3);
+        push.TopicSends.Should().BeEmpty(
+            "a topic blast cannot express 'exclude the initiator' — regressing to it re-opens P1");
+    }
+
+    [Fact] // G-U3
+    public async Task NonJeeber_Never_Receives()
+    {
+        // The audience source is the capability-gated jeeber_availability roster
+        // (AvailabilityController is class-level [RequireCapability(AvailabilityToggle)] and is
+        // the only writer on a user path), so a customer-only account is structurally
+        // unreachable — it simply has no row.
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber("jeeberA") } };
+        var notifier = NewNotifier(push, store);
+
+        await notifier.FanOutAsync(Job(initiator: "customer-only-1"), CancellationToken.None);
+
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "jeeberA" });
+    }
+
+    [Fact] // G-U4 — the wire contract old APKs and the mobile deep-link depend on.
+    public async Task PerUser_Payload_Is_Unchanged()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber("jeeberA") } };
+        var notifier = NewNotifier(push, store);
+
+        await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        var payload = (IDictionary<string, object?>)push.UserSends.Single().Payload;
         payload["title"].Should().Be("New delivery request");
         payload["type"].Should().Be("new_request");
         payload["category"].Should().Be("delivery");
-        // Time-sensitive new-request push carries the flat high-priority hint.
         payload["priority"].Should().Be("high");
+        payload["audience"].Should().Be("jeebers");
+        payload["audience_role"].Should().Be(JeebGateway.Users.Roles.Jeeber);
         // Both id variants are carried flat so the mobile deep-link (routes /orders/:id from
         // delivery_id/order_id/requestId fallback) resolves regardless of which key it reads.
         payload["requestId"].Should().Be(RequestId);
@@ -83,179 +160,377 @@ public class NewRequestPushNotifierTests
         // Routing fields are flat top-level entries — no nested "data" object.
         payload.Should().NotContainKey("data");
         ((string)payload["body"]!).Should().Contain("Pick up a package");
-        // The body shows the resolved human tier NAME, never the raw id.
-        ((string)payload["body"]!).Should().Contain(TierName);
-        ((string)payload["body"]!).Should().NotContain(TierId);
+        ((string)payload["body"]!).Should().Contain($" • {TierName}");
     }
 
-    [Fact]
-    public async Task Body_IsTrimmedTo80Chars_ThenTierSuffixAppended()
+    [Fact] // G-U5 — under-notification must be LOUD, never silent.
+    public async Task Empty_Recipient_Set_Is_A_Loud_NoOp()
     {
-        var push = new RecordingTopicPushClient();
-        var notifier = NewNotifier(push);
+        var push = new RecordingPushClient();
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(push, new FakeAvailabilityStore(), logger: log);
 
-        var longDescription = new string('x', 100);
-        await notifier.NotifyNewRequestAsync(RequestId, TierId, longDescription, CancellationToken.None);
+        var act = async () => await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
 
-        var payload = (IDictionary<string, object?>)push.Sends.Single().Payload;
-        var body = (string)payload["body"]!;
-
-        // The 80-char preview cap applies to the description ONLY; the " • {tier}" suffix
-        // (the resolved display NAME) is added after the trim, so it survives even when the
-        // description is over-length.
-        body.Should().Be(new string('x', 80) + " • " + TierName);
+        await act.Should().NotThrowAsync();
+        push.UserSends.Should().BeEmpty();
+        push.TopicSends.Should().BeEmpty();
+        log.Has(LogLevel.Warning, "recipients=0").Should().BeTrue(
+            "an empty recipient set is the R1 regression signal and must reach journalctl");
     }
 
-    [Fact]
-    public async Task UnresolvableTierId_DropsSuffix_ButStillCarriesRawTierIdFlat()
+    [Fact] // G-U5b — the leak cannot come back by accident.
+    public async Task TopicFallback_Is_Off_By_Default_And_Honoured_When_Enabled()
     {
-        var push = new RecordingTopicPushClient();
-        var notifier = NewNotifier(push);
+        var offByDefault = new RecordingPushClient();
+        await NewNotifier(offByDefault, new FakeAvailabilityStore())
+            .FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+        offByDefault.TopicSends.Should().BeEmpty("TopicFallbackWhenEmpty defaults to FALSE");
 
-        // An opaque id not in the catalog (a raw UUID, or a code from a divergent
-        // taxonomy). The body suffix must be DROPPED — a raw id/UUID is never shown —
-        // yet the flat machine field still carries the id verbatim for client filtering.
-        var uuid = Guid.NewGuid().ToString();
-        await notifier.NotifyNewRequestAsync(RequestId, uuid, "Short desc", CancellationToken.None);
+        var enabled = new RecordingPushClient();
+        await NewNotifier(
+                enabled,
+                new FakeAvailabilityStore(),
+                new NewRequestFanoutOptions { TopicFallbackWhenEmpty = true })
+            .FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
 
-        var payload = (IDictionary<string, object?>)push.Sends.Single().Payload;
-        ((string)payload["body"]!).Should().Be("Short desc", "an unresolvable tier id → no ' • {tier}' suffix");
-        ((string)payload["body"]!).Should().NotContain(uuid, "the raw id/UUID must never leak into the body");
-        payload["tierId"].Should().Be(uuid, "the raw id is still carried flat as a machine field");
+        enabled.TopicSends.Should().ContainSingle();
+        enabled.TopicSends.Single().Topic.Should().Be(JeebPushTopicMap.JeebersTopic);
     }
 
-    [Fact]
-    public async Task NoTier_OmitsTierSuffix_AndCarriesNullTierId()
+    [Fact] // G-U6 — R8: a device-less recipient makes the relay 404; the batch must survive.
+    public async Task One_Failing_Send_Does_Not_Abort_Fanout()
     {
-        var push = new RecordingTopicPushClient();
-        var notifier = NewNotifier(push);
+        var push = new RecordingPushClient { ThrowForUser = id => id == "B" };
+        var store = new FakeAvailabilityStore
+        {
+            Online = new[] { P1Fanout.Jeeber("A"), P1Fanout.Jeeber("B"), P1Fanout.Jeeber("C") }
+        };
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(push, store, logger: log);
 
-        await notifier.NotifyNewRequestAsync(RequestId, tierId: null, "Short desc", CancellationToken.None);
+        var act = async () => await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
 
-        var payload = (IDictionary<string, object?>)push.Sends.Single().Payload;
-        ((string)payload["body"]!).Should().Be("Short desc", "no tier → no ' • {tier}' suffix");
-        payload["tierId"].Should().BeNull();
+        await act.Should().NotThrowAsync();
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "A", "C" });
+        log.Has(LogLevel.Information, "sent=2 failed=1").Should().BeTrue(
+            "the aggregate counts are the operator-facing signal; per-recipient faults stay at Debug");
     }
 
-    [Fact]
+    [Fact] // G-U7 — the R1 mitigation.
+    public async Task FallsBackToKnownJeebers_WhenNoneOnline()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Online = Array.Empty<JeeberAvailability>(),
+            Known = new[] { P1Fanout.Jeeber("jeeberA"), P1Fanout.Jeeber("jeeberB") }
+        };
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(
+            push, store, new NewRequestFanoutOptions { FallbackToKnownJeebers = true }, logger: log);
+
+        await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "jeeberA", "jeeberB" });
+        log.Has(LogLevel.Information, "source=known").Should().BeTrue();
+        store.LastKnownSince.Should().NotBeNull("the roster read is windowed, not unbounded");
+    }
+
+    [Fact] // G-U7b
+    public async Task KnownFallback_Disabled_SendsNothing()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Online = Array.Empty<JeeberAvailability>(),
+            Known = new[] { P1Fanout.Jeeber("jeeberA") }
+        };
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(
+            push, store, new NewRequestFanoutOptions { FallbackToKnownJeebers = false }, logger: log);
+
+        await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        push.UserSends.Should().BeEmpty();
+        push.TopicSends.Should().BeEmpty();
+        log.Has(LogLevel.Warning, "recipients=0").Should().BeTrue();
+    }
+
+    [Fact] // G-U8
+    public async Task Dedupes_And_Caps_Recipients()
+    {
+        var rows = new List<JeeberAvailability>
+        {
+            P1Fanout.Jeeber("USER-DUP"),
+            P1Fanout.Jeeber("user-dup"),
+        };
+        for (var i = 0; i < 12; i++)
+        {
+            rows.Add(P1Fanout.Jeeber($"jeeber-{i:00}"));
+        }
+
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore { Online = rows };
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(
+            push, store, new NewRequestFanoutOptions { MaxRecipients = 10 }, logger: log);
+
+        await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        push.UserSends.Should().HaveCount(10, "MaxRecipients caps the blast radius");
+        push.RecipientIds.Distinct(StringComparer.OrdinalIgnoreCase).Should().HaveCount(10,
+            "the same id in two casings is ONE recipient");
+        log.Has(LogLevel.Warning, "recipients-truncated").Should().BeTrue(
+            "an overflow is logged, never silently dropped");
+    }
+
+    [Fact] // G-U9 — staged geo filter (ships OFF; this proves the code that lands with it).
+    public async Task GeoRadius_Filters_When_Configured()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Online = new[]
+            {
+                P1Fanout.Jeeber("near", 33.885, 35.505),
+                P1Fanout.Jeeber("far", 34.5, 36.5),
+                P1Fanout.Jeeber("noCoords"),
+            }
+        };
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(
+            push, store, new NewRequestFanoutOptions { RadiusKm = 5 }, logger: log);
+
+        await notifier.FanOutAsync(
+            Job(initiator: "customer-1", lat: 33.88, lng: 35.50), CancellationToken.None);
+
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "near", "noCoords" },
+            "a row WITHOUT stored coordinates is never dropped — partial data must not starve the auction");
+        log.Has(LogLevel.Information, "source=online+geo").Should().BeTrue();
+    }
+
+    [Fact] // G-U10 — a mis-set radius must never kill the auction.
+    public async Task GeoFilter_Emptying_Falls_Back_To_Unfiltered()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Online = new[]
+            {
+                P1Fanout.Jeeber("farA", 34.5, 36.5),
+                P1Fanout.Jeeber("farB", 35.5, 37.5),
+            }
+        };
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(
+            push, store, new NewRequestFanoutOptions { RadiusKm = 1 }, logger: log);
+
+        await notifier.FanOutAsync(
+            Job(initiator: "customer-1", lat: 33.88, lng: 35.50), CancellationToken.None);
+
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "farA", "farB" });
+        log.Has(LogLevel.Warning, "geo-filter-emptied").Should().BeTrue();
+    }
+
+    [Fact] // G-U11 — the config-only rollback path is PROVEN, not assumed.
+    public async Task Disabled_Restores_TopicBlast()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Online = new[] { P1Fanout.Jeeber("A"), P1Fanout.Jeeber("B") }
+        };
+        var notifier = NewNotifier(push, store, new NewRequestFanoutOptions { Enabled = false });
+
+        await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        push.TopicSends.Should().ContainSingle();
+        push.TopicSends.Single().Topic.Should().Be(JeebPushTopicMap.JeebersTopic);
+        push.UserSends.Should().BeEmpty();
+    }
+
+    [Fact] // G-U12
+    public async Task Initiator_Match_Is_Format_And_Case_Insensitive()
+    {
+        // PostgresAvailabilityStore.MapRow emits Guid.ToString() (lowercase "D"), while the
+        // initiator id comes from the JWT `sub` and may differ in case/format.
+        var upperGuid = "A1B2C3D4-0000-0000-0000-000000000001";
+        var guidPush = new RecordingPushClient();
+        await NewNotifier(guidPush, new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber(upperGuid) } })
+            .FanOutAsync(Job(initiator: upperGuid.ToLowerInvariant()), CancellationToken.None);
+
+        guidPush.UserSends.Should().BeEmpty("the same GUID in a different casing is the same user");
+
+        // Non-GUID ids fall back to a trimmed, case-insensitive string match.
+        var opaquePush = new RecordingPushClient();
+        await NewNotifier(opaquePush, new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber("user-x") } })
+            .FanOutAsync(Job(initiator: "  USER-X  "), CancellationToken.None);
+
+        opaquePush.UserSends.Should().BeEmpty();
+    }
+
+    [Fact] // G-U13
+    public async Task BlankRequestId_EnqueuesNothing()
+    {
+        var queue = new RecordingFanoutQueue();
+        var notifier = NewNotifier(new RecordingPushClient(), queue: queue);
+
+        var act = async () => await notifier.NotifyNewRequestAsync(
+            Job(initiator: "customer-1", requestId: "  "), CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        queue.Jobs.Should().BeEmpty();
+    }
+
+    [Fact] // G-U14 — degrade-don't-fail.
     public async Task PushServiceFault_IsSwallowed_NeverThrows()
     {
-        var push = new RecordingTopicPushClient { Throw = true };
-        var notifier = NewNotifier(push);
+        var push = new RecordingPushClient { Throw = true };
+        var store = new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber("A") } };
+        var notifier = NewNotifier(push, store);
 
-        // Degrade-don't-fail: a push blip must never surface to the create path.
-        var act = async () => await notifier.NotifyNewRequestAsync(RequestId, TierId, "desc", CancellationToken.None);
+        var act = async () => await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
         await act.Should().NotThrowAsync();
         push.Attempts.Should().BeGreaterThanOrEqualTo(1);
     }
 
-    [Fact]
-    public async Task BlankRequestId_PushesNothing()
+    [Fact] // G-U15 — the hot path never blocks, and an overflow is never silent.
+    public async Task QueueFull_DropsAndWarns()
     {
-        var push = new RecordingTopicPushClient();
-        var notifier = NewNotifier(push);
+        var queue = new NewRequestFanoutQueue(capacity: 1);
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(new RecordingPushClient(), queue: queue, logger: log);
 
-        await notifier.NotifyNewRequestAsync(requestId: "  ", TierId, "desc", CancellationToken.None);
+        await notifier.NotifyNewRequestAsync(Job(initiator: "c", requestId: "req-1"), CancellationToken.None);
 
-        push.Sends.Should().BeEmpty();
-        push.Attempts.Should().Be(0);
+        var act = async () => await notifier.NotifyNewRequestAsync(
+            Job(initiator: "c", requestId: "req-2"), CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        queue.PendingCount.Should().Be(1, "the buffer is capacity-1 and was never drained");
+        log.Has(LogLevel.Warning, "queue full").Should().BeTrue();
     }
 
-    // ---------------------------------------------------------------------
-    // E2E wiring — the REAL POST /v1/requests JSON pipeline calls the notifier.
-    // ---------------------------------------------------------------------
+    // =====================================================================
+    // Wiring — the REAL create pipelines enqueue the right job.
+    // =====================================================================
 
-    [Fact]
-    public async Task JsonCreate_TriggersExactlyOneTopicPublish_WithNewRequestType_AndRequestId()
+    [Fact] // G-W1
+    public async Task JsonCreate_EnqueuesExactlyOneJob_WithInitiatorAndPickup()
     {
-        var push = new RecordingTopicPushClient();
-        using var factory = NewFactory(push);
-        var client = ClientFor(factory, $"client-{Guid.NewGuid()}");
+        var queue = new RecordingFanoutQueue();
+        using var factory = NewFactory(queue: queue);
+        var userId = $"client-{Guid.NewGuid()}";
+        var client = ClientFor(factory, userId);
 
         var resp = await client.PostAsJsonAsync("/v1/requests", ValidPayload("Pick up groceries"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
         var dto = (await resp.Content.ReadFromJsonAsync<CreatedRequestDto>())!;
 
-        push.Sends.Should().ContainSingle("exactly one topic publish per accepted create");
-        var send = push.Sends.Single();
-        send.Topic.Should().Be(JeebPushTopicMap.JeebersTopic);
-
-        var payload = (IDictionary<string, object?>)send.Payload;
-        payload["type"].Should().Be("new_request");
-        payload["priority"].Should().Be("high");
-        payload["requestId"].Should().Be(dto.Id);
-        payload["request_id"].Should().Be(dto.Id);
-        payload["tierId"].Should().Be(TierId);
-        // End-to-end, the body carries the resolved display NAME (not the raw id).
-        ((string)payload["body"]!).Should().Contain(TierName);
-        payload.Should().NotContainKey("data");
+        queue.Jobs.Should().ContainSingle("exactly one fan-out job per accepted create");
+        var job = queue.Jobs.Single();
+        job.RequestId.Should().Be(dto.Id);
+        job.TierId.Should().Be(TierId);
+        job.InitiatorUserId.Should().Be(userId,
+            "the fan-out cannot exclude the initiator unless the create tells it who that is");
+        job.PickupLat.Should().Be(33.88);
+        job.PickupLng.Should().Be(35.50);
     }
 
-    [Fact]
-    public async Task JsonCreate_WhenPushClientThrows_StillReturns201()
+    [Fact] // G-W2
+    public async Task VoiceCreate_EnqueuesJob_WithInitiator()
     {
-        var push = new RecordingTopicPushClient { Throw = true };
-        using var factory = NewFactory(push);
-        var client = ClientFor(factory, $"client-{Guid.NewGuid()}");
+        var queue = new RecordingFanoutQueue();
+        using var factory = NewFactory(queue: queue, voice: true);
+        var userId = $"client-{Guid.NewGuid()}";
+        var client = ClientFor(factory, userId);
 
-        var resp = await client.PostAsJsonAsync("/v1/requests", ValidPayload("Deliver documents"));
+        var resp = await client.PostAsync("/v1/requests", VoiceForm(Guid.NewGuid().ToString()));
 
-        // Degrade-don't-fail end-to-end: a throwing push service does not flip the 201.
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
-        push.Attempts.Should().BeGreaterThanOrEqualTo(1);
+        queue.Jobs.Should().ContainSingle();
+        queue.Jobs.Single().InitiatorUserId.Should().Be(userId);
     }
 
-    [Fact]
-    public async Task JsonCreate_BlankDescription_Returns400_AndPublishesNothing()
+    [Fact] // G-W3
+    public async Task RejectedCreates_EnqueueNothing()
     {
-        var push = new RecordingTopicPushClient();
-        using var factory = NewFactory(push);
+        var queue = new RecordingFanoutQueue();
+        using var factory = NewFactory(queue: queue);
         var client = ClientFor(factory, $"client-{Guid.NewGuid()}");
 
         var resp = await client.PostAsJsonAsync("/v1/requests", ValidPayload("   "));
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        push.Sends.Should().BeEmpty("a rejected (400) create never reaches the push hook");
-        push.Attempts.Should().Be(0);
+        queue.Jobs.Should().BeEmpty("a rejected (400) create never reaches the fan-out hook");
     }
 
-    [Fact]
-    public async Task JsonCreate_FourthActiveRequest_Returns201_AndPublishes()
+    [Fact] // G-W4 — R2: the hot path is an in-memory TryWrite, not an HTTP round-trip.
+    public async Task Create201_IsNotDelayedByFanout()
     {
-        var push = new RecordingTopicPushClient();
-        using var factory = NewFactory(push);
+        // REAL queue + REAL hosted processor, with a push client that stalls 3s per send.
+        var push = new RecordingPushClient { Delay = TimeSpan.FromSeconds(3) };
+        var availability = new FakeAvailabilityStore
+        {
+            Online = Enumerable.Range(0, 5).Select(i => P1Fanout.Jeeber($"jeeber-{i}")).ToArray()
+        };
+        using var factory = NewFactory(push: push, availability: availability);
         var client = ClientFor(factory, $"client-{Guid.NewGuid()}");
 
-        // The first three succeed (three topic publishes)...
-        for (var i = 0; i < 3; i++)
-        {
-            var ok = await client.PostAsJsonAsync("/v1/requests", ValidPayload($"req {i}"));
-            ok.StatusCode.Should().Be(HttpStatusCode.Created, $"creation {i} should succeed");
-        }
+        // Warm the host so first-request JIT/startup is not measured.
+        (await client.PostAsJsonAsync("/v1/requests", ValidPayload("warm-up")))
+            .StatusCode.Should().Be(HttpStatusCode.Created);
 
-        push.Sends.Should().HaveCount(3, "one publish per accepted create");
+        var sw = Stopwatch.StartNew();
+        var resp = await client.PostAsJsonAsync("/v1/requests", ValidPayload("Deliver documents"));
+        sw.Stop();
 
-        var fourth = await client.PostAsJsonAsync("/v1/requests", ValidPayload("fourth"));
-        fourth.StatusCode.Should().Be(HttpStatusCode.Created);
-
-        push.Sends.Should().HaveCount(4, "the fourth create is accepted after cap removal");
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        sw.ElapsedMilliseconds.Should().BeLessThan(500,
+            "the create hot path only enqueues; recipient resolution and the sends run off it");
     }
 
     // ---------------------------------------------------------------------
     // helpers
     // ---------------------------------------------------------------------
 
-    private static WebApplicationFactory<Program> NewFactory(RecordingTopicPushClient push)
+    private static WebApplicationFactory<Program> NewFactory(
+        RecordingPushClient? push = null,
+        FakeAvailabilityStore? availability = null,
+        INewRequestFanoutQueue? queue = null,
+        bool voice = false)
         => new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
                 builder.ConfigureTestServices(services =>
                 {
                     // Replace the deployed :10040 push client with the recorder so no real
-                    // network call happens and the emitted topic/payload are asserted.
+                    // network call happens and the emitted recipients/payload are asserted.
                     services.RemoveAll<ServicePushNotificationClient>();
-                    services.AddSingleton<ServicePushNotificationClient>(push);
+                    services.AddSingleton<ServicePushNotificationClient>(push ?? new RecordingPushClient());
+
+                    if (availability is not null)
+                    {
+                        services.RemoveAll<IAvailabilityStore>();
+                        services.AddSingleton<IAvailabilityStore>(availability);
+                    }
+
+                    if (queue is not null)
+                    {
+                        // Deterministic: the recorder's reader never yields, so the real
+                        // hosted processor idles instead of racing the assertions.
+                        services.RemoveAll<INewRequestFanoutQueue>();
+                        services.AddSingleton(queue);
+                    }
+
+                    if (voice)
+                    {
+                        services.AddSingleton<IVoiceTranscriptionClient>(new StubVoiceClient());
+                        services.Configure<UpstreamFeatureFlags>(f => f.Voice = true);
+                    }
                 });
             });
 
@@ -276,31 +551,31 @@ public class NewRequestPushNotifierTests
         dropoffLocation = new { lat = 33.89, lng = 35.51 },
     };
 
+    private static MultipartFormDataContent VoiceForm(string requestId)
+    {
+        var form = new MultipartFormDataContent();
+        var part = new ByteArrayContent(new byte[] { 1, 2, 3 });
+        part.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
+        form.Add(part, "audio", "ar-5s.wav");
+        form.Add(new StringContent(requestId), "requestId");
+        form.Add(new StringContent("standard"), "tier");
+        return form;
+    }
+
     private sealed record CreatedRequestDto(string Id, string ClientId, string Status, string Description);
 
-    private sealed record SendRecord(string Topic, object Payload);
-
-    /// <summary>Recording stand-in for the deployed push client; overrides the hand-written
-    /// send-to-TOPIC seam the new-request notifier uses. The base ctor needs a base URL +
-    /// HttpClient.</summary>
-    private sealed class RecordingTopicPushClient : ServicePushNotificationClient
+    /// <summary>Deterministic upstream stub — returns a fixed transcript + confidence.</summary>
+    private sealed class StubVoiceClient : IVoiceTranscriptionClient
     {
-        public RecordingTopicPushClient() : base("http://localhost", new HttpClient()) { }
+        public Task<TranscriptionResult> TranscribeAsync(WhisperAudio audio, string language, CancellationToken ct)
+            => TranscribeVoiceAsync(audio, language, null, ct);
 
-        public ConcurrentQueue<SendRecord> Sends { get; } = new();
-        public int Attempts;
-        public bool Throw { get; init; }
-
-        public override Task<SentPayloadResponse> Send_notification_to_topicAsync(
-            string topicName, SentPayloadToTopicRequest body, CancellationToken cancellationToken)
-        {
-            Interlocked.Increment(ref Attempts);
-            if (Throw)
-            {
-                throw new InvalidOperationException("push service unavailable");
-            }
-            Sends.Enqueue(new SendRecord(topicName, body.Payload));
-            return Task.FromResult(new SentPayloadResponse { Message = "ok", Timestamp = DateTimeOffset.UtcNow });
-        }
+        public Task<TranscriptionResult> TranscribeVoiceAsync(
+            WhisperAudio audio, string language, string? idempotencyKey, CancellationToken ct)
+            => Task.FromResult(new TranscriptionResult(
+                AudioId: Guid.NewGuid().ToString("n"),
+                Outcome: TranscriptionOutcome.Transcribed,
+                Transcription: new WhisperTranscription("كيلو بندورة من السوق", language, 0.93),
+                Reason: null));
     }
 }

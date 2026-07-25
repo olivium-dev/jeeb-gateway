@@ -136,6 +136,10 @@ public class AutoOfflineSweeperTests
         public Task<IReadOnlyList<JeeberAvailability>> ListOnlineAsync(CancellationToken ct)
             => Task.FromResult(_online);
 
+        // P1: not exercised by the sweeper — the fan-out is the only caller.
+        public Task<IReadOnlyList<JeeberAvailability>> ListKnownJeebersAsync(DateTimeOffset since, CancellationToken ct)
+            => Task.FromResult(_online);
+
         public Task<GoOfflineResult> GoOfflineAsync(string userId, GoOfflineReason reason, CancellationToken ct)
         {
             _goOfflineCalls.Add(userId);

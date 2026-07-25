@@ -27,6 +27,15 @@ public interface IAvailabilityStore
     /// sweeper; in production this becomes a partial-index Postgres scan.
     /// </summary>
     Task<IReadOnlyList<JeeberAvailability>> ListOnlineAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Every Jeeber this gateway has seen interact since <paramref name="since"/>, ONLINE OR NOT.
+    /// Backs the new-request fan-out's never-starve fallback (P1): when nobody is currently online,
+    /// notifying the known jeeber roster is strictly better than notifying nobody, and is still a
+    /// per-user send (so a non-jeeber can never receive it — every row here was written behind
+    /// <c>[RequireCapability(AvailabilityToggle)]</c>).
+    /// </summary>
+    Task<IReadOnlyList<JeeberAvailability>> ListKnownJeebersAsync(DateTimeOffset since, CancellationToken ct);
 }
 
 public class GoOnlineRequest

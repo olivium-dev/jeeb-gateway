@@ -628,11 +628,29 @@ builder.Services.AddScoped<JeebGateway.Notifications.IOfferPushNotifier,
     JeebGateway.Notifications.OfferPushNotifier>();
 
 // BUILD-NEWREQ-PUSH — the request-created → "finding jeebers" push trigger. Best-effort
-// FCM topic broadcast to the jeeb_jeebers topic when a customer creates a delivery
-// request (the third missing push link, after chat and offer). Scoped: composes the
-// SCOPED ServicePushNotificationClient (:10040) via its hand-written topic seam.
+// FCM fan-out when a customer creates a delivery request (the third missing push link,
+// after chat and offer). Scoped: composes the SCOPED ServicePushNotificationClient (:10040).
 builder.Services.AddScoped<JeebGateway.Notifications.INewRequestPushNotifier,
     JeebGateway.Notifications.NewRequestPushNotifier>();
+
+// P1 — new-request fan-out: options + the off-hot-path dispatch rail. The notifier stays
+// SCOPED (it composes the SCOPED ServicePushNotificationClient); the queue is a singleton
+// buffer and the processor is a hosted service that opens a FRESH scope per job.
+// DI lifetime note (do NOT "fix" these): IAvailabilityStore = Singleton,
+// ServicePushNotificationClient = Scoped, INewRequestPushNotifier = Scoped.
+// Singleton-into-scoped is safe; scoped-into-singleton is the captive-dependency bug the
+// per-job scope in NewRequestFanoutProcessor avoids.
+builder.Services.Configure<JeebGateway.Notifications.NewRequestFanoutOptions>(
+    builder.Configuration.GetSection(JeebGateway.Notifications.NewRequestFanoutOptions.SectionName));
+// Explicit factory: NewRequestFanoutQueue exposes a second, capacity-int ctor for tests,
+// so an open AddSingleton<I,T>() would leave constructor selection to reflection.
+builder.Services.AddSingleton<JeebGateway.Notifications.INewRequestFanoutQueue>(sp =>
+    new JeebGateway.Notifications.NewRequestFanoutQueue(
+        sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<
+            JeebGateway.Notifications.NewRequestFanoutOptions>>()));
+builder.Services.AddSingleton<JeebGateway.Notifications.NewRequestFanoutProcessor>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Notifications.NewRequestFanoutProcessor>());
 
 // Feedback (ServiceFeedbackClient) — salehly sibling mirror.
 // The NSwag-generated ServiceFeedbackClient
