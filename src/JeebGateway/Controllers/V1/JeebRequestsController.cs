@@ -230,15 +230,26 @@ public sealed class JeebRequestsController : ControllerBase
             }
         }
 
-        // BUILD-NEWREQ-PUSH — best-effort "finding jeebers" broadcast. Belt-and-braces
+        // BUILD-NEWREQ-PUSH — best-effort "finding jeebers" fan-out. Belt-and-braces
         // try/catch (the notifier is already degrade-don't-fail internally, but the hook
         // must NEVER flip the create 201 even on a DI/synchronous fault). This single hook
         // covers BOTH mobile create paths: the standard compose screen and the chat-compose
         // screen both POST /v1/requests as application/json and land in this action.
+        // P1: the call is now O(1) — it only ENQUEUES; recipient resolution and the per-user
+        // sends happen off the hot path. The initiator (clientId) and the pickup point travel
+        // with the job so the fan-out can exclude the creator and (once enabled) narrow by
+        // radius. Pickup is read from the PERSISTED row, not the input body.
         try
         {
             await _newRequestPush.NotifyNewRequestAsync(
-                created.Id, created.TierId, created.Description, ct);
+                new Notifications.NewRequestNotification(
+                    RequestId: created.Id,
+                    TierId: created.TierId,
+                    Description: created.Description,
+                    InitiatorUserId: clientId,
+                    PickupLat: created.PickupLocation?.Lat,
+                    PickupLng: created.PickupLocation?.Lng),
+                ct);
         }
         catch (Exception ex)
         {
