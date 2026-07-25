@@ -642,8 +642,12 @@ builder.Services.AddScoped<JeebGateway.Notifications.INewRequestPushNotifier,
 // per-job scope in NewRequestFanoutProcessor avoids.
 builder.Services.Configure<JeebGateway.Notifications.NewRequestFanoutOptions>(
     builder.Configuration.GetSection(JeebGateway.Notifications.NewRequestFanoutOptions.SectionName));
-builder.Services.AddSingleton<JeebGateway.Notifications.INewRequestFanoutQueue,
-    JeebGateway.Notifications.NewRequestFanoutQueue>();
+// Explicit factory: NewRequestFanoutQueue exposes a second, capacity-int ctor for tests,
+// so an open AddSingleton<I,T>() would leave constructor selection to reflection.
+builder.Services.AddSingleton<JeebGateway.Notifications.INewRequestFanoutQueue>(sp =>
+    new JeebGateway.Notifications.NewRequestFanoutQueue(
+        sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<
+            JeebGateway.Notifications.NewRequestFanoutOptions>>()));
 builder.Services.AddSingleton<JeebGateway.Notifications.NewRequestFanoutProcessor>();
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<JeebGateway.Notifications.NewRequestFanoutProcessor>());
