@@ -189,15 +189,22 @@ public class JeebNotificationsProjectionTests
     }
 
     [Fact]
-    public void ExtractRows_CapturedDuplicateNotificationIdsKeepFirstRowOnly()
+    public void AC10d_AC10e_CapturedDuplicateIdsRenderOneRowWhileEnvelopeTotalDrivesPages()
     {
         var wire = Fm1NotificationWireFixtures.CapturedA5DuplicateEnvelope();
 
         var (rows, total) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+        var page = JeebNotificationsProjection.ProjectPage(
+            rows,
+            page: 1,
+            pageSize: 1,
+            upstreamTotal: total);
 
         rows.Should().ContainSingle();
         rows[0].Id.Should().Be("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeee0001");
         total.Should().Be(2);
+        page.TotalCount.Should().Be(2);
+        page.TotalPages.Should().Be(2);
     }
 
     /// <summary>
@@ -225,7 +232,7 @@ public class JeebNotificationsProjectionTests
     /// real <c>ExtractRows</c> and inbox projection path.
     /// </summary>
     [Fact]
-    public void AC5_AcceptedAmount_IsJsonNumber_NotQuotedString()
+    public void AC5_AC10a_AcceptedAmountAndPayloadTimestampProjectFromCapturedRow()
     {
         var wire = Fm1NotificationWireFixtures.CapturedAc4Ac5LiveRoundTrip();
 
@@ -236,6 +243,25 @@ public class JeebNotificationsProjectionTests
             notificationId: "ac500000-0000-4000-8000-000000000005");
 
         AssertNumericAmountAndExactPickup(payload, "accepted_amount");
+
+        var messages = wire["messages"].Should().BeOfType<JArray>().Subject;
+        var acceptedWire = messages.Children<JObject>().Single(item =>
+            item.Value<string>("notification_type") == "jeeb.offer_accepted");
+        acceptedWire.Property("ts").Should().BeNull();
+        acceptedWire.Property("timestamp").Should().BeNull();
+        acceptedWire.Property("createdAt").Should().BeNull();
+        acceptedWire.Property("created_at").Should().BeNull();
+        acceptedWire.Property("ref").Should().BeNull();
+        payload.Value<DateTime>("created_at").Should()
+            .Be(DateTime.Parse("2026-07-26T00:00:00"));
+
+        var (rows, _) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+        var projected = rows.Single(row =>
+            row.Id == "ac500000-0000-4000-8000-000000000005");
+        projected.Type.Should().Be("offer_accepted");
+        projected.Timestamp.Should().Be("2026-07-26T00:00:00.0000000");
+        projected.Timestamp.Should().NotBeNullOrWhiteSpace();
+        projected.Ref.Should().BeNull();
     }
 
     private static JObject ProjectAndSelectPayload(
