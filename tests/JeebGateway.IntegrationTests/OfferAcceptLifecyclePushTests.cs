@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -10,6 +11,8 @@ using System.Threading.Tasks;
 using FluentAssertions;
 using JeebGateway.Availability;
 using JeebGateway.Notifications;
+using JeebGateway.Observability;
+using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
 using JeebGateway.service.ServicePushNotification;
 using JeebGateway.Tiers;
@@ -111,6 +114,108 @@ public class OfferAcceptLifecyclePushTests
 
         push.Sends.Should().BeEmpty();
         push.Attempts.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task OfferAccepted_WithAuthoritativeFee_WritesBeforePush_WithSameCopyAndCorrelation()
+    {
+        var timeline = new List<string>();
+        var writer = new RecordingNotificationRecordWriter(timeline);
+        var push = new RecordingUserPushClient { BeforeSend = () => timeline.Add("push") };
+        var request = AcceptedRequest(acceptedFee: 12.5m);
+        var notifier = new OfferPushNotifier(
+            push,
+            writer,
+            (_, _) => Task.FromResult<DeliveryRequest?>(request),
+            NullLogger<OfferPushNotifier>.Instance);
+
+        await notifier.NotifyOfferAcceptedAsync(
+            "jeeber-winner",
+            request.Id,
+            "offer-win",
+            CancellationToken.None);
+
+        timeline.Should().Equal("write", "push");
+        var record = writer.Accepted.Should().ContainSingle().Subject;
+        var payload = PayloadOf(push.Sends.Single());
+        record.Payload.AcceptedAmount.Should().Be(12.5m);
+        record.Payload.JeeberId.Should().Be("jeeber-winner");
+        record.Payload.PickupLocation.Should().Be("Hamra");
+        record.Payload.DeliveryLocation.Should().Be("Achrafieh");
+        payload["title"].Should().Be(record.Title);
+        payload["body"].Should().Be(record.Description);
+        payload["notificationId"].Should().Be(record.NotificationCorrelationId);
+        payload["notification_id"].Should().Be(record.NotificationCorrelationId);
+    }
+
+    [Fact]
+    public async Task OfferAccepted_NullAcceptedFee_SkipsWrite_IncrementsCounter_AndPushes()
+    {
+        const string offerId = "offer-no-fee";
+        long matchingSkipCount = 0;
+        using var meterListener = new MeterListener();
+        meterListener.InstrumentPublished = (instrument, listener) =>
+        {
+            if (instrument.Meter.Name == BusinessOutcomeTelemetry.MeterName &&
+                instrument.Name == "notif.durable_write.skipped")
+            {
+                listener.EnableMeasurementEvents(instrument);
+            }
+        };
+        meterListener.SetMeasurementEventCallback<long>(
+            (instrument, measurement, tags, state) =>
+            {
+                foreach (var tag in tags)
+                {
+                    if (tag.Key == "entityId" && Equals(tag.Value, offerId))
+                    {
+                        Interlocked.Add(ref matchingSkipCount, measurement);
+                    }
+                }
+            });
+        meterListener.Start();
+
+        var writer = new RecordingNotificationRecordWriter();
+        var push = new RecordingUserPushClient();
+        var request = AcceptedRequest(acceptedFee: null);
+        var notifier = new OfferPushNotifier(
+            push,
+            writer,
+            (_, _) => Task.FromResult<DeliveryRequest?>(request),
+            NullLogger<OfferPushNotifier>.Instance);
+
+        await notifier.NotifyOfferAcceptedAsync(
+            "jeeber-winner",
+            request.Id,
+            offerId,
+            CancellationToken.None);
+
+        writer.Accepted.Should().BeEmpty();
+        push.Sends.Should().ContainSingle();
+        matchingSkipCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task OfferAccepted_ThrowingRequestStore_DoesNotWrite_StillPushesAndNeverThrows()
+    {
+        var writer = new RecordingNotificationRecordWriter();
+        var push = new RecordingUserPushClient();
+        var notifier = new OfferPushNotifier(
+            push,
+            writer,
+            (_, _) => Task.FromException<DeliveryRequest?>(
+                new InvalidOperationException("request store unavailable")),
+            NullLogger<OfferPushNotifier>.Instance);
+
+        var act = async () => await notifier.NotifyOfferAcceptedAsync(
+            "jeeber-winner",
+            "req-1",
+            "offer-win",
+            CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        writer.Accepted.Should().BeEmpty();
+        push.Sends.Should().ContainSingle();
     }
 
     // ---------------------------------------------------------------------
@@ -265,6 +370,19 @@ public class OfferAcceptLifecyclePushTests
     private static string TypeOf(SendRecord s) => (string)((IDictionary<string, object?>)s.Payload)["type"]!;
     private static IDictionary<string, object?> PayloadOf(SendRecord s) => (IDictionary<string, object?>)s.Payload;
 
+    private static DeliveryRequest AcceptedRequest(decimal? acceptedFee) => new()
+    {
+        Id = "req-accepted",
+        ClientId = "client-owner",
+        Status = RequestStatus.Accepted,
+        Description = "Parcel",
+        PickupAddress = "Hamra",
+        DropoffAddress = "Achrafieh",
+        AcceptedFee = acceptedFee,
+        AcceptedAt = DateTimeOffset.Parse("2026-07-26T11:12:13Z"),
+        CreatedAt = DateTimeOffset.Parse("2026-07-26T10:11:12Z"),
+    };
+
     private static WebApplicationFactory<Program> NewFactory(IOfferServiceClient fake, RecordingUserPushClient push)
         => new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
@@ -303,17 +421,45 @@ public class OfferAcceptLifecyclePushTests
         public ConcurrentQueue<SendRecord> Sends { get; } = new();
         public int Attempts { get; private set; }
         public bool Throw { get; init; }
+        public Action? BeforeSend { get; init; }
 
         public override Task<SentPayloadResponse> Send_notification_to_userAsync(
             string user_id, SentPayloadToUserRequest body, CancellationToken cancellationToken)
         {
             Attempts++;
+            BeforeSend?.Invoke();
             if (Throw)
             {
                 throw new InvalidOperationException("push service unavailable");
             }
             Sends.Enqueue(new SendRecord(user_id, body.Payload));
             return Task.FromResult(new SentPayloadResponse { Message = "ok", Timestamp = DateTimeOffset.UtcNow });
+        }
+    }
+
+    private sealed class RecordingNotificationRecordWriter : INotificationRecordWriter
+    {
+        private readonly List<string>? _timeline;
+
+        public RecordingNotificationRecordWriter(List<string>? timeline = null)
+            => _timeline = timeline;
+
+        public List<OfferAcceptedNotificationRecord> Accepted { get; } = new();
+
+        public Task<NotificationRecordWriteOutcome> WriteOfferReceivedAsync(
+            OfferReceivedNotificationRecord record,
+            CancellationToken requestToken)
+            => throw new NotSupportedException();
+
+        public Task<NotificationRecordWriteOutcome> WriteOfferAcceptedAsync(
+            OfferAcceptedNotificationRecord record,
+            CancellationToken requestToken)
+        {
+            _timeline?.Add("write");
+            Accepted.Add(record);
+            return Task.FromResult(new NotificationRecordWriteOutcome(
+                NotificationRecordWriteClassification.Committed,
+                201));
         }
     }
 
