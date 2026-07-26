@@ -35,4 +35,8 @@
     <ProjectReference Include="..\..\src\JeebGateway\JeebGateway.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="Fixtures\FM1\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

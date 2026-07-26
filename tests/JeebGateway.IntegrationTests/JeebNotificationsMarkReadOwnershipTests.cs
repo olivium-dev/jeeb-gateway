@@ -44,6 +44,32 @@ public sealed class JeebNotificationsMarkReadOwnershipTests
         upstream.PatchCount.Should().Be(0);
     }
 
+    [Fact]
+    public async Task MarkRead_OwnNotification_ChecksOwnershipThenPatchesOnce()
+    {
+        var upstream = new RecordingNotificationClient();
+        var httpContext = new DefaultHttpContext();
+        httpContext.User = new ClaimsPrincipal(new ClaimsIdentity(
+            [
+                new Claim("sub", "caller-a"),
+                new Claim("roles", "client"),
+            ],
+            authenticationType: "test"));
+        var controller = new JeebNotificationsInboxController(
+            upstream,
+            new MissingOfferRequestIndex(),
+            NullLogger<JeebNotificationsInboxController>.Instance)
+        {
+            ControllerContext = new ControllerContext { HttpContext = httpContext },
+        };
+
+        var response = await controller.MarkRead("owned-by-a");
+
+        response.Should().BeOfType<OkResult>();
+        upstream.Sequence.Should().Equal("GET", "PATCH");
+        upstream.PatchCount.Should().Be(1);
+    }
+
     private sealed class MissingOfferRequestIndex : IOfferRequestIndex
     {
         public void Record(string offerId, string requestId)
@@ -81,6 +107,7 @@ public sealed class JeebNotificationsMarkReadOwnershipTests
         }
 
         public List<string> ReceiverReads { get; } = [];
+        public List<string> Sequence { get; } = [];
         public int PatchCount { get; private set; }
 
         public override Task<object> Get_messages_by_receiver_messages_receiver__receiver_id__getAsync(
@@ -95,6 +122,7 @@ public sealed class JeebNotificationsMarkReadOwnershipTests
             CancellationToken cancellationToken)
         {
             ReceiverReads.Add(receiver_id);
+            Sequence.Add("GET");
             return Task.FromResult<object>(JObject.Parse(ReceiverScopedWireJson));
         }
 
@@ -103,6 +131,7 @@ public sealed class JeebNotificationsMarkReadOwnershipTests
             CancellationToken cancellationToken)
         {
             PatchCount++;
+            Sequence.Add("PATCH");
             return Task.FromResult<object>(new JObject());
         }
     }

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Claims;
 using FluentAssertions;
 using JeebGateway.Availability;
@@ -25,6 +26,19 @@ public sealed class JeebNotificationsDeepLinkResolutionTests
     }
 
     [Fact]
+    public async Task ListNotifications_TopLevelRequestAliasWinsWithoutIndexLookup()
+    {
+        var index = new RecordingOfferRequestIndex(_ => "SHOULD-NOT-BE-USED");
+
+        var page = await ListPage(
+            index,
+            Fm1NotificationWireFixtures.ConstructedOfferWithTopLevelRequestRef());
+
+        page.Items.Should().ContainSingle().Which.Ref.Should().Be("REQ-TOP-LEVEL");
+        index.CallCount.Should().Be(0);
+    }
+
+    [Fact]
     public async Task ListNotifications_IndexNull_LeavesOfferRefNull()
     {
         var page = await ListPage(new RecordingOfferRequestIndex(_ => null));
@@ -47,14 +61,19 @@ public sealed class JeebNotificationsDeepLinkResolutionTests
     {
         var index = new RecordingOfferRequestIndex(_ =>
         {
-            Thread.Sleep(175);
+            Thread.Sleep(500);
             return "REQ-TOO-LATE";
         });
 
+        var stopwatch = Stopwatch.StartNew();
         var page = await ListPage(index);
+        stopwatch.Stop();
 
         index.CallCount.Should().Be(1);
         page.Items.Should().OnlyContain(item => item.Ref == null);
+        stopwatch.Elapsed.Should().BeLessThanOrEqualTo(
+            JeebNotificationsInboxController.OfferResolutionBudget
+            + TimeSpan.FromMilliseconds(100));
     }
 
     [Fact]

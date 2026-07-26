@@ -62,6 +62,8 @@ namespace JeebGateway.Controllers;
 [Produces("application/json")]
 public sealed class JeebNotificationsInboxController : ControllerBase
 {
+    internal static readonly TimeSpan OfferResolutionBudget = TimeSpan.FromMilliseconds(150);
+
     private readonly ServiceNotificationClient _notifications;
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly ILogger<JeebNotificationsInboxController> _log;
@@ -139,8 +141,8 @@ public sealed class JeebNotificationsInboxController : ControllerBase
                     created_before: null,
                     ct);
 
-            var (rows, total) = ExtractRows(response);
-            ResolveOfferRequestRefs(rows);
+            var (rows, total, offerRouteCandidates) = ExtractRows(response);
+            await ResolveOfferRequestRefsAsync(offerRouteCandidates);
 
             // F5 (JEBV4-302) PRIVACY FILTER — the "finding jeebers" new-request broadcast
             // is fanned to the jeeb_jeebers FCM topic (see NewRequestPushNotifier). A
@@ -173,57 +175,68 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         }
     }
 
-    private void ResolveOfferRequestRefs(IReadOnlyList<UpstreamNotificationRow> rows)
+    private async Task ResolveOfferRequestRefsAsync(
+        IReadOnlyList<OfferRouteCandidate> candidates)
     {
-        var unresolved = new List<(UpstreamNotificationRow Row, string OfferId)>();
-        foreach (var row in rows)
+        foreach (var candidate in candidates)
         {
-            if (!string.Equals(row.Type, "offer", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var offerId = row.Ref?.Trim();
-            row.Ref = null;
-            if (!string.IsNullOrEmpty(offerId))
-            {
-                unresolved.Add((row, offerId));
-            }
+            candidate.Row.Ref = null;
         }
 
         var resolved = new Dictionary<string, string?>(StringComparer.Ordinal);
         var budget = Stopwatch.StartNew();
-        foreach (var (row, offerId) in unresolved)
+        foreach (var candidate in candidates)
         {
-            if (budget.Elapsed >= TimeSpan.FromMilliseconds(150))
+            if (!resolved.TryGetValue(candidate.OfferId, out var requestId))
             {
-                break;
-            }
-
-            if (!resolved.TryGetValue(offerId, out var requestId))
-            {
-                try
+                var remaining = OfferResolutionBudget - budget.Elapsed;
+                if (remaining <= TimeSpan.Zero)
                 {
-                    requestId = _offerRequestIndex.ResolveRequestId(offerId);
-                }
-                catch (Exception ex)
-                {
-                    _log.LogWarning(
-                        ex,
-                        "Notification inbox offer route resolution failed for offer {OfferId}.",
-                        offerId);
-                    requestId = null;
+                    break;
                 }
 
-                resolved[offerId] = requestId;
+                requestId = await ResolveRequestIdWithinBudgetAsync(
+                    candidate.OfferId,
+                    remaining);
+                resolved[candidate.OfferId] = requestId;
             }
 
-            if (budget.Elapsed >= TimeSpan.FromMilliseconds(150))
+            candidate.Row.Ref = string.IsNullOrWhiteSpace(requestId)
+                ? null
+                : requestId.Trim();
+        }
+    }
+
+    private async Task<string?> ResolveRequestIdWithinBudgetAsync(
+        string offerId,
+        TimeSpan remaining)
+    {
+        var resolution = Task.Run(() =>
+        {
+            try
             {
-                break;
+                return _offerRequestIndex.ResolveRequestId(offerId);
             }
+            catch (Exception ex)
+            {
+                _log.LogWarning(
+                    ex,
+                    "Notification inbox offer route resolution failed for offer {OfferId}.",
+                    offerId);
+                return null;
+            }
+        });
 
-            row.Ref = string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim();
+        try
+        {
+            return await resolution.WaitAsync(remaining).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            _log.LogWarning(
+                "Notification inbox offer route resolution exhausted its wall-clock budget for offer {OfferId}.",
+                offerId);
+            return null;
         }
     }
 
@@ -300,7 +313,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
                     created_before: null,
                     ct);
 
-            var (rows, total) = ExtractRows(response);
+            var (rows, total, _) = ExtractRows(response);
             if (rows.Any(row =>
                     string.Equals(row.Id?.Trim(), notificationId, StringComparison.Ordinal)))
             {
@@ -371,13 +384,22 @@ public sealed class JeebNotificationsInboxController : ControllerBase
     /// returns the transport-free <see cref="UpstreamNotificationRow"/> the pure
     /// projection is tested against.
     /// </summary>
-    private static (IReadOnlyList<UpstreamNotificationRow> Rows, int? Total) ExtractRows(object? response)
+    private static (
+        IReadOnlyList<UpstreamNotificationRow> Rows,
+        int? Total,
+        IReadOnlyList<OfferRouteCandidate> OfferRouteCandidates) ExtractRows(object? response)
     {
         if (response is not JToken token)
         {
             // NSwag (Newtonsoft) deserialises the upstream `object` to a JToken; if not,
             // round-trip it so the same extraction path applies.
-            if (response is null) return (Array.Empty<UpstreamNotificationRow>(), null);
+            if (response is null)
+            {
+                return (
+                    Array.Empty<UpstreamNotificationRow>(),
+                    null,
+                    Array.Empty<OfferRouteCandidate>());
+            }
             token = JToken.FromObject(response);
         }
 
@@ -393,20 +415,28 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         }
 
         var rows = new List<UpstreamNotificationRow>();
+        var offerRouteCandidates = new List<OfferRouteCandidate>();
         if (itemsToken is JArray array)
         {
             foreach (var node in array)
             {
                 if (node is JObject obj)
                 {
-                    rows.Add(MapRow(obj));
-                    NormalizeMappedRow(rows[^1], obj);
+                    var row = MapRow(obj);
+                    rows.Add(row);
+                    var payloadOfferId = NormalizeMappedRow(row, obj);
+                    if (payloadOfferId is not null)
+                    {
+                        offerRouteCandidates.Add(new OfferRouteCandidate(row, payloadOfferId));
+                    }
                 }
             }
         }
 
         DeduplicateByNotificationId(rows);
-        return (rows, total);
+        offerRouteCandidates.RemoveAll(candidate =>
+            !rows.Any(row => ReferenceEquals(row, candidate.Row)));
+        return (rows, total, offerRouteCandidates);
     }
 
     /// <summary>Map one upstream <c>JObject</c> row to the normalized intermediate (tolerant of field aliases).</summary>
@@ -424,13 +454,25 @@ public sealed class JeebNotificationsInboxController : ControllerBase
 
     internal static (IReadOnlyList<UpstreamNotificationRow> Rows, int? Total)
         ExtractRowsForTests(object? response)
-        => ExtractRows(response);
+    {
+        var (rows, total, _) = ExtractRows(response);
+        return (rows, total);
+    }
 
-    private static void NormalizeMappedRow(UpstreamNotificationRow row, JObject obj)
+    private static string? NormalizeMappedRow(UpstreamNotificationRow row, JObject obj)
     {
         row.Type = NormalizeType(row.Type);
-        row.Timestamp ??= StrScalar(obj["payload"] as JObject, "created_at");
-        row.Ref ??= PayloadRef(obj["payload"] as JObject, row.Type);
+        var payload = obj["payload"] as JObject;
+        row.Timestamp ??= StrScalar(payload, "created_at");
+        if (row.Ref is null && string.Equals(row.Type, "offer", StringComparison.Ordinal))
+        {
+            var payloadOfferId = StrScalar(payload, "offer_id");
+            row.Ref = payloadOfferId;
+            return payloadOfferId;
+        }
+
+        row.Ref ??= PayloadRef(payload, row.Type);
+        return null;
     }
 
     private static void DeduplicateByNotificationId(List<UpstreamNotificationRow> rows)
@@ -466,13 +508,16 @@ public sealed class JeebNotificationsInboxController : ControllerBase
     private static string? PayloadRef(JObject? payload, string? type)
         => type switch
         {
-            "offer" => StrScalar(payload, "offer_id"),
             "delivery_status_updated" => StrScalar(payload, "delivery_id", "order_id"),
             "dispute_resolved" => StrScalar(payload, "dispute_id"),
             "settlement_paid" => StrScalar(payload, "settlement_id"),
             "kyc_approved" or "kyc_rejected" => StrScalar(payload, "kyc_id"),
             _ => null,
         };
+
+    private sealed record OfferRouteCandidate(
+        UpstreamNotificationRow Row,
+        string OfferId);
 
     private static string? StrScalar(JObject? obj, params string[] keys)
     {

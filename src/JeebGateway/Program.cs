@@ -628,6 +628,7 @@ ServiceClientExtensions.AttachBreakerAndTimeoutOnly(
 builder.Services.AddScoped<
     JeebGateway.Notifications.INotificationRecordWriter,
     JeebGateway.Notifications.NotificationRecordWriter>();
+builder.Services.AddHostedService<JeebGateway.Notifications.NotificationDurableWriteStartupAlarm>();
 
 // BUILD-CHAT-PUSH — the chat-message → push-notification trigger. Best-effort fan-out
 // of an FCM push to the conversation's other delivery principal when a chat message is
