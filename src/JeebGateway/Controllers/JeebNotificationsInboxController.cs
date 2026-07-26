@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
@@ -323,6 +324,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         var root = token as JObject;
         var itemsToken = root? ["items"] ?? root? ["notifications"] ?? root? ["messages"];
         int? total = (root? ["total"] ?? root? ["totalCount"] ?? root? ["count"])?.Value<int?>();
+        total ??= root? ["total_messages"]?.Value<int?>();
 
         // Some upstreams return a bare array rather than an envelope.
         if (itemsToken is not JArray && token is JArray bareArray)
@@ -338,10 +340,12 @@ public sealed class JeebNotificationsInboxController : ControllerBase
                 if (node is JObject obj)
                 {
                     rows.Add(MapRow(obj));
+                    NormalizeMappedRow(rows[^1], obj);
                 }
             }
         }
 
+        DeduplicateByNotificationId(rows);
         return (rows, total);
     }
 
@@ -357,6 +361,88 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         Ref = Str(obj, "ref", "targetId", "target_id", "deliveryId", "delivery_id",
             "entityId", "entity_id", "referenceId", "reference_id"),
     };
+
+    internal static (IReadOnlyList<UpstreamNotificationRow> Rows, int? Total)
+        ExtractRowsForTests(object? response)
+        => ExtractRows(response);
+
+    private static void NormalizeMappedRow(UpstreamNotificationRow row, JObject obj)
+    {
+        row.Type = NormalizeType(row.Type);
+        row.Timestamp ??= StrScalar(obj["payload"] as JObject, "created_at");
+        row.Ref ??= PayloadRef(obj["payload"] as JObject, row.Type);
+    }
+
+    private static void DeduplicateByNotificationId(List<UpstreamNotificationRow> rows)
+    {
+        var seenNotificationIds = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < rows.Count;)
+        {
+            var notificationId = rows[index].Id?.Trim();
+            if (!string.IsNullOrEmpty(notificationId)
+                && !seenNotificationIds.Add(notificationId))
+            {
+                rows.RemoveAt(index);
+                continue;
+            }
+
+            index++;
+        }
+    }
+
+    private static string? NormalizeType(string? wireType)
+    {
+        var trimmed = wireType?.Trim();
+        if (string.IsNullOrEmpty(trimmed)
+            || !trimmed.StartsWith("jeeb.", StringComparison.OrdinalIgnoreCase))
+        {
+            return trimmed;
+        }
+
+        var jeebType = trimmed["jeeb.".Length..].Trim().ToLowerInvariant();
+        return jeebType == "offer_received" ? "offer" : jeebType;
+    }
+
+    private static string? PayloadRef(JObject? payload, string? type)
+        => type switch
+        {
+            "offer" => StrScalar(payload, "offer_id"),
+            "delivery_status_updated" => StrScalar(payload, "delivery_id", "order_id"),
+            "dispute_resolved" => StrScalar(payload, "dispute_id"),
+            "settlement_paid" => StrScalar(payload, "settlement_id"),
+            "kyc_approved" or "kyc_rejected" => StrScalar(payload, "kyc_id"),
+            _ => null,
+        };
+
+    private static string? StrScalar(JObject? obj, params string[] keys)
+    {
+        if (obj is null) return null;
+
+        foreach (var key in keys)
+        {
+            var token = obj[key];
+            if (token is not JValue scalar
+                || token.Type is not (
+                    JTokenType.String
+                    or JTokenType.Integer
+                    or JTokenType.Float
+                    or JTokenType.Date
+                    or JTokenType.Guid))
+            {
+                continue;
+            }
+
+            var value = scalar.Value switch
+            {
+                DateTimeOffset dateTimeOffset => dateTimeOffset.ToString("o"),
+                DateTime dateTime => dateTime.ToString("o", CultureInfo.InvariantCulture),
+                _ => Convert.ToString(scalar.Value, CultureInfo.InvariantCulture),
+            };
+            if (!string.IsNullOrWhiteSpace(value)) return value;
+        }
+
+        return null;
+    }
 
     private static string? Str(JObject obj, params string[] keys)
     {
