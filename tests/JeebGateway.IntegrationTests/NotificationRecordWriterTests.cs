@@ -194,12 +194,142 @@ public sealed class NotificationRecordWriterTests
         handler.Gets.Should().Be(0);
     }
 
+    // ── b02 step 3 · silent ⇒ ZERO notification-centre writes ─────────────────────────
+    //
+    // The two cases below differ in EXACTLY ONE input: the notification type. Same
+    // recipient, same entity, same ncid, same POST delegate, same feature flag, same
+    // handler. So the presence/absence of the POST is attributable to the silent gate and
+    // to nothing else — which is what makes the pair a real positive/negative control
+    // rather than two independent assertions.
+    //
+    // `jeeb.delivery_status_updated` is the silent case: owner ruling D4 classifies the
+    // `delivery` refresh category as silent-only. It has no public writer method yet (that
+    // is step 6a), so the gate is exercised at the internal WriteAsync choke point every
+    // present and future writer funnels through.
+
+    [Fact]
+    public async Task Step3_SilentType_IssuesZeroPostsToTheNotificationCentre()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.Created);
+        var writer = NewWriter(handler, out var http);
+        var postDelegateInvocations = 0;
+
+        var outcome = await writer.WriteAsync(
+            SilentTemplateKey,
+            "client-1",
+            "delivery-1",
+            "ncid-silent",
+            ct =>
+            {
+                postDelegateInvocations++;
+                return PostCentreRowAsync(http, SilentTemplateKey, ct);
+            });
+
+        outcome.Classification.Should()
+            .Be(NotificationRecordWriteClassification.SkippedSilent);
+        postDelegateInvocations.Should().Be(
+            0,
+            "the gate must refuse the write before the POST delegate is ever invoked");
+        handler.PostPaths.Should().BeEmpty(
+            "a silent push must produce NO row — not a hidden one, not a soft-deleted one");
+        handler.Posts.Should().Be(0);
+        handler.Gets.Should().Be(
+            0,
+            "there is nothing to read back when nothing was written");
+        outcome.UpstreamStatus.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Step3Negative_NonSilentType_WritesExactlyOneRow()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.Created);
+        var writer = NewWriter(handler, out var http);
+        var postDelegateInvocations = 0;
+
+        var outcome = await writer.WriteAsync(
+            NonSilentTemplateKey,
+            "client-1",
+            "delivery-1",
+            "ncid-silent",
+            ct =>
+            {
+                postDelegateInvocations++;
+                return PostCentreRowAsync(http, NonSilentTemplateKey, ct);
+            });
+
+        outcome.Classification.Should().Be(NotificationRecordWriteClassification.Committed);
+        postDelegateInvocations.Should().Be(1);
+        handler.Posts.Should().Be(1, "non-silent ⇒ exactly one centre row");
+        handler.PostPaths.Should().ContainSingle()
+            .Which.Should().Be($"/notifications/{NonSilentTemplateKey}");
+        handler.Gets.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Step3_LiveWriters_StayNonSilent_AndStillPostExactlyOnce()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.Created);
+        var writer = NewWriter(handler);
+
+        var received = await writer.WriteOfferReceivedAsync(
+            ReceivedRecord(),
+            CancellationToken.None);
+        var accepted = await writer.WriteOfferAcceptedAsync(
+            AcceptedRecord(),
+            CancellationToken.None);
+
+        received.Classification.Should().Be(NotificationRecordWriteClassification.Committed);
+        accepted.Classification.Should().Be(NotificationRecordWriteClassification.Committed);
+        handler.Posts.Should().Be(2, "one row each — the gate must not silence these");
+        handler.PostPaths.Should().BeEquivalentTo(new[]
+        {
+            "/notifications/jeeb.offer_received",
+            "/notifications/jeeb.offer_accepted",
+        });
+    }
+
+    private const string SilentTemplateKey = "jeeb.delivery_status_updated";
+    private const string NonSilentTemplateKey = "jeeb.settlement_paid";
+
+    // Mirrors JeebNotificationRecordClient.PostAsync's route shape
+    // (POST notifications/{templateKey}) for a type that has no typed writer yet, so the
+    // assertion is about a real request on the same handler, not a mock counter.
+    private static async Task<HttpStatusCode> PostCentreRowAsync(
+        HttpClient http,
+        string templateKey,
+        CancellationToken cancellationToken)
+    {
+        using var response = await http.PostAsync(
+            $"notifications/{templateKey}",
+            new StringContent("{}", Encoding.UTF8, "application/json"),
+            cancellationToken);
+        return response.StatusCode;
+    }
+
+    private static NotificationRecordWriter NewWriter(
+        RecordingHandler handler,
+        out HttpClient http,
+        RecordingLogger<NotificationRecordWriter>? logger = null,
+        bool enabled = true)
+    {
+        http = new HttpClient(handler) { BaseAddress = new Uri("http://127.0.0.1/") };
+        return NewWriter(http, logger, enabled);
+    }
+
     private static NotificationRecordWriter NewWriter(
         RecordingHandler handler,
         RecordingLogger<NotificationRecordWriter>? logger = null,
         bool enabled = true)
+        => NewWriter(
+            new HttpClient(handler) { BaseAddress = new Uri("http://127.0.0.1/") },
+            logger,
+            enabled);
+
+    private static NotificationRecordWriter NewWriter(
+        HttpClient http,
+        RecordingLogger<NotificationRecordWriter>? logger,
+        bool enabled)
     {
-        var http = new HttpClient(handler) { BaseAddress = new Uri("http://127.0.0.1/") };
         var client = new JeebNotificationRecordClient(http);
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -292,6 +422,13 @@ public sealed class NotificationRecordWriterTests
         public int Posts { get; private set; }
         public int Gets { get; private set; }
         public List<string> PostBodies { get; } = new();
+
+        /// <summary>
+        /// Absolute paths of every POST seen. The step-3 DoD is stated in terms of
+        /// <c>POST /notifications/*</c>, so the trace is asserted on the PATH, not on a
+        /// bare counter that a refactor could satisfy for the wrong reason.
+        /// </summary>
+        public List<string> PostPaths { get; } = new();
         public List<bool> ObservedCancellation { get; } = new();
 
         protected override async Task<HttpResponseMessage> SendAsync(
@@ -302,6 +439,7 @@ public sealed class NotificationRecordWriterTests
             if (request.Method == HttpMethod.Post)
             {
                 Posts++;
+                PostPaths.Add(request.RequestUri!.AbsolutePath);
                 if (request.Content is not null)
                 {
                     PostBodies.Add(await request.Content.ReadAsStringAsync(cancellationToken));
