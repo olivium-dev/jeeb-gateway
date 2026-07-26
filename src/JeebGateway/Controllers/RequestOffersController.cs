@@ -324,6 +324,11 @@ public class RequestOffersController : ControllerBase
         try
         {
             await _offerPush.NotifyNewOfferAsync(
+                new OfferReceivedNotificationContext(
+                    request.PickupAddress,
+                    request.DropoffAddress,
+                    created.EtaMinutes,
+                    created.CreatedAt),
                 request.ClientId, requestId, created.Id, created.Fee, ct);
         }
         catch (Exception ex)

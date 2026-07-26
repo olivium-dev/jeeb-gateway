@@ -111,4 +111,18 @@ public class F5PrivacyInboxFilterTests
         v2.Should().BeEmpty();
         d2.Should().Be(0);
     }
+
+    [Fact]
+    public void CapturedWire_JeebPrefixedBroadcast_NormalizesBeforePrivacyFilter()
+    {
+        var wire = Fm1NotificationWireFixtures.JeeberBroadcast();
+        var (rows, _) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+
+        var (visible, dropped) =
+            JeebNotificationsInboxController.FilterJeeberBroadcasts(rows, callerIsJeeber: false);
+
+        rows.Should().OnlyContain(row => row.Type == "new_request");
+        visible.Should().BeEmpty();
+        dropped.Should().Be(3);
+    }
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using JeebGateway.Requests;
 using JeebGateway.service.ServicePushNotification;
 using Microsoft.Extensions.Logging;
 
@@ -48,6 +49,15 @@ public interface IOfferPushNotifier
         string requestId,
         string offerId,
         decimal fee,
+        CancellationToken ct,
+        OfferReceivedNotificationContext? context = null);
+
+    Task NotifyNewOfferAsync(
+        OfferReceivedNotificationContext context,
+        string clientId,
+        string requestId,
+        string offerId,
+        decimal fee,
         CancellationToken ct);
 
     /// <summary>
@@ -85,22 +95,58 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
     private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(2);
 
     private readonly ServicePushNotificationClient _push;
+    private readonly INotificationRecordWriter _recordWriter;
+    private readonly Func<string, CancellationToken, Task<DeliveryRequest?>> _getRequest;
     private readonly ILogger<OfferPushNotifier> _logger;
 
     public OfferPushNotifier(
         ServicePushNotificationClient push,
+        INotificationRecordWriter recordWriter,
+        IRequestsStore requests,
+        ILogger<OfferPushNotifier> logger)
+        : this(push, recordWriter, requests.GetAsync, logger)
+    {
+    }
+
+    public OfferPushNotifier(
+        ServicePushNotificationClient push,
+        ILogger<OfferPushNotifier> logger)
+        : this(
+            push,
+            DisabledNotificationRecordWriter.Instance,
+            (_, _) => Task.FromResult<DeliveryRequest?>(null),
+            logger)
+    {
+    }
+
+    internal OfferPushNotifier(
+        ServicePushNotificationClient push,
+        INotificationRecordWriter recordWriter,
+        Func<string, CancellationToken, Task<DeliveryRequest?>> getRequest,
         ILogger<OfferPushNotifier> logger)
     {
         _push = push;
+        _recordWriter = recordWriter;
+        _getRequest = getRequest;
         _logger = logger;
     }
+
+    public Task NotifyNewOfferAsync(
+        OfferReceivedNotificationContext context,
+        string clientId,
+        string requestId,
+        string offerId,
+        decimal fee,
+        CancellationToken ct)
+        => NotifyNewOfferAsync(clientId, requestId, offerId, fee, ct, context);
 
     public async Task NotifyNewOfferAsync(
         string clientId,
         string requestId,
         string offerId,
         decimal fee,
-        CancellationToken ct)
+        CancellationToken ct,
+        OfferReceivedNotificationContext? context = null)
     {
         try
         {
@@ -109,10 +155,47 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 return;
             }
 
+            var notificationCorrelationId = NotificationCorrelationId.Create(
+                OfferReceivedNotificationRecord.TemplateKey,
+                clientId,
+                offerId);
+            var copy = RenderNewOffer(fee);
+
+            if (context is not null)
+            {
+                var record = new OfferReceivedNotificationRecord
+                {
+                    Sender = "jeeb-gateway",
+                    Receiver = clientId,
+                    NotificationCorrelationId = notificationCorrelationId,
+                    Title = copy.Title,
+                    Description = copy.Body,
+                    Payload = new OfferReceivedNotificationPayload
+                    {
+                        UserId = clientId,
+                        OfferId = offerId,
+                        ClientName = string.Empty,
+                        PickupLocation = context.PickupAddress ?? string.Empty,
+                        DeliveryLocation = context.DropoffAddress ?? string.Empty,
+                        // Jeeb owns one money fact on an offer. The shared schema
+                        // has two money slots, so both echo the same decimal verbatim.
+                        OfferAmount = fee,
+                        DeliveryFee = fee,
+                        EstimatedDuration = context.EtaMinutes.ToString(CultureInfo.InvariantCulture),
+                        CreatedAt = context.CreatedAt,
+                    },
+                };
+                NotificationDurableWriteTelemetry.FieldAbsent.Add(
+                    1,
+                    new("field", "client_name"),
+                    new("templateKey", OfferReceivedNotificationRecord.TemplateKey));
+                await TryWriteOfferReceivedAsync(record, offerId, ct);
+            }
+
             var payload = new Dictionary<string, object?>
             {
-                ["title"] = "New offer on your request",
-                ["body"] = BuildBody(fee),
+                ["title"] = copy.Title,
+                ["body"] = copy.Body,
                 ["type"] = "offer",
                 ["category"] = "delivery",
                 // Both camel + snake variants — the mobile deep-link reads either
@@ -120,6 +203,8 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 ["requestId"] = requestId,
                 ["request_id"] = requestId,
                 ["offerId"] = offerId,
+                ["notificationId"] = notificationCorrelationId,
+                ["notification_id"] = notificationCorrelationId,
             };
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -139,10 +224,11 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
         }
     }
 
-    private static string BuildBody(decimal fee)
-        => fee > 0m
+    private static NotificationTemplate RenderNewOffer(decimal fee) => new(
+        "New offer on your request",
+        fee > 0m
             ? $"You received a new offer for ${fee.ToString("0.##", CultureInfo.InvariantCulture)}. Tap to review."
-            : "You received a new offer. Tap to review.";
+            : "You received a new offer. Tap to review.");
 
     // sprint-009 Lane E — the winner/loser accept-lifecycle pushes. Both mirror the
     // NotifyNewOfferAsync contract exactly (2s CTS, flat top-level payload, never-throws)
@@ -150,11 +236,89 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
     // client routes on (offer_accepted vs offer_lost). The title/body come from the
     // gateway-owned JeebNotificationCatalog (jeeb.offer_accepted / jeeb.offer_rejected)
     // and a jeeb://offers/{offerId} deep link is carried flat so the client can navigate.
-    public Task NotifyOfferAcceptedAsync(
+    public async Task NotifyOfferAcceptedAsync(
         string winnerJeeberId, string requestId, string offerId, CancellationToken ct)
-        => SendLifecycleAsync(
-            winnerJeeberId, requestId, offerId,
-            templateKey: "jeeb.offer_accepted", type: "offer_accepted", ct);
+    {
+        if (string.IsNullOrWhiteSpace(winnerJeeberId) || string.IsNullOrWhiteSpace(offerId))
+        {
+            return;
+        }
+
+        var templateKey = OfferAcceptedNotificationRecord.TemplateKey;
+        var template = JeebNotificationCatalog.Render(templateKey);
+        var notificationCorrelationId = NotificationCorrelationId.Create(
+            templateKey,
+            winnerJeeberId,
+            offerId);
+
+        try
+        {
+            var request = await _getRequest(requestId, ct);
+            if (request?.AcceptedFee is not null)
+            {
+                var record = new OfferAcceptedNotificationRecord
+                {
+                    Sender = "jeeb-gateway",
+                    Receiver = winnerJeeberId,
+                    NotificationCorrelationId = notificationCorrelationId,
+                    Title = template.Title,
+                    Description = template.Body,
+                    Payload = new OfferAcceptedNotificationPayload
+                    {
+                        UserId = request.ClientId,
+                        OfferId = offerId,
+                        ClientName = string.Empty,
+                        PickupLocation = request.PickupAddress ?? string.Empty,
+                        DeliveryLocation = request.DropoffAddress ?? string.Empty,
+                        AcceptedAmount = request.AcceptedFee.Value,
+                        JeeberId = winnerJeeberId,
+                        CreatedAt = request.AcceptedAt ?? request.CreatedAt,
+                    },
+                };
+                NotificationDurableWriteTelemetry.FieldAbsent.Add(
+                    1,
+                    new("field", "client_name"),
+                    new("templateKey", templateKey));
+                await TryWriteOfferAcceptedAsync(record, offerId, ct);
+            }
+            else
+            {
+                NotificationDurableWriteTelemetry.Skipped.Add(
+                    1,
+                    new("type", templateKey),
+                    new("reason", "accepted_amount_absent"),
+                    new("entityId", offerId));
+                _logger.LogWarning(
+                    "event={event} type={type} reason={reason} recipientId={recipientId} " +
+                    "entityId={entityId} ncid={ncid}",
+                    "notif.durable_write.skipped",
+                    templateKey,
+                    "accepted_amount_absent",
+                    winnerJeeberId,
+                    offerId,
+                    notificationCorrelationId);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogDurableWriteFailure(
+                ex,
+                templateKey,
+                winnerJeeberId,
+                offerId,
+                notificationCorrelationId);
+        }
+
+        await SendLifecycleAsync(
+            winnerJeeberId,
+            requestId,
+            offerId,
+            templateKey,
+            type: "offer_accepted",
+            ct,
+            template,
+            notificationCorrelationId);
+    }
 
     public Task NotifyOfferLostAsync(
         string loserJeeberId, string requestId, string offerId, CancellationToken ct)
@@ -163,7 +327,14 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
             templateKey: "jeeb.offer_rejected", type: "offer_lost", ct);
 
     private async Task SendLifecycleAsync(
-        string recipientId, string requestId, string offerId, string templateKey, string type, CancellationToken ct)
+        string recipientId,
+        string requestId,
+        string offerId,
+        string templateKey,
+        string type,
+        CancellationToken ct,
+        NotificationTemplate? renderedTemplate = null,
+        string? notificationCorrelationId = null)
     {
         try
         {
@@ -172,7 +343,7 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 return;
             }
 
-            var template = JeebNotificationCatalog.Render(templateKey);
+            var template = renderedTemplate ?? JeebNotificationCatalog.Render(templateKey);
             var deepLink = NotificationDeepLinkResolver.Resolve(templateKey, offerId);
 
             var payload = new Dictionary<string, object?>
@@ -189,6 +360,11 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 // needs no nested-JSON hoist. Mirrors the inbox deepLink contract.
                 ["deepLink"] = deepLink,
             };
+            if (notificationCorrelationId is not null)
+            {
+                payload["notificationId"] = notificationCorrelationId;
+                payload["notification_id"] = notificationCorrelationId;
+            }
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(PushTimeout);
@@ -205,5 +381,90 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 "Offer {Type} push for request {RequestId} (offer {OfferId}) to {RecipientId} failed; "
                 + "accept stays 200.", type, requestId, offerId, recipientId);
         }
+    }
+
+    private async Task TryWriteOfferReceivedAsync(
+        OfferReceivedNotificationRecord record,
+        string offerId,
+        CancellationToken requestToken)
+    {
+        try
+        {
+            await _recordWriter.WriteOfferReceivedAsync(record, requestToken);
+        }
+        catch (Exception ex)
+        {
+            LogDurableWriteFailure(
+                ex,
+                OfferReceivedNotificationRecord.TemplateKey,
+                record.Receiver,
+                offerId,
+                record.NotificationCorrelationId);
+        }
+    }
+
+    private async Task TryWriteOfferAcceptedAsync(
+        OfferAcceptedNotificationRecord record,
+        string offerId,
+        CancellationToken requestToken)
+    {
+        try
+        {
+            await _recordWriter.WriteOfferAcceptedAsync(record, requestToken);
+        }
+        catch (Exception ex)
+        {
+            LogDurableWriteFailure(
+                ex,
+                OfferAcceptedNotificationRecord.TemplateKey,
+                record.Receiver,
+                offerId,
+                record.NotificationCorrelationId);
+        }
+    }
+
+    private void LogDurableWriteFailure(
+        Exception exception,
+        string templateKey,
+        string recipientId,
+        string entityId,
+        string notificationCorrelationId)
+    {
+        NotificationDurableWriteTelemetry.Outcomes.Add(
+            1,
+            new("classification", "unproven"),
+            new("templateKey", templateKey));
+        _logger.LogError(
+            exception,
+            "event={event} classification={classification} templateKey={templateKey} " +
+            "recipientId={recipientId} entityId={entityId} ncid={ncid} upstreamStatus={upstreamStatus}",
+            "notif.durable_write.failed",
+            "unproven",
+            templateKey,
+            recipientId,
+            entityId,
+            notificationCorrelationId,
+            null);
+    }
+
+    private sealed class DisabledNotificationRecordWriter : INotificationRecordWriter
+    {
+        internal static readonly DisabledNotificationRecordWriter Instance = new();
+
+        public Task<NotificationRecordWriteOutcome> WriteOfferReceivedAsync(
+            OfferReceivedNotificationRecord record,
+            CancellationToken requestToken)
+            => Task.FromResult(
+                new NotificationRecordWriteOutcome(
+                    NotificationRecordWriteClassification.Disabled,
+                    null));
+
+        public Task<NotificationRecordWriteOutcome> WriteOfferAcceptedAsync(
+            OfferAcceptedNotificationRecord record,
+            CancellationToken requestToken)
+            => Task.FromResult(
+                new NotificationRecordWriteOutcome(
+                    NotificationRecordWriteClassification.Disabled,
+                    null));
     }
 }

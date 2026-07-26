@@ -1,6 +1,8 @@
 using System.Collections.Generic;
 using FluentAssertions;
+using JeebGateway.Controllers;
 using JeebGateway.JeebNotifications;
+using Newtonsoft.Json.Linq;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -134,4 +136,109 @@ public class JeebNotificationsProjectionTests
         page.TotalCount.Should().Be(25);
         page.TotalPages.Should().Be(3); // ceil(25/10)
     }
+
+    // ── FM-1 real-wire extraction (R2 / R19 / D5) ──────────────────────────
+
+    [Fact]
+    public void ExtractRows_CapturedOfferRow_NormalizesTypeTimestampAndPayloadRef()
+    {
+        var wire = Fm1NotificationWireFixtures.CapturedOfferReceived();
+
+        var (rows, total) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+
+        rows.Should().HaveCount(3);
+        rows[0].Id.Should().Be("00468148-d722-445a-97a1-4e39b87dafb3");
+        rows[0].Type.Should().Be("offer");
+        rows[0].Timestamp.Should().Be("2026-07-26T00:00:00.0000000");
+        rows[0].Ref.Should().Be("OFR-PROBE-3");
+        total.Should().Be(3);
+    }
+
+    [Fact]
+    public void ExtractRows_ConstructedDegeneratePayloadIds_LeaveRefNull_NoThrow()
+    {
+        var wire = Fm1NotificationWireFixtures.ConstructedDegenerateOfferPayloads();
+
+        var act = () => JeebNotificationsInboxController.ExtractRowsForTests(wire);
+
+        var result = act.Should().NotThrow().Subject;
+        result.Rows.Should().HaveCount(6);
+        result.Rows.Should().OnlyContain(row => row.Ref == null);
+    }
+
+    [Fact]
+    public void ExtractRows_ConstructedWireExistingTopLevelAliasWinsOverPayloadFallback()
+    {
+        var wire = Fm1NotificationWireFixtures.DeliveryWithTopLevelAndPayloadIds();
+
+        var (rows, _) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+
+        rows[0].Type.Should().Be("delivery_status_updated");
+        rows[0].Ref.Should().Be("TOP-LEVEL-DELIVERY");
+    }
+
+    [Fact]
+    public void ExtractRows_ConstructedOfferAcceptedDoesNotHoistOfferIdIntoChatRef()
+    {
+        var wire = Fm1NotificationWireFixtures.OfferAccepted();
+
+        var (rows, _) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+
+        rows[0].Type.Should().Be("offer_accepted");
+        rows[0].Ref.Should().BeNull();
+    }
+
+    [Fact]
+    public void ExtractRows_CapturedDuplicateNotificationIdsKeepFirstRowOnly()
+    {
+        var wire = Fm1NotificationWireFixtures.CapturedA5DuplicateEnvelope();
+
+        var (rows, total) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+
+        rows.Should().ContainSingle();
+        rows[0].Id.Should().Be("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeee0001");
+        total.Should().Be(2);
+    }
+}
+
+/// <summary>
+/// Literal notification wire fixtures. Files prefixed <c>captured-</c> are exact
+/// read-only MSI responses; files prefixed <c>constructed-</c> are explicitly
+/// labelled environmental-limit cases that the strict live schema cannot store.
+/// </summary>
+internal static class Fm1NotificationWireFixtures
+{
+    public static JObject CapturedOfferReceived()
+        => Load("captured-offer-received-page.json");
+
+    public static JObject CapturedA5DuplicateEnvelope()
+        => Load("captured-a5-duplicate-page.json");
+
+    public static JObject ConstructedDegenerateOfferPayloads()
+        => Load("constructed-degenerate-offer-payloads-page.json");
+
+    public static JObject DeliveryWithTopLevelAndPayloadIds()
+        => Load("constructed-delivery-precedence-page.json");
+
+    public static JObject OfferAccepted()
+        => Load("constructed-offer-accepted-page.json");
+
+    public static JObject JeeberBroadcast()
+        => Load("constructed-jeeber-broadcast-page.json");
+
+    public static JObject OffersSharingOneOfferId()
+        => Load("constructed-shared-offer-id-page.json");
+
+    public static JObject ConstructedOfferWithTopLevelRequestRef()
+        => Load("constructed-top-level-offer-ref-page.json");
+
+    public static JObject ConstructedOfferResolutionCap()
+        => Load("constructed-offer-resolution-cap-page.json");
+
+    private static JObject Load(string fileName)
+        => JObject.Parse(File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "Fixtures",
+            "FM1",
+            fileName)));
 }

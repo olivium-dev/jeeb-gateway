@@ -16,6 +16,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -86,6 +87,78 @@ public class OfferPushNotifierTests
 
         push.Sends.Should().BeEmpty();
         push.Attempts.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task NewOffer_DurableWritePrecedesPush_AndSharesCorrelationAndCopy()
+    {
+        var timeline = new List<string>();
+        var writer = new RecordingNotificationRecordWriter(timeline);
+        var push = new RecordingUserPushClient { BeforeSend = () => timeline.Add("push") };
+        var notifier = new OfferPushNotifier(
+            push,
+            writer,
+            (_, _) => Task.FromResult<DeliveryRequest?>(null),
+            NullLogger<OfferPushNotifier>.Instance);
+        var context = new OfferReceivedNotificationContext(
+            "Hamra, Beirut",
+            "Achrafieh, Beirut",
+            30,
+            DateTimeOffset.Parse("2026-07-26T10:11:12Z"));
+
+        await notifier.NotifyNewOfferAsync(
+            context,
+            Client,
+            RequestId,
+            OfferId,
+            fee: 12.5m,
+            CancellationToken.None);
+
+        timeline.Should().Equal("write", "push");
+        var record = writer.Received.Should().ContainSingle().Subject;
+        var payload = (IDictionary<string, object?>)push.Sends.Single().Payload;
+        payload["notificationId"].Should().Be(record.NotificationCorrelationId);
+        payload["notification_id"].Should().Be(record.NotificationCorrelationId);
+        payload["title"].Should().Be(record.Title);
+        payload["body"].Should().Be(record.Description);
+        record.Payload.OfferAmount.Should().Be(12.5m);
+        record.Payload.DeliveryFee.Should().Be(12.5m);
+        record.Payload.EstimatedDuration.Should().Be("30");
+        record.Payload.PickupLocation.Should().Be("Hamra, Beirut");
+        record.Payload.DeliveryLocation.Should().Be("Achrafieh, Beirut");
+    }
+
+    [Fact]
+    public async Task NewOffer_ThrowingDurableWriter_StillPushesAndReturns()
+    {
+        var writer = new RecordingNotificationRecordWriter(throwOnWrite: true);
+        var push = new RecordingUserPushClient();
+        var logger = new RecordingLogger<OfferPushNotifier>();
+        var notifier = new OfferPushNotifier(
+            push,
+            writer,
+            (_, _) => Task.FromResult<DeliveryRequest?>(null),
+            logger);
+        var context = new OfferReceivedNotificationContext(
+            "A",
+            "B",
+            10,
+            DateTimeOffset.Parse("2026-07-26T10:11:12Z"));
+
+        var act = async () => await notifier.NotifyNewOfferAsync(
+            context,
+            Client,
+            RequestId,
+            OfferId,
+            5m,
+            CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        writer.Attempts.Should().Be(1);
+        push.Sends.Should().ContainSingle();
+        logger.Entries.Should().ContainSingle(entry =>
+            entry.Level == LogLevel.Error &&
+            Equals(entry.Properties["event"], "notif.durable_write.failed"));
     }
 
     // ---------------------------------------------------------------------
@@ -188,11 +261,13 @@ public class OfferPushNotifierTests
         public ConcurrentQueue<SendRecord> Sends { get; } = new();
         public int Attempts { get; private set; }
         public bool Throw { get; init; }
+        public Action? BeforeSend { get; init; }
 
         public override Task<SentPayloadResponse> Send_notification_to_userAsync(
             string user_id, SentPayloadToUserRequest body, CancellationToken cancellationToken)
         {
             Attempts++;
+            BeforeSend?.Invoke();
             if (Throw)
             {
                 throw new InvalidOperationException("push service unavailable");
@@ -201,4 +276,68 @@ public class OfferPushNotifierTests
             return Task.FromResult(new SentPayloadResponse { Message = "ok", Timestamp = DateTimeOffset.UtcNow });
         }
     }
+
+    private sealed class RecordingNotificationRecordWriter : INotificationRecordWriter
+    {
+        private readonly List<string>? _timeline;
+        private readonly bool _throwOnWrite;
+
+        public RecordingNotificationRecordWriter(
+            List<string>? timeline = null,
+            bool throwOnWrite = false)
+        {
+            _timeline = timeline;
+            _throwOnWrite = throwOnWrite;
+        }
+
+        public int Attempts { get; private set; }
+        public List<OfferReceivedNotificationRecord> Received { get; } = new();
+
+        public Task<NotificationRecordWriteOutcome> WriteOfferReceivedAsync(
+            OfferReceivedNotificationRecord record,
+            CancellationToken requestToken)
+        {
+            Attempts++;
+            _timeline?.Add("write");
+            if (_throwOnWrite)
+            {
+                throw new InvalidOperationException("writer fault");
+            }
+            Received.Add(record);
+            return Task.FromResult(new NotificationRecordWriteOutcome(
+                NotificationRecordWriteClassification.Committed,
+                201));
+        }
+
+        public Task<NotificationRecordWriteOutcome> WriteOfferAcceptedAsync(
+            OfferAcceptedNotificationRecord record,
+            CancellationToken requestToken)
+            => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public List<LogEntry> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var properties = state as IEnumerable<KeyValuePair<string, object?>>
+                ?? Array.Empty<KeyValuePair<string, object?>>();
+            Entries.Add(new LogEntry(
+                logLevel,
+                properties.ToDictionary(pair => pair.Key, pair => pair.Value)));
+        }
+    }
+
+    private sealed record LogEntry(
+        LogLevel Level,
+        IReadOnlyDictionary<string, object?> Properties);
 }

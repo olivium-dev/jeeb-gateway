@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Availability;
 using JeebGateway.JeebNotifications;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Http;
@@ -59,14 +61,21 @@ namespace JeebGateway.Controllers;
 [Produces("application/json")]
 public sealed class JeebNotificationsInboxController : ControllerBase
 {
+    // Resolve at most 25% of the capped 20-row page so synchronous index work cannot
+    // multiply across an offer-heavy page; later rows degrade safely to the shell.
+    internal const int MaxOfferResolutionRowsPerPage = 5;
+
     private readonly ServiceNotificationClient _notifications;
+    private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly ILogger<JeebNotificationsInboxController> _log;
 
     public JeebNotificationsInboxController(
         ServiceNotificationClient notifications,
+        IOfferRequestIndex offerRequestIndex,
         ILogger<JeebNotificationsInboxController> log)
     {
         _notifications = notifications;
+        _offerRequestIndex = offerRequestIndex;
         _log = log;
     }
 
@@ -133,7 +142,8 @@ public sealed class JeebNotificationsInboxController : ControllerBase
                     created_before: null,
                     ct);
 
-            var (rows, total) = ExtractRows(response);
+            var (rows, total, offerRouteCandidates) = ExtractRows(response);
+            ResolveOfferRequestRefs(offerRouteCandidates);
 
             // F5 (JEBV4-302) PRIVACY FILTER — the "finding jeebers" new-request broadcast
             // is fanned to the jeeb_jeebers FCM topic (see NewRequestPushNotifier). A
@@ -166,6 +176,42 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         }
     }
 
+    private void ResolveOfferRequestRefs(
+        IReadOnlyList<OfferRouteCandidate> candidates)
+    {
+        foreach (var candidate in candidates)
+        {
+            candidate.Row.Ref = null;
+        }
+
+        var resolved = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var rowsToResolve = Math.Min(candidates.Count, MaxOfferResolutionRowsPerPage);
+        for (var index = 0; index < rowsToResolve; index++)
+        {
+            var candidate = candidates[index];
+            if (!resolved.TryGetValue(candidate.OfferId, out var requestId))
+            {
+                try
+                {
+                    requestId = _offerRequestIndex.ResolveRequestId(candidate.OfferId);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(
+                        ex,
+                        "Notification inbox offer route resolution failed for offer {OfferId}.",
+                        candidate.OfferId);
+                    requestId = null;
+                }
+                resolved[candidate.OfferId] = requestId;
+            }
+
+            candidate.Row.Ref = string.IsNullOrWhiteSpace(requestId)
+                ? null
+                : requestId.Trim();
+        }
+    }
+
     /// <summary>
     /// PATCH /v1/notifications/{id}/read — mark a single notification read (JM-057).
     /// Maps onto the generic single mark-read primitive. The mobile repo only awaits a
@@ -180,7 +226,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> MarkRead(string id, CancellationToken ct = default)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
 
         if (string.IsNullOrWhiteSpace(id))
         {
@@ -194,8 +240,14 @@ public sealed class JeebNotificationsInboxController : ControllerBase
 
         try
         {
+            var notificationId = id.Trim();
+            if (!await NotificationBelongsToCallerAsync(callerId, notificationId, ct))
+            {
+                return NotFound();
+            }
+
             await _notifications
-                .Mark_notification_read_notifications__notification_id__mark_read_patchAsync(id.Trim(), ct);
+                .Mark_notification_read_notifications__notification_id__mark_read_patchAsync(notificationId, ct);
             return Ok();
         }
         catch (NotificationApiException ex) when (ex.StatusCode is 401 or 403)
@@ -209,6 +261,42 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         catch (NotificationApiException ex)
         {
             return UpstreamProblem(ex);
+        }
+    }
+
+    private async Task<bool> NotificationBelongsToCallerAsync(
+        string callerId,
+        string notificationId,
+        CancellationToken ct)
+    {
+        const int pageSize = 100;
+
+        for (var page = 1; ; page++)
+        {
+            var response = await _notifications
+                .Get_messages_by_receiver_messages_receiver__receiver_id__getAsync(
+                    callerId,
+                    page,
+                    pageSize,
+                    read_status: "all",
+                    notification_type: null,
+                    sender: null,
+                    created_after: null,
+                    created_before: null,
+                    ct);
+
+            var (rows, total, _) = ExtractRows(response);
+            if (rows.Any(row =>
+                    string.Equals(row.Id?.Trim(), notificationId, StringComparison.Ordinal)))
+            {
+                return true;
+            }
+
+            if (rows.Count < pageSize
+                || total.HasValue && (long)page * pageSize >= total.Value)
+            {
+                return false;
+            }
         }
     }
 
@@ -268,19 +356,29 @@ public sealed class JeebNotificationsInboxController : ControllerBase
     /// returns the transport-free <see cref="UpstreamNotificationRow"/> the pure
     /// projection is tested against.
     /// </summary>
-    private static (IReadOnlyList<UpstreamNotificationRow> Rows, int? Total) ExtractRows(object? response)
+    private static (
+        IReadOnlyList<UpstreamNotificationRow> Rows,
+        int? Total,
+        IReadOnlyList<OfferRouteCandidate> OfferRouteCandidates) ExtractRows(object? response)
     {
         if (response is not JToken token)
         {
             // NSwag (Newtonsoft) deserialises the upstream `object` to a JToken; if not,
             // round-trip it so the same extraction path applies.
-            if (response is null) return (Array.Empty<UpstreamNotificationRow>(), null);
+            if (response is null)
+            {
+                return (
+                    Array.Empty<UpstreamNotificationRow>(),
+                    null,
+                    Array.Empty<OfferRouteCandidate>());
+            }
             token = JToken.FromObject(response);
         }
 
         var root = token as JObject;
         var itemsToken = root? ["items"] ?? root? ["notifications"] ?? root? ["messages"];
         int? total = (root? ["total"] ?? root? ["totalCount"] ?? root? ["count"])?.Value<int?>();
+        total ??= root? ["total_messages"]?.Value<int?>();
 
         // Some upstreams return a bare array rather than an envelope.
         if (itemsToken is not JArray && token is JArray bareArray)
@@ -289,18 +387,28 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         }
 
         var rows = new List<UpstreamNotificationRow>();
+        var offerRouteCandidates = new List<OfferRouteCandidate>();
         if (itemsToken is JArray array)
         {
             foreach (var node in array)
             {
                 if (node is JObject obj)
                 {
-                    rows.Add(MapRow(obj));
+                    var row = MapRow(obj);
+                    rows.Add(row);
+                    var payloadOfferId = NormalizeMappedRow(row, obj);
+                    if (payloadOfferId is not null)
+                    {
+                        offerRouteCandidates.Add(new OfferRouteCandidate(row, payloadOfferId));
+                    }
                 }
             }
         }
 
-        return (rows, total);
+        DeduplicateByNotificationId(rows);
+        offerRouteCandidates.RemoveAll(candidate =>
+            !rows.Any(row => ReferenceEquals(row, candidate.Row)));
+        return (rows, total, offerRouteCandidates);
     }
 
     /// <summary>Map one upstream <c>JObject</c> row to the normalized intermediate (tolerant of field aliases).</summary>
@@ -315,6 +423,103 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         Ref = Str(obj, "ref", "targetId", "target_id", "deliveryId", "delivery_id",
             "entityId", "entity_id", "referenceId", "reference_id"),
     };
+
+    internal static (IReadOnlyList<UpstreamNotificationRow> Rows, int? Total)
+        ExtractRowsForTests(object? response)
+    {
+        var (rows, total, _) = ExtractRows(response);
+        return (rows, total);
+    }
+
+    private static string? NormalizeMappedRow(UpstreamNotificationRow row, JObject obj)
+    {
+        row.Type = NormalizeType(row.Type);
+        var payload = obj["payload"] as JObject;
+        row.Timestamp ??= StrScalar(payload, "created_at");
+        if (row.Ref is null && string.Equals(row.Type, "offer", StringComparison.Ordinal))
+        {
+            var payloadOfferId = StrScalar(payload, "offer_id");
+            row.Ref = payloadOfferId;
+            return payloadOfferId;
+        }
+
+        row.Ref ??= PayloadRef(payload, row.Type);
+        return null;
+    }
+
+    private static void DeduplicateByNotificationId(List<UpstreamNotificationRow> rows)
+    {
+        var seenNotificationIds = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < rows.Count;)
+        {
+            var notificationId = rows[index].Id?.Trim();
+            if (!string.IsNullOrEmpty(notificationId)
+                && !seenNotificationIds.Add(notificationId))
+            {
+                rows.RemoveAt(index);
+                continue;
+            }
+
+            index++;
+        }
+    }
+
+    private static string? NormalizeType(string? wireType)
+    {
+        var trimmed = wireType?.Trim();
+        if (string.IsNullOrEmpty(trimmed)
+            || !trimmed.StartsWith("jeeb.", StringComparison.OrdinalIgnoreCase))
+        {
+            return trimmed;
+        }
+
+        var jeebType = trimmed["jeeb.".Length..].Trim().ToLowerInvariant();
+        return jeebType == "offer_received" ? "offer" : jeebType;
+    }
+
+    private static string? PayloadRef(JObject? payload, string? type)
+        => type switch
+        {
+            "delivery_status_updated" => StrScalar(payload, "delivery_id", "order_id"),
+            "dispute_resolved" => StrScalar(payload, "dispute_id"),
+            "settlement_paid" => StrScalar(payload, "settlement_id"),
+            "kyc_approved" or "kyc_rejected" => StrScalar(payload, "kyc_id"),
+            _ => null,
+        };
+
+    private sealed record OfferRouteCandidate(
+        UpstreamNotificationRow Row,
+        string OfferId);
+
+    private static string? StrScalar(JObject? obj, params string[] keys)
+    {
+        if (obj is null) return null;
+
+        foreach (var key in keys)
+        {
+            var token = obj[key];
+            if (token is not JValue scalar
+                || token.Type is not (
+                    JTokenType.String
+                    or JTokenType.Integer
+                    or JTokenType.Float
+                    or JTokenType.Date
+                    or JTokenType.Guid))
+            {
+                continue;
+            }
+
+            var value = scalar.Value switch
+            {
+                DateTimeOffset dateTimeOffset => dateTimeOffset.ToString("o"),
+                DateTime dateTime => dateTime.ToString("o", CultureInfo.InvariantCulture),
+                _ => Convert.ToString(scalar.Value, CultureInfo.InvariantCulture),
+            };
+            if (!string.IsNullOrWhiteSpace(value)) return value;
+        }
+
+        return null;
+    }
 
     private static string? Str(JObject obj, params string[] keys)
     {
