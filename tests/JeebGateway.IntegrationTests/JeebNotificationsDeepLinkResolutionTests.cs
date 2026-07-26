@@ -70,10 +70,10 @@ public sealed class JeebNotificationsDeepLinkResolutionTests
         stopwatch.Stop();
 
         index.CallCount.Should().Be(1);
-        page.Items.Should().OnlyContain(item => item.Ref == null);
         stopwatch.Elapsed.Should().BeLessThanOrEqualTo(
             JeebNotificationsInboxController.OfferResolutionBudget
             + TimeSpan.FromMilliseconds(100));
+        page.Items.Should().OnlyContain(item => item.Ref == null);
     }
 
     [Fact]
