@@ -66,18 +66,43 @@ public sealed class IdempotencyMiddleware
 
     public async Task InvokeAsync(HttpContext context, IIdempotencyStore store)
     {
-        if (!ShouldApply(context, out var key))
+        if (!ShouldApply(context, out var clientKey))
         {
             await _next(context);
             return;
         }
 
+        // JEBV4-335: the chat SEND key is a per-mount client counter that restarts
+        // at 0, so a re-entered thread re-presents keys we already stored and this
+        // middleware replayed a cached 201 without ever forwarding the message.
+        // Bind the key to a fingerprint of THIS request so a distinct send can
+        // never inherit another send's stored response. If the request cannot be
+        // fingerprinted we FAIL OPEN and forward — a duplicate bubble is cosmetic,
+        // a dropped message is data loss. See ChatSendIdempotencyGuard.
+        if (ChatSendIdempotencyGuard.AppliesTo(context.Request))
+        {
+            var guarded = await ChatSendIdempotencyGuard.TryDisambiguateAsync(context, clientKey!);
+            if (guarded is null)
+            {
+                _logger.LogWarning(
+                    "Chat send key {Key} could not be collision-guarded; forwarding WITHOUT dedup (fail-open)",
+                    clientKey);
+                await _next(context);
+                return;
+            }
+
+            context.Items[ChatSendIdempotencyGuard.EffectiveKeyItem] = guarded;
+            clientKey = guarded;
+        }
+
+        var key = ScopeKey(context, clientKey!);
+
         // JEBV4-45: serialize same-key concurrent requests (see KeyStripes doc).
-        var stripe = StripeFor(key!);
+        var stripe = StripeFor(key);
         await stripe.WaitAsync(context.RequestAborted);
         try
         {
-            await InvokeSerializedAsync(context, store, key!);
+            await InvokeSerializedAsync(context, store, key);
         }
         finally
         {
@@ -154,24 +179,36 @@ public sealed class IdempotencyMiddleware
         await originalBody.WriteAsync(bodyBytes, context.RequestAborted);
     }
 
-    private static bool ShouldApply(HttpContext context, out string? key)
+    /// <summary>
+    /// Extracts the raw CLIENT-supplied key. Scoping is applied separately by
+    /// <see cref="ScopeKey"/> so a per-endpoint collision guard (JEBV4-335) can
+    /// rewrite the client key before it is scoped and persisted.
+    /// </summary>
+    private static bool ShouldApply(HttpContext context, out string? clientKey)
     {
-        key = null;
+        clientKey = null;
         if (!MutatingMethods.Contains(context.Request.Method)) return false;
         if (!context.Request.Headers.TryGetValue(HeaderName, out var values)) return false;
 
         var candidate = values.ToString();
         if (string.IsNullOrWhiteSpace(candidate) || candidate.Length > MaxKeyLength) return false;
 
-        // Scope the key by method+path so the same client key on two different
-        // endpoints cannot collide — but the persisted key must be SLASH-FREE
-        // because the state-service exposes GET /idempotency/{key} and a raw
-        // request path ("/prohibited-items/scan") would break path routing.
-        // We therefore hash the {method}:{path} scope into a compact, URL-safe
-        // prefix and append the client-supplied key.
-        var scope = ScopeHash($"{context.Request.Method}:{context.Request.Path}");
-        key = $"{scope}.{candidate}";
+        clientKey = candidate;
         return true;
+    }
+
+    /// <summary>
+    /// Scope the key by method+path so the same client key on two different
+    /// endpoints cannot collide — but the persisted key must be SLASH-FREE
+    /// because the state-service exposes GET /idempotency/{key} and a raw
+    /// request path ("/prohibited-items/scan") would break path routing.
+    /// We therefore hash the {method}:{path} scope into a compact, URL-safe
+    /// prefix and append the client-supplied key.
+    /// </summary>
+    private static string ScopeKey(HttpContext context, string clientKey)
+    {
+        var scope = ScopeHash($"{context.Request.Method}:{context.Request.Path}");
+        return $"{scope}.{clientKey}";
     }
 
     private static string ScopeHash(string scope)

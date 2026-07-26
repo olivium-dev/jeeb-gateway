@@ -135,7 +135,13 @@ public sealed class JeebConversationsBffTests
         fake.LastAppend!.AuthorId.Should().Be(kamalUserId);
         fake.LastAppend.AuthorId.Should().NotBe("SPOOFED-attacker");
         fake.LastAppendConversationId.Should().Be("conv-1");
-        fake.LastAppend.IdempotencyKey.Should().Be("idem-h3-1");
+        // JEBV4-335: the client key is forwarded as a readable PREFIX, bound to a
+        // per-send fingerprint. It is deliberately NOT verbatim — the raw client key
+        // is a per-mount counter, and forwarding it verbatim would hand chat-service
+        // the same collidable anchor that silently dropped messages at the gateway.
+        // See ChatSendIdempotencyCollisionTests.
+        fake.LastAppend.IdempotencyKey.Should().StartWith("idem-h3-1");
+        fake.LastAppend.IdempotencyKey.Should().NotBe("idem-h3-1");
     }
 
     [Fact]
