@@ -3,8 +3,11 @@ using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Notifications;
+using JeebGateway.Requests;
+using JeebGateway.service.ServicePushNotification;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -41,19 +44,31 @@ public sealed class NotificationRecordWriterTests
     }
 
     [Fact]
-    public async Task Ambiguous500_WithExactReadBackMatch_IsClassifiedWithoutSecondPost()
+    public async Task AC6a_AC6b_AC6c_AC6d_Ambiguous500_CommitsAfterOneReadBackWithoutErrorAndPushes()
     {
         var record = ReceivedRecord();
+        var notificationId = NotificationCorrelationId.Create(
+            OfferReceivedNotificationRecord.TemplateKey,
+            record.Receiver,
+            record.Payload.OfferId);
         var handler = new RecordingHandler(
             HttpStatusCode.InternalServerError,
             readBody:
-                $$"""{"messages":[{"notification_id":"{{record.NotificationCorrelationId}}"}],"total_messages":1}""");
+                $$"""{"messages":[{"notification_id":"{{notificationId}}"}],"total_messages":1}""");
         var logger = new RecordingLogger<NotificationRecordWriter>();
-        var writer = NewWriter(handler, logger);
+        var writer = new CapturingNotificationRecordWriter(NewWriter(handler, logger));
+        var push = new RecordingPushClient();
+        var notifier = NewNotifier(writer, push);
 
-        var outcome = await writer.WriteOfferReceivedAsync(record, CancellationToken.None);
+        await notifier.NotifyNewOfferAsync(
+            ReceivedContext(),
+            record.Receiver,
+            "request-1",
+            record.Payload.OfferId,
+            record.Payload.OfferAmount,
+            CancellationToken.None);
 
-        outcome.Classification.Should()
+        writer.LastOutcome!.Classification.Should()
             .Be(NotificationRecordWriteClassification.CommittedAfterAmbiguousResponse);
         handler.Posts.Should().Be(1, "the notification service does not deduplicate NCIDs");
         handler.Gets.Should().Be(1);
@@ -63,6 +78,7 @@ public sealed class NotificationRecordWriterTests
                 entry.Properties["classification"],
                 "committed_after_ambiguous_response"));
         logger.Entries.Should().NotContain(entry => entry.Level == LogLevel.Error);
+        push.Sends.Should().Be(1);
     }
 
     [Fact]
@@ -159,6 +175,22 @@ public sealed class NotificationRecordWriterTests
             logger ?? new RecordingLogger<NotificationRecordWriter>());
     }
 
+    private static OfferPushNotifier NewNotifier(
+        INotificationRecordWriter writer,
+        RecordingPushClient push)
+        => new(
+            push,
+            writer,
+            (_, _) => Task.FromResult<DeliveryRequest?>(null),
+            NullLogger<OfferPushNotifier>.Instance);
+
+    private static OfferReceivedNotificationContext ReceivedContext()
+        => new(
+            "Hamra, Beirut",
+            "Achrafieh, Beirut",
+            30,
+            DateTimeOffset.Parse("2026-07-26T10:11:12Z"));
+
     private static OfferReceivedNotificationRecord ReceivedRecord() => new()
     {
         Sender = "jeeb-gateway",
@@ -252,6 +284,53 @@ public sealed class NotificationRecordWriterTests
             {
                 Content = new StringContent(_readBody, Encoding.UTF8, "application/json"),
             };
+        }
+    }
+
+    private sealed class CapturingNotificationRecordWriter : INotificationRecordWriter
+    {
+        private readonly INotificationRecordWriter _inner;
+
+        public CapturingNotificationRecordWriter(INotificationRecordWriter inner)
+        {
+            _inner = inner;
+        }
+
+        public NotificationRecordWriteOutcome? LastOutcome { get; private set; }
+
+        public async Task<NotificationRecordWriteOutcome> WriteOfferReceivedAsync(
+            OfferReceivedNotificationRecord record,
+            CancellationToken requestToken)
+        {
+            LastOutcome = await _inner.WriteOfferReceivedAsync(record, requestToken);
+            return LastOutcome;
+        }
+
+        public Task<NotificationRecordWriteOutcome> WriteOfferAcceptedAsync(
+            OfferAcceptedNotificationRecord record,
+            CancellationToken requestToken)
+            => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingPushClient : ServicePushNotificationClient
+    {
+        public RecordingPushClient() : base("http://127.0.0.1/", new HttpClient())
+        {
+        }
+
+        public int Sends { get; private set; }
+
+        public override Task<SentPayloadResponse> Send_notification_to_userAsync(
+            string user_id,
+            SentPayloadToUserRequest body,
+            CancellationToken cancellationToken)
+        {
+            Sends++;
+            return Task.FromResult(new SentPayloadResponse
+            {
+                Message = "ok",
+                Timestamp = DateTimeOffset.UtcNow,
+            });
         }
     }
 
