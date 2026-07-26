@@ -14,6 +14,20 @@ public sealed class DispatchingRequestExpiryNotifier : IRequestExpiryNotifier
 {
     private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(2);
 
+    /// <summary>
+    /// A request nudge / expiry push is a FIRE-ONCE heuristic, so the reserved
+    /// outbox row is allowed exactly one dispatch attempt. Nothing in the gateway
+    /// re-drives <see cref="INotificationDispatchOutbox.GetDueAsync"/> for this
+    /// path (the sweeper itself short-circuits on the idempotency key), so leaving
+    /// a failed entry <c>Pending</c> would claim a retry that never happens.
+    /// One attempt then straight to the DLQ, where
+    /// <c>GET /v1/notifications/dlq</c> surfaces it with its last error.
+    /// </summary>
+    private const int MaxDispatchAttempts = 1;
+
+    /// <summary>Upper bound on the error text persisted to <c>last_error</c>.</summary>
+    private const int MaxRecordedErrorLength = 500;
+
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<DispatchingRequestExpiryNotifier> _logger;
 
@@ -102,17 +116,22 @@ public sealed class DispatchingRequestExpiryNotifier : IRequestExpiryNotifier
                 ["language"] = locale,
             };
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(PushTimeout);
-
-            var push = scope.ServiceProvider.GetRequiredService<ServicePushNotificationClient>();
-            await push.Send_notification_to_userAsync(
-                clientId,
-                new SentPayloadToUserRequest { Payload = payload },
-                cts.Token);
-
-            // Preserve the existing request-expired/request-nudge deduplication without
-            // routing delivery back through the in-gateway device-token registry.
+            // RESERVE the dedupe row BEFORE the push attempt.
+            //
+            // This row used to be written only AFTER a successful send, with the
+            // failure swallowed by the catch below. A push that kept failing
+            // (e.g. the push service 500s because every stored device token for
+            // this user is dead) therefore never recorded `request-nudge:{id}`,
+            // so ExistsAsync above never deduplicated and RequestNudgeSweeper
+            // re-sent the identical nudge on EVERY 30s sweep, forever — hundreds
+            // of calls per stuck request, which in turn kept the shared push
+            // client's circuit breaker pinned open for unrelated users.
+            //
+            // The nudge/expiry push is a fire-once heuristic: the row is the
+            // record that we attempted it. Losing one to a genuine transient
+            // failure is the deliberate trade-off against an unbounded re-send
+            // loop; the attempt is not lost silently — a failed attempt lands in
+            // the DLQ with its last error (see MaxDispatchAttempts).
             var entry = await outbox.AddAsync(new NotificationDispatchEntry
             {
                 TemplateKey = templateKey,
@@ -121,6 +140,30 @@ public sealed class DispatchingRequestExpiryNotifier : IRequestExpiryNotifier
                 RecipientUserId = uid,
                 IdempotencyKey = idempotencyKey,
             }, ct);
+
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(PushTimeout);
+
+                var push = scope.ServiceProvider.GetRequiredService<ServicePushNotificationClient>();
+                await push.Send_notification_to_userAsync(
+                    clientId,
+                    new SentPayloadToUserRequest { Payload = payload },
+                    cts.Token);
+            }
+            catch (Exception pushEx)
+            {
+                _logger.LogWarning(
+                    pushEx,
+                    "Notification {TemplateKey} for request {RequestId} failed to dispatch; " +
+                    "the outbox entry is recorded as failed and will NOT be re-sent.",
+                    templateKey,
+                    requestId);
+                await RecordDispatchFailureAsync(outbox, entry.Id, pushEx, templateKey, requestId, ct);
+                return;
+            }
+
             await outbox.MarkDeliveredAsync(entry.Id, ct);
         }
         catch (Exception ex)
@@ -128,6 +171,47 @@ public sealed class DispatchingRequestExpiryNotifier : IRequestExpiryNotifier
             _logger.LogWarning(
                 ex,
                 "Notification {TemplateKey} for request {RequestId} failed; request lifecycle processing continues.",
+                templateKey,
+                requestId);
+        }
+    }
+
+    /// <summary>
+    /// Books the failed dispatch against the reserved outbox entry so the attempt
+    /// is observable (attempt count + last error, then DLQ) instead of vanishing.
+    /// Bookkeeping is itself best-effort: if the outbox write fails, the reserved
+    /// row still exists and still deduplicates, which is the property that stops
+    /// the re-send loop.
+    /// </summary>
+    private async Task RecordDispatchFailureAsync(
+        INotificationDispatchOutbox outbox,
+        Guid entryId,
+        Exception pushEx,
+        string templateKey,
+        string requestId,
+        CancellationToken ct)
+    {
+        try
+        {
+            var error = $"{pushEx.GetType().Name}: {pushEx.Message}";
+            if (error.Length > MaxRecordedErrorLength)
+            {
+                error = error[..MaxRecordedErrorLength];
+            }
+
+            await outbox.RecordFailureAsync(
+                entryId,
+                error,
+                maxAttempts: MaxDispatchAttempts,
+                retryDelay: TimeSpan.Zero,
+                ct);
+        }
+        catch (Exception bookkeepingEx)
+        {
+            _logger.LogWarning(
+                bookkeepingEx,
+                "Could not record the failed dispatch of {TemplateKey} for request {RequestId}; " +
+                "the reserved outbox entry still suppresses a re-send.",
                 templateKey,
                 requestId);
         }

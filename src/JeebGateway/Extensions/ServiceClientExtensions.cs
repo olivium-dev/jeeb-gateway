@@ -834,4 +834,136 @@ public static class ServiceClientExtensions
             Timeout = TimeSpan.FromSeconds(10),
         });
     }
+
+    /// <summary>
+    /// PUSH-BREAKER — attaches the PUSH-ONLY circuit-breaker + timeout pipeline
+    /// to the <c>ServicePushNotificationClient</c> named client.
+    ///
+    /// <para>Deliberately NOT <see cref="AttachBreakerAndTimeoutOnly"/>: that
+    /// helper's <see cref="ConfigureBreakerAndTimeoutOnly"/> is SHARED with
+    /// <c>ServiceWalletClient</c> (money-adjacent), so its breaker accounting must
+    /// not be relaxed. The push client gets its own pipeline instead — identical
+    /// windows/thresholds, one narrowly-scoped exclusion (see
+    /// <see cref="ConfigurePushBreakerAndTimeout"/>).</para>
+    /// </summary>
+    internal static IHttpClientBuilder AttachPushBreakerAndTimeout(IHttpClientBuilder builder)
+    {
+        builder.AddResilienceHandler("push-no-retry", ConfigurePushBreakerAndTimeout);
+        return builder;
+    }
+
+    /// <summary>
+    /// PUSH-BREAKER — the push client's own circuit-breaker + timeout pipeline.
+    /// Window, ratio, throughput and break duration are IDENTICAL to
+    /// <see cref="ConfigureBreakerAndTimeoutOnly"/>; the only difference is the
+    /// <c>ShouldHandle</c> predicate (<see cref="ShouldBreakOnPushOutcome"/>),
+    /// which keeps a single poisoned recipient out of the breaker's accounting.
+    ///
+    /// <para><b>Why.</b> The shared push service answers
+    /// <c>POST /api/v1/sent-payload/user/{id}</c> with HTTP 500 when every stored
+    /// device token for THAT ONE user is dead (its endpoints wrap all non-HTTP
+    /// exceptions into a generic 500). That failure is permanent for that user and
+    /// says nothing about the health of the push service, yet under the shared
+    /// policy it counted like any other 5xx: a repeatedly-notified poisoned
+    /// recipient tripped the breaker and — because Polly v8 re-opens on a single
+    /// failed half-open probe, and that recipient's next 500 was almost always
+    /// the probe — the breaker stayed effectively open, denying pushes with
+    /// <c>BrokenCircuitException</c> to every OTHER user of the same named
+    /// client (offer, offer_accepted, chat).</para>
+    ///
+    /// <para><b>Scope of the exclusion.</b> As narrow as the response allows:
+    /// status EXACTLY 500 AND the request path is the per-user send endpoint.
+    /// Everything else still trips the breaker unchanged — connect failures and
+    /// other transport exceptions, timeouts, 502/503/504, and 500s on any other
+    /// push endpoint (register/delete device, send-to-device, broadcast, topic,
+    /// health). A genuine push-service outage therefore still opens the circuit
+    /// and fails fast. The body is NOT used as a discriminator: the service
+    /// deliberately never echoes exception text, so its 500 body is generic and
+    /// carries no signal (and reading it inside the predicate would consume the
+    /// streamed response the NSwag client still has to read).</para>
+    ///
+    /// <para><b>Residual risk, accepted and stated.</b> An outage whose ONLY
+    /// symptom is a 500 on the per-user endpoint (e.g. the push service is up but
+    /// its database is down) no longer opens the circuit; those calls fail
+    /// individually within the 10s timeout instead of failing fast. That is the
+    /// deliberate trade against the observed alternative — one dead-token
+    /// recipient blacking out push for everyone. Push dispatch is best-effort and
+    /// fire-and-forget at every call site, so the cost is latency on a failing
+    /// call, not a failed user request.</para>
+    /// </summary>
+    private static void ConfigurePushBreakerAndTimeout(ResiliencePipelineBuilder<HttpResponseMessage> b)
+    {
+        b.AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
+        {
+            SamplingDuration = TimeSpan.FromSeconds(30),
+            FailureRatio = 0.5,
+            MinimumThroughput = 10,
+            BreakDuration = TimeSpan.FromSeconds(30),
+            ShouldHandle = args => ShouldBreakOnPushOutcome(args.Outcome.Exception, args.Outcome.Result)
+                ? PredicateResult.True()
+                : PredicateResult.False(),
+        });
+
+        b.AddTimeout(new HttpTimeoutStrategyOptions
+        {
+            Timeout = TimeSpan.FromSeconds(10),
+        });
+    }
+
+    /// <summary>The push service's per-user send endpoint (PUSH-BREAKER).</summary>
+    private const string PerUserPushPath = "/api/v1/sent-payload/user/";
+
+    /// <summary>
+    /// PUSH-BREAKER — the push client's circuit-breaker predicate, factored out
+    /// for unit testing. Defers to the package default
+    /// (<see cref="HttpClientResiliencePredicates.IsTransient(Outcome{HttpResponseMessage})"/>)
+    /// for every outcome EXCEPT a per-user "all device tokens dead" 500, which is
+    /// a per-recipient permanent failure rather than a signal about the shared
+    /// push service (see <see cref="ConfigurePushBreakerAndTimeout"/>).
+    /// </summary>
+    /// <param name="exception">The outcome exception, if the attempt threw.</param>
+    /// <param name="response">The outcome response, if the attempt completed.</param>
+    /// <returns><c>true</c> if the outcome should count toward the breaker.</returns>
+    internal static bool ShouldBreakOnPushOutcome(Exception? exception, HttpResponseMessage? response)
+    {
+        if (exception is not null)
+        {
+            // Transport faults and timeouts are exactly the outage signal the
+            // breaker exists for — unchanged from the shared policy.
+            return HttpClientResiliencePredicates.IsTransient(
+                Outcome.FromException<HttpResponseMessage>(exception));
+        }
+
+        if (response is null)
+        {
+            return false;
+        }
+
+        if (IsPerUserPushDeadTokenFailure(response))
+        {
+            return false;
+        }
+
+        return HttpClientResiliencePredicates.IsTransient(Outcome.FromResult(response));
+    }
+
+    /// <summary>
+    /// True only for HTTP 500 returned by the push service's per-user send
+    /// endpoint — the shape the service produces when every stored device token
+    /// for that one recipient is dead. Fail-safe: if the originating request is
+    /// not attached to the response we return false, so the outcome keeps
+    /// counting toward the breaker.
+    /// </summary>
+    private static bool IsPerUserPushDeadTokenFailure(HttpResponseMessage response)
+    {
+        if (response.StatusCode != System.Net.HttpStatusCode.InternalServerError)
+            return false;
+
+        var uri = response.RequestMessage?.RequestUri;
+        if (uri is null)
+            return false;
+
+        var path = uri.IsAbsoluteUri ? uri.AbsolutePath : uri.OriginalString;
+        return path.Contains(PerUserPushPath, StringComparison.OrdinalIgnoreCase);
+    }
 }
