@@ -613,6 +613,21 @@ builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePu
     pushClient.InternalApiKey = builder.Configuration["PushNotificationServiceApi:InternalApiKey"];
     return pushClient;
 });
+ServiceClientExtensions.AttachBreakerAndTimeoutOnly(
+    builder.Services.AddHttpClient<JeebGateway.Notifications.JeebNotificationRecordClient>(
+        JeebGateway.Notifications.JeebNotificationRecordClient.HttpClientName,
+        client =>
+        {
+            var apiUrl = builder.Configuration["ServiceNotificationClient:BaseUrl"];
+            if (!string.IsNullOrWhiteSpace(apiUrl))
+            {
+                client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
+            }
+            client.Timeout = TimeSpan.FromSeconds(30);
+        }));
+builder.Services.AddScoped<
+    JeebGateway.Notifications.INotificationRecordWriter,
+    JeebGateway.Notifications.NotificationRecordWriter>();
 
 // BUILD-CHAT-PUSH — the chat-message → push-notification trigger. Best-effort fan-out
 // of an FCM push to the conversation's other delivery principal when a chat message is
