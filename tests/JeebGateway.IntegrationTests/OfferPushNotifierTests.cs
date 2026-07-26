@@ -129,7 +129,7 @@ public class OfferPushNotifierTests
     }
 
     [Fact]
-    public async Task NewOffer_ThrowingDurableWriter_StillPushesAndReturns()
+    public async Task AC2a_AC2b_NewOffer_ThrowingDurableWriter_StillPushesAndLogsOnceWithNcid()
     {
         var writer = new RecordingNotificationRecordWriter(throwOnWrite: true);
         var push = new RecordingUserPushClient();
@@ -156,9 +156,12 @@ public class OfferPushNotifierTests
         await act.Should().NotThrowAsync();
         writer.Attempts.Should().Be(1);
         push.Sends.Should().ContainSingle();
-        logger.Entries.Should().ContainSingle(entry =>
-            entry.Level == LogLevel.Error &&
-            Equals(entry.Properties["event"], "notif.durable_write.failed"));
+        var pushPayload = (IDictionary<string, object?>)push.Sends.Single().Payload;
+        var error = logger.Entries.Should()
+            .ContainSingle(entry => entry.Level == LogLevel.Error)
+            .Subject;
+        error.Properties["event"].Should().Be("notif.durable_write.failed");
+        error.Properties["ncid"].Should().Be(pushPayload["notificationId"]);
     }
 
     // ---------------------------------------------------------------------
