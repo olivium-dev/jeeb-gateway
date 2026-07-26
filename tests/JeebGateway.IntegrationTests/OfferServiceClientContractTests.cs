@@ -23,7 +23,7 @@ namespace JeebGateway.IntegrationTests;
 ///     dollars↔cents mapping + status collapse + 409/404/403 mapping.</item>
 ///   <item><b>Live-wire tests</b> (opt-in via <c>JEEB_OFFER_LIVE=1</c>): hit the
 ///     real upstream at <c>JEEB_OFFER_BASEURL</c> (default
-///     http://192.168.2.50:10063) and assert the auth/error envelope the
+///     http://127.0.0.1:10063) and assert the auth/error envelope the
 ///     gateway depends on. Skipped by default because CI has no route to the
 ///     upstream's private network.</item>
 /// </list>
@@ -610,7 +610,7 @@ public class OfferServiceClientContractTests
     private static bool LiveEnabled(out string baseUrl)
     {
         baseUrl = Environment.GetEnvironmentVariable("JEEB_OFFER_BASEURL")
-                  ?? "http://192.168.2.50:10063";
+                  ?? "http://127.0.0.1:10063";
         return Environment.GetEnvironmentVariable("JEEB_OFFER_LIVE") == "1";
     }
 

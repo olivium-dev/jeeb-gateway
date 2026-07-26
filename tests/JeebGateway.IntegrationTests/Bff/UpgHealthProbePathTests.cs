@@ -32,7 +32,7 @@ namespace JeebGateway.IntegrationTests.Bff;
 public class UpgHealthProbePathTests
 {
     private const string UpgName = "unified-payment-gateway";
-    private const string UpgBaseUrl = "http://192.168.2.50:10066";
+    private const string UpgBaseUrl = "http://127.0.0.1:10066";
 
     [Fact]
     public void Upg_Probe_Resolves_To_Decoupled_Readiness_Path_Not_Removed_Health()
@@ -40,7 +40,7 @@ public class UpgHealthProbePathTests
         var uri = ResolveUpgProbeUri();
 
         // The decoupled UPG readiness surface (200). MUST NOT be the removed /health.
-        uri.AbsoluteUri.Should().Be("http://192.168.2.50:10066/api/v1/gateways");
+        uri.AbsoluteUri.Should().Be("http://127.0.0.1:10066/api/v1/gateways");
         uri.AbsolutePath.Should().Be("/api/v1/gateways");
         uri.AbsolutePath.Should().NotBe("/health",
             "the UPG decouple removed GET /health (404) — probing it falsely 503s the gateway aggregate");

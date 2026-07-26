@@ -21,7 +21,7 @@ namespace JeebGateway.IntegrationTests.Whisper;
 ///     client-side <c>422 unprocessable_audio</c> — locking the mapping onto the
 ///     gateway's <see cref="TranscriptionResult"/> contract and asserting the
 ///     request is posted as multipart/form-data (the FastAPI UploadFile contract).
-///   * LIVE contract test against <c>http://192.168.2.50:10062</c>: proves the real
+///   * LIVE contract test against <c>http://127.0.0.1:10062</c>: proves the real
 ///     submit path (POST /v1/transcribe) plus /healthz + /readyz reachability. It
 ///     is reachability-guarded: when the host is unreachable (e.g. CI without the
 ///     overlay network) the assertions are skipped rather than failing the build,
@@ -29,7 +29,7 @@ namespace JeebGateway.IntegrationTests.Whisper;
 /// </summary>
 public class VoiceTranscriptionClientContractTests
 {
-    private const string LiveBaseUrl = "http://192.168.2.50:10062/";
+    private const string LiveBaseUrl = "http://127.0.0.1:10062/";
 
     // ---- SEAM: upstream 422 unprocessable_audio maps to QueuedForRetry (not a 502) ----
     [Fact]

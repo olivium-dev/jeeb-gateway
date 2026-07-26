@@ -44,7 +44,7 @@ in their migration tickets.
 ## jeeb-state-service (Layer-2 durable rewire — ADR-001-rev2)
 
 `jeeb-state-service.openapi.json` is the LIVE spec fetched from
-`http://192.168.2.50:10073/swagger/v1/swagger.json` and the
+`http://127.0.0.1:10073/swagger/v1/swagger.json` and the
 `JeebStateServiceClient.cs` is generated from it via `nswag run nswag-state.json`
 (freshness-gated in CI). Probed live 2026-06-04; every endpoint exercised.
 
@@ -118,7 +118,12 @@ and are documented in `docs/batches/b02-20260726/UPG-REMOVAL.md`:
 - `Services/Clients/HttpPaymentRefundClient.cs` — the dispute-resolve refund
   (money OUT), consumed by `Disputes/V2/DisputeCaseService.cs`.
 - Both light up whenever `Services:UnifiedPayment:BaseUrl` is set — and it **is**
-  set in `appsettings.Production.json` (`http://192.168.2.50:10066`).
+  set in `appsettings.Production.json` (port `10066`). It is the **only** value in
+  the repo still pointing at the banned legacy swarm host: the `.50` purge
+  (batch `b02-20260726`, P0) deliberately left it alone, because blanking it swaps
+  `HttpPaymentRefundClient` for the in-memory no-op and turns production refunds
+  into silent successes. Tracked as the one payments exception in
+  `scripts/no-50-allowlist.txt`, pending an owner decision.
 - `Financials/IUpgSettlementClient.cs` + `UpgSettlementClient.cs` +
   `UpgSettlementLedgerClient.cs` — the settlement-ledger post, gated by
   `FeatureFlags:UseUpstream:Payments` (default **false**, so dormant, but one
