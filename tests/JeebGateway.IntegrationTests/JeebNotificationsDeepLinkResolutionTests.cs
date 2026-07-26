@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Security.Claims;
 using FluentAssertions;
 using JeebGateway.Availability;
@@ -57,23 +56,52 @@ public sealed class JeebNotificationsDeepLinkResolutionTests
     }
 
     [Fact]
-    public async Task ListNotifications_BudgetExhausted_StopsRemainingLookupsAndLeavesRefsNull()
+    public async Task ListNotifications_ResolutionCap_StopsAtNamedCountAndLeavesRemainingRowsAtShell()
     {
-        var index = new RecordingOfferRequestIndex(_ =>
+        var index = new RecordingOfferRequestIndex(
+            offerId => offerId.Replace("OFR-CAP-", "REQ-CAP-", StringComparison.Ordinal));
+
+        var page = await ListPage(
+            index,
+            Fm1NotificationWireFixtures.ConstructedOfferResolutionCap());
+
+        index.CallCount.Should().Be(
+            JeebNotificationsInboxController.MaxOfferResolutionRowsPerPage);
+        page.Items.Select(item => item.Ref).Should().Equal(
+            "REQ-CAP-1",
+            "REQ-CAP-2",
+            "REQ-CAP-3",
+            "REQ-CAP-4",
+            "REQ-CAP-5",
+            null,
+            null,
+            null);
+    }
+
+    [Fact]
+    public async Task ListNotifications_SlowIndexCall_StillObservesResolutionCallCap()
+    {
+        var index = new RecordingOfferRequestIndex(offerId =>
         {
-            Thread.Sleep(500);
-            return "REQ-TOO-LATE";
+            if (offerId == "OFR-CAP-1")
+            {
+                Thread.Sleep(100);
+            }
+
+            return offerId.Replace("OFR-CAP-", "REQ-CAP-", StringComparison.Ordinal);
         });
 
-        var stopwatch = Stopwatch.StartNew();
-        var page = await ListPage(index);
-        stopwatch.Stop();
+        var page = await ListPage(
+            index,
+            Fm1NotificationWireFixtures.ConstructedOfferResolutionCap());
 
-        index.CallCount.Should().Be(1);
-        stopwatch.Elapsed.Should().BeLessThanOrEqualTo(
-            JeebNotificationsInboxController.OfferResolutionBudget
-            + TimeSpan.FromMilliseconds(100));
-        page.Items.Should().OnlyContain(item => item.Ref == null);
+        index.CallCount.Should().Be(
+            JeebNotificationsInboxController.MaxOfferResolutionRowsPerPage);
+        page.Items[0].Ref.Should().Be("REQ-CAP-1");
+        page.Items
+            .Skip(JeebNotificationsInboxController.MaxOfferResolutionRowsPerPage)
+            .Should()
+            .OnlyContain(item => item.Ref == null);
     }
 
     [Fact]

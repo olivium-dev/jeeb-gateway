@@ -232,6 +232,9 @@ internal static class Fm1NotificationWireFixtures
     public static JObject ConstructedOfferWithTopLevelRequestRef()
         => Load("constructed-top-level-offer-ref-page.json");
 
+    public static JObject ConstructedOfferResolutionCap()
+        => Load("constructed-offer-resolution-cap-page.json");
+
     private static JObject Load(string fileName)
         => JObject.Parse(File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,

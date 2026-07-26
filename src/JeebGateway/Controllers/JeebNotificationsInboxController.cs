@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -62,7 +61,9 @@ namespace JeebGateway.Controllers;
 [Produces("application/json")]
 public sealed class JeebNotificationsInboxController : ControllerBase
 {
-    internal static readonly TimeSpan OfferResolutionBudget = TimeSpan.FromMilliseconds(150);
+    // Resolve at most 25% of the capped 20-row page so synchronous index work cannot
+    // multiply across an offer-heavy page; later rows degrade safely to the shell.
+    internal const int MaxOfferResolutionRowsPerPage = 5;
 
     private readonly ServiceNotificationClient _notifications;
     private readonly IOfferRequestIndex _offerRequestIndex;
@@ -142,7 +143,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
                     ct);
 
             var (rows, total, offerRouteCandidates) = ExtractRows(response);
-            await ResolveOfferRequestRefsAsync(offerRouteCandidates);
+            ResolveOfferRequestRefs(offerRouteCandidates);
 
             // F5 (JEBV4-302) PRIVACY FILTER — the "finding jeebers" new-request broadcast
             // is fanned to the jeeb_jeebers FCM topic (see NewRequestPushNotifier). A
@@ -175,7 +176,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         }
     }
 
-    private async Task ResolveOfferRequestRefsAsync(
+    private void ResolveOfferRequestRefs(
         IReadOnlyList<OfferRouteCandidate> candidates)
     {
         foreach (var candidate in candidates)
@@ -184,59 +185,30 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         }
 
         var resolved = new Dictionary<string, string?>(StringComparer.Ordinal);
-        var budget = Stopwatch.StartNew();
-        foreach (var candidate in candidates)
+        var rowsToResolve = Math.Min(candidates.Count, MaxOfferResolutionRowsPerPage);
+        for (var index = 0; index < rowsToResolve; index++)
         {
+            var candidate = candidates[index];
             if (!resolved.TryGetValue(candidate.OfferId, out var requestId))
             {
-                var remaining = OfferResolutionBudget - budget.Elapsed;
-                if (remaining <= TimeSpan.Zero)
+                try
                 {
-                    break;
+                    requestId = _offerRequestIndex.ResolveRequestId(candidate.OfferId);
                 }
-
-                requestId = await ResolveRequestIdWithinBudgetAsync(
-                    candidate.OfferId,
-                    remaining);
+                catch (Exception ex)
+                {
+                    _log.LogWarning(
+                        ex,
+                        "Notification inbox offer route resolution failed for offer {OfferId}.",
+                        candidate.OfferId);
+                    requestId = null;
+                }
                 resolved[candidate.OfferId] = requestId;
             }
 
             candidate.Row.Ref = string.IsNullOrWhiteSpace(requestId)
                 ? null
                 : requestId.Trim();
-        }
-    }
-
-    private async Task<string?> ResolveRequestIdWithinBudgetAsync(
-        string offerId,
-        TimeSpan remaining)
-    {
-        var resolution = Task.Run(() =>
-        {
-            try
-            {
-                return _offerRequestIndex.ResolveRequestId(offerId);
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(
-                    ex,
-                    "Notification inbox offer route resolution failed for offer {OfferId}.",
-                    offerId);
-                return null;
-            }
-        });
-
-        try
-        {
-            return await resolution.WaitAsync(remaining).ConfigureAwait(false);
-        }
-        catch (TimeoutException)
-        {
-            _log.LogWarning(
-                "Notification inbox offer route resolution exhausted its wall-clock budget for offer {OfferId}.",
-                offerId);
-            return null;
         }
     }
 
