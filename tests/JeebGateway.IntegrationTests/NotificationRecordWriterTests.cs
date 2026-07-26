@@ -14,12 +14,13 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests;
 
+[Collection("FM1 notification durability telemetry")]
 public sealed class NotificationRecordWriterTests
 {
     [Theory]
     [InlineData(HttpStatusCode.OK)]
     [InlineData(HttpStatusCode.Created)]
-    public async Task OfferReceived_WireIsConcreteAndTyped_AndAcceptsCommittedStatuses(
+    public async Task AC8a_OfferReceived_WireAmountsAreConcreteNumbers(
         HttpStatusCode postStatus)
     {
         var handler = new RecordingHandler(postStatus);
