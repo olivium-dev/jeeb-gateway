@@ -180,7 +180,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> MarkRead(string id, CancellationToken ct = default)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
 
         if (string.IsNullOrWhiteSpace(id))
         {
@@ -194,8 +194,14 @@ public sealed class JeebNotificationsInboxController : ControllerBase
 
         try
         {
+            var notificationId = id.Trim();
+            if (!await NotificationBelongsToCallerAsync(callerId, notificationId, ct))
+            {
+                return NotFound();
+            }
+
             await _notifications
-                .Mark_notification_read_notifications__notification_id__mark_read_patchAsync(id.Trim(), ct);
+                .Mark_notification_read_notifications__notification_id__mark_read_patchAsync(notificationId, ct);
             return Ok();
         }
         catch (NotificationApiException ex) when (ex.StatusCode is 401 or 403)
@@ -209,6 +215,42 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         catch (NotificationApiException ex)
         {
             return UpstreamProblem(ex);
+        }
+    }
+
+    private async Task<bool> NotificationBelongsToCallerAsync(
+        string callerId,
+        string notificationId,
+        CancellationToken ct)
+    {
+        const int pageSize = 100;
+
+        for (var page = 1; ; page++)
+        {
+            var response = await _notifications
+                .Get_messages_by_receiver_messages_receiver__receiver_id__getAsync(
+                    callerId,
+                    page,
+                    pageSize,
+                    read_status: "all",
+                    notification_type: null,
+                    sender: null,
+                    created_after: null,
+                    created_before: null,
+                    ct);
+
+            var (rows, total) = ExtractRows(response);
+            if (rows.Any(row =>
+                    string.Equals(row.Id?.Trim(), notificationId, StringComparison.Ordinal)))
+            {
+                return true;
+            }
+
+            if (rows.Count < pageSize
+                || total.HasValue && (long)page * pageSize >= total.Value)
+            {
+                return false;
+            }
         }
     }
 
