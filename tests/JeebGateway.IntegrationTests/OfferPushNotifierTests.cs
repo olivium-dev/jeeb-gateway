@@ -90,7 +90,7 @@ public class OfferPushNotifierTests
     }
 
     [Fact]
-    public async Task NewOffer_DurableWritePrecedesPush_AndSharesCorrelationAndCopy()
+    public async Task AC3()
     {
         var timeline = new List<string>();
         var writer = new RecordingNotificationRecordWriter(timeline);

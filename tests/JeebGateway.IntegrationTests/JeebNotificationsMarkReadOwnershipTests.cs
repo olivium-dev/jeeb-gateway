@@ -19,7 +19,7 @@ namespace JeebGateway.IntegrationTests;
 public sealed class JeebNotificationsMarkReadOwnershipTests
 {
     [Fact]
-    public async Task MarkRead_ForeignNotification_Returns404_AndDoesNotPatch()
+    public async Task AC1()
     {
         var upstream = new RecordingNotificationClient();
         var httpContext = new DefaultHttpContext();
