@@ -20,7 +20,7 @@ public sealed class NotificationRecordWriterTests
     [Theory]
     [InlineData(HttpStatusCode.OK)]
     [InlineData(HttpStatusCode.Created)]
-    public async Task AC8a_OfferReceived_WireAmountsAreConcreteNumbers(
+    public async Task AC8a_AC9a_OfferReceived_2xxPostsExactlyOnceWithConcreteNumbers(
         HttpStatusCode postStatus)
     {
         var handler = new RecordingHandler(postStatus);
@@ -47,7 +47,7 @@ public sealed class NotificationRecordWriterTests
     }
 
     [Fact]
-    public async Task AC6a_AC6b_AC6c_AC6d_Ambiguous500_CommitsAfterOneReadBackWithoutErrorAndPushes()
+    public async Task AC6a_AC6b_AC6c_AC6d_AC9b_Ambiguous500_CommitsAfterOnePostAndReadBackThenPushes()
     {
         var record = ReceivedRecord();
         var notificationId = NotificationCorrelationId.Create(
@@ -85,7 +85,7 @@ public sealed class NotificationRecordWriterTests
     }
 
     [Fact]
-    public async Task AC7a_AC7b_AC7c_AC7d_Ambiguous500_MissIsUnprovenLogsAndPushesWithoutRetry()
+    public async Task AC7a_AC7b_AC7c_AC7d_AC9c_Ambiguous500_MissIsUnprovenAfterOnePostThenPushes()
     {
         long unprovenCount = 0;
         using var meterListener = new MeterListener();
