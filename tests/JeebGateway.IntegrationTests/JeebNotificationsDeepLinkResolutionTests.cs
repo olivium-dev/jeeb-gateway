@@ -14,13 +14,14 @@ namespace JeebGateway.IntegrationTests;
 public sealed class JeebNotificationsDeepLinkResolutionTests
 {
     [Fact]
-    public async Task ListNotifications_IndexHit_ReplacesOfferIdWithRequestId()
+    public async Task AC17a_ListNotifications_IndexHit_ResolvesPayloadOfferIdToRequestRef()
     {
         var index = new RecordingOfferRequestIndex(
             offerId => offerId == "OFR-PROBE-3" ? "REQ-PROBE-3" : null);
 
         var page = await ListPage(index);
 
+        index.OfferIds.Should().Contain("OFR-PROBE-3");
         page.Items[0].Ref.Should().Be("REQ-PROBE-3");
     }
 
@@ -38,10 +39,12 @@ public sealed class JeebNotificationsDeepLinkResolutionTests
     }
 
     [Fact]
-    public async Task ListNotifications_IndexNull_LeavesOfferRefNull()
+    public async Task AC17b_ListNotifications_IndexNull_LeavesRefNullWithoutException()
     {
-        var page = await ListPage(new RecordingOfferRequestIndex(_ => null));
+        var act = () => ListPage(new RecordingOfferRequestIndex(_ => null));
 
+        var result = await act.Should().NotThrowAsync();
+        var page = result.Which;
         page.Items.Should().OnlyContain(item => item.Ref == null);
     }
 
@@ -56,7 +59,7 @@ public sealed class JeebNotificationsDeepLinkResolutionTests
     }
 
     [Fact]
-    public async Task ListNotifications_ResolutionCap_StopsAtNamedCountAndLeavesRemainingRowsAtShell()
+    public async Task AC17c_ListNotifications_MoreThanFiveResolvableOffersCallsIndexAtMostFiveAndNullsRemainder()
     {
         var index = new RecordingOfferRequestIndex(
             offerId => offerId.Replace("OFR-CAP-", "REQ-CAP-", StringComparison.Ordinal));
@@ -179,6 +182,7 @@ public sealed class JeebNotificationsDeepLinkResolutionTests
         }
 
         public int CallCount { get; private set; }
+        public List<string> OfferIds { get; } = [];
 
         public void Record(string offerId, string requestId)
         {
@@ -191,6 +195,7 @@ public sealed class JeebNotificationsDeepLinkResolutionTests
         public string? ResolveRequestId(string offerId)
         {
             CallCount++;
+            OfferIds.Add(offerId);
             return _resolve(offerId);
         }
 
