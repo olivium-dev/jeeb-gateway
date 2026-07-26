@@ -87,57 +87,45 @@ bounce because the service is keyed by its own opaque ids:
 
 ---
 
-## unified-payment-gateway (UPG) — JEB-1484 boundary remediation
+## unified-payment-gateway (UPG) — contract REMOVED 2026-07-26
 
-`unified-payment-gateway.openapi.json` is the **committed-real** de-leaked UPG
-contract (OpenApiSpex `v1.1.0`), generated from the JEB-1484 branch with
-`mix openapi.spec.json --spec UnifiedPaymentGatewayWeb.ApiSpec`. JEB-1484
-migrated the live, product-specific COD settlement surface
-(`/api/v1/payments/cod_jeeb/*`, commit dc1213e) out of the shared payments
-service into the generic, product-agnostic primitive:
+**Owner directive, 2026-07-26:** Jeeb no longer treats `unified_payment_gateway`
+as a mandated payments destination. The prior "payments only via UPG" constraint
+is **withdrawn for Jeeb** (it remains in force for other olivium product lines,
+and the UPG service itself is untouched).
 
-- `POST /api/v1/payments/settlements/record` — record a settlement keyed by
-  `(source, externalRef)`; UPG performs **zero** fee/commission math (callers
-  pass pre-computed `gross`/`fee`/`net`).
-- `GET /api/v1/payments/settlements/{source}/{external_ref}` — read by key.
+The following were deleted from this repo because they had **zero call sites**:
 
-The legacy `cod_jeeb` routes are retained on UPG as deprecated forwarding
-aliases (RFC 8594 Sunset headers) — intentionally **omitted** from this spec so
-new gateway code only ever binds to the generic contract.
+- `contracts/unified-payment-gateway.openapi.json` — the committed UPG spec.
+- `Services/Generated/ServiceUnifiedPaymentGatewayClient.cs` — its NSwag client.
+  Its only consumer was `Services/Clients/UpgRefundAdapter.cs`, which was itself
+  never registered in DI (and asked `IHttpClientFactory` for a named client,
+  `"UnifiedPaymentGateway"`, that was never registered anywhere).
+- `Services/Clients/UpgRefundAdapter.cs` — dead adapter, never wired.
+- `nswag-upg.json` and its row in `scripts/regenerate-clients.sh` — the
+  generation config whose only output was the deleted client.
 
-### Client + GR3 routing: WIRED behind a default-off flag
+### What was NOT removed, and why
 
-The gateway now routes the COD cash-settlement ledger post **through UPG** via a
-typed client, gated by `FeatureFlags:UseUpstream:Payments` (default **false**):
+Deleting the remaining references would delete the *evidence* of a dependency
+that still exists at runtime, not the dependency itself. These are still LIVE
+and are documented in `docs/batches/b02-20260726/UPG-REMOVAL.md`:
 
-- `Financials/IUpgSettlementClient.cs` + `Financials/UpgSettlementClient.cs` —
-  typed transport over `POST /api/v1/payments/settlements/record`. Registered in
-  `Extensions/ServiceClientExtensions.cs` with the org-standard
-  bearer + `X-Service-Auth` + Polly resilience pipeline (identical to every
-  other downstream client), base address from `Services:UnifiedPayment`.
-- `Financials/UpgSettlementLedgerClient.cs` — an `ISettlementLedgerClient`
-  implementation that MAPS the gateway-computed `gross`/`fee`/`net` onto the
-  generic UPG primitive (`source="jeeb.cod"`, `externalRef=deliveryId`,
-  `payeeRef=jeeberId`; Jeeb ids ride in opaque `metadata`). It performs no math.
-- `Program.cs` swaps `ISettlementLedgerClient` to the UPG-backed impl only when
-  the flag is on; otherwise the in-process `InMemorySettlementLedgerClient`
-  stays as the instant-rollback target. Additive + non-breaking (GR1).
+- `Controllers/CodSettlementComposeController.cs` — three routed endpoints
+  (`POST api/v1/payments/cod/record`, `GET api/v1/payments/cod_jeeb/by-delivery/{id}`,
+  `POST admin/v1/settlements/{batchId}/mark-paid`) that dial UPG through
+  `Financials/Cod/IUnifiedPaymentCodClient`.
+- `Services/Clients/HttpPaymentRefundClient.cs` — the dispute-resolve refund
+  (money OUT), consumed by `Disputes/V2/DisputeCaseService.cs`.
+- Both light up whenever `Services:UnifiedPayment:BaseUrl` is set — and it **is**
+  set in `appsettings.Production.json` (`http://192.168.2.50:10066`).
+- `Financials/IUpgSettlementClient.cs` + `UpgSettlementClient.cs` +
+  `UpgSettlementLedgerClient.cs` — the settlement-ledger post, gated by
+  `FeatureFlags:UseUpstream:Payments` (default **false**, so dormant, but one
+  env var — `FeatureFlags__UseUpstream__Payments=true` — arms it).
+- `Extensions/HealthCheckExtensions.cs` — UPG is a **critical** readiness probe;
+  removing it changes the gateway's deploy health gate (guarded by
+  `tests/JeebGateway.IntegrationTests/Bff/UpgHealthProbePathTests.cs`).
 
-**GR4 — NSwag regeneration DEFERRED to CI (honest flag, not a workaround):**
-`UpgSettlementClient` is a **hand-coded** interim transport because the fix host
-has no `dotnet`/`nswag` toolchain. This follows the established repo precedent
-for specs NSwag can't cleanly model (`Services/Clients/BanServiceClient.cs`,
-`OfferServiceClient.cs`). The registry row in `scripts/regenerate-clients.sh`
-pins this contract so CI/the owner can regenerate
-`ServiceUnifiedPaymentGatewayClient` and swap the transport with no call-site
-changes.
-
-**Flip is owner-gated:** the flag stays OFF until UPG's owner-gated JEB-1484 PR
-is approved + deployed (prod UPG is still at the pre-remediation baseline, with
-no `/payments/settlements/*` surface). Enabling before then would point at a
-non-existent prod endpoint — hence default-off + the deploy BLOCKER.
-
-The gateway already owns all Jeeb settlement semantics + commission math
-(`Financials/CommissionCalculator.cs`, `Financials/SettlementService.cs`), so
-JEB-1484's "relocate Jeeb logic to the gateway" requirement is satisfied; this
-client closes the GR3 "settlement flows THROUGH UPG" loop.
+Retiring these requires a decision on what replaces the COD-settlement and
+dispute-refund destinations. Until then the code stays and stays documented.

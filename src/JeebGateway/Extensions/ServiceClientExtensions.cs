@@ -503,10 +503,11 @@ public static class ServiceClientExtensions
         // other typed client. BindBaseAddress resolves Services:UnifiedPayment
         // [:BaseUrl] with a trailing slash so "api/v1/payments/..." resolves under
         // the host (lazy/safe: a missing BaseUrl leaves BaseAddress null and the
-        // flag stays off). HAND-CODED transport pending NSwag regeneration of
-        // ServiceUnifiedPaymentGatewayClient from
-        // contracts/unified-payment-gateway.openapi.json (deferred to CI; the build
-        // host has no dotnet nswag tool) — tracked as GR4 debt.
+        // flag stays off). HAND-CODED transport: the committed UPG spec and its
+        // NSwag-generated client were deleted 2026-07-26 (owner directive — no
+        // unified_payment_gateway coupling in Jeeb) as they had zero call sites.
+        // This registration is retained because the flag-gated settlement path
+        // still resolves it — see docs/batches/b02-20260726/UPG-REMOVAL.md.
         AttachStandardPipeline(
             services.AddHttpClient<IUpgSettlementClient, UpgSettlementClient>(http =>
                 BindBaseAddress(http, config, "Services:UnifiedPayment")));
