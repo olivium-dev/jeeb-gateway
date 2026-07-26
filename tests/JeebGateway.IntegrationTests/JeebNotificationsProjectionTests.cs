@@ -206,7 +206,7 @@ public class JeebNotificationsProjectionTests
     /// real <c>ExtractRows</c> and inbox projection path.
     /// </summary>
     [Fact]
-    public void AC4()
+    public void AC4_OfferAmount_IsJsonNumber_NotQuotedString()
     {
         var wire = Fm1NotificationWireFixtures.CapturedAc4Ac5LiveRoundTrip();
 
@@ -225,7 +225,7 @@ public class JeebNotificationsProjectionTests
     /// real <c>ExtractRows</c> and inbox projection path.
     /// </summary>
     [Fact]
-    public void AC5()
+    public void AC5_AcceptedAmount_IsJsonNumber_NotQuotedString()
     {
         var wire = Fm1NotificationWireFixtures.CapturedAc4Ac5LiveRoundTrip();
 
