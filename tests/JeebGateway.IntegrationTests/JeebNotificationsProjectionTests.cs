@@ -178,12 +178,14 @@ public class JeebNotificationsProjectionTests
     }
 
     [Fact]
-    public void ExtractRows_ConstructedOfferAcceptedDoesNotHoistOfferIdIntoChatRef()
+    public void AC17d_OfferAcceptedPayloadOfferIdIsNeverHoistedIntoChatRef()
     {
         var wire = Fm1NotificationWireFixtures.OfferAccepted();
 
         var (rows, _) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
 
+        wire.SelectToken("messages[0].payload.offer_id")!.Value<string>()
+            .Should().Be("OFR-CONSTRUCTED");
         rows[0].Type.Should().Be("offer_accepted");
         rows[0].Ref.Should().BeNull();
     }
