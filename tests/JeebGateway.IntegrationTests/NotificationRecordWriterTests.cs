@@ -463,7 +463,7 @@ public sealed class NotificationRecordWriterTests
         }
     }
 
-    private sealed class CapturingNotificationRecordWriter : INotificationRecordWriter
+    private sealed class CapturingNotificationRecordWriter : FakeNotificationRecordWriterBase
     {
         private readonly INotificationRecordWriter _inner;
 
@@ -474,18 +474,13 @@ public sealed class NotificationRecordWriterTests
 
         public NotificationRecordWriteOutcome? LastOutcome { get; private set; }
 
-        public async Task<NotificationRecordWriteOutcome> WriteOfferReceivedAsync(
+        public override async Task<NotificationRecordWriteOutcome> WriteOfferReceivedAsync(
             OfferReceivedNotificationRecord record,
             CancellationToken requestToken)
         {
             LastOutcome = await _inner.WriteOfferReceivedAsync(record, requestToken);
             return LastOutcome;
         }
-
-        public Task<NotificationRecordWriteOutcome> WriteOfferAcceptedAsync(
-            OfferAcceptedNotificationRecord record,
-            CancellationToken requestToken)
-            => throw new NotSupportedException();
     }
 
     private sealed class RecordingPushClient : ServicePushNotificationClient

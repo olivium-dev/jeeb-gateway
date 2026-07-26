@@ -57,6 +57,73 @@ public sealed class NotificationRecordWriter : INotificationRecordWriter
             record.NotificationCorrelationId,
             cancellationToken => _client.PostOfferAcceptedAsync(record, cancellationToken));
 
+    // ── b02 step 6a — the six previously-unwritten types ─────────────────────────────
+    //
+    // Each is the same three lines: template key, recipient, the entity id the log/read-back
+    // keys on, and the one POST. Nothing type-specific happens in this class — the silent gate,
+    // the budget and the ambiguity classification below apply identically to all eight. The
+    // `entityId` chosen per type is the id an operator would grep for when a row is missing.
+
+    public Task<NotificationRecordWriteOutcome> WriteDeliveryStatusUpdatedAsync(
+        DeliveryStatusUpdatedNotificationRecord record,
+        CancellationToken requestToken)
+        => WriteAsync(
+            DeliveryStatusUpdatedNotificationRecord.TemplateKey,
+            record.Receiver,
+            record.Payload.DeliveryId,
+            record.NotificationCorrelationId,
+            cancellationToken => _client.PostDeliveryStatusUpdatedAsync(record, cancellationToken));
+
+    public Task<NotificationRecordWriteOutcome> WriteSettlementPaidAsync(
+        SettlementPaidNotificationRecord record,
+        CancellationToken requestToken)
+        => WriteAsync(
+            SettlementPaidNotificationRecord.TemplateKey,
+            record.Receiver,
+            record.Payload.SettlementId,
+            record.NotificationCorrelationId,
+            cancellationToken => _client.PostSettlementPaidAsync(record, cancellationToken));
+
+    public Task<NotificationRecordWriteOutcome> WriteKycApprovedAsync(
+        KycApprovedNotificationRecord record,
+        CancellationToken requestToken)
+        => WriteAsync(
+            KycApprovedNotificationRecord.TemplateKey,
+            record.Receiver,
+            record.Payload.KycId,
+            record.NotificationCorrelationId,
+            cancellationToken => _client.PostKycApprovedAsync(record, cancellationToken));
+
+    public Task<NotificationRecordWriteOutcome> WriteKycRejectedAsync(
+        KycRejectedNotificationRecord record,
+        CancellationToken requestToken)
+        => WriteAsync(
+            KycRejectedNotificationRecord.TemplateKey,
+            record.Receiver,
+            record.Payload.KycId,
+            record.NotificationCorrelationId,
+            cancellationToken => _client.PostKycRejectedAsync(record, cancellationToken));
+
+    public Task<NotificationRecordWriteOutcome> WriteDisputeResolvedAsync(
+        DisputeResolvedNotificationRecord record,
+        CancellationToken requestToken)
+        => WriteAsync(
+            DisputeResolvedNotificationRecord.TemplateKey,
+            record.Receiver,
+            record.Payload.DisputeId,
+            record.NotificationCorrelationId,
+            cancellationToken => _client.PostDisputeResolvedAsync(record, cancellationToken));
+
+    public Task<NotificationRecordWriteOutcome> WriteRatingAutoRevealedAsync(
+        RatingAutoRevealedNotificationRecord record,
+        CancellationToken requestToken)
+        => WriteAsync(
+            RatingAutoRevealedNotificationRecord.TemplateKey,
+            record.Receiver,
+            record.Payload.DeliveryId,
+            record.NotificationCorrelationId,
+            cancellationToken => _client.PostRatingAutoRevealedAsync(record, cancellationToken));
+
     /// <summary>
     /// The one path to the notification centre. <c>internal</c> rather than <c>private</c>
     /// so the silent gate below can be exercised directly against a notification type that

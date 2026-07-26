@@ -35,4 +35,41 @@ public interface INotificationRecordWriter
     Task<NotificationRecordWriteOutcome> WriteOfferAcceptedAsync(
         OfferAcceptedNotificationRecord record,
         CancellationToken requestToken);
+
+    // ── b02 step 6a — the six previously-unwritten notification-centre types ─────────
+    //
+    // Every one goes through the same NotificationRecordWriter.WriteAsync choke point as the
+    // two above, so all of them inherit step 3's silent gate, the single-attempt-plus-read-back
+    // classification, and the per-attempt budget. That uniformity is the point: a writer that
+    // reached the centre by any other route would be outside the silent policy.
+
+    /// <summary>
+    /// <b>Returns <see cref="NotificationRecordWriteClassification.SkippedSilent"/> ALWAYS,
+    /// today.</b> Owner ruling D4 classifies the <c>delivery</c> category silent, so this type
+    /// writes no row by design. See <see cref="DeliveryStatusUpdatedNotificationRecord"/> before
+    /// changing anything about it.
+    /// </summary>
+    Task<NotificationRecordWriteOutcome> WriteDeliveryStatusUpdatedAsync(
+        DeliveryStatusUpdatedNotificationRecord record,
+        CancellationToken requestToken);
+
+    Task<NotificationRecordWriteOutcome> WriteSettlementPaidAsync(
+        SettlementPaidNotificationRecord record,
+        CancellationToken requestToken);
+
+    Task<NotificationRecordWriteOutcome> WriteKycApprovedAsync(
+        KycApprovedNotificationRecord record,
+        CancellationToken requestToken);
+
+    Task<NotificationRecordWriteOutcome> WriteKycRejectedAsync(
+        KycRejectedNotificationRecord record,
+        CancellationToken requestToken);
+
+    Task<NotificationRecordWriteOutcome> WriteDisputeResolvedAsync(
+        DisputeResolvedNotificationRecord record,
+        CancellationToken requestToken);
+
+    Task<NotificationRecordWriteOutcome> WriteRatingAutoRevealedAsync(
+        RatingAutoRevealedNotificationRecord record,
+        CancellationToken requestToken);
 }

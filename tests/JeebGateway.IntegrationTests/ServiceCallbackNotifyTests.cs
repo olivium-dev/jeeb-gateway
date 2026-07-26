@@ -190,12 +190,16 @@ public sealed class ServiceCallbackNotifyTests
     }
 
     /// <summary>
-    /// Execution-plan correction C6: the catalog declares <c>jeeb.offer_rejected</c> but the
-    /// notification centre has no route for it (405 where served types answer 422). Accepting it
-    /// would mint a shade entry for a taxonomy whose inbox row cannot exist.
+    /// b02 step 6b (owner ruling D3 = retire) — <c>jeeb.offer_rejected</c> must be unreachable from
+    /// this endpoint. It used to be blocked by a one-entry deny-list for execution-plan correction
+    /// C6 (the centre answers 405 for it where every served type answers 422). Step 6b removed the
+    /// type from <see cref="JeebGateway.Notifications.JeebNotificationCatalog"/> instead, so it is
+    /// now rejected as an UNKNOWN type by the same check that rejects any other non-catalog string.
+    /// The observable contract is identical — 400, no push — which is exactly why this test kept
+    /// its assertions and only changed its reason.
     /// </summary>
     [Fact]
-    public async Task Catalog_Type_Without_A_Centre_Route_Is_Rejected()
+    public async Task Retired_Unroutable_Type_Is_Rejected()
     {
         var push = new RecordingPushClient();
         await using var factory = CreateFactory(push);

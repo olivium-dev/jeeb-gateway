@@ -65,16 +65,16 @@ public sealed class ServiceCallbacksController : ControllerBase
     /// <summary>Bounds the push round-trip so a slow push microservice cannot hold the 202 open.</summary>
     private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(5);
 
-    /// <summary>
-    /// Catalog keys that must NOT be accepted yet (execution-plan correction C6). The gateway
-    /// catalog declares nine <c>jeeb.*</c> types; the notification centre serves eight —
-    /// <c>POST :10026/notifications/jeeb.offer_rejected</c> answers <b>405</b> where every served
-    /// type answers 422 (route exists, body invalid). Accepting it here would let a caller mint a
-    /// shade entry for a taxonomy whose inbox row can never exist. Removed from this set when
-    /// step 6b lands (either the centre route is added, or the catalog entry is retired).
-    /// </summary>
-    private static readonly HashSet<string> NotYetRoutableTypes =
-        new(StringComparer.OrdinalIgnoreCase) { "jeeb.offer_rejected" };
+    // NOTE — there is no longer a "not yet routable types" deny-list here. It held exactly one
+    // entry, jeeb.offer_rejected, for execution-plan correction C6: the catalog declared nine
+    // jeeb.* types while the notification centre served eight, and that ninth answered 405 where
+    // every served type answers 422. b02 step 6b resolved that at the source (owner ruling D3 =
+    // retire): the type is gone from JeebNotificationCatalog, so the HasTemplate check above now
+    // rejects it as an unknown type and a second overlapping gate would be dead code. Every key
+    // the catalog still declares has a live centre route — verified by probing all eight.
+    //
+    // If a future catalog key is added whose centre route does not exist, do NOT reintroduce a
+    // deny-list: add the route, or do not add the key.
 
     /// <summary>Payload keys the gateway owns; a caller's <c>data</c> may not overwrite them.</summary>
     private static readonly HashSet<string> ReservedPayloadKeys =
@@ -85,15 +85,18 @@ public sealed class ServiceCallbacksController : ControllerBase
 
     private readonly ServicePushNotificationClient _push;
     private readonly IIdempotencyStore _idempotency;
+    private readonly INotificationRecordWriter _records;
     private readonly ILogger<ServiceCallbacksController> _log;
 
     public ServiceCallbacksController(
         ServicePushNotificationClient push,
         IIdempotencyStore idempotency,
+        INotificationRecordWriter records,
         ILogger<ServiceCallbacksController> log)
     {
         _push = push;
         _idempotency = idempotency;
+        _records = records;
         _log = log;
     }
 
@@ -141,14 +144,6 @@ public sealed class ServiceCallbacksController : ControllerBase
                 $"Unknown notificationType '{notificationType}'. Known types: "
                 + string.Join(", ", JeebNotificationCatalog.Keys.OrderBy(k => k, StringComparer.Ordinal))
                 + ".");
-        }
-
-        if (NotYetRoutableTypes.Contains(notificationType))
-        {
-            return Invalid(
-                $"notificationType '{notificationType}' is declared in the catalog but has no "
-                + "notification-centre route yet (execution-plan correction C6); it is not accepted "
-                + "on this callback until that is resolved.");
         }
 
         var recipientUserId = body.RecipientUserId?.Trim();
@@ -224,6 +219,18 @@ public sealed class ServiceCallbacksController : ControllerBase
         var entityId = ResolveEntityId(body.Data);
         var payload = BuildPayload(notificationType, template, body, entityId);
 
+        // b02 step 6a — the inbox row, BEFORE the push, matching the order the offer seats already
+        // use (OfferPushNotifier writes then pushes). Row-first is the right order: the shade entry
+        // is the user's notice that something happened, and the row is what they open afterwards, so
+        // if one of the two is going to be missing it must not be the row that the tap lands on.
+        //
+        // Never fatal to the 202: the callback's contract is best-effort dispatch, and the writer
+        // itself never throws (single attempt + read-back classification). A silent type returns
+        // SkippedSilent and writes nothing — that gate lives in NotificationRecordWriter, not here,
+        // so this call site cannot accidentally bypass it.
+        await TryWriteCentreRowAsync(
+            notificationType, recipientUserId, template, body.Data, entityId, entryId, ct);
+
         var status = DispatchStatus.Queued;
         try
         {
@@ -255,6 +262,66 @@ public sealed class ServiceCallbacksController : ControllerBase
             WasDeduplicated = false,
             Status = status,
         });
+    }
+
+    /// <summary>
+    /// b02 step 6a — write the durable notification-centre row for a type that has a writer.
+    ///
+    /// <para>Push-only types (the two offer seats, which mint their own rows from authoritative
+    /// store data) are skipped by <see cref="ServiceCallbackRecordFactory.CanWrite"/> rather than
+    /// double-written; the centre does not deduplicate on <c>notification_id</c>, so two producers
+    /// on one taxonomy would mean two inbox rows for one event.</para>
+    /// </summary>
+    private async Task TryWriteCentreRowAsync(
+        string notificationType,
+        string recipientUserId,
+        NotificationTemplate template,
+        IReadOnlyDictionary<string, string>? data,
+        string? entityId,
+        string entryId,
+        CancellationToken ct)
+    {
+        if (!ServiceCallbackRecordFactory.CanWrite(notificationType))
+        {
+            return;
+        }
+
+        try
+        {
+            // The correlation handle joins this row to its push. When the caller sent no entity id
+            // we fall back to the gateway-minted entryId: NotificationCorrelationId.Create rejects a
+            // blank component, and an entryId-derived handle is still unique and still greppable —
+            // it just is not stable across a retry that omits the id, which is acceptable because
+            // the idempotency reservation already stopped the retry before reaching here.
+            var ncid = NotificationCorrelationId.Create(
+                notificationType, recipientUserId, entityId ?? entryId);
+
+            var write = ServiceCallbackRecordFactory.WriteAsync(
+                _records, notificationType, recipientUserId, template, data, ncid, ct);
+
+            if (write is null)
+            {
+                return;
+            }
+
+            var outcome = await write;
+
+            _log.LogInformation(
+                "event={event} type={type} recipientId={recipientId} entryId={entryId} "
+                + "ncid={ncid} classification={classification} upstreamStatus={upstreamStatus}",
+                "svc_callback.centre_write", notificationType, recipientUserId, entryId,
+                ncid, outcome.Classification, outcome.UpstreamStatus);
+        }
+        catch (Exception ex)
+        {
+            // Degrade, do not fail: the caller's event already happened upstream and the push is
+            // still worth attempting. A lost row is loud in the log above and in
+            // notif.durable_write.* telemetry; a 5xx here would make the caller retry the whole
+            // callback and risk a duplicate shade entry.
+            _log.LogError(ex,
+                "event={event} type={type} recipientId={recipientId} entryId={entryId}",
+                "svc_callback.centre_write_failed", notificationType, recipientUserId, entryId);
+        }
     }
 
     private BadRequestObjectResult Invalid(string title) => BadRequest(new ProblemDetails

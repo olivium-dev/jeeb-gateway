@@ -6,9 +6,21 @@ using System.Text.Json.Serialization;
 namespace JeebGateway.Notifications;
 
 /// <summary>
-/// Hand-written typed notification-service client for the two FM-1 durable
-/// notification creates and their exact-correlation read-back. The registered
-/// pipeline has a breaker and timeout but no retry and no auth handlers.
+/// Hand-written typed notification-service client for the durable notification
+/// creates and their exact-correlation read-back. The registered pipeline has a
+/// breaker and timeout but no retry and no auth handlers.
+///
+/// <para>b02 step 6a added the six previously-unwritten types. Every method here is a
+/// one-liner over <see cref="PostAsync{TRecord}"/> on purpose: this class is transport
+/// only, so a new type costs one line and cannot introduce a new failure mode. All
+/// classification, budgeting and the silent gate live in
+/// <see cref="NotificationRecordWriter"/>, which is the SOLE caller — do not add a
+/// second caller, or the silent policy stops being enforceable at one choke point.</para>
+///
+/// <para>All eight paths were probed live against the centre on 2026-07-26: each answers
+/// 422 for an empty body, i.e. the route exists. The ninth catalog type that used to
+/// exist, <c>jeeb.offer_rejected</c>, answered 405 and was retired in step 6b — there is
+/// deliberately no method for it, and adding one would fail on every call.</para>
 /// </summary>
 public sealed class JeebNotificationRecordClient
 {
@@ -28,6 +40,44 @@ public sealed class JeebNotificationRecordClient
         OfferAcceptedNotificationRecord record,
         CancellationToken cancellationToken)
         => PostAsync(OfferAcceptedNotificationRecord.TemplateKey, record, cancellationToken);
+
+    // ── b02 step 6a — the six types that had no writer ───────────────────────────────
+
+    /// <summary>
+    /// <c>POST notifications/jeeb.delivery_status_updated</c>. Reachable, but see
+    /// <see cref="DeliveryStatusUpdatedNotificationRecord"/>: owner ruling D4 classifies this
+    /// type SILENT, so <see cref="NotificationRecordWriter"/> never actually calls this method
+    /// today. It exists so the gate is exercised at a real writer, not a stand-in.
+    /// </summary>
+    public Task<HttpStatusCode> PostDeliveryStatusUpdatedAsync(
+        DeliveryStatusUpdatedNotificationRecord record,
+        CancellationToken cancellationToken)
+        => PostAsync(DeliveryStatusUpdatedNotificationRecord.TemplateKey, record, cancellationToken);
+
+    public Task<HttpStatusCode> PostSettlementPaidAsync(
+        SettlementPaidNotificationRecord record,
+        CancellationToken cancellationToken)
+        => PostAsync(SettlementPaidNotificationRecord.TemplateKey, record, cancellationToken);
+
+    public Task<HttpStatusCode> PostKycApprovedAsync(
+        KycApprovedNotificationRecord record,
+        CancellationToken cancellationToken)
+        => PostAsync(KycApprovedNotificationRecord.TemplateKey, record, cancellationToken);
+
+    public Task<HttpStatusCode> PostKycRejectedAsync(
+        KycRejectedNotificationRecord record,
+        CancellationToken cancellationToken)
+        => PostAsync(KycRejectedNotificationRecord.TemplateKey, record, cancellationToken);
+
+    public Task<HttpStatusCode> PostDisputeResolvedAsync(
+        DisputeResolvedNotificationRecord record,
+        CancellationToken cancellationToken)
+        => PostAsync(DisputeResolvedNotificationRecord.TemplateKey, record, cancellationToken);
+
+    public Task<HttpStatusCode> PostRatingAutoRevealedAsync(
+        RatingAutoRevealedNotificationRecord record,
+        CancellationToken cancellationToken)
+        => PostAsync(RatingAutoRevealedNotificationRecord.TemplateKey, record, cancellationToken);
 
     public async Task<bool> ContainsCorrelationIdAsync(
         string recipientId,

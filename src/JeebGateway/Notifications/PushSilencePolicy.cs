@@ -145,7 +145,13 @@ public static class PushSilencePolicy
         {
             ["jeeb.offer_received"] = CategoryNewOffer,
             ["jeeb.offer_accepted"] = CategoryOfferAccepted,
-            ["jeeb.offer_rejected"] = CategoryOfferLost,
+
+            // "jeeb.offer_rejected" is deliberately ABSENT (b02 step 6b, owner ruling D3 =
+            // retire): the notification centre 405s it, so it can never reach a centre writer and
+            // this policy — which decides only whether to call the centre — has nothing to decide
+            // about it. The loser-bidder push still ships, unconditionally, from
+            // OfferPushNotifier.NotifyOfferLostAsync; CategoryOfferLost below stays because it is
+            // the mobile-facing category on that push's wire payload.
 
             // D4 puts `delivery` on the silent side: a delivery-status change is the
             // refresh signal that replaces the delivery-status poll, so it gets NO
