@@ -1,8 +1,10 @@
+using System.Diagnostics.Metrics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Notifications;
+using JeebGateway.Observability;
 using JeebGateway.Requests;
 using JeebGateway.service.ServicePushNotification;
 using Microsoft.Extensions.Configuration;
@@ -82,25 +84,60 @@ public sealed class NotificationRecordWriterTests
     }
 
     [Fact]
-    public async Task Ambiguous500_WithReadBackMiss_IsUnprovenAndLogsOneError()
+    public async Task AC7a_AC7b_AC7c_AC7d_Ambiguous500_MissIsUnprovenLogsAndPushesWithoutRetry()
     {
+        long unprovenCount = 0;
+        using var meterListener = new MeterListener();
+        meterListener.InstrumentPublished = (instrument, listener) =>
+        {
+            if (instrument.Meter.Name == BusinessOutcomeTelemetry.MeterName &&
+                instrument.Name == "notif.durable_write.outcomes")
+            {
+                listener.EnableMeasurementEvents(instrument);
+            }
+        };
+        meterListener.SetMeasurementEventCallback<long>(
+            (instrument, measurement, tags, state) =>
+            {
+                foreach (var tag in tags)
+                {
+                    if (tag.Key == "classification" &&
+                        Equals(tag.Value, "unproven"))
+                    {
+                        Interlocked.Add(ref unprovenCount, measurement);
+                    }
+                }
+            });
+        meterListener.Start();
+
         var handler = new RecordingHandler(
             HttpStatusCode.InternalServerError,
             readBody: """{"messages":[],"total_messages":0}""");
         var logger = new RecordingLogger<NotificationRecordWriter>();
-        var writer = NewWriter(handler, logger);
+        var writer = new CapturingNotificationRecordWriter(NewWriter(handler, logger));
+        var push = new RecordingPushClient();
+        var notifier = NewNotifier(writer, push);
 
-        var outcome = await writer.WriteOfferReceivedAsync(
-            ReceivedRecord(),
+        var act = async () => await notifier.NotifyNewOfferAsync(
+            ReceivedContext(),
+            "client-1",
+            "request-1",
+            "offer-1",
+            12.5m,
             CancellationToken.None);
 
-        outcome.Classification.Should().Be(NotificationRecordWriteClassification.Unproven);
+        await act.Should().NotThrowAsync();
+        writer.LastOutcome!.Classification.Should()
+            .Be(NotificationRecordWriteClassification.Unproven);
         handler.Posts.Should().Be(1);
         handler.Gets.Should().Be(1);
-        logger.Entries.Should().ContainSingle(entry =>
-            entry.Level == LogLevel.Error &&
-            Equals(entry.Properties["event"], "notif.durable_write.failed") &&
-            Equals(entry.Properties["classification"], "unproven"));
+        var error = logger.Entries.Should()
+            .ContainSingle(entry => entry.Level == LogLevel.Error)
+            .Subject;
+        error.Properties["event"].Should().Be("notif.durable_write.failed");
+        error.Properties["classification"].Should().Be("unproven");
+        unprovenCount.Should().Be(1);
+        push.Sends.Should().Be(1);
     }
 
     [Fact]
