@@ -589,11 +589,18 @@ if (notificationUpstreamEnabled && notificationSeederEnabled)
 // (device register, broadcast, send-to-user) with NO idempotency key in the
 // generated client, so a retried 5xx/timeout could duplicate-deliver a push
 // the upstream already sent — the exact non-idempotent-POST case PP-7 calls
-// out. AttachBreakerAndTimeoutOnly gives it the sub-100s timeout + breaker
+// out. The attached pipeline gives it the sub-100s timeout + breaker
 // (a genuinely down upstream still trips and fails fast) WITHOUT retrying the
 // same dispatch call. Not AttachStandardPipeline either: no bearer/ServiceAuth
 // chain by design (salehly mirror).
-ServiceClientExtensions.AttachBreakerAndTimeoutOnly(builder.Services.AddHttpClient("ServicePushNotificationClient", client =>
+// PUSH-BREAKER — AttachPushBreakerAndTimeout, NOT the shared
+// AttachBreakerAndTimeoutOnly (which ServiceWalletClient also uses and whose
+// accounting must stay strict). Same window/ratio/throughput/break duration;
+// the push pipeline additionally excludes a per-user "all device tokens dead"
+// 500 on api/v1/sent-payload/user/{id} from breaker accounting, so one poisoned
+// recipient can no longer pin the breaker open and deny pushes to everyone else.
+// Rationale + accepted residual risk: ServiceClientExtensions.ConfigurePushBreakerAndTimeout.
+ServiceClientExtensions.AttachPushBreakerAndTimeout(builder.Services.AddHttpClient("ServicePushNotificationClient", client =>
 {
     var apiUrl = builder.Configuration["PushNotificationServiceApi:BaseUrl"];
     if (!string.IsNullOrWhiteSpace(apiUrl))

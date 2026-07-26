@@ -96,6 +96,69 @@ public class DispatchingRequestExpiryNotifierTests
         handler.Requests.Should().ContainSingle();
     }
 
+    /// <summary>
+    /// PUSH-LOOP regression (Bug A). The dedupe row used to be written only AFTER
+    /// a successful push, so a push that kept failing never recorded
+    /// <c>request-nudge:{requestId}</c> — <c>ExistsAsync</c> never deduplicated and
+    /// <see cref="RequestNudgeSweeper"/> re-sent the identical nudge on EVERY 30s
+    /// sweep, forever (four stuck requests × 56 re-sends in one observed window).
+    /// The entry is now reserved BEFORE the push, so a FAILED push still fires once.
+    /// </summary>
+    [Fact]
+    public async Task Failed_Push_Still_Records_Dedupe_Entry_So_Later_Sweeps_Do_Not_Resend()
+    {
+        // 500 = the push service's "every device token for this user is dead" shape.
+        var handler = new RecordingPushHandler(HttpStatusCode.InternalServerError);
+        using var services = BuildServices(handler);
+        var notifier = CreateNotifier(services);
+
+        // Three sweeps over the same still-pending request.
+        for (var sweep = 0; sweep < 3; sweep++)
+        {
+            await notifier.NotifyTryExpandTierAsync(
+                ClientId,
+                RequestId,
+                DateTimeOffset.UtcNow,
+                CancellationToken.None);
+        }
+
+        handler.Requests.Should().ContainSingle(
+            "a nudge is fire-once: a failed push must not be re-sent on every subsequent sweep");
+
+        var outbox = services.GetRequiredService<INotificationDispatchOutbox>();
+        (await outbox.ExistsAsync($"request-nudge:{RequestId}"))
+            .Should().BeTrue("the dedupe entry must be recorded even though the push failed");
+
+        var dlq = await outbox.GetDlqAsync();
+        var entry = dlq.Should().ContainSingle(
+            "the failed attempt is booked to the DLQ, not silently dropped").Subject;
+        entry.IdempotencyKey.Should().Be($"request-nudge:{RequestId}");
+        entry.AttemptCount.Should().Be(1);
+        entry.LastError.Should().NotBeNullOrWhiteSpace();
+        outbox.PendingCount.Should().Be(
+            0,
+            "nothing re-drives this outbox path, so a failed entry must not linger as Pending");
+    }
+
+    [Fact]
+    public async Task Successful_Push_Marks_The_Entry_Delivered()
+    {
+        var handler = new RecordingPushHandler(HttpStatusCode.Created);
+        using var services = BuildServices(handler);
+        var notifier = CreateNotifier(services);
+
+        await notifier.NotifyExpiredAsync(
+            ClientId,
+            RequestId,
+            DateTimeOffset.UtcNow,
+            CancellationToken.None);
+
+        var outbox = services.GetRequiredService<INotificationDispatchOutbox>();
+        (await outbox.ExistsAsync($"request-expired:{RequestId}")).Should().BeTrue();
+        (await outbox.GetDlqAsync()).Should().BeEmpty("a successful push is not a failure");
+        outbox.PendingCount.Should().Be(0, "a delivered entry leaves the Pending state");
+    }
+
     private static DispatchingRequestExpiryNotifier CreateNotifier(IServiceProvider services) =>
         new(
             services.GetRequiredService<IServiceScopeFactory>(),
