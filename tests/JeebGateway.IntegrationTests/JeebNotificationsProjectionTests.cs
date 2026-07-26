@@ -178,26 +178,130 @@ public class JeebNotificationsProjectionTests
     }
 
     [Fact]
-    public void ExtractRows_ConstructedOfferAcceptedDoesNotHoistOfferIdIntoChatRef()
+    public void AC17d_OfferAcceptedPayloadOfferIdIsNeverHoistedIntoChatRef()
     {
         var wire = Fm1NotificationWireFixtures.OfferAccepted();
 
         var (rows, _) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
 
+        wire.SelectToken("messages[0].payload.offer_id")!.Value<string>()
+            .Should().Be("OFR-CONSTRUCTED");
         rows[0].Type.Should().Be("offer_accepted");
         rows[0].Ref.Should().BeNull();
     }
 
     [Fact]
-    public void ExtractRows_CapturedDuplicateNotificationIdsKeepFirstRowOnly()
+    public void AC10d_AC10e_CapturedDuplicateIdsRenderOneRowWhileEnvelopeTotalDrivesPages()
     {
         var wire = Fm1NotificationWireFixtures.CapturedA5DuplicateEnvelope();
 
         var (rows, total) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+        var page = JeebNotificationsProjection.ProjectPage(
+            rows,
+            page: 1,
+            pageSize: 1,
+            upstreamTotal: total);
 
         rows.Should().ContainSingle();
         rows[0].Id.Should().Be("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeee0001");
         total.Should().Be(2);
+        page.TotalCount.Should().Be(2);
+        page.TotalPages.Should().Be(2);
+    }
+
+    /// <summary>
+    /// AC-4: the captured <c>jeeb.offer_received</c> payload remains numeric and
+    /// location-exact at the closest payload-bearing boundary after the gateway's
+    /// real <c>ExtractRows</c> and inbox projection path.
+    /// </summary>
+    [Fact]
+    public void AC4_OfferAmount_IsJsonNumber_NotQuotedString()
+    {
+        var wire = Fm1NotificationWireFixtures.CapturedAc4Ac5LiveRoundTrip();
+
+        var payload = ProjectAndSelectPayload(
+            wire,
+            wireType: "jeeb.offer_received",
+            projectedType: "offer",
+            notificationId: "ac400000-0000-4000-8000-000000000004");
+
+        AssertNumericAmountAndExactPickup(payload, "offer_amount");
+    }
+
+    /// <summary>
+    /// AC-5: the captured <c>jeeb.offer_accepted</c> payload remains numeric and
+    /// location-exact at the closest payload-bearing boundary after the gateway's
+    /// real <c>ExtractRows</c> and inbox projection path.
+    /// </summary>
+    [Fact]
+    public void AC5_AC10a_AcceptedAmountAndPayloadTimestampProjectFromCapturedRow()
+    {
+        var wire = Fm1NotificationWireFixtures.CapturedAc4Ac5LiveRoundTrip();
+
+        var payload = ProjectAndSelectPayload(
+            wire,
+            wireType: "jeeb.offer_accepted",
+            projectedType: "offer_accepted",
+            notificationId: "ac500000-0000-4000-8000-000000000005");
+
+        AssertNumericAmountAndExactPickup(payload, "accepted_amount");
+
+        var messages = wire["messages"].Should().BeOfType<JArray>().Subject;
+        var acceptedWire = messages.Children<JObject>().Single(item =>
+            item.Value<string>("notification_type") == "jeeb.offer_accepted");
+        acceptedWire.Property("ts").Should().BeNull();
+        acceptedWire.Property("timestamp").Should().BeNull();
+        acceptedWire.Property("createdAt").Should().BeNull();
+        acceptedWire.Property("created_at").Should().BeNull();
+        acceptedWire.Property("ref").Should().BeNull();
+        payload.Value<DateTime>("created_at").Should()
+            .Be(DateTime.Parse("2026-07-26T00:00:00"));
+
+        var (rows, _) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+        var projected = rows.Single(row =>
+            row.Id == "ac500000-0000-4000-8000-000000000005");
+        projected.Type.Should().Be("offer_accepted");
+        projected.Timestamp.Should().Be("2026-07-26T00:00:00.0000000");
+        projected.Timestamp.Should().NotBeNullOrWhiteSpace();
+        projected.Ref.Should().BeNull();
+    }
+
+    private static JObject ProjectAndSelectPayload(
+        JObject wire,
+        string wireType,
+        string projectedType,
+        string notificationId)
+    {
+        var (rows, total) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+        var page = JeebNotificationsProjection.ProjectPage(rows, page: 1, pageSize: 10, total);
+
+        total.Should().Be(2);
+        page.TotalCount.Should().Be(2);
+        page.Items.Should().ContainSingle(item =>
+            item.Id == notificationId && item.Type == projectedType);
+
+        var messages = wire["messages"].Should().BeOfType<JArray>().Subject;
+        var message = messages.Children<JObject>().Single(item =>
+            item.Value<string>("notification_type") == wireType);
+        return message["payload"].Should().BeOfType<JObject>().Subject;
+    }
+
+    private static void AssertNumericAmountAndExactPickup(JObject payload, string amountField)
+    {
+        var amount = payload[amountField];
+        amount.Should().NotBeNull();
+        amount.Should().BeOfType<JValue>();
+        amount!.Type.Should().NotBe(JTokenType.String);
+        amount.Type.Should().NotBe(JTokenType.Object);
+        amount.Type.Should().NotBe(JTokenType.Array);
+        amount.Type.Should().Be(JTokenType.Float);
+        amount.Value<decimal>().Should().Be(12.5m);
+        amount.ToString(Newtonsoft.Json.Formatting.None).Should().Be("12.5");
+
+        var pickupLocation = payload["pickup_location"];
+        pickupLocation.Should().NotBeNull();
+        pickupLocation!.Type.Should().Be(JTokenType.String);
+        pickupLocation.Value<string>().Should().Be("Hamra, Beirut");
     }
 }
 
@@ -213,6 +317,9 @@ internal static class Fm1NotificationWireFixtures
 
     public static JObject CapturedA5DuplicateEnvelope()
         => Load("captured-a5-duplicate-page.json");
+
+    public static JObject CapturedAc4Ac5LiveRoundTrip()
+        => Load("captured-ac4-ac5-live-roundtrip-page.json");
 
     public static JObject ConstructedDegenerateOfferPayloads()
         => Load("constructed-degenerate-offer-payloads-page.json");

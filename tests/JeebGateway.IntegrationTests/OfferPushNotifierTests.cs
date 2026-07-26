@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -10,6 +11,7 @@ using System.Threading.Tasks;
 using FluentAssertions;
 using JeebGateway.Availability;
 using JeebGateway.Notifications;
+using JeebGateway.Observability;
 using JeebGateway.Requests;
 using JeebGateway.service.ServicePushNotification;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -33,6 +35,7 @@ namespace JeebGateway.IntegrationTests;
 ///     proving the controller fires exactly one push to the request's clientId with
 ///     type=offer + requestId, and that a throwing push client never breaks the 201.
 /// </summary>
+[Collection("FM1 notification durability telemetry")]
 public class OfferPushNotifierTests
 {
     private const string Client = "client-sami";
@@ -90,8 +93,37 @@ public class OfferPushNotifierTests
     }
 
     [Fact]
-    public async Task NewOffer_DurableWritePrecedesPush_AndSharesCorrelationAndCopy()
+    public async Task AC3_AC8b_AC8c_AC8d_DurableWriteUsesEtaAndAbsentClientNameBeforePush()
     {
+        long fieldAbsentCount = 0;
+        using var meterListener = new MeterListener();
+        meterListener.InstrumentPublished = (instrument, listener) =>
+        {
+            if (instrument.Meter.Name == BusinessOutcomeTelemetry.MeterName &&
+                instrument.Name == "notif.durable_write.field_absent")
+            {
+                listener.EnableMeasurementEvents(instrument);
+            }
+        };
+        meterListener.SetMeasurementEventCallback<long>(
+            (instrument, measurement, tags, state) =>
+            {
+                var isClientName = false;
+                var isOfferReceived = false;
+                foreach (var tag in tags)
+                {
+                    isClientName |= tag.Key == "field" &&
+                        Equals(tag.Value, "client_name");
+                    isOfferReceived |= tag.Key == "templateKey" &&
+                        Equals(tag.Value, OfferReceivedNotificationRecord.TemplateKey);
+                }
+                if (isClientName && isOfferReceived)
+                {
+                    Interlocked.Add(ref fieldAbsentCount, measurement);
+                }
+            });
+        meterListener.Start();
+
         var timeline = new List<string>();
         var writer = new RecordingNotificationRecordWriter(timeline);
         var push = new RecordingUserPushClient { BeforeSend = () => timeline.Add("push") };
@@ -124,12 +156,14 @@ public class OfferPushNotifierTests
         record.Payload.OfferAmount.Should().Be(12.5m);
         record.Payload.DeliveryFee.Should().Be(12.5m);
         record.Payload.EstimatedDuration.Should().Be("30");
+        record.Payload.ClientName.Should().BeEmpty();
         record.Payload.PickupLocation.Should().Be("Hamra, Beirut");
         record.Payload.DeliveryLocation.Should().Be("Achrafieh, Beirut");
+        fieldAbsentCount.Should().Be(1);
     }
 
     [Fact]
-    public async Task NewOffer_ThrowingDurableWriter_StillPushesAndReturns()
+    public async Task AC2a_AC2b_NewOffer_ThrowingDurableWriter_StillPushesAndLogsOnceWithNcid()
     {
         var writer = new RecordingNotificationRecordWriter(throwOnWrite: true);
         var push = new RecordingUserPushClient();
@@ -156,9 +190,12 @@ public class OfferPushNotifierTests
         await act.Should().NotThrowAsync();
         writer.Attempts.Should().Be(1);
         push.Sends.Should().ContainSingle();
-        logger.Entries.Should().ContainSingle(entry =>
-            entry.Level == LogLevel.Error &&
-            Equals(entry.Properties["event"], "notif.durable_write.failed"));
+        var pushPayload = (IDictionary<string, object?>)push.Sends.Single().Payload;
+        var error = logger.Entries.Should()
+            .ContainSingle(entry => entry.Level == LogLevel.Error)
+            .Subject;
+        error.Properties["event"].Should().Be("notif.durable_write.failed");
+        error.Properties["ncid"].Should().Be(pushPayload["notificationId"]);
     }
 
     // ---------------------------------------------------------------------

@@ -149,7 +149,7 @@ public class OfferAcceptLifecyclePushTests
     }
 
     [Fact]
-    public async Task OfferAccepted_NullAcceptedFee_SkipsWrite_IncrementsCounter_AndPushes()
+    public async Task AC8e_AC8f_AC9d_NullAcceptedFee_PostsZero_IncrementsReasonCounter_AndPushes()
     {
         const string offerId = "offer-no-fee";
         long matchingSkipCount = 0;
@@ -165,17 +165,24 @@ public class OfferAcceptLifecyclePushTests
         meterListener.SetMeasurementEventCallback<long>(
             (instrument, measurement, tags, state) =>
             {
+                var isExpectedEntity = false;
+                var isAcceptedAmountAbsent = false;
                 foreach (var tag in tags)
                 {
-                    if (tag.Key == "entityId" && Equals(tag.Value, offerId))
-                    {
-                        Interlocked.Add(ref matchingSkipCount, measurement);
-                    }
+                    isExpectedEntity |= tag.Key == "entityId" &&
+                        Equals(tag.Value, offerId);
+                    isAcceptedAmountAbsent |= tag.Key == "reason" &&
+                        Equals(tag.Value, "accepted_amount_absent");
+                }
+                if (isExpectedEntity && isAcceptedAmountAbsent)
+                {
+                    Interlocked.Add(ref matchingSkipCount, measurement);
                 }
             });
         meterListener.Start();
 
-        var writer = new RecordingNotificationRecordWriter();
+        var handler = new CountingNotificationHandler();
+        var writer = NewConcreteWriter(handler);
         var push = new RecordingUserPushClient();
         var request = AcceptedRequest(acceptedFee: null);
         var notifier = new OfferPushNotifier(
@@ -190,8 +197,9 @@ public class OfferAcceptLifecyclePushTests
             offerId,
             CancellationToken.None);
 
-        writer.Accepted.Should().BeEmpty();
+        handler.Posts.Should().Be(0);
         push.Sends.Should().ContainSingle();
+        TypeOf(push.Sends.Single()).Should().Be("offer_accepted");
         matchingSkipCount.Should().Be(1);
     }
 
@@ -383,6 +391,26 @@ public class OfferAcceptLifecyclePushTests
         CreatedAt = DateTimeOffset.Parse("2026-07-26T10:11:12Z"),
     };
 
+    private static NotificationRecordWriter NewConcreteWriter(
+        CountingNotificationHandler handler)
+    {
+        var http = new HttpClient(handler)
+        {
+            BaseAddress = new Uri("http://127.0.0.1/"),
+        };
+        var client = new JeebNotificationRecordClient(http);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [NotificationRecordWriter.EnabledConfigurationKey] = "true",
+            })
+            .Build();
+        return new NotificationRecordWriter(
+            client,
+            configuration,
+            NullLogger<NotificationRecordWriter>.Instance);
+    }
+
     private static WebApplicationFactory<Program> NewFactory(IOfferServiceClient fake, RecordingUserPushClient push)
         => new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
@@ -460,6 +488,22 @@ public class OfferAcceptLifecyclePushTests
             return Task.FromResult(new NotificationRecordWriteOutcome(
                 NotificationRecordWriteClassification.Committed,
                 201));
+        }
+    }
+
+    private sealed class CountingNotificationHandler : HttpMessageHandler
+    {
+        public int Posts { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                Posts++;
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Created));
         }
     }
 
