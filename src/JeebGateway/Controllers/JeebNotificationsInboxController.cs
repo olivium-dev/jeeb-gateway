@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Availability;
 using JeebGateway.JeebNotifications;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Http;
@@ -61,13 +63,16 @@ namespace JeebGateway.Controllers;
 public sealed class JeebNotificationsInboxController : ControllerBase
 {
     private readonly ServiceNotificationClient _notifications;
+    private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly ILogger<JeebNotificationsInboxController> _log;
 
     public JeebNotificationsInboxController(
         ServiceNotificationClient notifications,
+        IOfferRequestIndex offerRequestIndex,
         ILogger<JeebNotificationsInboxController> log)
     {
         _notifications = notifications;
+        _offerRequestIndex = offerRequestIndex;
         _log = log;
     }
 
@@ -135,6 +140,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
                     ct);
 
             var (rows, total) = ExtractRows(response);
+            ResolveOfferRequestRefs(rows);
 
             // F5 (JEBV4-302) PRIVACY FILTER — the "finding jeebers" new-request broadcast
             // is fanned to the jeeb_jeebers FCM topic (see NewRequestPushNotifier). A
@@ -164,6 +170,60 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         catch (NotificationApiException ex)
         {
             return UpstreamProblem(ex);
+        }
+    }
+
+    private void ResolveOfferRequestRefs(IReadOnlyList<UpstreamNotificationRow> rows)
+    {
+        var unresolved = new List<(UpstreamNotificationRow Row, string OfferId)>();
+        foreach (var row in rows)
+        {
+            if (!string.Equals(row.Type, "offer", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var offerId = row.Ref?.Trim();
+            row.Ref = null;
+            if (!string.IsNullOrEmpty(offerId))
+            {
+                unresolved.Add((row, offerId));
+            }
+        }
+
+        var resolved = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var budget = Stopwatch.StartNew();
+        foreach (var (row, offerId) in unresolved)
+        {
+            if (budget.Elapsed >= TimeSpan.FromMilliseconds(150))
+            {
+                break;
+            }
+
+            if (!resolved.TryGetValue(offerId, out var requestId))
+            {
+                try
+                {
+                    requestId = _offerRequestIndex.ResolveRequestId(offerId);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(
+                        ex,
+                        "Notification inbox offer route resolution failed for offer {OfferId}.",
+                        offerId);
+                    requestId = null;
+                }
+
+                resolved[offerId] = requestId;
+            }
+
+            if (budget.Elapsed >= TimeSpan.FromMilliseconds(150))
+            {
+                break;
+            }
+
+            row.Ref = string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim();
         }
     }
 

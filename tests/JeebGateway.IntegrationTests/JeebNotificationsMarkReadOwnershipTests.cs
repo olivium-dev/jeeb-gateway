@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Security.Claims;
 using FluentAssertions;
+using JeebGateway.Availability;
 using JeebGateway.Controllers;
 using JeebGateway.service.ServiceNotification;
 using Microsoft.AspNetCore.Http;
@@ -30,6 +31,7 @@ public sealed class JeebNotificationsMarkReadOwnershipTests
             authenticationType: "test"));
         var controller = new JeebNotificationsInboxController(
             upstream,
+            new MissingOfferRequestIndex(),
             NullLogger<JeebNotificationsInboxController>.Instance)
         {
             ControllerContext = new ControllerContext { HttpContext = httpContext },
@@ -40,6 +42,21 @@ public sealed class JeebNotificationsMarkReadOwnershipTests
         response.Should().BeOfType<NotFoundResult>();
         upstream.ReceiverReads.Should().Equal("caller-a");
         upstream.PatchCount.Should().Be(0);
+    }
+
+    private sealed class MissingOfferRequestIndex : IOfferRequestIndex
+    {
+        public void Record(string offerId, string requestId)
+        {
+        }
+
+        public void Record(string offerId, string requestId, string? jeeberId)
+        {
+        }
+
+        public string? ResolveRequestId(string offerId) => null;
+
+        public string? ResolveJeeberId(string offerId) => null;
     }
 
     private sealed class RecordingNotificationClient : ServiceNotificationClient

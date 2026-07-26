@@ -270,4 +270,9 @@ internal static class Fm1NotificationWireFixtures
             @"""notification_type"":""jeeb.offer_received""",
             @"""notification_type"":""jeeb.new_request""",
             StringComparison.Ordinal));
+
+    public static JObject OffersSharingOneOfferId()
+        => JObject.Parse(CapturedOfferReceivedJson
+            .Replace("OFR-PROBE-2", "OFR-PROBE-3", StringComparison.Ordinal)
+            .Replace("OFR-PROBE-1", "OFR-PROBE-3", StringComparison.Ordinal));
 }
