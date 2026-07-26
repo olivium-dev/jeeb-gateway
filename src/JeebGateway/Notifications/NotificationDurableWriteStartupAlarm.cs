@@ -1,4 +1,3 @@
-using JeebGateway.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -31,7 +30,9 @@ internal sealed class NotificationDurableWriteStartupAlarm : IHostedService
     {
         var enabled = _configuration.GetValue<bool>(
             NotificationRecordWriter.EnabledConfigurationKey);
-        if (enabled || StoreDurabilityGuard.IsExempt(_environment))
+        var isExemptEnvironment = _environment.IsDevelopment()
+            || _environment.IsEnvironment("Testing");
+        if (enabled || isExemptEnvironment)
         {
             return Task.CompletedTask;
         }
