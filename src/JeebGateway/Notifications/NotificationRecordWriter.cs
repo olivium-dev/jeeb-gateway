@@ -88,11 +88,19 @@ public sealed class NotificationRecordWriter : INotificationRecordWriter
         // duplicated shade. PushSilencePolicy makes that structural: one type, one mode.
         if (PushSilencePolicy.IsSilent(templateKey))
         {
+            // entityId is deliberately NOT a metric tag here, even though the sibling
+            // skip in OfferPushNotifier.cs tags it. This meter
+            // (BusinessOutcomeTelemetry.MeterName) is Prometheus-exported (Program.cs),
+            // so every tag becomes a label and every distinct value becomes its own time
+            // series. That is tolerable for the sibling, which fires only on a rare data
+            // defect; this counter fires on EVERY silent refresh — the whole volume the
+            // polling→push migration is moving onto this path — so tagging it per entity
+            // is an unbounded-cardinality bomb. The id stays in the structured log below,
+            // where per-event cardinality is free and the debugging value actually is.
             NotificationDurableWriteTelemetry.Skipped.Add(
                 1,
                 new("type", templateKey),
-                new("reason", "silent_is_not_inbox_state"),
-                new("entityId", entityId));
+                new("reason", "silent_is_not_inbox_state"));
             _logger.LogDebug(
                 "event={event} type={type} reason={reason} recipientId={recipientId} " +
                 "entityId={entityId} ncid={ncid}",
@@ -201,5 +209,9 @@ internal static class NotificationDurableWriteTelemetry
     internal static readonly Counter<long> Skipped =
         Meter.CreateCounter<long>(
             "notif.durable_write.skipped",
-            description: "Durable notification rows skipped because authoritative required data was absent.");
+            description:
+                "Durable notification rows not written. Disambiguate on the `reason` tag: "
+                + "`silent_is_not_inbox_state` is the CORRECT b02 step-3 outcome for a silent "
+                + "refresh signal and must not be alerted on; the data-absence reasons are "
+                + "genuine defects.");
 }
