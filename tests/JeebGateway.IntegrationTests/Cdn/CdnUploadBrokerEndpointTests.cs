@@ -161,6 +161,90 @@ public sealed class CdnUploadBrokerEndpointTests
     }
 
     [Fact]
+    public async Task BrokerUploadUrl_Chat_Attachment_Slot_Returns_200_For_A_Client()
+    {
+        // TC-A1 (P4/P5, b01-20260725) — the in-chat image attachment slot must be
+        // accepted by the signed-PUT broker exactly like the KYC/POD slots. Fails on
+        // c872d63 with 400 "Invalid upload slot" — that 400 was the whole reason a
+        // chat attachment could never reach the CDN.
+        using var factory = CdnEnabledFactory(new StubCdn());
+        var client = ClientFor(factory, "p45-cdn-chat-client", "customer");
+
+        var resp = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "chat_attachment",
+            content_type = "image/jpeg",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = await ReadJsonAsync(resp);
+        // ABSOLUTE upload target (JEBV4-259): the client must never be handed a
+        // relative/internal URL it cannot reach.
+        json.GetProperty("upload_url").GetString().Should().StartWith("http");
+        json.GetProperty("object_ref").GetString().Should().NotBeNullOrWhiteSpace();
+        // BR-2: expires_in must be ≤ 300.
+        json.GetProperty("expires_in").GetInt32().Should().BeLessThanOrEqualTo(300);
+        // The client's dedicated interceptor-free Dio needs the media type back.
+        json.GetProperty("required_headers").TryGetProperty("Content-Type", out var ct).Should().BeTrue();
+        ct.GetString().Should().Be("image/jpeg");
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Chat_Attachment_Slot_Returns_200_For_A_Jeeber()
+    {
+        // TC-A2 — CdnBroker is granted to Participant = {client, jeeber}
+        // (CapabilityRolePolicy). BOTH chat parties must be able to attach, so the
+        // jeeber (opaque role "driver") must get the same 200.
+        using var factory = CdnEnabledFactory(new StubCdn());
+        var client = ClientFor(factory, "p45-cdn-chat-jeeber", "driver");
+
+        var resp = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "chat_attachment",
+            content_type = "image/jpeg",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Allowlist_Is_Still_Closed_And_Enumerates_Chat_Attachment()
+    {
+        // TC-A3 — the allowlist did NOT become "anything": a neighbouring, plausible
+        // slot string is still rejected, and the ProblemDetails names the closed set
+        // (which now includes chat_attachment) so a client can self-diagnose.
+        using var factory = CdnEnabledFactory(new StubCdn());
+        var client = ClientFor(factory, "p45-cdn-chat-badslot", "customer");
+
+        var resp = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "chat_video",
+            content_type = "image/jpeg",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.Should().Contain("chat_attachment");
+        body.Should().Contain("proof_of_delivery", "the pre-existing slots must still be advertised");
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Chat_Attachment_Without_Identity_Returns_401()
+    {
+        // TC-A4 — adding the new slot must not have loosened the auth gate.
+        using var factory = CdnEnabledFactory(new StubCdn());
+        var anon = factory.CreateClient();
+
+        var resp = await anon.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "chat_attachment",
+            content_type = "image/jpeg",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
     public async Task BrokerUploadUrl_Unknown_Slot_Returns_400()
     {
         using var factory = CdnEnabledFactory(new StubCdn());
@@ -219,11 +303,17 @@ public sealed class CdnUploadBrokerEndpointTests
             });
         });
 
-    private static HttpClient ClientFor(WebApplicationFactory<Program> factory, string userId)
+    /// <param name="role">
+    /// The OPAQUE user-management role (<c>customer</c> = contract <c>client</c>,
+    /// <c>driver</c> = contract <c>jeeber</c>; JeebRoleTranslator). Defaults to
+    /// <c>driver</c> so every pre-existing test keeps its exact behaviour.
+    /// </param>
+    private static HttpClient ClientFor(
+        WebApplicationFactory<Program> factory, string userId, string role = "driver")
     {
         var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", userId);
-        client.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+        client.DefaultRequestHeaders.Add("X-User-Roles", role);
         return client;
     }
 

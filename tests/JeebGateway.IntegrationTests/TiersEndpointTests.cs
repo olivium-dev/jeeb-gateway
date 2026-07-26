@@ -228,7 +228,12 @@ public class TiersEndpointTests
             radiusKm =7.5,
             requestTtlSeconds =45 * 60,
             commissionRate =0.10,
-            priceHint ="Updated hint"
+            priceHint ="Updated hint",
+            // P7 (G-I): this PUT changes requestTtlSeconds (1800 -> 2700), which moves the
+            // DERIVED offer-wait deadline of every in-flight request on the tier. The guard
+            // now demands the change be acknowledged; this test is about field replacement,
+            // so it acknowledges. The guard itself is covered by AdminTierTtlGuardTests.
+            applyToInFlight = true
         });
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -349,7 +354,8 @@ public class TiersEndpointTests
             radiusKm =6.0,
             requestTtlSeconds =60 * 60,
             commissionRate =0.10,
-            priceHint ="Now slower"
+            priceHint ="Now slower",
+            applyToInFlight = true // P7 (G-I): TTL changes 1800 -> 3600; acknowledged.
         });
         put.EnsureSuccessStatusCode();
 

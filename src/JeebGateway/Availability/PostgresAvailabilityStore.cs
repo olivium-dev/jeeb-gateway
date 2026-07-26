@@ -317,6 +317,37 @@ public sealed class PostgresAvailabilityStore : IAvailabilityStore
         return results;
     }
 
+    public async Task<IReadOnlyList<JeeberAvailability>> ListKnownJeebersAsync(DateTimeOffset since, CancellationToken ct)
+    {
+        // P1 — the new-request fan-out's never-starve fallback roster: every Jeeber row this
+        // gateway has touched inside the window, ONLINE OR NOT. Same projection as
+        // ListOnlineAsync; only the WHERE differs. No migration: last_interaction_at (0026),
+        // last_seen_at + updated_at (0003) already exist, and
+        // jeeber_availability_last_interaction_idx (0026) already covers the hot column.
+        // Npgsql-UTC gotcha: callers pass a UTC DateTimeOffset (the notifier derives it from
+        // TimeProvider.GetUtcNow()).
+        const string sql = """
+            SELECT user_id, is_online, vehicle_type, zone,
+                   ST_X(last_location::geometry) AS longitude,
+                   ST_Y(last_location::geometry) AS latitude,
+                   last_seen_at, last_interaction_at, updated_at
+            FROM jeeber_availability
+            WHERE COALESCE(last_interaction_at, last_seen_at, updated_at) >= @Since
+            """;
+
+        await using var conn = await _db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("Since", since);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+
+        var results = new List<JeeberAvailability>();
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(MapRow(reader));
+        }
+        return results;
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private static async Task<JeeberAvailability?> QuerySingleAsync(NpgsqlConnection conn, Guid userId, CancellationToken ct)

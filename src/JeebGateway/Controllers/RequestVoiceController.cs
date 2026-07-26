@@ -268,10 +268,19 @@ public sealed class RequestVoiceController : ControllerBase
         // double-tap / network-retry collapsing onto an existing row never reaches this
         // line and never double-notifies. Only a fresh create (this 201 path) fires the
         // push. Belt-and-braces try/catch so the broadcast never flips the voice 201.
+        // P1: enqueue-only (O(1)); the fan-out resolves recipients off the hot path and
+        // excludes the initiator. Pickup comes from the PERSISTED row, not the input literal.
         try
         {
             await _newRequestPush.NotifyNewRequestAsync(
-                created.Id, created.TierId, created.Description, ct);
+                new Notifications.NewRequestNotification(
+                    RequestId: created.Id,
+                    TierId: created.TierId,
+                    Description: created.Description,
+                    InitiatorUserId: clientId,
+                    PickupLat: created.PickupLocation?.Lat,
+                    PickupLng: created.PickupLocation?.Lng),
+                ct);
         }
         catch (Exception ex)
         {

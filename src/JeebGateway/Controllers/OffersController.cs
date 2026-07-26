@@ -252,7 +252,7 @@ public class OffersController : ControllerBase
             accepted = await _requests.GetAsync(accepted.Id, ct) ?? accepted;
         }
 
-        return Ok(ToDto(accepted));
+        return Ok(ToDto(accepted, _clock.GetUtcNow()));
     }
 
     // -------------------------------------------------------------------------
@@ -1026,8 +1026,13 @@ public class OffersController : ControllerBase
                 : conversationPhase,
         };
 
-    private static DeliveryRequestDto ToDto(DeliveryRequest r) => new()
+    // P7 (G-E): DeliveryRequestDto.ServerNow is required — ONE clock read per
+    // response. Post-acceptance surfaces leave the offer-deadline fields null
+    // (IsPreAcceptance is false for them anyway); they only stamp ServerNow.
+    private static DeliveryRequestDto ToDto(DeliveryRequest r, DateTimeOffset serverNow) => new()
     {
+        ServerNow = serverNow,
+        ExpiredAt = r.ExpiredAt,
         Id = r.Id,
         ClientId = r.ClientId,
         Status = r.Status,

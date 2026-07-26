@@ -23,9 +23,17 @@ public sealed class TierExpiryWindowResolver
         _logger = logger;
     }
 
+    /// <param name="tolerateUpstreamFailure">
+    /// P7 (G-B): when true, a delivery-service blip while loading the UPSTREAM tier
+    /// overlay is logged and swallowed, and the locally-seeded catalog map is served
+    /// instead. Read endpoints (<see cref="OfferDeadlineProjector"/>) pass true so a
+    /// client read can never 5xx on an upstream hiccup; the sweeper keeps the default
+    /// false because its commit decision must not silently narrow its TTL source.
+    /// </param>
     public async Task<IReadOnlyDictionary<string, TimeSpan>> LoadTierTtlsAsync(
         JeebGateway.Tiers.ITiersStore tiers,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool tolerateUpstreamFailure = false)
     {
         // Two tier-id vocabularies reach this sweeper and BOTH must resolve:
         // the local catalog's slugs (urgent/same-day/scheduled — what
@@ -47,10 +55,22 @@ public sealed class TierExpiryWindowResolver
 
         if (_upstreamFlags.CurrentValue.Delivery)
         {
-            var upstreamCatalog = await _delivery.ListTiersAsync(ct);
-            foreach (var tier in upstreamCatalog.Where(t => t.RequestTtlSeconds > 0))
+            try
             {
-                merged[tier.Id] = TimeSpan.FromSeconds(tier.RequestTtlSeconds);
+                var upstreamCatalog = await _delivery.ListTiersAsync(ct);
+                foreach (var tier in upstreamCatalog.Where(t => t.RequestTtlSeconds > 0))
+                {
+                    merged[tier.Id] = TimeSpan.FromSeconds(tier.RequestTtlSeconds);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // A real cancellation is never an "upstream blip" — propagate it.
+                throw;
+            }
+            catch (Exception ex) when (tolerateUpstreamFailure)
+            {
+                _logger.LogWarning(ex, "Tier TTL upstream overlay failed; serving local catalog only");
             }
         }
 

@@ -445,6 +445,40 @@ public class DeliveryRequestDto
     public string? JeeberId { get; init; }
     public DateTimeOffset? AcceptedAt { get; init; }
 
+    // ── P7 (G-E): the offer-wait timer contract ──────────────────────────────
+    // DERIVED, never stored. One arithmetic (RequestExpiryMath) feeds both this
+    // projection and the sweeper. `broadcastExpiresAt` was NEVER emitted by this
+    // gateway — these four members are the whole wire contract, and they are
+    // ADDITIVE (nothing an old consumer reads disappears).
+
+    /// <summary>
+    /// Absolute UTC instant the offer-wait window closes (<c>CreatedAt</c> +
+    /// resolved tier TTL). Null unless the row is pending/matched. NEVER diff
+    /// this against the handset clock — clients anchor on
+    /// <see cref="OfferDeadlineInSeconds"/> + their own receive instant.
+    /// </summary>
+    public DateTimeOffset? OfferDeadlineAt { get; set; }
+
+    /// <summary>
+    /// Seconds remaining at <see cref="ServerNow"/>, clamped at 0. THE value the
+    /// client anchors on. Null EXACTLY when <see cref="OfferDeadlineAt"/> is null;
+    /// its absence on a live pre-acceptance row is a contract violation by design.
+    /// </summary>
+    public int? OfferDeadlineInSeconds { get; set; }
+
+    /// <summary>
+    /// This response's own UTC clock reading — ONE clock read per response.
+    /// Non-nullable: the client pairs it with its own receive instant to derive a
+    /// skew-proof deadline. <c>required</c> is deliberate — it is the compile-time
+    /// enforcement that every construction site stamps a real clock.
+    /// </summary>
+    public required DateTimeOffset ServerNow { get; init; }
+
+    /// <summary>
+    /// When the sweeper terminally expired the row. Null until then.
+    /// </summary>
+    public DateTimeOffset? ExpiredAt { get; init; }
+
     /// <summary>
     /// JEB-50 (S05 H7 / H9b): the broadcasting conversation auto-created for
     /// this order, surfaced so the client can read the conversation phase via

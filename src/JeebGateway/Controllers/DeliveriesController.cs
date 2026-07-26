@@ -422,22 +422,41 @@ public class DeliveriesController : ControllerBase
                 var canonical = await _deliveryClient.GetCanonicalDeliveryAsync(deliveryId, ct);
                 if (canonical is not null)
                 {
-                    var canonicalDto = new DeliveryRequestDto
-                    {
-                        Id = canonical.DeliveryId,
-                        ClientId = canonical.ClientId ?? string.Empty,
-                        Status = canonical.Status,
-                        Description = string.Empty,
-                        TierId = canonical.TierId,
-                        JeeberId = canonical.JeeberId,
-                        CreatedAt = canonical.CreatedAt
-                    };
                     // fix/client-visibility (run-22 P1): the local mirror row carries the
                     // accept-time fee snapshot the enrichment falls back to when the live
                     // offers lookup cannot resolve the accepted offer (jeeber-party reads,
                     // post-terminal offer-state collapse). Best-effort — a mirror miss just
                     // means no snapshot.
+                    // P3 (b01-20260725): the mirror ALSO carries the client-typed request
+                    // Description, which DeliveryReadUpstream does not. Hoisted above the DTO
+                    // construction because Description is `init`-only — EnrichWithOfferAndJeeberAsync
+                    // cannot patch it after construction. SAME single read, just earlier.
                     var mirror = await _store.GetAsync(deliveryId, ct);
+
+                    // P3 PRIVACY GUARD — do not simplify away. This canonical branch delegates
+                    // row scoping to delivery-service and deliberately does NOT run
+                    // CallerParticipatesInDelivery (unlike the mirror fallback at :505-508).
+                    // Free text the customer typed is a NEW class of data on this branch, so it
+                    // is surfaced ONLY to a proven participant (the client or the assigned
+                    // jeeber). A non-participant keeps today's empty string — zero widening of
+                    // read access. Locked by GetById_FlagOn_Canonical_NonParticipant_DescriptionStaysEmpty.
+                    var description = mirror is not null && CallerParticipatesInDelivery(mirror, callerId)
+                        ? mirror.Description
+                        : string.Empty;
+
+                    var canonicalDto = new DeliveryRequestDto
+                    {
+                        // P7 (G-E): ONE clock read stamped on the response.
+                        ServerNow = _clock.GetUtcNow(),
+                        ExpiredAt = mirror?.ExpiredAt,
+                        Id = canonical.DeliveryId,
+                        ClientId = canonical.ClientId ?? string.Empty,
+                        Status = canonical.Status,
+                        Description = description,
+                        TierId = canonical.TierId,
+                        JeeberId = canonical.JeeberId,
+                        CreatedAt = canonical.CreatedAt
+                    };
                     await EnrichWithOfferAndJeeberAsync(
                         canonicalDto, deliveryId, canonical.JeeberId, mirror?.AcceptedFee, ct);
                     return Ok(canonicalDto);
@@ -488,7 +507,7 @@ public class DeliveriesController : ControllerBase
             return NotFound();
         }
 
-        var dto = ToDto(delivery);
+        var dto = ToDto(delivery, _clock.GetUtcNow());
         await EnrichWithOfferAndJeeberAsync(dto, deliveryId, delivery.JeeberId, delivery.AcceptedFee, ct);
         return Ok(dto);
     }
@@ -738,6 +757,27 @@ public class DeliveriesController : ControllerBase
                 deliveryId);
         }
 
+        // P6/G1: AtDoor → Done has exactly ONE legal edge — `otp_verified` (DeliverySm
+        // edge 10), fired by POST /v1/deliveries/{id}/otp/verify. A jeeber's bare status
+        // PATCH is NOT that trigger, and delivery-service answers it with the generic
+        // `transition_not_allowed`, which the app renders as "That transition is not
+        // allowed" (incident 2026-07-25: five 1 ms 422s on delivery
+        // d8b010f8-7a96-4dc1-9c36-1a376af51723). Answer it here with the TYPED
+        // `otp_required` reason so the app raises the door-OTP entry it already
+        // implements — and fail fast, without the doomed upstream round-trip. Scoped to
+        // jeeber-sourced calls: the customer "received it" PATCH → Done leg and the admin
+        // `admin_resolve` leg are untouched.
+        if (string.Equals(canonicalTo, CanonicalDeliveryVocab.Done, StringComparison.Ordinal) &&
+            string.Equals(partySource, CanonicalDeliveryVocab.SourceJeeber, StringComparison.Ordinal))
+        {
+            _log.LogInformation(
+                "event=delivery.patch_done_rejected_otp_required delivery_id={DeliveryId} from={From} party=jeeber",
+                deliveryId, preTransitionRow?.Status);
+            return OtpRequiredTransitionProblem.Build(
+                preTransitionRow?.Status,
+                "AtDoor→Done is reachable only through the handover OTP verify endpoint.");
+        }
+
         try
         {
             DeliveryTransitionUpstream upstream;
@@ -840,6 +880,8 @@ public class DeliveriesController : ControllerBase
             // Surface the canonical row verbatim (status = upstream canonical vocab).
             return Ok(new DeliveryRequestDto
             {
+                // P7 (G-E): ONE clock read stamped on the response.
+                ServerNow = _clock.GetUtcNow(),
                 Id = upstream.DeliveryId,
                 ClientId = string.Empty,
                 Status = upstream.Status,
@@ -1445,7 +1487,7 @@ public class DeliveriesController : ControllerBase
 
                 return Ok(new OtpVerificationResponse
                 {
-                    Delivery = ToDto(req),
+                    Delivery = ToDto(req, _clock.GetUtcNow()),
                     AttemptsRemaining = result.AttemptsRemaining,
                     Verified = true
                 });
@@ -1488,7 +1530,7 @@ public class DeliveriesController : ControllerBase
             "Delivery {DeliveryId} flagged client-unreachable at {At} — 15-min escalation timer started",
             row.Id, row.ClientUnreachableAt);
 
-        return Ok(ToDto(row));
+        return Ok(ToDto(row, _clock.GetUtcNow()));
     }
 
     /// <summary>
@@ -2858,8 +2900,13 @@ public class DeliveriesController : ControllerBase
             : null;
     }
 
-    private static DeliveryRequestDto ToDto(DeliveryRequest r) => new()
+    // P7 (G-E): DeliveryRequestDto.ServerNow is required — ONE clock read per
+    // response. Post-acceptance surfaces leave the offer-deadline fields null
+    // (IsPreAcceptance is false for them anyway); they only stamp ServerNow.
+    private static DeliveryRequestDto ToDto(DeliveryRequest r, DateTimeOffset serverNow) => new()
     {
+        ServerNow = serverNow,
+        ExpiredAt = r.ExpiredAt,
         Id = r.Id,
         ClientId = r.ClientId,
         Status = r.Status,

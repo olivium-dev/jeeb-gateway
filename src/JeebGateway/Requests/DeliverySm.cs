@@ -80,6 +80,19 @@ public static class DeliverySm
     public const string ReasonUnknownTrigger = "unknown_trigger";
 
     /// <summary>
+    /// The AtDoor gate (P6/G1): the only exit from <c>AtDoor</c> to <c>Done</c> is
+    /// <c>otp_verified</c> (edge 10), fired exclusively by
+    /// <c>POST /v1/deliveries/{id}/otp/verify</c>. A jeeber-sourced bare status PATCH
+    /// targeting <c>Done</c> is therefore answered with this TYPED reason instead of the
+    /// generic <see cref="ReasonTransitionNotAllowed"/>, so the client can route straight
+    /// to the door-OTP entry it already implements.
+    ///
+    /// This is a REASON STRING only — it is not a trigger and adds no edge to the frozen
+    /// table (<c>DeliverySmParityTests</c> must still see exactly 14 edges).
+    /// </summary>
+    public const string ReasonOtpRequired = "otp_required";
+
+    /// <summary>
     /// Validates <c>(from, trigger)</c> against the frozen table and returns the
     /// destination state. The <see cref="DeliveryTransitionResultCanonical.IsValid"/>
     /// flag is false iff the edge is off-table; the controller maps that to

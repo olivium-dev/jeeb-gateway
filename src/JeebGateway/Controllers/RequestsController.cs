@@ -253,7 +253,7 @@ public class RequestsController : ControllerBase
             });
         }
 
-        return Created($"/requests/{created.Id}", ToDto(created));
+        return Created($"/requests/{created.Id}", ToDto(created, _clock.GetUtcNow()));
     }
 
     /// <summary>
@@ -326,7 +326,11 @@ public class RequestsController : ControllerBase
         if (!UserIdentity.TryGetUserId(HttpContext, out var clientId, out var problem)) return problem;
 
         var rows = await _store.ListForClientAsync(clientId, ct);
-        var dtos = rows.Select(ToDto).ToArray();
+        // P7 §0.2: this [Obsolete] surface stays a BARE ARRAY — it is on no mobile path
+        // and converting it to an envelope is explicitly out of scope. It still stamps
+        // ServerNow per item from ONE clock read for the whole response.
+        var serverNow = _clock.GetUtcNow();
+        var dtos = rows.Select(r => ToDto(r, serverNow)).ToArray();
         return Ok(dtos);
     }
 
@@ -365,7 +369,7 @@ public class RequestsController : ControllerBase
             return NotFound();
         }
 
-        return Ok(ToDto(existing));
+        return Ok(ToDto(existing, _clock.GetUtcNow()));
     }
 
     /// <summary>
@@ -456,8 +460,14 @@ public class RequestsController : ControllerBase
     private Task<IActionResult?> EvaluateModerationAsync(string clientId, string description, CancellationToken ct)
         => _moderationEvaluator.EvaluateAsync(clientId, description, ct);
 
-    private static DeliveryRequestDto ToDto(DeliveryRequest r) => new()
+    // P7 (G-E): every DeliveryRequestDto carries a ServerNow stamped from ONE
+    // clock read per response. This legacy surface leaves the deadline fields
+    // null (it is not a pre-acceptance countdown surface); only
+    // GET /v1/requests/{id} and the jeeber feed populate them.
+    private static DeliveryRequestDto ToDto(DeliveryRequest r, DateTimeOffset serverNow) => new()
     {
+        ServerNow = serverNow,
+        ExpiredAt = r.ExpiredAt,
         Id = r.Id,
         ClientId = r.ClientId,
         Status = r.Status,

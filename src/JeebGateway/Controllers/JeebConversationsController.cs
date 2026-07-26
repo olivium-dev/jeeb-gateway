@@ -8,6 +8,7 @@ using JeebGateway.Conversations.Client;
 using JeebGateway.Conversations.Realtime;
 using JeebGateway.Notifications;
 using JeebGateway.Services;
+using JeebGateway.StateService.Idempotency;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -281,10 +282,26 @@ public sealed class JeebConversationsController : ControllerBase
                 statusCode: StatusCodes.Status400BadRequest);
         }
 
-        var idempotencyKey = Request.Headers.TryGetValue("Idempotency-Key", out var hdr)
+        // JEBV4-335 — NEVER forward the raw client key here. It is a per-mount
+        // counter (msg-{conversationId}-{N}-u-{userId}, N restarts at 0 on every
+        // chat mount), so forwarding it verbatim would hand chat-service the same
+        // collidable anchor that made the gateway replay a cached 201 and silently
+        // drop the message. We forward the COLLISION-GUARDED key instead: identical
+        // for a genuine retry of the same send, distinct for a different send that
+        // merely re-used an index. Prefer the value the middleware already deduped
+        // on; when the middleware is not mounted (no state-service configured) we
+        // derive the same shape from the bound body so the guarantee holds in EVERY
+        // gateway configuration.
+        var rawIdempotencyKey = Request.Headers.TryGetValue("Idempotency-Key", out var hdr)
             && !string.IsNullOrWhiteSpace(hdr)
             ? hdr.ToString()
             : null;
+
+        var idempotencyKey = rawIdempotencyKey is null
+            ? null
+            : ChatSendIdempotencyGuard.EffectiveKeyOrNull(HttpContext)
+                ?? ChatSendIdempotencyGuard.DisambiguateFromMaterial(
+                    rawIdempotencyKey, authorId, DescribeAppendBody(body));
 
         try
         {
@@ -572,6 +589,20 @@ public sealed class JeebConversationsController : ControllerBase
     /// </summary>
     private bool TryGetUserId(out string userId, out IActionResult problem)
         => UserIdentity.TryGetUserId(HttpContext, out userId, out problem);
+
+    /// <summary>
+    /// JEBV4-335 fallback fingerprint material: a deterministic rendering of the
+    /// bound append body. Two DIFFERENT sends render differently (so a re-used
+    /// client counter no longer collapses them); the SAME send retried renders
+    /// identically (so a genuine retry still dedupes exactly once).
+    /// </summary>
+    private static string DescribeAppendBody(AppendMessageBody body) => string.Join(
+        '\n',
+        body.Kind ?? string.Empty,
+        body.Subtype ?? string.Empty,
+        body.Body ?? string.Empty,
+        body.Audience?.GetRawText() ?? string.Empty,
+        body.Payload?.GetRawText() ?? string.Empty);
 }
 
 /// <summary>

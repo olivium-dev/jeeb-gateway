@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
+using JeebGateway.Availability;
 using JeebGateway.Notifications;
 using JeebGateway.Push;
 using JeebGateway.Services.Clients;
@@ -21,6 +22,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -107,13 +109,16 @@ public class TierUnificationTests
     public async Task PushBody_CarriesDisplayName_ForCatalogAndLegacyTierIds(
         string tierId, string expectedDisplayName)
     {
-        var push = new RecordingTopicPushClient();
-        var notifier = new NewRequestPushNotifier(
-            push, new InMemoryTiersStore(), NullLogger<NewRequestPushNotifier>.Instance);
+        // P1: the push is now a per-user fan-out over the jeeber_availability roster, so the
+        // body is read off the per-user rail. Tier display resolution itself is untouched.
+        var push = new RecordingPushClient();
+        var notifier = NewFanoutNotifier(push);
 
-        await notifier.NotifyNewRequestAsync("req-1", tierId, "Deliver a parcel", CancellationToken.None);
+        await notifier.FanOutAsync(
+            new NewRequestNotification("req-1", tierId, "Deliver a parcel", "customer-1", null, null),
+            CancellationToken.None);
 
-        var payload = (IDictionary<string, object?>)push.Sends.Single().Payload;
+        var payload = (IDictionary<string, object?>)push.UserSends.Single().Payload;
         ((string)payload["body"]!).Should().EndWith($" • {expectedDisplayName}",
             $"tier id '{tierId}' must resolve to the '{expectedDisplayName}' display name");
         // The RAW id (machine field) is carried untranslated — display resolution
@@ -126,16 +131,31 @@ public class TierUnificationTests
     {
         // Behavior kept from the pre-unification notifier: an id that resolves in
         // NEITHER taxonomy drops the suffix (a raw id/UUID is never shown).
-        var push = new RecordingTopicPushClient();
-        var notifier = new NewRequestPushNotifier(
-            push, new InMemoryTiersStore(), NullLogger<NewRequestPushNotifier>.Instance);
+        var push = new RecordingPushClient();
+        var notifier = NewFanoutNotifier(push);
 
-        await notifier.NotifyNewRequestAsync(
-            "req-1", "definitely-not-a-tier", "Deliver a parcel", CancellationToken.None);
+        await notifier.FanOutAsync(
+            new NewRequestNotification(
+                "req-1", "definitely-not-a-tier", "Deliver a parcel", "customer-1", null, null),
+            CancellationToken.None);
 
-        var payload = (IDictionary<string, object?>)push.Sends.Single().Payload;
+        var payload = (IDictionary<string, object?>)push.UserSends.Single().Payload;
         ((string)payload["body"]!).Should().Be("Deliver a parcel");
     }
+
+    /// <summary>
+    /// P1 notifier over one online jeeber, so a single per-user send carries the payload
+    /// whose tier body/id these theories assert.
+    /// </summary>
+    private static NewRequestPushNotifier NewFanoutNotifier(RecordingPushClient push)
+        => new(
+            push,
+            new InMemoryTiersStore(),
+            NullLogger<NewRequestPushNotifier>.Instance,
+            new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber("jeeberA") } },
+            new RecordingFanoutQueue(),
+            Options.Create(new NewRequestFanoutOptions()),
+            TimeProvider.System);
 
     // ---------------------------------------------------------------------
     // POST /v1/requests (JSON V1 path) — create-time tier validation, e2e.
@@ -160,7 +180,8 @@ public class TierUnificationTests
     public async Task V1Create_UnknownTierId_Returns404TierNotFound_AndPublishesNothing()
     {
         var push = new RecordingTopicPushClient();
-        using var factory = NewFactory(push);
+        var queue = new RecordingFanoutQueue();
+        using var factory = NewFactory(push, queue);
         var client = ClientFor(factory, $"client-{Guid.NewGuid()}");
 
         var resp = await client.PostAsJsonAsync(
@@ -174,6 +195,7 @@ public class TierUnificationTests
 
         // A rejected create never reaches the push hook and persists no row.
         push.Sends.Should().BeEmpty();
+        queue.Jobs.Should().BeEmpty();
     }
 
     [Fact]
@@ -201,15 +223,28 @@ public class TierUnificationTests
         // End-to-end proof of the original defect fix: a create with a LEGACY code
         // flows through to the jeebers push with a resolved display name (previously
         // the suffix was silently dropped because the code never hit a catalog row).
-        var push = new RecordingTopicPushClient();
-        using var factory = NewFactory(push);
+        // P1: the create now ENQUEUES; the recorded job is then driven through the app's
+        // OWN notifier (real tier catalog, real DI) so the assertion stays end-to-end
+        // without racing the hosted processor.
+        var push = new RecordingPushClient();
+        var queue = new RecordingFanoutQueue();
+        var availability = new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber("jeeberA") } };
+        using var factory = NewFactory(push, queue, availability);
         var client = ClientFor(factory, $"client-{Guid.NewGuid()}");
 
         var resp = await client.PostAsJsonAsync("/v1/requests", ValidPayload("Deliver documents", "flash"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
-        push.Sends.Should().ContainSingle();
-        var payload = (IDictionary<string, object?>)push.Sends.Single().Payload;
+        queue.Jobs.Should().ContainSingle();
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var notifier = scope.ServiceProvider.GetRequiredService<INewRequestPushNotifier>();
+            await notifier.FanOutAsync(queue.Jobs.Single(), CancellationToken.None);
+        }
+
+        push.UserSends.Should().ContainSingle();
+        var payload = (IDictionary<string, object?>)push.UserSends.Single().Payload;
         ((string)payload["body"]!).Should().Contain("Urgent",
             "the legacy 'flash' code aliases to the 'urgent' catalog row");
         payload["tierId"].Should().Be("flash", "the raw machine field is never rewritten");
@@ -287,7 +322,10 @@ public class TierUnificationTests
     // helpers (same recorder/factory pattern as NewRequestPushNotifierTests)
     // ---------------------------------------------------------------------
 
-    private static WebApplicationFactory<Program> NewFactory(RecordingTopicPushClient push)
+    private static WebApplicationFactory<Program> NewFactory(
+        ServicePushNotificationClient push,
+        INewRequestFanoutQueue? queue = null,
+        IAvailabilityStore? availability = null)
         => new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
@@ -295,6 +333,20 @@ public class TierUnificationTests
                 {
                     services.RemoveAll<ServicePushNotificationClient>();
                     services.AddSingleton<ServicePushNotificationClient>(push);
+
+                    // P1: swapping in the recorder queue makes the create→fan-out hand-off
+                    // deterministic (its reader never yields, so the hosted processor idles).
+                    if (queue is not null)
+                    {
+                        services.RemoveAll<INewRequestFanoutQueue>();
+                        services.AddSingleton(queue);
+                    }
+
+                    if (availability is not null)
+                    {
+                        services.RemoveAll<IAvailabilityStore>();
+                        services.AddSingleton(availability);
+                    }
                 });
             });
 
