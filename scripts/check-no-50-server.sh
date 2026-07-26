@@ -20,6 +20,15 @@
 # allowlist is SELF-LIQUIDATING: a stale entry (one that no longer matches) also
 # fails the build, so an exception cannot outlive the reason it was granted.
 #
+# There is also an inline opt-out for the narrow case of code whose PURPOSE is to
+# detect the pattern (a guard step must name what it forbids). Put
+#
+#     no-50-gate:allow <reason>
+#
+# on the line. A reason is mandatory and every use is printed in the gate output,
+# so a pragma cannot hide. Use the allowlist, not the pragma, for a real
+# .50 destination that is merely waiting on a decision.
+#
 # Usage:  bash scripts/check-no-50-server.sh
 # Exit:   0 = clean, 1 = violation (or stale allowlist entry)
 
@@ -100,8 +109,12 @@ for raw in os.environ.get("ALLOWLIST_TEXT", "").splitlines():
     p, content = entry.split(":", 1)
     allow.setdefault((p.strip(), content.strip()), 0)
 
+PRAGMA = "no-50-gate:allow"
+
 violations = []
 comments = 0
+pragmas = []
+bad_pragmas = []
 
 for raw in sys.stdin.read().splitlines():
     if not raw.strip():
@@ -113,6 +126,13 @@ for raw in sys.stdin.read().splitlines():
         continue
     idx = content.find(PATTERN)
     if idx < 0:
+        continue
+    if PRAGMA in content:
+        reason = content.split(PRAGMA, 1)[1].strip().lstrip("-#*/ ").strip()
+        if not reason:
+            bad_pragmas.append((path, lineno, content.strip()))
+        else:
+            pragmas.append((path, lineno, reason))
         continue
     if in_comment(path, content, idx):
         comments += 1
@@ -149,11 +169,23 @@ if stale:
     for p, content in stale:
         print("  %s:%s" % (p, content[:200]))
 
-if violations or stale:
+if bad_pragmas:
+    print("::error::%d %s pragma(s) with no reason. A reason is mandatory."
+          % (len(bad_pragmas), PRAGMA))
+    for path, lineno, content in bad_pragmas:
+        print("  %s:%s" % (path, lineno))
+        print("      %s" % content[:200])
+
+if violations or stale or bad_pragmas:
     sys.exit(1)
 
 print("OK: no non-comment reference to %s in tracked files." % PATTERN)
 print("    %d comment reference(s) allowed (historical swarm topology, cannot dial)." % comments)
+if pragmas:
+    print("    %d inline %s pragma(s) — every use is listed so none can hide:"
+          % (len(pragmas), PRAGMA))
+    for path, lineno, reason in pragmas:
+        print("      %s:%s  %s" % (path, lineno, reason[:120]))
 if allow:
     print("    %d allowlisted exception(s), all still matching:" % len(allow))
     for (p, content), n in allow.items():
