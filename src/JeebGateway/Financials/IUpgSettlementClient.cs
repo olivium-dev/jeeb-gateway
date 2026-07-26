@@ -10,15 +10,17 @@ namespace JeebGateway.Financials;
 /// is a product-agnostic ledger that records pre-computed gross/fee/net keyed
 /// by <c>(source, externalRef)</c> and performs NO settlement math.
 ///
-/// GR4 — this consumer should be the NSwag-generated
-/// <c>ServiceUnifiedPaymentGatewayClient</c> regenerated from
-/// <c>contracts/unified-payment-gateway.openapi.json</c> via
-/// <c>scripts/regenerate-clients.sh</c>. The hand-coded
-/// <see cref="UpgSettlementClient"/> is an interim transport carrying the
-/// SAME bearer + X-Service-Auth + resilience pipeline as every other typed
-/// client; NSwag regeneration is deferred to CI (the build host has no dotnet
-/// nswag tool). This mirrors the established OfferServiceClient / BanServiceClient
-/// hand-coded-client precedent and is tracked as GR4 debt.
+/// The committed UPG spec and its NSwag-generated client were deleted on
+/// 2026-07-26 (owner directive — no unified_payment_gateway coupling in Jeeb);
+/// they had zero call sites. <see cref="UpgSettlementClient"/> remains the
+/// hand-coded transport, carrying the SAME bearer + X-Service-Auth + resilience
+/// pipeline as every other typed client.
+///
+/// This type is NOT dead code: it is reached whenever
+/// <c>FeatureFlags:UseUpstream:Payments</c> is true (default false, so dormant —
+/// but `FeatureFlags__UseUpstream__Payments=true` arms it). Retiring it needs a
+/// replacement settlement destination first; see
+/// docs/batches/b02-20260726/UPG-REMOVAL.md.
 /// </summary>
 public interface IUpgSettlementClient
 {

@@ -7,12 +7,15 @@ namespace JeebGateway.Services.Clients;
 /// resolves with <c>decision=refund</c>, supplying the case id as the
 /// idempotency key so a retried resolve does not double-refund.
 ///
-/// Hand-coded ahead of the NSwag-generated client — the
-/// <c>unified_payment_gateway</c> OpenAPI spec lives in
-/// <c>contracts/unified-payment-gateway.openapi.json</c> as a placeholder
-/// until the upstream spec is published. Replace this implementation
-/// with the NSwag-generated client during the T-backend-bff-payments
-/// follow-up.
+/// Hand-coded transport. The committed UPG OpenAPI spec and its
+/// NSwag-generated client were REMOVED on 2026-07-26 (owner directive: no
+/// unified_payment_gateway coupling in Jeeb) — they had zero call sites. This
+/// interface is deliberately NOT removed: it is still the LIVE refund path.
+/// <see cref="HttpPaymentRefundClient"/> takes over whenever
+/// <c>Services:UnifiedPayment:BaseUrl</c> is configured (it IS set in
+/// appsettings.Production.json), so a real dispute refund still leaves the
+/// gateway for unified_payment_gateway. Removing this requires a replacement
+/// refund destination first — see docs/batches/b02-20260726/UPG-REMOVAL.md.
 /// </summary>
 public interface IPaymentRefundClient
 {
