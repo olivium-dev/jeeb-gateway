@@ -76,7 +76,7 @@ public sealed class JeebNotificationsMarkReadOwnershipTests
             """;
 
         public RecordingNotificationClient()
-            : base("http://notif.test/", new HttpClient())
+            : base("http://127.0.0.1/", new HttpClient())
         {
         }
 

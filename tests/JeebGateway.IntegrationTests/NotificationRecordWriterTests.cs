@@ -145,7 +145,7 @@ public sealed class NotificationRecordWriterTests
         RecordingLogger<NotificationRecordWriter>? logger = null,
         bool enabled = true)
     {
-        var http = new HttpClient(handler) { BaseAddress = new Uri("http://notification.test/") };
+        var http = new HttpClient(handler) { BaseAddress = new Uri("http://127.0.0.1/") };
         var client = new JeebNotificationRecordClient(http);
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>

@@ -104,7 +104,7 @@ public sealed class JeebNotificationsDeepLinkResolutionTests
         private readonly object _wire;
 
         public FixtureNotificationClient(object wire)
-            : base("http://notif.test/", new HttpClient())
+            : base("http://127.0.0.1/", new HttpClient())
         {
             _wire = wire;
         }
