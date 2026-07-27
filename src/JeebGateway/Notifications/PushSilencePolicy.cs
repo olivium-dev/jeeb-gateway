@@ -56,6 +56,28 @@ public enum PushDeliveryMode
 /// (<c>:10026</c>) owns the stored rows, which is why the only decision made here is
 /// whether to call it at all.</para>
 ///
+/// <para><b>⚠️ REACHABILITY — READ THIS BEFORE BELIEVING THE TESTS.</b> As of this commit
+/// the silent branch is <b>unreachable from any live caller</b>, and that is a fact about
+/// the codebase, not a defect in this policy. <see cref="NotificationRecordWriter"/> has
+/// exactly two public writer methods (<c>jeeb.offer_received</c>,
+/// <c>jeeb.offer_accepted</c>) and both are <see cref="PushDeliveryMode.ShadeAndStored"/>.
+/// The one silent-classified type, <c>jeeb.delivery_status_updated</c>, has no writer at
+/// all, and <see cref="CategoryNewRequest"/> has no template key. So this policy changes
+/// <b>zero</b> production behaviour today: it is a guard pre-placed at the sole choke point
+/// ahead of the writers that will need it. Do not describe a green test suite here as proof
+/// that a silent push was suppressed in production — nothing has yet asked for one.</para>
+///
+/// <para><b>⚠️ TWO DEFINITIONS OF "SILENT" ARE IN FLIGHT, and nothing reconciles them.</b>
+/// This policy decides silence from the notification <b>type</b> (a static lookup). The
+/// push service decides it from a per-send wire flag (<c>payload.get("silent")</c>, b02
+/// step 2). They can disagree and no code forces agreement — today they never meet, because
+/// nothing in this gateway stamps <c>silent</c> on an outbound payload (verified by
+/// <c>grep -rni silent src --include=*.cs</c>: no hit in any send path). When the gateway
+/// does start stamping it, both desync directions are live: a silent push that still wrote
+/// a row (an inbox entry the user was never told about), or a shade buzz with no row (a
+/// banner the user taps and finds nothing behind). Whoever wires the stamp must source it
+/// from <see cref="IsSilent"/> and from nowhere else.</para>
+///
 /// <para><b>⚠️ THE FLAT WIRE <c>category</c> FIELD IS NOT A REFRESH CATEGORY.</b> Today's
 /// payloads stamp <c>["category"] = "delivery"</c> on new-offer
 /// (<c>OfferPushNotifier.cs</c>), new-request (<c>NewRequestPushNotifier.cs</c>) and
@@ -71,7 +93,16 @@ public static class PushSilencePolicy
     // Spelled as the mobile `NotificationCategory` enum names them
     // (jeeb-mobile lib/core/notifications/domain/notification_message.dart).
 
-    /// <summary>Silent-only per D4 — the jeeber new-request feed refresh signal.</summary>
+    /// <summary>
+    /// Silent-only per D4 — the jeeber new-request feed refresh signal.
+    ///
+    /// <para><b>DORMANT, and deliberately so.</b> No catalog template key maps to this
+    /// category: the gateway's new-request push (<c>NewRequestPushNotifier</c>) holds no
+    /// <see cref="INotificationRecordWriter"/> and there is no <c>jeeb.new_request</c>
+    /// catalog template, so there is no centre write for this policy to suppress. The
+    /// category is declared because D4 names it, not because it is wired. Both D4 silent
+    /// categories are in this state today — see the class remarks.</para>
+    /// </summary>
     public const string CategoryNewRequest = "newRequest";
 
     /// <summary>Silent-only per D4 — the delivery-status refresh signal.</summary>
@@ -153,13 +184,23 @@ public static class PushSilencePolicy
             // OfferPushNotifier.NotifyOfferLostAsync; CategoryOfferLost below stays because it is
             // the mobile-facing category on that push's wire payload.
 
-            // D4 puts `delivery` on the silent side: a delivery-status change is the
-            // refresh signal that replaces the delivery-status poll, so it gets NO
-            // centre row. If a specific delivery MILESTONE is judged worth telling the
-            // human about, the corollary above says that is ONE non-silent notification
-            // of its OWN type carrying `delivery` in its data block — NOT a second,
-            // silent push. Adding a `jeeb.delivery_status_updated` centre writer without
-            // making that call first would write rows this policy then discards.
+            // ⚠️ UNRESOLVED CONTRADICTION — OWNER DECISION REQUIRED, DO NOT SETTLE IT HERE.
+            //   • Owner ruling D4 (2026-07-26) puts `delivery` on the SILENT side: a
+            //     delivery-status change is the refresh signal that replaces the
+            //     delivery-status poll, so it gets NO centre row.
+            //   • Work order 6a wants a `jeeb.delivery_status_updated` centre writer whose
+            //     DoD is "a readable row per type via GET /messages/receiver/{id}".
+            // Those cannot both hold. This file encodes D4 because D4 is the ruling; that
+            // makes 6a's DoD unsatisfiable for this type, and a 6a writer would emit rows
+            // the gate then discards.
+            // It is INERT today (nothing writes this type), so it is a landmine rather than
+            // a live bug — which is exactly why it is enforced instead of merely commented:
+            // PushSilencePolicyTests.NoSilentClassifiedType_HasACentreWriteDto goes RED the
+            // moment a writer DTO appears for a silent type. Do not "fix" that red by
+            // deleting the test or flipping this row; get the ruling.
+            // If a specific delivery MILESTONE is judged worth telling the human about, the
+            // corollary above says that is ONE non-silent notification of its OWN type
+            // carrying `delivery` in its data block — NOT a second, silent push.
             ["jeeb.delivery_status_updated"] = CategoryDelivery,
 
             ["jeeb.settlement_paid"] = CategorySettlement,

@@ -1,3 +1,5 @@
+using System.Linq;
+using System.Reflection;
 using FluentAssertions;
 using JeebGateway.Notifications;
 using Xunit;
@@ -59,6 +61,65 @@ public sealed class PushSilencePolicyTests
             JeebNotificationCatalog.Keys,
             "adding a jeeb.* template without deciding silent-vs-stored must fail here "
             + "rather than default silently in production");
+
+    [Fact]
+    public void ThePolicyMapsNoTemplateKeyTheCatalogDoesNotDefine()
+    {
+        // The reverse direction of EveryCatalogTemplate_HasAnExplicitMode, and it catches a
+        // failure mode that one cannot: a TYPO in a policy key. A mistyped entry here still
+        // makes the map look total (same count), while the REAL key it was meant to cover
+        // falls through to the unmapped default. For a type the owner ruled silent that
+        // default is ShadeAndStored — i.e. the typo silently re-enables the row this policy
+        // exists to prevent. Set equality is what closes it.
+        PushSilencePolicy.TemplateKeys.Should().BeEquivalentTo(
+            JeebNotificationCatalog.Keys,
+            "the policy and the catalog must describe exactly the same set of notification "
+            + "types; a key on one side only is either an undecided type or a typo");
+    }
+
+    [Fact]
+    public void NoSilentClassifiedType_HasACentreWriteDto()
+    {
+        // ── THE §6a LANDMINE, ENFORCED RATHER THAN COMMENTED ───────────────────────────
+        // Owner ruling D4 says `delivery` is silent ⇒ jeeb.delivery_status_updated writes
+        // NO row. Work order 6a wants a jeeb.delivery_status_updated centre writer with a
+        // "readable row per type" DoD. Those CONTRADICT. It is inert today because no
+        // writer exists — so the failure would otherwise surface as a confusing "6a is
+        // done but the rows are missing", days later, to someone who never read the
+        // comment. This test makes it surface at the moment the writer is added instead.
+        //
+        // Reflection basis: a notification type gets a centre row only via a wire DTO that
+        // declares `public const string TemplateKey` (JeebNotificationRecordDtos.cs). A new
+        // writer needs a new DTO, so a new DTO is the earliest observable signal.
+        var centreWriteDtoKeys = typeof(PushSilencePolicy).Assembly
+            .GetTypes()
+            .Where(type => type.Namespace == "JeebGateway.Notifications")
+            .Select(type => type.GetField(
+                "TemplateKey",
+                BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy))
+            .Where(field => field is { IsLiteral: true, IsInitOnly: false }
+                && field.FieldType == typeof(string))
+            .Select(field => (string)field!.GetRawConstantValue()!)
+            .Distinct()
+            .ToArray();
+
+        // Guard the guard. A reflection query that matches nothing would make the assertion
+        // below pass vacuously — the exact shape of failure this batch keeps being burned
+        // by. Pin the two DTOs that provably exist today, so the query must still be
+        // finding them for the real assertion to mean anything.
+        centreWriteDtoKeys.Should().Contain(
+            new[] { OfferReceivedNotificationRecord.TemplateKey, OfferAcceptedNotificationRecord.TemplateKey },
+            "if the reflection basis stops finding the two known centre-write DTOs then "
+            + "this test is passing because it looked nowhere, not because nothing is wrong");
+
+        centreWriteDtoKeys.Where(PushSilencePolicy.IsSilent).Should().BeEmpty(
+            "a type classified SilentRefresh must have NO notification-centre write DTO — "
+            + "its rows would be POSTed and then discarded by the gate. If this is red "
+            + "because step 6a added a writer for jeeb.delivery_status_updated: owner "
+            + "ruling D4 (delivery = silent, no row) and work order 6a (delivery_status "
+            + "needs a readable row) contradict each other. That is an OWNER DECISION. Do "
+            + "not resolve it by deleting this test or by flipping the policy row");
+    }
 
     [Fact]
     public void UnknownInputs_FailTowardsTheVisibleOutcome()
