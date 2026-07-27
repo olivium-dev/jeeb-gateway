@@ -265,13 +265,26 @@ public sealed class ChatMessageCreatedAtWireTests
     }
 
     /// <summary>
-    /// The other direction of honesty: when chat-service really sends no timestamp,
-    /// the gateway must relay that ABSENCE (null) rather than manufacture the
-    /// <c>0001-01-01</c> <c>default(DateTime)</c> husk, which reads as a valid date
-    /// to anything that does not special-case it.
+    /// The other direction of honesty, case 1 of 2: the upstream body OMITS
+    /// <c>created_at</c> entirely, and the gateway relays that absence as
+    /// <c>null</c>.
+    ///
+    /// <para>
+    /// NAMED FOR WHAT IT ACTUALLY PINS. This test used to be called
+    /// <c>An_Upstream_Row_With_No_Timestamp_Relays_Null_Not_The_0001_Husk</c> and
+    /// asserted <c>raw.Should().NotContain("0001-01-01")</c> — but its fixture omits
+    /// the field, and an omitted field cannot produce the husk under any DTO. The
+    /// husk assertion was therefore vacuously true and claimed a behaviour the
+    /// gateway did not have: chat-service declares <c>DateTime CreatedAt</c>
+    /// NON-nullable, so a real unset row emits <c>"created_at":"0001-01-01T00:00:00"</c>,
+    /// which bound to a non-null <see cref="DateTime.MinValue"/> and was re-emitted
+    /// verbatim. That case is now covered — for real — by
+    /// <see cref="An_Upstream_Row_Carrying_The_0001_Husk_Is_Normalised_To_Null"/>,
+    /// which sends the husk instead of assuming it away.
+    /// </para>
     /// </summary>
     [Fact]
-    public async Task An_Upstream_Row_With_No_Timestamp_Relays_Null_Not_The_0001_Husk()
+    public async Task An_Upstream_Row_With_The_created_at_Field_ABSENT_Relays_Null()
     {
         var upstream = new ReplayingConversationUpstream();
         using var factory = MakeFactory(upstream);
@@ -289,9 +302,84 @@ public sealed class ChatMessageCreatedAtWireTests
         var created = ParseWire(raw)["messages"]![0]!["created_at"];
 
         created!.Type.Should().Be(JTokenType.Null,
-            "an absent upstream timestamp is null on the wire — never 0001-01-01");
+            "an absent upstream timestamp is null on the wire");
+    }
+
+    /// <summary>
+    /// The other direction of honesty, case 2 of 2 — THE ONE THAT ACTUALLY HAPPENS.
+    ///
+    /// <para>
+    /// chat-service cannot omit <c>created_at</c>: it declares the property
+    /// NON-nullable (<c>DateTime CreatedAt</c>) over a persistence base type that
+    /// initialises it, so an unset row serialises the <c>default(DateTime)</c> husk
+    /// <c>0001-01-01T00:00:00</c>. That text binds happily to a non-null
+    /// <see cref="DateTime.MinValue"/> on the gateway's <c>DateTime?</c> and, before
+    /// the normalising setter, was re-emitted to the device verbatim — a date that
+    /// reads as valid to anything that does not special-case year 1.
+    /// </para>
+    ///
+    /// <para>
+    /// The fixture below SENDS the husk rather than omitting the field, which is the
+    /// difference between pinning this behaviour and assuming it.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task An_Upstream_Row_Carrying_The_0001_Husk_Is_Normalised_To_Null()
+    {
+        var upstream = new ReplayingConversationUpstream();
+        using var factory = MakeFactory(upstream);
+        var http = factory.CreateClient();
+        var (token, userId) = await MintSession(http, "+9613001865");
+        upstream.ListBody =
+            $$"""
+            {"conversation_id":"{{ConversationId}}","viewer_id":"{{userId}}","messages":[
+              {"message_id":"msg-husk","conversation_id":"{{ConversationId}}","kind":"text",
+               "subtype":null,"author_id":"{{userId}}","audience":"all","payload":null,
+               "body":"husk","created_at":"0001-01-01T00:00:00"}]}
+            """;
+
+        // Sanity: the input genuinely carries the husk. Without this the assertions
+        // below could "prove" normalisation from a body that never had one — the
+        // exact defect this test replaces.
+        ParseWire(upstream.ListBody)["messages"]![0]!["created_at"]!.Value<string>()
+            .Should().StartWith("0001-01-01");
+
+        var raw = await GetMessagesRaw(http, token);
+        var created = ParseWire(raw)["messages"]![0]!["created_at"];
+
+        created!.Type.Should().Be(JTokenType.Null,
+            "the husk means 'no send time'; the gateway must say so in the one way "
+            + "every reader understands, instead of relaying a year-1 date");
         raw.Should().NotContain("0001-01-01",
             "the default(DateTime) husk is a serializer artefact, not a send time");
+    }
+
+    /// <summary>
+    /// DISCRIMINATING CONTROL for the husk normalisation: a REAL timestamp must
+    /// survive the same setter untouched. Without this, "normalise the husk" could
+    /// be satisfied by a setter that nulled everything, and the suite would still be
+    /// green while every message on the device lost its clock.
+    /// </summary>
+    [Fact]
+    public void Husk_Normalisation_Does_Not_Touch_A_Real_Timestamp()
+    {
+        var husk = JsonConvert.DeserializeObject<JeebMessageResponse>(
+            """{"message_id":"m","created_at":"0001-01-01T00:00:00"}""")!;
+        var real = JsonConvert.DeserializeObject<JeebMessageResponse>(
+            $$"""{"message_id":"m","created_at":"{{LiveCreatedAt}}"}""")!;
+        var absent = JsonConvert.DeserializeObject<JeebMessageResponse>(
+            """{"message_id":"m"}""")!;
+
+        husk.CreatedAt.Should().BeNull("year 1 is not a send time");
+        absent.CreatedAt.Should().BeNull("an omitted field was never a send time");
+        real.CreatedAt.Should().NotBeNull(
+            "the normalisation is a husk guard, not a delete — if this is null the "
+            + "setter is nulling everything and the husk assertions are vacuous");
+
+        // …and the real instant is preserved exactly, through BOTH serializer legs.
+        AssertSameInstantAs(
+            LiveCreatedAt,
+            ParseWire(Stj.JsonSerializer.Serialize(real))["created_at"]!);
     }
 
     // =====================================================================
