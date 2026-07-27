@@ -42,7 +42,7 @@ public static class BusinessOutcomeTelemetry
     // that divergence observable (ties into JEBV4-59 business counters).
     public static readonly Counter<long> SettlementLedgerPostFailures =
         Meter.CreateCounter<long>("settlement.ledger.post_failures",
-            description: "Number of settlement UPG ledger posts that failed at settle time and were left for the reconciler.");
+            description: "Number of settlement ledger posts that failed at settle time and were left for the reconciler.");
 
     public static readonly Counter<long> SettlementLedgerReconciled =
         Meter.CreateCounter<long>("settlement.ledger.reconciled",

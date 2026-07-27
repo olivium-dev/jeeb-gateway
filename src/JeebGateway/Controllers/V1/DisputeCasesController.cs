@@ -339,7 +339,8 @@ public sealed class DisputeCasesController : ControllerBase
                     {
                         Title = "refund_failed",
                         Detail = result.FailureReason
-                            ?? "Refund call to unified_payment_gateway failed; case left open for retry.",
+                            ?? "Refund could not be issued (Jeeb is cash on delivery — there is no captured payment to "
+                             + "refund); case left open for manual handling.",
                         Status = StatusCodes.Status502BadGateway,
                         Type = "https://jeeb.dev/errors/refund-failed"
                     });
