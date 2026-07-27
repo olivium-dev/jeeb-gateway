@@ -184,6 +184,16 @@ public sealed class JeebMessageResponse
     [Stj.JsonPropertyName("message_id")]
     public string MessageId { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The conversation this message belongs to. chat-service stamps it on every
+    /// message projection (<c>ConversationMessageResponse.conversation_id</c>);
+    /// declared here so the typed hop relays it instead of silently erasing it
+    /// (same omission class as <see cref="CreatedAt"/> — see that remark).
+    /// </summary>
+    [JsonProperty("conversation_id")]
+    [Stj.JsonPropertyName("conversation_id")]
+    public string? ConversationId { get; set; }
+
     [JsonProperty("kind")]
     [Stj.JsonPropertyName("kind")]
     public string? Kind { get; set; }
@@ -220,6 +230,61 @@ public sealed class JeebMessageResponse
     [JsonProperty("body")]
     [Stj.JsonPropertyName("body")]
     public string? Body { get; set; }
+
+    /// <summary>
+    /// WHEN chat-service created this message — the send time, and the ONLY send
+    /// time any reader can trust.
+    ///
+    /// <para>
+    /// THE BILATERAL EMPTY-THREAD DEFECT. This field did not exist on this DTO.
+    /// chat-service emits it on every message projection
+    /// (<c>ChatService.Domain/Response/ConversationMessageResponse.cs</c> →
+    /// <c>[JsonProperty("created_at")] DateTime CreatedAt</c>, confirmed on the LIVE
+    /// service: <c>"created_at":"…Z"</c>), but because no property here declared it,
+    /// the typed deserialize/re-serialize hop in
+    /// <c>JeebConversationClient.SendAsync&lt;JeebMessageListResponse&gt;</c> DROPPED
+    /// it, and <c>GET /v1/conversations/{id}/messages</c> answered 200 with rows that
+    /// carried no timestamp at all. The mobile client's history decoder rejected
+    /// every such row, so a 200 with the whole thread decoded to ZERO messages for
+    /// BOTH participants — an empty chat on a healthy API. A dropped field is
+    /// invisible on the gateway side: nothing throws, the status is 200, and the
+    /// count of messages is right. Only the RECEIVER notices.
+    /// </para>
+    ///
+    /// <para>
+    /// TYPE CHOICE — <c>DateTime?</c>, deliberately, not <c>DateTimeOffset?</c> and
+    /// not <c>string</c>:
+    /// <list type="bullet">
+    ///   <item><c>DateTime?</c> mirrors the exact CLR type chat-service declares, and
+    ///   Newtonsoft's default <c>DateTimeZoneHandling.RoundtripKind</c> preserves the
+    ///   <c>Z</c> as <c>DateTimeKind.Utc</c>, which the STJ response serializer
+    ///   re-emits as the same ISO-8601 <c>…Z</c> text. The value the device reads is
+    ///   the value chat-service stored.</item>
+    ///   <item><c>DateTimeOffset?</c> (the <see cref="JeebConversationParticipant.RemovedAt"/>
+    ///   precedent) would SHIFT the instant if chat-service ever emitted an
+    ///   offset-less timestamp, because Newtonsoft would then assume the GATEWAY
+    ///   host's local offset. A timestamp that is silently wrong by the server's
+    ///   UTC offset is worse than one that is missing.</item>
+    ///   <item>NULLABLE so an upstream row with no timestamp stays <c>null</c> rather
+    ///   than being fabricated as the <c>0001-01-01</c> <c>default(DateTime)</c> husk.
+    ///   The client treats both as "no send time" and falls back to the row's
+    ///   position, but null is the honest wire signal and keeps the husk out of
+    ///   logs and clients that are less forgiving.</item>
+    /// </list>
+    /// </para>
+    ///
+    /// <para>
+    /// WIRE NAME — <c>created_at</c>, the name chat-service already emits and the
+    /// FIRST name the mobile decoder looks for
+    /// (<c>dio_chat_gateway.dart</c> → <c>_sentAtOf</c>: <c>createdAt</c> ??
+    /// <c>created_at</c> ?? <c>sentAt</c> ?? <c>sent_at</c>). Do not rename it or add
+    /// an alias: four spellings already exist in this system and each new one is
+    /// another row a reader can fail to date.
+    /// </para>
+    /// </summary>
+    [JsonProperty("created_at")]
+    [Stj.JsonPropertyName("created_at")]
+    public DateTime? CreatedAt { get; set; }
 }
 
 /// <summary>
@@ -230,6 +295,25 @@ public sealed class JeebMessageResponse
 /// </summary>
 public sealed class JeebMessageListResponse
 {
+    /// <summary>
+    /// The conversation the slice was read from. Emitted by chat-service on the
+    /// list envelope; relayed rather than dropped (see
+    /// <see cref="JeebMessageResponse.CreatedAt"/> for the omission class).
+    /// </summary>
+    [JsonProperty("conversation_id")]
+    [Stj.JsonPropertyName("conversation_id")]
+    public string? ConversationId { get; set; }
+
+    /// <summary>
+    /// WHO the slice was scoped for. chat-service owns the VisibilityFilter and
+    /// echoes the viewer it filtered against so the parity contract (INV-1: the
+    /// delta read can never leak a message the full read hides) is auditable ON THE
+    /// WIRE instead of only in chat-service's logs. Relayed, never computed here.
+    /// </summary>
+    [JsonProperty("viewer_id")]
+    [Stj.JsonPropertyName("viewer_id")]
+    public string? ViewerId { get; set; }
+
     [JsonProperty("messages")]
     [Stj.JsonPropertyName("messages")]
     public IList<JeebMessageResponse> Messages { get; set; }
