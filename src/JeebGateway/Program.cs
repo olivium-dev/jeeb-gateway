@@ -650,6 +650,18 @@ builder.Services.AddScoped<JeebGateway.Notifications.IChatMessagePushNotifier,
 builder.Services.AddScoped<JeebGateway.Notifications.IOfferPushNotifier,
     JeebGateway.Notifications.OfferPushNotifier>();
 
+// b02 WAVE B.1 — the delivery-status → push trigger, on STACK B. Delivery status was the
+// LAST push category still composed inside the gateway and handed to the in-gateway
+// IPushNotificationService, whose InMemoryPushTransport enqueues to an in-process queue and
+// reports Delivered. Six mobile surfaces polled (5s/10s/60s) precisely because the push they
+// were waiting for never left the process. Scoped: composes the SCOPED
+// ServicePushNotificationClient (:10040), exactly like chat/offer/new-request.
+// ⛔ Do NOT "fix" the old path by setting Push__UseFcmTransport=true — permanently forbidden
+// (the gateway must never speak to FCM itself) AND it would not work anyway, because
+// IDeviceTokenStore.RegisterAsync has zero production callers so the send resolves NoDevices.
+builder.Services.AddScoped<JeebGateway.Notifications.IDeliveryStatusPushNotifier,
+    JeebGateway.Notifications.DeliveryStatusPushNotifier>();
+
 // BUILD-NEWREQ-PUSH — the request-created → "finding jeebers" push trigger. Best-effort
 // FCM fan-out when a customer creates a delivery request (the third missing push link,
 // after chat and offer). Scoped: composes the SCOPED ServicePushNotificationClient (:10040).
