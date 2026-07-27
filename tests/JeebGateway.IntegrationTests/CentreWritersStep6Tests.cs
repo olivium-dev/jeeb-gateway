@@ -36,13 +36,19 @@ public sealed class CentreWritersStep6Tests
     // ─────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The five non-silent step-6a types each POST exactly once to their own centre path.
+    /// All SIX step-6a types each POST exactly once to their own centre path.
     ///
     /// <para>The path is asserted, not a counter. Every one of these routes was probed live on the
     /// centre (422 for an empty body ⇒ the route exists); a typo'd path would answer 404 in
     /// production while a bare "one POST happened" assertion stayed green.</para>
+    ///
+    /// <para><b>2026-07-27 — <c>jeeb.delivery_status_updated</c> joined this list.</b> It used to
+    /// be the step's negative case, asserting ZERO POSTs because D4 classified <c>delivery</c> as
+    /// silent. The owner reversed that: delivery IS a readable inbox row. Six writers, six rows.
+    /// </para>
     /// </summary>
     [Theory]
+    [InlineData("jeeb.delivery_status_updated")]
     [InlineData("jeeb.settlement_paid")]
     [InlineData("jeeb.kyc_approved")]
     [InlineData("jeeb.kyc_rejected")]
@@ -61,19 +67,24 @@ public sealed class CentreWritersStep6Tests
     }
 
     /// <summary>
-    /// The negative test for the whole step, and the reason
-    /// <see cref="DeliveryStatusUpdatedNotificationRecord"/> exists at all.
+    /// <b>THE REVERSAL, PINNED — this test used to assert the exact opposite.</b>
     ///
-    /// <para><c>jeeb.delivery_status_updated</c> has a live centre route — it answers 422 for an
-    /// empty body exactly like the five above — so nothing about the transport stops it. It writes
-    /// NO row purely because owner ruling D4 classifies the <c>delivery</c> category as a silent
-    /// refresh signal and <see cref="PushSilencePolicy"/> is consulted before any POST. Asserting
-    /// zero POSTs here is what proves the step-3 gate is load-bearing rather than decorative: a
-    /// writer that reached the centre by any other route would make this test go green with one
-    /// POST.</para>
+    /// <para>Until 2026-07-27 this was <c>Step6a_SilentType_WritesNoRowAndIssuesNoPost</c>: it
+    /// asserted <c>SkippedSilent</c> and ZERO POSTs, because owner ruling D4 (2026-07-26) put the
+    /// <c>delivery</c> category on the silent side while work order 6a demanded a readable
+    /// <c>jeeb.delivery_status_updated</c> row. That contradiction is what the reflection landmine
+    /// <c>PushSilencePolicyTests.NoSilentClassifiedType_HasACentreWriteDto</c> was built to force,
+    /// and it did: adding <see cref="DeliveryStatusUpdatedNotificationRecord"/> turned it red. The
+    /// owner then ruled — <b>delivery IS a readable inbox row, shade + stored</b>.</para>
+    ///
+    /// <para>So the row is now written, and this test states that as a behaviour rather than as a
+    /// policy-table lookup. It is kept as its own <c>[Fact]</c>, separate from the six-type Theory
+    /// above, purely so the reversal has a named home a reader can find. The transport was never
+    /// the obstacle: this route answers 422 for an empty body like the other five, so the only
+    /// thing that ever suppressed it was <see cref="PushSilencePolicy"/>.</para>
     /// </summary>
     [Fact]
-    public async Task Step6a_SilentType_WritesNoRowAndIssuesNoPost()
+    public async Task Step6a_DeliveryStatusUpdated_WritesARowAfterThe20260727Reversal()
     {
         var handler = new PathRecordingHandler(HttpStatusCode.Created);
         var writer = NewWriter(handler);
@@ -81,17 +92,21 @@ public sealed class CentreWritersStep6Tests
         var outcome = await WriteAsync(writer, DeliveryStatusUpdatedNotificationRecord.TemplateKey);
 
         outcome.Classification.Should().Be(
-            NotificationRecordWriteClassification.SkippedSilent,
-            "owner ruling D4 puts the delivery category on the silent side");
-        outcome.UpstreamStatus.Should().BeNull("no request was made, so there is no upstream status");
-        handler.Posts.Should().Be(0, "silent means NO ROW — not a hidden row, not a read row");
-        handler.Gets.Should().Be(0, "there is nothing to read back when nothing was posted");
+            NotificationRecordWriteClassification.Committed,
+            "owner ruling 2026-07-27 REVERSED D4 for delivery: it is a readable inbox row. A "
+            + "SkippedSilent here means the policy row was flipped back and the inbox read paths "
+            + "in JeebNotificationsInboxController / NotificationDeepLinkResolver are now dead");
+        handler.Posts.Should().Be(1, "one emission is one POST — the writer never retries");
+        handler.PostPaths.Single().Should()
+            .Be($"/notifications/{DeliveryStatusUpdatedNotificationRecord.TemplateKey}");
     }
 
     /// <summary>
-    /// The silent gate outranks the feature flag AND the enabled flag, in both directions: a silent
-    /// type is skipped even with durable write fully enabled (above), and enabling nothing does not
-    /// turn a stored type into a silent one. This pins that the two conditions are not confusable.
+    /// The durable-write flag and the silent gate are distinct conditions and must not be
+    /// confusable: switching the flag off reports <c>Disabled</c>, never <c>SkippedSilent</c>. The
+    /// converse half of this pair — a silent type skipped even with durable write fully enabled —
+    /// has no reachable type since the 2026-07-27 reversal (see the note in
+    /// <c>NotificationRecordWriterTests</c>), so this direction is what remains live.
     /// </summary>
     [Fact]
     public async Task Step6a_DisabledFlag_IsReportedAsDisabledNotAsSilent()

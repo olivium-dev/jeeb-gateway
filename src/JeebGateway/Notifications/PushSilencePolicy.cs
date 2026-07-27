@@ -56,16 +56,18 @@ public enum PushDeliveryMode
 /// (<c>:10026</c>) owns the stored rows, which is why the only decision made here is
 /// whether to call it at all.</para>
 ///
-/// <para><b>⚠️ REACHABILITY — READ THIS BEFORE BELIEVING THE TESTS.</b> As of this commit
-/// the silent branch is <b>unreachable from any live caller</b>, and that is a fact about
-/// the codebase, not a defect in this policy. <see cref="NotificationRecordWriter"/> has
-/// exactly two public writer methods (<c>jeeb.offer_received</c>,
-/// <c>jeeb.offer_accepted</c>) and both are <see cref="PushDeliveryMode.ShadeAndStored"/>.
-/// The one silent-classified type, <c>jeeb.delivery_status_updated</c>, has no writer at
-/// all, and <see cref="CategoryNewRequest"/> has no template key. So this policy changes
-/// <b>zero</b> production behaviour today: it is a guard pre-placed at the sole choke point
-/// ahead of the writers that will need it. Do not describe a green test suite here as proof
-/// that a silent push was suppressed in production — nothing has yet asked for one.</para>
+/// <para><b>⚠️ REACHABILITY — READ THIS BEFORE BELIEVING THE TESTS.</b> The silent branch
+/// is <b>unreachable from any live caller</b>, and that is a fact about the codebase, not a
+/// defect in this policy. Since the 2026-07-27 reversal (below) <b>no catalog template key
+/// is silent at all</b>: every key in <see cref="CategoryByTemplateKey"/> resolves to
+/// <see cref="PushDeliveryMode.ShadeAndStored"/>, and the sole remaining silent category,
+/// <see cref="CategoryNewRequest"/>, has no template key and no centre writer — its push
+/// (<c>NewRequestPushNotifier</c>) never touches the centre. So the silent gate in
+/// <see cref="NotificationRecordWriter"/> suppresses <b>nothing</b> in production today; it
+/// is a guard pre-placed at the sole choke point, waiting for the first silent type that
+/// acquires a writer. Do not describe a green test suite here as proof that a silent push
+/// was suppressed in production — nothing has yet asked for one. Equally, do not delete the
+/// gate because it is currently dormant: dormant is the intended state of a guard.</para>
 ///
 /// <para><b>⚠️ TWO DEFINITIONS OF "SILENT" ARE IN FLIGHT, and nothing reconciles them.</b>
 /// This policy decides silence from the notification <b>type</b> (a static lookup). The
@@ -82,10 +84,25 @@ public enum PushDeliveryMode
 /// payloads stamp <c>["category"] = "delivery"</c> on new-offer
 /// (<c>OfferPushNotifier.cs</c>), new-request (<c>NewRequestPushNotifier.cs</c>) and
 /// request-expiry (<c>DispatchingRequestExpiryNotifier.cs</c>) alike — it is a coarse
-/// legacy product-area label, not the D4 taxonomy below. Feeding it to
-/// <see cref="ModeForCategory"/> would silence the offer notifications, which are the two
-/// notification types that DO have live centre writers. Resolve the mode from the
+/// legacy product-area label, not the D4 taxonomy below. It happens to be HARMLESS to feed
+/// <c>"delivery"</c> to <see cref="ModeForCategory"/> since the 2026-07-27 reversal made
+/// that category stored, and that coincidence is exactly the trap: before the reversal the
+/// same line silenced the offer notifications, and a future silent category reachable from
+/// this field would silence them again with no test to catch it. The field is a product
+/// label that collides with taxonomy names by accident, so resolve the mode from the
 /// notification TYPE (template key), never from that field.</para>
+///
+/// <para><b>⚠️ OWNER RULING REVERSAL, 2026-07-27 — <c>delivery</c> IS A READABLE INBOX
+/// ROW.</b> The 2026-07-26 D4 line classified <c>delivery</c> as silent-only. That is
+/// <b>SUPERSEDED</b>. Delivery is now <b>shade + stored</b> alongside kyc / settlement /
+/// dispute / rating / chat, and <c>newRequest</c> is the ONLY silent-only category left.
+/// This is what unblocked <c>jeeb.delivery_status_updated</c>'s centre writer (b02 step 6a):
+/// the writer and the four already-merged read paths that assume the row exists
+/// (<c>JeebNotificationsInboxController.PayloadRef</c>,
+/// <see cref="NotificationDeepLinkResolver"/>, <see cref="JeebNotificationCatalog"/>,
+/// <see cref="JeebNotificationCatalogSeeder"/>) are now consistent with this policy instead
+/// of contradicting it. If you are reading an older comment, a doc row, or a commit message
+/// that says "delivery = silent, no row", it predates this ruling.</para>
 /// </summary>
 public static class PushSilencePolicy
 {
@@ -100,12 +117,19 @@ public static class PushSilencePolicy
     /// category: the gateway's new-request push (<c>NewRequestPushNotifier</c>) holds no
     /// <see cref="INotificationRecordWriter"/> and there is no <c>jeeb.new_request</c>
     /// catalog template, so there is no centre write for this policy to suppress. The
-    /// category is declared because D4 names it, not because it is wired. Both D4 silent
-    /// categories are in this state today — see the class remarks.</para>
+    /// category is declared because D4 names it, not because it is wired. Since the
+    /// 2026-07-27 reversal moved <see cref="CategoryDelivery"/> to the stored side, this is
+    /// the ONLY silent-only category left — see the class remarks.</para>
     /// </summary>
     public const string CategoryNewRequest = "newRequest";
 
-    /// <summary>Silent-only per D4 — the delivery-status refresh signal.</summary>
+    /// <summary>
+    /// Shade + stored. <b>REVERSED 2026-07-27</b> — D4 (2026-07-26) had this silent-only;
+    /// the owner ruled that a delivery-status change IS a readable inbox row (shade AND
+    /// stored), which is what unblocks the <c>jeeb.delivery_status_updated</c> centre
+    /// writer. The refresh still happens: per the corollary above, that is ONE stored push
+    /// whose <c>data</c> block carries this category, not a second silent push.
+    /// </summary>
     public const string CategoryDelivery = "delivery";
 
     /// <summary>Shade + stored per D4.</summary>
@@ -149,11 +173,15 @@ public static class PushSilencePolicy
     private static readonly IReadOnlyDictionary<string, PushDeliveryMode> ModeByCategory =
         new Dictionary<string, PushDeliveryMode>(StringComparer.Ordinal)
         {
-            // D4 · silent-only (pure refresh signals — the polls being replaced)
+            // D4 · silent-only (pure refresh signal — the poll being replaced).
+            // ONE entry, not two: `delivery` was here until the 2026-07-27 reversal.
             [CategoryNewRequest] = PushDeliveryMode.SilentRefresh,
-            [CategoryDelivery] = PushDeliveryMode.SilentRefresh,
 
             // D4 · shade + stored
+            // `delivery` joined this block on 2026-07-27 (owner ruling: a delivery-status
+            // change IS a readable inbox row). It is listed first so the reversal is
+            // visible at the point of decision, not only in the doc comment.
+            [CategoryDelivery] = PushDeliveryMode.ShadeAndStored,
             [CategoryKyc] = PushDeliveryMode.ShadeAndStored,
             [CategorySettlement] = PushDeliveryMode.ShadeAndStored,
             [CategoryDispute] = PushDeliveryMode.ShadeAndStored,
@@ -184,23 +212,22 @@ public static class PushSilencePolicy
             // OfferPushNotifier.NotifyOfferLostAsync; CategoryOfferLost below stays because it is
             // the mobile-facing category on that push's wire payload.
 
-            // ⚠️ UNRESOLVED CONTRADICTION — OWNER DECISION REQUIRED, DO NOT SETTLE IT HERE.
-            //   • Owner ruling D4 (2026-07-26) puts `delivery` on the SILENT side: a
-            //     delivery-status change is the refresh signal that replaces the
-            //     delivery-status poll, so it gets NO centre row.
-            //   • Work order 6a wants a `jeeb.delivery_status_updated` centre writer whose
+            // ✅ CONTRADICTION RESOLVED BY THE OWNER, 2026-07-27. The history matters, so
+            // it is recorded rather than erased:
+            //   • D4 (2026-07-26) put `delivery` on the SILENT side — no centre row.
+            //   • Work order 6a wanted a `jeeb.delivery_status_updated` centre writer whose
             //     DoD is "a readable row per type via GET /messages/receiver/{id}".
-            // Those cannot both hold. This file encodes D4 because D4 is the ruling; that
-            // makes 6a's DoD unsatisfiable for this type, and a 6a writer would emit rows
-            // the gate then discards.
-            // It is INERT today (nothing writes this type), so it is a landmine rather than
-            // a live bug — which is exactly why it is enforced instead of merely commented:
-            // PushSilencePolicyTests.NoSilentClassifiedType_HasACentreWriteDto goes RED the
-            // moment a writer DTO appears for a silent type. Do not "fix" that red by
-            // deleting the test or flipping this row; get the ruling.
-            // If a specific delivery MILESTONE is judged worth telling the human about, the
-            // corollary above says that is ONE non-silent notification of its OWN type
-            // carrying `delivery` in its data block — NOT a second, silent push.
+            // Those could not both hold, and the landmine guard
+            // PushSilencePolicyTests.NoSilentClassifiedType_HasACentreWriteDto went RED the
+            // moment step 6 added DeliveryStatusUpdatedNotificationRecord — which is
+            // precisely what it was built to do. The owner then RULED: delivery IS a
+            // readable inbox row (shade + stored). So CategoryDelivery moved to
+            // ShadeAndStored above and this key keeps pointing at it.
+            //
+            // The guard was NOT weakened to get here. It still asserts "no silent type has
+            // a centre-write DTO"; it passes now because delivery is no longer silent, not
+            // because the assertion was relaxed. If you are tempted to move a type back to
+            // the silent side, that DTO check will stop you, and it should.
             ["jeeb.delivery_status_updated"] = CategoryDelivery,
 
             ["jeeb.settlement_paid"] = CategorySettlement,

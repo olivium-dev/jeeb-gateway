@@ -18,15 +18,34 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public sealed class PushSilencePolicyTests
 {
-    // Owner ruling D4, 2026-07-26.
+    // Owner ruling D4 (2026-07-26) as REVERSED for `delivery` on 2026-07-27.
+    // `newRequest` is now the only silent-only category; `delivery` moved to the stored
+    // list below. Asserted as a single-item Theory rather than folded into a Fact so that
+    // re-silencing a category is a one-line, reviewable diff here.
     [Theory]
     [InlineData(PushSilencePolicy.CategoryNewRequest)]
-    [InlineData(PushSilencePolicy.CategoryDelivery)]
     public void D4_SilentOnlyCategories_AreSilent(string category)
         => PushSilencePolicy.ModeForCategory(category).Should()
             .Be(PushDeliveryMode.SilentRefresh);
 
+    // The silent list above is now ONE entry, and a shrinking allow-list is the shape that
+    // rots into a vacuous test. Pin the count so that dropping `newRequest` — which would
+    // make D4_SilentOnlyCategories_AreSilent vanish rather than fail — is itself a failure.
+    [Fact]
+    public void ExactlyOneCategoryIsSilent_AndItIsNewRequest()
+        => PushSilencePolicy.Categories
+            .Where(category => PushSilencePolicy.ModeForCategory(category)
+                == PushDeliveryMode.SilentRefresh)
+            .Should().BeEquivalentTo(new[] { PushSilencePolicy.CategoryNewRequest },
+                "2026-07-27 reversal: `delivery` is shade+stored, so `newRequest` is the "
+                + "only silent-only category left. A second entry here means someone "
+                + "silenced a human-addressed category");
+
     [Theory]
+    // Moved from the silent list by the owner ruling of 2026-07-27: a delivery-status
+    // change IS a readable inbox row. This row is what makes the
+    // jeeb.delivery_status_updated centre writer legal.
+    [InlineData(PushSilencePolicy.CategoryDelivery)]
     [InlineData(PushSilencePolicy.CategoryKyc)]
     [InlineData(PushSilencePolicy.CategorySettlement)]
     [InlineData(PushSilencePolicy.CategoryDispute)]
@@ -80,13 +99,19 @@ public sealed class PushSilencePolicyTests
     [Fact]
     public void NoSilentClassifiedType_HasACentreWriteDto()
     {
-        // ── THE §6a LANDMINE, ENFORCED RATHER THAN COMMENTED ───────────────────────────
-        // Owner ruling D4 says `delivery` is silent ⇒ jeeb.delivery_status_updated writes
-        // NO row. Work order 6a wants a jeeb.delivery_status_updated centre writer with a
-        // "readable row per type" DoD. Those CONTRADICT. It is inert today because no
-        // writer exists — so the failure would otherwise surface as a confusing "6a is
-        // done but the rows are missing", days later, to someone who never read the
-        // comment. This test makes it surface at the moment the writer is added instead.
+        // ── THE §6a LANDMINE — IT FIRED, AND THE OWNER RULED ──────────────────────────
+        // History, because a guard that has already done its job is the one people delete.
+        // D4 (2026-07-26) said `delivery` is silent ⇒ jeeb.delivery_status_updated writes NO
+        // row. Work order 6a wanted a jeeb.delivery_status_updated centre writer with a
+        // "readable row per type" DoD. Those CONTRADICTED, and this test existed to force
+        // the decision at the moment a writer DTO appeared rather than surfacing days later
+        // as a confusing "6a is done but the rows are missing".
+        //
+        // It worked. Step 6 added DeliveryStatusUpdatedNotificationRecord and this test went
+        // RED naming jeeb.delivery_status_updated. The owner then RULED (2026-07-27):
+        // delivery IS a readable inbox row, shade + stored. The assertion below is UNCHANGED
+        // — it is green because PushSilencePolicy no longer classifies delivery as silent,
+        // NOT because the check was relaxed. Weakening it would defeat the whole mechanism.
         //
         // Reflection basis: a notification type gets a centre row only via a wire DTO that
         // declares `public const string TemplateKey` (JeebNotificationRecordDtos.cs). A new
@@ -105,20 +130,29 @@ public sealed class PushSilencePolicyTests
 
         // Guard the guard. A reflection query that matches nothing would make the assertion
         // below pass vacuously — the exact shape of failure this batch keeps being burned
-        // by. Pin the two DTOs that provably exist today, so the query must still be
-        // finding them for the real assertion to mean anything.
+        // by. STRENGTHENED on 2026-07-27: the pin now includes the delivery DTO whose
+        // arrival made this test fire. That is deliberate. The whole point of the ruling is
+        // that jeeb.delivery_status_updated HAS a centre writer, so if the reflection basis
+        // ever stops seeing that DTO the assertion below would go green for the wrong
+        // reason — the same green it would show if delivery had simply been re-silenced.
         centreWriteDtoKeys.Should().Contain(
-            new[] { OfferReceivedNotificationRecord.TemplateKey, OfferAcceptedNotificationRecord.TemplateKey },
-            "if the reflection basis stops finding the two known centre-write DTOs then "
-            + "this test is passing because it looked nowhere, not because nothing is wrong");
+            new[]
+            {
+                OfferReceivedNotificationRecord.TemplateKey,
+                OfferAcceptedNotificationRecord.TemplateKey,
+                DeliveryStatusUpdatedNotificationRecord.TemplateKey,
+            },
+            "if the reflection basis stops finding the known centre-write DTOs then this "
+            + "test is passing because it looked nowhere, not because nothing is wrong");
 
         centreWriteDtoKeys.Where(PushSilencePolicy.IsSilent).Should().BeEmpty(
             "a type classified SilentRefresh must have NO notification-centre write DTO — "
-            + "its rows would be POSTed and then discarded by the gate. If this is red "
-            + "because step 6a added a writer for jeeb.delivery_status_updated: owner "
-            + "ruling D4 (delivery = silent, no row) and work order 6a (delivery_status "
-            + "needs a readable row) contradict each other. That is an OWNER DECISION. Do "
-            + "not resolve it by deleting this test or by flipping the policy row");
+            + "its rows would be POSTed and then discarded by the gate. This is the check "
+            + "that forced the delivery decision in b02: it went red when step 6 added "
+            + "DeliveryStatusUpdatedNotificationRecord, and the owner resolved it on "
+            + "2026-07-27 by ruling delivery shade+stored. If it is red again, some type "
+            + "has both a centre writer and a silent classification — resolve THAT, do not "
+            + "delete this test and do not delete the DTO");
     }
 
     [Fact]
@@ -135,27 +169,63 @@ public sealed class PushSilencePolicyTests
         PushSilencePolicy.IsSilent(null).Should().BeFalse();
     }
 
+    /// <summary>
+    /// Owner ruling 2026-07-27, stated as the single assertion the four already-merged read
+    /// paths depend on. <c>JeebNotificationsInboxController.PayloadRef</c>,
+    /// <see cref="NotificationDeepLinkResolver"/>, <see cref="JeebNotificationCatalog"/> and
+    /// <see cref="JeebNotificationCatalogSeeder"/> all assume a
+    /// <c>jeeb.delivery_status_updated</c> row can exist. If this flips back to silent, all
+    /// four become unreachable code and the step-6a writer starts POSTing into the gate.
+    /// </summary>
     [Fact]
-    public void DeliveryStatusUpdated_IsSilent_AndSoWritesNoRow()
-        => PushSilencePolicy.IsSilent("jeeb.delivery_status_updated").Should().BeTrue();
+    public void DeliveryStatusUpdated_IsStored_SoTheInboxReadPathsAreReachable()
+    {
+        PushSilencePolicy.IsSilent("jeeb.delivery_status_updated").Should().BeFalse(
+            "owner ruling 2026-07-27 REVERSED D4 for this type: a delivery-status change "
+            + "is a readable inbox row, shade AND stored");
+        PushSilencePolicy.ModeForTemplateKey("jeeb.delivery_status_updated").Should()
+            .Be(PushDeliveryMode.ShadeAndStored);
+        PushSilencePolicy.CategoryForTemplateKey("jeeb.delivery_status_updated").Should()
+            .Be(PushSilencePolicy.CategoryDelivery,
+                "the type still carries the `delivery` refresh category — the corollary "
+                + "says the refresh rides in the stored push's data block, it does not "
+                + "become a second silent push");
+    }
 
     [Theory]
     [InlineData("jeeb.offer_received")]
     [InlineData("jeeb.offer_accepted")]
     public void TheTwoLiveCentreWriters_StayNonSilent(string templateKey)
         => PushSilencePolicy.IsSilent(templateKey).Should().BeFalse(
-            "these are the only notification types with a live centre writer; silencing "
-            + "them would delete the gateway's entire inbox output");
+            "these are the gateway's two original in-seat centre writers; silencing them "
+            + "would delete the inbox output that predates step 6");
+
+    [Fact]
+    public void NoCatalogTypeIsSilentToday_AndTheGateIsKeptAnyway()
+        // The honest post-reversal state, pinned so nobody infers it from a green suite.
+        // Every catalog template key is now ShadeAndStored, so NotificationRecordWriter's
+        // silent gate suppresses nothing in production — `newRequest` is silent but has no
+        // template key and no centre writer. That makes the gate dormant, which is the
+        // intended state of a guard, NOT dead code to delete. This test also means the day
+        // a genuinely silent type is introduced, someone must come here and say so.
+        => PushSilencePolicy.TemplateKeys.Where(PushSilencePolicy.IsSilent).Should().BeEmpty(
+            "after the 2026-07-27 reversal no catalog notification type is silent; if this "
+            + "is red you have added one, and you must also add a writer-level test proving "
+            + "the gate actually suppresses it");
 
     [Fact]
     public void TheLegacyFlatCategoryField_IsNotARefreshCategory()
     {
         // OfferPushNotifier.cs and NewRequestPushNotifier.cs both stamp
         // ["category"] = "delivery" on the wire — a coarse product-area label, NOT the D4
-        // taxonomy. Resolving the mode from that field would silence the offer pushes. This
-        // test pins the trap so the next reader sees it stated, not inferred.
+        // taxonomy. Before 2026-07-27 that literal collided with a SILENT category and
+        // resolving the mode from the field would have silenced the offer pushes. The
+        // reversal made the collision harmless BY ACCIDENT, which is worse than the old
+        // trap, not better: the wrong-by-design lookup now returns the right answer, so a
+        // reader can no longer discover the bug by running it. Pinned deliberately.
         PushSilencePolicy.ModeForCategory(PushSilencePolicy.CategoryDelivery).Should()
-            .Be(PushDeliveryMode.SilentRefresh);
+            .Be(PushDeliveryMode.ShadeAndStored,
+                "reversed 2026-07-27 — this used to be SilentRefresh");
         PushSilencePolicy.ModeForTemplateKey("jeeb.offer_received").Should()
             .Be(PushDeliveryMode.ShadeAndStored, "resolved from the TYPE, not that field");
     }
