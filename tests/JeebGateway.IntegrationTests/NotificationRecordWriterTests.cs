@@ -266,6 +266,76 @@ public sealed class NotificationRecordWriterTests
     }
 
     [Fact]
+    public async Task Step3_SilentType_StaysSkippedSilent_WhenTheDurableWriteFlagIsOff()
+    {
+        // Two things at once.
+        //
+        // (a) The gate is a POLICY INVARIANT, not a feature: there is no configuration
+        //     under which a silent refresh signal may be stored. Flipping the flag off
+        //     must not change the classification to `Disabled`, because a later change
+        //     that made `Disabled` mean "write it later" would then quietly re-enable the
+        //     row this policy exists to prevent.
+        //
+        // (b) Because the gate sits AHEAD of the flag, `notif.durable_write.skipped`
+        //     increments even when the durable-write path is switched off entirely — an
+        //     operator reading that counter could conclude the path is live. The two
+        //     states are behaviourally identical (nothing written) but not diagnostically
+        //     identical, so the skip record carries the flag state. Two values, so it is
+        //     cardinality-safe, unlike a per-entity tag.
+        var handler = new RecordingHandler(HttpStatusCode.Created);
+        var logger = new RecordingLogger<NotificationRecordWriter>();
+        var writer = NewWriter(handler, out var http, logger, enabled: false);
+        var postDelegateInvocations = 0;
+
+        var outcome = await writer.WriteAsync(
+            SilentTemplateKey,
+            "client-1",
+            "delivery-1",
+            "ncid-silent-flag-off",
+            ct =>
+            {
+                postDelegateInvocations++;
+                return PostCentreRowAsync(http, SilentTemplateKey, ct);
+            });
+
+        outcome.Classification.Should().Be(
+            NotificationRecordWriteClassification.SkippedSilent,
+            "silent is an invariant, so it must not degrade to Disabled when the flag is off");
+        postDelegateInvocations.Should().Be(0);
+        handler.Posts.Should().Be(0);
+        handler.PostPaths.Should().BeEmpty();
+
+        logger.Entries.Should().ContainSingle(entry =>
+            entry.Properties.ContainsKey("reason")
+            && (string?)entry.Properties["reason"] == "silent_is_not_inbox_state"
+            && entry.Properties.ContainsKey("durableWriteEnabled")
+            && Equals(entry.Properties["durableWriteEnabled"], false));
+    }
+
+    [Fact]
+    public async Task Step3_SilentSkipRecord_ReportsTheDurableWriteFlagAsOn_WhenItIsOn()
+    {
+        // The other half of the pair above. Without it, the flag tag could be hard-coded
+        // to `false` and both the assertion above and the DoD test would still pass.
+        var handler = new RecordingHandler(HttpStatusCode.Created);
+        var logger = new RecordingLogger<NotificationRecordWriter>();
+        var writer = NewWriter(handler, out _, logger, enabled: true);
+
+        await writer.WriteAsync(
+            SilentTemplateKey,
+            "client-1",
+            "delivery-1",
+            "ncid-silent-flag-on",
+            _ => Task.FromResult(HttpStatusCode.Created));
+
+        logger.Entries.Should().ContainSingle(entry =>
+            entry.Properties.ContainsKey("reason")
+            && (string?)entry.Properties["reason"] == "silent_is_not_inbox_state"
+            && entry.Properties.ContainsKey("durableWriteEnabled")
+            && Equals(entry.Properties["durableWriteEnabled"], true));
+    }
+
+    [Fact]
     public async Task Step3_LiveWriters_StayNonSilent_AndStillPostExactlyOnce()
     {
         var handler = new RecordingHandler(HttpStatusCode.Created);

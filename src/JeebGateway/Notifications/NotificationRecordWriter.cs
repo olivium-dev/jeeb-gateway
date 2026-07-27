@@ -97,19 +97,29 @@ public sealed class NotificationRecordWriter : INotificationRecordWriter
             // polling→push migration is moving onto this path — so tagging it per entity
             // is an unbounded-cardinality bomb. The id stays in the structured log below,
             // where per-event cardinality is free and the debugging value actually is.
+            //
+            // `durable_write_enabled` is here because this gate sits AHEAD of the feature
+            // flag. Without it, an operator seeing a non-zero notif.durable_write.skipped
+            // would reasonably conclude the durable-write path is live, when it may be
+            // switched off entirely — the two states are behaviourally identical (nothing
+            // is written either way) but not diagnostically identical. Two values only, so
+            // unlike entityId this tag is cardinality-safe.
+            var durableWriteEnabled = _configuration.GetValue<bool>(EnabledConfigurationKey);
             NotificationDurableWriteTelemetry.Skipped.Add(
                 1,
                 new("type", templateKey),
-                new("reason", "silent_is_not_inbox_state"));
+                new("reason", "silent_is_not_inbox_state"),
+                new("durable_write_enabled", durableWriteEnabled ? "true" : "false"));
             _logger.LogDebug(
                 "event={event} type={type} reason={reason} recipientId={recipientId} " +
-                "entityId={entityId} ncid={ncid}",
+                "entityId={entityId} ncid={ncid} durableWriteEnabled={durableWriteEnabled}",
                 "notif.durable_write.skipped",
                 templateKey,
                 "silent_is_not_inbox_state",
                 recipientId,
                 entityId,
-                notificationCorrelationId);
+                notificationCorrelationId,
+                durableWriteEnabled);
             return new(NotificationRecordWriteClassification.SkippedSilent, null);
         }
 
