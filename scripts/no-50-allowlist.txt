@@ -69,4 +69,3 @@
 # refund destination, or an explicit acceptance that refunds are inert. Then the
 # BaseUrl and this entry are removed together.
 # ---------------------------------------------------------------------------
-src/JeebGateway/appsettings.Production.json:"BaseUrl": "http://192.168.2.50:10066"
