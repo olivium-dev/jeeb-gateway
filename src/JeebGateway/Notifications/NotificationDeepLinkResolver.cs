@@ -36,10 +36,13 @@ public static class NotificationDeepLinkResolver
             ["offer_received"]      = "jeeb://offers/{id}",
             ["jeeb.offer_accepted"] = "jeeb://offers/{id}",
             ["offer_accepted"]      = "jeeb://offers/{id}",
-            // sprint-009 Lane E — a rejected/losing bidder deep-links to the same offer
-            // detail so they land on the (now terminal) offer they lost.
-            ["jeeb.offer_rejected"] = "jeeb://offers/{id}",
-            ["offer_rejected"]      = "jeeb://offers/{id}",
+            // NOTE — "jeeb.offer_rejected" / "offer_rejected" are deliberately ABSENT
+            // (b02 step 6b, owner ruling D3 = retire). This map exists to deep-link an INBOX
+            // ROW, and the notification centre has no route for either spelling
+            // (POST :10026/notifications/jeeb.offer_rejected -> 405), so a row of that type
+            // cannot exist and an entry here could never be reached from the inbox.
+            // The loser-bidder PUSH still carries jeeb://offers/{offerId}; it now gets that
+            // link from OfferPushNotifier.OfferLostDeepLink, not from this resolver.
 
             // KYC approve/reject -> KYC review screen
             ["jeeb.kyc_approved"] = "jeeb://kyc/status",

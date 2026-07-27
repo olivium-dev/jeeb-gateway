@@ -194,49 +194,83 @@ public sealed class NotificationRecordWriterTests
         handler.Gets.Should().Be(0);
     }
 
-    // ── b02 step 3 · silent ⇒ ZERO notification-centre writes ─────────────────────────
+    // ── b02 step 3 · the silent gate, AFTER the 2026-07-27 delivery reversal ──────────
     //
-    // The two cases below differ in EXACTLY ONE input: the notification type. Same
-    // recipient, same entity, same ncid, same POST delegate, same feature flag, same
-    // handler. So the presence/absence of the POST is attributable to the silent gate and
-    // to nothing else — which is what makes the pair a real positive/negative control
-    // rather than two independent assertions.
+    // WHAT CHANGED, AND WHAT WAS LOST. Until 2026-07-27 this section held a real
+    // positive/negative control pair: `jeeb.delivery_status_updated` (silent, zero POSTs)
+    // against `jeeb.settlement_paid` (stored, one POST), differing in exactly one input.
+    // The owner then ruled that a delivery-status change IS a readable inbox row, so
+    // `delivery` moved to shade+stored — and with it, the LAST silent-classified catalog
+    // template key disappeared. `newRequest` is still silent but has no template key and no
+    // centre writer.
     //
-    // `jeeb.delivery_status_updated` is the silent case: owner ruling D4 classifies the
-    // `delivery` refresh category as silent-only. It has no public writer method yet (that
-    // is step 6a), so the gate is exercised at the internal WriteAsync choke point every
-    // present and future writer funnels through.
+    // Consequence, stated plainly rather than hidden behind a green suite: the silent
+    // branch of NotificationRecordWriter.WriteAsync is now UNREACHABLE for every real
+    // notification type, so its runtime behaviour (skip-before-POST, the SkippedSilent
+    // classification, the `notif.durable_write.skipped` record and its `durableWriteEnabled`
+    // tag) is no longer exercised here. The four tests that used to exercise it were removed
+    // rather than kept alive against a fabricated silent key: PushSilencePolicy.IsSilent is
+    // a pure static lookup, so the only way to feed it a silent key would be to invent one
+    // the catalog does not serve — a faked positive control, which is precisely the failure
+    // this batch keeps being burned by.
+    //
+    // The gate CODE stays. It is a dormant guard sitting at the sole choke point, and
+    // Step3_TheSilentGate_IsDormantAndMustStaySo below is the tripwire that makes the day a
+    // silent type reappears the day someone has to restore this coverage.
 
+    /// <summary>
+    /// The 2026-07-27 reversal proved at the writer choke point, not just in the policy
+    /// table: <c>jeeb.delivery_status_updated</c> now POSTs exactly one row. This is the
+    /// assertion that inverted — it read "zero POSTs, SkippedSilent" before the ruling.
+    /// </summary>
     [Fact]
-    public async Task Step3_SilentType_IssuesZeroPostsToTheNotificationCentre()
+    public async Task Reversal20260727_DeliveryStatusUpdated_WritesExactlyOneRow()
     {
         var handler = new RecordingHandler(HttpStatusCode.Created);
         var writer = NewWriter(handler, out var http);
         var postDelegateInvocations = 0;
 
         var outcome = await writer.WriteAsync(
-            SilentTemplateKey,
+            DeliveryTemplateKey,
             "client-1",
             "delivery-1",
-            "ncid-silent",
+            "ncid-delivery",
             ct =>
             {
                 postDelegateInvocations++;
-                return PostCentreRowAsync(http, SilentTemplateKey, ct);
+                return PostCentreRowAsync(http, DeliveryTemplateKey, ct);
             });
 
-        outcome.Classification.Should()
-            .Be(NotificationRecordWriteClassification.SkippedSilent);
-        postDelegateInvocations.Should().Be(
-            0,
-            "the gate must refuse the write before the POST delegate is ever invoked");
-        handler.PostPaths.Should().BeEmpty(
-            "a silent push must produce NO row — not a hidden one, not a soft-deleted one");
-        handler.Posts.Should().Be(0);
-        handler.Gets.Should().Be(
-            0,
-            "there is nothing to read back when nothing was written");
-        outcome.UpstreamStatus.Should().BeNull();
+        outcome.Classification.Should().Be(
+            NotificationRecordWriteClassification.Committed,
+            "owner ruling 2026-07-27: delivery is a readable inbox row, so the gate must "
+            + "let it through — SkippedSilent here means the reversal was undone");
+        postDelegateInvocations.Should().Be(1);
+        handler.Posts.Should().Be(1, "shade+stored ⇒ exactly one centre row, never two");
+        handler.PostPaths.Should().ContainSingle()
+            .Which.Should().Be($"/notifications/{DeliveryTemplateKey}");
+    }
+
+    /// <summary>
+    /// The tripwire for the dormancy described above. It is deliberately an assertion about
+    /// the policy rather than about the writer, because there is nothing left to drive
+    /// through the writer: if this goes red, a silent catalog type exists again, the gate is
+    /// live again, and the writer-level skip tests deleted on 2026-07-27 must come back with
+    /// it. The reference to <see cref="NotificationRecordWriteClassification.SkippedSilent"/>
+    /// is load-bearing too — deleting the gate's classification becomes a compile error here
+    /// rather than a silently vanished test.
+    /// </summary>
+    [Fact]
+    public void Step3_TheSilentGate_IsDormantAndMustStaySo()
+    {
+        PushSilencePolicy.TemplateKeys.Where(PushSilencePolicy.IsSilent).Should().BeEmpty(
+            "after the 2026-07-27 delivery reversal no catalog notification type is silent; "
+            + "if you have added one, restore the writer-level skip coverage that proved "
+            + "the gate refuses the POST, records notif.durable_write.skipped, and outranks "
+            + "the durable-write feature flag");
+
+        Enum.IsDefined(NotificationRecordWriteClassification.SkippedSilent).Should().BeTrue(
+            "the gate is dormant, not deleted");
     }
 
     [Fact]
@@ -265,75 +299,19 @@ public sealed class NotificationRecordWriterTests
         handler.Gets.Should().Be(0);
     }
 
-    [Fact]
-    public async Task Step3_SilentType_StaysSkippedSilent_WhenTheDurableWriteFlagIsOff()
-    {
-        // Two things at once.
-        //
-        // (a) The gate is a POLICY INVARIANT, not a feature: there is no configuration
-        //     under which a silent refresh signal may be stored. Flipping the flag off
-        //     must not change the classification to `Disabled`, because a later change
-        //     that made `Disabled` mean "write it later" would then quietly re-enable the
-        //     row this policy exists to prevent.
-        //
-        // (b) Because the gate sits AHEAD of the flag, `notif.durable_write.skipped`
-        //     increments even when the durable-write path is switched off entirely — an
-        //     operator reading that counter could conclude the path is live. The two
-        //     states are behaviourally identical (nothing written) but not diagnostically
-        //     identical, so the skip record carries the flag state. Two values, so it is
-        //     cardinality-safe, unlike a per-entity tag.
-        var handler = new RecordingHandler(HttpStatusCode.Created);
-        var logger = new RecordingLogger<NotificationRecordWriter>();
-        var writer = NewWriter(handler, out var http, logger, enabled: false);
-        var postDelegateInvocations = 0;
-
-        var outcome = await writer.WriteAsync(
-            SilentTemplateKey,
-            "client-1",
-            "delivery-1",
-            "ncid-silent-flag-off",
-            ct =>
-            {
-                postDelegateInvocations++;
-                return PostCentreRowAsync(http, SilentTemplateKey, ct);
-            });
-
-        outcome.Classification.Should().Be(
-            NotificationRecordWriteClassification.SkippedSilent,
-            "silent is an invariant, so it must not degrade to Disabled when the flag is off");
-        postDelegateInvocations.Should().Be(0);
-        handler.Posts.Should().Be(0);
-        handler.PostPaths.Should().BeEmpty();
-
-        logger.Entries.Should().ContainSingle(entry =>
-            entry.Properties.ContainsKey("reason")
-            && (string?)entry.Properties["reason"] == "silent_is_not_inbox_state"
-            && entry.Properties.ContainsKey("durableWriteEnabled")
-            && Equals(entry.Properties["durableWriteEnabled"], false));
-    }
-
-    [Fact]
-    public async Task Step3_SilentSkipRecord_ReportsTheDurableWriteFlagAsOn_WhenItIsOn()
-    {
-        // The other half of the pair above. Without it, the flag tag could be hard-coded
-        // to `false` and both the assertion above and the DoD test would still pass.
-        var handler = new RecordingHandler(HttpStatusCode.Created);
-        var logger = new RecordingLogger<NotificationRecordWriter>();
-        var writer = NewWriter(handler, out _, logger, enabled: true);
-
-        await writer.WriteAsync(
-            SilentTemplateKey,
-            "client-1",
-            "delivery-1",
-            "ncid-silent-flag-on",
-            _ => Task.FromResult(HttpStatusCode.Created));
-
-        logger.Entries.Should().ContainSingle(entry =>
-            entry.Properties.ContainsKey("reason")
-            && (string?)entry.Properties["reason"] == "silent_is_not_inbox_state"
-            && entry.Properties.ContainsKey("durableWriteEnabled")
-            && Equals(entry.Properties["durableWriteEnabled"], true));
-    }
+    // REMOVED 2026-07-27, with the delivery reversal — see the section header above:
+    //   Step3_SilentType_StaysSkippedSilent_WhenTheDurableWriteFlagIsOff
+    //   Step3_SilentSkipRecord_ReportsTheDurableWriteFlagAsOn_WhenItIsOn
+    // They asserted that the silent gate outranks the durable-write feature flag and that
+    // the `notif.durable_write.skipped` record carries `durableWriteEnabled` in both
+    // states. Both drove the writer with `jeeb.delivery_status_updated`, the only silent
+    // catalog key there was; the ruling made it stored, and no other silent key exists to
+    // put in its place. The production code they covered is intact and unchanged.
+    // Step3_TheSilentGate_IsDormantAndMustStaySo goes red the moment a silent type returns,
+    // which is the moment to restore both of these from git history
+    // (`git log -S Step3_SilentSkipRecord_ReportsTheDurableWriteFlagAsOn_WhenItIsOn`).
+    // The flag-off half of the ordering claim still has live coverage in
+    // CentreWritersStep6Tests.Step6a_DisabledFlag_IsReportedAsDisabledNotAsSilent.
 
     [Fact]
     public async Task Step3_LiveWriters_StayNonSilent_AndStillPostExactlyOnce()
@@ -358,7 +336,10 @@ public sealed class NotificationRecordWriterTests
         });
     }
 
-    private const string SilentTemplateKey = "jeeb.delivery_status_updated";
+    // Was `SilentTemplateKey` until the 2026-07-27 reversal made it stored. Renamed rather
+    // than repointed at another key: there is no other silent key, and leaving the old name
+    // on a stored type is how a reader concludes the gate is still being exercised.
+    private const string DeliveryTemplateKey = "jeeb.delivery_status_updated";
     private const string NonSilentTemplateKey = "jeeb.settlement_paid";
 
     // Mirrors JeebNotificationRecordClient.PostAsync's route shape
@@ -533,7 +514,7 @@ public sealed class NotificationRecordWriterTests
         }
     }
 
-    private sealed class CapturingNotificationRecordWriter : INotificationRecordWriter
+    private sealed class CapturingNotificationRecordWriter : FakeNotificationRecordWriterBase
     {
         private readonly INotificationRecordWriter _inner;
 
@@ -544,18 +525,13 @@ public sealed class NotificationRecordWriterTests
 
         public NotificationRecordWriteOutcome? LastOutcome { get; private set; }
 
-        public async Task<NotificationRecordWriteOutcome> WriteOfferReceivedAsync(
+        public override async Task<NotificationRecordWriteOutcome> WriteOfferReceivedAsync(
             OfferReceivedNotificationRecord record,
             CancellationToken requestToken)
         {
             LastOutcome = await _inner.WriteOfferReceivedAsync(record, requestToken);
             return LastOutcome;
         }
-
-        public Task<NotificationRecordWriteOutcome> WriteOfferAcceptedAsync(
-            OfferAcceptedNotificationRecord record,
-            CancellationToken requestToken)
-            => throw new NotSupportedException();
     }
 
     private sealed class RecordingPushClient : ServicePushNotificationClient

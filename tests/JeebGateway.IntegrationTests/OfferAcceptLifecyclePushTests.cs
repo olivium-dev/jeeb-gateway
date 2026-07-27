@@ -465,7 +465,7 @@ public class OfferAcceptLifecyclePushTests
         }
     }
 
-    private sealed class RecordingNotificationRecordWriter : INotificationRecordWriter
+    private sealed class RecordingNotificationRecordWriter : FakeNotificationRecordWriterBase
     {
         private readonly List<string>? _timeline;
 
@@ -474,12 +474,10 @@ public class OfferAcceptLifecyclePushTests
 
         public List<OfferAcceptedNotificationRecord> Accepted { get; } = new();
 
-        public Task<NotificationRecordWriteOutcome> WriteOfferReceivedAsync(
-            OfferReceivedNotificationRecord record,
-            CancellationToken requestToken)
-            => throw new NotSupportedException();
-
-        public Task<NotificationRecordWriteOutcome> WriteOfferAcceptedAsync(
+        // WriteOfferReceivedAsync and the six step-6a writers are left to the base, which throws
+        // if reached: this fake exists to count offer-ACCEPTED writes, so any other write arriving
+        // here is the test lying about what the notifier did.
+        public override Task<NotificationRecordWriteOutcome> WriteOfferAcceptedAsync(
             OfferAcceptedNotificationRecord record,
             CancellationToken requestToken)
         {

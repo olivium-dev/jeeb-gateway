@@ -94,6 +94,34 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
     // the offer-submit 201 (the LAN-local push svc is normally <200ms).
     private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(2);
 
+    /// <summary>
+    /// b02 step 6b (owner ruling D3 = retire) — the loser-bidder copy, relocated here VERBATIM
+    /// from the retired <c>jeeb.offer_rejected</c> catalog entry.
+    ///
+    /// <para><b>Why it moved instead of dying with the taxonomy.</b> The catalog entry was retired
+    /// because the notification centre has no route for that type (405, where every served type
+    /// answers 422), so no inbox row of it can exist. But this PUSH never needed the centre — it
+    /// renders copy locally and dispatches through the push microservice. Retiring an unroutable
+    /// notification-centre taxonomy must not silently degrade a live user-facing push into the
+    /// catalog's product-neutral fallback ("You have a new notification for jeeb.offer_rejected").
+    /// So the copy lives next to its only caller.</para>
+    ///
+    /// <para>EN only: the loser push has always rendered with the catalog's DEFAULT locale
+    /// (<c>Render(templateKey)</c> was called with no locale), so English is what shipped and
+    /// English is what still ships. This is deliberately behaviour-preserving, NOT an opinion that
+    /// the notification should be unlocalized — localizing it is a separate, visible change.</para>
+    /// </summary>
+    internal static readonly NotificationTemplate OfferLostTemplate = new(
+        "Offer Not Selected",
+        "Your offer wasn't selected this time. Keep an eye out for new delivery requests.");
+
+    /// <summary>
+    /// Deep-link template for the loser push, relocated from the retired
+    /// <see cref="NotificationDeepLinkResolver"/> entry for the same reason as
+    /// <see cref="OfferLostTemplate"/>. A losing bidder lands on the (now terminal) offer.
+    /// </summary>
+    internal static string OfferLostDeepLink(string offerId) => $"jeeb://offers/{offerId}";
+
     private readonly ServicePushNotificationClient _push;
     private readonly INotificationRecordWriter _recordWriter;
     private readonly Func<string, CancellationToken, Task<DeliveryRequest?>> _getRequest;
@@ -320,11 +348,24 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
             notificationCorrelationId);
     }
 
+    // b02 step 6b — the template key is GONE from JeebNotificationCatalog (retired: the centre
+    // 405s it, so no inbox row of that type can exist). Copy and deep link are therefore passed
+    // in explicitly. There is no durable-write attempt here and never was: this is a push-only
+    // notification, which is exactly why retiring the taxonomy costs the user nothing.
     public Task NotifyOfferLostAsync(
         string loserJeeberId, string requestId, string offerId, CancellationToken ct)
         => SendLifecycleAsync(
             loserJeeberId, requestId, offerId,
-            templateKey: "jeeb.offer_rejected", type: "offer_lost", ct);
+            templateKey: RetiredOfferLostTemplateKey, type: "offer_lost", ct,
+            renderedTemplate: OfferLostTemplate,
+            deepLinkOverride: OfferLostDeepLink(offerId));
+
+    /// <summary>
+    /// The retired key, kept ONLY as the log/telemetry label for this push so operator dashboards
+    /// and log greps that key on it keep working. It is intentionally NOT in
+    /// <see cref="JeebNotificationCatalog"/> and must not be re-added there.
+    /// </summary>
+    internal const string RetiredOfferLostTemplateKey = "jeeb.offer_rejected";
 
     private async Task SendLifecycleAsync(
         string recipientId,
@@ -334,7 +375,8 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
         string type,
         CancellationToken ct,
         NotificationTemplate? renderedTemplate = null,
-        string? notificationCorrelationId = null)
+        string? notificationCorrelationId = null,
+        string? deepLinkOverride = null)
     {
         try
         {
@@ -344,7 +386,12 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
             }
 
             var template = renderedTemplate ?? JeebNotificationCatalog.Render(templateKey);
-            var deepLink = NotificationDeepLinkResolver.Resolve(templateKey, offerId);
+
+            // deepLinkOverride carries the link for a notification whose taxonomy is no longer in
+            // the resolver (b02 step 6b retired jeeb.offer_rejected). Without it the resolver would
+            // return the inbox root for that type and the loser push would lose its destination.
+            var deepLink = deepLinkOverride
+                           ?? NotificationDeepLinkResolver.Resolve(templateKey, offerId);
 
             var payload = new Dictionary<string, object?>
             {
@@ -462,6 +509,42 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
         public Task<NotificationRecordWriteOutcome> WriteOfferAcceptedAsync(
             OfferAcceptedNotificationRecord record,
             CancellationToken requestToken)
+            => Disabled();
+
+        // b02 step 6a — this notifier only ever writes the two offer types; the other six exist on
+        // the interface for the service-callback seat. They are implemented as Disabled rather than
+        // throwing so that substituting this stand-in can never turn a missing write into a crash.
+        public Task<NotificationRecordWriteOutcome> WriteDeliveryStatusUpdatedAsync(
+            DeliveryStatusUpdatedNotificationRecord record,
+            CancellationToken requestToken)
+            => Disabled();
+
+        public Task<NotificationRecordWriteOutcome> WriteSettlementPaidAsync(
+            SettlementPaidNotificationRecord record,
+            CancellationToken requestToken)
+            => Disabled();
+
+        public Task<NotificationRecordWriteOutcome> WriteKycApprovedAsync(
+            KycApprovedNotificationRecord record,
+            CancellationToken requestToken)
+            => Disabled();
+
+        public Task<NotificationRecordWriteOutcome> WriteKycRejectedAsync(
+            KycRejectedNotificationRecord record,
+            CancellationToken requestToken)
+            => Disabled();
+
+        public Task<NotificationRecordWriteOutcome> WriteDisputeResolvedAsync(
+            DisputeResolvedNotificationRecord record,
+            CancellationToken requestToken)
+            => Disabled();
+
+        public Task<NotificationRecordWriteOutcome> WriteRatingAutoRevealedAsync(
+            RatingAutoRevealedNotificationRecord record,
+            CancellationToken requestToken)
+            => Disabled();
+
+        private static Task<NotificationRecordWriteOutcome> Disabled()
             => Task.FromResult(
                 new NotificationRecordWriteOutcome(
                     NotificationRecordWriteClassification.Disabled,

@@ -20,9 +20,11 @@ namespace JeebGateway.IntegrationTests;
 ///
 /// Without this seeder, the catalog's <c>Render</c>/<c>All</c> are referenced
 /// only by tests and the live jeeb.* localization is dark in production. These
-/// tests pin that the seeder POSTs every catalog key (all 9 as of sprint-009's
-/// <c>jeeb.offer_rejected</c>, EN+AR title/body) to the generic opaque-key
-/// <c>POST /templates/register</c> endpoint and that re-running it is idempotent.
+/// tests pin that the seeder POSTs every catalog key (all 8 as of b02 step 6b,
+/// which retired <c>jeeb.offer_rejected</c> — the centre 405s that path, so a
+/// registration for it advertised a type no row could ever use; EN+AR title/body)
+/// to the generic opaque-key <c>POST /templates/register</c> endpoint and that
+/// re-running it is idempotent.
 /// </summary>
 public class JeebNotificationCatalogSeederTests
 {
@@ -34,7 +36,7 @@ public class JeebNotificationCatalogSeederTests
     private static int CatalogSize => JeebNotificationCatalog.All.Count;
 
     [Fact]
-    public async Task Seeds_All_Nine_Jeeb_Keys_With_Both_Locales_To_Register_Endpoint()
+    public async Task Seeds_All_Eight_Jeeb_Keys_With_Both_Locales_To_Register_Endpoint()
     {
         var handler = new RecordingHandler(HttpStatusCode.Created);
         using var client = NewClient(handler);
@@ -42,7 +44,11 @@ public class JeebNotificationCatalogSeederTests
         var count = await JeebNotificationCatalogSeeder.SeedAsync(
             client, NullLogger.Instance, CancellationToken.None);
 
-        CatalogSize.Should().Be(9, "sprint-009 Lane E added jeeb.offer_rejected as the ninth template");
+        CatalogSize.Should().Be(
+            8,
+            "b02 step 6b retired jeeb.offer_rejected (owner ruling D3): the notification centre "
+            + "answers 405 for it where every served type answers 422, so registering it upstream "
+            + "advertised a taxonomy whose inbox row can never exist");
         count.Should().Be(CatalogSize);
         handler.Requests.Should().HaveCount(CatalogSize);
 
@@ -57,9 +63,10 @@ public class JeebNotificationCatalogSeederTests
 
         postedKeys.Should().BeEquivalentTo(JeebNotificationCatalog.All.Keys);
 
-        // Pin the sprint-009 addition explicitly: the loser side of the
-        // multi-offer accept lifecycle must be registered upstream.
-        postedKeys.Should().Contain("jeeb.offer_rejected");
+        // Pin the b02 step 6b retirement explicitly: the seeder must NOT register a key the
+        // centre has no route for. The loser-bidder push is unaffected — it renders locally from
+        // OfferPushNotifier.OfferLostTemplate and never needed an upstream registration.
+        postedKeys.Should().NotContain("jeeb.offer_rejected");
 
         // Each registration carries EN + AR title/body lifted verbatim from the
         // gateway-owned catalog (this is the copy that was removed from the
@@ -103,7 +110,7 @@ public class JeebNotificationCatalogSeederTests
             .Select(b => b.RootElement.GetProperty("key").GetString());
         var secondKeys = handler.Bodies.Skip(CatalogSize)
             .Select(b => b.RootElement.GetProperty("key").GetString());
-        firstKeys.Should().Contain("jeeb.offer_rejected");
+        firstKeys.Should().NotContain("jeeb.offer_rejected");
         secondKeys.Should().BeEquivalentTo(firstKeys);
     }
 

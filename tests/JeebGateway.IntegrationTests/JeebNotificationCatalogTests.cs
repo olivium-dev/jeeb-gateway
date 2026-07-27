@@ -20,8 +20,10 @@ public class JeebNotificationCatalogTests
     {
         "jeeb.offer_received",
         "jeeb.offer_accepted",
-        // sprint-009 Lane E — the loser side of the multi-offer accept lifecycle.
-        "jeeb.offer_rejected",
+        // "jeeb.offer_rejected" is deliberately NOT here: b02 step 6b retired it (owner ruling
+        // D3) because the notification centre 405s that path, so no inbox row of it can exist.
+        // The loser-bidder PUSH is unaffected and its copy is pinned by
+        // OfferAcceptLifecyclePushTests — see OfferPushNotifier.OfferLostTemplate.
         "jeeb.delivery_status_updated",
         "jeeb.settlement_paid",
         "jeeb.kyc_approved",

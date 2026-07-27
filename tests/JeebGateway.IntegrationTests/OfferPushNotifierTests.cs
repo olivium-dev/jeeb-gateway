@@ -314,7 +314,7 @@ public class OfferPushNotifierTests
         }
     }
 
-    private sealed class RecordingNotificationRecordWriter : INotificationRecordWriter
+    private sealed class RecordingNotificationRecordWriter : FakeNotificationRecordWriterBase
     {
         private readonly List<string>? _timeline;
         private readonly bool _throwOnWrite;
@@ -330,7 +330,7 @@ public class OfferPushNotifierTests
         public int Attempts { get; private set; }
         public List<OfferReceivedNotificationRecord> Received { get; } = new();
 
-        public Task<NotificationRecordWriteOutcome> WriteOfferReceivedAsync(
+        public override Task<NotificationRecordWriteOutcome> WriteOfferReceivedAsync(
             OfferReceivedNotificationRecord record,
             CancellationToken requestToken)
         {
@@ -346,10 +346,8 @@ public class OfferPushNotifierTests
                 201));
         }
 
-        public Task<NotificationRecordWriteOutcome> WriteOfferAcceptedAsync(
-            OfferAcceptedNotificationRecord record,
-            CancellationToken requestToken)
-            => throw new NotSupportedException();
+        // WriteOfferAcceptedAsync and the six step-6a writers stay on the base, which throws if
+        // reached — this fake counts offer-RECEIVED writes only.
     }
 
     private sealed class RecordingLogger<T> : ILogger<T>
