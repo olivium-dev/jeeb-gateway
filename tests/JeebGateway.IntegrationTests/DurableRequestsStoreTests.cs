@@ -345,6 +345,77 @@ public sealed class DurableRequestsStoreTests
     }
 
     [Fact]
+    public async Task GetByConversationId_falls_back_to_the_mirror_when_inner_misses()
+    {
+        // JEBV4-345 REGRESSION. The expected disposition here is NOT author-chosen: it is
+        // the behaviour observed on MSI 2026-07-27. A chat send on a conversation created
+        // in the CURRENT process emitted a push to the push service; a real UI chat send on
+        // a conversation created the previous day emitted nothing at all, because the
+        // gateway had restarted in between and this lookup consulted only the in-memory
+        // store. The row was in Postgres the whole time. Empty inner + populated mirror is
+        // exactly that post-bounce state.
+        var store = BuildWithMirror(out var inner, out _, out var mirror);
+        mirror.Rows.Add(new DeliveryRequest
+        {
+            Id = "req-cold-1",
+            ClientId = "client-cold",
+            JeeberId = "jeeber-cold",
+            Status = "accepted",
+            Description = "row that outlived the process",
+            ConversationId = "conv-cold-1",
+            CreatedAt = DateTimeOffset.UtcNow.AddDays(-1),
+            PickupLocation = new GeoPoint { Lat = 25.2, Lng = 55.3 },
+            DropoffLocation = new GeoPoint { Lat = 25.4, Lng = 55.5 },
+        });
+
+        // Precondition: the in-memory store genuinely does not know this conversation,
+        // so a pass cannot come from the hot path.
+        (await inner.GetByConversationIdAsync("conv-cold-1", CancellationToken.None))
+            .Should().BeNull();
+
+        var resolved = await store.GetByConversationIdAsync("conv-cold-1", CancellationToken.None);
+
+        // Both delivery principals must come back — they are the chat push recipient set.
+        resolved.Should().NotBeNull();
+        resolved!.Id.Should().Be("req-cold-1");
+        resolved.ClientId.Should().Be("client-cold");
+        resolved.JeeberId.Should().Be("jeeber-cold");
+    }
+
+    [Fact]
+    public async Task GetByConversationId_returns_null_when_neither_inner_nor_mirror_knows_it()
+    {
+        // Negative control for the test above: the fallback must not invent a row. An
+        // unknown conversation still resolves to null, which is what makes the notifier's
+        // new WARNING meaningful rather than noise.
+        var store = BuildWithMirror(out _, out _, out _);
+
+        var resolved = await store.GetByConversationIdAsync("conv-never-seen", CancellationToken.None);
+
+        resolved.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task SetConversationId_persists_the_accept_time_stamp_to_the_mirror()
+    {
+        // JEBV4-345: the accept path resolves/creates the conversation after create. Before
+        // this change it assigned the id to the in-memory object only, so an order whose
+        // conversation was born at accept had a NULL gw_conversation_id in Postgres and
+        // stayed unresolvable after a bounce even with the durable read above.
+        var store = BuildWithMirror(out var inner, out _, out var mirror);
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        await store.SetConversationIdAsync(created.Id, "conv-at-accept", CancellationToken.None);
+
+        // Hot path sees it...
+        (await inner.GetAsync(created.Id, CancellationToken.None))!
+            .ConversationId.Should().Be("conv-at-accept");
+        // ...and so does the durable mirror, which is the leg that survives the bounce.
+        mirror.ConversationIds.Should().ContainKey(created.Id)
+            .WhoseValue.Should().Be("conv-at-accept");
+    }
+
+    [Fact]
     public async Task Get_reads_through_to_delivery_service_when_inner_misses()
     {
         // Cold path (post-bounce): the in-memory mirror lost the row, so GetAsync
@@ -1020,6 +1091,21 @@ public sealed class DurableRequestsStoreTests
     /// </summary>
     private sealed class RecordingMirror : IDurableRequestsMirror
     {
+        /// <summary>JEBV4-345: rows stamped with a conversation id, keyed by request id.</summary>
+        public Dictionary<string, string> ConversationIds { get; } = new(StringComparer.Ordinal);
+
+        public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
+            => Task.FromResult(Rows.FirstOrDefault(r =>
+                string.Equals(r.ConversationId, conversationId, StringComparison.Ordinal)));
+
+        public Task UpdateConversationIdAsync(string requestId, string conversationId, CancellationToken ct)
+        {
+            ConversationIds[requestId] = conversationId;
+            var row = Rows.FirstOrDefault(r => string.Equals(r.Id, requestId, StringComparison.Ordinal));
+            if (row is not null) row.ConversationId = conversationId;
+            return Task.CompletedTask;
+        }
+
         private readonly Dictionary<string, string> _persistedStatuses = new(StringComparer.Ordinal);
 
         public List<DeliveryRequest> Upserted { get; } = new();

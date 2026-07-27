@@ -115,4 +115,43 @@ public interface IDurableRequestsMirror
     /// Returns <see langword="null"/> when the id is not a UUID or has no mirrored row.
     /// </summary>
     Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct);
+
+    /// <summary>
+    /// JEBV4-345: durable SINGLE-ROW read by chat <c>gw_conversation_id</c> — the
+    /// conversation-keyed counterpart of <see cref="GetAsync"/>.
+    ///
+    /// <para>WHY THIS EXISTS. <see cref="IRequestsStore.GetByConversationIdAsync"/> is
+    /// the ONLY recipient resolver the chat-message push notifier has: the chat send
+    /// handler is keyed by conversationId, and chat-service exposes no
+    /// participants-by-conversationId read, so the gateway recovers the two delivery
+    /// principals (ClientId / JeeberId) from its own request row. Before this method,
+    /// <see cref="DurableRequestsStore.GetByConversationIdAsync"/> delegated to the
+    /// IN-MEMORY store alone — which is empty after a process bounce. The observable
+    /// consequence was total and silent: every conversation created before the last
+    /// gateway restart resolved to null, the notifier skipped at Debug level, and chat
+    /// push simply stopped for those orders with no error anywhere. Reading the mirror
+    /// makes recipient resolution survive a restart exactly like the owner-list does.</para>
+    ///
+    /// Returns <see langword="null"/> when the conversation id is not a UUID or has no
+    /// mirrored row.
+    /// </summary>
+    Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct);
+
+    /// <summary>
+    /// JEBV4-345: persists the chat conversation id onto the mirror row.
+    ///
+    /// <para>The create path stamps <c>gw_conversation_id</c> through
+    /// <see cref="UpsertOnCreateAsync"/>, but the ACCEPT path
+    /// (<c>JeebOffersController.EnsureConversationAndSeatWinnerAsync</c>) resolves or
+    /// creates the conversation later and previously stamped it on the in-memory row
+    /// only. Any order whose conversation was born at accept — auto-create off, or
+    /// chat-service down at create time — therefore had a NULL
+    /// <c>gw_conversation_id</c> in the mirror, so
+    /// <see cref="GetByConversationIdAsync"/> could never recover it after a bounce.
+    /// Writing it here closes that hole.</para>
+    ///
+    /// Touches ONLY the gateway column; the native enum/CHECK columns are untouched so
+    /// no constraint can fire. No-op when the request id is not a UUID.
+    /// </summary>
+    Task UpdateConversationIdAsync(string requestId, string conversationId, CancellationToken ct);
 }

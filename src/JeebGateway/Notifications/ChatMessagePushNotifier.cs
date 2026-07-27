@@ -56,9 +56,28 @@ public interface IChatMessagePushNotifier
 /// <inheritdoc />
 public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
 {
-    // Bounds the FCM fan-out so a slow/down push service cannot materially delay
-    // the chat send's 201 (the LAN-local push svc is normally <200ms).
-    private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(2);
+    // Bounds EACH recipient's push so a down push service cannot hang the chat send's 201.
+    //
+    // JEBV4-345 — was 2s, on the stated assumption that "the LAN-local push svc is normally
+    // <200ms". MEASURED on MSI 2026-07-27, three consecutive real sends to a registered
+    // device: 3.08s / 3.05s / 2.84s. The 200ms figure describes a push that has no device
+    // token to deliver to (the push service answers 404 immediately); a push that actually
+    // reaches FCM costs ~3s. So the 2s cap did not "bound a slow service" — it guaranteed
+    // that every push to a REGISTERED recipient was aborted mid-flight with
+    // TaskCanceledException, i.e. the healthy path was the only one it could never complete.
+    // Observed live at 11:44:49 CEST: recipient resolved correctly, socket connected, request
+    // cancelled at 2s, push service never logged the call, device never got the notification.
+    //
+    // 10s matches the ceiling the push HttpClient's own resilience pipeline already enforces
+    // (ServiceClientExtensions.ConfigurePushBreakerAndTimeout), so this no longer pre-empts
+    // the transport's own budget — the pipeline stays the authority on when to give up.
+    //
+    // FOLLOW-UP (not this change): the notifier is awaited inline on the send path, so a
+    // healthy push now adds ~3s to the chat send's 201. The right end state is to detach it
+    // onto a background queue the way NewRequestPushNotifier does
+    // (NewRequestFanoutQueue/NewRequestFanoutProcessor); that is an architectural change and
+    // wants its own review. Arriving late beats never arriving, which is the state today.
+    private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(10);
 
     private const int PreviewMaxLength = 120;
 
@@ -93,10 +112,21 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
             if (request is null)
             {
                 // The conversation id does not map to a known delivery request row
-                // (e.g. a legacy chat-service channel id, or a row not locally synced).
-                // Best-effort: nothing to resolve recipients from — skip silently.
-                _logger.LogDebug(
-                    "Chat push: no request row for conversation {ConversationId}; skipping push.",
+                // (e.g. a legacy chat-service channel id, or a row neither in memory nor
+                // in the durable mirror). Nothing to resolve recipients from — skip.
+                //
+                // JEBV4-345 — WARNING, not Debug. This branch is a TOTAL, SILENT loss of
+                // chat push for the order: the send still returns 201, the sender sees
+                // their own message, and nothing anywhere records that the counterpart
+                // was never notified. At Debug it is invisible in production logging, and
+                // an investigation reading "no chat-push log lines" cannot tell this
+                // branch apart from "no chat sends happened" — which is exactly how this
+                // defect survived a full test round. It is a real delivery failure; log it
+                // like one.
+                _logger.LogWarning(
+                    "Chat push SKIPPED: conversation {ConversationId} resolves to no delivery "
+                    + "request row (neither in-memory nor durable), so no recipient can be "
+                    + "derived and the counterpart gets NO notification for this message.",
                     conversationId);
                 return;
             }
@@ -111,6 +141,14 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
 
             if (recipients.Length == 0)
             {
+                // Legitimate in the broadcasting phase (no jeeber awarded yet, so the only
+                // principal is the author). Still logged at Information — see the WARNING
+                // above for why silence on this path is expensive.
+                _logger.LogInformation(
+                    "Chat push: conversation {ConversationId} (request {RequestId}) has no "
+                    + "recipient other than the author {AuthorUserId} (jeeber not yet awarded); "
+                    + "no push emitted.",
+                    conversationId, request.Id, authorUserId);
                 return;
             }
 
@@ -126,6 +164,17 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
             // why the client needs the hoistNestedRoutingFields workaround. Emit the routing
             // fields as FLAT top-level string entries instead, so each lands as its own FCM
             // data key (conversationId, requestId, type) and no client-side parsing is needed.
+            //
+            // VISIBILITY IS PART OF THE CONTRACT — DO NOT ADD ["silent"] HERE.
+            // The owner's bar is: "in case the user is not on the right chat session, user
+            // should see the notification whether the app is in forground or background or
+            // even closed". The push service treats `silent` as a pure transport switch
+            // (app/endpoints/sent_payload.py::_delivery_fields): absent/falsy sends BOTH a
+            // notification block and data, so the OS posts a shade entry even when the app
+            // is force-quit; truthy sends data ONLY, which posts nothing and which iOS drops
+            // outright for a force-quit app. Omitting the key is therefore what satisfies
+            // the requirement, and the foreground/open-thread case is suppressed CLIENT-side
+            // (jeeb-mobile #179) using the ids below — never by dropping the shade entry here.
             var payload = new Dictionary<string, object?>
             {
                 ["title"] = "New message",
@@ -140,17 +189,32 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
                 ["type"] = "chat",
             };
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(PushTimeout);
-
             foreach (var recipient in recipients)
             {
+                // JEBV4-345: the budget is PER RECIPIENT. It used to be one CancellationTokenSource
+                // created before the loop, so the whole fan-out shared a single deadline and the
+                // second recipient inherited whatever the first left over — with a real ~3s FCM
+                // round trip that is reliably nothing. Per-recipient isolation of the deadline
+                // matches the per-recipient isolation of the catch below.
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(PushTimeout);
+
                 try
                 {
                     await _push.Send_notification_to_userAsync(
                         recipient,
                         new SentPayloadToUserRequest { Payload = payload },
                         cts.Token);
+
+                    // JEBV4-345: log the SUCCESS too. Before this, the notifier logged only
+                    // on failure, so an empty log window was ambiguous between "push sent
+                    // fine" and "push never attempted" — and the investigation that read
+                    // that window concluded the wrong one. An explicit accepted-by-push-
+                    // service line makes the absence of a line mean something.
+                    _logger.LogInformation(
+                        "Chat push ACCEPTED by push service for recipient {RecipientUserId} on "
+                        + "conversation {ConversationId} (request {RequestId}).",
+                        recipient, conversationId, request.Id);
                 }
                 catch (Exception ex)
                 {
