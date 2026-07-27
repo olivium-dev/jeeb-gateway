@@ -23,7 +23,7 @@ namespace JeebGateway.IntegrationTests.Cdn;
 /// </summary>
 public sealed class CdnServiceClientContractTests
 {
-    private const string CdnBaseUrl = "http://192.168.2.50:10099"; // stand-in; real port TBD
+    private const string CdnBaseUrl = "http://127.0.0.1:10099"; // stand-in; real port TBD
 
     [Fact]
     public async Task UploadAsync_Posts_Multipart_To_Assets_And_Binds_CdnAsset()

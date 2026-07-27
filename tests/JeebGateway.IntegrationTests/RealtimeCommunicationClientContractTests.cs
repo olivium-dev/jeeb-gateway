@@ -135,7 +135,7 @@ public class RealtimeCommunicationClientContractTests
     private static bool LiveEnabled(out string baseUrl)
     {
         baseUrl = Environment.GetEnvironmentVariable("JEEB_REALTIME_BASEURL")
-                  ?? "http://192.168.2.50:4000";
+                  ?? "http://127.0.0.1:4000";
         return Environment.GetEnvironmentVariable("JEEB_REALTIME_LIVE") == "1";
     }
 

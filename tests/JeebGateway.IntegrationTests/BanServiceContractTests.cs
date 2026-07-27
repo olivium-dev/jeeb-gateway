@@ -24,7 +24,7 @@ namespace JeebGateway.IntegrationTests;
 ///   BOTH AdminCancellationsController and DeliveriesController.</item>
 /// </list>
 ///
-/// A third, OPT-IN test drives the LIVE service at 192.168.2.50:10065 when
+/// A third, OPT-IN test drives the LIVE service at 127.0.0.1:10065 when
 /// <c>JEEB_BAN_LIVE=1</c>, proving the full read/write round-trip end-to-end.
 /// </summary>
 public class BanServiceContractTests
@@ -180,7 +180,7 @@ public class BanServiceContractTests
 
     // -----------------------------------------------------------------
     // (3) OPT-IN real-wire test against the LIVE ban-service at
-    //     192.168.2.50:10065. Runs only when JEEB_BAN_LIVE=1 so CI without
+    //     127.0.0.1:10065. Runs only when JEEB_BAN_LIVE=1 so CI without
     //     VPN access stays green. Exercises apply (write) → status (read) →
     //     force-reset (cleanup) against the service's real Redis store.
     // -----------------------------------------------------------------
@@ -194,7 +194,7 @@ public class BanServiceContractTests
         }
 
         var baseUrl = Environment.GetEnvironmentVariable("JEEB_BAN_BASEURL")
-                      ?? "http://192.168.2.50:10065/";
+                      ?? "http://127.0.0.1:10065/";
         var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
         var client = new BanServiceClient(http);
         var store = new BanServiceJeeberRestrictionStore(client);

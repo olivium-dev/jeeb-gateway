@@ -13,7 +13,7 @@ namespace JeebGateway.IntegrationTests.Cdn;
 /// </summary>
 public sealed class CdnUploadUrlResolverTests
 {
-    private static readonly Uri CdnInternalBase = new("http://192.168.2.50:10072/");
+    private static readonly Uri CdnInternalBase = new("http://127.0.0.1:10072/");
     private const string GatewayPublicBase = "https://jeeb.fds-1.com";
 
     [Fact]
@@ -34,7 +34,7 @@ public sealed class CdnUploadUrlResolverTests
         // A provider that returns an absolute URL at the internal-only cdn host is
         // still unreachable by the mobile client → proxy it.
         const string internalAbsolute =
-            "http://192.168.2.50:10072/api/ImageUpload/put-signed/OBJ777?exp=9&ct=image/png&sig=zzz";
+            "http://127.0.0.1:10072/api/ImageUpload/put-signed/OBJ777?exp=9&ct=image/png&sig=zzz";
 
         var resolved = CdnUploadUrlResolver.Resolve(internalAbsolute, CdnInternalBase, GatewayPublicBase);
 

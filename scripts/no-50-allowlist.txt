@@ -1,0 +1,72 @@
+# Allowlist for scripts/check-no-50-server.sh — the .50 ban gate.
+#
+# Format:  <tracked path>:<exact trimmed content of the offending line>
+# Lines starting with '#' and blank lines are ignored.
+#
+# RULES
+#  1. Every entry needs a dated reason and a named owner of the decision that
+#     unblocks it. No bare entries.
+#  2. The gate FAILS on a stale entry (one matching nothing), so an exception
+#     cannot outlive its reason. Removing the .50 line and its allowlist entry
+#     is one atomic change.
+#  3. This file is the visible inventory of the ban's open exceptions. It should
+#     only ever shrink.
+#
+# ---------------------------------------------------------------------------
+# EXCEPTION 1 — deploy-to-jeeb.yml workflow_dispatch defaults (10 lines)
+# Added 2026-07-26 · batch b02-20260726 · P0 · blocked on D2 (token scope)
+#
+# These are the workflow_dispatch input DEFAULTS for 10 services. They are the
+# highest-value part of the purge: a deploy that accepts the defaults repoints
+# notification (:10026) and push (:10040) — plus 8 more legs — at an unroutable
+# host, which breaks the polling→push cutover and presents as a product bug.
+#
+# NOT fixed here because the available GitHub token lacks the `workflow` OAuth
+# scope and the remote hard-refuses any push touching .github/workflows/*:
+#   "refusing to allow an OAuth App to create or update workflow
+#    .github/workflows/i18n-gate.yml without `workflow` scope"
+# (verified empirically on a throwaway branch, 2026-07-26 — not assumed).
+#
+# UNBLOCK: the owner applies
+#   docs/batches/b02-20260726/OWNER-APPLY-workflow-50-purge.patch
+# which rewrites these 10 defaults AND deletes these 10 allowlist entries AND
+# wires this gate into .github/workflows/ci.yml, in one commit.
+# ---------------------------------------------------------------------------
+.github/workflows/deploy-to-jeeb.yml:chat_base_url:               { description: 'Chat service base URL',            required: true, default: 'http://192.168.2.50:10028' }
+.github/workflows/deploy-to-jeeb.yml:user_management_base_url:    { description: 'User-management service base URL',  required: true, default: 'http://192.168.2.50:10001' }
+.github/workflows/deploy-to-jeeb.yml:wallet_base_url:             { description: 'Wallet service base URL',          required: true, default: 'http://192.168.2.50:10014' }
+.github/workflows/deploy-to-jeeb.yml:notification_base_url:       { description: 'Notification service base URL',     required: true, default: 'http://192.168.2.50:10026' }
+.github/workflows/deploy-to-jeeb.yml:push_notification_base_url:  { description: 'Push-notification service base URL',required: true, default: 'http://192.168.2.50:10040' }
+.github/workflows/deploy-to-jeeb.yml:otp_base_url:                { description: 'OTP service base URL',             required: true, default: 'http://192.168.2.50:10037' }
+.github/workflows/deploy-to-jeeb.yml:matching_base_url:           { description: 'Matching service base URL (native host)', required: true, default: 'http://192.168.2.50:10025' }
+.github/workflows/deploy-to-jeeb.yml:delivery_base_url:           { description: 'Delivery service base URL (live Jeeb swarm publishes on :10055 — S07 H6c accept->delivery-create)', required: true, default: 'http://192.168.2.50:10055' }
+.github/workflows/deploy-to-jeeb.yml:kyc_base_url:                { description: 'Services__Kyc__BaseUrl — owning kyc-service (live swarm host)',  required: true, default: 'http://192.168.2.50:10074' }
+.github/workflows/deploy-to-jeeb.yml:cdn_base_url:                { description: 'Services__Cdn__BaseUrl — cdn-service signed-PUT broker (live swarm host)', required: true, default: 'http://192.168.2.50:10072' }
+#
+# ---------------------------------------------------------------------------
+# EXCEPTION 2 — Services:UnifiedPayment:BaseUrl (1 line)
+# Added 2026-07-26 · batch b02-20260726 · P0 · blocked on an OWNER DECISION
+#
+# This is the only .50 value in the repo that is genuinely load-bearing, and it
+# is where the .50 ban collides with the locked payments policy in AGENTS.md.
+#
+#  * gateway.env does NOT export Services__UnifiedPayment__BaseUrl, and
+#    deploy-to-jeeb.yml has no unified-payment input (both verified). So unlike
+#    every other leg, this committed value IS the live effective destination.
+#  * Program.cs:1799-1813 registers HttpPaymentRefundClient ONLY when the
+#    BaseUrl is non-empty. Blanking it swaps in InMemoryPaymentRefundClient, so
+#    every production dispute refund (POST /admin/v1/disputes/{id}/resolve —
+#    real money OUT) becomes a silent no-op the system reports as success.
+#  * HealthCheckExtensions.cs:93 probes this URL as a CRITICAL readiness check.
+#  * AGENTS.md: an existing payments route may not be deleted without an owner
+#    decision recorded in docs/batches/b02-20260726/UPG-REMOVAL.md.
+#
+# Changing this line is therefore a payments decision, not a config cleanup, and
+# it is explicitly out of scope for an agent. Left as-is and surfaced here rather
+# than "cleaned up" quietly.
+#
+# UNBLOCK: owner records a decision in UPG-REMOVAL.md — either a replacement
+# refund destination, or an explicit acceptance that refunds are inert. Then the
+# BaseUrl and this entry are removed together.
+# ---------------------------------------------------------------------------
+src/JeebGateway/appsettings.Production.json:"BaseUrl": "http://192.168.2.50:10066"
