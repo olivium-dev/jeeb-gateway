@@ -2,6 +2,7 @@ using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations;
 using JeebGateway.Financials;
+using JeebGateway.Notifications;
 using JeebGateway.Observability;
 using JeebGateway.Push;
 using JeebGateway.Requests;
@@ -13,6 +14,7 @@ using JeebGateway.Users;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
@@ -64,7 +66,14 @@ public class DeliveriesController : ControllerBase
     // JEB-56: settlement store for COD platform records (recorded→batched→paid).
     private readonly ISettlementStore _settlementStore;
     private readonly ISettlementService _settlements;
-    private readonly IPushNotificationService _push;
+    // b02 wave B.1: delivery-status push now rides STACK B (the push microservice), not the
+    // in-gateway IPushNotificationService, whose InMemoryPushTransport delivered nothing.
+    // The dependency on IPushNotificationService is GONE from this controller on purpose —
+    // re-adding it would silently restore a path that reports success for a push that never
+    // reached a device.
+    private readonly IDeliveryStatusPushNotifier _deliveryPush;
+    // Opens a fresh DI scope for the fire-and-forget status push — see NotifyOtherPartyAsync.
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ICancellationService _cancellations;
     private readonly IAdminEscalationStore _escalations;
     private readonly IOptions<OtpHandoverOptions> _otpOptions;
@@ -194,7 +203,8 @@ public class DeliveriesController : ControllerBase
         IUsersStore users,
         ISettlementStore settlementStore,
         ISettlementService settlements,
-        IPushNotificationService push,
+        IDeliveryStatusPushNotifier deliveryPush,
+        IServiceScopeFactory scopeFactory,
         ICancellationService cancellations,
         IAdminEscalationStore escalations,
         IOptions<OtpHandoverOptions> otpOptions,
@@ -214,7 +224,8 @@ public class DeliveriesController : ControllerBase
         _users = users;
         _settlementStore = settlementStore;
         _settlements = settlements;
-        _push = push;
+        _deliveryPush = deliveryPush;
+        _scopeFactory = scopeFactory;
         _cancellations = cancellations;
         _escalations = escalations;
         _otpOptions = otpOptions;
@@ -1228,15 +1239,6 @@ public class DeliveriesController : ControllerBase
             recipients.Add(req.JeeberId);
         }
 
-        var data = new Dictionary<string, string>
-        {
-            ["deliveryId"] = req.Id,
-            ["previousStatus"] = previousStatus,
-            ["status"] = req.Status,
-            ["cancelledBy"] = req.CancelledBy ?? string.Empty,
-            ["pendingApproval"] = (outcome == CancellationOutcome.PendingAdminApproval) ? "true" : "false"
-        };
-
         var title = outcome == CancellationOutcome.PendingAdminApproval
             ? "Cancellation requested"
             : "Delivery cancelled";
@@ -1244,26 +1246,23 @@ public class DeliveriesController : ControllerBase
             ? "The client requested a cancellation. An admin will review."
             : $"Delivery cancelled from {previousStatus}.";
 
-        foreach (var userId in recipients)
-        {
-            try
-            {
-                var request = new PushNotificationRequest(
-                    UserId: userId,
-                    Trigger: NotificationTrigger.StatusChange,
-                    Title: title,
-                    Body: bodyText,
-                    Data: data,
-                    IdempotencyKey: $"{req.Id}:{req.Status}:cancel:{userId}");
-                await _push.SendAsync(request, ct);
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex,
-                    "Cancellation push failed for delivery {DeliveryId} user {UserId}",
-                    req.Id, userId);
-            }
-        }
+        // STACK B. This used to compose an IPushNotificationService request, which is
+        // routed to InMemoryPushTransport — an in-process queue that delivers nothing and
+        // is then counted Delivered. See IDeliveryStatusPushNotifier for the three
+        // independent reasons that path cannot work. The notifier never throws.
+        await _deliveryPush.NotifyAsync(
+            new DeliveryStatusPushNotification(
+                DeliveryId: req.Id,
+                RequestId: req.Id,
+                PreviousStatus: previousStatus,
+                Status: req.Status,
+                Recipients: recipients,
+                Title: title,
+                Body: bodyText,
+                GpsTrackingActive: req.GpsTrackingActive,
+                CancelledBy: req.CancelledBy ?? string.Empty,
+                PendingApproval: outcome == CancellationOutcome.PendingAdminApproval),
+            ct);
     }
 
     /// <summary>
@@ -1299,29 +1298,29 @@ public class DeliveriesController : ControllerBase
             recipients.Add(req.JeeberId);
         }
 
-        var data = new Dictionary<string, string>
-        {
-            ["deliveryId"] = req.Id,
-            ["previousStatus"] = previousStatus,
-            ["status"] = effectiveStatus,
-            ["gpsTrackingActive"] = req.GpsTrackingActive ? "true" : "false"
-        };
-
         var title = "Delivery status updated";
         var bodyText = $"Status changed from {previousStatus} to {effectiveStatus}.";
 
-        // Build the per-recipient push requests SYNCHRONOUSLY so every value is captured
-        // from `req` now — the caller mutates/returns the row the instant this returns.
+        // Build the notification SYNCHRONOUSLY so every value is captured from `req` now —
+        // the caller mutates/returns the row the instant this returns.
+        //
+        // STACK B (b02 wave B.1). This used to hand an IPushNotificationService request to
+        // the in-gateway push stack, which binds InMemoryPushTransport and delivers nothing
+        // while logging Delivered. Every delivery-status-driven mobile surface therefore had
+        // to poll, because the push it was waiting for never left the process. The notifier
+        // composes the SAME ServicePushNotificationClient whose arrival is proven on
+        // hardware, and emits the type=delivery + delivery_id contract the mobile handler
+        // actually parses. See IDeliveryStatusPushNotifier.
         var deliveryId = req.Id;
-        var pushRequests = recipients
-            .Select(userId => new PushNotificationRequest(
-                UserId: userId,
-                Trigger: NotificationTrigger.StatusChange,
-                Title: title,
-                Body: bodyText,
-                Data: data,
-                IdempotencyKey: $"{deliveryId}:{effectiveStatus}:{userId}"))
-            .ToList();
+        var notification = new DeliveryStatusPushNotification(
+            DeliveryId: deliveryId,
+            RequestId: deliveryId,
+            PreviousStatus: previousStatus,
+            Status: effectiveStatus,
+            Recipients: recipients,
+            Title: title,
+            Body: bodyText,
+            GpsTrackingActive: req.GpsTrackingActive);
 
         // JEBV4-281 — FIRE-AND-FORGET. The status-change push MUST NOT block the
         // transition / OTP-verify response. The push pipeline resolves the counterparty
@@ -1332,27 +1331,30 @@ public class DeliveriesController : ControllerBase
         // backend state had already committed. So detach the send loop onto a background
         // task with its OWN short-timeout token (NOT the request `ct`, which is cancelled
         // the instant the response completes) and swallow+log failures as warnings.
-        // `_push` (IPushNotificationService) is a DI SINGLETON (Program.cs), so it is safe
-        // to use after the request scope ends. The transition/OTP endpoints now return in
-        // <1s regardless of push reachability; when the push IS reachable it delivers
-        // exactly as before (same request shape + idempotency key).
+        //
+        // ⚠️ SCOPE. The old code could use `_push` after the response because
+        // IPushNotificationService is a DI SINGLETON. `IDeliveryStatusPushNotifier` is
+        // SCOPED — it composes the scoped ServicePushNotificationClient — so capturing
+        // `_deliveryPush` here would use a service whose scope is disposed the instant the
+        // response completes. Open a FRESH scope inside the background task instead, the
+        // same pattern NewRequestFanoutProcessor uses for its off-hot-path sends. Resolving
+        // the injected instance would work today only because the NSwag client happens not
+        // to be IDisposable; that is an accident, not a contract.
         _ = Task.Run(async () =>
         {
             using var pushCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            foreach (var pushRequest in pushRequests)
+            try
             {
-                try
-                {
-                    await _push.SendAsync(pushRequest, pushCts.Token);
-                }
-                catch (Exception ex)
-                {
-                    // Best-effort; the state transition already committed. Log for
-                    // observability, never surface to the (already-returned) caller.
-                    _log.LogWarning(ex,
-                        "Status-change push failed for delivery {DeliveryId} user {UserId}",
-                        deliveryId, pushRequest.UserId);
-                }
+                using var scope = _scopeFactory.CreateScope();
+                var notifier = scope.ServiceProvider.GetRequiredService<IDeliveryStatusPushNotifier>();
+                await notifier.NotifyAsync(notification, pushCts.Token);
+            }
+            catch (Exception ex)
+            {
+                // Best-effort; the state transition already committed. Log for
+                // observability, never surface to the (already-returned) caller.
+                _log.LogWarning(ex,
+                    "Status-change push fan-out failed for delivery {DeliveryId}", deliveryId);
             }
         });
 
