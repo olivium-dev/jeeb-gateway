@@ -89,8 +89,10 @@ public static class HealthCheckExtensions
         // new decoupled surface is GET /api/v1/gateways (verified 200 on the swarm,
         // trailing-slash variant also 200). Probe the readiness path it actually
         // serves; bare /health here 404s and falsely 503s the gateway aggregate.
-        // Critical-path: a genuine UPG readiness failure remains fatal (Unhealthy).
-        AddDownstreamProbe(checks, config, "unified-payment-gateway", "Services:UnifiedPayment:BaseUrl",  healthPath: "api/v1/gateways");
+        // UPG probe REMOVED 2026-07-27 by owner ruling: "do not use UPG, jeeb is only cash on
+        // delivery". Services:UnifiedPayment:BaseUrl is gone from committed config (it was the last
+        // live 192.168.2.50 destination), so probing it would dial a banned host and fail a
+        // CRITICAL readiness check for a service Jeeb deliberately no longer uses. Do not re-add.
 
         // voice-transcription serves /healthz (not /health).
         AddDownstreamProbe(checks, config, "voice-transcription",     "Services:VoiceTranscription:BaseUrl", healthPath: "healthz");

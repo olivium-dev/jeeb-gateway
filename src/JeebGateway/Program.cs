@@ -1795,27 +1795,23 @@ builder.Services.AddSingleton<IDisputeCaseStore, InMemoryDisputeCaseStore>();
 builder.Services.AddScoped<IDisputeEvidenceOrchestrator, DisputeEvidenceOrchestrator>();
 builder.Services.AddScoped<IDisputeCaseService, DisputeCaseService>();
 
-builder.Services.AddSingleton<InMemoryPaymentRefundClient>();
-var paymentBaseUrl = builder.Configuration["Services:UnifiedPayment:BaseUrl"]
-    ?? builder.Configuration["Services:UnifiedPayment"];
-if (!string.IsNullOrWhiteSpace(paymentBaseUrl))
-{
-    builder.Services.AddHttpClient<IPaymentRefundClient, HttpPaymentRefundClient>(http =>
-    {
-        http.BaseAddress = new Uri(paymentBaseUrl!.TrimEnd('/') + "/");
-        http.Timeout = TimeSpan.FromSeconds(5);
-    })
-        // R6 (sprint-009 money-resilience-audit): front UPG refund with the org-standard
-        // circuit breaker so a sustained UPG outage fails fast instead of eating the full
-        // timeout on every dispute-resolve. Retry is double-refund-safe — the refund carries
-        // an Idempotency-Key (dispute:{caseId}:refund), so UPG dedupes replays.
-        .AddStandardResilienceHandler();
-}
-else
-{
-    builder.Services.AddSingleton<IPaymentRefundClient>(sp =>
-        sp.GetRequiredService<InMemoryPaymentRefundClient>());
-}
+// PAYMENTS — OWNER RULING 2026-07-27: "do not use UPG, jeeb is only cash on delivery".
+//
+// Jeeb settles COD in cash, so there is no captured card payment to refund and therefore no
+// unified_payment_gateway route to keep. The UPG BaseUrl has been removed from committed config
+// (it was the last live 192.168.2.50 destination) and MUST NOT be re-added.
+//
+// The previous shape was a trap worth naming, because it is why this could not simply be deleted
+// earlier: when the BaseUrl was absent it silently fell back to InMemoryPaymentRefundClient, which
+// REPORTS SUCCESS. That turned every dispute refund (real money OUT) into a no-op the system
+// believed had worked. Removing the URL alone would have made a money path lie.
+//
+// So the fallback now FAILS LOUDLY instead. If any dispute-resolve path still reaches
+// IPaymentRefundClient, it throws and the operation surfaces as an error rather than a phantom
+// success. That is the correct behaviour under a COD-only policy: a refund request that cannot be
+// honoured must never be reported as honoured. Removing the remaining call sites in
+// Disputes/V2/DisputeCaseService.cs is tracked separately — see UPG-REMOVAL.md.
+builder.Services.AddSingleton<IPaymentRefundClient, CashOnDeliveryNoRefundClient>();
 
 // S10 COD-compose: unified_payment_gateway COD + admin-batch client (JEB-56/57/62).
 // Payments-only-via-UPG: the gateway RECORDS an intent / READS / FRONTS the admin
@@ -1825,27 +1821,23 @@ else
 // (idempotent on delivery id) keeps the compose surface exercisable in dev/test.
 builder.Services.Configure<JeebGateway.Financials.Cod.UnifiedPaymentCodOptions>(
     builder.Configuration.GetSection(JeebGateway.Financials.Cod.UnifiedPaymentCodOptions.SectionName));
+// COD settlement ledger — OWNER RULING 2026-07-27: "jeeb is only cash on delivery", no UPG.
+//
+// The HTTP variant (JEB-1484 / GR3) would have posted the cash-settlement ledger THROUGH UPG. It
+// was already DEFAULT-OFF (FeatureFlags:Payments = false) and required Services:UnifiedPayment:BaseUrl,
+// which is now removed. Registering the in-process ledger unconditionally is therefore
+// BEHAVIOUR-PRESERVING — it is exactly what production has been running — while removing the last
+// code path that could dial a payment gateway.
+//
+// Note the deliberate asymmetry with IPaymentRefundClient above: there, the in-memory client
+// REPORTED SUCCESS for money that never moved, so its fallback had to become a hard failure. Here
+// the in-process client IS the ledger of record for cash already collected in person, so it tells
+// the truth and is the correct permanent implementation under a cash-only policy.
+builder.Services.Configure<JeebGateway.Financials.Cod.UnifiedPaymentCodOptions>(
+    builder.Configuration.GetSection(JeebGateway.Financials.Cod.UnifiedPaymentCodOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Financials.Cod.InMemoryUnifiedPaymentCodClient>();
-if (!string.IsNullOrWhiteSpace(paymentBaseUrl))
-{
-    builder.Services
-        .AddHttpClient<JeebGateway.Financials.Cod.IUnifiedPaymentCodClient,
-                       JeebGateway.Financials.Cod.HttpUnifiedPaymentCodClient>(http =>
-        {
-            http.BaseAddress = new Uri(paymentBaseUrl!.TrimEnd('/') + "/");
-            http.Timeout = TimeSpan.FromSeconds(10);
-        })
-            // R6 (sprint-009 money-resilience-audit): front UPG COD-record/mark-paid with the
-            // org-standard circuit breaker so a slow UPG fails fast rather than degrading every
-            // COD-record call for the full timeout. Retry is safe — the COD record carries an
-            // Idempotency-Key (delivery_id), so UPG dedupes replays.
-            .AddStandardResilienceHandler();
-}
-else
-{
-    builder.Services.AddSingleton<JeebGateway.Financials.Cod.IUnifiedPaymentCodClient>(sp =>
-        sp.GetRequiredService<JeebGateway.Financials.Cod.InMemoryUnifiedPaymentCodClient>());
-}
+builder.Services.AddSingleton<JeebGateway.Financials.Cod.IUnifiedPaymentCodClient>(sp =>
+    sp.GetRequiredService<JeebGateway.Financials.Cod.InMemoryUnifiedPaymentCodClient>());
 
 // Jeeber KYC submission pipeline (T-backend-004 / JEEB-22).
 //
