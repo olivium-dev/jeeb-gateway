@@ -403,8 +403,86 @@ public sealed class DurableRequestsStore : IRequestsStore
         }
     }
 
-    public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
-        => _inner.GetByConversationIdAsync(conversationId, ct);
+    /// <summary>
+    /// JEBV4-345: conversation → request resolution that SURVIVES A RESTART.
+    ///
+    /// <para>This lookup is the chat-message push notifier's only recipient resolver, so
+    /// whatever it cannot resolve simply gets no chat push. Delegating to the inner
+    /// in-memory store alone (the pre-fix behaviour) meant that after every gateway
+    /// bounce — a deploy, a crash-restart, anything — the conversation → (client, jeeber)
+    /// mapping for every EXISTING order was gone, and chat push died silently for those
+    /// orders while continuing to work for orders created since the bounce. Confirmed on
+    /// MSI 2026-07-27: a fresh in-session conversation emitted a push to :10040, while a
+    /// real UI send on a conversation created the previous day emitted nothing at all.</para>
+    ///
+    /// <para>In-memory first (hot path, no I/O), Postgres mirror on a miss. A mirror fault
+    /// degrades to the in-memory answer rather than throwing — the caller is a
+    /// best-effort notifier on the chat send path and must never turn a 201 into a 500.</para>
+    /// </summary>
+    public async Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
+    {
+        var local = await _inner.GetByConversationIdAsync(conversationId, ct);
+        if (local is not null || _mirror is null || string.IsNullOrWhiteSpace(conversationId))
+        {
+            return local;
+        }
+
+        try
+        {
+            return await _mirror.GetByConversationIdAsync(conversationId, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "requests-durable: durable conversation lookup for {ConversationId} failed; " +
+                "chat push recipients cannot be resolved for this send.",
+                conversationId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// JEBV4-345: stamps the chat conversation id onto the live row AND the durable
+    /// mirror. The accept path resolves/creates the conversation after create, and
+    /// previously assigned <c>request.ConversationId</c> on the in-memory object only —
+    /// so an order whose conversation was born at accept had a NULL
+    /// <c>gw_conversation_id</c> in Postgres and stayed unresolvable after a bounce even
+    /// with the durable read above. Best-effort on the mirror leg, exactly like
+    /// <see cref="MirrorLifecycleAsync"/>: the accept saga has already committed.
+    /// </summary>
+    public async Task SetConversationIdAsync(string requestId, string conversationId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(requestId) || string.IsNullOrWhiteSpace(conversationId)) return;
+
+        var local = await _inner.GetAsync(requestId, ct);
+        if (local is not null)
+        {
+            local.ConversationId = conversationId;
+        }
+
+        if (_mirror is null) return;
+        try
+        {
+            await _mirror.UpdateConversationIdAsync(requestId, conversationId, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "postgres-requests-conversation-id"));
+            _logger.LogWarning(ex,
+                "requests-durable: conversation-id mirror write failed for {RequestId}; " +
+                "chat push for conversation {ConversationId} will stop working after a bounce.",
+                requestId, conversationId);
+        }
+    }
 
     /// <summary>
     /// FT-08: durable expiry-sweep read. When the durable path is active the

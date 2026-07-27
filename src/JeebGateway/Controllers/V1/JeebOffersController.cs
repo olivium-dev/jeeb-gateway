@@ -631,7 +631,14 @@ public sealed class JeebOffersController : ControllerBase
             // 2) Link the conversation id onto the local projection (in-place stamp on the
             //    live store row, mirroring the create-time auto-create path) so subsequent
             //    reads surface a non-null conversationId.
+            //
+            //    JEBV4-345: route the stamp THROUGH THE STORE as well. The bare field
+            //    assignment below only mutates the in-memory object; on the durable store
+            //    that leaves gw_conversation_id NULL in Postgres, so after a gateway bounce
+            //    GetByConversationIdAsync can no longer resolve this conversation and the
+            //    chat push for this order dies silently. The store call persists it.
             request.ConversationId = conversationId;
+            await _requests.SetConversationIdAsync(requestId, conversationId, ct);
 
             // 3) Seat the winning jeeber so they can open chat without a 403.
             await _conversations.AddParticipantAsync(

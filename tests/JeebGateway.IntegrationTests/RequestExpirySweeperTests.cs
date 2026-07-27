@@ -579,6 +579,12 @@ public class RequestExpirySweeperTests
 
         public LocalExpiryAuthority(InMemoryRequestsStore rows) => _rows = rows;
 
+        public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
+            => _rows.GetByConversationIdAsync(conversationId, ct);
+
+        public Task UpdateConversationIdAsync(string requestId, string conversationId, CancellationToken ct)
+            => _rows.SetConversationIdAsync(requestId, conversationId, ct);
+
         public async Task<bool> MarkExpiredAsync(
             string requestId,
             DateTimeOffset expiredAt,

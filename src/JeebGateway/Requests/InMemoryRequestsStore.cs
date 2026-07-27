@@ -176,6 +176,25 @@ public class InMemoryRequestsStore : IRequestsStore
         }
     }
 
+    /// <inheritdoc />
+    public Task SetConversationIdAsync(string requestId, string conversationId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(requestId) || string.IsNullOrWhiteSpace(conversationId))
+        {
+            return Task.CompletedTask;
+        }
+
+        lock (_writeLock)
+        {
+            if (_requests.TryGetValue(requestId, out var existing))
+            {
+                existing.ConversationId = conversationId;
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
     public Task<IReadOnlyList<DeliveryRequest>> ListPendingCreatedAtOrBeforeAsync(
         DateTimeOffset cutoff,
         CancellationToken ct)

@@ -185,6 +185,23 @@ public interface IRequestsStore
     Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct);
 
     /// <summary>
+    /// JEBV4-345: stamps the chat <c>ConversationId</c> onto the request row through the
+    /// store, so a durable store can persist it instead of it living only on the
+    /// in-memory object.
+    ///
+    /// <para>The create path stamps the conversation id inside the store itself. The
+    /// ACCEPT path resolves or creates the conversation in the controller and used to
+    /// assign <c>request.ConversationId</c> directly on the returned object — invisible
+    /// to any durable backing, so <see cref="GetByConversationIdAsync"/> could never
+    /// recover that conversation after a process bounce and its chat push died silently.
+    /// Routing the stamp through the store is what makes the two paths equivalent.</para>
+    ///
+    /// <para>Best-effort by contract: implementations never throw into the caller (the
+    /// accept saga has already committed) and a no-op on an unknown id is legal.</para>
+    /// </summary>
+    Task SetConversationIdAsync(string requestId, string conversationId, CancellationToken ct);
+
+    /// <summary>
     /// Counts the requests where
     /// <see cref="DeliveryRequest.JeeberId"/> equals <paramref name="jeeberId"/>
     /// and the status is in <see cref="RequestStatus.JeeberActiveStates"/>

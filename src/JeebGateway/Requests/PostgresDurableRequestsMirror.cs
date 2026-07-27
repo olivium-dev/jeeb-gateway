@@ -358,6 +358,87 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
         return rows.Count > 0 ? rows[0] : null;
     }
 
+    /// <summary>
+    /// JEBV4-345: durable by-conversation read. Same column projection + <see cref="MapRow"/>
+    /// as the by-id read, filtered on the gateway-owned <c>gw_conversation_id</c> TEXT
+    /// column (migration 0024). Backs chat-push recipient resolution across a restart.
+    ///
+    /// <para>The id is validated as a UUID before the query even though the column is TEXT:
+    /// every conversation id the gateway stamps comes from chat-service and IS a UUID, so a
+    /// non-UUID argument is a caller bug or a legacy channel id, and rejecting it early keeps
+    /// an arbitrary caller string off the wire. <c>ORDER BY created_at</c> + <c>LIMIT 1</c>
+    /// makes the read deterministic if a conversation were ever stamped onto two rows — the
+    /// in-memory store's <c>FirstOrDefault</c> has no such guarantee, and a nondeterministic
+    /// recipient set is worse than a stable one.</para>
+    /// </summary>
+    public async Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
+    {
+        if (!Guid.TryParse(conversationId, out _)) return null;
+
+        await using var conn = await _db.OpenAsync(ct);
+
+        const string sql = """
+            SELECT
+                id,
+                client_id,
+                COALESCE(gw_status, status::text)  AS status,
+                description,
+                transcription,
+                audio_url,
+                gw_tier_code,
+                ST_Y(pickup_location::geometry)     AS pickup_lat,
+                ST_X(pickup_location::geometry)     AS pickup_lng,
+                ST_Y(dropoff_location::geometry)    AS dropoff_lat,
+                ST_X(dropoff_location::geometry)    AS dropoff_lng,
+                pickup_address,
+                dropoff_address,
+                gw_recipient_phone,
+                created_at,
+                scheduled_at,
+                gw_expired_at,
+                gw_jeeber_id,
+                gw_accepted_fee,
+                gw_conversation_id,
+                gw_cancelled_by,
+                gw_cancellation_reason,
+                gw_cancelled_at
+            FROM delivery_requests
+            WHERE gw_conversation_id = @ConversationId AND gw_mirror = TRUE
+            ORDER BY created_at DESC
+            LIMIT 1
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("ConversationId", conversationId);
+        var rows = await ReadListAsync(cmd, ct);
+        return rows.Count > 0 ? rows[0] : null;
+    }
+
+    /// <inheritdoc />
+    public async Task UpdateConversationIdAsync(string requestId, string conversationId, CancellationToken ct)
+    {
+        if (!Guid.TryParse(requestId, out var id)) return;
+        if (string.IsNullOrWhiteSpace(conversationId)) return;
+
+        await using var conn = await _db.OpenAsync(ct);
+
+        // Touch ONLY the gateway column, exactly like UpdateLifecycleAsync. The
+        // conversation id is write-once per row in practice (chat-service de-dups on
+        // correlation_key), so an unconditional assignment is idempotent for a replay
+        // and self-healing for a row whose accept-time stamp never reached Postgres.
+        const string sql = """
+            UPDATE delivery_requests
+               SET gw_conversation_id = @ConversationId,
+                   gw_updated_at      = now()
+             WHERE id = @Id AND gw_mirror = TRUE
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("Id", id);
+        cmd.Parameters.AddWithValue("ConversationId", conversationId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private static async Task<List<DeliveryRequest>> ReadListAsync(NpgsqlCommand cmd, CancellationToken ct)
