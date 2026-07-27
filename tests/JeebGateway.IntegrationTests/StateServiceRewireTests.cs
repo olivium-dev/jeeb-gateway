@@ -301,6 +301,13 @@ internal sealed class FakeStateClient : IJeebStateServiceClient
     // Remaining members are unused by these tests.
     public Task UpsertIdempotencyKeyAsync(IdempotencyPutRequest body) => Task.CompletedTask;
     public Task UpsertIdempotencyKeyAsync(IdempotencyPutRequest body, CancellationToken ct) => Task.CompletedTask;
+    public Task<IdempotencyUpsertResult> UpsertIdempotencyKeyWithResultAsync(
+        IdempotencyPutRequest body, CancellationToken ct) =>
+        Task.FromResult(new IdempotencyUpsertResult
+        {
+            HttpStatusCode = 201,
+            Record = new IdempotencyRecord { Key = body.Key, Inserted = true },
+        });
     public Task<IdempotencyRecord> GetIdempotencyKeyAsync(string key) => GetIdempotencyKeyAsync(key, default);
     public Task<IdempotencyRecord> GetIdempotencyKeyAsync(string key, CancellationToken ct) =>
         Task.FromResult(new IdempotencyRecord());
