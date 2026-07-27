@@ -56,9 +56,28 @@ public interface IChatMessagePushNotifier
 /// <inheritdoc />
 public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
 {
-    // Bounds the FCM fan-out so a slow/down push service cannot materially delay
-    // the chat send's 201 (the LAN-local push svc is normally <200ms).
-    private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(2);
+    // Bounds EACH recipient's push so a down push service cannot hang the chat send's 201.
+    //
+    // JEBV4-345 — was 2s, on the stated assumption that "the LAN-local push svc is normally
+    // <200ms". MEASURED on MSI 2026-07-27, three consecutive real sends to a registered
+    // device: 3.08s / 3.05s / 2.84s. The 200ms figure describes a push that has no device
+    // token to deliver to (the push service answers 404 immediately); a push that actually
+    // reaches FCM costs ~3s. So the 2s cap did not "bound a slow service" — it guaranteed
+    // that every push to a REGISTERED recipient was aborted mid-flight with
+    // TaskCanceledException, i.e. the healthy path was the only one it could never complete.
+    // Observed live at 11:44:49 CEST: recipient resolved correctly, socket connected, request
+    // cancelled at 2s, push service never logged the call, device never got the notification.
+    //
+    // 10s matches the ceiling the push HttpClient's own resilience pipeline already enforces
+    // (ServiceClientExtensions.ConfigurePushBreakerAndTimeout), so this no longer pre-empts
+    // the transport's own budget — the pipeline stays the authority on when to give up.
+    //
+    // FOLLOW-UP (not this change): the notifier is awaited inline on the send path, so a
+    // healthy push now adds ~3s to the chat send's 201. The right end state is to detach it
+    // onto a background queue the way NewRequestPushNotifier does
+    // (NewRequestFanoutQueue/NewRequestFanoutProcessor); that is an architectural change and
+    // wants its own review. Arriving late beats never arriving, which is the state today.
+    private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(10);
 
     private const int PreviewMaxLength = 120;
 
@@ -170,11 +189,16 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
                 ["type"] = "chat",
             };
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(PushTimeout);
-
             foreach (var recipient in recipients)
             {
+                // JEBV4-345: the budget is PER RECIPIENT. It used to be one CancellationTokenSource
+                // created before the loop, so the whole fan-out shared a single deadline and the
+                // second recipient inherited whatever the first left over — with a real ~3s FCM
+                // round trip that is reliably nothing. Per-recipient isolation of the deadline
+                // matches the per-recipient isolation of the catch below.
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(PushTimeout);
+
                 try
                 {
                     await _push.Send_notification_to_userAsync(
