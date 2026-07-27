@@ -199,7 +199,9 @@ public class GatewayDbProbeEndpointTests
                 {
                     foreach (var name in new[]
                     {
-                        "db-probe-notification", "db-probe-geolocation", "db-probe-unified-payment",
+                        // "db-probe-unified-payment" removed 2026-07-27 (cash-on-delivery only):
+                        // the named client it stubbed no longer exists in the gateway.
+                        "db-probe-notification", "db-probe-geolocation",
                         "db-probe-realtime", "db-probe-compliment", "db-probe-ban", "db-probe-otp",
                     })
                     {

@@ -1040,22 +1040,22 @@ else
     builder.Services.AddSingleton<ISettlementEnqueueStore, InMemorySettlementEnqueueStore>();
 }
 
-// GR3 (JEB-1484) — the cash-settlement ledger post runs THROUGH UPG via the
-// generic external-settlement endpoint (UpgSettlementLedgerClient ->
-// IUpgSettlementClient) when FeatureFlags:UseUpstream:Payments is true. The flag
-// defaults OFF, keeping today's in-process ledger (InMemorySettlementLedgerClient)
-// as the instant rollback target. SettlementService treats the post as
-// best-effort and is idempotent on the settlement id, so this swap is additive
-// and non-breaking. Flip via FeatureFlags__UseUpstream__Payments=true once UPG's
-// JEB-1484 PR is owner-approved + deployed (Services:UnifiedPayment:BaseUrl set).
-if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Payments"))
-{
-    builder.Services.AddSingleton<ISettlementLedgerClient, UpgSettlementLedgerClient>();
-}
-else
-{
-    builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
-}
+// Cash-settlement ledger — OWNER RULING 2026-07-27: "jeeb is only cash on delivery", no UPG.
+//
+// This was a FeatureFlags:UseUpstream:Payments swap between UpgSettlementLedgerClient (which
+// posted the settlement THROUGH unified_payment_gateway's generic external-settlement endpoint)
+// and the in-process ledger. The flag defaulted OFF and the UPG BaseUrl is gone from committed
+// config, so registering the in-process ledger UNCONDITIONALLY is behaviour-preserving — it is
+// exactly what production has been running. The flag branch, the UPG ledger client and its typed
+// transport are deleted, so no configuration value can resurrect the dial.
+//
+// SIDE OF THE ASYMMETRY (see IPaymentRefundClient below for the other side): the in-process ledger
+// TELLS THE TRUTH. Cash was already collected hand-to-hand by the Jeeber; recording it in the
+// gateway's own ledger is the complete operation, not a stand-in for a remote write that did not
+// happen. That is why this one is safe to keep as the permanent implementation while the refund
+// client had to be made to fail loudly. SettlementService still treats the post as best-effort and
+// idempotent on the settlement id.
+builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
 
 // JEBV4-302: shared per-jeeber earnings-cache invalidation registry. Singleton so the
 // read side (JeebEarningsController links each cache entry to the jeeber's change token)
@@ -1774,10 +1774,8 @@ builder.Services.AddSingleton<IDisputeService, DisputeService>();
 //   POST /v1/deliveries/{id}/escalate
 //   POST /admin/v1/disputes/{id}/resolve
 //
-// Refund path proxies to olivium-dev/unified_payment_gateway (locked-in
-// payments policy). InMemoryPaymentRefundClient stands in for tests /
-// local dev; HttpPaymentRefundClient takes over when
-// Services:UnifiedPayment:BaseUrl is configured.
+// The refund path no longer proxies anywhere — see the PAYMENTS block below;
+// under cash-on-delivery there is no capture to refund and the client throws.
 //
 // Evidence orchestrator captures chat transcript + GPS polyline at
 // escalate time with per-call timeouts so the AC6 1s open budget holds
@@ -1813,31 +1811,23 @@ builder.Services.AddScoped<IDisputeCaseService, DisputeCaseService>();
 // Disputes/V2/DisputeCaseService.cs is tracked separately — see UPG-REMOVAL.md.
 builder.Services.AddSingleton<IPaymentRefundClient, CashOnDeliveryNoRefundClient>();
 
-// S10 COD-compose: unified_payment_gateway COD + admin-batch client (JEB-56/57/62).
-// Payments-only-via-UPG: the gateway RECORDS an intent / READS / FRONTS the admin
-// mark-paid against UPG's live routes — it never touches a provider. Credentials
-// (UPG :api X-Api-Key + AdminAuthPlug bearer) are env-injected, never committed.
-// Live HttpClient when Services:UnifiedPayment:BaseUrl is set; in-memory fallback
-// (idempotent on delivery id) keeps the compose surface exercisable in dev/test.
-builder.Services.Configure<JeebGateway.Financials.Cod.UnifiedPaymentCodOptions>(
-    builder.Configuration.GetSection(JeebGateway.Financials.Cod.UnifiedPaymentCodOptions.SectionName));
-// COD settlement ledger — OWNER RULING 2026-07-27: "jeeb is only cash on delivery", no UPG.
+// S10 COD-compose ledger (JEB-56/57/62) — OWNER RULING 2026-07-27: "jeeb is only cash on
+// delivery", no unified_payment_gateway.
 //
-// The HTTP variant (JEB-1484 / GR3) would have posted the cash-settlement ledger THROUGH UPG. It
-// was already DEFAULT-OFF (FeatureFlags:Payments = false) and required Services:UnifiedPayment:BaseUrl,
-// which is now removed. Registering the in-process ledger unconditionally is therefore
-// BEHAVIOUR-PRESERVING — it is exactly what production has been running — while removing the last
-// code path that could dial a payment gateway.
+// The HTTP implementation (HttpUnifiedPaymentCodClient) and the UnifiedPaymentCodOptions that
+// carried UPG's :api X-Api-Key + AdminAuthPlug bearer are DELETED. Under a cash-only policy there
+// is no external settlement destination, so the in-process ledger is not a fallback — it is the
+// ledger of record, and it is registered unconditionally. Behaviour-preserving: the BaseUrl that
+// would have selected the HTTP client is already gone from committed config, so this is exactly
+// what production has been running.
 //
-// Note the deliberate asymmetry with IPaymentRefundClient above: there, the in-memory client
-// REPORTED SUCCESS for money that never moved, so its fallback had to become a hard failure. Here
-// the in-process client IS the ledger of record for cash already collected in person, so it tells
-// the truth and is the correct permanent implementation under a cash-only policy.
-builder.Services.Configure<JeebGateway.Financials.Cod.UnifiedPaymentCodOptions>(
-    builder.Configuration.GetSection(JeebGateway.Financials.Cod.UnifiedPaymentCodOptions.SectionName));
-builder.Services.AddSingleton<JeebGateway.Financials.Cod.InMemoryUnifiedPaymentCodClient>();
-builder.Services.AddSingleton<JeebGateway.Financials.Cod.IUnifiedPaymentCodClient>(sp =>
-    sp.GetRequiredService<JeebGateway.Financials.Cod.InMemoryUnifiedPaymentCodClient>());
+// ASYMMETRY, deliberate — compare IPaymentRefundClient above. There, the in-memory client REPORTED
+// SUCCESS for money that never moved, so its replacement FAILS LOUDLY. Here the in-process ledger
+// records cash ALREADY COLLECTED in person: it tells the truth, so it is the correct permanent
+// implementation. Neither money path is allowed to become a silent no-op.
+builder.Services.AddSingleton<JeebGateway.Financials.Cod.InProcessCodSettlementLedger>();
+builder.Services.AddSingleton<JeebGateway.Financials.Cod.ICodSettlementLedger>(sp =>
+    sp.GetRequiredService<JeebGateway.Financials.Cod.InProcessCodSettlementLedger>());
 
 // Jeeber KYC submission pipeline (T-backend-004 / JEEB-22).
 //

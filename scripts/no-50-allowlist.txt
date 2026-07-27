@@ -44,28 +44,27 @@
 .github/workflows/deploy-to-jeeb.yml:cdn_base_url:                { description: 'Services__Cdn__BaseUrl — cdn-service signed-PUT broker (live swarm host)', required: true, default: 'http://192.168.2.50:10072' }
 #
 # ---------------------------------------------------------------------------
-# EXCEPTION 2 — Services:UnifiedPayment:BaseUrl (1 line)
-# Added 2026-07-26 · batch b02-20260726 · P0 · blocked on an OWNER DECISION
+# EXCEPTION 2 — Services:UnifiedPayment:BaseUrl — RESOLVED / CLOSED 2026-07-27
 #
-# This is the only .50 value in the repo that is genuinely load-bearing, and it
-# is where the .50 ban collides with the locked payments policy in AGENTS.md.
+# This exception no longer exists. It described the one genuinely load-bearing
+# .50 value in the repo: the UPG BaseUrl that selected HttpPaymentRefundClient
+# for real dispute refunds (money OUT), which could not simply be blanked because
+# blanking it swapped in a client that REPORTED SUCCESS for a refund that never
+# happened.
 #
-#  * gateway.env does NOT export Services__UnifiedPayment__BaseUrl, and
-#    deploy-to-jeeb.yml has no unified-payment input (both verified). So unlike
-#    every other leg, this committed value IS the live effective destination.
-#  * Program.cs:1799-1813 registers HttpPaymentRefundClient ONLY when the
-#    BaseUrl is non-empty. Blanking it swaps in InMemoryPaymentRefundClient, so
-#    every production dispute refund (POST /admin/v1/disputes/{id}/resolve —
-#    real money OUT) becomes a silent no-op the system reports as success.
-#  * HealthCheckExtensions.cs:93 probes this URL as a CRITICAL readiness check.
-#  * AGENTS.md: an existing payments route may not be deleted without an owner
-#    decision recorded in docs/batches/b02-20260726/UPG-REMOVAL.md.
+# The owner ruled on 2026-07-27: "jeeb is only cash on delivery", no
+# unified_payment_gateway. The resolution was NOT to blank the URL:
+#   * the refund path now fails LOUDLY (CashOnDeliveryNoRefundClient throws) —
+#     a refund that cannot be honoured must never be reported as honoured;
+#   * HttpPaymentRefundClient, the UPG settlement client + its typed transport,
+#     the db-probe-unified-payment client and the readiness probe are DELETED;
+#   * the COD settlement ledger, which records cash ALREADY collected in person,
+#     is served in-process — it tells the truth, so it is permanent, not a stub.
 #
-# Changing this line is therefore a payments decision, not a config cleanup, and
-# it is explicitly out of scope for an agent. Left as-is and surfaced here rather
-# than "cleaned up" quietly.
-#
-# UNBLOCK: owner records a decision in UPG-REMOVAL.md — either a replacement
-# refund destination, or an explicit acceptance that refunds are inert. Then the
-# BaseUrl and this entry are removed together.
+# No allowlist line is needed because no Services:UnifiedPayment key survives in
+# committed config OR in the compiled assembly (verified with a UTF-16-aware
+# scan of the built DLL — an ASCII-only grep previously produced a FALSE
+# absence here). The standing guard is
+# tests/JeebGateway.IntegrationTests/Payments/NoPaymentGatewayDialGuardTests.cs.
+# Decision recorded in docs/batches/b02-20260726/UPG-REMOVAL.md.
 # ---------------------------------------------------------------------------

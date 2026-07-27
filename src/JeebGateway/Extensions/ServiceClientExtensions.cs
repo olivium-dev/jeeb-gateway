@@ -492,25 +492,19 @@ public static class ServiceClientExtensions
         heartBeatBuilder.AddHttpMessageHandler<Services.Clients.HeartBeatServiceAuthKeyHandler>();
         heartBeatBuilder.AddResilienceHandler("standard", ConfigureStandardResilience);
 
-        // JEB-1484 (GR3 + GR4) — typed client over the Unified Payment Gateway's
-        // GENERIC external-settlement endpoint (POST /api/v1/payments/settlements/
-        // record). The Jeeb fee policy is computed in the gateway
-        // (CommissionCalculator / SettlementService); UPG records the pre-computed
-        // gross/fee/net. UpgSettlementLedgerClient (the ISettlementLedgerClient
-        // impl, wired in Program.cs behind FeatureFlags:UseUpstream:Payments) maps
-        // a settlement onto this client. AttachStandardPipeline gives it the same
-        // bearer + X-Service-Auth (ServiceAuth gating) + resilience chain as every
-        // other typed client. BindBaseAddress resolves Services:UnifiedPayment
-        // [:BaseUrl] with a trailing slash so "api/v1/payments/..." resolves under
-        // the host (lazy/safe: a missing BaseUrl leaves BaseAddress null and the
-        // flag stays off). HAND-CODED transport: the committed UPG spec and its
-        // NSwag-generated client were deleted 2026-07-26 (owner directive — no
-        // unified_payment_gateway coupling in Jeeb) as they had zero call sites.
-        // This registration is retained because the flag-gated settlement path
-        // still resolves it — see docs/batches/b02-20260726/UPG-REMOVAL.md.
-        AttachStandardPipeline(
-            services.AddHttpClient<IUpgSettlementClient, UpgSettlementClient>(http =>
-                BindBaseAddress(http, config, "Services:UnifiedPayment")));
+        // REMOVED 2026-07-27 (owner ruling — "jeeb is only cash on delivery", no
+        // unified_payment_gateway): the typed IUpgSettlementClient /
+        // UpgSettlementClient pair that dialed UPG's generic external-settlement
+        // endpoint (POST /api/v1/payments/settlements/record), bound via
+        // BindBaseAddress(http, config, "Services:UnifiedPayment").
+        //
+        // This registration was UNCONDITIONAL even though its only consumer
+        // (UpgSettlementLedgerClient) was behind FeatureFlags:UseUpstream:Payments,
+        // so "Services:UnifiedPayment:BaseUrl" stayed a live configuration string
+        // compiled into the shipped assembly. Both the clients and this binding are
+        // deleted — the cash-settlement ledger is now in-process unconditionally
+        // (see Program.cs / InProcessCodSettlementLedger). Do NOT re-add a payments
+        // HttpClient here; see docs/batches/b02-20260726/UPG-REMOVAL.md.
 
         AddDbProbeClients(services, config);
 
@@ -544,9 +538,11 @@ public static class ServiceClientExtensions
         // geolocation-service (PG read) — GET /locations/user/{user_id}.
         AddNamedDownstreamClient(services, config, "db-probe-geolocation", "Services:Geolocation:BaseUrl");
 
-        // unified_payment_gateway (PG read, READ-ONLY) —
-        // GET /api/v1/payments/cod_jeeb/by-delivery/{deliveryId}.
-        AddNamedDownstreamClient(services, config, "db-probe-unified-payment", "Services:UnifiedPayment:BaseUrl");
+        // REMOVED 2026-07-27 (owner ruling — cash on delivery only): the
+        // "db-probe-unified-payment" named client bound to
+        // "Services:UnifiedPayment:BaseUrl". Read-only or not, it was a configured
+        // route to a payment gateway and the second reason that config key survived
+        // into the compiled assembly. The COD record it probed now lives in-process.
 
         // realtime-comunication-service (PG read) — GET /admin/topics.
         AddNamedDownstreamClient(services, config, "db-probe-realtime", "Services:Realtime:BaseUrl");

@@ -10,47 +10,48 @@ namespace JeebGateway.Controllers;
 /// <summary>
 /// COD-compose BFF surface (S10 H3.3/H4/N10-N12, JEB-56/57/62).
 ///
-/// Thin gateway composition over unified_payment_gateway (UPG). The gateway
-/// authorizes the USER (jeeber / admin) JWT at its OWN boundary, then proxies
-/// the corresponding UPG route via <see cref="IUnifiedPaymentCodClient"/>:
+/// The gateway authorizes the USER (jeeber / admin) JWT at its OWN boundary, then
+/// serves the corresponding route from <see cref="ICodSettlementLedger"/>:
 ///
 ///   * POST /api/v1/payments/cod/record               — record COD intent (party).
 ///   * GET  /api/v1/payments/cod_jeeb/by-delivery/{id} — read COD record (party/admin).
 ///   * POST /admin/v1/settlements/{batchId}/mark-paid  — bank-confirmation (admin).
 ///
-/// LAWS honored:
-///   * Payments only via UPG — the gateway NEVER touches a provider; it RECORDS
-///     an intent / READS / FRONTS the admin action against UPG's live routes.
-///   * No inter-service coupling — the gateway composes UPG; it does not read
-///     UPG's DB or call any other backend on UPG's behalf.
-///   * Identity ids are text (forwarded verbatim).
+/// OWNER RULING 2026-07-27 — "jeeb is only cash on delivery": these three routes
+/// were previously a thin composition over unified_payment_gateway. UPG is gone;
+/// the ledger is now in-process (InProcessCodSettlementLedger). The ROUTES,
+/// status codes and body shapes are unchanged — this is a change of WHERE the
+/// COD record lives, never of WHETHER it is written. Authorization is unchanged
+/// too: a non-party still never reaches the ledger.
 ///
-/// UPG's status + body are re-emitted VERBATIM so the upstream contract is never
-/// reshaped. When UPG is unreachable, the compose surface returns 502.
+/// LAWS honored:
+///   * The gateway NEVER touches a payment provider — under cash-on-delivery
+///     there is no provider; the cash moved hand-to-hand and this records it.
+///   * Identity ids are text (forwarded verbatim).
 /// </summary>
 [ApiController]
 [Produces("application/json", "application/problem+json")]
 public sealed class CodSettlementComposeController : ControllerBase
 {
-    private readonly IUnifiedPaymentCodClient _upg;
+    private readonly ICodSettlementLedger _ledger;
     private readonly ISettlementService _settlements;
     private readonly IDeliveryParticipantResolver _participants;
 
     public CodSettlementComposeController(
-        IUnifiedPaymentCodClient upg,
+        ICodSettlementLedger ledger,
         ISettlementService settlements,
         IDeliveryParticipantResolver participants)
     {
-        _upg = upg;
+        _ledger = ledger;
         _settlements = settlements;
         _participants = participants;
     }
 
     /// <summary>
     /// POST /api/v1/payments/cod/record — records the COD settlement intent for a
-    /// delivery on UPG. The recording Jeeber must be a party to the delivery (or
-    /// admin); the amounts are taken from the gateway-side settlement row so the
-    /// caller cannot choose the commission (UPG copies them verbatim, BR-16).
+    /// delivery. The recording Jeeber must be a party to the delivery (or admin);
+    /// the amounts are taken from the gateway-side settlement row so the caller
+    /// cannot choose the commission (copied verbatim, BR-16).
     /// </summary>
     [HttpPost("api/v1/payments/cod/record")]
     [RequireCapability(Capabilities.DeliveryParticipate)] // {client, jeeber}; party/admin is STATE in-action
@@ -70,7 +71,7 @@ public sealed class CodSettlementComposeController : ControllerBase
         // The settlement row is the authoritative amount + party source. A COD
         // record requires the Jeeber to have already settled the cash on the
         // gateway (POST /deliveries/{id}/settle) — that row holds the verbatim
-        // commission UPG must copy.
+        // commission the COD record must copy.
         var settlement = await _settlements.GetByDeliveryAsync(body.DeliveryId, ct);
         if (settlement is null)
             return NotFound();
@@ -80,7 +81,7 @@ public sealed class CodSettlementComposeController : ControllerBase
         if (!isParty && !UserIdentity.IsAdmin(HttpContext))
             return Forbidden();
 
-        var result = await _upg.RecordCodAsync(new CodRecordRequest(
+        var result = await _ledger.RecordCodAsync(new CodRecordRequest(
             DeliveryId: settlement.DeliveryId,
             JeeberId: settlement.JeeberId,
             GrossAmount: settlement.GoodsCost,
@@ -94,8 +95,7 @@ public sealed class CodSettlementComposeController : ControllerBase
 
     /// <summary>
     /// GET /api/v1/payments/cod_jeeb/by-delivery/{deliveryId} — reads the COD
-    /// record from UPG, authorized by the USER JWT at the gateway boundary (NOT
-    /// the db-probe service key, which UPG's :api pipeline 401s). The caller must
+    /// record, authorized by the USER JWT at the gateway boundary. The caller must
     /// be a party to the delivery (or admin).
     /// </summary>
     [HttpGet("api/v1/payments/cod_jeeb/by-delivery/{deliveryId}")]
@@ -110,7 +110,7 @@ public sealed class CodSettlementComposeController : ControllerBase
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
 
         // Authorize against the gateway's view of the delivery parties first so a
-        // non-party never reaches UPG. The settlement row (if any) is the
+        // non-party never reaches the ledger. The settlement row (if any) is the
         // strongest party source; fall back to the delivery participant resolver.
         var settlement = await _settlements.GetByDeliveryAsync(deliveryId, ct);
         var isParty =
@@ -127,16 +127,15 @@ public sealed class CodSettlementComposeController : ControllerBase
                 return Forbidden();
         }
 
-        var result = await _upg.GetCodByDeliveryAsync(deliveryId, ct);
+        var result = await _ledger.GetCodByDeliveryAsync(deliveryId, ct);
         return Passthrough(result);
     }
 
     /// <summary>
     /// POST /admin/v1/settlements/{batchId}/mark-paid — the bank-confirmation
-    /// action. The gateway gates on the admin user-type, then fronts UPG's
-    /// AdminAuthPlug route with UPG's admin credential + the authenticated
-    /// principal id as X-Admin-Id (paidBy is the principal, never a client header
-    /// — closes E12). UPG's status (200 / 409 already-paid / 422 terminal /
+    /// action. The gateway gates on the admin user-type, then marks the batch with
+    /// the authenticated principal id as paidBy (never a client-supplied header —
+    /// closes E12). The ledger's status (200 / 409 already-paid / 422 terminal /
     /// 404 unknown) is re-emitted verbatim.
     /// </summary>
     [HttpPost("admin/v1/settlements/{batchId}/mark-paid")]
@@ -155,15 +154,17 @@ public sealed class CodSettlementComposeController : ControllerBase
         if (!UserIdentity.IsAdmin(HttpContext))
             return Forbidden();
 
-        var result = await _upg.MarkBatchPaidAsync(batchId, adminId, ct);
+        var result = await _ledger.MarkBatchPaidAsync(batchId, adminId, ct);
         return Passthrough(result);
     }
 
-    private IActionResult Passthrough(UpgResult result)
+    private IActionResult Passthrough(CodLedgerResult result)
     {
-        if (!result.Reachable)
+        // Defensive only — the in-process ledger is always available. Retained so
+        // the mapping stays total if the ledger is ever backed by a durable store.
+        if (!result.Available)
             return StatusCode(StatusCodes.Status502BadGateway,
-                Problem("upg-unreachable", "unified_payment_gateway could not be reached."));
+                Problem("cod-ledger-unavailable", "The COD settlement ledger could not be reached."));
 
         return new ContentResult
         {

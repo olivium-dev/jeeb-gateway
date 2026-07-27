@@ -3,13 +3,19 @@ using System.Collections.Concurrent;
 namespace JeebGateway.Services.Clients;
 
 /// <summary>
-/// MVP fallback for <see cref="IPaymentRefundClient"/>. Records every
-/// refund in process so integration tests can assert ledger calls
-/// happened (T-BE-028 / JEB-64 AC2). Honours the <c>IdempotencyKey</c>
-/// contract by short-circuiting replays of the same key.
+/// TEST DOUBLE ONLY — <b>not registered in the application</b>. Records every
+/// refund in process so integration tests can assert that a refund call
+/// happened (T-BE-028 / JEB-64 AC2). Honours the <c>IdempotencyKey</c> contract
+/// by short-circuiting replays of the same key.
 ///
-/// The HTTP-backed <see cref="HttpPaymentRefundClient"/> takes over
-/// once <c>Services:UnifiedPayment:BaseUrl</c> is configured.
+/// <para>DANGER, and the reason this type is quarantined to tests: it REPORTS
+/// SUCCESS. That is exactly the failure it was implicated in — while it was the
+/// production fallback, every dispute refund (real money OUT) became a no-op the
+/// system believed had worked. Since 2026-07-27 the only registered
+/// <see cref="IPaymentRefundClient"/> is
+/// <see cref="CashOnDeliveryNoRefundClient"/>, which throws. Do NOT register
+/// this class in <c>Program.cs</c>; a test that needs it must inject it
+/// explicitly via <c>ConfigureTestServices</c>.</para>
 /// </summary>
 public sealed class InMemoryPaymentRefundClient : IPaymentRefundClient
 {
