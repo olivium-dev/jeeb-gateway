@@ -20,10 +20,13 @@ namespace JeebGateway.IntegrationTests;
 ///
 ///   AC1. POST /location/update accepts a batch of points and records
 ///        the most-recent (by device timestamp) as the Jeeber's latest fix.
-///   AC2. GET /deliveries/{id}/tracking emits SSE frames carrying the
-///        latest position and a straight-line polyline to the dropoff.
-///   AC3. When the latest fix ages beyond the stale threshold, the SSE
-///        stream switches the event name to <c>last-seen</c>.
+///   AC2. GET /deliveries/{id}/tracking returns a one-shot JSON snapshot
+///        carrying the latest position and a straight-line polyline to the
+///        dropoff. (Was an SSE stream; the 5 s server-side re-read loop that
+///        faked it is deleted — see NoBackendPollOrFirestoreListenerGuardTests.)
+///   AC3. When the latest fix ages beyond the stale threshold, the snapshot
+///        reports <c>stale: true</c> with a <c>secondsSinceUpdate</c>.
+///        (Was the stream's <c>last-seen</c> event name.)
 ///   AC4. Validation: malformed payloads (out-of-range lat/lng, empty
 ///        batch, oversized batch) are rejected with 400.
 ///   AC5. Authorisation: unauthenticated callers get 401; non-participants
@@ -203,15 +206,15 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
             $"50k updates/min target requires sustained throughput; achieved {perSecond:F0}/s");
     }
 
-    // ---- GET /deliveries/{id}/tracking SSE -------------------------------------
+    // ---- GET /deliveries/{id}/tracking — one-shot snapshot ---------------------
 
     [Fact]
-    public async Task Tracking_Stream_Emits_Position_Frame_With_Polyline()
+    public async Task Tracking_Snapshot_Carries_Position_And_Polyline()
     {
         var seed = await SeedDeliveryWithDropoffAsync(
             dropoffLat: 24.8000, dropoffLng: 46.8000);
 
-        // Pre-record a position so the very first SSE frame carries data.
+        // Pre-record a position so the snapshot carries data.
         var store = _factory.Services.GetRequiredService<ILocationStore>();
         await store.RecordAsync(seed.JeeberId, new[]
         {
@@ -219,11 +222,8 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
         });
 
         var http = AuthClient(seed.ClientId);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var frame = await ReadTrackingSnapshotAsync(http, $"/deliveries/{seed.Id}/tracking");
 
-        var (eventName, frame) = await ReadFirstSseFrameAsync(http, $"/deliveries/{seed.Id}/tracking", cts.Token);
-
-        eventName.Should().Be("position");
         frame.DeliveryId.Should().Be(seed.Id);
         frame.JeeberId.Should().Be(seed.JeeberId);
         frame.Position.Should().NotBeNull();
@@ -235,11 +235,11 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
     }
 
     [Fact]
-    public async Task Tracking_Stream_Emits_LastSeen_Event_When_Position_Is_Stale()
+    public async Task Tracking_Snapshot_Reports_Stale_When_Position_Is_Old()
     {
-        // Configure a short stale threshold for this test so we don't
-        // wait two minutes. The SSE interval is also tightened so the
-        // first frame lands quickly.
+        // Configure a short stale threshold for this test so we don't wait two
+        // minutes. There is no interval to shorten any more — the endpoint reads
+        // once and returns.
         var factory = _factory.WithWebHostBuilder(b =>
         {
             b.ConfigureAppConfiguration((_, cfg) =>
@@ -247,7 +247,6 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
                 cfg.AddInMemoryCollection(new Dictionary<string, string?>
                 {
                     ["Tracking:StaleThreshold"] = "00:00:00.100",
-                    ["Tracking:SseInterval"] = "00:00:00.100",
                     ["Tracking:PositionTtl"] = "00:05:00"
                 });
             });
@@ -262,34 +261,28 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
             new GpsPointDto { Lat = 24.7, Lng = 46.7, Accuracy = 5, Timestamp = DateTimeOffset.UtcNow }
         });
 
-        // Let the recorded fix age past the configured 100ms stale
-        // threshold before opening the stream.
+        // Let the recorded fix age past the configured 100ms stale threshold.
         await Task.Delay(TimeSpan.FromMilliseconds(300));
 
         var http = factory.CreateClient();
         http.DefaultRequestHeaders.Add("X-User-Id", seed.ClientId);
         http.DefaultRequestHeaders.Add("X-User-Roles", "client,jeeber"); // ADR-005 §7 edge user-type
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
-        var (eventName, frame) = await ReadFirstSseFrameAsync(http, $"/deliveries/{seed.Id}/tracking", cts.Token);
-        eventName.Should().Be("last-seen");
+        var frame = await ReadTrackingSnapshotAsync(http, $"/deliveries/{seed.Id}/tracking");
         frame.Stale.Should().BeTrue();
         frame.Position.Should().NotBeNull();
         frame.SecondsSinceUpdate.Should().BeGreaterThan(0);
     }
 
     [Fact]
-    public async Task Tracking_Stream_Emits_Initial_Frame_With_Null_Position_When_No_Fix()
+    public async Task Tracking_Snapshot_Has_Null_Position_When_No_Fix()
     {
         var seed = await SeedDeliveryWithDropoffAsync(dropoffLat: 24.8, dropoffLng: 46.8);
-        // Do NOT record a position — the stream should still emit the
-        // initial "awaiting first ping" frame.
+        // Do NOT record a position — the snapshot must still answer, so the
+        // client can paint the "awaiting first ping" state.
 
         var http = AuthClient(seed.ClientId);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-
-        var (eventName, frame) = await ReadFirstSseFrameAsync(http, $"/deliveries/{seed.Id}/tracking", cts.Token);
-        eventName.Should().Be("position");
+        var frame = await ReadTrackingSnapshotAsync(http, $"/deliveries/{seed.Id}/tracking");
         frame.Position.Should().BeNull();
         frame.Polyline.Should().BeEmpty();
         frame.Stale.Should().BeFalse();
@@ -371,51 +364,16 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
     }
 
     /// <summary>
-    /// Reads the SSE response one byte at a time until the first
-    /// `event: ...\ndata: ...\n\n` block lands, then returns the parsed
-    /// frame. Stops the stream by disposing the response so the
-    /// controller's loop exits via cancellation.
+    /// Reads the one-shot tracking snapshot. No streaming, no cancellation
+    /// token, no held connection: the request completes or the test fails.
     /// </summary>
-    private static async Task<(string Event, TrackingFrameDto Frame)> ReadFirstSseFrameAsync(
-        HttpClient http, string path, CancellationToken ct)
+    private static async Task<TrackingPolylineDto> ReadTrackingSnapshotAsync(HttpClient http, string path)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, path);
-        // S09 (JEB-54): the tracking route now content-negotiates — an explicit
-        // Accept: text/event-stream selects the SSE relay; any other Accept gets
-        // the one-shot JSON polyline body. The SSE clients these tests exercise
-        // declare the stream Accept, matching the live mobile subscription.
-        req.Headers.Add("Accept", "text/event-stream");
-        var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+        var resp = await http.GetAsync(path);
         resp.EnsureSuccessStatusCode();
-        resp.Content.Headers.ContentType!.MediaType.Should().Be("text/event-stream");
-
-        await using var stream = await resp.Content.ReadAsStreamAsync(ct);
-        using var reader = new StreamReader(stream, Encoding.UTF8);
-
-        string? eventName = null;
-        var dataBuf = new StringBuilder();
-        string? line;
-        while ((line = await reader.ReadLineAsync(ct)) is not null)
-        {
-            if (line.Length == 0)
-            {
-                if (eventName is not null && dataBuf.Length > 0)
-                {
-                    var frame = JsonSerializer.Deserialize<TrackingFrameDto>(dataBuf.ToString(), JsonOptions)!;
-                    return (eventName, frame);
-                }
-                continue;
-            }
-            if (line.StartsWith("event: ", StringComparison.Ordinal))
-            {
-                eventName = line["event: ".Length..];
-            }
-            else if (line.StartsWith("data: ", StringComparison.Ordinal))
-            {
-                dataBuf.Append(line["data: ".Length..]);
-            }
-        }
-        throw new InvalidOperationException("SSE stream closed before a complete frame was received.");
+        resp.Content.Headers.ContentType!.MediaType.Should().Be("application/json",
+            "the tracking surface returns a snapshot; the event-stream arm was deleted");
+        return (await resp.Content.ReadFromJsonAsync<TrackingPolylineDto>(JsonOptions))!;
     }
 
     private sealed record Seed(string Id, string ClientId, string JeeberId);

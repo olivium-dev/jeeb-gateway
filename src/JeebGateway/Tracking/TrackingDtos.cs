@@ -74,56 +74,15 @@ public class LocationUpdateResponse
 }
 
 /// <summary>
-/// GET /deliveries/{id}/tracking emits one of these as the data payload of
-/// each SSE event. The event name (<c>position</c> vs <c>last-seen</c>)
-/// determines which branch the client UI takes; the polyline is included
-/// on the position events so the client doesn't need a separate request.
-/// </summary>
-public class TrackingFrameDto
-{
-    public required string DeliveryId { get; init; }
-    public required string JeeberId { get; init; }
-
-    /// <summary>
-    /// The most recent position recorded for the Jeeber, or null when the
-    /// store has nothing yet (the SSE stream emits a single
-    /// <c>position</c> frame with a null position so the client can paint
-    /// an initial "awaiting first ping" state).
-    /// </summary>
-    public GpsPointDto? Position { get; init; }
-
-    /// <summary>
-    /// Straight-line route from the current position to the dropoff
-    /// (MVP polyline). Encoded as an ordered list of [lat, lng] pairs.
-    /// Empty when the dropoff is unknown or the Jeeber position is
-    /// unavailable.
-    /// </summary>
-    public IReadOnlyList<double[]> Polyline { get; init; } = Array.Empty<double[]>();
-
-    /// <summary>
-    /// True when the most recent sample is older than the stale
-    /// threshold (default 2 min). The SSE stream switches the event name
-    /// to <c>last-seen</c> in that case but still carries the same DTO
-    /// so the client has the last known fix.
-    /// </summary>
-    public bool Stale { get; init; }
-
-    /// <summary>
-    /// Seconds elapsed since the most recent sample. Null when nothing
-    /// has been recorded yet.
-    /// </summary>
-    public double? SecondsSinceUpdate { get; init; }
-
-    public required DateTimeOffset ServerTimestamp { get; init; }
-}
-
-/// <summary>
-/// JSON body of <c>GET /deliveries/{id}/tracking</c> when the caller does NOT
-/// request <c>Accept: text/event-stream</c> (S09 H4/A3, JEB-54 AC3). This is
-/// the polyline-replay view: a one-shot snapshot of the trip route the client
-/// can render without holding an SSE connection open. The polyline is the same
-/// MVP straight-line route the SSE <c>position</c> frame carries; <see cref="Etag"/>
-/// lets a repeat call within the geolocation cache window be conditional.
+/// JSON body of <c>GET /deliveries/{id}/tracking</c> — the ONLY shape this
+/// surface returns (S09 H4/A3, JEB-54 AC3). A one-shot snapshot of the trip
+/// route the client renders without holding a connection open.
+///
+/// <para>The former <c>TrackingFrameDto</c> — the payload of the deleted 5-second
+/// server-side event-stream loop — is gone. Its two frame-only fields,
+/// <see cref="Stale"/> and <see cref="SecondsSinceUpdate"/>, moved onto this DTO
+/// so the "Jeeber offline" affordance survives without a stream. Both are
+/// ADDITIVE on the wire: a client that does not read them is unaffected.</para>
 /// </summary>
 public class TrackingPolylineDto
 {
@@ -141,6 +100,20 @@ public class TrackingPolylineDto
     /// store has nothing yet.
     /// </summary>
     public GpsPointDto? Position { get; init; }
+
+    /// <summary>
+    /// True when the most recent sample is older than
+    /// <c>Tracking:StaleThreshold</c> (default 2 min) — the client renders the
+    /// "Jeeber offline" affordance. This replaces the deleted stream's
+    /// <c>last-seen</c> event name.
+    /// </summary>
+    public bool Stale { get; init; }
+
+    /// <summary>
+    /// Seconds elapsed since the most recent sample, or null when nothing has
+    /// been recorded yet.
+    /// </summary>
+    public double? SecondsSinceUpdate { get; init; }
 
     /// <summary>
     /// Stable hash of the polyline geometry. A repeat read whose route has

@@ -3,7 +3,12 @@ namespace JeebGateway.Tracking;
 /// <summary>
 /// Tunable thresholds for T-backend-014. Values are mirrored in
 /// appsettings under the <c>Tracking</c> section; defaults match the
-/// acceptance criteria (5-min TTL, 5s SSE cadence, 2-min stale window).
+/// acceptance criteria (5-min TTL, 2-min stale window).
+///
+/// <para><c>SseInterval</c> (default 5 s) is GONE. It was the sleep of the
+/// gateway's server-side re-read loop, not a cadence anyone chose — see
+/// <c>LocationController</c>. Deleting the option as well as the loop means
+/// re-introducing the poll cannot be done by flipping config.</para>
 /// </summary>
 public class TrackingOptions
 {
@@ -18,15 +23,9 @@ public class TrackingOptions
     public TimeSpan PositionTtl { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// Interval the SSE endpoint pushes a frame at. Default 5 seconds
-    /// per AC. Tests override to a smaller value so they don't wait the
-    /// full 5 seconds per assertion.
-    /// </summary>
-    public TimeSpan SseInterval { get; set; } = TimeSpan.FromSeconds(5);
-
-    /// <summary>
-    /// When the most recent sample is older than this, the SSE stream
-    /// switches the event name to <c>last-seen</c>. Default 2 minutes
+    /// When the most recent sample is older than this, the tracking snapshot
+    /// reports <c>stale: true</c> and a <c>secondsSinceUpdate</c>, so the
+    /// client renders the "Jeeber offline" affordance. Default 2 minutes
     /// per AC.
     /// </summary>
     public TimeSpan StaleThreshold { get; set; } = TimeSpan.FromMinutes(2);
