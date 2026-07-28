@@ -211,7 +211,7 @@ public sealed class DeliveryStatusPushNotifier : IDeliveryStatusPushNotifier
     /// exactly the event the user wants to see, and the owner ruling is that the shade is
     /// acceptable — so the key is omitted deliberately.</para>
     /// </summary>
-    private static Dictionary<string, object?> BuildPayload(DeliveryStatusPushNotification n)
+    internal static Dictionary<string, object?> BuildPayload(DeliveryStatusPushNotification n)
     {
         var payload = new Dictionary<string, object?>
         {
