@@ -650,6 +650,13 @@ builder.Services.AddScoped<JeebGateway.Notifications.IChatMessagePushNotifier,
 builder.Services.AddScoped<JeebGateway.Notifications.IOfferPushNotifier,
     JeebGateway.Notifications.OfferPushNotifier>();
 
+// The seam that lets a push seat use a budget big enough to actually complete without
+// putting that budget in front of a user-visible response. Singleton: it holds only the
+// scope factory and a logger, and creates a FRESH scope per dispatch because the notifiers
+// it runs are scoped and the request scope dies with the response.
+builder.Services.AddSingleton<JeebGateway.Notifications.IDetachedPushDispatcher,
+    JeebGateway.Notifications.DetachedPushDispatcher>();
+
 // b02 WAVE B.1 — the delivery-status → push trigger, on STACK B. Delivery status was the
 // LAST push category still composed inside the gateway and handed to the in-gateway
 // IPushNotificationService, whose InMemoryPushTransport enqueues to an in-process queue and

@@ -98,7 +98,15 @@ public sealed class DeliveryStatusPushNotifier : IDeliveryStatusPushNotifier
     /// truncated audience is always the JEEBER. Detached callers must size their ceiling
     /// from this value: see <c>DeliveriesController.DetachedPushBudgetFor</c>.</para>
     /// </summary>
-    public static readonly TimeSpan PerRecipientTimeout = TimeSpan.FromSeconds(8);
+    /// <remarks>
+    /// Now sourced from <see cref="PushSendBudget.PerRecipient"/> (10s) rather than a
+    /// seat-local 8s. 8s did clear the measured healthy call (2.53-3.97s across 10 consecutive
+    /// sends on 2026-07-28) so this seat was not broken — but the cost is linear in the
+    /// recipient's device-row count and those rows only ever accumulate, so a seat-local
+    /// number is a seat-local drift risk. <c>DeliveriesController.DetachedPushBudgetFor</c>
+    /// derives from this field, so its ceiling scales with it automatically.
+    /// </remarks>
+    public static readonly TimeSpan PerRecipientTimeout = PushSendBudget.PerRecipient;
 
     private readonly ServicePushNotificationClient _push;
     private readonly ILogger<DeliveryStatusPushNotifier> _logger;
@@ -147,7 +155,7 @@ public sealed class DeliveryStatusPushNotifier : IDeliveryStatusPushNotifier
 
                 try
                 {
-                    await _push.Send_notification_to_userAsync(
+                    var accepted = await _push.Send_notification_to_userAsync(
                         recipient,
                         new SentPayloadToUserRequest { Payload = payload },
                         cts.Token);
@@ -155,11 +163,15 @@ public sealed class DeliveryStatusPushNotifier : IDeliveryStatusPushNotifier
                     // Log the SUCCESS, not only the failure. An empty log window is
                     // otherwise ambiguous between "sent fine" and "never attempted" —
                     // and every prior investigation of this path read that window and
-                    // concluded the wrong one.
+                    // concluded the wrong one. Carry the push service's OWN device-row
+                    // accounting rather than the bare word "ACCEPTED", which reads as
+                    // delivery and is not (see PushAcceptance).
                     _logger.LogInformation(
-                        "Delivery-status push ACCEPTED by push service for recipient "
-                        + "{RecipientUserId} on delivery {DeliveryId} ({PreviousStatus} -> {Status}).",
-                        recipient, n.DeliveryId, n.PreviousStatus, n.Status);
+                        "Delivery-status push accepted by push service for recipient "
+                        + "{RecipientUserId} on delivery {DeliveryId} ({PreviousStatus} -> {Status}): "
+                        + "{Accounting}.",
+                        recipient, n.DeliveryId, n.PreviousStatus, n.Status,
+                        PushAcceptance.Describe(accepted));
                 }
                 catch (Exception ex)
                 {

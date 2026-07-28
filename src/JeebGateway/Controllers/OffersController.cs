@@ -63,6 +63,7 @@ public class OffersController : ControllerBase
     private readonly IJeebConversationClient _conversationAggregate;
     private readonly IDeliveryServiceClient _deliveryService;
     private readonly IOfferPushNotifier _offerPush;
+    private readonly IDetachedPushDispatcher _detachedPush;
     private readonly UpstreamFeatureFlags _flags;
     private readonly DeliveryClientOptions _deliveryOptions;
     private readonly ILogger<OffersController> _logger;
@@ -78,6 +79,7 @@ public class OffersController : ControllerBase
         IJeebConversationClient conversationAggregate,
         IDeliveryServiceClient deliveryService,
         IOfferPushNotifier offerPush,
+        IDetachedPushDispatcher detachedPush,
         IOptions<UpstreamFeatureFlags> flags,
         IOptions<DeliveryClientOptions> deliveryOptions,
         ILogger<OffersController> logger)
@@ -92,6 +94,7 @@ public class OffersController : ControllerBase
         _conversationAggregate = conversationAggregate;
         _deliveryService = deliveryService;
         _offerPush = offerPush;
+        _detachedPush = detachedPush;
         _flags = flags.Value;
         _deliveryOptions = deliveryOptions.Value;
         _logger = logger;
@@ -675,8 +678,13 @@ public class OffersController : ControllerBase
         // DEGRADE-DON'T-FAIL: the saga already committed, so a push blip is logged and
         // swallowed — it never turns a successful accept into a 5xx. Mirrors the V1
         // JeebOffersController fan-out so both accept surfaces behave identically.
-        await DispatchAcceptLifecyclePushesAsync(
-            requestId, envelope.AcceptedOfferId, winningJeeberId, envelope.RejectedOfferIds, ct);
+        //
+        // DETACHED, not awaited — see JeebOffersController for the arithmetic. At the
+        // per-recipient budget a push actually needs, awaiting winner + N losers in front of
+        // this response can outlast the mobile client's receive timeout and report an accept
+        // that HAS committed as a connection failure.
+        DispatchAcceptLifecyclePushes(
+            requestId, envelope.AcceptedOfferId, winningJeeberId, envelope.RejectedOfferIds);
 
         var now = _clock.GetUtcNow();
 
@@ -920,45 +928,76 @@ public class OffersController : ControllerBase
     /// <c>jeeb.offer_accepted</c> push to the winning jeeber and one
     /// <c>jeeb.offer_rejected</c> push per rejected sibling (each losing bidder resolved
     /// from the offer routing index via <see cref="IOfferRequestIndex.ResolveJeeberId"/>).
-    /// The notifier never throws; this extra try/catch is belt-and-braces so the committed
-    /// accept's 200 can never be flipped to a 5xx. Identical contract to the V1
-    /// <c>JeebOffersController</c> fan-out.
+    ///
+    /// <para>Returns <c>void</c> and dispatches through <see cref="IDetachedPushDispatcher"/>:
+    /// the sends run BEHIND the accept response, so the committed 200 can neither be flipped
+    /// to a 5xx nor delayed by winner + N losers at the per-recipient push budget. The
+    /// belt-and-braces try/catch that used to live here moved into the dispatcher, which is
+    /// now the only thing that can observe a fault on this path. Identical contract to the V1
+    /// <c>JeebOffersController</c> fan-out.</para>
     /// </summary>
-    private async Task DispatchAcceptLifecyclePushesAsync(
+    private void DispatchAcceptLifecyclePushes(
         string requestId,
         string acceptedOfferId,
         string? winningJeeberId,
-        IReadOnlyList<string>? rejectedOfferIds,
-        CancellationToken ct)
+        IReadOnlyList<string>? rejectedOfferIds)
     {
-        try
+        var losers = ResolveLosingBidders(rejectedOfferIds);
+        var winner = string.IsNullOrWhiteSpace(winningJeeberId) ? null : winningJeeberId;
+        var recipientCount = (winner is null ? 0 : 1) + losers.Count;
+        if (recipientCount == 0)
         {
-            if (!string.IsNullOrWhiteSpace(winningJeeberId))
-            {
-                await _offerPush.NotifyOfferAcceptedAsync(winningJeeberId, requestId, acceptedOfferId, ct);
-            }
+            return;
+        }
 
-            if (rejectedOfferIds is not null)
+        _detachedPush.Dispatch(
+            "offer.accept_lifecycle", recipientCount, correlationId: requestId,
+            work: async (sp, token) =>
             {
-                foreach (var rejectedOfferId in rejectedOfferIds)
+                var push = sp.GetRequiredService<IOfferPushNotifier>();
+
+                if (winner is not null)
                 {
-                    if (string.IsNullOrWhiteSpace(rejectedOfferId))
-                        continue;
-
-                    var loserJeeberId = _offerRequestIndex.ResolveJeeberId(rejectedOfferId);
-                    if (string.IsNullOrWhiteSpace(loserJeeberId))
-                        continue;
-
-                    await _offerPush.NotifyOfferLostAsync(loserJeeberId, requestId, rejectedOfferId, ct);
+                    await push.NotifyOfferAcceptedAsync(winner, requestId, acceptedOfferId, token);
                 }
-            }
-        }
-        catch (Exception ex)
+
+                foreach (var (loserJeeberId, rejectedOfferId) in losers)
+                {
+                    await push.NotifyOfferLostAsync(loserJeeberId, requestId, rejectedOfferId, token);
+                }
+            });
+    }
+
+    /// <summary>
+    /// Resolves each rejected offer to its bidder from the routing index learned at submit
+    /// time. Done on the REQUEST thread on purpose: <see cref="IOfferRequestIndex"/> is a
+    /// singleton, the lookup is in-memory, and resolving here keeps the detached work a pure
+    /// list of sends whose recipient count is known before the budget is sized. A null result
+    /// (offer unknown to this instance / recorded without a jeeber id) means we cannot address
+    /// the push — skip it, never guess.
+    /// </summary>
+    private List<(string JeeberId, string OfferId)> ResolveLosingBidders(
+        IReadOnlyList<string>? rejectedOfferIds)
+    {
+        var losers = new List<(string, string)>();
+        if (rejectedOfferIds is null)
         {
-            _logger.LogWarning(ex,
-                "Post-accept lifecycle push fan-out for request {RequestId} (offer {OfferId}) failed; "
-                + "accept stays 200.", requestId, acceptedOfferId);
+            return losers;
         }
+
+        foreach (var rejectedOfferId in rejectedOfferIds)
+        {
+            if (string.IsNullOrWhiteSpace(rejectedOfferId))
+                continue;
+
+            var loserJeeberId = _offerRequestIndex.ResolveJeeberId(rejectedOfferId);
+            if (string.IsNullOrWhiteSpace(loserJeeberId))
+                continue;
+
+            losers.Add((loserJeeberId, rejectedOfferId));
+        }
+
+        return losers;
     }
 
     /// <summary>

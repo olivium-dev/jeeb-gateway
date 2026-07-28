@@ -42,11 +42,28 @@ public class NewRequestFanoutOptions
     /// <summary>Bounded parallelism so N sends cannot stampede the LAN-local relay (R9).</summary>
     public int MaxParallelSends { get; set; } = 8;
 
-    /// <summary>Per-recipient relay timeout.</summary>
-    public TimeSpan PerSendTimeout { get; set; } = TimeSpan.FromSeconds(2);
+    /// <summary>
+    /// Per-recipient relay timeout. Was a seat-local 2s, which every healthy send exceeded —
+    /// measured 2.53-3.97s across 10 consecutive calls to registered recipients on
+    /// 2026-07-28, i.e. 10 of 10 aborted. Now the shared
+    /// <see cref="PushSendBudget.PerRecipient"/>; the distribution and the reasoning for 10s
+    /// live there.
+    /// </summary>
+    public TimeSpan PerSendTimeout { get; set; } = PushSendBudget.PerRecipient;
 
-    /// <summary>Whole-job budget; bounds the fan-out even with a wedged relay.</summary>
-    public TimeSpan TotalBudget { get; set; } = TimeSpan.FromSeconds(30);
+    /// <summary>
+    /// Whole-job budget; bounds the fan-out even with a wedged relay.
+    ///
+    /// <para>Raised 30s -> 60s alongside <see cref="PerSendTimeout"/>, because the two are
+    /// not independent: the recipients a fan-out can fully cover in the worst case is
+    /// <c>MaxParallelSends * floor(TotalBudget / PerSendTimeout)</c>. At 8 x floor(30/10) = 24
+    /// that would have sat right on the observed roster size (23), so one extra jeeber joining
+    /// would silently truncate the tail. 8 x floor(60/10) = 48 restores the head-room. Nothing
+    /// waits on this job — it runs off the bounded channel in
+    /// <c>NewRequestFanoutProcessor</c>, behind the create 201 — so the cost of the larger
+    /// ceiling is bounded background time, not user-visible latency.</para>
+    /// </summary>
+    public TimeSpan TotalBudget { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
     /// Escape hatch: blast the legacy topic when the resolved recipient set is EMPTY.

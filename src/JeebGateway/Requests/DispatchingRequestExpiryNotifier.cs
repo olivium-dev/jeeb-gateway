@@ -12,7 +12,11 @@ namespace JeebGateway.Requests;
 /// </summary>
 public sealed class DispatchingRequestExpiryNotifier : IRequestExpiryNotifier
 {
-    private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(2);
+    // Was a seat-local 2s. Measured 2026-07-28, a push to a recipient who actually owns a
+    // device costs 2.53-3.97s (10 consecutive calls), so 2s aborted every healthy send while
+    // the "<200ms" figure it was sized from describes a recipient with NO device rows (404 in
+    // ~14ms). Shared value now — see PushSendBudget for the distribution and the bound.
+    private static readonly TimeSpan PushTimeout = JeebGateway.Notifications.PushSendBudget.PerRecipient;
 
     /// <summary>
     /// A request nudge / expiry push is a FIRE-ONCE heuristic, so the reserved

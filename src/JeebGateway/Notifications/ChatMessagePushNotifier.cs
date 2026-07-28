@@ -77,7 +77,12 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
     // onto a background queue the way NewRequestPushNotifier does
     // (NewRequestFanoutQueue/NewRequestFanoutProcessor); that is an architectural change and
     // wants its own review. Arriving late beats never arriving, which is the state today.
-    private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(10);
+    //
+    // The value now comes from PushSendBudget, which is where the measured distribution and
+    // the reasoning for 10s live. JEBV4-345 raised THIS seat's private copy and left five
+    // siblings on 2s, because a per-seat constant is a per-seat opportunity to drift. There
+    // is one value now. IDetachedPushDispatcher is the seam this seat's follow-up should use.
+    private static readonly TimeSpan PushTimeout = PushSendBudget.PerRecipient;
 
     private const int PreviewMaxLength = 120;
 
@@ -201,7 +206,7 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
 
                 try
                 {
-                    await _push.Send_notification_to_userAsync(
+                    var accepted = await _push.Send_notification_to_userAsync(
                         recipient,
                         new SentPayloadToUserRequest { Payload = payload },
                         cts.Token);
@@ -209,12 +214,21 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
                     // JEBV4-345: log the SUCCESS too. Before this, the notifier logged only
                     // on failure, so an empty log window was ambiguous between "push sent
                     // fine" and "push never attempted" — and the investigation that read
-                    // that window concluded the wrong one. An explicit accepted-by-push-
-                    // service line makes the absence of a line mean something.
+                    // that window concluded the wrong one.
+                    //
+                    // …and then the line it added said "ACCEPTED by push service" and threw
+                    // the response body away, so the NEXT investigation read THAT and
+                    // concluded the wrong thing in the opposite direction: the customer's
+                    // message was logged ACCEPTED and the jeeber's handset showed nothing for
+                    // 3.5 minutes. The word was doing work it had not earned. A 201 from the
+                    // per-user endpoint means FCM took >=1 of this user's device rows — the
+                    // two live accounts have 19 and 24 rows of which 15 and 21 are dead — and
+                    // says nothing whatever about the phone in the recipient's hand. Log the
+                    // accounting the push service already computed; see PushAcceptance.
                     _logger.LogInformation(
-                        "Chat push ACCEPTED by push service for recipient {RecipientUserId} on "
-                        + "conversation {ConversationId} (request {RequestId}).",
-                        recipient, conversationId, request.Id);
+                        "Chat push accepted by push service for recipient {RecipientUserId} on "
+                        + "conversation {ConversationId} (request {RequestId}): {Accounting}.",
+                        recipient, conversationId, request.Id, PushAcceptance.Describe(accepted));
                 }
                 catch (Exception ex)
                 {

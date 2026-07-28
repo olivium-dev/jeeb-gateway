@@ -62,8 +62,25 @@ public sealed class ServiceCallbacksController : ControllerBase
     /// </summary>
     private const int IdempotencyTtlSeconds = 24 * 60 * 60;
 
-    /// <summary>Bounds the push round-trip so a slow push microservice cannot hold the 202 open.</summary>
-    private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(5);
+    /// <summary>
+    /// Bounds the push round-trip so a slow push microservice cannot hold the 202 open.
+    ///
+    /// <para>Was a seat-local 5s. That did clear the measured healthy call (2.53-3.97s across
+    /// 10 consecutive sends, 2026-07-28) — but only by 1.26x, and the per-call cost is linear
+    /// in the recipient's device-row count, which only ever grows because the push service
+    /// never deletes a row whose send failed. 1.26x of head-room on a number that drifts
+    /// upward is the same under-sizing that left every other seat on 2s; this seat was one
+    /// row-growth cycle from repeating it. Sourced from
+    /// <see cref="JeebGateway.Notifications.PushSendBudget.PerRecipient"/> now, so there is no
+    /// seat-local copy left to drift.</para>
+    ///
+    /// <para><b>Inline exposure, accepted deliberately.</b> Unlike the offer seats this one is
+    /// still awaited in front of its response, so the worst case grows 5s -> 10s. That is
+    /// bounded and single-recipient (this seat pushes to exactly one user, never a fan-out),
+    /// and the caller is a microservice with its own retry schedule — not the mobile client
+    /// whose receive timeout made the same arithmetic unsafe on the offer-accept path.</para>
+    /// </summary>
+    private static readonly TimeSpan PushTimeout = JeebGateway.Notifications.PushSendBudget.PerRecipient;
 
     // NOTE — there is no longer a "not yet routable types" deny-list here. It held exactly one
     // entry, jeeb.offer_rejected, for execution-plan correction C6: the catalog declared nine
