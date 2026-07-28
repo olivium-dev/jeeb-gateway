@@ -44,10 +44,10 @@ public interface INotificationRecordWriter
     // reached the centre by any other route would be outside the silent policy.
 
     /// <summary>
-    /// <b>Returns <see cref="NotificationRecordWriteClassification.SkippedSilent"/> ALWAYS,
-    /// today.</b> Owner ruling D4 classifies the <c>delivery</c> category silent, so this type
-    /// writes no row by design. See <see cref="DeliveryStatusUpdatedNotificationRecord"/> before
-    /// changing anything about it.
+    /// <b>Writes a row.</b> The "returns <see cref="NotificationRecordWriteClassification.SkippedSilent"/>
+    /// ALWAYS, today" claim that used to sit here described owner ruling D4 (2026-07-26) and was
+    /// <b>reversed on 2026-07-27</b>: the <c>delivery</c> category is shade + stored, so this
+    /// writer is NOT silent-gated. See <see cref="DeliveryStatusUpdatedNotificationRecord"/>.
     /// </summary>
     Task<NotificationRecordWriteOutcome> WriteDeliveryStatusUpdatedAsync(
         DeliveryStatusUpdatedNotificationRecord record,

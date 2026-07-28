@@ -88,8 +88,17 @@ public sealed class DeliveryStatusPushNotifier : IDeliveryStatusPushNotifier
     /// Bounds EACH recipient's send. Deliberately per-recipient, not per-fan-out: a
     /// single shared deadline lets the first recipient's ~3s FCM round trip leave the
     /// second with nothing, which is a silent total loss of push for that user.
+    ///
+    /// <para><b>PUBLIC on purpose.</b> The per-recipient budget only holds if the token the
+    /// CALLER passes in outlives the whole fan-out — <see cref="NotifyAsync"/> links each
+    /// recipient's timeout to it, so a caller deadline shorter than
+    /// <c>recipients x this</c> re-imposes exactly the shared deadline this field exists to
+    /// avoid, and the recipient that loses its push is always the LAST one composed. Both
+    /// delivery-status call sites compose <c>[ClientId, JeeberId]</c> in that order, so the
+    /// truncated audience is always the JEEBER. Detached callers must size their ceiling
+    /// from this value: see <c>DeliveriesController.DetachedPushBudgetFor</c>.</para>
     /// </summary>
-    private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(8);
+    public static readonly TimeSpan PerRecipientTimeout = TimeSpan.FromSeconds(8);
 
     private readonly ServicePushNotificationClient _push;
     private readonly ILogger<DeliveryStatusPushNotifier> _logger;
@@ -134,7 +143,7 @@ public sealed class DeliveryStatusPushNotifier : IDeliveryStatusPushNotifier
             foreach (var recipient in recipients)
             {
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                cts.CancelAfter(PushTimeout);
+                cts.CancelAfter(PerRecipientTimeout);
 
                 try
                 {

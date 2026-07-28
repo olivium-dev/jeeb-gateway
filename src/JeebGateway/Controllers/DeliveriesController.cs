@@ -71,8 +71,12 @@ public class DeliveriesController : ControllerBase
     // The dependency on IPushNotificationService is GONE from this controller on purpose —
     // re-adding it would silently restore a path that reports success for a push that never
     // reached a device.
-    private readonly IDeliveryStatusPushNotifier _deliveryPush;
-    // Opens a fresh DI scope for the fire-and-forget status push — see NotifyOtherPartyAsync.
+    // IDeliveryStatusPushNotifier is NOT injected here either, and that is deliberate. It is
+    // SCOPED, so a captured instance is only usable while the request scope lives — which is
+    // precisely the window a delivery-status push must OUTLIVE. Every leg resolves it from a
+    // fresh scope inside DispatchDeliveryPushDetached; holding a field invites the next
+    // author to `await` it on the request path, which is the regression that cost the cancel
+    // endpoint up to 16s against a 15s client timeout.
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ICancellationService _cancellations;
     private readonly IAdminEscalationStore _escalations;
@@ -203,7 +207,6 @@ public class DeliveriesController : ControllerBase
         IUsersStore users,
         ISettlementStore settlementStore,
         ISettlementService settlements,
-        IDeliveryStatusPushNotifier deliveryPush,
         IServiceScopeFactory scopeFactory,
         ICancellationService cancellations,
         IAdminEscalationStore escalations,
@@ -224,7 +227,6 @@ public class DeliveriesController : ControllerBase
         _users = users;
         _settlementStore = settlementStore;
         _settlements = settlements;
-        _deliveryPush = deliveryPush;
         _scopeFactory = scopeFactory;
         _cancellations = cancellations;
         _escalations = escalations;
@@ -1248,7 +1250,74 @@ public class DeliveriesController : ControllerBase
         }
     }
 
-    private async Task NotifyCancellationCounterpartyAsync(
+    /// <summary>
+    /// Head-room on top of the per-recipient budget: DI scope creation, payload build and
+    /// the log write. Small on purpose — the ceiling exists to stop a wedged background
+    /// task living forever, not to add a second, competing deadline.
+    /// </summary>
+    private static readonly TimeSpan DetachedPushDispatchOverhead = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The ceiling a DETACHED delivery-status fan-out may run for, sized from the number of
+    /// recipients it actually has.
+    ///
+    /// <para><b>Why this is not a constant.</b> It used to be a flat 10s while
+    /// <see cref="DeliveryStatusPushNotifier.PerRecipientTimeout"/> is 8s per recipient, and
+    /// the notifier LINKS each recipient's timeout to the caller's token. So a first
+    /// recipient that took its full 8s left the second with 2s — and the second recipient is
+    /// always the JEEBER, because both call sites compose <c>[ClientId, JeeberId]</c> in
+    /// that order. That is the "shared deadline starves the last recipient" failure the
+    /// notifier's per-recipient budget exists to prevent, re-imposed from outside it: the
+    /// customer's push lands, the jeeber's is cancelled, and the only trace is a
+    /// TaskCanceledException logged as a warning. Observed sends run ~2.5-3s each, so it
+    /// fits today and fails on the first slow first-send.</para>
+    /// </summary>
+    internal static TimeSpan DetachedPushBudgetFor(int recipientCount)
+        => DetachedPushDispatchOverhead
+           + DeliveryStatusPushNotifier.PerRecipientTimeout * Math.Max(1, recipientCount);
+
+    /// <summary>
+    /// Hands one already-composed delivery-status push to a background task and returns
+    /// immediately. Both delivery-status legs (status change and cancellation) go through
+    /// here so neither can drift back onto the request path.
+    ///
+    /// <para><b>Why detached (JEBV4-281).</b> The push is a real network call to the push
+    /// microservice now that this category rides Stack B, and the mobile client's dio
+    /// receive timeout is 15s. Awaiting a two-recipient fan-out on the request path can
+    /// spend more than that budget before the response is written, which surfaces to the
+    /// user as "No internet connection" and a reverted UI on a transition/cancellation that
+    /// has ALREADY COMMITTED server-side. The state change is authoritative; the push is
+    /// best-effort and must never be in front of the response.</para>
+    ///
+    /// <para><b>Why a fresh DI scope.</b> <see cref="IDeliveryStatusPushNotifier"/> is
+    /// SCOPED (it composes the scoped push client) and the request scope is disposed the
+    /// instant the response completes, so the captured instance would outlive its scope.
+    /// Same pattern <c>NewRequestFanoutProcessor</c> uses for its off-hot-path sends.</para>
+    /// </summary>
+    private void DispatchDeliveryPushDetached(DeliveryStatusPushNotification notification)
+    {
+        var deliveryId = notification.DeliveryId;
+        var budget = DetachedPushBudgetFor(notification.Recipients.Count);
+        _ = Task.Run(async () =>
+        {
+            using var pushCts = new CancellationTokenSource(budget);
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var notifier = scope.ServiceProvider.GetRequiredService<IDeliveryStatusPushNotifier>();
+                await notifier.NotifyAsync(notification, pushCts.Token);
+            }
+            catch (Exception ex)
+            {
+                // Best-effort; the state transition already committed. Log for
+                // observability, never surface to the (already-returned) caller.
+                _log.LogWarning(ex,
+                    "Status-change push fan-out failed for delivery {DeliveryId}", deliveryId);
+            }
+        });
+    }
+
+    private Task NotifyCancellationCounterpartyAsync(
         DeliveryRequest req,
         string previousStatus,
         CancellationOutcome outcome,
@@ -1271,7 +1340,18 @@ public class DeliveriesController : ControllerBase
         // routed to InMemoryPushTransport — an in-process queue that delivers nothing and
         // is then counted Delivered. See IDeliveryStatusPushNotifier for the three
         // independent reasons that path cannot work. The notifier never throws.
-        await _deliveryPush.NotifyAsync(
+        //
+        // ⚠️ DETACHED since the Stack B cut-over. While this was an in-process enqueue,
+        // awaiting it cost microseconds. It is now two sequential HTTP round trips to the
+        // push microservice, bounded at 8s EACH — up to 16s in front of the cancel
+        // response, against a 15s client receive timeout. Cancel is the one transition a
+        // user retries when it appears to fail, and the retry lands on an already-cancelled
+        // row. The PATCH leg was detached for exactly this reason (JEBV4-281); this leg was
+        // left synchronous when the category moved onto the real transport.
+        //
+        // `ct` is deliberately NOT forwarded: it is cancelled the instant the response
+        // completes, which is before this send can finish. See DispatchDeliveryPushDetached.
+        DispatchDeliveryPushDetached(
             new DeliveryStatusPushNotification(
                 DeliveryId: req.Id,
                 RequestId: req.Id,
@@ -1282,8 +1362,9 @@ public class DeliveriesController : ControllerBase
                 Body: bodyText,
                 GpsTrackingActive: req.GpsTrackingActive,
                 CancelledBy: req.CancelledBy ?? string.Empty,
-                PendingApproval: outcome == CancellationOutcome.PendingAdminApproval),
-            ct);
+                PendingApproval: outcome == CancellationOutcome.PendingAdminApproval));
+
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -1366,23 +1447,11 @@ public class DeliveriesController : ControllerBase
         // same pattern NewRequestFanoutProcessor uses for its off-hot-path sends. Resolving
         // the injected instance would work today only because the NSwag client happens not
         // to be IDisposable; that is an accident, not a contract.
-        _ = Task.Run(async () =>
-        {
-            using var pushCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            try
-            {
-                using var scope = _scopeFactory.CreateScope();
-                var notifier = scope.ServiceProvider.GetRequiredService<IDeliveryStatusPushNotifier>();
-                await notifier.NotifyAsync(notification, pushCts.Token);
-            }
-            catch (Exception ex)
-            {
-                // Best-effort; the state transition already committed. Log for
-                // observability, never surface to the (already-returned) caller.
-                _log.LogWarning(ex,
-                    "Status-change push fan-out failed for delivery {DeliveryId}", deliveryId);
-            }
-        });
+        //
+        // ⚠️ The background task's ceiling is sized from the RECIPIENT COUNT. It was a flat
+        // 10s against an 8s-per-recipient notifier budget, which starved the second
+        // recipient — always the jeeber. See DetachedPushBudgetFor.
+        DispatchDeliveryPushDetached(notification);
 
         return Task.CompletedTask;
     }
