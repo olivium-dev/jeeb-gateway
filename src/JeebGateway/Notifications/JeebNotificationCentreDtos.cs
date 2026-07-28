@@ -89,17 +89,19 @@ public abstract record JeebNotificationRecordEnvelope<TPayload>
 /// <summary>
 /// Wire DTO for <c>jeeb.delivery_status_updated</c>.
 ///
-/// <para><b>⚠️ THIS WRITER IS GATED SILENT AND WILL NOT PRODUCE A ROW TODAY.</b> Owner ruling D4
-/// (2026-07-26) puts the <c>delivery</c> refresh category on the SILENT-only side, and
-/// <see cref="PushSilencePolicy"/> maps this template key to that category — so
-/// <see cref="NotificationRecordWriter"/> short-circuits with
-/// <see cref="NotificationRecordWriteClassification.SkippedSilent"/> before any POST. The type is
-/// implemented here because the centre serves the route and because the silent gate must be
-/// demonstrable at a REAL writer rather than at a test stand-in; it is this type that proves the
-/// step-3 policy is load-bearing. Do NOT "fix" the missing row by bypassing the policy — if a
-/// specific delivery MILESTONE is judged worth telling a human about, that is a new non-silent
-/// notification TYPE of its own, per the corollary documented in <see cref="PushSilencePolicy"/>,
-/// and it needs an owner decision first.</para>
+/// <para><b>⚠️ THE "GATED SILENT, NO ROW TODAY" CLAIM THAT USED TO BE HERE IS RETRACTED.</b>
+/// It described owner ruling D4 (2026-07-26), which put the <c>delivery</c> refresh category on
+/// the silent-only side. That was <b>REVERSED on 2026-07-27</b>: delivery is <b>shade + stored</b>,
+/// and <see cref="PushSilencePolicy"/> maps this template key to
+/// <see cref="PushDeliveryMode.ShadeAndStored"/> (see <c>ModeByCategory</c>, where
+/// <c>CategoryDelivery</c> sits in the stored block). <see cref="NotificationRecordWriter"/> does
+/// NOT short-circuit this type — it POSTs. Resolve the symbol before believing any comment on this
+/// subject: the retracted sentence outlived the ruling it described, which is how a live writer
+/// gets read as dormant.</para>
+///
+/// <para>If a specific delivery MILESTONE ever warrants different treatment from the rest of the
+/// category, that is a new notification TYPE of its own per the corollary documented in
+/// <see cref="PushSilencePolicy"/>, and it needs an owner decision first.</para>
 /// </summary>
 public sealed record DeliveryStatusUpdatedNotificationRecord
     : JeebNotificationRecordEnvelope<DeliveryStatusUpdatedNotificationPayload>

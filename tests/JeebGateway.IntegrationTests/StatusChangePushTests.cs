@@ -1,7 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
-using JeebGateway.Push;
+using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
 using JeebGateway.Tiers;
@@ -33,12 +33,35 @@ namespace JeebGateway.IntegrationTests;
 /// These tests drive the UPSTREAM compose path (Delivery=true) with the delivery + OTP
 /// NSwag clients and the push composer swapped for in-process fakes (same harness family
 /// as <c>JeeberEarningsOnCompleteTests</c>), so no live Go/Elixir upstream is needed.
+///
+/// <para><b>⚠️ THIS GUARD HAD INVERTED, and was merged red.</b> It spied on
+/// <c>IPushNotificationService</c> — the in-gateway Stack A composer. PR #330 moved the
+/// delivery-status category off that stack (it binds <c>InMemoryPushTransport</c>, an
+/// in-process queue that delivers nothing and is then counted <c>Delivered</c>) onto
+/// <see cref="IDeliveryStatusPushNotifier"/> and the push microservice. All three tests
+/// went red on that commit — they were green on its parent — and stayed red on main. A
+/// guard demanding the DEAD path is not a safety net: it is standing pressure to re-add
+/// the path whose whole defect was that it reported success for a push that never left
+/// the process, and "make CI green" is all it takes. The spy is now the live notifier.</para>
+///
+/// <para><b>The push is FIRE-AND-FORGET</b> (JEBV4-281: awaiting a real push-service round
+/// trip in front of the response timed transitions out client-side). So every assertion
+/// below waits for the detached task instead of reading the spy straight after the
+/// response — a synchronous read here would be a race that fails ~always on a fast box and
+/// passes on a slow one.</para>
 /// </summary>
 public class StatusChangePushTests
 {
     private const string RecipientPhone = "+9613123456";
     private const string TenantApplicationId = "17f6f47f-4047-4f1e-bac2-632a5eaa9a46";
     private const string ValidCode = "1234";
+
+    /// <summary>
+    /// How long to wait for the DETACHED push task. Generous because it only ever costs
+    /// wall-clock on a genuine failure: the wait polls and returns the moment the push
+    /// lands, which on a healthy box is the first 25ms tick.
+    /// </summary>
+    private static readonly TimeSpan DetachedPushWait = TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// KEYSTONE (PATCH live path): a flag-ON PATCH /status transition that commits
@@ -49,7 +72,7 @@ public class StatusChangePushTests
     [Fact]
     public async Task PatchStatus_Transition_On_Live_Emits_StatusChange_Push_To_Counterparty()
     {
-        var push = new CapturingPushService();
+        var push = new CapturingDeliveryStatusPush();
         var delivery = new ConfigurableDeliveryClient
         {
             TransitionOutcome = to => new DeliveryTransitionUpstream { DeliveryId = "overwritten", Status = to }
@@ -63,16 +86,19 @@ public class StatusChangePushTests
 
         patch.StatusCode.Should().Be(HttpStatusCode.OK, "the canonical transition committed upstream");
 
-        var statusPushes = push.Sent
-            .Where(r => r.Trigger == NotificationTrigger.StatusChange
-                        && r.Data is { } d && d.TryGetValue("deliveryId", out var id) && id == deliveryId)
-            .ToList();
+        (await push.WaitForAttemptsAsync(1, DetachedPushWait))
+            .Should().BeTrue("the committed transition must fan a StatusChange push (the regression)");
+
+        var statusPushes = push.Sent.Where(n => n.DeliveryId == deliveryId).ToList();
 
         statusPushes.Should().NotBeEmpty("the committed transition must fan a StatusChange push (the regression)");
-        statusPushes.Select(r => r.UserId).Should().Contain(clientId, "the client is a counterparty");
-        statusPushes.Select(r => r.UserId).Should().Contain(jeeberId, "the jeeber is a counterparty");
-        statusPushes.Should().OnlyContain(r => r.Data!["status"] == CanonicalDeliveryStatus.InTransit,
+        statusPushes.Should().OnlyContain(n => n.Recipients.Contains(clientId), "the client is a counterparty");
+        statusPushes.Should().OnlyContain(n => n.Recipients.Contains(jeeberId), "the jeeber is a counterparty");
+        statusPushes.Should().OnlyContain(n => n.Status == CanonicalDeliveryStatus.InTransit,
             "the push carries the fresh upstream target status");
+        statusPushes.Should().OnlyContain(n => n.PreviousStatus != n.Status,
+            "\"Status changed from X to X.\" is never a true sentence — the caller must snapshot "
+            + "the pre-transition status before the store mirror advances the live row in place");
     }
 
     /// <summary>
@@ -84,7 +110,7 @@ public class StatusChangePushTests
     [Fact]
     public async Task OtpVerify_Completion_On_Live_Emits_Completion_StatusChange_Push()
     {
-        var push = new CapturingPushService();
+        var push = new CapturingDeliveryStatusPush();
         var delivery = new ConfigurableDeliveryClient
         {
             VerifyOutcome = _ => new DeliveryHandoverVerifyResult
@@ -102,14 +128,15 @@ public class StatusChangePushTests
 
         verify.StatusCode.Should().Be(HttpStatusCode.OK, "the handover completes on the upstream path");
 
-        var completionPushes = push.Sent
-            .Where(r => r.Trigger == NotificationTrigger.StatusChange
-                        && r.Data is { } d && d.TryGetValue("deliveryId", out var id) && id == deliveryId)
-            .ToList();
+        (await push.WaitForAttemptsAsync(1, DetachedPushWait))
+            .Should().BeTrue("handover completion must fan a StatusChange push");
+
+        var completionPushes = push.Sent.Where(n => n.DeliveryId == deliveryId).ToList();
 
         completionPushes.Should().NotBeEmpty("handover completion must fan a StatusChange push");
-        completionPushes.Select(r => r.UserId).Should().Contain(new[] { clientId, jeeberId });
-        completionPushes.Should().OnlyContain(r => r.Data!["status"] == CanonicalDeliveryStatus.Done,
+        completionPushes.Should().OnlyContain(n => n.Recipients.Contains(clientId));
+        completionPushes.Should().OnlyContain(n => n.Recipients.Contains(jeeberId));
+        completionPushes.Should().OnlyContain(n => n.Status == CanonicalDeliveryStatus.Done,
             "the completion push carries the Done terminal status");
     }
 
@@ -121,7 +148,7 @@ public class StatusChangePushTests
     [Fact]
     public async Task PatchStatus_Push_Composer_Throw_Does_Not_Fail_The_Transition()
     {
-        var push = new CapturingPushService { ThrowOnSend = true };
+        var push = new CapturingDeliveryStatusPush { ThrowOnSend = true };
         var delivery = new ConfigurableDeliveryClient
         {
             TransitionOutcome = to => new DeliveryTransitionUpstream { DeliveryId = "overwritten", Status = to }
@@ -135,7 +162,10 @@ public class StatusChangePushTests
 
         patch.StatusCode.Should().Be(HttpStatusCode.OK,
             "a push-composer fault is swallowed best-effort; the committed transition stays a 200");
-        push.SendAttempts.Should().BeGreaterThan(0, "the push WAS attempted (and threw), proving the guard caught it");
+
+        (await push.WaitForAttemptsAsync(1, DetachedPushWait))
+            .Should().BeTrue("the push WAS attempted (and threw), proving the guard caught it");
+        push.Sent.Should().BeEmpty("the throwing composer captured nothing — the attempt is the evidence");
     }
 
     // ----------------------------------------------------------------------
@@ -143,7 +173,7 @@ public class StatusChangePushTests
     // ----------------------------------------------------------------------
 
     private WebApplicationFactory<Program> UpstreamFactory(
-        ConfigurableDeliveryClient delivery, CapturingPushService push)
+        ConfigurableDeliveryClient delivery, CapturingDeliveryStatusPush push)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("FeatureFlags:UseUpstream:Delivery", "true");
@@ -154,8 +184,11 @@ public class StatusChangePushTests
                 services.AddSingleton<IDeliveryServiceClient>(delivery);
                 services.RemoveAll<IServiceOTPClient>();
                 services.AddSingleton<IServiceOTPClient>(new RecordingOtpClient());
-                services.RemoveAll<IPushNotificationService>();
-                services.AddSingleton<IPushNotificationService>(push);
+                // Registered SINGLETON on purpose although the real notifier is SCOPED:
+                // the controller resolves it from a FRESH scope inside the detached task,
+                // and a scoped fake would hand each resolution a different, empty spy.
+                services.RemoveAll<IDeliveryStatusPushNotifier>();
+                services.AddSingleton<IDeliveryStatusPushNotifier>(push);
             });
         });
 
@@ -194,25 +227,63 @@ public class StatusChangePushTests
         return c;
     }
 
-    /// <summary>Captures every push handed to the composer; can be told to throw to prove best-effort.</summary>
-    private sealed class CapturingPushService : IPushNotificationService
+    /// <summary>
+    /// Captures every delivery-status push handed to the notifier; can be told to throw to
+    /// prove the caller's best-effort guard catches it.
+    ///
+    /// <para>Thread-safe and awaitable because the production call site DETACHES the send
+    /// onto a background task — the response returns before this is ever invoked.</para>
+    /// </summary>
+    private sealed class CapturingDeliveryStatusPush : IDeliveryStatusPushNotifier
     {
-        private readonly List<PushNotificationRequest> _sent = new();
-        public IReadOnlyList<PushNotificationRequest> Sent => _sent;
-        public int SendAttempts { get; private set; }
+        private readonly object _gate = new();
+        private readonly List<DeliveryStatusPushNotification> _sent = new();
+        private int _attempts;
+
         public bool ThrowOnSend { get; init; }
 
-        public Task<PushDeliveryResult> SendAsync(PushNotificationRequest request, CancellationToken ct)
+        public int SendAttempts => Volatile.Read(ref _attempts);
+
+        public IReadOnlyList<DeliveryStatusPushNotification> Sent
         {
-            SendAttempts++;
+            get { lock (_gate) { return _sent.ToList(); } }
+        }
+
+        public Task NotifyAsync(DeliveryStatusPushNotification notification, CancellationToken ct)
+        {
             if (ThrowOnSend)
             {
+                // Count the attempt BEFORE throwing: the assertion that matters is "the push
+                // was attempted and the caller swallowed the fault", and a counter bumped
+                // only on success cannot distinguish that from "never attempted at all".
+                Interlocked.Increment(ref _attempts);
                 throw new InvalidOperationException("simulated push composer failure");
             }
 
-            _sent.Add(request);
-            return Task.FromResult(new PushDeliveryResult(
-                request.UserId, request.Trigger, PushDeliveryOutcome.Delivered, 1));
+            lock (_gate)
+            {
+                _sent.Add(notification);
+            }
+
+            Interlocked.Increment(ref _attempts);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Waits for the detached push to land, POLLING rather than sleeping a fixed
+        /// interval so a slow CI box does not turn a correct fix into a flake. Returns
+        /// false on timeout so the caller fails with a domain message instead of this
+        /// helper throwing a timeout no reader can interpret.
+        /// </summary>
+        public async Task<bool> WaitForAttemptsAsync(int attempts, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (SendAttempts < attempts && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(25);
+            }
+
+            return SendAttempts >= attempts;
         }
     }
 

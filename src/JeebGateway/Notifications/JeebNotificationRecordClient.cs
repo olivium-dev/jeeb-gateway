@@ -44,10 +44,10 @@ public sealed class JeebNotificationRecordClient
     // ── b02 step 6a — the six types that had no writer ───────────────────────────────
 
     /// <summary>
-    /// <c>POST notifications/jeeb.delivery_status_updated</c>. Reachable, but see
-    /// <see cref="DeliveryStatusUpdatedNotificationRecord"/>: owner ruling D4 classifies this
-    /// type SILENT, so <see cref="NotificationRecordWriter"/> never actually calls this method
-    /// today. It exists so the gate is exercised at a real writer, not a stand-in.
+    /// <c>POST notifications/jeeb.delivery_status_updated</c>. Reachable AND reached: the
+    /// "owner ruling D4 classifies this type SILENT, so this method is never called" sentence
+    /// that used to sit here was <b>reversed on 2026-07-27</b> — delivery is shade + stored.
+    /// See <see cref="DeliveryStatusUpdatedNotificationRecord"/>.
     /// </summary>
     public Task<HttpStatusCode> PostDeliveryStatusUpdatedAsync(
         DeliveryStatusUpdatedNotificationRecord record,
