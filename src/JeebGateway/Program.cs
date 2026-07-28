@@ -792,6 +792,19 @@ builder.Services.AddScoped<JeebGateway.Availability.IOfferJeeberEnricher,
 builder.Services.Configure<UpstreamFeatureFlags>(
     builder.Configuration.GetSection(UpstreamFeatureFlags.SectionName));
 
+// Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
+// that lets the client read its own thread straight from Firestore instead of
+// re-fetching it over REST. The signing key is referenced by absolute HOST path in
+// configuration and is never committed; when unconfigured the route reports 503 and
+// nothing else changes. See FirebaseCustomTokenMinter for the credential-locality
+// guards and the project pinning.
+builder.Services.Configure<JeebGateway.Chat.Firebase.FirebaseCustomTokenOptions>(
+    builder.Configuration.GetSection(
+        JeebGateway.Chat.Firebase.FirebaseCustomTokenOptions.SectionName));
+builder.Services.AddSingleton<
+    JeebGateway.Chat.Firebase.IFirebaseCustomTokenMinter,
+    JeebGateway.Chat.Firebase.FirebaseCustomTokenMinter>();
+
 // S07 / BR-10 — delivery-service typed-client tunables (active-delivery cap).
 // Bound from the existing Services:Delivery block (which holds the upstream
 // BaseUrl) so the per-jeeber concurrent-active-delivery limit is config-driven;
