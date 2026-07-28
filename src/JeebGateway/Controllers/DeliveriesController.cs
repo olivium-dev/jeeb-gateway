@@ -757,9 +757,25 @@ public class DeliveriesController : ControllerBase
         // STRICTLY best-effort: a null/failed read only means the push is skipped, it
         // never blocks or fails the transition.
         DeliveryRequest? preTransitionRow = null;
+        // "Status changed from Picked to Picked." — THE COPY BUG, fixed here.
+        //
+        // `preTransitionRow` is the LIVE store instance: InMemoryRequestsStore.GetAsync
+        // hands back the dictionary's own object with no defensive copy, and
+        // SetStatusAsync (called below, on the committed transition) mutates
+        // `existing.Status` IN PLACE. Reading `notifyRow.Status` at push-compose time —
+        // which is what the code did — therefore read the value the mirror had ALREADY
+        // written, so `previousStatus` and `effectiveStatus` were the same token and both
+        // customer phones showed "Status changed from Picked to Picked." /
+        // "Status changed from AtDoor to AtDoor."
+        //
+        // Snapshot the STRING now, before anything can write to that row. This is the
+        // PATCH-leg counterpart of the `preCompletionStatus` snapshot the OTP-handover
+        // path already takes for exactly this reason (see its comment there).
+        string? preTransitionStatus = null;
         try
         {
             preTransitionRow = await _store.GetAsync(deliveryId, ct);
+            preTransitionStatus = preTransitionRow?.Status;
         }
         catch (Exception ex)
         {
@@ -864,7 +880,12 @@ public class DeliveriesController : ControllerBase
             {
                 try
                 {
-                    var previousStatus = notifyRow.Status;
+                    // Use the SNAPSHOT taken before the transition — NOT
+                    // `notifyRow.Status`, which the SetStatusAsync mirror above has
+                    // already advanced in place on this very object (see the snapshot
+                    // comment at the pre-read). Reading it here is what produced
+                    // "Status changed from Picked to Picked."
+                    var previousStatus = preTransitionStatus ?? string.Empty;
                     notifyRow.Status = upstream.Status;
                     await NotifyOtherPartyAsync(notifyRow, previousStatus, ct);
                 }
@@ -1299,7 +1320,12 @@ public class DeliveriesController : ControllerBase
         }
 
         var title = "Delivery status updated";
-        var bodyText = $"Status changed from {previousStatus} to {effectiveStatus}.";
+        // BELT-AND-BRACES on the same copy bug the caller's snapshot fixes: "Status
+        // changed from X to X." is never a true sentence, and it is still reachable
+        // WITHOUT any aliasing defect — an idempotent re-PATCH to the status the
+        // delivery already holds is a legitimate client retry. See
+        // DeliveryStatusPushCopy (unit-tested there, no web host required).
+        var bodyText = DeliveryStatusPushCopy.StatusChangeBody(previousStatus, effectiveStatus);
 
         // Build the notification SYNCHRONOUSLY so every value is captured from `req` now —
         // the caller mutates/returns the row the instant this returns.
