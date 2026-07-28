@@ -10,25 +10,33 @@ using Microsoft.Extensions.Options;
 namespace JeebGateway.Controllers;
 
 /// <summary>
-/// GPS location ingest + SSE tracking surface (T-backend-014, JEEB-32).
+/// GPS location ingest + tracking snapshot surface (T-backend-014, JEEB-32).
 ///
 /// <list type="bullet">
 ///   <item>POST /location/update — Jeebers stream a batch of GPS samples;
 ///     the latest (by device timestamp) is retained per Jeeber in
 ///     <see cref="ILocationStore"/> with the configured TTL (default 5 min).</item>
-///   <item>GET /deliveries/{id}/tracking — Server-Sent Events stream
-///     emitting a position frame every <see cref="TrackingOptions.SseInterval"/>
-///     (default 5 s). When the latest fix is older than
-///     <see cref="TrackingOptions.StaleThreshold"/> (default 2 min) the
-///     event name switches to <c>last-seen</c> so the client can render
-///     the "Jeeber offline" affordance.</item>
+///   <item>GET /deliveries/{id}/tracking — ONE-SHOT JSON snapshot of the
+///     latest fix plus the straight-line polyline to the dropoff. It reads
+///     once and returns; it never holds the connection open.</item>
 /// </list>
 ///
-/// The SSE loop is intentionally minimal — no buffering, no per-client
-/// queue. Each tick reads the in-memory store (lock-free) and writes a
-/// single SSE record. That keeps the per-connection cost at one timer
-/// and one dictionary lookup, which scales to thousands of concurrent
-/// tracking sessions without blocking the location ingest path.
+/// <para><b>NO SERVER-SIDE POLLING.</b> This surface used to answer
+/// <c>Accept: text/event-stream</c> with a fake stream: a
+/// <c>while (!ct.IsCancellationRequested)</c> loop that slept
+/// <c>Tracking:SseInterval</c> (5 s) and re-read the gateway's OWN store on
+/// every tick to synthesise a "live" feed. That is a poll wearing a stream's
+/// clothes — the gateway asking itself "is there anything new?" forever, once
+/// per connected client. It is deleted, along with the
+/// <c>/v1/geo/jeeb/stream/{id}</c> alias that existed only to open it.</para>
+///
+/// <para>Propagation is not this layer's job. Per the architecture ruling the
+/// backend WRITES and the client SUBSCRIBES: chat state lands in Firestore
+/// (chat-service <c>FirestoreConversationStore.AddMessageAsync</c>) and the
+/// device's own snapshot listener delivers it. Nothing here — and nothing
+/// anywhere in this gateway — opens a Firestore listener or loops asking a
+/// datastore for changes. <c>Tracking/NoBackendPollOrFirestoreListenerGuardTests</c>
+/// is the standing gate on both halves of that sentence.</para>
 /// </summary>
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
@@ -227,32 +235,15 @@ public class LocationController : ControllerBase
         => TrackOrPolylineAsync(deliveryId, ct);
 
     /// <summary>
-    /// S09 (JEB-54) SSE alias. The mobile live-map screen subscribes here with
-    /// <c>Accept: text/event-stream</c>. It is the participant-gated bridge to
-    /// the live track — identical authorization + stream as
-    /// <c>GET /deliveries/{id}/tracking</c>, exposed under the
-    /// <c>/v1/geo/jeeb/stream/{id}</c> path the client SDK calls. The gateway
-    /// resolves participants via delivery-service and DENIES a non-party
-    /// (403, N1) BEFORE opening the upstream geo:track subscription — the
-    /// socket never receives a position frame. Composition lives only here:
-    /// delivery-service owns the parties, geolocation owns the pings.
-    /// </summary>
-    [HttpGet("v1/geo/jeeb/stream/{deliveryId}")]
-    [RequireCapability(Capabilities.DeliveryTrackOwn)]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public Task StreamAsync(string deliveryId, CancellationToken ct)
-        => TrackOrPolylineAsync(deliveryId, ct);
-
-    /// <summary>
-    /// Shared body for the live-track surface. Resolves + authorizes the caller
-    /// against the delivery parties (delivery-service is the authority), then
-    /// content-negotiates: <c>Accept: text/event-stream</c> ⇒ the SSE relay;
-    /// otherwise a one-shot JSON polyline snapshot (H4/A3). The participant gate
-    /// runs once, BEFORE either branch, so a non-party is denied before any
-    /// stream is opened (N1).
+    /// Body of the live-track surface. Resolves + authorizes the caller against
+    /// the delivery parties (delivery-service is the authority), then returns a
+    /// one-shot JSON polyline snapshot (H4/A3). The participant gate runs first,
+    /// so a non-party is denied (403 + RFC 7807) before any position is read (N1).
+    ///
+    /// <para>There is deliberately no <c>Accept</c> branch any more: the
+    /// event-stream arm was a 5-second server-side re-read loop and is deleted.
+    /// A client that still sends <c>Accept: text/event-stream</c> gets this same
+    /// JSON snapshot rather than a held connection — degraded, never wedged.</para>
     /// </summary>
     private async Task TrackOrPolylineAsync(string deliveryId, CancellationToken ct)
     {
@@ -287,33 +278,25 @@ public class LocationController : ControllerBase
             return;
         }
 
-        // Content negotiation (H4/A3): a non-SSE Accept gets the JSON polyline
-        // snapshot instead of an open stream. This is the "polyline replay /
-        // route screen" view — one read, no held connection.
-        var accept = Request.Headers.Accept.ToString();
-        var wantsSse = accept.Contains("text/event-stream", StringComparison.OrdinalIgnoreCase);
-        if (!wantsSse)
-        {
-            await WritePolylineSnapshotAsync(participants, ct);
-            return;
-        }
-
-        await StreamSseAsync(deliveryId, participants, ct);
+        // One read, one body, connection closed. No Accept branch, no loop.
+        await WritePolylineSnapshotAsync(participants, ct);
     }
 
     /// <summary>
-    /// One-shot JSON polyline body for <c>Accept != text/event-stream</c>.
+    /// The one-shot JSON polyline body — the whole of this surface now.
     /// Composes the latest Jeeber fix (held in <see cref="ILocationStore"/>)
-    /// with the delivery's dropoff into the same MVP straight-line route the
-    /// SSE position frame carries. No held connection, no upstream Directions
-    /// hit beyond what the SSE path already does; a stable etag lets a repeat
-    /// read be conditional (JEB-54 AC3).
+    /// with the delivery's dropoff into the MVP straight-line route, and
+    /// carries the staleness verdict (<c>stale</c> / <c>secondsSinceUpdate</c>)
+    /// that used to ride the deleted <c>last-seen</c> stream event, so the
+    /// "Jeeber offline" affordance survives the stream's removal. No held
+    /// connection; a stable etag lets a repeat read be conditional (JEB-54 AC3).
     /// </summary>
     private async Task WritePolylineSnapshotAsync(DeliveryParticipants participants, CancellationToken ct)
     {
         var jeeberId = participants.JeeberId ?? string.Empty;
         var latest = string.IsNullOrEmpty(jeeberId) ? null : await _store.GetLatestAsync(jeeberId, ct);
         var polyline = Polyline.StraightLine(latest, participants.DropoffLocation);
+        var now = _clock.GetUtcNow();
 
         var dto = new TrackingPolylineDto
         {
@@ -327,8 +310,13 @@ public class LocationController : ControllerBase
                 Accuracy = latest.Accuracy,
                 Timestamp = latest.DeviceTimestamp
             },
+            // Staleness moved here from the deleted stream's `last-seen` event
+            // name. Additive on the wire: existing readers ignore the two new
+            // fields, and the offline affordance no longer needs a held socket.
+            Stale = latest is not null && (now - latest.ReceivedAt) > _options.CurrentValue.StaleThreshold,
+            SecondsSinceUpdate = latest is null ? null : (now - latest.ReceivedAt).TotalSeconds,
             Etag = PolylineEtag(polyline),
-            ServerTimestamp = _clock.GetUtcNow()
+            ServerTimestamp = now
         };
 
         Response.StatusCode = StatusCodes.Status200OK;
@@ -363,92 +351,5 @@ public class LocationController : ControllerBase
             }
             return hash.ToString("x16");
         }
-    }
-
-    private async Task StreamSseAsync(string deliveryId, DeliveryParticipants participants, CancellationToken ct)
-    {
-        Response.StatusCode = StatusCodes.Status200OK;
-        Response.Headers["Content-Type"] = "text/event-stream";
-        Response.Headers["Cache-Control"] = "no-cache";
-        Response.Headers["X-Accel-Buffering"] = "no";
-
-        // Send an immediate frame so the client doesn't sit on an empty
-        // stream for the first interval — important for "awaiting first
-        // ping" UX when the Jeeber hasn't reported yet.
-        await EmitFrameAsync(participants, ct);
-
-        var interval = _options.CurrentValue.SseInterval;
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                await Task.Delay(interval, _clock, ct);
-            }
-            catch (TaskCanceledException)
-            {
-                break;
-            }
-            // Re-resolve the delivery so a status flip to a terminal state
-            // (Done / delivered / rated / cancelled) cleanly ends the stream
-            // instead of streaming forever after the trip ends. Uses the same
-            // resolver as the gate so the SSE loop and the authz path agree on
-            // the canonical-vs-mirror source.
-            var current = await _participants.ResolveAsync(deliveryId, ct);
-            if (current is null || IsTerminalStatus(current.Status))
-            {
-                break;
-            }
-            await EmitFrameAsync(current, ct);
-        }
-    }
-
-    /// <summary>
-    /// Terminal-status predicate spanning both vocabularies: the canonical
-    /// SM-1 <c>Done</c> and the legacy mirror terminal set (delivered / rated /
-    /// cancelled / expired). Closing the stream on either keeps the SSE loop
-    /// correct regardless of which source answered the resolve.
-    /// </summary>
-    private static bool IsTerminalStatus(string status) =>
-        string.Equals(status, "Done", StringComparison.OrdinalIgnoreCase)
-        || RequestStatus.IsTerminal(status);
-
-    private async Task EmitFrameAsync(DeliveryParticipants delivery, CancellationToken ct)
-    {
-        var jeeberId = delivery.JeeberId ?? string.Empty;
-        var latest = string.IsNullOrEmpty(jeeberId) ? null : await _store.GetLatestAsync(jeeberId, ct);
-        var now = _clock.GetUtcNow();
-
-        double? sinceSec = latest is null
-            ? null
-            : (now - latest.ReceivedAt).TotalSeconds;
-        var stale = latest is not null
-            && (now - latest.ReceivedAt) > _options.CurrentValue.StaleThreshold;
-
-        var frame = new TrackingFrameDto
-        {
-            DeliveryId = delivery.DeliveryId,
-            JeeberId = jeeberId,
-            Position = latest is null ? null : new GpsPointDto
-            {
-                Lat = latest.Lat,
-                Lng = latest.Lng,
-                Accuracy = latest.Accuracy,
-                Timestamp = latest.DeviceTimestamp
-            },
-            Polyline = Polyline.StraightLine(latest, delivery.DropoffLocation),
-            Stale = stale,
-            SecondsSinceUpdate = sinceSec,
-            ServerTimestamp = now
-        };
-
-        var eventName = stale ? "last-seen" : "position";
-        var json = JsonSerializer.Serialize(frame, JsonOptions);
-
-        // SSE wire format: `event: <name>\ndata: <json>\n\n`. Multi-line
-        // JSON is fine because we serialize without indentation, so the
-        // single data: prefix carries the entire payload.
-        await Response.WriteAsync($"event: {eventName}\n", ct);
-        await Response.WriteAsync($"data: {json}\n\n", ct);
-        await Response.Body.FlushAsync(ct);
     }
 }

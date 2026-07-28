@@ -17,10 +17,12 @@ namespace JeebGateway.IntegrationTests;
 /// <summary>
 /// S09 (JEB-54) gateway BFF surface for live tracking + settlement read:
 ///
-///   PR-3a. GET /v1/geo/jeeb/stream/{id} — participant-gated SSE alias.
-///          Party ⇒ 200 text/event-stream (H3/A1/A2); non-party ⇒ 403 (N1).
-///   PR-3b. GET /deliveries/{id}/tracking with a non-SSE Accept ⇒ JSON polyline
-///          body carrying $.polyline + $.etag (H4/A3).
+///   PR-3a. GET /v1/geo/jeeb/stream/{id} — DELETED. The alias existed only to
+///          open the 5 s server-side re-read loop that faked a live stream; the
+///          loop is gone and so is the route. The gate it used to protect lives
+///          on at PR-3b, which is now the single tracking read.
+///   PR-3b. GET /deliveries/{id}/tracking ⇒ JSON polyline body carrying
+///          $.polyline + $.etag (H4/A3), for every Accept.
 ///   PR-4.  POST /location/update {deliveryId,lat,lng} — delivery-scoped ingest
 ///          authz: non-party ⇒ 403 (N2); not-in-transit ⇒ 409 (N5); the bound
 ///          jeeber while in-transit ⇒ 200.
@@ -53,10 +55,19 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
         });
     }
 
-    // ---- PR-3a: SSE alias /v1/geo/jeeb/stream/{id} ------------------------------
+    // ---- PR-3a: the SSE alias is gone -------------------------------------------
+    //
+    // The four PR-3a cases that used to live here (participant opens a stream,
+    // non-party 403, admin authorized, unauthenticated 401) all opened
+    // /v1/geo/jeeb/stream/{id}. That route was the only door into the deleted
+    // 5-second server-side re-read loop, so it is deleted with it. What those
+    // cases actually protected — the participant gate and its RFC 7807 body — is
+    // asserted below against the surviving snapshot route, plus in
+    // Tracking/NoBackendPollOrFirestoreListenerGuardTests, which pins the alias
+    // as ABSENT so it cannot come back unnoticed.
 
-    [Fact] // H3 / A1 / A2
-    public async Task SseAlias_Participant_Opens_EventStream()
+    [Fact] // A1: admin live-ops still gets a participant-equivalent view
+    public async Task Tracking_Admin_Authorized_As_Participant()
     {
         var seed = await SeedAsync(status: RequestStatus.HeadingOff, dropoffLat: 24.8, dropoffLng: 46.8);
         var store = _factory.Services.GetRequiredService<ILocationStore>();
@@ -65,56 +76,39 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
             new GpsPointDto { Lat = 24.70, Lng = 46.70, Accuracy = 5, Timestamp = DateTimeOffset.UtcNow }
         });
 
-        var http = AuthClient(seed.ClientId);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var http = _factory.CreateClient();
+        http.DefaultRequestHeaders.Add("X-User-Id", $"admin-{Guid.NewGuid()}");
+        http.DefaultRequestHeaders.Add("X-User-Roles", "admin");
 
-        var (eventName, frame) = await ReadFirstSseFrameAsync(
-            http, $"/v1/geo/jeeb/stream/{seed.Id}", cts.Token);
-
-        eventName.Should().Be("position");
-        frame.DeliveryId.Should().Be(seed.Id);
-        frame.Position.Should().NotBeNull();
-        frame.Polyline.Should().HaveCount(2);
+        var resp = await http.GetAsync($"/deliveries/{seed.Id}/tracking");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<TrackingPolylineDto>(JsonOptions);
+        body!.DeliveryId.Should().Be(seed.Id);
+        body.Position.Should().NotBeNull();
     }
 
     [Fact] // N1: Rana removed at S07-accept is not in {Sami, Kamal, admin}
-    public async Task SseAlias_NonParticipant_Returns_403_ProblemJson()
+    public async Task Tracking_NonParticipant_Returns_403_ProblemJson()
     {
         var seed = await SeedAsync(status: RequestStatus.HeadingOff, dropoffLat: 24.8, dropoffLng: 46.8);
         var http = AuthClient($"rana-{Guid.NewGuid()}");
 
-        var resp = await http.GetAsync($"/v1/geo/jeeb/stream/{seed.Id}",
-            HttpCompletionOption.ResponseHeadersRead);
+        var resp = await http.GetAsync($"/deliveries/{seed.Id}/tracking");
 
         resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
         resp.Content.Headers.ContentType!.MediaType.Should().Be("application/problem+json");
     }
 
-    [Fact] // A1: admin live-ops gets a participant-equivalent view
-    public async Task SseAlias_Admin_Authorized_As_Participant()
-    {
-        var seed = await SeedAsync(status: RequestStatus.HeadingOff, dropoffLat: 24.8, dropoffLng: 46.8);
-        var http = _factory.CreateClient();
-        http.DefaultRequestHeaders.Add("X-User-Id", $"admin-{Guid.NewGuid()}");
-        http.DefaultRequestHeaders.Add("X-User-Roles", "admin");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-
-        var (eventName, _) = await ReadFirstSseFrameAsync(
-            http, $"/v1/geo/jeeb/stream/{seed.Id}", cts.Token);
-        eventName.Should().Be("position");
-    }
-
     [Fact]
-    public async Task SseAlias_Unauthenticated_Returns_401()
+    public async Task Tracking_Unauthenticated_Returns_401()
     {
         var seed = await SeedAsync(status: RequestStatus.HeadingOff, dropoffLat: 24.8, dropoffLng: 46.8);
         var http = _factory.CreateClient();
-        var resp = await http.GetAsync($"/v1/geo/jeeb/stream/{seed.Id}",
-            HttpCompletionOption.ResponseHeadersRead);
+        var resp = await http.GetAsync($"/deliveries/{seed.Id}/tracking");
         resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
-    // ---- PR-3b: content-negotiated polyline body --------------------------------
+    // ---- PR-3b: the polyline body -----------------------------------------------
 
     [Fact] // H4 / A3
     public async Task Tracking_NonSse_Accept_Returns_Json_Polyline_With_Etag()
@@ -349,44 +343,6 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
         accepted.Should().NotBeNull();
         await store.SetStatusAsync(created.Id, status, default);
         return new Seed(created.Id, clientId, jeeberId);
-    }
-
-    private static async Task<(string Event, TrackingFrameDto Frame)> ReadFirstSseFrameAsync(
-        HttpClient http, string path, CancellationToken ct)
-    {
-        using var req = new HttpRequestMessage(HttpMethod.Get, path);
-        req.Headers.Add("Accept", "text/event-stream");
-        var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-        resp.EnsureSuccessStatusCode();
-        resp.Content.Headers.ContentType!.MediaType.Should().Be("text/event-stream");
-
-        await using var stream = await resp.Content.ReadAsStreamAsync(ct);
-        using var reader = new StreamReader(stream, Encoding.UTF8);
-
-        string? eventName = null;
-        var dataBuf = new StringBuilder();
-        string? line;
-        while ((line = await reader.ReadLineAsync(ct)) is not null)
-        {
-            if (line.Length == 0)
-            {
-                if (eventName is not null && dataBuf.Length > 0)
-                {
-                    var frame = JsonSerializer.Deserialize<TrackingFrameDto>(dataBuf.ToString(), JsonOptions)!;
-                    return (eventName, frame);
-                }
-                continue;
-            }
-            if (line.StartsWith("event: ", StringComparison.Ordinal))
-            {
-                eventName = line["event: ".Length..];
-            }
-            else if (line.StartsWith("data: ", StringComparison.Ordinal))
-            {
-                dataBuf.Append(line["data: ".Length..]);
-            }
-        }
-        throw new InvalidOperationException("SSE stream closed before a complete frame was received.");
     }
 
     private sealed record Seed(string Id, string ClientId, string JeeberId);
