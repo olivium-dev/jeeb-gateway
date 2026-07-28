@@ -68,6 +68,7 @@ public class RequestOffersController : ControllerBase
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly IJeebConversationClient _conversations;
     private readonly IOfferPushNotifier _offerPush;
+    private readonly IDetachedPushDispatcher _detachedPush;
     private readonly UpstreamFeatureFlags _flags;
     private readonly TimeProvider _clock;
     private readonly ILogger<RequestOffersController> _logger;
@@ -80,6 +81,7 @@ public class RequestOffersController : ControllerBase
         IOfferRequestIndex offerRequestIndex,
         IJeebConversationClient conversations,
         IOfferPushNotifier offerPush,
+        IDetachedPushDispatcher detachedPush,
         IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         ILogger<RequestOffersController> logger)
@@ -91,6 +93,7 @@ public class RequestOffersController : ControllerBase
         _offerRequestIndex = offerRequestIndex;
         _conversations = conversations;
         _offerPush = offerPush;
+        _detachedPush = detachedPush;
         _flags = flags.Value;
         _clock = clock;
         _logger = logger;
@@ -316,27 +319,33 @@ public class RequestOffersController : ControllerBase
         // offer landed so they can open the auction and compare bids. clientId is read
         // straight off the request row already loaded above — no extra fetch.
         //
-        // DEGRADE-DON'T-FAIL: the offer is already durable and the 201 is committed. The
-        // notifier itself swallows every push-service failure; the extra try/catch here
-        // is belt-and-braces so even a bug in the notifier can NEVER flip the 201 into a
-        // 5xx or slow it materially (the FCM round-trip is timeout-bounded inside the
-        // notifier). Same contract as the realtime fan-out above and the AdvancePhase seat.
-        try
-        {
-            await _offerPush.NotifyNewOfferAsync(
-                new OfferReceivedNotificationContext(
-                    request.PickupAddress,
-                    request.DropoffAddress,
-                    created.EtaMinutes,
-                    created.CreatedAt),
-                request.ClientId, requestId, created.Id, created.Fee, ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Failed to dispatch offer push for request {RequestId}, offer {OfferId}; offer stays 201.",
-                requestId, created.Id);
-        }
+        // DEGRADE-DON'T-FAIL: the offer is already durable and the 201 is committed.
+        //
+        // DETACHED, not awaited. It used to be awaited here with the claim that it could not
+        // "slow it materially (the FCM round-trip is timeout-bounded inside the notifier)".
+        // That claim was load-bearing and false in both directions: the bound was 2s, which is
+        // BELOW what a push to a recipient who owns a device costs (measured 2.53-3.97s), so
+        // the seat was not slow — it was guaranteed to abort. Raising the bound to a value
+        // that can complete (PushSendBudget.PerRecipient) makes "materially slow" true instead,
+        // and the 201 is the jeeber's own submit response. So the await moves behind the
+        // response, the way the delivery-status seat already does (JEBV4-281).
+        //
+        // The dispatcher resolves the notifier from a FRESH DI scope — IOfferPushNotifier is
+        // scoped and this request's scope dies with the response — and does NOT link the
+        // request token, which would re-cancel the very call we just stopped cancelling.
+        var pushContext = new OfferReceivedNotificationContext(
+            request.PickupAddress,
+            request.DropoffAddress,
+            created.EtaMinutes,
+            created.CreatedAt);
+        var pushClientId = request.ClientId;
+        var pushOfferId = created.Id;
+        var pushFee = created.Fee;
+
+        _detachedPush.Dispatch(
+            "offer.new", recipientCount: 1, correlationId: requestId,
+            work: (sp, token) => sp.GetRequiredService<IOfferPushNotifier>()
+                .NotifyNewOfferAsync(pushContext, pushClientId, requestId, pushOfferId, pushFee, token));
 
         return Created($"/requests/{requestId}/offers/{created.Id}", ToDto(created));
     }

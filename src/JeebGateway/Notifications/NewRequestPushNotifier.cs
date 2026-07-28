@@ -94,8 +94,8 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 {
     // Bounds the FCM round-trip on the legacy topic-blast path (rollback branch) so a
     // slow/down relay cannot wedge the job. Per-recipient sends use
-    // NewRequestFanoutOptions.PerSendTimeout instead.
-    private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(2);
+    // NewRequestFanoutOptions.PerSendTimeout instead. Both now come from PushSendBudget.
+    private static readonly TimeSpan PushTimeout = PushSendBudget.PerRecipient;
 
     // FR: the request description is a preview, not the full order — cap it so a long
     // transcript/compose body does not blow up the FCM notification body.
@@ -203,9 +203,11 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
             _logger.LogInformation(
                 "newreq-fanout requestId={RequestId} source={Source} candidates={Candidates} recipients={Recipients} "
-                + "initiatorExcluded={InitiatorExcluded} sent={Sent} failed={Failed} elapsedMs={ElapsedMs}",
+                + "initiatorExcluded={InitiatorExcluded} sent={Sent} failed={Failed} "
+                + "fcmAcceptedRows={AcceptedRows} fcmRejectedRows={RejectedRows} elapsedMs={ElapsedMs}",
                 n.RequestId, resolved.Source, resolved.CandidateCount, resolved.Recipients.Count,
                 resolved.InitiatorExcluded, tally.Sent, tally.Failed,
+                tally.DeviceRowsAccepted, tally.DeviceRowsRejected,
                 (int)(_clock.GetUtcNow() - started).TotalMilliseconds);
         }
         catch (Exception ex)
@@ -351,8 +353,17 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
     private sealed class SendTally
     {
+        /// <summary>Recipients whose per-user call completed. NOT a delivery count.</summary>
         public int Sent;
+
+        /// <summary>Recipients whose per-user call threw (404 no rows, 500 all rows dead, timeout).</summary>
         public int Failed;
+
+        /// <summary>Device rows FCM accepted, summed over the recipients that answered.</summary>
+        public int DeviceRowsAccepted;
+
+        /// <summary>Device rows FCM rejected, summed over the recipients that answered.</summary>
+        public int DeviceRowsRejected;
     }
 
     private async Task<SendTally> SendAllAsync(
@@ -388,12 +399,28 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(_options.PerSendTimeout);
 
-                await _push.Send_notification_to_userAsync(
+                var accepted = await _push.Send_notification_to_userAsync(
                     userId,
                     new SentPayloadToUserRequest { Payload = payload },
                     cts.Token);
 
                 Interlocked.Increment(ref tally.Sent);
+
+                // The summary line's sent=/failed= counters are recipient-level and have
+                // misled two batches on their own (they counted a push "failed" that a human
+                // then watched arrive). Carry the push service's device-row accounting up to
+                // the summary so the operator signal is about tokens, not about whether the
+                // gateway's own CTS beat the response.
+                var rows = PushAcceptance.Parse(accepted);
+                if (rows.Accepted is int a)
+                {
+                    Interlocked.Add(ref tally.DeviceRowsAccepted, a);
+                }
+
+                if (rows.Failed is int f)
+                {
+                    Interlocked.Add(ref tally.DeviceRowsRejected, f);
+                }
             }
             catch (Exception ex)
             {

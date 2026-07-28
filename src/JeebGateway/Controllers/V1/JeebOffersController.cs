@@ -40,6 +40,7 @@ public sealed class JeebOffersController : ControllerBase
     private readonly IDeliveryServiceClient _deliveryService;
     private readonly IJeebConversationClient _conversations;
     private readonly IOfferPushNotifier _offerPush;
+    private readonly IDetachedPushDispatcher _detachedPush;
     private readonly IHandoverCodeStore _handoverCodes;
     private readonly UpstreamFeatureFlags _flags;
     private readonly DeliveryClientOptions _deliveryOptions;
@@ -55,6 +56,7 @@ public sealed class JeebOffersController : ControllerBase
         IDeliveryServiceClient deliveryService,
         IJeebConversationClient conversations,
         IOfferPushNotifier offerPush,
+        IDetachedPushDispatcher detachedPush,
         IHandoverCodeStore handoverCodes,
         IOptions<UpstreamFeatureFlags> flags,
         IOptions<DeliveryClientOptions> deliveryOptions,
@@ -68,6 +70,7 @@ public sealed class JeebOffersController : ControllerBase
         _deliveryService = deliveryService;
         _conversations = conversations;
         _offerPush = offerPush;
+        _detachedPush = detachedPush;
         _handoverCodes = handoverCodes;
         _flags = flags.Value;
         _deliveryOptions = deliveryOptions.Value;
@@ -448,7 +451,16 @@ public sealed class JeebOffersController : ControllerBase
         // LOSING bidder named in the envelope's RejectedOfferIds. DEGRADE-DON'T-FAIL: the
         // saga already committed and the 200 is emitted, so a push blip is logged and
         // swallowed — it must never flip a successful accept into a 5xx.
-        await DispatchAcceptLifecyclePushesAsync(requestId, offerId, winningJeeberId, result.Envelope?.RejectedOfferIds, ct);
+        //
+        // DETACHED, not awaited (JEBV4-281's lesson, applied to the seat that needed it most).
+        // The per-recipient push budget is PushSendBudget.PerRecipient because that is what a
+        // push to a recipient who actually owns a device costs — 2.53-3.97s measured, so the
+        // old 2s cap aborted every healthy send. But winner + N losers awaited in front of
+        // this response at that budget is 10s x (1+N), past the mobile client's receive
+        // timeout, and the accept has ALREADY COMMITTED: the customer would be told "No
+        // internet connection" about an auction they successfully closed. Raising the cap is
+        // only safe behind the response, so the fan-out moves behind it.
+        DispatchAcceptLifecyclePushes(requestId, offerId, winningJeeberId, result.Envelope?.RejectedOfferIds);
 
         // Gap G4 (run-24 CHECK C) — mint the CUSTOMER's in-app handover code at accept
         // and ride it ONLY on this owner's accept response as `handoverCode`. The
@@ -509,48 +521,64 @@ public sealed class JeebOffersController : ControllerBase
     /// <c>jeeb.offer_accepted</c> push to the winning jeeber and one
     /// <c>jeeb.offer_rejected</c> push per rejected sibling (resolving each losing bidder
     /// from the offer routing index via <see cref="IOfferRequestIndex.ResolveJeeberId"/>).
-    /// The notifier itself never throws; this extra try/catch is belt-and-braces so even a
-    /// bug in the fan-out can NEVER flip the committed accept's 200 into a 5xx. Mirrors the
-    /// degrade-don't-fail contract of the offer-submit push seat.
+    ///
+    /// <para>Returns <c>void</c> and dispatches through <see cref="IDetachedPushDispatcher"/>:
+    /// the sends run BEHIND the accept response. That is both halves of degrade-don't-fail at
+    /// once — a bug in the fan-out cannot flip the committed 200 into a 5xx, and a slow push
+    /// cannot hold the 200 past the client's receive timeout. The belt-and-braces try/catch
+    /// that used to live here moved into the dispatcher, which is the only thing left that can
+    /// observe a fault on this path.</para>
     /// </summary>
-    private async Task DispatchAcceptLifecyclePushesAsync(
+    private void DispatchAcceptLifecyclePushes(
         string requestId,
         string acceptedOfferId,
         string? winningJeeberId,
-        IReadOnlyList<string>? rejectedOfferIds,
-        CancellationToken ct)
+        IReadOnlyList<string>? rejectedOfferIds)
     {
-        try
+        // Resolve the losing bidders from the routing index learned at submit time, on the
+        // REQUEST thread: IOfferRequestIndex is a singleton and the lookup is in-memory, so
+        // doing it here costs nothing and lets the detached budget be sized from a recipient
+        // count that is already known. A null result (offer unknown to this instance /
+        // recorded without a jeeber id) means we cannot address the push — skip, never guess.
+        var losers = new List<(string JeeberId, string OfferId)>();
+        if (rejectedOfferIds is not null)
         {
-            if (!string.IsNullOrWhiteSpace(winningJeeberId))
+            foreach (var rejectedOfferId in rejectedOfferIds)
             {
-                await _offerPush.NotifyOfferAcceptedAsync(winningJeeberId, requestId, acceptedOfferId, ct);
-            }
+                if (string.IsNullOrWhiteSpace(rejectedOfferId))
+                    continue;
 
-            if (rejectedOfferIds is not null)
+                var loserJeeberId = _offerRequestIndex.ResolveJeeberId(rejectedOfferId);
+                if (string.IsNullOrWhiteSpace(loserJeeberId))
+                    continue;
+
+                losers.Add((loserJeeberId, rejectedOfferId));
+            }
+        }
+
+        var winner = string.IsNullOrWhiteSpace(winningJeeberId) ? null : winningJeeberId;
+        var recipientCount = (winner is null ? 0 : 1) + losers.Count;
+        if (recipientCount == 0)
+        {
+            return;
+        }
+
+        _detachedPush.Dispatch(
+            "offer.accept_lifecycle", recipientCount, correlationId: requestId,
+            work: async (sp, token) =>
             {
-                foreach (var rejectedOfferId in rejectedOfferIds)
+                var push = sp.GetRequiredService<IOfferPushNotifier>();
+
+                if (winner is not null)
                 {
-                    if (string.IsNullOrWhiteSpace(rejectedOfferId))
-                        continue;
-
-                    // Resolve the losing bidder from the routing index learned at submit
-                    // time. A null result (offer unknown to this instance / recorded without
-                    // a jeeber id) means we cannot address the push — skip it, never guess.
-                    var loserJeeberId = _offerRequestIndex.ResolveJeeberId(rejectedOfferId);
-                    if (string.IsNullOrWhiteSpace(loserJeeberId))
-                        continue;
-
-                    await _offerPush.NotifyOfferLostAsync(loserJeeberId, requestId, rejectedOfferId, ct);
+                    await push.NotifyOfferAcceptedAsync(winner, requestId, acceptedOfferId, token);
                 }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Post-accept lifecycle push fan-out for request {RequestId} (offer {OfferId}) failed; "
-                + "accept stays 200.", requestId, acceptedOfferId);
-        }
+
+                foreach (var (loserJeeberId, rejectedOfferId) in losers)
+                {
+                    await push.NotifyOfferLostAsync(loserJeeberId, requestId, rejectedOfferId, token);
+                }
+            });
     }
 
     /// <summary>

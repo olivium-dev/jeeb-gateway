@@ -1255,7 +1255,8 @@ public class DeliveriesController : ControllerBase
     /// the log write. Small on purpose — the ceiling exists to stop a wedged background
     /// task living forever, not to add a second, competing deadline.
     /// </summary>
-    private static readonly TimeSpan DetachedPushDispatchOverhead = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DetachedPushDispatchOverhead =
+        JeebGateway.Notifications.PushSendBudget.DispatchOverhead;
 
     /// <summary>
     /// The ceiling a DETACHED delivery-status fan-out may run for, sized from the number of
@@ -1273,8 +1274,7 @@ public class DeliveriesController : ControllerBase
     /// fits today and fails on the first slow first-send.</para>
     /// </summary>
     internal static TimeSpan DetachedPushBudgetFor(int recipientCount)
-        => DetachedPushDispatchOverhead
-           + DeliveryStatusPushNotifier.PerRecipientTimeout * Math.Max(1, recipientCount);
+        => JeebGateway.Notifications.PushSendBudget.ForFanOut(recipientCount);
 
     /// <summary>
     /// Hands one already-composed delivery-status push to a background task and returns

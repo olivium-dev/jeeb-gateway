@@ -90,9 +90,21 @@ public interface IOfferPushNotifier
 /// <inheritdoc />
 public sealed class OfferPushNotifier : IOfferPushNotifier
 {
-    // Bounds the FCM round-trip so a slow/down push service cannot materially delay
-    // the offer-submit 201 (the LAN-local push svc is normally <200ms).
-    private static readonly TimeSpan PushTimeout = TimeSpan.FromSeconds(2);
+    // Bounds EACH recipient's FCM round-trip.
+    //
+    // Was 2s, on the stated assumption that "the LAN-local push svc is normally <200ms".
+    // JEBV4-345 measured that assumption false for the chat sibling and raised ITS copy to
+    // 10s — and this one, the fan-out's, the expiry notifier's and the callback seat's were
+    // left behind, because each seat owned a private copy of the number. Re-measured
+    // 2026-07-28: <200ms is what a push with NO device row costs (404 in ~14ms); a push to a
+    // registered recipient costs 2.53-3.97s across 10 consecutive calls, so 10 out of 10
+    // healthy sends blew this cap. The full distribution and the reasoning for 10s live on
+    // PushSendBudget; there is now ONE value and no seat-local copy to drift.
+    //
+    // Raising it is only safe because the offer seats no longer await this on the request
+    // path — see IDetachedPushDispatcher and the call sites in RequestOffersController /
+    // OffersController / JeebOffersController.
+    private static readonly TimeSpan PushTimeout = PushSendBudget.PerRecipient;
 
     /// <summary>
     /// b02 step 6b (owner ruling D3 = retire) — the loser-bidder copy, relocated here VERBATIM
@@ -238,10 +250,18 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(PushTimeout);
 
-            await _push.Send_notification_to_userAsync(
+            var accepted = await _push.Send_notification_to_userAsync(
                 clientId,
                 new SentPayloadToUserRequest { Payload = payload },
                 cts.Token);
+
+            // Log the push service's OWN accounting, not a bare "ACCEPTED". See
+            // PushAcceptance: a 201 means FCM took at least one of this user's device rows,
+            // and most of those rows are dead. It is not delivery.
+            _logger.LogInformation(
+                "Offer push accepted for request {RequestId} (offer {OfferId}) to client "
+                + "{ClientId}: {Accounting}.",
+                requestId, offerId, clientId, PushAcceptance.Describe(accepted));
         }
         catch (Exception ex)
         {
@@ -259,7 +279,7 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
             : "You received a new offer. Tap to review.");
 
     // sprint-009 Lane E — the winner/loser accept-lifecycle pushes. Both mirror the
-    // NotifyNewOfferAsync contract exactly (2s CTS, flat top-level payload, never-throws)
+    // NotifyNewOfferAsync contract exactly (PushSendBudget CTS, flat top-level payload, never-throws)
     // and differ only in recipient, template, and the `type` discriminator the mobile
     // client routes on (offer_accepted vs offer_lost). The title/body come from the
     // gateway-owned JeebNotificationCatalog (jeeb.offer_accepted / jeeb.offer_rejected)
@@ -416,10 +436,16 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(PushTimeout);
 
-            await _push.Send_notification_to_userAsync(
+            var accepted = await _push.Send_notification_to_userAsync(
                 recipientId,
                 new SentPayloadToUserRequest { Payload = payload },
                 cts.Token);
+
+            // The push service's own device-row accounting, not a bare "ACCEPTED".
+            _logger.LogInformation(
+                "Offer {Type} push accepted for request {RequestId} (offer {OfferId}) to "
+                + "{RecipientId}: {Accounting}.",
+                type, requestId, offerId, recipientId, PushAcceptance.Describe(accepted));
         }
         catch (Exception ex)
         {
