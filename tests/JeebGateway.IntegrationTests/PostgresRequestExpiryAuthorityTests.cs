@@ -127,7 +127,7 @@ public sealed class PostgresRequestExpiryAuthorityTests
             .AddSingleton<IRequestsStore>(store)
             .AddSingleton<IDurableRequestsMirror>(mirror)
             .AddSingleton<IRequestExpiryNotifier>(notifier)
-            .AddSingleton<IPendingOffersStore, InMemoryPendingOffersStore>()
+            .AddSingleton<IPendingOffersStore, JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore>()
             .AddSingleton<JeebGateway.Tiers.ITiersStore, InMemoryTiersStore>()
             .BuildServiceProvider();
 

@@ -177,7 +177,7 @@ public class ClientVisibilityAndReceiptTests
     public async Task GetById_AfterFullLifecycleToDone_StillCarriesAmountAndJeeberName_ForBothParties()
     {
         var delivery = new RecordingDeliveryClient();
-        var offers = new FlippablePendingOffersStore(new InMemoryPendingOffersStore(TimeProvider.System));
+        var offers = new FlippablePendingOffersStore(new JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore(TimeProvider.System));
         using var factory = Factory(delivery, offers);
 
         var clientId = $"client-{Guid.NewGuid():N}";
@@ -255,7 +255,7 @@ public class ClientVisibilityAndReceiptTests
         // owner, so the owner-scoped read is authorized at exactly this moment) and
         // snapshot it for all later reads.
         var delivery = new RecordingDeliveryClient();
-        var offers = new FlippablePendingOffersStore(new InMemoryPendingOffersStore(TimeProvider.System));
+        var offers = new FlippablePendingOffersStore(new JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore(TimeProvider.System));
         var offerService = new AcceptingOfferServiceClient();
 
         var clientId = $"client-{Guid.NewGuid():N}";

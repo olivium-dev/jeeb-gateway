@@ -262,6 +262,10 @@ public class OfferPushNotifierTests
                     // network call happens and the emitted payload/recipient are asserted.
                     services.RemoveAll<ServicePushNotificationClient>();
                     services.AddSingleton<ServicePushNotificationClient>(push);
+
+                    // GW3 / W3.5(c): the gateway ships no in-memory offer store any more, so a test that
+                    // needs a working offer ledger registers the test-owned double itself.
+                    Fakes.FakeOfferStoreWebApplicationFactory.UseFakeOfferStore(services);
                 });
             });
 

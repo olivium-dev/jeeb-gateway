@@ -231,7 +231,7 @@ public class RequestExpirySweeperTests
         var requestId = await CreateRequest(client, "Deliver a box");
 
         // Seed a live (pending) bid on the request, as a jeeber would have submitted.
-        var offers = (JeebGateway.Availability.InMemoryPendingOffersStore)
+        var offers = (JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore)
             factory.Services.GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
         var seeded = offers.EnqueueForTest(jeeberId: "jeeber-1", requestId: requestId);
         seeded.Status.Should().Be(JeebGateway.Availability.PendingOfferStatus.Pending);
@@ -255,7 +255,7 @@ public class RequestExpirySweeperTests
 
         var requestId = await CreateRequest(client, "Still open");
 
-        var offers = (JeebGateway.Availability.InMemoryPendingOffersStore)
+        var offers = (JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore)
             factory.Services.GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
         offers.EnqueueForTest(jeeberId: "jeeber-2", requestId: requestId);
 
@@ -407,9 +407,9 @@ public class RequestExpirySweeperTests
         services.AddSingleton<InMemoryRequestExpiryNotifier>();
         services.AddSingleton<IRequestExpiryNotifier>(sp =>
             sp.GetRequiredService<InMemoryRequestExpiryNotifier>());
-        services.AddSingleton<JeebGateway.Availability.InMemoryPendingOffersStore>();
+        services.AddSingleton<JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore>();
         services.AddSingleton<JeebGateway.Availability.IPendingOffersStore>(sp =>
-            sp.GetRequiredService<JeebGateway.Availability.InMemoryPendingOffersStore>());
+            sp.GetRequiredService<JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore>());
         services.AddSingleton<JeebGateway.Tiers.ITiersStore, InMemoryTiersStore>();
         return services.BuildServiceProvider();
     }

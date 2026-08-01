@@ -8,10 +8,13 @@ namespace JeebGateway.Availability;
 /// <summary>
 /// Thin-BFF adapter that satisfies <see cref="IPendingOffersStore"/> by
 /// proxying the real offer-service (Elixir/Phoenix, host port 10063) through
-/// <see cref="IOfferServiceClient"/>. Selected over
-/// <see cref="InMemoryPendingOffersStore"/> in <c>Program.cs</c> when
-/// <c>FeatureFlags:UseUpstream:Offer</c> is true; the in-memory store remains
-/// the flag-OFF fallback (store deletion is a tracked fast-follow, not this PR).
+/// <see cref="IOfferServiceClient"/>.
+///
+/// <para>GW3 / W3.5(c): this is now the <b>only</b> implementation the gateway
+/// registers. The former flag-OFF in-memory fallback is deleted — it moved into
+/// the test project as a fixture double. <c>FeatureFlags:UseUpstream:Offer</c> no
+/// longer selects a store; a test that needs a working offer ledger registers its
+/// own.</para>
 ///
 /// Contract impedance handled here:
 ///
@@ -39,13 +42,16 @@ namespace JeebGateway.Availability;
 /// currently exposes only the four write/auction routes
 /// (submit / edit / withdraw / accept) — there is no "get offer by id",
 /// "list offers for request", or "withdraw all offers for a jeeber" route.
-/// <see cref="GetAsync"/>, <see cref="ListForRequestAsync"/> and
-/// <see cref="WithdrawForJeeberAsync"/> therefore throw
-/// <see cref="NotSupportedException"/> under the upstream wire; the
-/// auto-offline sweeper and the offer-accept lookup path stay on the in-memory
-/// store until offer-service grows those read routes. The flag is OFF in
-/// non-production so the existing fixtures (which exercise those paths) stay
-/// green.</para>
+/// <see cref="GetAsync"/> and <see cref="WithdrawForJeeberAsync"/> therefore throw
+/// <see cref="NotSupportedException"/>. This is a REAL gap on every deployed
+/// overlay, not a dev-only one — they all set <c>UseUpstream:Offer = true</c>, so
+/// the auto-offline sweeper's bulk-withdraw and the offer-accept get-by-id lookup
+/// already fault in production today. (<see cref="AutoOfflineSweeper"/> catches
+/// per-record and continues; that is containment, not a fix.) The old note here
+/// claimed those paths "stay on the in-memory store" — they never did: they resolve
+/// <see cref="IPendingOffersStore"/>, which is this class. Closing the gap needs
+/// offer-service to grow get-by-id and bulk-withdraw routes (JEBV4-148, an
+/// owner / service-owner call).</para>
 /// </summary>
 public sealed class UpstreamPendingOffersStore : IPendingOffersStore
 {
@@ -222,12 +228,13 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
         CancellationToken ct)
         => throw new NotSupportedException(
             "offer-service owns the edit rule + the 2-edit cap via OffersController's upstream forward " +
-            "(IOfferServiceClient.EditAsync with max_edits); the in-memory TryEditAsync is the flag-OFF path only.");
+            "(IOfferServiceClient.EditAsync with max_edits); GW3 deleted the gateway's local edit path.");
 
     public Task<PendingOffer?> GetAsync(string offerId, CancellationToken ct)
         => throw new NotSupportedException(
-            "offer-service exposes no get-offer-by-id route; the offer-accept lookup path stays on the " +
-            "in-memory store until offer-service grows GET /api/v1/offers/{id} (tracked fast-follow).");
+            "offer-service exposes no get-offer-by-id route, so the offer-accept lookup path has NO " +
+            "implementation until offer-service grows GET /api/v1/offers/{id} (tracked fast-follow, " +
+            "JEBV4-148). GW3 deleted the in-memory offer store an earlier wording of this message named.");
 
     /// <summary>
     /// BUG-3 fix (customer offers-read 500). offer-service GREW
@@ -353,8 +360,10 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
 
     public Task<int> WithdrawForJeeberAsync(string jeeberId, CancellationToken ct)
         => throw new NotSupportedException(
-            "offer-service exposes no bulk withdraw-for-jeeber route; the auto-offline sweeper stays on the " +
-            "in-memory store until offer-service grows a per-jeeber withdrawal route (tracked fast-follow).");
+            "offer-service exposes no bulk withdraw-for-jeeber route, so the auto-offline sweeper's bulk " +
+            "withdraw has NO implementation until offer-service grows a per-jeeber withdrawal route " +
+            "(tracked fast-follow, JEBV4-148). GW3 deleted the in-memory offer store an earlier wording " +
+            "of this message named.");
 
     // --- mapping helpers ---
 
