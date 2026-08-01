@@ -132,18 +132,31 @@ public sealed class GeoServiceLocationStoreTests
         latest.Should().BeNull("a 404 from /locations/user/{id} means no fix, not an error");
     }
 
+    /// <summary>
+    /// The upstream seam must not swallow an old fix either. This test used to
+    /// assert the OPPOSITE — that a fix older than <c>PositionTtl</c> mapped to
+    /// <c>null</c> "matching the in-memory TTL contract" — and that mirrored
+    /// contract was the phantom-pin defect: a discarded fix takes its
+    /// <c>ReceivedAt</c> with it, and the tracking snapshot then reports a missing
+    /// courier as <c>stale:false</c>, indistinguishable from one who never
+    /// started. Age is REPORTED here and classified by the caller
+    /// (<see cref="TrackingFreshness"/>), which is what keeps
+    /// <c>FeatureFlags:UseUpstream:Geolocation</c> behaviourally invisible.
+    /// </summary>
     [Fact]
-    public async Task GetLatest_Returns_Null_When_Upstream_Fix_Is_Older_Than_Ttl()
+    public async Task GetLatest_Returns_Old_Upstream_Fix_With_Its_Age_Intact()
     {
+        var createdAt = DateTimeOffset.UtcNow.AddMinutes(-30);
         var handler = new StubHandler((_, _) =>
         {
-            // created_at well beyond the 5-minute TTL.
+            // created_at well beyond the 5-minute PositionTtl, but well inside the
+            // 12-hour retention window.
             var json = $$"""
             {
               "user_id": "jeeber-1",
               "latitude": 24.72,
               "longitude": 46.68,
-              "created_at": "{{DateTimeOffset.UtcNow.AddMinutes(-30):O}}"
+              "created_at": "{{createdAt:O}}"
             }
             """;
             return new HttpResponseMessage(HttpStatusCode.OK)
@@ -152,8 +165,52 @@ public sealed class GeoServiceLocationStoreTests
             };
         });
 
-        var store = BuildStore(handler, new TrackingOptions { PositionTtl = TimeSpan.FromMinutes(5) });
-        (await store.GetLatestAsync("jeeber-1")).Should().BeNull("a stale upstream fix maps to 'no current fix', matching the in-memory TTL contract");
+        var options = new TrackingOptions { PositionTtl = TimeSpan.FromMinutes(5) };
+        var store = BuildStore(handler, options);
+
+        var latest = await store.GetLatestAsync("jeeber-1");
+
+        latest.Should().NotBeNull("a fix past PositionTtl is old, not absent — discarding it destroys the only evidence staleness can be computed from");
+        latest!.ReceivedAt.Should().BeCloseTo(createdAt, TimeSpan.FromSeconds(1),
+            "the caller classifies freshness from this stamp");
+
+        // ...and the caller's verdict on it is 'lost', NOT 'awaiting first fix'.
+        TrackingFreshness.Classify(latest, DateTimeOffset.UtcNow, options)
+            .Should().Be(PositionFreshness.Lost);
+    }
+
+    /// <summary>
+    /// Retention — not the freshness TTL — is what makes the upstream seam forget.
+    /// Both implementations must forget at the same boundary or the flag becomes
+    /// observable.
+    /// </summary>
+    [Fact]
+    public async Task GetLatest_Returns_Null_When_Upstream_Fix_Is_Older_Than_Retention()
+    {
+        var handler = new StubHandler((_, _) =>
+        {
+            var json = $$"""
+            {
+              "user_id": "jeeber-1",
+              "latitude": 24.72,
+              "longitude": 46.68,
+              "created_at": "{{DateTimeOffset.UtcNow.AddDays(-3):O}}"
+            }
+            """;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+        });
+
+        var store = BuildStore(handler, new TrackingOptions
+        {
+            PositionTtl = TimeSpan.FromMinutes(5),
+            PositionRetention = TimeSpan.FromHours(12)
+        });
+
+        (await store.GetLatestAsync("jeeber-1")).Should().BeNull(
+            "past PositionRetention the fix is forgotten entirely, matching InMemoryLocationStore.GetLatest");
     }
 
     [Fact]

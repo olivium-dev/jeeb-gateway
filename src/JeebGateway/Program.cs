@@ -2307,15 +2307,40 @@ else
 }
 builder.Services.AddHostedService<AutoOfflineSweeper>();
 
-// GPS location streaming + SSE delivery tracking (T-backend-014).
-// The store is an in-memory ConcurrentDictionary keyed by Jeeber id with
-// a 5-min TTL — production swaps to Redis (SET ... EX 300) keyed on
-// jeeber:{id}:position so multiple gateway replicas share the view. The
-// SSE controller reads the store on a 5-second timer, flips the event
-// name to "last-seen" when the latest fix is older than the configured
-// stale threshold (default 2 min), and ends the stream when the delivery
-// row reaches a terminal status.
-builder.Services.Configure<TrackingOptions>(builder.Configuration.GetSection(TrackingOptions.SectionName));
+// GPS location tracking (T-backend-014).
+// The store is an in-memory ConcurrentDictionary keyed by Jeeber id.
+//
+// PRODUCTION REDIS SWAP — read before changing either number:
+//   SET jeeber:{id}:position <json incl. receivedAt> EX <Tracking:PositionRetention>
+// The EX is Tracking:PositionRetention (default 43200 s), NOT Tracking:PositionTtl.
+// Key expiry is a MEMORY bound; freshness is derived at read time from the
+// receivedAt stamp inside the value. The old design used `EX 300` and let key
+// absence mean "stale", which made "the courier never started" and "we have lost
+// the courier" identical on the wire — the phantom courier pin. Setting EX back to
+// PositionTtl would reintroduce that defect on the Redis path only, invisibly, and
+// only in production.
+//
+// The three windows are a strict ladder: 0 < StaleThreshold <= PositionTtl <
+// PositionRetention. ValidateOnStart refuses to boot on a config that breaks it,
+// because every ordering violation silently degrades or erases a wire state:
+// StaleThreshold > PositionTtl skips "stale" entirely, and PositionRetention <=
+// PositionTtl erases "lost" by forgetting the fix before it can be reported.
+builder.Services
+    .AddOptions<TrackingOptions>()
+    .Bind(builder.Configuration.GetSection(TrackingOptions.SectionName))
+    .Validate(
+        o => o.StaleThreshold > TimeSpan.Zero,
+        "Tracking:StaleThreshold must be greater than zero.")
+    .Validate(
+        o => o.PositionTtl >= o.StaleThreshold,
+        "Tracking:PositionTtl must be >= Tracking:StaleThreshold, otherwise a position can never be reported as 'stale' — it jumps straight from 'live' to 'lost'.")
+    .Validate(
+        o => o.PositionRetention > o.PositionTtl,
+        "Tracking:PositionRetention must be > Tracking:PositionTtl, otherwise a fix is forgotten before it can be reported as 'lost' and a missing courier becomes indistinguishable from one who never started (the phantom-pin defect).")
+    .Validate(
+        o => o.MaxPointsPerBatch > 0,
+        "Tracking:MaxPointsPerBatch must be greater than zero.")
+    .ValidateOnStart();
 // Gap 1 flag-gated store swap (BanService precedent): when
 // FeatureFlags:UseUpstream:Geolocation is ON, the record-of-truth is the shared
 // geolocation-service via GeoServiceLocationStore (NSwag client); default OFF keeps

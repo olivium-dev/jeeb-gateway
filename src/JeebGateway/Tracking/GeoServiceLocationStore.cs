@@ -25,11 +25,22 @@ namespace JeebGateway.Tracking;
 ///   <see cref="LocationStoreUpdateResult"/>. The upstream <c>latest</c> fix becomes
 ///   the result's <see cref="StoredPosition"/>.</item>
 ///   <item><b>GetLatest</b> (read): reads <c>GET /locations/user/{id}</c>. A 404 maps
-///   to <c>null</c> (no fix on record), NOT an exception. A fix whose upstream
-///   <c>created_at</c> is older than <see cref="TrackingOptions.PositionTtl"/> maps to
-///   <c>null</c> too, mirroring the in-memory store's lazy-TTL contract so callers
-///   see identical "stale == no current fix" behaviour regardless of the flag.</item>
+///   to <c>null</c> (no fix on record), NOT an exception. An old fix is returned AS
+///   IS with its <c>created_at</c> as <see cref="StoredPosition.ReceivedAt"/> —
+///   age is reported, never swallowed — and only a fix past
+///   <see cref="TrackingOptions.PositionRetention"/> maps to <c>null</c>, mirroring
+///   the in-memory store's retention bound so callers see identical behaviour
+///   regardless of the flag.</item>
 /// </list>
+///
+/// <para><b>Do not re-add a <see cref="TrackingOptions.PositionTtl"/> filter here.</b>
+/// This wrapper used to map any fix older than the 5-minute TTL to <c>null</c> to
+/// mirror the in-memory store. Both halves of that mirror were the phantom-pin
+/// defect: a swallowed fix takes its <c>ReceivedAt</c> with it, and the snapshot
+/// endpoint then cannot distinguish "the courier never started" from "the courier
+/// is missing" — see <see cref="ILocationStore.GetLatestAsync"/>. Freshness is
+/// classified by the caller (<see cref="TrackingFreshness"/>), which is what keeps
+/// <c>FeatureFlags:UseUpstream:Geolocation</c> behaviourally invisible.</para>
 ///
 /// <para><b>Fully async (JEBV4-57 / GW12-PERF-1).</b> <see cref="ILocationStore"/>
 /// is now async, so both delegating methods <c>await</c> the generated client
@@ -99,10 +110,13 @@ public sealed class GeoServiceLocationStore : ILocationStore
         }
 
         var receivedAt = upstream.CreatedAt ?? _clock.GetUtcNow();
-        if (_clock.GetUtcNow() - receivedAt > _options.CurrentValue.PositionTtl)
+        if (_clock.GetUtcNow() - receivedAt > _options.CurrentValue.PositionRetention)
         {
-            // Stale upstream fix maps to "no current fix", matching the in-memory
-            // store's lazy-TTL contract so the flag is behaviourally invisible.
+            // Past RETENTION (not the freshness TTL) the fix is forgotten entirely,
+            // matching InMemoryLocationStore.GetLatest. Anything younger is returned
+            // with its age intact so the caller can classify it as live / stale /
+            // lost — see the class remarks for why filtering on PositionTtl here was
+            // the bug.
             return null;
         }
 

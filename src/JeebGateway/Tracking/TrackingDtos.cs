@@ -96,8 +96,12 @@ public class TrackingPolylineDto
     public IReadOnlyList<double[]> Polyline { get; init; } = Array.Empty<double[]>();
 
     /// <summary>
-    /// The most recent position recorded for the Jeeber, or null when the
-    /// store has nothing yet.
+    /// The most recent position recorded for the Jeeber. Null when the store has
+    /// nothing on record (<c>positionStatus: "awaitingFirstFix"</c>) AND when the
+    /// fix is older than <c>Tracking:PositionTtl</c>
+    /// (<c>positionStatus: "lost"</c>) — we will not hand out coordinates we
+    /// cannot vouch for, so a client that reads nothing but this field can never
+    /// draw a pin for a courier we have lost.
     /// </summary>
     public GpsPointDto? Position { get; init; }
 
@@ -106,14 +110,37 @@ public class TrackingPolylineDto
     /// <c>Tracking:StaleThreshold</c> (default 2 min) — the client renders the
     /// "Jeeber offline" affordance. This replaces the deleted stream's
     /// <c>last-seen</c> event name.
+    ///
+    /// <para><b>Also true for <c>"lost"</c>.</b> It used to be computed as
+    /// <c>latest is not null &amp;&amp; age &gt; StaleThreshold</c>, which made it
+    /// <c>false</c> by construction once the store had discarded the fix — so the
+    /// longer a courier had been missing, the more confidently this field said
+    /// "fine". It is now monotonic in the position's age and never returns to
+    /// <c>false</c> without a fresh fix.</para>
     /// </summary>
     public bool Stale { get; init; }
 
     /// <summary>
-    /// Seconds elapsed since the most recent sample, or null when nothing has
-    /// been recorded yet.
+    /// Seconds elapsed since the most recent sample. Null ONLY when no fix is on
+    /// record at all. It is deliberately non-null in the <c>"lost"</c> state even
+    /// though <see cref="Position"/> is null: that pairing — an age without
+    /// coordinates — is what tells a client "we had this courier and lost them"
+    /// rather than "this courier never started".
     /// </summary>
     public double? SecondsSinceUpdate { get; init; }
+
+    /// <summary>
+    /// Explicit freshness verdict: <c>"awaitingFirstFix"</c> | <c>"live"</c> |
+    /// <c>"stale"</c> | <c>"lost"</c>. See <see cref="PositionFreshness"/> for the
+    /// meaning of each and for why the previous single <c>stale</c> boolean could
+    /// not express this axis.
+    ///
+    /// <para>ADDITIVE on the wire: a client that does not read it keeps the
+    /// corrected <see cref="Stale"/> / <see cref="Position"/> behaviour and is
+    /// strictly better off than before. Sent as a string, not an enum ordinal, so
+    /// the contract does not depend on member ordering.</para>
+    /// </summary>
+    public string PositionStatus { get; init; } = "awaitingFirstFix";
 
     /// <summary>
     /// Stable hash of the polyline geometry. A repeat read whose route has
