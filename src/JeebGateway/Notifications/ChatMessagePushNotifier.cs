@@ -37,8 +37,9 @@ namespace JeebGateway.Notifications;
 /// <para>Reuses the EXISTING, deployed <see cref="ServicePushNotificationClient"/>
 /// (the same typed client + base URL :10040 that <c>PushNotificationController</c>
 /// uses) and its <see cref="SentPayloadToUserRequest"/> contract — no new push
-/// contract is invented. The dead in-gateway IPushNotificationService/FcmPushTransport
-/// path is intentionally NOT used.</para>
+/// contract is invented. The dead in-gateway IPushNotificationService path is
+/// intentionally NOT used; its direct-to-provider transport was DELETED outright in
+/// b05/GW1 W0.6.</para>
 /// </summary>
 public interface IChatMessagePushNotifier
 {

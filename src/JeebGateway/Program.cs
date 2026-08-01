@@ -663,9 +663,11 @@ builder.Services.AddSingleton<JeebGateway.Notifications.IDetachedPushDispatcher,
 // reports Delivered. Six mobile surfaces polled (5s/10s/60s) precisely because the push they
 // were waiting for never left the process. Scoped: composes the SCOPED
 // ServicePushNotificationClient (:10040), exactly like chat/offer/new-request.
-// ⛔ Do NOT "fix" the old path by setting Push__UseFcmTransport=true — permanently forbidden
-// (the gateway must never speak to FCM itself) AND it would not work anyway, because
-// IDeviceTokenStore.RegisterAsync has zero production callers so the send resolves NoDevices.
+// ⛔ Do NOT "fix" the old path by re-adding an in-gateway transport that dials a push
+// provider directly — permanently forbidden (the gateway must never speak to a push
+// provider itself; b05/GW1 W0.6 DELETED the class and its config switch). It would not
+// work anyway: IDeviceTokenStore.RegisterAsync has zero production callers, so the send
+// resolves NoDevices.
 builder.Services.AddScoped<JeebGateway.Notifications.IDeliveryStatusPushNotifier,
     JeebGateway.Notifications.DeliveryStatusPushNotifier>();
 
@@ -1081,13 +1083,37 @@ else
 // exactly what production has been running. The flag branch, the UPG ledger client and its typed
 // transport are deleted, so no configuration value can resurrect the dial.
 //
-// SIDE OF THE ASYMMETRY (see IPaymentRefundClient below for the other side): the in-process ledger
+// SIDE OF THE ASYMMETRY (see IPaymentRefundClient below for the other side): the LOCAL ledger
 // TELLS THE TRUTH. Cash was already collected hand-to-hand by the Jeeber; recording it in the
 // gateway's own ledger is the complete operation, not a stand-in for a remote write that did not
 // happen. That is why this one is safe to keep as the permanent implementation while the refund
 // client had to be made to fail loudly. SettlementService still treats the post as best-effort and
 // idempotent on the settlement id.
-builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
+//
+// b05/GW1 W1.8 + W3.5(b) — OWNER RULING 2026-07-31 "PROMOTE": local no longer means volatile.
+// The ledger is now Postgres-backed (settlement_ledger_entries, migration 0044) whenever
+// GatewayPostgres is configured, and ISettlementLedgerClient is a Critical store under
+// StoreDurabilityGuard, so a prod-like boot REFUSES the in-memory fallback rather than serving
+// money bookkeeping out of process memory.
+//
+// The specific hole this closes is NOT "the settlement row was lost" — that row is in Postgres
+// already. It is the IDEMPOTENCY MEMO. InMemorySettlementLedgerClient's whole correctness
+// argument was GetOrAdd(IdempotencyKey): replay the same settlement id, get the ORIGINAL entry
+// back. That memo was a ConcurrentDictionary, so a restart emptied it — and the 60 s
+// SettlementLedgerReconciler then replays every settlement row with a NULL ledger_entry_id using
+// that same key, minting a SECOND entry id for one cash collection and overwriting the first
+// stamp. Nothing throws; the books just disagree with themselves. The PK on idempotency_key
+// moves that memo into the database, where a restart cannot reach it.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<ISettlementLedgerClient, PostgresSettlementLedgerClient>();
+}
+else
+{
+    // Dev/CI/test only. In a prod-like env the fail-closed guard refuses this fallback by name
+    // (StoreDurabilityGuard.Critical) — it does not merely warn.
+    builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
+}
 
 // JEBV4-302: shared per-jeeber earnings-cache invalidation registry. Singleton so the
 // read side (JeebEarningsController links each cache entry to the jeeber's change token)
@@ -1328,18 +1354,15 @@ else
     builder.Services.AddSingleton<IPushDeliveryTracker>(sp => sp.GetRequiredService<InMemoryPushDeliveryTracker>());
 }
 
-var pushOpts = builder.Configuration.GetSection(PushOptions.SectionName).Get<PushOptions>() ?? new PushOptions();
-if (pushOpts.UseFcmTransport)
-{
-    builder.Services.AddHttpClient<FcmPushTransport>();
-    builder.Services.AddSingleton<IPushTransport, FcmPushTransport>();
-    builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
-}
-else
-{
-    builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Fcm));
-    builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
-}
+// b05/GW1 W0.6 — the in-gateway direct-to-Google push transport is DELETED, not
+// flag-disabled, per owner ruling: the gateway must NEVER speak to a push provider
+// itself; every push leaves via the push microservice (:10040). The switch that used
+// to select it, its two credential options and its config keys went with it, so this
+// registration is now UNCONDITIONAL and there is no branch left to flip.
+// DevicePlatform.Fcm stays — it is the platform DISCRIMINATOR on the device token, not
+// a transport, and PushNotificationService routes on it.
+builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Fcm));
+builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
 
 builder.Services.AddSingleton<IPushNotificationService, PushNotificationService>();
 builder.Services.AddSingleton<PushRetryQueueProcessor>();

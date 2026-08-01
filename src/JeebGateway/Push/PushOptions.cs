@@ -4,6 +4,12 @@ namespace JeebGateway.Push;
 /// Configuration for the push pipeline (T-backend-022). Defaults match the
 /// ticket's acceptance criteria: 5-second delivery SLA, single retry 30
 /// seconds after a failed first attempt.
+///
+/// <para><b>b05/GW1 W0.6.</b> The direct-to-Google transport class, its
+/// <c>UseFcmTransport</c> switch and its two credential-shaped options
+/// (project id + bearer token) were DELETED, not disabled. Owner ruling: the
+/// gateway must never speak to a push provider itself — every push leaves via
+/// the push microservice (:10040). Do not re-add a credential property here.</para>
 /// </summary>
 public sealed class PushOptions
 {
@@ -20,17 +26,4 @@ public sealed class PushOptions
 
     /// <summary>Per-transport HTTP timeout. Tight to keep the 5s SLA.</summary>
     public TimeSpan TransportTimeout { get; set; } = TimeSpan.FromSeconds(2);
-
-    /// <summary>Google Cloud project ID for FCM HTTP v1 API.</summary>
-    public string FcmProjectId { get; set; } = string.Empty;
-
-    /// <summary>
-    /// OAuth2 bearer token for FCM HTTP v1. In production, rotate via
-    /// Google Application Default Credentials; for the MVP a long-lived
-    /// service account token is acceptable.
-    /// </summary>
-    public string FcmBearerToken { get; set; } = string.Empty;
-
-    /// <summary>Whether to use the real FCM transport or the in-memory test double.</summary>
-    public bool UseFcmTransport { get; set; }
 }
