@@ -663,9 +663,11 @@ builder.Services.AddSingleton<JeebGateway.Notifications.IDetachedPushDispatcher,
 // reports Delivered. Six mobile surfaces polled (5s/10s/60s) precisely because the push they
 // were waiting for never left the process. Scoped: composes the SCOPED
 // ServicePushNotificationClient (:10040), exactly like chat/offer/new-request.
-// ⛔ Do NOT "fix" the old path by setting Push__UseFcmTransport=true — permanently forbidden
-// (the gateway must never speak to FCM itself) AND it would not work anyway, because
-// IDeviceTokenStore.RegisterAsync has zero production callers so the send resolves NoDevices.
+// ⛔ Do NOT "fix" the old path by re-adding an in-gateway transport that dials a push
+// provider directly — permanently forbidden (the gateway must never speak to a push
+// provider itself; b05/GW1 W0.6 DELETED the class and its config switch). It would not
+// work anyway: IDeviceTokenStore.RegisterAsync has zero production callers, so the send
+// resolves NoDevices.
 builder.Services.AddScoped<JeebGateway.Notifications.IDeliveryStatusPushNotifier,
     JeebGateway.Notifications.DeliveryStatusPushNotifier>();
 
@@ -1328,18 +1330,15 @@ else
     builder.Services.AddSingleton<IPushDeliveryTracker>(sp => sp.GetRequiredService<InMemoryPushDeliveryTracker>());
 }
 
-var pushOpts = builder.Configuration.GetSection(PushOptions.SectionName).Get<PushOptions>() ?? new PushOptions();
-if (pushOpts.UseFcmTransport)
-{
-    builder.Services.AddHttpClient<FcmPushTransport>();
-    builder.Services.AddSingleton<IPushTransport, FcmPushTransport>();
-    builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
-}
-else
-{
-    builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Fcm));
-    builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
-}
+// b05/GW1 W0.6 — the in-gateway direct-to-Google push transport is DELETED, not
+// flag-disabled, per owner ruling: the gateway must NEVER speak to a push provider
+// itself; every push leaves via the push microservice (:10040). The switch that used
+// to select it, its two credential options and its config keys went with it, so this
+// registration is now UNCONDITIONAL and there is no branch left to flip.
+// DevicePlatform.Fcm stays — it is the platform DISCRIMINATOR on the device token, not
+// a transport, and PushNotificationService routes on it.
+builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Fcm));
+builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
 
 builder.Services.AddSingleton<IPushNotificationService, PushNotificationService>();
 builder.Services.AddSingleton<PushRetryQueueProcessor>();

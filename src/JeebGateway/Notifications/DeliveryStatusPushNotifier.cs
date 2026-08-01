@@ -16,11 +16,13 @@ namespace JeebGateway.Notifications;
 /// the in-gateway push stack. That stack cannot deliver, for three independent
 /// reasons, each alone sufficient:</para>
 /// <list type="number">
-///   <item><c>Push:UseFcmTransport</c> is <c>false</c> at every layer, so DI binds
+///   <item>The only <c>IPushTransport</c> registration is
 ///   <c>InMemoryPushTransport</c>, which enqueues to an in-process
 ///   <c>ConcurrentQueue</c> and returns — and is then counted <c>Delivered</c>.
-///   The flag is PERMANENTLY FORBIDDEN by owner ruling (the gateway must never
-///   speak to FCM itself), so this is not fixable by configuration.</item>
+///   As of b05/GW1 W0.6 there is no configuration that can change this: the
+///   in-gateway direct-to-provider transport and its switch were DELETED by owner
+///   ruling (the gateway must never speak to a push provider itself), so this is
+///   not fixable by configuration and there is no flag left to flip.</item>
 ///   <item><c>IDeviceTokenStore.RegisterAsync</c> has ZERO production callers, so
 ///   even with a real transport the send short-circuits on <c>NoDevices</c>.
 ///   Flipping the flag would not work either.</item>
