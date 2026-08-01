@@ -35,10 +35,12 @@ namespace JeebGateway.IntegrationTests;
 ///     <c>RejectedOfferIds</c>, addressed to each losing bidder resolved from the offer
 ///     routing index.
 /// Two layers: unit tests on <see cref="OfferPushNotifier"/> (payload + deep link + degrade),
-/// and END-TO-END tests through BOTH accept routes (<c>POST /offers/{id}/accept</c> — legacy
-/// <c>OffersController</c>, and <c>POST /v1/offers/{id}/accept</c> — <c>JeebOffersController</c>)
-/// proving the fan-out fires once per recipient and that a throwing push client never breaks
-/// the committed 200.
+/// and END-TO-END tests through the accept route (<c>POST /v1/offers/{id}/accept</c> —
+/// <c>JeebOffersController</c>) proving the fan-out fires once per recipient, that an
+/// unresolvable losing bidder is skipped rather than guessed, and that a throwing push client
+/// never breaks the committed 200. (Until 2026-08-01 this file ran the same E2E block twice,
+/// against a second, duplicate accept route on the legacy <c>OffersController</c>; the owner
+/// retired that route, so there is one surface and one block.)
 /// </summary>
 public class OfferAcceptLifecyclePushTests
 {
@@ -227,112 +229,22 @@ public class OfferAcceptLifecyclePushTests
     }
 
     // ---------------------------------------------------------------------
-    // E2E — legacy OffersController: POST /offers/{offerId}/accept
+    // E2E — legacy OffersController: (Removed 2026-08-01)
+    //
+    // Three tests lived here, driving POST /offers/{offerId}/accept, which the owner
+    // retired on 2026-08-01 as a duplicate of POST /v1/offers/{id}/accept:
+    //   LegacyAccept_SendsWinnerPushOnce_AndOneLoserPushPerRejectedId
+    //   LegacyAccept_UnknownLoserBidder_IsSkipped_NotGuessed
+    //   LegacyAccept_WhenPushClientThrows_StillReturns200
+    //
+    // The first already had an exact V1 twin. The other two did NOT — so rather than
+    // delete their coverage with the route, they were PORTED onto the surviving V1
+    // surface below (V1Accept_UnknownLoserBidder_IsSkipped_NotGuessed and
+    // V1Accept_WhenPushClientThrows_StillReturns200). Both exercise the same invariants
+    // against JeebOffersController's own DispatchAcceptLifecyclePushes /
+    // ResolveLosingBidders, which is a separate copy of the fan-out from the deleted
+    // one — so these are real assertions on live code, not ceremony.
     // ---------------------------------------------------------------------
-
-    [Fact]
-    public async Task LegacyAccept_SendsWinnerPushOnce_AndOneLoserPushPerRejectedId()
-    {
-        var push = new RecordingUserPushClient();
-        var fake = new FakeOfferServiceClient
-        {
-            Result = new OfferAcceptResult
-            {
-                Status = OfferAcceptStatus.Accepted,
-                Envelope = new OfferAcceptWire
-                {
-                    AcceptedOfferId = "offer-win",
-                    JeeberId = "jeeber-winner",
-                    RejectedOfferIds = new[] { "offer-loser-a", "offer-loser-b" }
-                }
-            }
-        };
-        using var factory = NewFactory(fake, push);
-
-        // Winner + both losers recorded so the loser bidders resolve from the index.
-        var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
-        index.Record("offer-win", "req-1", "jeeber-winner");
-        index.Record("offer-loser-a", "req-1", "jeeber-loser-a");
-        index.Record("offer-loser-b", "req-1", "jeeber-loser-b");
-
-        var resp = await ClientActor(factory, "client-owner").PostAsync("/offers/offer-win/accept", null);
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-
-        // Exactly 3 pushes: 1 winner + 2 losers.
-        push.Sends.Should().HaveCount(3);
-
-        var winner = push.Sends.Single(s => TypeOf(s) == "offer_accepted");
-        winner.UserId.Should().Be("jeeber-winner");
-        PayloadOf(winner)["offerId"].Should().Be("offer-win");
-
-        var losers = push.Sends.Where(s => TypeOf(s) == "offer_lost").ToList();
-        losers.Should().HaveCount(2);
-        losers.Select(s => s.UserId).Should().BeEquivalentTo(new[] { "jeeber-loser-a", "jeeber-loser-b" });
-        losers.Select(s => (string)PayloadOf(s)["offerId"]!)
-              .Should().BeEquivalentTo(new[] { "offer-loser-a", "offer-loser-b" });
-    }
-
-    [Fact]
-    public async Task LegacyAccept_UnknownLoserBidder_IsSkipped_NotGuessed()
-    {
-        var push = new RecordingUserPushClient();
-        var fake = new FakeOfferServiceClient
-        {
-            Result = new OfferAcceptResult
-            {
-                Status = OfferAcceptStatus.Accepted,
-                Envelope = new OfferAcceptWire
-                {
-                    AcceptedOfferId = "offer-win2",
-                    JeeberId = "jeeber-winner2",
-                    // One resolvable loser, one NOT recorded in the index.
-                    RejectedOfferIds = new[] { "offer-known", "offer-unknown" }
-                }
-            }
-        };
-        using var factory = NewFactory(fake, push);
-        var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
-        index.Record("offer-win2", "req-2", "jeeber-winner2");
-        index.Record("offer-known", "req-2", "jeeber-known");
-        // offer-unknown intentionally NOT recorded.
-
-        var resp = await ClientActor(factory, "client-owner2").PostAsync("/offers/offer-win2/accept", null);
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-
-        // Winner + only the resolvable loser (the unknown bidder is skipped, never guessed).
-        push.Sends.Should().HaveCount(2);
-        push.Sends.Count(s => TypeOf(s) == "offer_lost").Should().Be(1);
-        push.Sends.Single(s => TypeOf(s) == "offer_lost").UserId.Should().Be("jeeber-known");
-    }
-
-    [Fact]
-    public async Task LegacyAccept_WhenPushClientThrows_StillReturns200()
-    {
-        var push = new RecordingUserPushClient { Throw = true };
-        var fake = new FakeOfferServiceClient
-        {
-            Result = new OfferAcceptResult
-            {
-                Status = OfferAcceptStatus.Accepted,
-                Envelope = new OfferAcceptWire
-                {
-                    AcceptedOfferId = "offer-boom",
-                    JeeberId = "jeeber-boom",
-                    RejectedOfferIds = new[] { "offer-loser-boom" }
-                }
-            }
-        };
-        using var factory = NewFactory(fake, push);
-        var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
-        index.Record("offer-boom", "req-boom", "jeeber-boom");
-        index.Record("offer-loser-boom", "req-boom", "jeeber-loser-boom");
-
-        var resp = await ClientActor(factory, "client-boom").PostAsync("/offers/offer-boom/accept", null);
-
-        // Degrade-don't-fail: a throwing push client must never flip the committed 200.
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        push.Attempts.Should().BeGreaterThanOrEqualTo(1);
-    }
 
     // ---------------------------------------------------------------------
     // E2E — V1 JeebOffersController: POST /v1/offers/{id}/accept
@@ -369,6 +281,84 @@ public class OfferAcceptLifecyclePushTests
         var loser = push.Sends.Single(s => TypeOf(s) == "offer_lost");
         loser.UserId.Should().Be("v1-jeeber-loser-a");
         PayloadOf(loser)["offerId"].Should().Be("v1-loser-a");
+    }
+
+    /// <summary>
+    /// PORTED 2026-08-01 from LegacyAccept_UnknownLoserBidder_IsSkipped_NotGuessed when the
+    /// legacy accept route was retired. A rejected offer id the routing index cannot resolve
+    /// to a bidder must be SKIPPED, never guessed — pushing "you lost" to the wrong jeeber is
+    /// worse than staying silent.
+    /// </summary>
+    [Fact]
+    public async Task V1Accept_UnknownLoserBidder_IsSkipped_NotGuessed()
+    {
+        var push = new RecordingUserPushClient();
+        var fake = new FakeOfferServiceClient
+        {
+            Result = new OfferAcceptResult
+            {
+                Status = OfferAcceptStatus.Accepted,
+                Envelope = new OfferAcceptWire
+                {
+                    AcceptedOfferId = "v1-offer-win2",
+                    JeeberId = "v1-jeeber-winner2",
+                    // One resolvable loser, one NOT recorded in the index.
+                    RejectedOfferIds = new[] { "v1-offer-known", "v1-offer-unknown" }
+                }
+            }
+        };
+        using var factory = NewFactory(fake, push);
+        var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
+        index.Record("v1-offer-win2", "v1-req-2", "v1-jeeber-winner2");
+        index.Record("v1-offer-known", "v1-req-2", "v1-jeeber-known");
+        // v1-offer-unknown intentionally NOT recorded.
+
+        var resp = await ClientActor(factory, "v1-client-owner2")
+            .PostAsync("/v1/offers/v1-offer-win2/accept", null);
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // Winner + only the resolvable loser (the unknown bidder is skipped, never guessed).
+        push.Sends.Should().HaveCount(2);
+        push.Sends.Count(s => TypeOf(s) == "offer_lost").Should().Be(1);
+        push.Sends.Single(s => TypeOf(s) == "offer_lost").UserId.Should().Be("v1-jeeber-known");
+    }
+
+    /// <summary>
+    /// PORTED 2026-08-01 from LegacyAccept_WhenPushClientThrows_StillReturns200 when the
+    /// legacy accept route was retired. Degrade-don't-fail at the ROUTE level: the accept
+    /// saga has already committed upstream, so a throwing push client must never flip the
+    /// committed 200. (LifecyclePush_PushServiceFault_IsSwallowed_NeverThrows asserts the
+    /// same invariant one layer down, on OfferPushNotifier; this one asserts it end-to-end
+    /// through the controller, which is what the retired test covered.)
+    /// </summary>
+    [Fact]
+    public async Task V1Accept_WhenPushClientThrows_StillReturns200()
+    {
+        var push = new RecordingUserPushClient { Throw = true };
+        var fake = new FakeOfferServiceClient
+        {
+            Result = new OfferAcceptResult
+            {
+                Status = OfferAcceptStatus.Accepted,
+                Envelope = new OfferAcceptWire
+                {
+                    AcceptedOfferId = "v1-offer-boom",
+                    JeeberId = "v1-jeeber-boom",
+                    RejectedOfferIds = new[] { "v1-offer-loser-boom" }
+                }
+            }
+        };
+        using var factory = NewFactory(fake, push);
+        var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
+        index.Record("v1-offer-boom", "v1-req-boom", "v1-jeeber-boom");
+        index.Record("v1-offer-loser-boom", "v1-req-boom", "v1-jeeber-loser-boom");
+
+        var resp = await ClientActor(factory, "v1-client-boom")
+            .PostAsync("/v1/offers/v1-offer-boom/accept", null);
+
+        // Degrade-don't-fail: a throwing push client must never flip the committed 200.
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        push.Attempts.Should().BeGreaterThanOrEqualTo(1);
     }
 
     // ---------------------------------------------------------------------

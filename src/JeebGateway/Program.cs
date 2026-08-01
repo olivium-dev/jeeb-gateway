@@ -2264,7 +2264,7 @@ builder.Services.AddSingleton<IPendingOffersStore>(sp =>
         sp.GetRequiredService<JeebGateway.Requests.IRequestsStore>()));
 // Offer → request routing index (S07 accept saga). Records the immutable
 // offerId → requestId pairing at submit time so the offer-scoped accept route
-// (POST /offers/{id}/accept) can forward to the request-scoped offer-service
+// (POST /v1/offers/{id}/accept) can forward to the request-scoped offer-service
 // accept saga under FeatureFlags:UseUpstream:Offer. Routing concern only — no
 // auction domain state lives here.
 // The in-memory index is the fast, authoritative-within-instance read/write model.

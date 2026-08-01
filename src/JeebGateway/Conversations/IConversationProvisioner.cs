@@ -39,52 +39,28 @@ public interface IConversationProvisioner
         string clientId,
         CancellationToken ct);
 
-    /// <summary>
-    /// S07 H6d (fix C): advances an already-provisioned broadcasting conversation
-    /// to the <c>accepted</c> phase when the request owner accepts a jeeber's
-    /// offer. ORCHESTRATION ONLY — the gateway is the SOLE chat caller (org no-
-    /// coupling law; offer-service holds no chat client). On a successful accept
-    /// the gateway:
-    /// <list type="number">
-    ///   <item>mints/adds the <b>winning</b> jeeber as a member of the channel
-    ///     (POST /api/members → POST /api/channels/{id}/members) so the accepted
-    ///     conversation has the client + winning jeeber as active participants;</item>
-    ///   <item>tags the channel <c>accepted</c> so chat-service's
-    ///     <c>ChannelSummaryService.ResolvePhase</c> can surface
-    ///     <c>phase: "accepted"</c> once it recognises the marker (the recognise-
-    ///     "accepted" half is a chat-service change tracked separately — see the
-    ///     implementation remarks);</item>
-    ///   <item>best-effort deactivates each supplied losing chat member id
-    ///     (PATCH /api/members/{id}/deactivate) so the auction losers drop out
-    ///     while history is retained.</item>
-    /// </list>
-    ///
-    /// DEGRADE-DON'T-FAIL: a chat-service blip (timeout, 5xx, null id) is logged
-    /// and swallowed — a chat outage must NEVER turn a successful offer accept
-    /// into a 5xx. Returns the winning jeeber's minted chat member id on success,
-    /// or <c>null</c> when auto-create is disabled / there is no conversation id /
-    /// the chat call degraded. Mirrors
-    /// <see cref="CreateBroadcastingConversationAsync"/>'s contract.
-    /// </summary>
-    /// <param name="conversationId">
-    /// The channel id minted at create time and stamped on the request
-    /// (<c>DeliveryRequest.ConversationId</c>). When null/empty the method is a
-    /// no-op (the order never got a broadcasting conversation).
-    /// </param>
-    /// <param name="winningJeeberId">
-    /// The user-management id of the jeeber whose offer was accepted. Recorded on
-    /// the new chat member's name for correlation.
-    /// </param>
-    /// <param name="losingMemberIds">
-    /// Chat member ids of the losing offerers to deactivate. May be empty when the
-    /// gateway has not retained the losers' chat member ids (see remarks) — the
-    /// winner-add + accepted-tag still run.
-    /// </param>
-    Task<string?> AdvanceToAcceptedAsync(
-        string? conversationId,
-        string winningJeeberId,
-        IReadOnlyList<string> losingMemberIds,
-        CancellationToken ct);
+    // S07 H6d — AdvanceToAcceptedAsync was DELETED here (owner ruling, 2026-08-01).
+    //
+    // It had exactly ONE production call site: OffersController's post-accept
+    // orchestration on the retired POST /offers/{offerId}/accept route. That route
+    // was a duplicate of POST /v1/offers/{id}/accept and is gone, so this member had
+    // no caller left.
+    //
+    // It was also REDUNDANT while it existed. It advanced the legacy CHANNEL
+    // aggregate (POST /api/members -> POST /api/channels/{id}/members, then PATCH
+    // /api/members/{id}/deactivate for losers) to promote the winner and drop losers,
+    // while the SAME caller, a few lines later, already did winner promotion + loser
+    // removal ATOMICALLY on the correct aggregate via
+    // IJeebConversationClient.AdvancePhaseAsync(WinnerUserId, RemoveOthers: true).
+    // Its return value was discarded. Worse, its first step (POST /api/members) is NOT
+    // channel-scoped, so it would have SUCCEEDED and minted an orphan chat member row
+    // before the channel-scoped second step failed against the wrong aggregate — the
+    // same Channels-vs-Conversations subsystem split documented on
+    // CloseConversationAsync below.
+    //
+    // Do NOT reinstate it. Winner promotion and loser removal belong to the
+    // conversation aggregate's phase-advance, which does both atomically.
+
 
     /// <summary>
     /// E22 / I3 (JEBV4-241, cross-ref JEBV4-217; Q-036): auto-close the conversation
@@ -125,8 +101,8 @@ public interface IConversationProvisioner
     ///
     /// <para>DEGRADE-DON'T-FAIL: a chat blip / disabled auto-create flag / null-or-empty
     /// conversation id is a silent no-op — a chat outage must NEVER turn a committed,
-    /// settled delivery completion into a 5xx (mirrors
-    /// <see cref="AdvanceToAcceptedAsync"/>). Idempotent: re-advancing an already-closed
+    /// settled delivery completion into a 5xx (the same degrade-don't-fail contract the
+    /// deleted AdvanceToAcceptedAsync carried). Idempotent: re-advancing an already-closed
     /// conversation re-assigns the same phase and is a no-op upstream. Default no-op
     /// implementation so existing <see cref="IConversationProvisioner"/> fakes need no
     /// change (additive-first).</para>

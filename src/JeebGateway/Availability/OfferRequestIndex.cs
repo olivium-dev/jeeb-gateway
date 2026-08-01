@@ -6,7 +6,7 @@ namespace JeebGateway.Availability;
 /// Thin-BFF routing index mapping <c>offerId → requestId</c>.
 ///
 /// <para><b>Why this exists.</b> The mobile accept route is offer-scoped
-/// (<c>POST /offers/{offerId}/accept</c>) while the canonical offer-service
+/// (<c>POST /v1/offers/{offerId}/accept</c>) while the canonical offer-service
 /// accept route is request-scoped
 /// (<c>POST /api/v1/requests/{requestId}/offers/{offerId}/accept</c>) and
 /// offer-service exposes no get-offer-by-id route to recover the requestId from
@@ -80,7 +80,7 @@ public interface IOfferRequestIndex
 /// <summary>
 /// In-process, thread-safe <see cref="IOfferRequestIndex"/>. Registered as a
 /// singleton so the pairing learned by <c>RequestOffersController.Submit</c> is
-/// visible to <c>OffersController.Accept</c> on the same gateway instance.
+/// visible to <c>V1.JeebOffersController.Accept</c> on the same gateway instance.
 /// </summary>
 public sealed class InMemoryOfferRequestIndex : IOfferRequestIndex
 {

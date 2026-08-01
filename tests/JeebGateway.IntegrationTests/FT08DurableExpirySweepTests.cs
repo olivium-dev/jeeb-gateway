@@ -231,10 +231,6 @@ public class FT08DurableExpirySweepTests
             string requestId, string clientId, CancellationToken ct)
             => Task.FromResult<string?>(null);
 
-        public Task<string?> AdvanceToAcceptedAsync(
-            string? conversationId, string winningJeeberId,
-            IReadOnlyList<string> losingMemberIds, CancellationToken ct)
-            => Task.FromResult<string?>(null);
     }
 
     private sealed class NoOpBroadcastEventRecorder : IBroadcastEventRecorder

@@ -10,7 +10,7 @@ namespace JeebGateway.StateService.Durable;
 /// S08 (A3/N9) — DURABLE, bounce- and replica-survivable <see cref="IOfferRequestIndex"/>.
 ///
 /// <para><b>The problem this fixes.</b> The mobile offer-edit and offer-accept routes are
-/// offer-scoped (<c>PUT /v1/offers/{offerId}</c>, <c>POST /offers/{offerId}/accept</c>)
+/// offer-scoped (<c>PUT /v1/offers/{offerId}</c>, <c>POST /v1/offers/{offerId}/accept</c>)
 /// while the canonical offer-service routes are request-scoped, and offer-service exposes
 /// NO get-offer-by-id route to recover the requestId from the offer. The gateway therefore
 /// learns the <c>offerId → (requestId, jeeberId)</c> pairing at submit time and resolves it

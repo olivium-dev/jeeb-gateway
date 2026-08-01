@@ -127,66 +127,32 @@ public sealed class S08GatewayCloseoutTests
     }
 
     // -----------------------------------------------------------------
-    // D-accept (H7/N9) — accept DTO carries winner_user_id + conversation_phase.
+    // D-accept (H7/N9) — (Removed 2026-08-01) accept DTO winner_user_id +
+    // conversation_phase.
+    //
+    // Accept_EnrichesDto_With_WinnerUserId_And_ConversationPhase_NoDeliveryLeak and
+    // Accept_WhenPhaseAdvanceThrows_DefaultsPhaseToAccepted_StillReturns200 lived here.
+    // Both drove POST /offers/{id}/accept, retired by owner ruling 2026-08-01 as a
+    // duplicate of POST /v1/offers/{id}/accept.
+    //
+    // CONTRACT CONSEQUENCE, STATED PLAINLY: the snake_case keys these asserted —
+    // $.winner_user_id and $.conversation_phase — were carried ONLY by
+    // OffersController's OfferAcceptResultDto, which was returned ONLY by the retired
+    // route. The surviving V1 accept returns DeliveryRequestDto (+ handoverCode /
+    // conversationId), which has never carried either key. So retiring the route
+    // REMOVES both keys from every gateway response; they are not relocated.
+    //
+    // Verified inert before deletion: a census of jeeb-mobile, jeeb-admin and
+    // jeeb-partner-portal at origin/main finds ZERO readers of either key (0 hits in
+    // all three repos across .dart/.ts/.tsx/.js/.jsx/.vue/.json). "winner_user_id"
+    // survives in src/ only as an OUTBOUND request field the gateway SENDS to
+    // chat-service (JeebConversationContracts / PATCH /api/conversations/{id}/phase),
+    // never as a response key.
+    //
+    // The underlying BEHAVIOUR these tests really guarded — that the winner is promoted
+    // and the losers removed on the conversation aggregate — is unaffected and is
+    // covered on the surviving route by S03AcceptConversationSeatTests.
     // -----------------------------------------------------------------
-
-    [Fact]
-    public async Task Accept_EnrichesDto_With_WinnerUserId_And_ConversationPhase_NoDeliveryLeak()
-    {
-        var chat = new RecordingJeebConversationClient { AdvancedPhase = "accepted" };
-        using var factory = NewFactory(chat, chatEnabled: true, offerEnabled: true,
-            fakeOffer: AcceptedFake("offer-d", "jeeber-kamal"));
-
-        var requestId = await SeedRequestAsync(factory, "client-d", "conv-d-" + Guid.NewGuid());
-        SeedRouting(factory, "offer-d", requestId, "jeeber-kamal");
-
-        var resp = await ClientActor(factory, "client-d").PostAsync("/offers/offer-d/accept", null);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var json = JObject.Parse(await resp.Content.ReadAsStringAsync());
-
-        // S07 fields preserved — status is the OFFER outcome, NOT a delivery state.
-        json["id"]!.Value<string>().Should().Be(requestId);
-        json["status"]!.Value<string>().Should().Be("accepted");
-        json["jeeberId"]!.Value<string>().Should().Be("jeeber-kamal");
-
-        // S08 additions (snake_case, the exact keys H7/N9 assert).
-        json["winner_user_id"]!.Value<string>().Should().Be("jeeber-kamal");
-        json["conversation_phase"]!.Value<string>().Should().Be("accepted");
-
-        // The conversation aggregate phase was advanced via chat-service (the authority),
-        // promoting the winner and removing the other jeebers.
-        chat.AdvancePhaseCalls.Should().Be(1);
-        chat.LastAdvancePhaseConversationId.Should().Be(requestId);
-        chat.LastAdvancePhase!.Phase.Should().Be("accepted");
-        chat.LastAdvancePhase.WinnerUserId.Should().Be("jeeber-kamal");
-        chat.LastAdvancePhase.WinnerRoleInConvo.Should().Be("jeeber_winner");
-        chat.LastAdvancePhase.RemoveOthers.Should().BeTrue();
-    }
-
-    [Fact]
-    public async Task Accept_WhenPhaseAdvanceThrows_DefaultsPhaseToAccepted_StillReturns200()
-    {
-        // chat blip on phase advance must NEVER 5xx the accept; conversation_phase
-        // defaults to "accepted" (the saga committed) so H7's assertion still holds.
-        var chat = new RecordingJeebConversationClient
-        {
-            AdvancePhaseThrows = new JeebConversationApiException(HttpStatusCode.BadGateway, "boom"),
-        };
-        using var factory = NewFactory(chat, chatEnabled: true, offerEnabled: true,
-            fakeOffer: AcceptedFake("offer-d2", "jeeber-win"));
-
-        var requestId = await SeedRequestAsync(factory, "client-d2", "conv-d2-" + Guid.NewGuid());
-        SeedRouting(factory, "offer-d2", requestId, "jeeber-win");
-
-        var resp = await ClientActor(factory, "client-d2").PostAsync("/offers/offer-d2/accept", null);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var json = JObject.Parse(await resp.Content.ReadAsStringAsync());
-        json["status"]!.Value<string>().Should().Be("accepted");
-        json["winner_user_id"]!.Value<string>().Should().Be("jeeber-win");
-        json["conversation_phase"]!.Value<string>().Should().Be("accepted");
-    }
 
     // -----------------------------------------------------------------
     // D-WS (H6) — realtime gate mints a signed membership ticket for a member.

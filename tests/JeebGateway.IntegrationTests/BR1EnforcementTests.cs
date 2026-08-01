@@ -205,37 +205,19 @@ public class BR1EnforcementTests : IClassFixture<Fakes.FakeOfferStoreWebApplicat
     // -----------------------------------------------------------------
 
     // -----------------------------------------------------------------
-    // 4. Offer-accept BR-1: a user cannot be both Client and Jeeber on the
-    //    same delivery. S07: accepting is a CLIENT action (the request owner),
-    //    so the dual-role user accepts AS THE CLIENT and BR-1 fires because the
-    //    OFFER's jeeber is the same person who owns the request.
+    // 4. (Removed 2026-08-01) Offer-accept BR-1 self-offer 409.
+    //
+    //    This drove the retired POST /offers/{id}/accept route, which the owner
+    //    retired as a duplicate of POST /v1/offers/{id}/accept. The BR-1 self-offer
+    //    guard it covered was NOT lost with it: the surviving V1 route carries the
+    //    same check (JEBV4-83 F5, back-ported from this route precisely so the two
+    //    could not diverge), and it is asserted by
+    //    V1/JeebOffersAcceptHardeningTests.V1Accept_Genuine_Self_Offer_Returns_409_BR1_Before_Saga
+    //    plus its negative twin V1Accept_By_Request_Owning_Client_Does_Not_Trip_BR1.
+    //
+    //    The DualRoleService-level BR-1 rule this class is really about is still
+    //    covered directly by Same_Delivery_Violation_When_User_Is_Client above.
     // -----------------------------------------------------------------
-
-    [Fact]
-    public async Task Offer_Accept_Returns_409_When_Offer_Jeeber_Is_Client_Of_Same_Delivery()
-    {
-        var userId = $"self-accept-{Guid.NewGuid()}";
-        SeedDualRoleUser(userId, activeRole: Roles.Client);
-
-        var requestStore = _factory.Services.GetRequiredService<IRequestsStore>();
-        var request = await requestStore.CreateAsync(new CreateRequestInput
-        {
-            ClientId = userId,
-            Description = "My own delivery I want to accept"
-        }, CancellationToken.None);
-
-        // The offer on this request is bid by the SAME user (their jeeber persona).
-        var offersStore = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
-        var offer = offersStore.EnqueueForTest(userId, request.Id);
-
-        // The user accepts AS THE CLIENT (the request owner) — reaches the controller.
-        var client = CreateAuthenticatedClient(userId, Roles.Client);
-        var resp = await client.PostAsync($"/offers/{offer.Id}/accept", null);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
-        var body = await resp.Content.ReadAsStringAsync();
-        body.Should().Contain("same-delivery-role-violation");
-    }
 
     // -----------------------------------------------------------------
     // 5. (Removed) GET /users/me ActiveRole field test — the /users/me

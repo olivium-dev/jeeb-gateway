@@ -1249,12 +1249,6 @@ public sealed class DurableRequestsStoreTests
             return Task.FromResult(_conversationId);
         }
 
-        // S07: the create-path durable store does not advance to accepted (that is
-        // OffersController orchestration), so this fake's advance is an unused no-op.
-        public Task<string?> AdvanceToAcceptedAsync(
-            string? conversationId, string winningJeeberId,
-            IReadOnlyList<string> losingMemberIds, CancellationToken ct)
-            => Task.FromResult<string?>(null);
     }
 
     private sealed class RecordingBroadcastEventRecorder : IBroadcastEventRecorder

@@ -168,7 +168,7 @@ public interface IOfferServiceClient
         CancellationToken ct);
 
     /// <summary>
-    /// S08 A5 — POST /offers/{offerId}/reject — the request-owning CLIENT rejects a
+    /// S08 A5 — POST /v1/offers/{offerId}/reject — the request-owning CLIENT rejects a
     /// single jeeber's bid (distinct from the accept-saga's automatic sibling
     /// rejection). offer-service owns the reject rule (only the owning request's
     /// client may reject; <c>StateMachine.apply :reject</c>: submitted/edited →

@@ -128,47 +128,30 @@ public class CreateDoubleSubmitConcurrencyTests
     }
 
     // ------------------------------------------------------------------
-    // Guard AC: "the accept path is NOT this bug" — 2 concurrent accepts of
-    // the SAME offer must resolve to exactly one winner (already believed
-    // atomic via IRequestsStore.TryAcceptByJeeberAsync's process-local write
-    // lock). This is a regression guard, not expected to fail.
+    // Guard AC — (Removed 2026-08-01) "the accept path is NOT this bug":
+    // Two_Concurrent_Accepts_Of_One_Offer_Resolve_To_Exactly_One_Winner.
+    //
+    // It fired two concurrent POST /offers/{id}/accept calls, a route the owner retired
+    // on 2026-08-01 as a duplicate of POST /v1/offers/{id}/accept.
+    //
+    // It is deliberately NOT ported. What it asserted was the GATEWAY's own
+    // single-winner race guard — IRequestsStore.TryAcceptByJeeberAsync +
+    // AcceptWithSupersedeAsync under the in-memory store's process-local write lock —
+    // and that guard lived ONLY in the retired route's flag-OFF in-memory branch. The
+    // surviving V1 route holds no auction state: it forwards every accept to
+    // offer-service, which owns the race-safe single-winner transition (SELECT FOR
+    // UPDATE + optimistic lock) and the sibling supersede.
+    //
+    // Re-pointing this test at /v1/... would have raced two calls into a FAKE
+    // IOfferServiceClient and asserted whatever that fake was told to return — a test
+    // that cannot fail, which is a stub wearing a race test's name. The real guarantee
+    // now lives in offer-service and must be proven there, not here. What the gateway
+    // still owes on this path — that it forwards rather than adjudicating — is asserted
+    // by Gw3Pack/W35c_OfferStoreAndLocalAcceptDeletedTests.C11.
+    //
+    // The Idempotency-Key double-submit tests above, which are what this file is
+    // actually about, are untouched.
     // ------------------------------------------------------------------
-    [Fact]
-    public async Task Two_Concurrent_Accepts_Of_One_Offer_Resolve_To_Exactly_One_Winner()
-    {
-        // GW3 / W3.5(c): the gateway ships no in-memory offer store any more, so this
-        // race test supplies the fixture double itself instead of borrowing the one
-        // Program.cs used to register.
-        using var factory = new Fakes.FakeOfferStoreWebApplicationFactory();
-        var jeeberId = $"j-race-{Guid.NewGuid()}";
-        var clientId = $"c-race-{Guid.NewGuid()}";
-
-        var requests = factory.Services.GetRequiredService<IRequestsStore>();
-        var created = await requests.CreateAsync(new CreateRequestInput
-        {
-            ClientId = clientId,
-            Description = "concurrent accept guard"
-        }, CancellationToken.None);
-
-        var offers = factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
-        var offer = offers.EnqueueForTest(jeeberId, created.Id);
-
-        var clientA = ClientActor(factory, clientId);
-        var clientB = ClientActor(factory, clientId);
-
-        var responses = await Task.WhenAll(
-            clientA.PostAsync($"/offers/{offer.Id}/accept", content: null),
-            clientB.PostAsync($"/offers/{offer.Id}/accept", content: null));
-
-        responses.Count(r => r.StatusCode == HttpStatusCode.OK).Should().Be(1,
-            "exactly one of the two concurrent accept calls must win");
-        responses.Count(r => r.StatusCode == HttpStatusCode.Conflict).Should().Be(1,
-            "the losing concurrent accept call must observe a 409, not a silent second success");
-
-        var finalRequest = await requests.GetAsync(created.Id, CancellationToken.None);
-        finalRequest!.Status.Should().Be(RequestStatus.Accepted);
-        finalRequest.JeeberId.Should().Be(jeeberId);
-    }
 
     // ------------------------------------------------------------------
     // Helpers
