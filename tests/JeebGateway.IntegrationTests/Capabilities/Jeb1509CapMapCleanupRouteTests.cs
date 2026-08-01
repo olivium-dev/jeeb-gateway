@@ -31,7 +31,15 @@ namespace JeebGateway.IntegrationTests.CapabilityAuthz;
 /// </summary>
 public sealed class Jeb1509CapMapCleanupRouteTests
 {
-    private const string OfferAcceptRoute = "/offers/ofr_test/accept";
+    // REPOINTED 2026-08-01 (owner ruling: retire the duplicate accept surface). This was
+    // "/offers/ofr_test/accept" — the legacy OffersController route, now DELETED. The
+    // offer.accept capability binding it locks did NOT change: the SAME
+    // [RequireCapability(Capabilities.OfferAccept)] marker sits on the surviving V1 route
+    // (V1/JeebOffersController.Accept). Repointing rather than deleting is deliberate —
+    // deleting these four cases would have silently dropped the only route-level ALLOW/DENY
+    // lock on offer.accept, which is exactly the ADR-005 regression the retirement must not
+    // cause.
+    private const string OfferAcceptRoute = "/v1/offers/ofr_test/accept";
     private const string PushBroadcastRoute = "/api/PushNotification/broadcast";
     private const string RegisterTemplateRoute = "/contract-signing/templates";
     private const string CreateContractRoute = "/contract-signing/contracts";
@@ -50,10 +58,10 @@ public sealed class Jeb1509CapMapCleanupRouteTests
 
     // ── offer.accept {client} (S07: repointed {jeeber}->{client}) ──────────────────────────────────
     // In the Jeeb auction jeebers SUBMIT offers (offer.submit {jeeber}) and the request-owning CLIENT
-    // ACCEPTS one to award the delivery, so POST /offers/{id}/accept is a {client} action. These lock
-    // the capability-to-route binding at the pipeline level so a future map edit can't silently change
-    // who may accept. (RequireActiveUser sits AFTER the capability gate: a non-suspended client — the
-    // test default, no IUsersStore profile — passes through to the controller.)
+    // ACCEPTS one to award the delivery, so POST /v1/offers/{id}/accept is a {client} action. These
+    // lock the capability-to-route binding at the pipeline level so a future map edit can't silently
+    // change who may accept. (RequireActiveUser sits AFTER the capability gate: a non-suspended
+    // client — the test default, no IUsersStore profile — passes through to the controller.)
 
     [Theory]
     [InlineData("customer")] // opaque client (production vocabulary)

@@ -37,9 +37,11 @@ namespace JeebGateway.Controllers;
 ///     a WS event was delivered.)</item>
 /// </list>
 ///
-/// Accepting an offer remains on <see cref="OffersController"/> at
-/// <c>POST /offers/{offerId}/accept</c> because that path is keyed by
-/// offer-id, not request-id.
+/// Accepting an offer is a SEPARATE, offer-scoped surface — <c>POST
+/// /v1/offers/{offerId}/accept</c> on <see cref="V1.JeebOffersController"/> —
+/// because that path is keyed by offer-id, not request-id. (Until 2026-08-01 a
+/// duplicate of it also sat on <see cref="OffersController"/>; the owner retired
+/// that one, so there is exactly one accept route.)
 /// </summary>
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]
 [ApiController]
@@ -273,7 +275,7 @@ public class RequestOffersController : ControllerBase
         }
 
         // Record the offerId → (requestId, jeeberId) routing pairing so the
-        // offer-scoped accept route (POST /offers/{offerId}/accept) can (a)
+        // offer-scoped accept route (POST /v1/offers/{offerId}/accept) can (a)
         // forward to the request-scoped offer-service accept saga and (b) detect
         // a genuine BR-1 self-offer (accepting CLIENT == this offer's bidder)
         // without an extra round-trip. This is a thin BFF routing concern, not

@@ -51,104 +51,33 @@ public class OfferStateMachineSm2Tests : IClassFixture<Fakes.FakeOfferStoreWebAp
     }
 
     // -----------------------------------------------------------------
-    // ACC-02 — accept supersedes competing offers on the same request.
+    // ACC-02 — (Removed 2026-08-01) accept-supersedes and re-accept-409.
+    //
+    // Four tests lived here: Accept_Supersedes_Other_Pending_Offers_On_Same_Request,
+    // Accept_Does_Not_Touch_Offers_On_Other_Requests,
+    // ReAccept_Same_Offer_Returns_409_Already_Accepted_With_Winner, and
+    // Accept_Of_Superseded_Competing_Offer_Returns_409_Already_Accepted.
+    //
+    // All four drove POST /offers/{id}/accept, which the owner retired on 2026-08-01
+    // as a duplicate of POST /v1/offers/{id}/accept. Specifically they drove that
+    // route's flag-OFF LEGACY IN-MEMORY branch — the one that called
+    // IPendingOffersStore.AcceptWithSupersedeAsync and rendered
+    // "https://jeeb.dev/errors/already-accepted" with a winnerJeeberId extension.
+    //
+    // BE HONEST ABOUT WHAT WENT WITH IT: the surviving V1 route has NO in-memory
+    // branch. It forwards every accept to offer-service, which owns the race-safe
+    // single-winner transition AND the sibling supersede, and the gateway re-emits the
+    // upstream status verbatim (a re-accept surfaces offer-service's 409
+    // "offer-not-pending", NOT the gateway-minted already-accepted/winnerJeeberId
+    // shape). That gateway-local supersede rule and its ProblemDetails extension are
+    // therefore genuinely gone, not relocated — they were a second implementation of an
+    // auction close that offer-service already owns, which is why the surface was
+    // retired. The forwarding contract that replaced them is asserted by
+    // Gw3Pack/W35c_OfferStoreAndLocalAcceptDeletedTests.C11 and by
+    // OfferAcceptColdIndexReconcileTests.Accept_ColdIndex_GenuinelyNonPending_SagaConflict_Returns409.
+    //
+    // The EDIT tests below are untouched — Edit survives the retirement.
     // -----------------------------------------------------------------
-
-    [Fact]
-    public async Task Accept_Supersedes_Other_Pending_Offers_On_Same_Request()
-    {
-        var clientId = $"client-{Guid.NewGuid()}";
-        var winningJeeber = $"jeeber-win-{Guid.NewGuid()}";
-        var losingJeeberA = $"jeeber-loseA-{Guid.NewGuid()}";
-        var losingJeeberB = $"jeeber-loseB-{Guid.NewGuid()}";
-
-        var requestId = await SeedRequestAsync(clientId);
-        var winning = EnqueueOffer(winningJeeber, requestId);
-        var losingA = EnqueueOffer(losingJeeberA, requestId);
-        var losingB = EnqueueOffer(losingJeeberB, requestId);
-
-        var resp = await ClientActor(clientId).PostAsync($"/offers/{winning.Id}/accept", content: null);
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-
-        var offers = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
-        (await offers.GetAsync(winning.Id, default))!.Status.Should().Be(PendingOfferStatus.Accepted);
-        // The competing bids are SUPERSEDED — not withdrawn (the Jeebers did not
-        // retract them; the auction closed around a different winner).
-        (await offers.GetAsync(losingA.Id, default))!.Status.Should().Be(PendingOfferStatus.Superseded);
-        (await offers.GetAsync(losingB.Id, default))!.Status.Should().Be(PendingOfferStatus.Superseded);
-    }
-
-    [Fact]
-    public async Task Accept_Does_Not_Touch_Offers_On_Other_Requests()
-    {
-        var clientId = $"client-{Guid.NewGuid()}";
-        var requestId = await SeedRequestAsync(clientId);
-        var otherRequestId = await SeedRequestAsync($"client-other-{Guid.NewGuid()}");
-
-        var winning = EnqueueOffer($"jeeber-win-{Guid.NewGuid()}", requestId);
-        var unrelated = EnqueueOffer($"jeeber-unrelated-{Guid.NewGuid()}", otherRequestId);
-
-        var resp = await ClientActor(clientId).PostAsync($"/offers/{winning.Id}/accept", content: null);
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-
-        var offers = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
-        // An offer on an UNRELATED request must stay pending — supersede is
-        // request-scoped, never a global sweep.
-        (await offers.GetAsync(unrelated.Id, default))!.Status.Should().Be(PendingOfferStatus.Pending);
-    }
-
-    // -----------------------------------------------------------------
-    // ACC-02 — re-accept → 409 already_accepted (returns the winner).
-    // -----------------------------------------------------------------
-
-    [Fact]
-    public async Task ReAccept_Same_Offer_Returns_409_Already_Accepted_With_Winner()
-    {
-        var clientId = $"client-{Guid.NewGuid()}";
-        var winningJeeber = $"jeeber-win-{Guid.NewGuid()}";
-
-        var requestId = await SeedRequestAsync(clientId);
-        var winning = EnqueueOffer(winningJeeber, requestId);
-
-        var client = ClientActor(clientId);
-        (await client.PostAsync($"/offers/{winning.Id}/accept", content: null))
-            .StatusCode.Should().Be(HttpStatusCode.OK);
-
-        // Second accept of the SAME (now-accepted) offer.
-        var reAccept = await client.PostAsync($"/offers/{winning.Id}/accept", content: null);
-        reAccept.StatusCode.Should().Be(HttpStatusCode.Conflict);
-
-        var problem = await reAccept.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/already-accepted");
-        problem.Detail.Should().Contain(winningJeeber);
-        problem.Extensions.Should().ContainKey("winnerJeeberId");
-        problem.Extensions["winnerJeeberId"]!.ToString().Should().Contain(winningJeeber);
-    }
-
-    [Fact]
-    public async Task Accept_Of_Superseded_Competing_Offer_Returns_409_Already_Accepted()
-    {
-        var clientId = $"client-{Guid.NewGuid()}";
-        var winningJeeber = $"jeeber-win-{Guid.NewGuid()}";
-        var losingJeeber = $"jeeber-lose-{Guid.NewGuid()}";
-
-        var requestId = await SeedRequestAsync(clientId);
-        var winning = EnqueueOffer(winningJeeber, requestId);
-        var losing = EnqueueOffer(losingJeeber, requestId);
-
-        var client = ClientActor(clientId);
-        (await client.PostAsync($"/offers/{winning.Id}/accept", content: null))
-            .StatusCode.Should().Be(HttpStatusCode.OK);
-
-        // The losing offer was superseded by the accept; trying to accept IT now
-        // must report the auction is already closed and name the actual winner.
-        var resp = await client.PostAsync($"/offers/{losing.Id}/accept", content: null);
-        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
-
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/already-accepted");
-        problem.Detail.Should().Contain(winningJeeber);
-    }
 
     // -----------------------------------------------------------------
     // OFF-04 — offer EDIT under the default (Offer kill-switch OFF) factory.
@@ -266,8 +195,14 @@ public class OfferStateMachineSm2Tests : IClassFixture<Fakes.FakeOfferStoreWebAp
         var requestId = await SeedRequestAsync(clientId);
         var offerId = await SubmitOfferViaHttpAsync(jeeberId, requestId, fee: 5m, eta: 15);
 
-        (await ClientActor(clientId).PostAsync($"/offers/{offerId}/accept", content: null))
-            .StatusCode.Should().Be(HttpStatusCode.OK);
+        // Drive the offer to ACCEPTED through the store, not over HTTP. This used to
+        // POST the retired /offers/{id}/accept route; that route is gone (owner ruling
+        // 2026-08-01) and the surviving V1 route forwards to a real offer-service this
+        // flag-OFF fixture does not run. The store write reaches the SAME terminal state
+        // the assertion below cares about, and keeps this test about EDIT.
+        (await _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>()
+            .AcceptWithSupersedeAsync(offerId, DateTimeOffset.UtcNow, CancellationToken.None))
+            .Status.Should().Be(AcceptOfferStatus.Accepted);
 
         var resp = await JeeberClient(jeeberId).PutAsJsonAsync($"/v1/offers/{offerId}", new { fee = 50m });
         resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);

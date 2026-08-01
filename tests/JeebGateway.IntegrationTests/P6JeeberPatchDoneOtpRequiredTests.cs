@@ -330,11 +330,6 @@ public class P6JeeberPatchDoneOtpRequiredTests
             string requestId, string clientId, CancellationToken ct)
             => Task.FromResult<string?>(null);
 
-        public Task<string?> AdvanceToAcceptedAsync(
-            string? conversationId, string winningJeeberId,
-            IReadOnlyList<string> losingMemberIds, CancellationToken ct)
-            => Task.FromResult<string?>(null);
-
         public Task CloseConversationAsync(string? conversationId, CancellationToken ct)
             => Task.CompletedTask;
     }

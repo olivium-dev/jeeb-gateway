@@ -221,7 +221,11 @@ public class PushSendBudgetRegressionTests
     /// Structure, not behaviour.</para>
     /// </summary>
     [Theory]
-    [InlineData(typeof(OffersController), "DispatchAcceptLifecyclePushes")]
+    // The OffersController row was DROPPED 2026-08-01: the owner retired the duplicate
+    // POST /offers/{id}/accept surface, so that controller no longer holds an
+    // IDetachedPushDispatcher or a DispatchAcceptLifecyclePushes fan-out to constrain.
+    // The invariant itself is UNCHANGED and still enforced on the one surviving accept
+    // seat (V1/JeebOffersController) below.
     [InlineData(typeof(JeebGateway.Controllers.V1.JeebOffersController), "DispatchAcceptLifecyclePushes")]
     [InlineData(typeof(RequestOffersController), null)]
     public void Offer_Seats_Dispatch_Behind_The_Response(Type controller, string? fanOutMethod)
