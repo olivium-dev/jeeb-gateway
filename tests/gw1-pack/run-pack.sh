@@ -181,7 +181,25 @@ item_begin "W1.8" "durable settlement ledger + PROMOTE to StoreDurabilityGuard.C
   run_script B6py "migration 0044 <-> PostgresSettlementLedgerClient agree (python)" \
              python3 "$LIB/schema-contract.py"
 
-  run_filter B3_B6 "boot/selector/hazard/schema legs (Gw1Pack.W18_)" "FullyQualifiedName~Gw1Pack.W18_"
+  # B9py — the reader V-2 points at MSI, run against its own fixtures. It must ACCEPT
+  # the post-GW1 payload and REJECT seven look-alikes, including the pre-GW1 "all 32"
+  # and a Development host's "exempt" (which is ALSO Healthy). An instrument only ever
+  # observed accepting is not an instrument.
+  run_script B9py "the /health/ready reader can reject as well as accept (8 fixtures)" \
+             python3 "$LIB/health-parse.py" --self-test
+
+  # NOTE the narrowed filter: `~Gw1Pack.W18_` now also matches W18_LiveProbeInstrumentTests,
+  # and folding the two into one id would lose exactly the per-leg attribution this pack
+  # exists to give. Two files, two ids.
+  run_filter B3_B6 "boot/selector/hazard/schema legs (Gw1Pack.W18_SettlementLedgerDurableTests)" \
+                   "FullyQualifiedName~Gw1Pack.W18_SettlementLedgerDurableTests"
+
+  # B9 — validation of the LIVE instrument. Proves the byte-exact string MSI reports is
+  # emitted only when Evaluate() resolved ISettlementLedgerClient to the durable type,
+  # that swapping ONLY that store destroys it, that a Development host's Healthy looks
+  # identical on status alone, and that the fail-closed escape hatch cannot silence it.
+  run_filter B9    "live-probe instrument controls (Gw1Pack.W18_LiveProbe)" \
+                   "FullyQualifiedName~Gw1Pack.W18_LiveProbeInstrumentTests"
   run_filter B7    "the writer's own ledger + guard tests still green" \
                    "FullyQualifiedName~Financials.PostgresSettlementLedgerClientTests"
   run_filter B8    "the pre-existing fail-closed guard suite is not regressed" \
@@ -241,19 +259,43 @@ cat <<'NOTPROVEN'
 These are NOT failures and NOT passes. Per GATE.md §3 they are the wrong evidence
 class for a host suite, and per §4 an honest NOT-PROVEN never counts as a pass.
 
-  service  W1.8's actual claim — a ledger entry SURVIVES a restart.
-           Nothing here executes the SQL: Testcontainers needs Docker, which is
-           banned in this environment, and no host test can restart a process and
-           re-read a database. The pack proves the SELECTOR, the GUARD, the
-           SCHEMA/CODE agreement and the HAZARD; it cannot prove the round trip.
-           V-2 leg:  settle one COD delivery -> record the ledger entry id
-                  -> docs/agents/scripts/msi.sh --sudo systemctl restart jeeb-gateway
-                  -> read the SAME id back.
-           PRECONDITION, and it is a hard one: ISettlementLedgerClient is now
-           Critical, so a prod-like boot REFUSES to start unless
-           GatewayPostgres:ConnectionString is set, and migration 0044 must be
-           applied or every post throws 42P01 SILENTLY (SettlementService swallows
-           it; ledger_entry_id stays NULL and the 60 s reconciler retries forever).
+  service  W1.8's actual claim — a ledger ROW survives a restart.
+           Nothing here executes SQL: Testcontainers needs Docker (banned), and
+           psql against the datastore box 192.168.2.20 is forbidden outright by
+           owner rule 2026-07-23 ("Never use .20"), from anywhere including MSI.
+           This pack proves the SELECTOR, the GUARD, the SCHEMA/CODE agreement and
+           the HAZARD. It cannot prove the round trip.
+
+           PARTLY CLOSED SINCE THE FIRST CUT — run  tests/gw1-pack/service-probe.sh
+           --sha <sha>  (read-only, MSI only, writes nothing, never touches .20).
+           It proves the LIVE process resolved ISettlementLedgerClient to
+           PostgresSettlementLedgerClient, which is stronger than GW1.md credits:
+           StoreDurabilityHealthCheck emits "all 33 critical stores durable" ONLY
+           after Evaluate() resolved every Critical interface from the live
+           container and matched its CONCRETE TYPE. The number is cosmetic; the
+           condition is a live type read. B9/B9py above are that instrument's
+           controls. What the probe still does NOT prove is that a ROW was written.
+
+           AND A TRAP IN THE OBVIOUS RESTART TEST, which would otherwise be scored
+           as a pass: "settle -> restart -> settle again -> same ledger id" is
+           INVARIANT UNDER GW1. SettlementService stamps settlements.ledger_entry_id
+           (PostgresSettlementStore, migration 0015 — durable long before this
+           batch) and SettleAsync short-circuits an already-settled row, so the
+           replay returns the stored stamp whichever ledger client is wired. The
+           defect W1.8 closes only bites when that stamp is NULL: the 60 s
+           SettlementLedgerReconciler then replays the settlement id, and an
+           in-memory memo emptied by the restart mints a SECOND ledger_entry_id for
+           one cash collection. A round that cannot produce a NULL-stamped row has
+           not exercised the claim.
+
+           PRECONDITION for any live round, and it is a hard one:
+           ISettlementLedgerClient is now Critical, so a prod-like boot REFUSES to
+           start unless GatewayPostgres:ConnectionString is set, and migration 0044
+           must be applied or every post throws 42P01 SILENTLY (SettlementService
+           swallows it; ledger_entry_id stays NULL and the reconciler retries
+           forever). The sanctioned observation of that is the journal line
+           "Settlement ledger entry posted idempotencyKey=" — unique to the durable
+           client, written only after the INSERT returned a row (leg S5).
 
   device   W0.6 says nothing about whether push works. InMemoryPushTransport
            enqueues to a ConcurrentQueue and the send is then counted Delivered.

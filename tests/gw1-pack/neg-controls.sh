@@ -125,8 +125,13 @@ git_sync() {
 # current time makes the restore visible to the build. (Note the family
 # resemblance to the `cp -p` mtime trap in OWNER-DECISIONS.md 2026-07-31 10:32Z:
 # the same preserved-mtime mechanism, one layer down.)
+# `tests/gw1-pack` is in this list because N26 mutates the pack's OWN reader. Leaving it
+# out would restore everything except the mutation, and every control after N26 would run
+# against a silently relaxed instrument — a false green with no trace, which is the exact
+# shape of the hazard in OWNER-DECISIONS.md 2026-07-31 10:32Z. The inner run-pack.sh
+# removes its `.lock` on exit, so `--delete` never races it.
 restore_all() {
-  for d in src db tests/JeebGateway.IntegrationTests; do
+  for d in src db tests/JeebGateway.IntegrationTests tests/gw1-pack; do
     rsync -a --checksum --no-times --delete --exclude 'bin/' --exclude 'obj/' \
           "$PRISTINE/$d/" "$WORK/$d/"
   done
@@ -347,6 +352,62 @@ m_N15() {  # migration numbering
      "$WORK/db/migrations/0045_init_settlement_ledger_entries.sql"
 }
 control N15 W1.8 B3_B6 "the migration is renumbered off 0044" m_N15
+
+# --- controls for the LIVE-INSTRUMENT legs (B9 / B9py) -----------------------
+# These three break the thing V-2 READS, not the thing V-2 reads ABOUT. Each is a
+# real, plausible edit that leaves the durable wiring entirely intact and silently
+# destroys the service-class evidence — the failure mode this programme calls a
+# confidently-wrong instrument.
+
+m_N23() {  # the live string is reformatted; the wiring is untouched
+  py <<'PY' "$WORK/src/JeebGateway/Infrastructure/StoreDurabilityGuard.cs"
+import io,sys
+p=sys.argv[1]; s=io.open(p,encoding="utf-8").read()
+s=s.replace('$"store-durability: all {StoreDurabilityGuard.Critical.Length} critical stores durable"',
+            '$"store-durability: {StoreDurabilityGuard.Critical.Length} critical stores are durable"',1)
+io.open(p,"w",encoding="utf-8").write(s)
+PY
+}
+control N23 W1.8 B9 "the health description is REFORMATTED (V-2's byte-exact grep would silently stop matching)" m_N23 B3_B6
+
+m_N24() {  # the readiness probe starts honouring the boot gate's escape hatch
+  py <<'PY' "$WORK/src/JeebGateway/Infrastructure/StoreDurabilityGuard.cs"
+import io,sys
+p=sys.argv[1]; s=io.open(p,encoding="utf-8").read()
+s=s.replace("""        if (StoreDurabilityGuard.IsExempt(_environment))
+        {
+            return Task.FromResult(HealthCheckResult.Healthy("store-durability: exempt (Development/Testing)"));
+        }""",
+"""        if (StoreDurabilityGuard.IsExempt(_environment)
+            || StoreDurabilityGuard.IsFailClosedDisabled(_services))
+        {
+            return Task.FromResult(HealthCheckResult.Healthy("store-durability: exempt (Development/Testing)"));
+        }""",1)
+io.open(p,"w",encoding="utf-8").write(s)
+PY
+}
+control N24 W1.8 B9 "the readiness probe acquires the fail-closed escape hatch (one env var would then silence the whole live gate)" m_N24
+
+m_N25() {  # the journal signal stops being attributable to the durable client
+  py <<'PY' "$WORK/src/JeebGateway/Financials/InMemorySettlementLedgerClient.cs"
+import io,sys
+p=sys.argv[1]; s=io.open(p,encoding="utf-8").read()
+i=s.rindex("}")
+io.open(p,"w",encoding="utf-8").write(
+    s[:i]+'    // Settlement ledger entry posted idempotencyKey={IdempotencyKey}\n'+s[i:])
+PY
+}
+control N25 W1.8 B9 "the in-memory client also names the ledger-posted log template (a journal hit stops discriminating)" m_N25
+
+m_N26() {  # the reader is relaxed to a substring match — the classic silent widening
+  py <<'PY' "$WORK/tests/gw1-pack/lib/health-parse.py"
+import io,sys
+p=sys.argv[1]; s=io.open(p,encoding="utf-8").read()
+s=s.replace("    if description != expected:", "    if expected.split(':')[0] not in description:",1)
+io.open(p,"w",encoding="utf-8").write(s)
+PY
+}
+control N26 W1.8 B9py "the health reader is relaxed from byte-exact to substring (it would then accept 'all 32')" m_N26
 
 # =============================================================================
 # ITEM W2.6
