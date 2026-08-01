@@ -344,6 +344,8 @@ public sealed class DurableRequestsStore : IRequestsStore
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.DurableReadFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "postgres-requests-by-id"));
             _logger.LogWarning(ex,
                 "requests-durable: durable mirror existence probe for {RequestId} failed; skipping the durable status heal.",
                 requestId);
@@ -437,6 +439,8 @@ public sealed class DurableRequestsStore : IRequestsStore
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.DurableReadFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "postgres-requests-conversation-id"));
             _logger.LogWarning(ex,
                 "requests-durable: durable conversation lookup for {ConversationId} failed; " +
                 "chat push recipients cannot be resolved for this send.",
@@ -679,6 +683,8 @@ public sealed class DurableRequestsStore : IRequestsStore
             }
             catch (Exception ex)
             {
+                BusinessOutcomeTelemetry.DurableReadFailures.Add(1,
+                    new KeyValuePair<string, object?>("store", "postgres-requests-by-id"));
                 _logger.LogWarning(ex,
                     "requests-durable: durable mirror by-id read for {RequestId} failed; returning null (unknown-id).",
                     requestId);
@@ -717,6 +723,8 @@ public sealed class DurableRequestsStore : IRequestsStore
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.DurableReadFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "postgres-requests-cancel-marker"));
             _logger.LogWarning(ex,
                 "requests-durable: durable cancel-marker read for {RequestId} failed; not overriding the read-through/sweep.",
                 requestId);
@@ -753,6 +761,8 @@ public sealed class DurableRequestsStore : IRequestsStore
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.DurableReadFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "postgres-requests-owner-list"));
             _logger.LogWarning(ex,
                 "requests-durable: owner-list mirror read failed for {ClientId}; returning in-memory rows only.",
                 clientId);
@@ -857,6 +867,8 @@ public sealed class DurableRequestsStore : IRequestsStore
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.DurableReadFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "postgres-requests-jeeber-list"));
             _logger.LogWarning(ex,
                 "requests-durable: jeeber-list mirror read failed for {JeeberId}; returning in-memory rows only.",
                 jeeberId);
@@ -925,6 +937,8 @@ public sealed class DurableRequestsStore : IRequestsStore
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.DurableReadFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "postgres-requests-assigned-since"));
             _logger.LogWarning(ex,
                 "requests-durable: accept-settle reconcile candidate mirror read failed; "
                 + "returning in-memory rows only (a post-bounce backlog will be invisible "

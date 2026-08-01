@@ -36,6 +36,26 @@ public static class BusinessOutcomeTelemetry
         Meter.CreateCounter<long>("durable.write_failures",
             description: "Number of handled durable writer failures, tagged by bounded store name.");
 
+    // The read half of DurableWriteFailures, and it was missing for a reason worth
+    // recording. GET /v1/state/idempotency/by-prefix returned 404 on EVERY call for six
+    // weeks. The gateway's degrade-don't-fail contract did exactly what it promises —
+    // caught, logged a `warn`, served the in-memory fallback, stayed 200 — and because
+    // nothing COUNTED it, nothing alerted and nobody looked. Writes had a counter the
+    // whole time; reads did not, so a total read outage and a healthy read path produced
+    // the same signal: silence.
+    //
+    // Emitted from the durable-read catch blocks that swallow a fault and return a
+    // degraded answer (in-memory rows, an empty list, or null). It does NOT fire when a
+    // read legitimately finds nothing — a miss is an answer, a fault is not.
+    //
+    // `store` carries the same bounded, literal vocabulary as the write counter, so the
+    // two are directly comparable per store. NO ALERT THRESHOLD IS DEFINED HERE and none
+    // should be inferred: what a healthy rate looks like, and what should page, is an
+    // owner decision. This commit instruments; it does not set policy.
+    public static readonly Counter<long> DurableReadFailures =
+        Meter.CreateCounter<long>("durable.read_failures",
+            description: "Number of handled durable READ failures that were degraded to an in-memory/empty/null answer, tagged by bounded store name. Compare against durable.write_failures on the same store; a flat zero on its own proves nothing unless the store is also being read.");
+
     // JEBV4-47 (M3/R7): the settlement -> UPG generic-settlement ledger post is
     // best-effort. When it fails at settle time the row persists but the ledger
     // diverges until the SettlementLedgerReconciler replays it. These counters make
