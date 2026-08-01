@@ -146,8 +146,18 @@ public class W35c_OfferStoreAndLocalAcceptDeletedTests
     // ---------------------------------------------------------------------
     // C13 — cross-batch regression guard. GW1 sealed Critical at 33
     // (OWNER-DECISIONS.md 2026-07-31). GW3 must not move it, and must not quietly
-    // drop the offer ledger off the backlog just because the in-memory store went
+    // drop the offer ledger off the guard just because the in-memory store went
     // away — the remaining implementation still throws on 5 of its 9 members.
+    //
+    // AMENDED 2026-08-01. This test used to assert the offer ledger sat specifically
+    // on KnownInMemoryBacklog. That bucket was the wrong CATEGORY — a list whose own
+    // doc reads "stores of record still awaiting a Postgres target", naming a store
+    // that holds no process memory at all — so it was reclassified onto
+    // UpstreamContractIncomplete. The assertion now tests C13's actual INTENT ("not
+    // quietly dropped", "not silently promoted") rather than the bucket's name, so it
+    // still fails loudly if anyone deletes the entry outright, while no longer pinning
+    // a miscategorisation in place. GW1's sealed Critical==33 is untouched, and this
+    // reclassification cannot affect it: both lists are log-only.
     // ---------------------------------------------------------------------
     [Fact]
     public void C13_StoreDurabilityGuard_IsUnchangedByGw3()
@@ -155,10 +165,18 @@ public class W35c_OfferStoreAndLocalAcceptDeletedTests
         StoreDurabilityGuard.Critical.Should().HaveCount(33,
             "GW1's sealed predicate (SEALED-PREDICATES.md, owner ruling 2026-07-31)");
 
-        StoreDurabilityGuard.KnownInMemoryBacklog.Should().Contain(typeof(IPendingOffersStore),
-            "GW3 changed the shape of the offer-durability gap (no more restart-drops-bids) "
-            + "but did not close it: the only surviving implementation throws NotSupportedException "
-            + "on GetAsync / AcceptAsync / AcceptWithSupersedeAsync / TryEditAsync / WithdrawForJeeberAsync");
+        StoreDurabilityGuard.UpstreamContractIncomplete.Should().Contain(typeof(IPendingOffersStore),
+            "GW3 changed the shape of the offer gap (no more restart-drops-bids) but did not close "
+            + "it: the only surviving implementation throws NotSupportedException on GetAsync / "
+            + "AcceptAsync / AcceptWithSupersedeAsync / TryEditAsync / WithdrawForJeeberAsync");
+
+        // The anti-quiet-drop teeth, independent of which loud list holds it: the guard
+        // must still classify the offer ledger somewhere it gets logged at boot.
+        StoreDurabilityGuard.KnownInMemoryBacklog
+            .Concat(StoreDurabilityGuard.UpstreamContractIncomplete)
+            .Should().Contain(typeof(IPendingOffersStore),
+                "the gap must stay tracked and loudly logged; reclassifying it is allowed, "
+                + "deleting it is not");
 
         StoreDurabilityGuard.Critical.Select(c => c.Iface)
             .Should().NotContain(typeof(IPendingOffersStore),
