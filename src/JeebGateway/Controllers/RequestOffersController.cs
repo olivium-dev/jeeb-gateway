@@ -30,9 +30,11 @@ namespace JeebGateway.Controllers;
 ///   <item>Unlimited live offers per request.</item>
 ///   <item>One live offer per Jeeber per request (re-offer allowed after
 ///     withdraw).</item>
-///   <item>Realtime "new offer" event to the Client on every accepted
-///     submission (<see cref="IOfferRealtimeNotifier"/>, currently stubbed
-///     in-memory).</item>
+///   <item>The Client is notified of every accepted submission by
+///     <see cref="IOfferPushNotifier"/>, through the push microservice.
+///     (GW3 / W3.5(a): the old in-process "realtime" fan-out seam was
+///     deleted — it appended to a list nothing read, while this doc claimed
+///     a WS event was delivered.)</item>
 /// </list>
 ///
 /// Accepting an offer remains on <see cref="OffersController"/> at
@@ -64,7 +66,6 @@ public class RequestOffersController : ControllerBase
     private readonly IPendingOffersStore _offers;
     private readonly IRequestsStore _requests;
     private readonly IDualRoleService _dualRole;
-    private readonly IOfferRealtimeNotifier _realtime;
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly IJeebConversationClient _conversations;
     private readonly IOfferPushNotifier _offerPush;
@@ -77,7 +78,6 @@ public class RequestOffersController : ControllerBase
         IPendingOffersStore offers,
         IRequestsStore requests,
         IDualRoleService dualRole,
-        IOfferRealtimeNotifier realtime,
         IOfferRequestIndex offerRequestIndex,
         IJeebConversationClient conversations,
         IOfferPushNotifier offerPush,
@@ -89,7 +89,6 @@ public class RequestOffersController : ControllerBase
         _offers = offers;
         _requests = requests;
         _dualRole = dualRole;
-        _realtime = realtime;
         _offerRequestIndex = offerRequestIndex;
         _conversations = conversations;
         _offerPush = offerPush;
@@ -295,25 +294,18 @@ public class RequestOffersController : ControllerBase
         // A chat blip, a disabled Chat flag, or a request row that never got a
         // conversation id (chat was down at create) must NEVER turn the offer 201
         // into a 5xx — every failure is logged and swallowed, exactly like the
-        // realtime fan-out below.
+        // BUILD-OFFER-PUSH dispatch below.
         if (_flags.Chat)
         {
             await SeatOfferingJeeberAsync(request, created, requestId, ct);
         }
 
-        // Realtime fan-out is best-effort: the offer is already durable, so
-        // a notifier failure must not flip the 201 into a 5xx. The Client
-        // can also poll the offer-listing endpoint if the WS event is lost.
-        try
-        {
-            await _realtime.NotifyNewOfferAsync(request.ClientId, created, ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Failed to dispatch realtime new-offer event for request {RequestId}, offer {OfferId}",
-                requestId, created.Id);
-        }
+        // GW3 / W3.5(a): the in-process "realtime new-offer" notifier used to be
+        // awaited here. It was deleted rather than rewired — it appended the event
+        // to a List<T> inside the gateway process that no code path ever read, so
+        // this call site cost a lock and a heap allocation per real jeeber offer and
+        // delivered nothing. The Client's actual notification is the push dispatch
+        // immediately below, which rides the push microservice.
 
         // BUILD-OFFER-PUSH — notify the request's CUSTOMER (the requester) that a new
         // offer landed so they can open the auction and compare bids. clientId is read

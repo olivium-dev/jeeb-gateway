@@ -2223,12 +2223,17 @@ builder.Services.AddSingleton<IPendingOffersStore>(sp =>
 builder.Services.AddSingleton<InMemoryOfferRequestIndex>();
 builder.Services.AddSingleton<IOfferRequestIndex>(
     sp => sp.GetRequiredService<InMemoryOfferRequestIndex>());
-// Realtime "new offer" fan-out for T-backend-010. Stubbed in-memory for
-// the MVP (records dispatched events so tests can assert delivery);
-// production wiring will swap for a SignalR / realtime-service client
-// behind the same IOfferRealtimeNotifier contract.
-builder.Services.AddSingleton<InMemoryOfferRealtimeNotifier>();
-builder.Services.AddSingleton<IOfferRealtimeNotifier>(sp => sp.GetRequiredService<InMemoryOfferRealtimeNotifier>());
+// GW3 / W3.5(a) — the "new offer" realtime fan-out seam is DELETED, not rewired.
+// It was an in-process, in-memory event recorder registered here
+// unconditionally and injected into the LIVE RequestOffersController, so every
+// real jeeber offer appended an event to a List<T> that nothing ever read: no
+// SignalR hub, no realtime-service client, no reader of any kind. A seam that
+// only pretends to notify is worse than an absent one, because the controller's
+// own doc claimed the Client received a WS event on every submission.
+// The customer IS notified on this path — by IOfferPushNotifier, through the
+// push microservice (see RequestOffersController.Submit, BUILD-OFFER-PUSH).
+// If a genuine realtime fan-out is wanted later, add it then; do not re-add a
+// recorder to hold its place.
 
 // Auto-offline notifications flow through the shared push pipeline
 // (T-backend-022, T-backend-023) so they obey the same transport and retry

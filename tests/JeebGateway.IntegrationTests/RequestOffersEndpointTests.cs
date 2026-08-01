@@ -54,12 +54,13 @@ public class RequestOffersEndpointTests : IClassFixture<WebApplicationFactory<Pr
         dto.EtaMinutes.Should().Be(30);
         dto.Note.Should().Be("Heading that way");
 
-        var realtime = _factory.Services.GetRequiredService<InMemoryOfferRealtimeNotifier>();
-        realtime.Events.Should().Contain(e =>
-            e.OfferId == dto.Id
-            && e.RequestId == requestId
-            && e.ClientId == clientId
-            && e.JeeberId == jeeberId);
+        // GW3 / W3.5(a): the old assertion here read the in-process realtime
+        // recorder's event list. That recorder is deleted — it was the only
+        // reader of its own writes, so asserting on it proved the gateway had
+        // appended to a list, never that any Client was notified. The Client's
+        // real notification is the push dispatch, covered by
+        // OfferPushNotifierTests / OfferAcceptLifecyclePushTests.
+        clientId.Should().NotBeNullOrWhiteSpace();
     }
 
     [Fact]
@@ -217,10 +218,10 @@ public class RequestOffersEndpointTests : IClassFixture<WebApplicationFactory<Pr
         secondOffer.Id.Should().NotBe(firstOffer.Id);
         secondOffer.Fee.Should().Be(7m);
 
-        // Two WS events expected (one per accepted submission).
-        var realtime = _factory.Services.GetRequiredService<InMemoryOfferRealtimeNotifier>();
-        realtime.Events.Should().Contain(e => e.OfferId == firstOffer.Id);
-        realtime.Events.Should().Contain(e => e.OfferId == secondOffer.Id);
+        // GW3 / W3.5(a): the "two WS events expected" assertion is gone with the
+        // in-process recorder it read. No WS event was ever emitted — the recorder
+        // was the whole implementation. What this test still proves (re-offer after
+        // withdraw yields a NEW offer id at the new fee) is asserted above.
     }
 
     [Fact]
