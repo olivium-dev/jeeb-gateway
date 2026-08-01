@@ -1,7 +1,9 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using JeebGateway.Realtime;
 
 namespace JeebGateway.Services.Clients;
 
@@ -32,10 +34,12 @@ public sealed class RealtimeCommunicationClient : IRealtimeCommunicationClient
     };
 
     private readonly HttpClient _http;
+    private readonly IRealtimeGuardianTokenIssuer _guardian;
 
-    public RealtimeCommunicationClient(HttpClient http)
+    public RealtimeCommunicationClient(HttpClient http, IRealtimeGuardianTokenIssuer guardian)
     {
         _http = http;
+        _guardian = guardian;
     }
 
     public async Task<RealtimePublishResult> PublishAsync(
@@ -65,7 +69,28 @@ public sealed class RealtimeCommunicationClient : IRealtimeCommunicationClient
             Meta = meta,
         };
 
-        using var response = await _http.PostAsJsonAsync(url, body, JsonOptions, ct);
+        using var request = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = JsonContent.Create(body, options: JsonOptions),
+        };
+
+        // The upstream authenticates ingest with ITS OWN Guardian secret
+        // (IngestController.authenticate/1), which the gateway's forwarded user bearer
+        // cannot satisfy. Mint a credential narrowed to exactly this topic with publish
+        // scope only, so a leaked publish credential grants one topic and no reads.
+        // BearerForwardingHandler leaves an already-set Authorization header alone, so
+        // this wins over the inbound bearer; when no secret is configured we set nothing
+        // and behaviour is exactly what it was before this path existed.
+        var credential = _guardian.Issue(
+            subject: "jeeb-gateway",
+            topic: topic,
+            scopes: RealtimeGuardianTokenIssuer.PublishOnly);
+        if (credential is not null)
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential.Token);
+        }
+
+        using var response = await _http.SendAsync(request, ct);
 
         // The upstream returns explicit 401/403/429 envelopes; surface them as a
         // typed HttpRequestException carrying the status so the controller can map

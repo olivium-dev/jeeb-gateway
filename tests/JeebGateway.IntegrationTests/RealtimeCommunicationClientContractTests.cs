@@ -144,17 +144,85 @@ public class RealtimeCommunicationClientContractTests
     // -----------------------------------------------------------------------
 
     private static RealtimeCommunicationClient ClientReturning(HttpStatusCode status, string json)
-        => new(new HttpClient(new StubHandler(status, json))
-        {
-            BaseAddress = new Uri("http://realtime-service.test/")
-        });
+        => new(
+            new HttpClient(new StubHandler(status, json))
+            {
+                BaseAddress = new Uri("http://realtime-service.test/")
+            },
+            Issuer(secret: null));
 
     private static RealtimeCommunicationClient ClientCapturing(
-        HttpStatusCode status, string json, Action<HttpRequestMessage, string?> capture)
-        => new(new HttpClient(new StubHandler(status, json, capture))
-        {
-            BaseAddress = new Uri("http://realtime-service.test/")
-        });
+        HttpStatusCode status, string json, Action<HttpRequestMessage, string?> capture,
+        string? guardianSecret = null)
+        => new(
+            new HttpClient(new StubHandler(status, json, capture))
+            {
+                BaseAddress = new Uri("http://realtime-service.test/")
+            },
+            Issuer(guardianSecret));
+
+    /// <summary>
+    /// A <c>null</c> secret yields an issuer that mints nothing, so these wire-shape tests
+    /// see exactly the request they saw before the realtime credential existed.
+    /// </summary>
+    private static JeebGateway.Realtime.IRealtimeGuardianTokenIssuer Issuer(string? secret)
+        => new JeebGateway.Realtime.RealtimeGuardianTokenIssuer(
+            Microsoft.Extensions.Options.Options.Create(
+                new JeebGateway.Realtime.RealtimeGuardianOptions { GuardianSecret = secret }),
+            TimeProvider.System,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<
+                JeebGateway.Realtime.RealtimeGuardianTokenIssuer>.Instance);
+
+    /// <summary>
+    /// The upstream authenticates every ingest against its OWN Guardian secret, so a
+    /// publish that carries no credential (or carries the forwarded gateway bearer) is
+    /// rejected 401. Pin that the client attaches a topic-scoped credential when one can
+    /// be minted — and that it is scoped to the topic being published, not to "*".
+    /// </summary>
+    [Fact]
+    public async Task PublishAsync_Attaches_A_Topic_Scoped_Guardian_Credential()
+    {
+        HttpRequestMessage? seen = null;
+        var client = ClientCapturing(
+            HttpStatusCode.Accepted, "{\"ok\":true,\"id\":\"x\",\"seq\":1}",
+            (req, _) => seen = req,
+            guardianSecret: "contract-test-guardian-secret-0123456789-0123456789-abcdef");
+
+        await client.PublishAsync(
+            "jeeb:delivery:d-1", "location",
+            new Dictionary<string, object?> { ["lat"] = 1.0 }, null, default);
+
+        seen!.Headers.Authorization.Should().NotBeNull();
+        seen.Headers.Authorization!.Scheme.Should().Be("Bearer");
+
+        var payload = seen.Headers.Authorization.Parameter!.Split('.')[1];
+        payload = payload.Replace('-', '+').Replace('_', '/');
+        payload = payload.PadRight(payload.Length + (4 - payload.Length % 4) % 4, '=');
+        var claims = System.Text.Json.JsonDocument.Parse(Convert.FromBase64String(payload)).RootElement;
+
+        claims.GetProperty("topics").EnumerateArray().Select(e => e.GetString())
+            .Should().Equal("jeeb:delivery:d-1");
+        claims.GetProperty("scopes").EnumerateArray().Select(e => e.GetString())
+            .Should().Equal("publish");
+    }
+
+    /// <summary>
+    /// NEGATIVE CONTROL for the test above: with no secret configured nothing is minted,
+    /// so the assertion above is detecting a real attachment rather than always passing.
+    /// </summary>
+    [Fact]
+    public async Task PublishAsync_Attaches_No_Credential_When_No_Secret_Is_Configured()
+    {
+        HttpRequestMessage? seen = null;
+        var client = ClientCapturing(
+            HttpStatusCode.Accepted, "{\"ok\":true,\"id\":\"x\",\"seq\":1}", (req, _) => seen = req);
+
+        await client.PublishAsync(
+            "jeeb:delivery:d-1", "location",
+            new Dictionary<string, object?> { ["lat"] = 1.0 }, null, default);
+
+        seen!.Headers.Authorization.Should().BeNull();
+    }
 
     private sealed class StubHandler : HttpMessageHandler
     {
