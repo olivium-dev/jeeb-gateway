@@ -34,6 +34,32 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         return tiers.Select(ToDeliveryTierDto).ToArray();
     }
 
+    /// <summary>
+    /// Maps an upstream tier row onto the tier DTO the public catalog serves.
+    ///
+    /// <para><b>Commission is NOT echoed from upstream (Q-001).</b> The published
+    /// <see cref="DeliveryTierDto.CommissionRate"/> is stamped from
+    /// <see cref="JeebGateway.Financials.CommissionCalculator.FlatRate"/> — the SAME
+    /// constant <see cref="JeebGateway.Financials.SettlementService"/> charges at
+    /// settlement — so the rate the catalog publishes and the rate a Jeeber is
+    /// actually settled at cannot diverge.</para>
+    ///
+    /// <para>Why: owner ruling Q-001 (2026-07-07) set v1 commission to a flat 10%
+    /// of the accepted offer and explicitly SUPERSEDED "the shipped tiered
+    /// 15/20/10% + 2% insurance + 1000-LBP floor, and the DB seeds". The gateway
+    /// converged its own catalogs (db/migrations 0035, 0036) and its calculator
+    /// (f80a6c3), but delivery-service's tier catalog still carries the
+    /// pre-ruling per-tier rates (Flash 0.25 / Express 0.20 / Standard 0.15), and
+    /// this mapper used to relay them verbatim — so GET /tiers advertised a
+    /// commission schedule that nothing honours. delivery-service does not own
+    /// Jeeb commission; the gateway is the canonical settlement engine (Q-005),
+    /// so the rate is sourced here rather than relayed.
+    /// Fixing the upstream seed remains the follow-up for the service owner;
+    /// this stamp makes the seed unable to misprice the public contract either way.</para>
+    ///
+    /// <para>Every other field is still relayed verbatim — the tier catalog
+    /// (ids, names, SLAs, radii, TTLs, price hints) remains delivery-service's.</para>
+    /// </summary>
     private static DeliveryTierDto ToDeliveryTierDto(DeliveryTierUpstream tier) => new()
     {
         Id = tier.Id,
@@ -45,7 +71,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
             : tier.TtlMinutes > 0
                 ? checked(tier.TtlMinutes * 60)
                 : 0,
-        CommissionRate = tier.CommissionRate,
+        CommissionRate = (double)JeebGateway.Financials.CommissionCalculator.FlatRate,
         PriceHint = tier.PriceHint,
         CreatedAt = tier.CreatedAt,
         UpdatedAt = tier.UpdatedAt,

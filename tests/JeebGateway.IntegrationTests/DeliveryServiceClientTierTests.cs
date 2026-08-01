@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using FluentAssertions;
+using JeebGateway.Financials;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Logging;
 using Xunit;
@@ -70,6 +71,38 @@ public class DeliveryServiceClientTierTests
         tier.RequestTtlSeconds.Should().Be(0);
     }
 
+    /// <summary>
+    /// Q-001 regression. The live delivery-service catalog still serves the
+    /// PRE-ruling per-tier commission schedule (Flash 0.25 / Express 0.20 /
+    /// Standard 0.15) — the exact values GET /tiers published on 2026-08-01 while
+    /// all six ledger entries settled at 10.000%. The published rate must be the
+    /// rate settlement charges, so the client stamps CommissionCalculator.FlatRate
+    /// instead of relaying the upstream field.
+    ///
+    /// Negative control: on the pre-fix mapper (which relayed
+    /// <c>tier.CommissionRate</c> verbatim) every one of these three cases fails.
+    /// </summary>
+    [Theory]
+    [InlineData("0be308ce-01b5-5cb9-a3e8-9adb60668d9c", "Flash", 0.25)]
+    [InlineData("efe0629b-0b50-555c-b182-4bd41fcd6507", "Express", 0.2)]
+    [InlineData("2bd0d5df-db76-5d14-9e4d-741d60b2fa12", "Standard", 0.15)]
+    public async Task ListTiersAsync_Publishes_Flat_Settlement_Commission_Not_The_Upstream_Rate(
+        string id, string name, double upstreamRate)
+    {
+        var client = ClientReturning(
+            TierJson(id, name, "\"ttl_seconds\":1800,", commissionRate: upstreamRate));
+
+        var tier = (await client.ListTiersAsync(CancellationToken.None)).Should().ContainSingle().Subject;
+
+        tier.CommissionRate.Should().Be((double)CommissionCalculator.FlatRate);
+        tier.CommissionRate.Should().NotBe(upstreamRate);
+
+        // Everything else still relays verbatim — the catalog stays upstream-owned.
+        tier.Id.Should().Be(id);
+        tier.Name.Should().Be(name);
+        tier.RequestTtlSeconds.Should().Be(1800);
+    }
+
     [Fact]
     public async Task ListExpiredDeliveriesAsync_Parses_Envelope()
     {
@@ -120,14 +153,14 @@ public class DeliveryServiceClientTierTests
         logger.Levels.Should().Equal(LogLevel.Warning);
     }
 
-    private static string TierJson(string id, string name, string ttlFields) => $$"""
+    private static string TierJson(string id, string name, string ttlFields, double commissionRate = 0.10) => $$"""
         [{
           "id":"{{id}}",
           "name":"{{name}}",
           "slaHours":1,
           "radiusKm":3.0,
           {{ttlFields}}
-          "commissionRate":0.10,
+          "commissionRate":{{commissionRate.ToString(System.Globalization.CultureInfo.InvariantCulture)}},
           "priceHint":"test",
           "createdAt":"2026-07-21T00:00:00Z",
           "updatedAt":"2026-07-21T00:00:00Z"
