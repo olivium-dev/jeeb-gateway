@@ -23,17 +23,23 @@ public sealed class DisputeEvidenceOrchestrator : IDisputeEvidenceOrchestrator
     private readonly ILocationStore _location;
     private readonly IRequestsStore _deliveries;
     private readonly IOptionsMonitor<DisputeEvidenceOptions> _options;
+    private readonly IOptionsMonitor<TrackingOptions> _tracking;
+    private readonly TimeProvider _clock;
     private readonly ILogger<DisputeEvidenceOrchestrator> _log;
 
     public DisputeEvidenceOrchestrator(
         ILocationStore location,
         IRequestsStore deliveries,
         IOptionsMonitor<DisputeEvidenceOptions> options,
+        IOptionsMonitor<TrackingOptions> tracking,
+        TimeProvider clock,
         ILogger<DisputeEvidenceOrchestrator> log)
     {
         _location = location;
         _deliveries = deliveries;
         _options = options;
+        _tracking = tracking;
+        _clock = clock;
         _log = log;
     }
 
@@ -96,11 +102,20 @@ public sealed class DisputeEvidenceOrchestrator : IDisputeEvidenceOrchestrator
 
             // Production wiring: replace with geolocation-service.RoutePolylineAsync
             // for the full ping history; MVP fold-down uses the latest fix.
+            //
+            // FRESHNESS IS EXPLICIT HERE, and must stay that way. ILocationStore now
+            // returns the last fix on record REGARDLESS of age (it used to silently
+            // discard anything past Tracking:PositionTtl, and that discarding was the
+            // phantom-pin defect — see ILocationStore.GetLatestAsync). Evidence
+            // attached to a dispute must not present an hours-old fix as "where the
+            // Jeeber was", so this call site states the currency requirement itself
+            // rather than relying on the store to have thrown the fix away.
             var jeeberId = request.JeeberId ?? delivery?.JeeberId;
             if (!string.IsNullOrEmpty(jeeberId))
             {
                 var latest = await _location.GetLatestAsync(jeeberId, linked.Token).ConfigureAwait(false);
-                if (latest is not null)
+                var freshness = TrackingFreshness.Classify(latest, _clock.GetUtcNow(), _tracking.CurrentValue);
+                if (latest is not null && freshness.PublishesCoordinates())
                 {
                     points.Add(new[] { latest.Lat, latest.Lng });
                 }

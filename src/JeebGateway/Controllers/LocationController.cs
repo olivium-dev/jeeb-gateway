@@ -330,36 +330,66 @@ public class LocationController : ControllerBase
     /// The one-shot JSON polyline body — the whole of this surface now.
     /// Composes the latest Jeeber fix (held in <see cref="ILocationStore"/>)
     /// with the delivery's dropoff into the MVP straight-line route, and
-    /// carries the staleness verdict (<c>stale</c> / <c>secondsSinceUpdate</c>)
-    /// that used to ride the deleted <c>last-seen</c> stream event, so the
-    /// "Jeeber offline" affordance survives the stream's removal. No held
-    /// connection; a stable etag lets a repeat read be conditional (JEB-54 AC3).
+    /// carries the staleness verdict (<c>positionStatus</c> / <c>stale</c> /
+    /// <c>secondsSinceUpdate</c>) that used to ride the deleted <c>last-seen</c>
+    /// stream event, so the "Jeeber offline" affordance survives the stream's
+    /// removal. No held connection; a stable etag lets a repeat read be
+    /// conditional (JEB-54 AC3).
     /// </summary>
+    /// <remarks>
+    /// <b>The phantom courier pin.</b> This body used to compute
+    /// <c>Stale = latest is not null &amp;&amp; age &gt; StaleThreshold</c>. Because the
+    /// store deleted a fix once it passed <c>Tracking:PositionTtl</c> and returned
+    /// null, <c>latest</c> went null exactly when the courier had been missing
+    /// LONGEST — and the conjunct above made <c>stale</c> <c>false</c> by
+    /// construction. Two opposite states serialised byte-identically
+    /// (<c>position:null, stale:false, secondsSinceUpdate:null, polyline:[]</c>),
+    /// so a customer's map, which keeps its own marker and waits for
+    /// <c>stale:true</c> to degrade it, was told "fine" forever and left a live-
+    /// looking pin at a location the courier had left minutes earlier.
+    /// <para>The verdict is now derived once, from the fix's age, by
+    /// <see cref="TrackingFreshness.Classify"/>, and every field below is a
+    /// function of it — so the four states cannot collapse into each other again
+    /// without that classifier changing.</para>
+    /// </remarks>
     private async Task WritePolylineSnapshotAsync(DeliveryParticipants participants, CancellationToken ct)
     {
         var jeeberId = participants.JeeberId ?? string.Empty;
         var latest = string.IsNullOrEmpty(jeeberId) ? null : await _store.GetLatestAsync(jeeberId, ct);
-        var polyline = Polyline.StraightLine(latest, participants.DropoffLocation);
         var now = _clock.GetUtcNow();
+
+        // ONE verdict, derived once. The store now hands back an old fix instead of
+        // destroying it, so `latest is null` genuinely means "nothing on record".
+        var freshness = TrackingFreshness.Classify(latest, now, _options.CurrentValue);
+
+        // Past PositionTtl we publish neither the coordinates nor a route drawn
+        // from them. That matches what the wire did before this fix (the store had
+        // simply thrown the fix away by then), so no client gains a pin it did not
+        // have — what changes is that `stale` now tells the truth alongside it.
+        var publishable = freshness.PublishesCoordinates() ? latest : null;
+        var polyline = Polyline.StraightLine(publishable, participants.DropoffLocation);
 
         var dto = new TrackingPolylineDto
         {
             DeliveryId = participants.DeliveryId,
             JeeberId = jeeberId,
             Polyline = polyline,
-            Position = latest is null ? null : new GpsPointDto
+            Position = publishable is null ? null : new GpsPointDto
             {
-                Lat = latest.Lat,
-                Lng = latest.Lng,
-                Accuracy = latest.Accuracy,
-                Timestamp = latest.DeviceTimestamp
+                Lat = publishable.Lat,
+                Lng = publishable.Lng,
+                Accuracy = publishable.Accuracy,
+                Timestamp = publishable.DeviceTimestamp
             },
-            // Staleness moved here from the deleted stream's `last-seen` event
-            // name. Additive on the wire: existing readers ignore the two new
-            // fields, and the offline affordance no longer needs a held socket.
-            Stale = latest is not null && (now - latest.ReceivedAt) > _options.CurrentValue.StaleThreshold,
+            // Additive on the wire; a client that reads none of these three is
+            // still strictly better off, because `stale` no longer lies.
+            PositionStatus = freshness.ToWireValue(),
+            Stale = freshness.IsStale(),
+            // Non-null whenever ANY fix is on record — including "lost", where it is
+            // the only thing separating a missing courier from one who never
+            // started. Measured from `latest`, not `publishable`.
             SecondsSinceUpdate = latest is null ? null : (now - latest.ReceivedAt).TotalSeconds,
-            Etag = PolylineEtag(polyline),
+            Etag = SnapshotEtag(polyline, freshness),
             ServerTimestamp = now
         };
 
@@ -370,18 +400,30 @@ public class LocationController : ControllerBase
     }
 
     /// <summary>
-    /// Stable, order-sensitive hash of the polyline geometry. Identical routes
+    /// Stable, order-sensitive hash of everything a client would re-render on:
+    /// the polyline geometry AND the freshness verdict. Identical snapshots
     /// produce identical etags so a repeat read within the cache window is a
     /// no-op render. Deterministic FNV-1a over the rounded coordinates — no
     /// allocation churn, no dependency on object identity.
     /// </summary>
-    private static string PolylineEtag(IReadOnlyList<double[]> polyline)
+    /// <remarks>
+    /// The freshness verdict is folded in deliberately. Hashing the geometry
+    /// ALONE meant the <c>live → stale</c> transition produced an identical etag
+    /// (a stationary courier's polyline does not move), so a client skipping a
+    /// re-render on an unchanged etag would never learn the marker had gone
+    /// stale — the same class of miss as the defect this method's caller fixes.
+    /// Only the four-valued verdict is folded in, never
+    /// <c>secondsSinceUpdate</c>: hashing a per-second value would churn the etag
+    /// every read and destroy its purpose.
+    /// </remarks>
+    private static string SnapshotEtag(IReadOnlyList<double[]> polyline, PositionFreshness freshness)
     {
         unchecked
         {
             const ulong fnvOffset = 14695981039346656037UL;
             const ulong fnvPrime = 1099511628211UL;
             var hash = fnvOffset;
+            hash = (hash ^ (ulong)(int)freshness) * fnvPrime;
             foreach (var pt in polyline)
             {
                 foreach (var coord in pt)

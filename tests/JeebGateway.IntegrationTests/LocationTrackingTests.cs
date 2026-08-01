@@ -232,6 +232,7 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
         frame.Polyline[0].Should().Equal(new[] { 24.7000, 46.7000 });
         frame.Polyline[1].Should().Equal(new[] { 24.8000, 46.8000 });
         frame.Stale.Should().BeFalse();
+        frame.PositionStatus.Should().Be("live");
     }
 
     [Fact]
@@ -270,8 +271,9 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
 
         var frame = await ReadTrackingSnapshotAsync(http, $"/deliveries/{seed.Id}/tracking");
         frame.Stale.Should().BeTrue();
-        frame.Position.Should().NotBeNull();
+        frame.Position.Should().NotBeNull("inside PositionTtl the coordinates are still published — a stationary courier legitimately uploads nothing for minutes");
         frame.SecondsSinceUpdate.Should().BeGreaterThan(0);
+        frame.PositionStatus.Should().Be("stale");
     }
 
     [Fact]
@@ -287,6 +289,200 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
         frame.Polyline.Should().BeEmpty();
         frame.Stale.Should().BeFalse();
         frame.SecondsSinceUpdate.Should().BeNull();
+        frame.PositionStatus.Should().Be("awaitingFirstFix");
+    }
+
+    // ---- store-level: TTL classifies, RETENTION forgets -------------------------
+
+    /// <summary>
+    /// The two windows must do different jobs. A fix past <c>PositionTtl</c> is
+    /// still on record (so "lost" is reportable for the whole trip); a fix past
+    /// <c>PositionRetention</c> is genuinely gone (so removing TTL eviction did not
+    /// turn the store into an unbounded leak).
+    /// </summary>
+    [Fact]
+    public void Store_Retains_Past_PositionTtl_But_Evicts_Past_PositionRetention()
+    {
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider(
+            new DateTimeOffset(2026, 8, 1, 12, 0, 0, TimeSpan.Zero));
+        var options = new TrackingOptions
+        {
+            StaleThreshold = TimeSpan.FromMinutes(2),
+            PositionTtl = TimeSpan.FromMinutes(5),
+            PositionRetention = TimeSpan.FromHours(12)
+        };
+        var store = new InMemoryLocationStore(new TrackingOptionsMonitor(options), clock);
+
+        store.RecordAsync("jeeber-1", new[]
+        {
+            new GpsPointDto { Lat = 24.7, Lng = 46.7, Accuracy = 5, Timestamp = clock.GetUtcNow() }
+        }).GetAwaiter().GetResult();
+
+        // t+301 s — past the 300 s TTL. The fix survives, and the caller classifies
+        // it as lost. Before the fix this read returned null AND deleted the entry.
+        clock.Advance(TimeSpan.FromSeconds(301));
+        var pastTtl = store.GetLatest("jeeber-1");
+        pastTtl.Should().NotBeNull("PositionTtl classifies; it must not destroy");
+        TrackingFreshness.Classify(pastTtl, clock.GetUtcNow(), options)
+            .Should().Be(PositionFreshness.Lost);
+
+        // A second read must be idempotent — the first must not have evicted it.
+        store.GetLatest("jeeber-1").Should().NotBeNull("the TTL read is not destructive");
+
+        // t+12 h 1 s — past retention. Now it really is gone.
+        clock.Advance(TimeSpan.FromHours(12));
+        store.GetLatest("jeeber-1").Should().BeNull(
+            "retention still bounds memory, so dropping TTL eviction is not a leak");
+    }
+
+    /// <summary>
+    /// The ladder <c>StaleThreshold &lt;= PositionTtl &lt; PositionRetention</c> is
+    /// enforced at startup, so the defect cannot be reintroduced by configuration
+    /// alone. <c>PositionRetention &lt;= PositionTtl</c> means a fix is forgotten
+    /// before it can ever be reported as "lost" — which is exactly the collapse
+    /// that produced the phantom pin — so the gateway must refuse to boot rather
+    /// than serve a wire that silently lies.
+    /// </summary>
+    [Fact]
+    public void Gateway_Refuses_To_Start_When_Retention_Does_Not_Outlast_PositionTtl()
+    {
+        var factory = _factory.WithWebHostBuilder(b =>
+        {
+            b.ConfigureAppConfiguration((_, cfg) =>
+            {
+                cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Tracking:StaleThreshold"] = "00:02:00",
+                    ["Tracking:PositionTtl"] = "00:05:00",
+                    ["Tracking:PositionRetention"] = "00:05:00" // not > PositionTtl
+                });
+            });
+        });
+
+        // CreateClient() starts the host, which is when ValidateOnStart runs.
+        var boot = () => factory.CreateClient();
+
+        boot.Should().Throw<Microsoft.Extensions.Options.OptionsValidationException>()
+            .WithMessage("*PositionRetention*",
+                "the failure must name the option an operator has to fix");
+    }
+
+    /// <summary>Minimal <see cref="IOptionsMonitor{T}"/> over a fixed value.</summary>
+    private sealed class TrackingOptionsMonitor : Microsoft.Extensions.Options.IOptionsMonitor<TrackingOptions>
+    {
+        public TrackingOptionsMonitor(TrackingOptions value) => CurrentValue = value;
+        public TrackingOptions CurrentValue { get; }
+        public TrackingOptions Get(string? name) => CurrentValue;
+        public IDisposable? OnChange(Action<TrackingOptions, string?> listener) => null;
+    }
+
+    // ---- the phantom courier pin -----------------------------------------------
+
+    /// <summary>
+    /// REGRESSION — the phantom courier pin.
+    ///
+    /// <para>A fix that ages past <c>Tracking:PositionTtl</c> must be reported as
+    /// <c>lost</c>, with <c>stale:true</c> and a non-null <c>secondsSinceUpdate</c>.
+    /// It used to be reported as <c>position:null, stale:false,
+    /// secondsSinceUpdate:null</c> — an explicit all-clear — because the store
+    /// DELETED the fix on read at the TTL and the controller computed
+    /// <c>Stale = latest is not null &amp;&amp; …</c>, which is false by construction
+    /// when <c>latest</c> is null. A customer's map keeps its own marker and waits
+    /// for <c>stale:true</c> to degrade it, so it left a live-looking pin at a
+    /// location the courier had left minutes earlier.</para>
+    ///
+    /// <para>This drives the PRODUCTION defaults (120 s stale / 300 s TTL) and moves
+    /// the gateway's own clock past them rather than shortening the thresholds, so
+    /// it reproduces the live capture's arithmetic — a fix 300.836 s old against a
+    /// 300.000 s TTL — instead of a scaled-down imitation of it.</para>
+    /// </summary>
+    [Fact]
+    public async Task Tracking_Snapshot_Reports_Lost_When_Fix_Ages_Past_PositionTtl()
+    {
+        var factory = _factory.WithWebHostBuilder(_ => { });
+        var seed = await SeedDeliveryWithDropoffAsync(
+            dropoffLat: 24.8, dropoffLng: 46.8, factory: factory);
+
+        var store = factory.Services.GetRequiredService<ILocationStore>();
+        await store.RecordAsync(seed.JeeberId, new[]
+        {
+            new GpsPointDto { Lat = 24.7, Lng = 46.7, Accuracy = 5, Timestamp = DateTimeOffset.UtcNow }
+        });
+
+        // Sanity: at t0 the position is live and drawn. Without this the test could
+        // pass on a snapshot that was never healthy in the first place.
+        var http = ClientFor(factory, seed.ClientId);
+        var before = await ReadTrackingSnapshotAsync(http, $"/deliveries/{seed.Id}/tracking");
+        before.PositionStatus.Should().Be("live");
+        before.Position.Should().NotBeNull();
+        before.Polyline.Should().HaveCount(2);
+
+        // Age the gateway's own clock past the 300 s default TTL. No sleeps, and no
+        // shrunken thresholds: this is the shipped configuration.
+        factory.Services
+            .GetRequiredService<JeebGateway.TestControlPlane.FakeTimeProvider>()
+            .AdvanceBy(TimeSpan.FromSeconds(301));
+
+        var after = await ReadTrackingSnapshotAsync(http, $"/deliveries/{seed.Id}/tracking");
+
+        after.PositionStatus.Should().Be("lost",
+            "we had this courier and we no longer know where they are");
+        after.Stale.Should().BeTrue(
+            "THE defect: this was false — the longer the courier had been missing, the more confidently the wire said 'fine'");
+        after.SecondsSinceUpdate.Should().NotBeNull(
+            "the age is the evidence that a courier existed and was lost");
+        after.SecondsSinceUpdate!.Value.Should().BeGreaterThanOrEqualTo(300);
+        after.Position.Should().BeNull(
+            "we do not hand out coordinates we cannot vouch for — a client reading only this field must not be able to draw the pin");
+        after.Polyline.Should().BeEmpty("no route is drawn from a position we have lost");
+        after.Etag.Should().NotBe(before.Etag,
+            "a client that skips re-render on an unchanged etag must still learn the courier was lost");
+    }
+
+    /// <summary>
+    /// The two states must not be byte-identical on the wire. In the live capture
+    /// they were: reads taken BEFORE the courier's first fix ever arrived were
+    /// indistinguishable from a read where the fix had aged out —
+    /// <c>position:null, stale:false, secondsSinceUpdate:null, polyline:[],
+    /// etag:cbf29ce484222325</c> (the bare FNV-1a offset basis, i.e. zero
+    /// coordinates hashed) in both cases.
+    /// </summary>
+    [Fact]
+    public async Task Tracking_Snapshot_Distinguishes_Courier_Not_Started_From_Courier_Lost()
+    {
+        var factory = _factory.WithWebHostBuilder(_ => { });
+
+        var neverStarted = await SeedDeliveryWithDropoffAsync(
+            dropoffLat: 24.8, dropoffLng: 46.8, factory: factory);
+        var lost = await SeedDeliveryWithDropoffAsync(
+            dropoffLat: 24.8, dropoffLng: 46.8, factory: factory);
+
+        // Only the second courier ever reports a position.
+        var store = factory.Services.GetRequiredService<ILocationStore>();
+        await store.RecordAsync(lost.JeeberId, new[]
+        {
+            new GpsPointDto { Lat = 24.7, Lng = 46.7, Accuracy = 5, Timestamp = DateTimeOffset.UtcNow }
+        });
+
+        factory.Services
+            .GetRequiredService<JeebGateway.TestControlPlane.FakeTimeProvider>()
+            .AdvanceBy(TimeSpan.FromSeconds(301));
+
+        var a = await ReadTrackingSnapshotAsync(
+            ClientFor(factory, neverStarted.ClientId), $"/deliveries/{neverStarted.Id}/tracking");
+        var b = await ReadTrackingSnapshotAsync(
+            ClientFor(factory, lost.ClientId), $"/deliveries/{lost.Id}/tracking");
+
+        a.PositionStatus.Should().Be("awaitingFirstFix");
+        b.PositionStatus.Should().Be("lost");
+
+        // Independent of the new field, the pre-existing fields now differ too, so
+        // even a client that never adopts positionStatus can tell them apart.
+        a.Stale.Should().BeFalse();
+        b.Stale.Should().BeTrue();
+        a.SecondsSinceUpdate.Should().BeNull("nothing was ever recorded, so there is no age");
+        b.SecondsSinceUpdate.Should().NotBeNull("we know exactly how long ago we lost them");
+        a.Etag.Should().NotBe(b.Etag, "the two states used to hash identically");
     }
 
     [Fact]
@@ -321,6 +517,19 @@ public class LocationTrackingTests : IClassFixture<WebApplicationFactory<Program
     }
 
     // -------------------- helpers ----------------------------------------------
+
+    /// <summary>
+    /// <see cref="AuthClient"/> against an explicitly supplied factory — needed by
+    /// the tests that take an isolated host so they can advance its clock without
+    /// shifting time for every other test in the class.
+    /// </summary>
+    private static HttpClient ClientFor(WebApplicationFactory<Program> factory, string userId)
+    {
+        var c = factory.CreateClient();
+        c.DefaultRequestHeaders.Add("X-User-Id", userId);
+        c.DefaultRequestHeaders.Add("X-User-Roles", "client,jeeber");
+        return c;
+    }
 
     private HttpClient AuthClient(string userId)
     {
