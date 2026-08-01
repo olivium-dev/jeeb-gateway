@@ -44,4 +44,18 @@ public sealed class ConversationProvisionOptions
     /// Stable literal; overridable only for tests.
     /// </summary>
     public string AcceptedTag { get; init; } = "accepted";
+
+    /// <summary>
+    /// The <c>phase</c> the gateway drives the CONVERSATION aggregate to when the
+    /// delivery it backs completes (<c>PATCH /api/conversations/{id}/phase</c>).
+    ///
+    /// <para>chat-service treats <c>phase</c> as an OPAQUE, caller-owned string — it
+    /// stores and compares it but never enumerates it by product meaning
+    /// (<c>ConversationService.AdvancePhaseAsync</c> validates only non-empty, then
+    /// assigns). So this literal needs NO chat-service change; the phase vocabulary
+    /// (<c>broadcasting</c> → <c>accepted</c> → <c>closed</c>) is the BFF's to own.</para>
+    ///
+    /// Stable literal; overridable only for tests.
+    /// </summary>
+    public string ClosedPhase { get; init; } = "closed";
 }
