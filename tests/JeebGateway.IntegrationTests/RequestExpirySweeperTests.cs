@@ -8,6 +8,7 @@ using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Tiers;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
@@ -394,6 +395,15 @@ public class RequestExpirySweeperTests
                 services.AddSingleton<TimeProvider>(theClock);
                 services.AddSingleton<IDurableRequestsMirror, LocalExpiryAuthority>();
             });
+
+            // GW3 / W3.5(c) deleted the gateway's in-memory offer store, so a bare
+            // WebApplicationFactory now resolves IPendingOffersStore to the real
+            // UpstreamPendingOffersStore (offer-service over HTTP). These expiry tests
+            // assert on the offer ledger the sweeper closes, so the fixture must own it.
+            // ConfigureTestServices (not ConfigureServices) so the swap lands after
+            // Program.cs's own unconditional registration.
+            builder.ConfigureTestServices(
+                Fakes.FakeOfferStoreWebApplicationFactory.UseFakeOfferStore);
         });
     }
 
