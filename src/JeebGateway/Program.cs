@@ -2181,33 +2181,56 @@ builder.Services.Configure<ZoneOptions>(builder.Configuration.GetSection(ZoneOpt
 // Tracked as IntentionalInMemory (not the migration backlog) in StoreDurabilityGuard.
 builder.Services.AddSingleton<IGeoIndex, InMemoryGeoIndex>();
 
-// Offer record-of-truth (T-backend-010). thin-BFF wire: when
-// FeatureFlags:UseUpstream:Offer is true the offer ledger is the real
-// offer-service (Elixir/Phoenix, host port 10063) proxied via
-// UpstreamPendingOffersStore → IOfferServiceClient; when false (default in
-// non-production) the legacy InMemoryPendingOffersStore is used. The in-memory
-// store is KEPT registered either way so existing fixtures and the auto-offline
-// sweeper / accept-lookup paths (which offer-service has no read route for yet)
-// continue to resolve it directly; store deletion is a tracked fast-follow.
-builder.Services.AddSingleton<InMemoryPendingOffersStore>();
+// Offer record-of-truth (T-backend-010). thin-BFF wire: the offer ledger is the
+// real offer-service (Elixir/Phoenix, host port 10063), proxied via
+// UpstreamPendingOffersStore → IOfferServiceClient. The gateway holds NO offer
+// state.
+//
+// GW3 / W3.5(c) — what this block used to say, and why it was wrong.
+// It used to register an in-memory offer store as a concrete singleton alongside
+// this mapping, select it whenever FeatureFlags:UseUpstream:Offer was false, and
+// justify keeping it with:
+//
+//     "The in-memory store is KEPT registered either way so existing fixtures and
+//      the auto-offline sweeper / accept-lookup paths (which offer-service has no
+//      read route for yet) continue to resolve it directly"
+//
+// The second half of that sentence was FALSE, and had been for as long as the
+// comment existed. Grepping the concrete store type across src/ returned exactly
+// SEVEN hits: the class itself (2), two comments in sibling files, and these
+// registration lines (3). ZERO concrete injections anywhere else. The auto-offline
+// sweeper (PostgresAvailabilityStore / InMemoryAvailabilityStore) and the
+// accept-lookup path (OffersController / JeebOffersController) all take
+// IPendingOffersStore, so at Offer=true — which is what every deployed overlay
+// sets — they resolved the UPSTREAM store and hit its NotSupportedException on
+// GetAsync / WithdrawForJeeberAsync. They never once "resolved it directly".
+// A comment that names a defence which does not exist is worse than no comment:
+// it retires the question.
+//
+// The store itself was fixture machinery (it shipped an `EnqueueForTest` seam in
+// production source and called itself "MVP"), so it moved into the test project as
+// JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore (git mv, history kept)
+// and this mapping became unconditional.
+//
+// CONSEQUENCE, stated so nobody rediscovers it as a bug: FeatureFlags:UseUpstream:Offer
+// = false no longer selects a second store — there is no second store. The flag still
+// gates the remaining legacy offer branches (OffersController's inline accept and
+// EditInMemoryAsync), which are self-labelled test-only and now run only against a
+// store a TEST supplies. Off + no override = the offer surface is not functional. Every
+// deployed overlay sets it true (appsettings.Production.json); the base false is the
+// test-harness default. Finishing the migration properly — so the flag can be deleted —
+// needs offer-service to grow get-by-id and bulk-withdraw routes (JEBV4-148), which is
+// an owner / service-owner call, not a gateway change.
 builder.Services.AddSingleton<IPendingOffersStore>(sp =>
-{
-    var flags = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<UpstreamFeatureFlags>>().Value;
-    if (flags.Offer)
-    {
-        return new UpstreamPendingOffersStore(
-            sp.GetRequiredService<JeebGateway.Services.Clients.IOfferServiceClient>(),
-            sp.GetRequiredService<Microsoft.AspNetCore.Http.IHttpContextAccessor>(),
-            // fix/offer-visibility (run-23 CHECK C): the submit-time routing index + the
-            // request read-model let ListForJeeberAsync recover the jeeber's own (incl.
-            // TERMINAL) offers through the owner-scoped request-list route — offer-service
-            // exposes no jeeber-scoped list route.
-            sp.GetRequiredService<IOfferRequestIndex>(),
-            sp.GetRequiredService<JeebGateway.Requests.IRequestsStore>());
-    }
-
-    return sp.GetRequiredService<InMemoryPendingOffersStore>();
-});
+    new UpstreamPendingOffersStore(
+        sp.GetRequiredService<JeebGateway.Services.Clients.IOfferServiceClient>(),
+        sp.GetRequiredService<Microsoft.AspNetCore.Http.IHttpContextAccessor>(),
+        // fix/offer-visibility (run-23 CHECK C): the submit-time routing index + the
+        // request read-model let ListForJeeberAsync recover the jeeber's own (incl.
+        // TERMINAL) offers through the owner-scoped request-list route — offer-service
+        // exposes no jeeber-scoped list route.
+        sp.GetRequiredService<IOfferRequestIndex>(),
+        sp.GetRequiredService<JeebGateway.Requests.IRequestsStore>()));
 // Offer → request routing index (S07 accept saga). Records the immutable
 // offerId → requestId pairing at submit time so the offer-scoped accept route
 // (POST /offers/{id}/accept) can forward to the request-scoped offer-service

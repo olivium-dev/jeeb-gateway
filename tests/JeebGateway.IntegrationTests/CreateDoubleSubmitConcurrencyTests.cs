@@ -136,7 +136,10 @@ public class CreateDoubleSubmitConcurrencyTests
     [Fact]
     public async Task Two_Concurrent_Accepts_Of_One_Offer_Resolve_To_Exactly_One_Winner()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        // GW3 / W3.5(c): the gateway ships no in-memory offer store any more, so this
+        // race test supplies the fixture double itself instead of borrowing the one
+        // Program.cs used to register.
+        using var factory = new Fakes.FakeOfferStoreWebApplicationFactory();
         var jeeberId = $"j-race-{Guid.NewGuid()}";
         var clientId = $"c-race-{Guid.NewGuid()}";
 
@@ -147,7 +150,7 @@ public class CreateDoubleSubmitConcurrencyTests
             Description = "concurrent accept guard"
         }, CancellationToken.None);
 
-        var offers = factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        var offers = factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
         var offer = offers.EnqueueForTest(jeeberId, created.Id);
 
         var clientA = ClientActor(factory, clientId);

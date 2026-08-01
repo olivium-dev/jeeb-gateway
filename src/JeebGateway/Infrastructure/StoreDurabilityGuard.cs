@@ -178,30 +178,42 @@ internal static class StoreDurabilityGuard
         typeof(JeebGateway.Whisper.IAudioStore),
 
         // JEBV4-148 (AUDIT-A guard-gap — DURABLE-TARGET-EXISTS-BUT-PROMOTION-OWNER-GATED):
-        // the pending-offers ledger (Availability/IPendingOffersStore). When
-        // FeatureFlags:UseUpstream:Offer is OFF (today's default) the AUTHORITATIVE store is
-        // InMemoryPendingOffersStore — it holds live auction state (pending/accepted/
-        // superseded, edit counts, the 20-offer cap, one-live-offer-per-jeeber) in process
-        // memory, so a restart drops in-flight bids. That is a real gap, hence it is listed
-        // here and logged loudly at boot rather than left silent.
+        // the pending-offers ledger (Availability/IPendingOffersStore).
+        //
+        // GW3 / W3.5(c) changed the SHAPE of this gap; it did not close it. This entry used
+        // to read: "When FeatureFlags:UseUpstream:Offer is OFF (today's default) the
+        // AUTHORITATIVE store is [the gateway's in-memory offer store] — it holds live
+        // auction state in process memory, so a restart drops in-flight bids." That store is
+        // now DELETED from the gateway (it moved to the test project as a fixture double), so
+        // the gateway no longer holds auction state in process memory at all and the
+        // restart-drops-bids gap is gone.
+        //
+        // What remains, and why this interface stays listed: the only implementation the
+        // gateway now ships is the thin-BFF UpstreamPendingOffersStore, which is INCOMPLETE —
+        // it throws NotSupportedException on 5 of its 9 members (see below). So the gateway
+        // still cannot serve the full offer contract from a durable source of record, which is
+        // exactly the condition this backlog exists to log loudly at boot. Promotion still
+        // waits on the same upstream routes.
         //
         // It is deliberately NOT promoted to Critical, and NOT given a gateway-Postgres table,
         // because the offer ledger's system of record is the offer-service (Elixir/Phoenix,
         // its OWN Postgres) — the gateway must not own an offers table (org no-coupling law;
         // same reason IUsersStore→UpstreamBackedUsersStore and IOfferRequestIndex→
         // StateServiceOfferRequestIndex are BFF/state-service backed, not gateway-Postgres).
-        // The durable path already exists as the thin-BFF UpstreamPendingOffersStore behind
-        // FeatureFlags:UseUpstream:Offer. Promoting this interface to Critical(
-        // UpstreamPendingOffersStore) would force UseUpstream:Offer=true in prod, but that
-        // BFF still throws NotSupportedException for GetAsync / AcceptAsync /
+        // The durable path already exists as the thin-BFF UpstreamPendingOffersStore, which
+        // since GW3 is the ONLY implementation this interface resolves to. It is still not
+        // Critical, because it throws NotSupportedException for GetAsync / AcceptAsync /
         // AcceptWithSupersedeAsync / TryEditAsync / WithdrawForJeeberAsync (offer-service has
         // no get-by-id or bulk-withdraw-for-jeeber route yet, and accept is driven by
-        // OffersController's own auction-close orchestration, not this seam) — so forcing the
-        // flag on today would 500 the auto-offline sweeper and the offer-accept lookup path.
-        // Promotion is therefore an OWNER decision (confirm prod runs UseUpstream:Offer=true
-        // AND offer-service grows the missing read/withdraw routes so the BFF is complete),
-        // tracked on JEBV4-148 — not a change this PR can safely make. Until then it stays a
-        // loudly-logged known-in-memory gap.
+        // OffersController's own auction-close orchestration, not this seam). Note what that
+        // means and do NOT re-derive it as new: the auto-offline sweeper's
+        // WithdrawForJeeberAsync call and the offer-accept GetAsync lookup ALREADY fault on
+        // every deployed overlay, because they all set UseUpstream:Offer = true. GW3 did not
+        // introduce that; it only removed the flag-off configuration that used to mask it in
+        // dev. AutoOfflineSweeper already catches per-record and continues.
+        // Promotion is therefore an OWNER decision (offer-service must grow the missing
+        // read/withdraw routes so the BFF is complete), tracked on JEBV4-148 — not a change
+        // this PR can safely make. Until then it stays a loudly-logged known gap.
         typeof(JeebGateway.Availability.IPendingOffersStore),
     };
 

@@ -1,26 +1,40 @@
 using System.Collections.Concurrent;
 
-namespace JeebGateway.Availability;
+using JeebGateway.Availability;
+
+namespace JeebGateway.IntegrationTests.Fakes;
 
 /// <summary>
-/// MVP in-memory offer ledger. Tests seed offers via
-/// <see cref="EnqueueForTest"/> (legacy accept-flow tests) or by hitting
-/// <see cref="TrySubmitAsync"/> from the submission tests; production
-/// swaps for an offer-service client behind the same
-/// <see cref="IPendingOffersStore"/> contract.
+/// TEST-ONLY in-memory offer ledger.
+///
+/// GW3 / W3.5(c): this file used to live in the gateway's own
+/// <c>src/JeebGateway/Availability/</c> folder, where it was registered
+/// unconditionally in <c>Program.cs</c> and selected as
+/// <see cref="IPendingOffersStore"/> whenever <c>FeatureFlags:UseUpstream:Offer</c>
+/// was false. It carried an <see cref="EnqueueForTest"/> seam in production source
+/// and its own doc called it "MVP" — it is fixture machinery, not gateway code, so
+/// it moved here (via <c>git mv</c>, history preserved) and the gateway now ships no
+/// in-memory offer store at all. The offer ledger of record is offer-service, reached
+/// through <c>UpstreamPendingOffersStore</c>.
+///
+/// Tests seed offers via <see cref="EnqueueForTest"/> or by hitting
+/// <see cref="TrySubmitAsync"/> through the HTTP surface. Register it from a test's
+/// own service collection / WebApplicationFactory (see
+/// <see cref="FakeOfferStoreWebApplicationFactory"/>) — it is NOT resolvable from the
+/// gateway's DI container any more.
 ///
 /// Concurrency: lookups go through the underlying ConcurrentDictionary;
 /// state-changing operations (submit, withdraw, accept) take the write
 /// lock so the multi-row transitions ("accept this, withdraw the others"
 /// and "count live offers, then insert") are atomic.
 /// </summary>
-public class InMemoryPendingOffersStore : IPendingOffersStore
+public class FakePendingOffersStore : IPendingOffersStore
 {
     private readonly ConcurrentDictionary<string, PendingOffer> _offers = new();
     private readonly object _writeLock = new();
     private readonly TimeProvider _clock;
 
-    public InMemoryPendingOffersStore(TimeProvider clock)
+    public FakePendingOffersStore(TimeProvider clock)
     {
         _clock = clock;
     }

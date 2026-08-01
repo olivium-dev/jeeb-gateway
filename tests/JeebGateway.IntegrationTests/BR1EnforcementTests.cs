@@ -20,11 +20,16 @@ namespace JeebGateway.IntegrationTests;
 ///   3. POST /users/{id}/switch-role endpoint happy + error paths.
 ///   4. Offer-accept BR-1 rejection (Jeeber cannot accept own request).
 /// </summary>
-public class BR1EnforcementTests : IClassFixture<WebApplicationFactory<Program>>
+// GW3 / W3.5(c): the class fixture is now FakeOfferStoreWebApplicationFactory, not a bare
+// WebApplicationFactory<Program>. Program.cs used to register an in-memory offer store and
+// select it whenever FeatureFlags:UseUpstream:Offer was false, so a bare factory silently
+// handed this class a working offer ledger. The gateway ships none now — offer-service is
+// the ledger of record — so the fixture supplies the test-owned double explicitly.
+public class BR1EnforcementTests : IClassFixture<Fakes.FakeOfferStoreWebApplicationFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly Fakes.FakeOfferStoreWebApplicationFactory _factory;
 
-    public BR1EnforcementTests(WebApplicationFactory<Program> factory)
+    public BR1EnforcementTests(Fakes.FakeOfferStoreWebApplicationFactory factory)
     {
         _factory = factory;
     }
@@ -220,7 +225,7 @@ public class BR1EnforcementTests : IClassFixture<WebApplicationFactory<Program>>
         }, CancellationToken.None);
 
         // The offer on this request is bid by the SAME user (their jeeber persona).
-        var offersStore = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        var offersStore = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
         var offer = offersStore.EnqueueForTest(userId, request.Id);
 
         // The user accepts AS THE CLIENT (the request owner) — reaches the controller.
