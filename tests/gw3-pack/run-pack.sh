@@ -55,6 +55,25 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --item is matched with bare string equality below (`[ "$ONLY" = "W3.5a" ]`), which
+# is exactly as forgiving of a typo/case slip (`w3.5a`, `W35a`, a stray space) as any
+# other string compare: the mismatch does not error, it just never matches. Every `if`
+# guarding an item block would then skip, FAILED_ITEMS would stay empty, and the
+# summary at the bottom READS EMPTY AS GREEN — this pack would print "all items PASS"
+# and exit 0 having executed zero assertions. Reproduced: `--item w3.5a` (case only)
+# runs nothing and reports PASS today. Validate the value up front, the same way an
+# unrecognized flag is already refused two lines up, so a bad --item is loud instead
+# of vacuous.
+case "$ONLY" in
+  all|W3.5a|W3.5c|HYGIENE) ;;
+  *)
+    echo "REFUSING TO RUN: unknown --item '$ONLY' (want: all | W3.5a | W3.5c | HYGIENE)." >&2
+    echo "A pack that cannot match its own --item silently runs zero assertions and would" >&2
+    echo "otherwise report the vacuous 'all items PASS' below. That is not evidence." >&2
+    exit 2
+    ;;
+esac
+
 # --- exclusive lock -----------------------------------------------------------
 # neg-controls.sh mutates source. If the two ever interleave, this runner reports a
 # red that is real, correctly formatted, attributable to a real assertion — and
@@ -73,8 +92,12 @@ FAILED_ITEMS=()
 CUR_ITEM=""
 CUR_FAILS=0
 BUILD_RC=0
+ITEMS_RUN=0   # belt-and-suspenders: the --item validation above should make this
+              # unreachable, but the final verdict checks it directly rather than
+              # trusting that an empty FAILED_ITEMS means "ran and passed" instead of
+              # "never ran" — the exact ambiguity the vacuous "all items PASS" bug was.
 
-item_begin() { CUR_ITEM="$1"; CUR_FAILS=0; echo; echo "===== ITEM $1 — $2 ====="; }
+item_begin() { CUR_ITEM="$1"; CUR_FAILS=0; ITEMS_RUN=$((ITEMS_RUN+1)); echo; echo "===== ITEM $1 — $2 ====="; }
 item_end()   { if [ "$CUR_FAILS" -gt 0 ]; then echo "----- ITEM $CUR_ITEM: FAIL ($CUR_FAILS assertion(s)) -----"
                                                FAILED_ITEMS+=("$CUR_ITEM")
                                           else echo "----- ITEM $CUR_ITEM: PASS -----"; fi; }
@@ -309,8 +332,14 @@ them. They are exactly GW3's Verifier-2 contract:
 NOTPROVEN
 
 echo
-if [ ${#FAILED_ITEMS[@]} -eq 0 ]; then
-  echo "GW3 PACK: all items PASS"
+if [ "$ITEMS_RUN" -eq 0 ]; then
+  # An empty FAILED_ITEMS array is ambiguous between "ran and passed" and "never ran
+  # a single assertion" — this branch exists so the second case can never print as
+  # the first. See the --item validation above for how this used to be reachable.
+  echo "GW3 PACK: 0 items ran for --item '$ONLY' — NOT a pass, NOT evidence." >&2
+  exit 99
+elif [ ${#FAILED_ITEMS[@]} -eq 0 ]; then
+  echo "GW3 PACK: all items PASS ($ITEMS_RUN ran)"
 else
   echo "GW3 PACK: ${#FAILED_ITEMS[@]} item(s) FAIL -> ${FAILED_ITEMS[*]}"
 fi
