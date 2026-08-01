@@ -501,6 +501,36 @@ builder.Services.AddHostedService(sp =>
 builder.Services.AddSingleton<JeebGateway.Conversations.Realtime.IRealtimeTicketIssuer,
                               JeebGateway.Conversations.Realtime.RealtimeTicketIssuer>();
 
+// Continuous courier position — the gateway half.
+//
+// The credential issuer for realtime-comunication-service. Its Guardian pipeline
+// verifies with ITS OWN secret, not the gateway's Jwt:SigningKey, so neither the
+// forwarded user bearer nor the S08 membership ticket above can authenticate against
+// it. The service does ship an OPEN, UNAUTHENTICATED POST /api/auth/token that mints
+// topics:["*"] for anyone; nothing here is built on that. The gateway mints its own
+// credentials instead, each scoped to a single topic — publish-only for the server-side
+// fan-out, subscribe-only for a client. Unconfigured (the committed default) means no
+// token is minted and every dependent path fails closed.
+builder.Services.Configure<JeebGateway.Realtime.RealtimeGuardianOptions>(
+    builder.Configuration.GetSection(JeebGateway.Realtime.RealtimeGuardianOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Realtime.IRealtimeGuardianTokenIssuer,
+                              JeebGateway.Realtime.RealtimeGuardianTokenIssuer>();
+
+// The GPS-ingest → realtime fan-out. Queue + drainer, mirroring the
+// NewRequestFanoutQueue / NewRequestFanoutProcessor pair: POST /location/update only
+// ever calls the non-blocking TryEnqueue, so a realtime outage cannot fail or slow the
+// location write. Explicit factory because CourierPositionQueue exposes a second,
+// capacity-int ctor for tests.
+builder.Services.Configure<JeebGateway.Realtime.CourierPositionPublishOptions>(
+    builder.Configuration.GetSection(JeebGateway.Realtime.CourierPositionPublishOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Realtime.ICourierPositionQueue>(sp =>
+    new JeebGateway.Realtime.CourierPositionQueue(
+        sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<
+            JeebGateway.Realtime.CourierPositionPublishOptions>>().Value.QueueCapacity));
+builder.Services.AddSingleton<JeebGateway.Realtime.CourierPositionPublisher>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Realtime.CourierPositionPublisher>());
+
 // Notification (ServiceNotificationClient) — salehly sibling mirror. The
 // NSwag-generated ServiceNotificationClient (Services/ServiceNotificationClient.cs,
 // namespace JeebGateway.service.ServiceNotification) is registered exactly as
