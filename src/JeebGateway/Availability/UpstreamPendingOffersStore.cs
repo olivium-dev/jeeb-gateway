@@ -228,12 +228,13 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
         CancellationToken ct)
         => throw new NotSupportedException(
             "offer-service owns the edit rule + the 2-edit cap via OffersController's upstream forward " +
-            "(IOfferServiceClient.EditAsync with max_edits); the in-memory TryEditAsync is the flag-OFF path only.");
+            "(IOfferServiceClient.EditAsync with max_edits); GW3 deleted the gateway's local edit path.");
 
     public Task<PendingOffer?> GetAsync(string offerId, CancellationToken ct)
         => throw new NotSupportedException(
-            "offer-service exposes no get-offer-by-id route; the offer-accept lookup path stays on the " +
-            "in-memory store until offer-service grows GET /api/v1/offers/{id} (tracked fast-follow).");
+            "offer-service exposes no get-offer-by-id route, so the offer-accept lookup path has NO " +
+            "implementation until offer-service grows GET /api/v1/offers/{id} (tracked fast-follow, " +
+            "JEBV4-148). GW3 deleted the in-memory offer store an earlier wording of this message named.");
 
     /// <summary>
     /// BUG-3 fix (customer offers-read 500). offer-service GREW
@@ -359,8 +360,10 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
 
     public Task<int> WithdrawForJeeberAsync(string jeeberId, CancellationToken ct)
         => throw new NotSupportedException(
-            "offer-service exposes no bulk withdraw-for-jeeber route; the auto-offline sweeper stays on the " +
-            "in-memory store until offer-service grows a per-jeeber withdrawal route (tracked fast-follow).");
+            "offer-service exposes no bulk withdraw-for-jeeber route, so the auto-offline sweeper's bulk " +
+            "withdraw has NO implementation until offer-service grows a per-jeeber withdrawal route " +
+            "(tracked fast-follow, JEBV4-148). GW3 deleted the in-memory offer store an earlier wording " +
+            "of this message named.");
 
     // --- mapping helpers ---
 

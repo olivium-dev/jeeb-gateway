@@ -16,9 +16,10 @@ namespace JeebGateway.Controllers.V1;
 /// JEB-1431: V1 BFF slice for offer mutations.
 ///
 /// <c>POST /v1/offers/{id}/accept</c> — accept an offer (close auction).
-/// Delegates to the offer-service accept saga when the
-/// <c>FeatureFlags:UseUpstream:Offer</c> flag is on; falls back to the
-/// legacy in-memory store path when the flag is off. The caller is the
+/// Delegates UNCONDITIONALLY to the offer-service accept saga. GW3 / W3.5(c)
+/// deleted the flag-off local accept along with the in-memory offer store that
+/// drove it, so <c>FeatureFlags:UseUpstream:Offer</c> no longer selects an accept
+/// path here and there is nothing left to fall back to. The caller is the
 /// request-owning CLIENT, NOT the jeeber. State (ownership, single-winner
 /// race safety, OTP mint, sibling rejection, chat-thread open) is owned
 /// by the offer-service; the gateway forwards the actor and surfaces the
