@@ -21,16 +21,18 @@ namespace JeebGateway.Controllers
     public class ChatController : ControllerBase
     {
         private readonly ServiceChatClient _serviceChatClient;
-        private readonly IChatMessagePushNotifier _chatPush;
         private readonly ILogger<ChatController> _logger;
 
+        // IChatMessagePushNotifier was injected here ONLY to fan a push out of the
+        // legacy channel-message CREATE path. That path is retired (see
+        // RetiredLegacyChannelWrite below), so the dependency is gone from this
+        // controller. The LIVE chat push still runs — JeebConversationsController
+        // injects the same notifier for /v1/conversations/{id}/messages.
         public ChatController(
             ServiceChatClient serviceChatClient,
-            IChatMessagePushNotifier chatPush,
             ILogger<ChatController> logger)
         {
             _serviceChatClient = serviceChatClient;
-            _chatPush = chatPush;
             _logger = logger;
         }
 
@@ -75,26 +77,45 @@ namespace JeebGateway.Controllers
                 statusCode: status);
         }
 
-        private ActionResult InvalidMessageProblem(string detail) => Problem(
-            title: "Invalid chat message request.",
-            detail: detail,
-            statusCode: StatusCodes.Status400BadRequest);
-
-        private static AddMessageRequest ToUpstreamRequest(
-            string channelId,
-            AddChatMessageRequest request) => new()
-        {
-            MemberId = request.MemberId!,
-            MemberID = request.MemberId!,
-            ChannelId = channelId,
-            ChannelID = channelId,
-            SessionId = request.SessionId!,
-            SessionID = request.SessionId!,
-            Text = request.Text!,
-            Payload = request.Payload!,
-            ParentId = request.ParentId!,
-            ParentID = request.ParentId!,
-        };
+        /// <summary>
+        /// Terminal response for a RETIRED legacy <c>Channels/</c> message-CREATE route.
+        ///
+        /// <para><b>What was retired and why.</b> chat-service persists a legacy channel
+        /// message at <c>Channels/{ChannelID}/Messages/{Guid}</c>
+        /// (<c>MessageRepository.AddAsync</c> → <c>SetAsync</c>). Exactly two gateway routes
+        /// could CREATE a document there:
+        /// <list type="number">
+        ///   <item><c>POST channels/{channelId}/messages</c> — unconditional creator
+        ///     (<c>MessageService.AddMessageAsync</c> → <c>LinearMessageProcessor</c>,
+        ///     <c>isEdit == false</c> → <c>AddAsync</c>).</item>
+        ///   <item><c>POST channels/{channelId}/messages/{messageId}/reply</c> —
+        ///     creator conditional on an existing parent message
+        ///     (<c>MessageService.ReplyToMessageAsync</c> → same <c>AddAsync</c>).</item>
+        /// </list>
+        /// Both now stop here and never dial chat-service.
+        ///
+        /// <para><b>Why the other legacy mutators were left alone.</b> They cannot create a
+        /// document: every one of them lands on <c>MessageRepository.UpdateAsync</c>, which
+        /// reads a snapshot first and throws <c>NoDataFoundException</c> when the document is
+        /// absent. <c>moderate</c> is included in that set because this gateway always supplies
+        /// <c>messageId</c> from the route, which forces the update branch.</para>
+        ///
+        /// <para><b>The live path is unaffected.</b> Jeeb chat is
+        /// <c>/v1/conversations/**</c> (JeebConversationsController → the
+        /// <c>Conversations/</c> aggregate). This controller's own comment already said so.</para>
+        ///
+        /// <para><b>chat-service was deliberately NOT changed.</b> It is a shared
+        /// olivium service: rahmah-gateway, salehly-gateway and jaiker-gateway all
+        /// carry generated <c>MessagesPOSTAsync</c> clients against the same upstream
+        /// route. Retiring it there would break three other product lines, so the
+        /// retirement is gateway-side only.</para>
+        /// </summary>
+        private ActionResult RetiredLegacyChannelWrite() => Problem(
+            title: "This chat route is retired.",
+            detail: "The legacy channel message-write surface is no longer served. "
+                  + "Jeeb chat writes go to POST /v1/conversations/{conversationId}/messages.",
+            statusCode: StatusCodes.Status410Gone,
+            type: "https://jeeb.dev/errors/legacy-channel-write-retired");
 
         #region Health
 
@@ -456,79 +477,22 @@ namespace JeebGateway.Controllers
         #region Messages
 
         /// <summary>
-        /// Add a message to a channel
+        /// RETIRED — legacy channel message create. Always 410 Gone; never dials chat-service.
+        /// See <see cref="RetiredLegacyChannelWrite"/> for the full rationale.
+        /// Live replacement: <c>POST /v1/conversations/{conversationId}/messages</c>.
         /// </summary>
-        /// <param name="channelId">Channel ID</param>
-        /// <param name="request">Add message request</param>
-        /// <returns>Identity response</returns>
-        /// <response code="201">Message added successfully</response>
-        /// <response code="400">Bad request</response>
-        /// <response code="404">Channel not found</response>
-        /// <response code="500">Internal server error</response>
+        /// <param name="channelId">Channel ID (ignored — the route is retired)</param>
+        /// <param name="request">Add message request (ignored — the route is retired)</param>
+        /// <returns>410 Gone</returns>
+        /// <response code="410">Route retired</response>
         [HttpPost("channels/{channelId}/messages")]
         [Authorize]
         [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
-        [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status201Created)]
-        [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
-        [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-        [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status500InternalServerError)]
-        public async Task<ActionResult<IdentityResponse>> AddMessage(
+        [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status410Gone)]
+        public ActionResult<IdentityResponse> AddMessage(
             string channelId,
             [FromBody] AddChatMessageRequest request)
-        {
-            if (string.IsNullOrWhiteSpace(channelId))
-            {
-                return InvalidMessageProblem("Channel ID is required.");
-            }
-
-            if (request is null)
-            {
-                return InvalidMessageProblem("Request body is required.");
-            }
-
-            if (string.IsNullOrWhiteSpace(request.Text))
-            {
-                return InvalidMessageProblem("Message text is required.");
-            }
-
-            if (string.IsNullOrWhiteSpace(request.ChannelId))
-            {
-                return InvalidMessageProblem("Message channel ID is required.");
-            }
-
-            if (!string.Equals(channelId, request.ChannelId, StringComparison.Ordinal))
-            {
-                return InvalidMessageProblem("Message channel ID must match the route channel ID.");
-            }
-
-            try
-            {
-                ValidateService();
-                var response = await _serviceChatClient.MessagesPOSTAsync(
-                    channelId,
-                    ToUpstreamRequest(channelId, request));
-
-                // BUILD-CHAT-PUSH — notify the conversation's other party (the only missing
-                // link for real A→B chat push). Best-effort/degrade-don't-fail; never affects
-                // this 201. NOTE: the legacy channels surface keys on channelId; recipient
-                // resolution succeeds only when channelId matches a delivery request's stamped
-                // ConversationId (else it no-ops). The live Jeeb chat path is /v1/conversations.
-                if (UserIdentity.TryGetUserId(HttpContext, out var authorId, out _))
-                {
-                    await _chatPush.NotifyNewMessageAsync(channelId, authorId, request?.Text, HttpContext.RequestAborted);
-                }
-
-                return StatusCode(StatusCodes.Status201Created, response);
-            }
-            catch (ChatApiException ex)
-            {
-                return UpstreamProblem(ex);
-            }
-            catch (Exception ex)
-            {
-                throw new ChatApiException($"Error adding message: {ex.Message}, Stack trace: {ex.StackTrace}", 500, "Internal Server Error", new Dictionary<string, IEnumerable<string>>(), null);
-            }
-        }
+            => RetiredLegacyChannelWrite();
 
         /// <summary>
         /// Edit a message
@@ -721,55 +685,23 @@ namespace JeebGateway.Controllers
         }
 
         /// <summary>
-        /// Reply to a message
+        /// RETIRED — legacy channel reply create. Always 410 Gone; never dials chat-service.
+        /// This is the second (and last) gateway route that could CREATE a
+        /// <c>Channels/{id}/Messages/{guid}</c> document.
+        /// See <see cref="RetiredLegacyChannelWrite"/> for the full rationale.
+        /// Live replacement: <c>POST /v1/conversations/{conversationId}/messages</c>.
         /// </summary>
-        /// <param name="channelId">Channel ID</param>
-        /// <param name="messageId">Message ID</param>
-        /// <param name="request">Reply to message request</param>
-        /// <returns>Identity response</returns>
-        /// <response code="201">Reply added successfully</response>
-        /// <response code="400">Bad request</response>
-        /// <response code="404">Message not found</response>
-        /// <response code="500">Internal server error</response>
+        /// <param name="channelId">Channel ID (ignored — the route is retired)</param>
+        /// <param name="messageId">Message ID (ignored — the route is retired)</param>
+        /// <param name="request">Reply request (ignored — the route is retired)</param>
+        /// <returns>410 Gone</returns>
+        /// <response code="410">Route retired</response>
         [HttpPost("channels/{channelId}/messages/{messageId}/reply")]
         [Authorize]
         [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE
-        [ProducesResponseType(typeof(IdentityResponse), StatusCodes.Status201Created)]
-        [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
-        [ProducesResponseType(typeof(string), StatusCodes.Status404NotFound)]
-        [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
-        public async Task<ActionResult<IdentityResponse>> ReplyToMessage(string channelId, string messageId, [FromBody] ReplyToMessageRequest request)
-        {
-            try
-            {
-                ValidateService();
-                if (string.IsNullOrEmpty(channelId))
-                {
-                    throw new ChatApiException("Channel ID is required", 400, "Bad Request", new Dictionary<string, IEnumerable<string>>(), null);
-                }
-
-                if (string.IsNullOrEmpty(messageId))
-                {
-                    throw new ChatApiException("Message ID is required", 400, "Bad Request", new Dictionary<string, IEnumerable<string>>(), null);
-                }
-
-                if (request == null)
-                {
-                    throw new ChatApiException("Request body cannot be null", 400, "Bad Request", new Dictionary<string, IEnumerable<string>>(), null);
-                }
-
-                var response = await _serviceChatClient.ReplyAsync(channelId, messageId, request);
-                return StatusCode(StatusCodes.Status201Created, response);
-            }
-            catch (ChatApiException ex)
-            {
-                return UpstreamProblem(ex);
-            }
-            catch (Exception ex)
-            {
-                throw new ChatApiException($"Error replying to message: {ex.Message}, Stack trace: {ex.StackTrace}", 500, "Internal Server Error", new Dictionary<string, IEnumerable<string>>(), null);
-            }
-        }
+        [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status410Gone)]
+        public ActionResult<IdentityResponse> ReplyToMessage(string channelId, string messageId, [FromBody] ReplyToMessageRequest request)
+            => RetiredLegacyChannelWrite();
 
         /// <summary>
         /// Bind a message
