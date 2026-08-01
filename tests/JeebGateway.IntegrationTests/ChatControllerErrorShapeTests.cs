@@ -42,8 +42,63 @@ public class ChatControllerErrorShapeTests
     private const string Canary =
         "System.NullReferenceException: SECRET_CANARY_ce8f at ChatService.Internal.SecretRepo.Load() line 42";
 
+    /// <summary>
+    /// RETIREMENT LOCK — the legacy channel message-CREATE route.
+    ///
+    /// <para>chat-service persists a legacy channel message at
+    /// <c>Channels/{ChannelID}/Messages/{Guid}</c> via
+    /// <c>MessageRepository.AddAsync</c> → <c>SetAsync</c>. This gateway route was the
+    /// unconditional creator of that shape. It is retired: it must answer 410 Gone and,
+    /// critically, must NOT dial chat-service — <c>stub.CallCount == 0</c> is the
+    /// assertion that actually proves the producer is dead, because a 410 emitted
+    /// *after* an upstream write would still have created the document.</para>
+    /// </summary>
     [Fact]
-    public async Task AddMessage_EmptyObject_Returns_BadRequest_ProblemDetails_Without_Upstream_Call()
+    public async Task AddMessage_Is_Retired_Returns_410_Gone_Without_Upstream_Call()
+    {
+        var stub = new StubHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            {
+                Content = new StringContent(Canary, Encoding.UTF8, "text/plain")
+            });
+
+        using var factory = NewFactoryWithChatStub(stub);
+        var client = MintBearerClient(factory);
+
+        // A fully-populated, VALID body — the retirement must not depend on validation.
+        var resp = await client.PostAsJsonAsync(
+            "/api/Chat/channels/00000000-0000-0000-0000-000000000000/messages",
+            new
+            {
+                channelId = "00000000-0000-0000-0000-000000000000",
+                memberId = "11111111-1111-1111-1111-111111111111",
+                sessionId = "22222222-2222-2222-2222-222222222222",
+                text = "this must never reach chat-service",
+                payload = "{}"
+            });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Gone);
+        resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
+
+        var problem = await resp.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        problem.Should().NotBeNull();
+        problem!.Status.Should().Be((int)HttpStatusCode.Gone);
+        problem.Title.Should().Be("This chat route is retired.");
+        problem.Type.Should().Be("https://jeeb.dev/errors/legacy-channel-write-retired");
+        problem.Detail.Should().Contain("/v1/conversations");
+
+        stub.CallCount.Should().Be(0,
+            "the retired route must never dial chat-service — an upstream call would still create Channels/{id}/Messages/{guid}");
+    }
+
+    /// <summary>
+    /// RETIREMENT LOCK — the legacy channel REPLY route, the only other gateway route
+    /// that could create a <c>Channels/{id}/Messages/{guid}</c> document
+    /// (<c>MessageService.ReplyToMessageAsync</c> → <c>LinearMessageProcessor</c> →
+    /// <c>AddAsync</c>).
+    /// </summary>
+    [Fact]
+    public async Task ReplyToMessage_Is_Retired_Returns_410_Gone_Without_Upstream_Call()
     {
         var stub = new StubHttpMessageHandler(_ =>
             new HttpResponseMessage(HttpStatusCode.InternalServerError)
@@ -55,19 +110,24 @@ public class ChatControllerErrorShapeTests
         var client = MintBearerClient(factory);
 
         var resp = await client.PostAsJsonAsync(
-            "/api/Chat/channels/00000000-0000-0000-0000-000000000000/messages",
-            new { });
+            "/api/Chat/channels/00000000-0000-0000-0000-000000000000/messages/33333333-3333-3333-3333-333333333333/reply",
+            new
+            {
+                channelId = "00000000-0000-0000-0000-000000000000",
+                messageId = "33333333-3333-3333-3333-333333333333",
+                memberId = "11111111-1111-1111-1111-111111111111",
+                sessionId = "22222222-2222-2222-2222-222222222222",
+                text = "this must never reach chat-service"
+            });
 
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
+        resp.StatusCode.Should().Be(HttpStatusCode.Gone);
 
         var problem = await resp.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
-        problem.Should().NotBeNull();
-        problem!.Status.Should().Be((int)HttpStatusCode.BadRequest);
-        problem.Title.Should().Be("Invalid chat message request.");
-        problem.Detail.Should().Be("Message text is required.");
-        problem.Type.Should().NotBeNullOrWhiteSpace();
-        stub.CallCount.Should().Be(0, "invalid input must be rejected by the gateway before chat-service is called");
+        problem!.Status.Should().Be((int)HttpStatusCode.Gone);
+        problem.Type.Should().Be("https://jeeb.dev/errors/legacy-channel-write-retired");
+
+        stub.CallCount.Should().Be(0,
+            "the retired reply route must never dial chat-service");
     }
 
     [Fact]
