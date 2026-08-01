@@ -263,6 +263,12 @@ public sealed class StateServiceOfferRequestIndex : IOfferRequestIndex
         }
         catch (Exception ex)
         {
+            // THE six-week-outage site. This is the read that GET
+            // /v1/state/idempotency/by-prefix serves, and it 404'd on every call for six
+            // weeks while this catch quietly returned the in-memory-only set. The warning
+            // below was already here; the counter is what was missing.
+            BusinessOutcomeTelemetry.DurableReadFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "state-service-offer-routing-reverse"));
             _logger.LogWarning(ex,
                 "Durable reverse read of offer-routing pairs for jeeber {JeeberId} failed; "
                 + "returning the in-memory-only my-offers set.",
@@ -293,6 +299,10 @@ public sealed class StateServiceOfferRequestIndex : IOfferRequestIndex
         }
         catch (Exception ex)
         {
+            // A fault here is served to the caller as "unknown offer" — indistinguishable
+            // from a genuine miss at the 404, which is exactly why it needs a counter.
+            BusinessOutcomeTelemetry.DurableReadFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "state-service-offer-routing"));
             _logger.LogWarning(ex,
                 "Durable read of offer-routing pairing for {OfferId} failed; "
                 + "resolving as unknown (phantom-offer 404 contract).",

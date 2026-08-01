@@ -19,6 +19,10 @@ namespace JeebGateway.IntegrationTests;
 /// re-hydrates the pairing from the durable store on resolve, and a durable-store fault
 /// degrades to the in-memory result (never throws into the offer hot path).
 /// </summary>
+// Serialised with DurableReadFailureCounterTests: this class's faulting-store test drives
+// the same durable-read degrade path, and the counter it increments carries no per-caller
+// discriminator. See DurableReadFailureCollection for the failure it prevents.
+[Collection(DurableReadFailureCollection.Name)]
 public sealed class StateServiceOfferRequestIndexTests
 {
     [Fact]
