@@ -60,7 +60,8 @@ public class ClientVisibilityAndReceiptTests
     public async Task AfterAccept_OwningClientLists_IncludeTheAcceptedRequestAndDelivery()
     {
         var delivery = new RecordingDeliveryClient();
-        using var factory = Factory(delivery);
+        var offerService = new AcceptingOfferServiceClient();
+        using var factory = Factory(delivery, offerService: offerService);
 
         // Real bearers: the flat GET /deliveries route is [Authorize] (bearer-only).
         var http = factory.CreateClient();
@@ -79,6 +80,21 @@ public class ClientVisibilityAndReceiptTests
         var offer = await offers.TrySubmitAsync(
             created.Id, jeeberId, fee: 12m, etaMinutes: 10, note: "RUN22 NOTE",
             maxPerRequest: 20, at: DateTimeOffset.UtcNow, ct: CancellationToken.None);
+
+        // GW3 / W3.5(c): POST /v1/offers/{id}/accept is now UNCONDITIONALLY the
+        // offer-service accept saga — the flag-off local in-memory accept was deleted
+        // along with the store that drove it, so UseUpstream:Offer no longer selects an
+        // accept path. The fixture therefore has to supply the two upstream facts the
+        // route now depends on: the saga's commit envelope, and the offerId → requestId
+        // routing pairing that a submit made over HTTP would have recorded.
+        offerService.Envelope = new OfferAcceptWire
+        {
+            AcceptedOfferId = offer.Id,
+            JeeberId = jeeberId,
+            RejectedOfferIds = Array.Empty<string>(),
+        };
+        factory.Services.GetRequiredService<IOfferRequestIndex>()
+            .Record(offer.Id, created.Id, jeeberId);
 
         // The OWNING client accepts through the V1 route the mobile app calls.
         var acceptResp = await HeaderClient(factory, clientId, "customer")
@@ -178,7 +194,8 @@ public class ClientVisibilityAndReceiptTests
     {
         var delivery = new RecordingDeliveryClient();
         var offers = new FlippablePendingOffersStore(new JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore(TimeProvider.System));
-        using var factory = Factory(delivery, offers);
+        var offerService = new AcceptingOfferServiceClient();
+        using var factory = Factory(delivery, offers, offerService: offerService);
 
         var clientId = $"client-{Guid.NewGuid():N}";
         var jeeberId = $"jeeber-{Guid.NewGuid():N}";
@@ -204,7 +221,20 @@ public class ClientVisibilityAndReceiptTests
             Name = "Karim Jeeber",
         }, CancellationToken.None);
 
-        // Accept through the V1 route (in-memory auction path) — stamps the fee snapshot.
+        // Accept through the V1 route — GW3 / W3.5(c) made this the offer-service accept
+        // saga unconditionally (the in-memory auction path this test used to take was
+        // deleted), so the fixture supplies the saga envelope and the routing pairing.
+        // The fee snapshot asserted below is still stamped by the gateway's own
+        // orchestration from the local offers store, which is what this test is about.
+        offerService.Envelope = new OfferAcceptWire
+        {
+            AcceptedOfferId = offer.Id,
+            JeeberId = jeeberId,
+            RejectedOfferIds = Array.Empty<string>(),
+        };
+        factory.Services.GetRequiredService<IOfferRequestIndex>()
+            .Record(offer.Id, created.Id, jeeberId);
+
         var acceptResp = await HeaderClient(factory, clientId, "customer")
             .PostAsync($"/v1/offers/{offer.Id}/accept", null);
         acceptResp.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -359,6 +389,15 @@ public class ClientVisibilityAndReceiptTests
                 {
                     services.RemoveAll<IPendingOffersStore>();
                     services.AddSingleton(offersStore);
+                }
+                else
+                {
+                    // GW3 / W3.5(c) deleted the gateway's in-memory offer store, so with
+                    // no explicit store this factory would resolve the real
+                    // UpstreamPendingOffersStore and every offer call would fail on an
+                    // unset BaseAddress. These tests exercise the accept/receipt path
+                    // against a ledger, so the fixture supplies its own.
+                    Fakes.FakeOfferStoreWebApplicationFactory.UseFakeOfferStore(services);
                 }
 
                 if (offerService is not null)
