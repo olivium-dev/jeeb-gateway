@@ -311,6 +311,70 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
     }
 
     /// <summary>
+    /// GW5 / W1.6-gateway: durable reconcile candidates for the post-accept chat
+    /// settlement — every mirror row that has a jeeber assigned inside the look-back
+    /// window, newest-first and bounded by LIMIT.
+    ///
+    /// <para>Same column projection and <c>MapRow</c> as the owner-list queries, so a
+    /// candidate carries <c>gw_conversation_id</c> and <c>client_id</c> — both of which
+    /// the reconciler needs to decide whether chat-service's roster is the settled
+    /// {owner, winner} 1:1.</para>
+    ///
+    /// <para><c>gw_jeeber_id &lt;&gt; ''</c> is asserted alongside NOT NULL because the
+    /// column is free text seeded verbatim from the gateway jeeber id; a blank string is
+    /// not an assignment and must not become a reconcile candidate.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<DeliveryRequest>> ListAssignedSinceAsync(
+        DateTimeOffset since, int limit, CancellationToken ct)
+    {
+        if (limit <= 0) return Array.Empty<DeliveryRequest>();
+
+        await using var conn = await _db.OpenAsync(ct);
+
+        const string sql = """
+            SELECT
+                id,
+                client_id,
+                COALESCE(gw_status, status::text)  AS status,
+                description,
+                transcription,
+                audio_url,
+                gw_tier_code,
+                ST_Y(pickup_location::geometry)     AS pickup_lat,
+                ST_X(pickup_location::geometry)     AS pickup_lng,
+                ST_Y(dropoff_location::geometry)    AS dropoff_lat,
+                ST_X(dropoff_location::geometry)    AS dropoff_lng,
+                pickup_address,
+                dropoff_address,
+                gw_recipient_phone,
+                created_at,
+                scheduled_at,
+                gw_expired_at,
+                gw_jeeber_id,
+                gw_accepted_fee,
+                gw_conversation_id,
+                gw_cancelled_by,
+                gw_cancellation_reason,
+                gw_cancelled_at
+            FROM delivery_requests
+            WHERE gw_mirror = TRUE
+              AND gw_jeeber_id IS NOT NULL
+              AND gw_jeeber_id <> ''
+              AND created_at >= @Since
+            ORDER BY created_at DESC
+            LIMIT @Limit
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        // DateTimeOffset, not .UtcDateTime — the same CLR type this file already binds
+        // to created_at on the upsert (line ~85). Mixing the two invites the Npgsql
+        // "cannot write DateTime with Kind=Unspecified to timestamptz" class of fault.
+        cmd.Parameters.AddWithValue("Since", since);
+        cmd.Parameters.AddWithValue("Limit", limit);
+        return await ReadListAsync(cmd, ct);
+    }
+
+    /// <summary>
     /// JEBV4-248: durable by-id read. Same column projection + <see cref="MapRow"/>
     /// as the owner-list queries, filtered to the single mirror row. The native id
     /// is a UUID column, so a non-UUID id has no mirror row (returns null). Used as

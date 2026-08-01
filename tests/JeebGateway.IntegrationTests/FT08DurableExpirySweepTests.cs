@@ -128,6 +128,12 @@ public class FT08DurableExpirySweepTests
         public Task<IReadOnlyList<DeliveryRequest>> ListPendingCreatedAtOrBeforeAsync(DateTimeOffset cutoff, CancellationToken ct)
             => Task.FromResult(_rows);
 
+        // GW5 / W1.6-gateway: reconcile candidates for the post-accept chat settlement.
+        // Unused by the FT-08 expiry sweep; empty page, not a throw, because the
+        // reconciler is a hosted service that may tick during a WebApplicationFactory run.
+        public Task<IReadOnlyList<DeliveryRequest>> ListAssignedSinceAsync(DateTimeOffset since, int limit, CancellationToken ct)
+            => Task.FromResult<IReadOnlyList<DeliveryRequest>>(Array.Empty<DeliveryRequest>());
+
         // All other methods are unused in these tests — throw to catch accidental calls.
         public Task<DeliveryRequest> CreateAsync(CreateRequestInput input, CancellationToken ct) => throw new NotImplementedException();
         public Task<DeliveryRequest> TryCreateWithLimitAsync(CreateRequestInput input, int clientLimit, CancellationToken ct) => throw new NotImplementedException();

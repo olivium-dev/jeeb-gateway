@@ -1094,6 +1094,15 @@ public sealed class DurableRequestsStoreTests
         /// <summary>JEBV4-345: rows stamped with a conversation id, keyed by request id.</summary>
         public Dictionary<string, string> ConversationIds { get; } = new(StringComparer.Ordinal);
 
+        // GW5 / W1.6-gateway: durable reconcile candidates for the post-accept chat
+        // settlement. This double is not exercising that sweep, so it reports an EMPTY
+        // page — and note what that means for anyone reusing it: an empty page is
+        // indistinguishable from "nothing needs reconciling". Seed real rows before
+        // asserting anything about the reconciler through this double.
+        public Task<IReadOnlyList<DeliveryRequest>> ListAssignedSinceAsync(
+            DateTimeOffset since, int limit, CancellationToken ct)
+            => Task.FromResult<IReadOnlyList<DeliveryRequest>>(Array.Empty<DeliveryRequest>());
+
         public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
             => Task.FromResult(Rows.FirstOrDefault(r =>
                 string.Equals(r.ConversationId, conversationId, StringComparison.Ordinal)));

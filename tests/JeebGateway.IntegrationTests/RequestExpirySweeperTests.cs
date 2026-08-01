@@ -579,6 +579,13 @@ public class RequestExpirySweeperTests
 
         public LocalExpiryAuthority(InMemoryRequestsStore rows) => _rows = rows;
 
+        // GW5 / W1.6-gateway: durable reconcile candidates for the post-accept chat
+        // settlement. This authority double is backed by a real InMemoryRequestsStore, so
+        // it delegates rather than reporting a fake-empty page.
+        public Task<IReadOnlyList<DeliveryRequest>> ListAssignedSinceAsync(
+            DateTimeOffset since, int limit, CancellationToken ct)
+            => _rows.ListAssignedSinceAsync(since, limit, ct);
+
         public Task<DeliveryRequest?> GetByConversationIdAsync(string conversationId, CancellationToken ct)
             => _rows.GetByConversationIdAsync(conversationId, ct);
 

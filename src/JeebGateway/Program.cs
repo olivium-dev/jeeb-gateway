@@ -469,6 +469,29 @@ builder.Services.AddHttpClient<JeebGateway.Conversations.Client.IJeebConversatio
     }
 });
 
+// GW5 / W1.6-gateway — the post-accept chat settlement, and the pass that heals it.
+//
+// SCOPED, matching IJeebConversationClient's typed-client lifetime: the settler holds a
+// chat client and an IRequestsStore and must never outlive the former.
+//
+// The reconciler is a singleton BackgroundService that opens its OWN scope per sweep
+// (the SettlementLedgerReconciler precedent). It exists because the seat-and-settle call
+// runs POST-COMMIT: folding two chat writes into one removes the window BETWEEN them,
+// but not the window between the accept saga's commit and the settle request. Anything
+// from a chat blip to the process being killed loses that attempt, and before GW5 the
+// only trace was a log line promising a reconciliation that did not exist. Candidates
+// are re-derived from the DURABLE request row (an assigned jeeber), which the accept
+// projection writes BEFORE the chat step — so a kill inside that step still leaves
+// findable evidence.
+builder.Services.AddScoped<JeebGateway.Conversations.IAcceptChatSettler,
+                           JeebGateway.Conversations.AcceptChatSettler>();
+builder.Services.Configure<JeebGateway.Conversations.AcceptChatSettleReconcilerOptions>(
+    builder.Configuration.GetSection(
+        JeebGateway.Conversations.AcceptChatSettleReconcilerOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Conversations.AcceptChatSettleReconciler>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Conversations.AcceptChatSettleReconciler>());
+
 // S08 (D / H6,N2) — the realtime membership-ticket issuer. The /v1/realtime gate
 // mints a short-lived signed ticket scoped to (conversation, viewer, role) after
 // the chat-service membership check, so realtime-comunication-service can authorize

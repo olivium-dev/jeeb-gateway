@@ -211,6 +211,34 @@ public class InMemoryRequestsStore : IRequestsStore
         }
     }
 
+    /// <summary>
+    /// GW5 — reconcile candidates for the post-accept chat settlement: rows carrying an
+    /// assigned jeeber, created at or after <paramref name="since"/>, newest first and
+    /// capped at <paramref name="limit"/>. Snapshotted under the write lock for the same
+    /// reason the expiry sweep is — a read can otherwise race a jeeber-id stamp
+    /// mid-iteration.
+    /// </summary>
+    public Task<IReadOnlyList<DeliveryRequest>> ListAssignedSinceAsync(
+        DateTimeOffset since,
+        int limit,
+        CancellationToken ct)
+    {
+        if (limit <= 0)
+        {
+            return Task.FromResult<IReadOnlyList<DeliveryRequest>>(Array.Empty<DeliveryRequest>());
+        }
+
+        lock (_writeLock)
+        {
+            IReadOnlyList<DeliveryRequest> snapshot = _requests.Values
+                .Where(r => !string.IsNullOrWhiteSpace(r.JeeberId) && r.CreatedAt >= since)
+                .OrderByDescending(r => r.CreatedAt)
+                .Take(limit)
+                .ToArray();
+            return Task.FromResult(snapshot);
+        }
+    }
+
     public Task<bool> TryExpireAsync(string requestId, DateTimeOffset at, CancellationToken ct)
     {
         lock (_writeLock)

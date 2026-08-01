@@ -1,6 +1,6 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
-using JeebGateway.Conversations.Client;
+using JeebGateway.Conversations;
 using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Requests.OtpHandover;
@@ -38,7 +38,12 @@ public sealed class JeebOffersController : ControllerBase
     private readonly IOfferServiceClient _offerService;
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly IDeliveryServiceClient _deliveryService;
-    private readonly IJeebConversationClient _conversations;
+    // GW5 / W1.6-gateway: the post-accept chat step is delegated to the settler, which
+    // the reconciler shares. This controller no longer holds IJeebConversationClient —
+    // it composed the two-call seat/advance sequence that the settle replaces, and a
+    // controller keeping a live handle on the chat client is how a second, drifting copy
+    // of that sequence gets written again.
+    private readonly IAcceptChatSettler _settler;
     private readonly IOfferPushNotifier _offerPush;
     private readonly IDetachedPushDispatcher _detachedPush;
     private readonly IHandoverCodeStore _handoverCodes;
@@ -54,7 +59,7 @@ public sealed class JeebOffersController : ControllerBase
         IOfferServiceClient offerService,
         IOfferRequestIndex offerRequestIndex,
         IDeliveryServiceClient deliveryService,
-        IJeebConversationClient conversations,
+        IAcceptChatSettler settler,
         IOfferPushNotifier offerPush,
         IDetachedPushDispatcher detachedPush,
         IHandoverCodeStore handoverCodes,
@@ -68,7 +73,7 @@ public sealed class JeebOffersController : ControllerBase
         _offerService = offerService;
         _offerRequestIndex = offerRequestIndex;
         _deliveryService = deliveryService;
-        _conversations = conversations;
+        _settler = settler;
         _offerPush = offerPush;
         _detachedPush = detachedPush;
         _handoverCodes = handoverCodes;
@@ -598,115 +603,54 @@ public sealed class JeebOffersController : ControllerBase
     /// <para>The gateway is the SOLE chat caller (org no-coupling law) and computes NO
     /// membership; it forwards (correlation_key, owner_user_id) and (conversationId, userId,
     /// role) to chat-service. DEGRADE-DON'T-FAIL: the accept saga already committed, so a
-    /// chat blip / disabled flag / lookup miss is logged and swallowed — never a 5xx; the
-    /// jeeber reads 403 until reconciled, exactly as before. Gated on the Chat upstream
-    /// flag, mirroring the offer-submit seat.</para>
+    /// chat blip / disabled flag / lookup miss is logged and swallowed — never a 5xx.
+    /// Gated on the Chat upstream flag, mirroring the offer-submit seat.</para>
+    ///
+    /// <para><b>GW5 / W1.6-gateway — WHAT CHANGED AND WHY.</b> The seat and the phase
+    /// advance used to be TWO independent chat-service requests issued from inside this
+    /// post-commit block. When the first landed and the second did not, the winner sat in
+    /// a conversation still in its pre-settlement phase with every losing bidder still
+    /// active — and this method's own catch logged <i>"may read 403 on chat until
+    /// reconciled"</i> while nothing reconciled. Accept is the money-committing step and
+    /// chat is the only coordination channel a cash handover has, so that half-state is
+    /// real damage, not a cosmetic lag.</para>
+    ///
+    /// <para>Failing loud here cannot fix it: this code runs AFTER the saga has
+    /// committed, so there is nothing left to abort. The fix is therefore two-part and
+    /// neither part is this method's own error handling — (1) ONE additive
+    /// <c>POST /api/conversations/{id}/settle</c> call, which removes the window between
+    /// the two writes, and (2) <see cref="JeebGateway.Conversations.AcceptChatSettleReconciler"/>,
+    /// which re-derives lost attempts from the durable request row and heals them. Both
+    /// live in <see cref="IAcceptChatSettler"/> because the reconciler must perform the
+    /// identical step; a second copy of a money-adjacent saga step is a second place to
+    /// drift.</para>
     /// </summary>
     private async Task EnsureConversationAndSeatWinnerAsync(
         DeliveryRequest? request, string? winningJeeberId, CancellationToken ct)
     {
-        if (!_flags.Chat)
-        {
-            return;
-        }
-        if (request is null || string.IsNullOrWhiteSpace(winningJeeberId))
-        {
-            return;
-        }
-
-        var requestId = request.Id;
         try
         {
-            // 1) Resolve the conversation: prefer the id already on the ledger row; else the
-            //    chat-service by-correlation lookup (a client may have created it explicitly);
-            //    else create it. chat-service de-dups on correlation_key, so a racing create is
-            //    safe (INV-3: replay returns the same conversation_id).
-            var conversationId = request.ConversationId;
-
-            if (string.IsNullOrWhiteSpace(conversationId))
-            {
-                try
-                {
-                    var existing = await _conversations.GetConversationByCorrelationAsync(requestId, ct);
-                    conversationId = existing?.ConversationId;
-                }
-                catch (JeebConversationApiException)
-                {
-                    // 404 / not-yet-created — fall through to create.
-                }
-            }
-
-            if (string.IsNullOrWhiteSpace(conversationId))
-            {
-                var created = await _conversations.CreateConversationAsync(new CreateJeebConversationRequest
-                {
-                    RequestId = requestId,            // -> correlation_key (idempotency authority)
-                    ClientUserId = request.ClientId,  // -> owner_user_id (seeded role_in_convo = client)
-                    IdempotencyKey = requestId,
-                }, ct);
-                conversationId = created?.ConversationId;
-            }
-
-            if (string.IsNullOrWhiteSpace(conversationId))
-            {
-                _logger.LogWarning(
-                    "Post-accept conversation ensure for request {RequestId}: no conversationId "
-                    + "resolvable or creatable; jeeber {JeeberId} stays unseated until reconciled "
-                    + "(accept stays 200).", requestId, winningJeeberId);
-                return;
-            }
-
-            // 2) Link the conversation id onto the local projection (in-place stamp on the
-            //    live store row, mirroring the create-time auto-create path) so subsequent
-            //    reads surface a non-null conversationId.
-            //
-            //    JEBV4-345: route the stamp THROUGH THE STORE as well. The bare field
-            //    assignment below only mutates the in-memory object; on the durable store
-            //    that leaves gw_conversation_id NULL in Postgres, so after a gateway bounce
-            //    GetByConversationIdAsync can no longer resolve this conversation and the
-            //    chat push for this order dies silently. The store call persists it.
-            request.ConversationId = conversationId;
-            await _requests.SetConversationIdAsync(requestId, conversationId, ct);
-
-            // 3) Seat the winning jeeber so they can open chat without a 403.
-            await _conversations.AddParticipantAsync(
-                conversationId,
-                new AddJeebParticipantRequest
-                {
-                    UserId = winningJeeberId,
-                    RoleInConvo = "jeeber_winner",
-                },
-                ct);
-
-            // 4) Advance the conversation OUT of the auction/broadcasting phase into the
-            //    settled (accepted) 1:1: promote the winner's role and soft-remove the
-            //    losing bidders. This is the second half of the winner-blind-to-client
-            //    fix — chat-service only grants the winner visibility of the client's
-            //    messages in a CLEAN 1:1 (owner + single accepted counterpart), so this
-            //    transition is what makes that safe (no losing bidder is left seated to
-            //    ever see the client's private text). Idempotent on the chat side; the
-            //    winner_role_in_convo token ("jeeber_winner") is the one the winner is
-            //    seated with above, so the promotion recognises it.
-            //    DEGRADE-DON'T-FAIL: still inside the accept saga's post-commit best-effort
-            //    block — a chat blip is logged and swallowed (accept stays 200); the phase
-            //    reconciles on a later pass.
-            await _conversations.AdvancePhaseAsync(
-                conversationId,
-                new AdvanceJeebPhaseRequest
-                {
-                    Phase = "accepted",
-                    WinnerUserId = winningJeeberId,
-                    WinnerRoleInConvo = "jeeber_winner",
-                    RemoveOthers = true,
-                },
-                ct);
+            // Flag gating, the resolve-or-create, the projection stamp and the ONE
+            // seat-and-settle call all live in the settler — see IAcceptChatSettler.
+            // It THROWS on a chat-service fault; deciding what that means is this
+            // caller's job, and here it means "log and stay 200".
+            await _settler.SettleAsync(request, winningJeeberId, ct);
         }
         catch (Exception ex)
         {
+            // DEGRADE-DON'T-FAIL, unchanged: the saga already committed upstream, so this
+            // must never turn a successful accept into a 5xx.
+            //
+            // The log line no longer promises a reconciliation that does not exist. The
+            // counter is the part that matters — a warning nobody aggregates is how this
+            // defect stayed invisible. Compare chat.accept_settle.failures against
+            // chat.accept_settle.settled; a zero on its own proves nothing.
+            JeebGateway.Conversations.ChatSettleTelemetry.Failures.Add(1);
             _logger.LogWarning(ex,
-                "Post-accept conversation ensure/seat for request {RequestId} failed; accept stays "
-                + "200, jeeber {JeeberId} may read 403 on chat until reconciled.",
-                requestId, winningJeeberId);
+                "Post-accept conversation ensure/settle for request {RequestId} failed; accept "
+                + "stays 200. Jeeber {JeeberId} reads 403 on chat until AcceptChatSettleReconciler "
+                + "heals it (candidate is durable: the request row already carries the assignment).",
+                request?.Id, winningJeeberId);
         }
     }
 

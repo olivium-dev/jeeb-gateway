@@ -451,6 +451,14 @@ public sealed class P45ChatAttachmentPayloadRoundTripTests
                 RoleInConvo = request.RoleInConvo,
             });
 
+        // GW5 / W1.6-gateway: chat-service's additive seat-and-settle route. This fake
+        // stands in for a surface that does NOT drive the post-accept path, so a call
+        // landing here is a wiring mistake — throw rather than return a default envelope
+        // that would let a mis-wired test pass on an empty conversation.
+        public Task<JeebConversationSettleResponse> SettleAsync(
+            string conversationId, SettleJeebConversationRequest request, CancellationToken ct)
+            => throw new NotSupportedException();
+
         public Task<JeebConversationResponse> AdvancePhaseAsync(
             string conversationId, AdvanceJeebPhaseRequest request, CancellationToken ct)
             => Task.FromResult(new JeebConversationResponse
