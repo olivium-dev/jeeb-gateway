@@ -26,6 +26,7 @@
 #   tests/gw3-pack/run-pack.sh --item W3.5c    # one item
 #   tests/gw3-pack/run-pack.sh --no-build      # reuse existing build output
 #   GW3_BASE=origin/main tests/gw3-pack/run-pack.sh
+#   GW3_FALSE_CLAIM_BASE=<sha> tests/gw3-pack/run-pack.sh   # A9/C7 POS control only
 #
 # Exit code = number of FAILING items (0 = all green).
 # =============================================================================
@@ -35,6 +36,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 BASE="${GW3_BASE:-origin/main}"
+
+# The false-claim positive controls get their OWN, PINNED base and do not ride $BASE.
+# $BASE means "the ref this branch is measured against", so it moves — and the day GW3
+# merged, every false-claim POS control silently went red, because the claims it expects
+# to find live at the base are gone from origin/main. A control that expires when the
+# work ships is not a control. c3d5451 (GW5) is GW3's commit parent: the last tree in
+# which every catalogued claim was live, and its content can never change.
+# Override for a one-off with GW3_FALSE_CLAIM_BASE.
+FALSE_CLAIM_BASE="${GW3_FALSE_CLAIM_BASE:-c3d5451}"
 TESTPROJ="tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj"
 LIB="tests/gw3-pack/lib"
 GW1LIB="tests/gw1-pack/lib"     # added-lines-inert.py — already proven by GW1's pack
@@ -200,8 +210,10 @@ item_begin "W3.5a" "the in-process offer realtime notifier is DELETED, not re-wi
                    "FullyQualifiedName~Gw3Pack.W35a_"
 
   # A9 — the doc claim W3.5(a) exists to retire, with its own base POS control.
-  run_script A9 "no LIVE false realtime-event claim in src/ (POS: it is live at $BASE)" \
-             python3 "$LIB/false-claim-scan.py" --ref HEAD --base "$BASE" --item W3.5a --controls
+  # The label says CATALOGUED on purpose: this scanner matches a closed, hand-audited
+  # list of patterns, so it can never support the universal "no false claim in src/".
+  run_script A9 "no LIVE false realtime-event claim from the CATALOGUE in src/ (POS: live at $FALSE_CLAIM_BASE; self-test on every run)" \
+             python3 "$LIB/false-claim-scan.py" --ref HEAD --base "$FALSE_CLAIM_BASE" --item W3.5a --controls
 
 item_end
 fi
@@ -254,10 +266,18 @@ item_begin "W3.5c" "the in-memory offer store + the local accept are DELETED; th
   assert_eq C6 "V-2 contract: 0 concrete store injections outside the registration" 0 "$C6N"
 
   # C7 — the false-comment fix. This is GW3's headline, not a footnote: the batch
-  # summary names it. Includes its own base POS control (the named comment IS live
-  # at $BASE), so a green here cannot be a blind scan.
-  run_script C7 "no LIVE false in-memory-offer-store claim in src/ (POS: they are live at $BASE)" \
-             python3 "$LIB/false-claim-scan.py" --ref HEAD --base "$BASE" --item W3.5c --controls
+  # summary names it. Includes its own base POS control (the named comments ARE live
+  # at $FALSE_CLAIM_BASE), so a green here cannot be a blind scan.
+  #
+  # THE LABEL SAYS "CATALOGUE" DELIBERATELY. It used to read "no LIVE false
+  # in-memory-offer-store claim in src/" — a universal the implementation cannot
+  # support, because the CATALOGUE is a closed list of hand-audited patterns. That
+  # over-claim cost real coverage: GW3's independent verifier found three more stale
+  # statements (two of them NotSupportedException messages in the very file the fix
+  # commit edited) while this check was reporting green. They are FC5/FC6/FC7 now.
+  # Found another? Add it — a green here is a statement about the catalogue.
+  run_script C7 "no LIVE false in-memory-offer-store claim from the CATALOGUE in src/ (POS: live at $FALSE_CLAIM_BASE; self-test on every run)" \
+             python3 "$LIB/false-claim-scan.py" --ref HEAD --base "$FALSE_CLAIM_BASE" --item W3.5c --controls
 
   # C8..C13 — the RUNTIME legs, including the decisive one: with the flag OFF the
   # accept still forwards upstream. The deleted branch never touched the client.

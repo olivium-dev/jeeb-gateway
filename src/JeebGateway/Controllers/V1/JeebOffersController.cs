@@ -790,15 +790,25 @@ public sealed class JeebOffersController : ControllerBase
     }
 
     // -----------------------------------------------------------------------
-    // In-memory accept path (legacy / test-only; flag off)
+    // Accept-response helpers  (upstream path — see AcceptUpstreamAsync)
+    //
+    // This banner used to read "In-memory accept path (legacy / test-only; flag
+    // off)". It was accurate until GW3 deleted the local accept helper it headed
+    // (the tombstone below records that deletion). What is left under it is
+    // ResolveAcceptedFeeAsync, which BuildAcceptedResponseAsync calls on the
+    // UPSTREAM accept path, and the response mapper. A section header that labels
+    // live upstream code "test-only, flag off" is the kind of note that stops the
+    // next reader from looking.
     // -----------------------------------------------------------------------
 
     /// <summary>
     /// fix/client-visibility (run-22 P1): resolves the accepted offer's fee for the
     /// accept-time snapshot. The caller is the request OWNER at this point, so the
-    /// owner-scoped offers list read is authorized on both the in-memory and the
-    /// upstream (offer-service) stores. Matches the accepted offer by id; null when
-    /// the offer cannot be resolved (the snapshot is then skipped, never guessed).
+    /// owner-scoped offers list read is authorized against whichever
+    /// <c>IPendingOffersStore</c> is registered (in src/ that is the thin-BFF
+    /// offer-service adapter; a test may supply a double). Matches the accepted offer
+    /// by id; null when the offer cannot be resolved (the snapshot is then skipped,
+    /// never guessed).
     /// </summary>
     private async Task<decimal?> ResolveAcceptedFeeAsync(string requestId, string offerId, CancellationToken ct)
     {

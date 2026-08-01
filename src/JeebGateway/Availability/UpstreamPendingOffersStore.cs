@@ -192,29 +192,46 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
 
     public Task<bool> AcceptAsync(string offerId, DateTimeOffset at, CancellationToken ct)
     {
-        // The in-memory contract's AcceptAsync takes only the offer id because
-        // it can resolve the owning jeeber/request from local state. Upstream
-        // accept is keyed by (request, offer) + x-user-id + a mandatory
-        // Idempotency-Key, none of which this signature carries — the gateway's
-        // own accept orchestration (OffersController) already resolves and
-        // transitions the request before flipping offer state. Wiring the full
-        // upstream accept (which itself closes the auction: OTP, chat thread,
-        // request transition) would double-run that orchestration. The accept
-        // path is therefore explicitly out of scope for THIS thin-BFF wire and
-        // tracked as a fast-follow once OffersController is migrated to call the
-        // upstream accept envelope directly.
+        // This seam is not on any accept path that exists. The in-memory contract's
+        // AcceptAsync takes only the offer id because it could resolve the owning
+        // jeeber/request from local state; upstream accept is keyed by
+        // (request, offer) + x-user-id + a mandatory Idempotency-Key, none of which
+        // this signature carries. Both accept surfaces therefore call
+        // IOfferServiceClient directly and never route through here:
+        // JeebOffersController.Accept forwards unconditionally to AcceptUpstreamAsync,
+        // and OffersController.Accept forwards to AcceptViaUpstreamAsync whenever
+        // FeatureFlags:UseUpstream:Offer is set — which every deployed overlay does
+        // (appsettings.Production.json).
+        //
+        // The previous message closed by telling the reader to hold the offer
+        // upstream flag off until OffersController was migrated. Both halves were
+        // wrong: the migration had already landed, and clearing that flag protects
+        // nothing — with no test-supplied store it leaves the entire offer surface
+        // non-functional (appsettings.json, "_comment_offer_gw3"). Operational
+        // advice that is wrong in the direction of "turn the product off" does not
+        // belong in an exception a stack trace hands to whoever is on call, so it
+        // is gone rather than reworded.
         throw new NotSupportedException(
-            "offer-service accept is wired through OffersController's own auction-close orchestration, " +
-            "not the IPendingOffersStore.AcceptAsync seam. Keep FeatureFlags:UseUpstream:Offer OFF for the " +
-            "accept path until OffersController is migrated to IOfferServiceClient.AcceptAsync (tracked fast-follow).");
+            "offer-service accept is driven by IOfferServiceClient.AcceptWithStatusAsync from the accept " +
+            "controllers, not through the IPendingOffersStore.AcceptAsync seam, which no live path calls. " +
+            "Reaching this throw means something re-routed accept through the store seam; fix the caller.");
     }
 
+    // The message below no longer points the reader at a "supersede-aware in-memory
+    // accept" as the flag-off path. GW3 deleted the gateway's in-memory offer store;
+    // the only IPendingOffersStore implementation left in src/ is THIS class, so the
+    // flag-off branch in OffersController.Accept resolves right back to this class and
+    // faults (at its opening GetAsync, before it ever reaches this method).
+    // The supersede-aware implementation survives only as a test fixture double
+    // (tests/…/Fakes/FakePendingOffersStore.cs) — naming it in a production stack
+    // trace sent whoever read it looking for a fallback that ships in no binary.
     public Task<AcceptOfferOutcome> AcceptWithSupersedeAsync(
         string offerId, DateTimeOffset at, CancellationToken ct)
         => throw new NotSupportedException(
             "offer-service owns the accept-and-supersede auction-close (SELECT FOR UPDATE single-winner + " +
-            "sibling rejection) via OffersController's upstream orchestration (IOfferServiceClient.AcceptWithStatusAsync), " +
-            "NOT the IPendingOffersStore seam. The supersede-aware in-memory accept is the flag-OFF path only.");
+            "sibling rejection) via the accept controllers' upstream orchestration " +
+            "(IOfferServiceClient.AcceptWithStatusAsync), NOT the IPendingOffersStore seam. No in-gateway " +
+            "supersede implementation exists to fall back to — the flag-off branch resolves to this throw.");
 
     public Task<EditOfferOutcome> TryEditAsync(
         string offerId,
