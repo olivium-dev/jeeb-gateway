@@ -1083,13 +1083,37 @@ else
 // exactly what production has been running. The flag branch, the UPG ledger client and its typed
 // transport are deleted, so no configuration value can resurrect the dial.
 //
-// SIDE OF THE ASYMMETRY (see IPaymentRefundClient below for the other side): the in-process ledger
+// SIDE OF THE ASYMMETRY (see IPaymentRefundClient below for the other side): the LOCAL ledger
 // TELLS THE TRUTH. Cash was already collected hand-to-hand by the Jeeber; recording it in the
 // gateway's own ledger is the complete operation, not a stand-in for a remote write that did not
 // happen. That is why this one is safe to keep as the permanent implementation while the refund
 // client had to be made to fail loudly. SettlementService still treats the post as best-effort and
 // idempotent on the settlement id.
-builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
+//
+// b05/GW1 W1.8 + W3.5(b) — OWNER RULING 2026-07-31 "PROMOTE": local no longer means volatile.
+// The ledger is now Postgres-backed (settlement_ledger_entries, migration 0044) whenever
+// GatewayPostgres is configured, and ISettlementLedgerClient is a Critical store under
+// StoreDurabilityGuard, so a prod-like boot REFUSES the in-memory fallback rather than serving
+// money bookkeeping out of process memory.
+//
+// The specific hole this closes is NOT "the settlement row was lost" — that row is in Postgres
+// already. It is the IDEMPOTENCY MEMO. InMemorySettlementLedgerClient's whole correctness
+// argument was GetOrAdd(IdempotencyKey): replay the same settlement id, get the ORIGINAL entry
+// back. That memo was a ConcurrentDictionary, so a restart emptied it — and the 60 s
+// SettlementLedgerReconciler then replays every settlement row with a NULL ledger_entry_id using
+// that same key, minting a SECOND entry id for one cash collection and overwriting the first
+// stamp. Nothing throws; the books just disagree with themselves. The PK on idempotency_key
+// moves that memo into the database, where a restart cannot reach it.
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<ISettlementLedgerClient, PostgresSettlementLedgerClient>();
+}
+else
+{
+    // Dev/CI/test only. In a prod-like env the fail-closed guard refuses this fallback by name
+    // (StoreDurabilityGuard.Critical) — it does not merely warn.
+    builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
+}
 
 // JEBV4-302: shared per-jeeber earnings-cache invalidation registry. Singleton so the
 // read side (JeebEarningsController links each cache entry to the jeeber's change token)
