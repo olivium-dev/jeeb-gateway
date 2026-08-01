@@ -21,11 +21,20 @@ namespace JeebGateway.IntegrationTests.Infrastructure;
 ///   <item><b>JEBV4-143 ILocationStore</b> → <see cref="StoreDurabilityGuard.IntentionalInMemory"/>
 ///   (derived, rebuildable hot-path GPS cache; authoritative last-known location is the already-
 ///   Critical PostgresAvailabilityStore — the IGeoIndex/JEBV4-156 precedent).</item>
-///   <item><b>JEBV4-148 IPendingOffersStore</b> → <see cref="StoreDurabilityGuard.KnownInMemoryBacklog"/>
-///   (durable target is offer-service via the UpstreamPendingOffersStore BFF, but promotion to
-///   Critical is owner-gated on the UseUpstream:Offer flag + offer-service route completion; logged
-///   loudly, not silent).</item>
+///   <item><b>JEBV4-148 IPendingOffersStore</b> → <see cref="StoreDurabilityGuard.UpstreamContractIncomplete"/>
+///   (RECLASSIFIED 2026-08-01; was KnownInMemoryBacklog). It holds no gateway state at all — its
+///   sole implementation is the thin-BFF UpstreamPendingOffersStore — but its contract is
+///   incomplete (5 members throw NotSupportedException pending offer-service routes). Logged
+///   loudly, not silent; promotion to Critical stays owner-gated.</item>
 /// </list>
+///
+/// <para><b>Why the reclassification matters.</b> While IPendingOffersStore sat on
+/// KnownInMemoryBacklog — a list whose own doc read "stores of record still awaiting a Postgres
+/// target" — the guard was lying about its own subject: an auditor asking "what in-memory state
+/// does the gateway hold?" got a false positive on a store holding none. The gap is real; the
+/// category was wrong. These tests pin the correct bucket AND, in
+/// <see cref="Guard_Still_Reds_For_A_Genuine_InMemory_StoreOfRecord"/>, prove the move did not
+/// blunt the guard's teeth for a store that genuinely IS in-memory.</para>
 /// </summary>
 public class StoreDurabilityGuardGapStoresTests
 {
@@ -62,14 +71,18 @@ public class StoreDurabilityGuardGapStoresTests
                 "it is intentional-in-memory (no migration pending), not a backlog gap");
     }
 
-    // ── JEBV4-148 — pending offers is on the known-in-memory backlog ───────
+    // ── JEBV4-148 — pending offers is an INCOMPLETE UPSTREAM CONTRACT, not in-memory ──
 
     [Fact]
-    public void PendingOffers_Is_On_The_InMemory_Backlog_Not_Critical()
+    public void PendingOffers_Is_UpstreamContractIncomplete_Not_InMemoryBacklog_Not_Critical()
     {
-        StoreDurabilityGuard.KnownInMemoryBacklog.Should()
+        StoreDurabilityGuard.UpstreamContractIncomplete.Should()
             .Contain(typeof(JeebGateway.Availability.IPendingOffersStore),
-                "the pending-offers ledger is a known in-memory gap, logged loudly (promotion to Critical is owner-gated on UseUpstream:Offer + offer-service routes)");
+                "its sole implementation is the stateless thin-BFF UpstreamPendingOffersStore whose contract is incomplete (members throw NotSupportedException pending offer-service routes)");
+
+        StoreDurabilityGuard.KnownInMemoryBacklog.Should()
+            .NotContain(typeof(JeebGateway.Availability.IPendingOffersStore),
+                "it holds NO state in process memory, so a list meaning 'still in-memory, lost on restart' must not name it — that is the checker lying about its own subject");
 
         InCritical(typeof(JeebGateway.Availability.IPendingOffersStore)).Should()
             .BeFalse("it is not yet promoted to the fail-closed set — that is an owner decision (JEBV4-148)");
@@ -83,6 +96,7 @@ public class StoreDurabilityGuardGapStoresTests
         var classified = new HashSet<Type>(
             StoreDurabilityGuard.Critical.Select(c => c.Iface)
                 .Concat(StoreDurabilityGuard.KnownInMemoryBacklog)
+                .Concat(StoreDurabilityGuard.UpstreamContractIncomplete)
                 .Concat(StoreDurabilityGuard.IntentionalInMemory));
 
         classified.Should().Contain(typeof(JeebGateway.Financials.ISettlementEnqueueStore));
@@ -97,10 +111,55 @@ public class StoreDurabilityGuardGapStoresTests
     {
         var critical = StoreDurabilityGuard.Critical.Select(c => c.Iface).ToList();
         var backlog = StoreDurabilityGuard.KnownInMemoryBacklog.ToList();
+        var upstreamIncomplete = StoreDurabilityGuard.UpstreamContractIncomplete.ToList();
         var intentional = StoreDurabilityGuard.IntentionalInMemory.ToList();
 
         critical.Should().NotIntersectWith(backlog, "a durable store is not a backlog gap");
+        critical.Should().NotIntersectWith(upstreamIncomplete, "a durable store is not an incomplete upstream contract");
         critical.Should().NotIntersectWith(intentional, "a durable store is not a rebuildable cache");
+        backlog.Should().NotIntersectWith(upstreamIncomplete, "an in-memory store of record is not a stateless adapter");
         backlog.Should().NotIntersectWith(intentional, "a backlog gap is not an intentional cache");
+        upstreamIncomplete.Should().NotIntersectWith(intentional, "an incomplete upstream contract is not a rebuildable cache");
+    }
+
+    // ── NEGATIVE CONTROL (executed, not described) ─────────────────────────
+    //
+    // Moving IPendingOffersStore between two LOGGING lists must not blunt the guard's
+    // teeth. This proves, by execution, that a store which genuinely IS an in-memory
+    // store of record still produces a violation — and that the all-durable baseline is
+    // silent, so the assertion is not passing vacuously.
+
+    [Fact]
+    public void Guard_Still_Reds_For_A_Genuine_InMemory_StoreOfRecord()
+    {
+        var durable = StoreDurabilityGuard.Critical
+            .ToDictionary(c => c.Iface, c => c.DurableImpls[0]);
+
+        // POSITIVE CONTROL — every critical interface on its approved durable impl.
+        // A checker that can never be silent proves nothing when it fires.
+        StoreDurabilityGuard
+            .Evaluate(t => durable.TryGetValue(t, out var ok) ? ok : null)
+            .Should().BeEmpty("all-durable is the green baseline the negative control is measured against");
+
+        // NEGATIVE CONTROL — swap exactly ONE critical store for a real in-memory
+        // store of record (money state) and require the guard to red.
+        var mutated = new Dictionary<Type, Type>(durable)
+        {
+            [typeof(JeebGateway.Financials.ISettlementStore)] =
+                typeof(JeebGateway.Financials.InMemorySettlementStore),
+        };
+
+        var violations = StoreDurabilityGuard
+            .Evaluate(t => mutated.TryGetValue(t, out var impl) ? impl : null);
+
+        violations.Should().ContainSingle(
+            "exactly one critical store was mutated, so exactly one violation must be reported");
+        violations[0].Should().Contain(nameof(JeebGateway.Financials.ISettlementStore))
+            .And.Contain(nameof(JeebGateway.Financials.InMemorySettlementStore),
+                "the violation must name both the contract and the in-memory impl that breached it");
+
+        // And the reclassified store is still absent from the fail-closed set, so this
+        // PR changed logging categories only — never the gate's behaviour.
+        InCritical(typeof(JeebGateway.Availability.IPendingOffersStore)).Should().BeFalse();
     }
 }
