@@ -47,6 +47,10 @@ namespace JeebGateway.IntegrationTests;
 /// test that only asserted "settle happened" would still pass if the old sequence were
 /// left running alongside it, which is the exact half-state GW5 exists to remove.</para>
 /// </summary>
+// GW5: joins the chat-settle collection so it never runs concurrently with G4's counter
+// deltas — this class drives ChatSettleTelemetry.Failures through the accept controller's
+// degrade-don't-fail catch, and those counters are static and untagged.
+[Collection(JeebGateway.IntegrationTests.Gw5Pack.Gw5ChatSettleCollection.Name)]
 public class S03AcceptConversationSeatTests
 {
     private const string ClientOwner = "client-owner";

@@ -34,6 +34,7 @@ namespace JeebGateway.IntegrationTests.Gw5Pack;
 /// everything unconditionally would pass every "healed" assertion on its own and be a
 /// permanent load generator against a shared service.</para>
 /// </summary>
+[Collection(Gw5ChatSettleCollection.Name)]
 public class G2_AcceptSettleReconcileTests
 {
     private const string Owner = "client-owner";
