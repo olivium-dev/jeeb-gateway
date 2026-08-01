@@ -88,37 +88,54 @@ public interface IConversationProvisioner
 
     /// <summary>
     /// E22 / I3 (JEBV4-241, cross-ref JEBV4-217; Q-036): auto-close the conversation
-    /// that backs a delivery once that delivery <b>completes</b>. Round-3 (2026-07-07)
-    /// SETTLED disposition: the close is routed through the <b>consumed</b> chat-service's
-    /// OWN API — the Lane-I consumption path — via the channel-deactivate verb it already
-    /// exposes (<c>PATCH /api/channels/{id}/deactivate</c>, the NSwag
-    /// <c>ServiceChatClient.DeactivateAsync</c>). It is NOT a gateway store write (GR-3)
-    /// and NOT a Firestore direct edit (GR-1); the gateway holds no conversation state and
-    /// only composes one existing typed-client call.
+    /// that backs a delivery once that delivery <b>completes</b>. The close is routed
+    /// through the <b>consumed</b> chat-service's OWN API — the Lane-I consumption path —
+    /// via the conversation phase-advance verb it already exposes
+    /// (<c>PATCH /api/conversations/{id}/phase</c>,
+    /// <c>IJeebConversationClient.AdvancePhaseAsync</c>). It is NOT a gateway store write
+    /// (GR-3) and NOT a Firestore direct edit (GR-1); the gateway holds no conversation
+    /// state and only composes one existing typed-client call.
     ///
-    /// <para>MECHANISM RECONCILIATION (the round-3 "AdvancePhase closed vs DeactivateAsync"
-    /// sweep flag): driving the S08 <em>conversation aggregate</em> to a NEW <c>closed</c>
-    /// phase (<c>IJeebConversationClient.AdvancePhaseAsync</c>,
-    /// <c>PATCH /api/conversations/{id}/phase</c>) is NOT taken here — the aggregate's phase
-    /// vocabulary is <c>broadcasting | accepted | direct</c> (see
-    /// <c>AdvanceJeebPhaseRequest</c> / <c>JeebConversationResponse</c>), so <c>closed</c>
-    /// is a chat-service capability that does NOT exist yet. Per the E22 ruling, a
-    /// not-yet-existing chat-service capability goes through the non-breaking extension
-    /// protocol + per-change owner approval (GR-1) and is NOT implemented gateway-side. The
-    /// existing channel-deactivate verb IS the consumed chat-service's close operation and
-    /// needs no chat-service change, so it is the ONE writer for the agent-scoped close.</para>
+    /// <para>MECHANISM RECONCILIATION — the round-3 (2026-07-07) disposition is RETIRED
+    /// (2026-08-01). Round 3 chose the legacy CHANNEL-deactivate verb
+    /// (<c>PATCH /api/channels/{id}/deactivate</c>) over the conversation phase-advance,
+    /// on the premise that <c>closed</c> "is a chat-service capability that does NOT exist
+    /// yet" and would need the extension protocol + owner approval. <b>Both halves of that
+    /// premise are false against the deployed service, and the chosen alternative never
+    /// worked.</b>
+    /// <list type="number">
+    ///   <item><c>phase</c> is an OPAQUE, caller-owned string upstream:
+    ///     <c>ConversationService.AdvancePhaseAsync</c> validates only that it is
+    ///     non-empty and then assigns it, and chat-service documents the whole
+    ///     vocabulary as caller-owned ("stores and compares but never enumerates by
+    ///     product meaning"). <c>closed</c> therefore needs ZERO chat-service change and
+    ///     trips no approval gate.</item>
+    ///   <item>The deactivate verb targets the legacy CHANNEL aggregate, a DIFFERENT
+    ///     Firestore collection (<c>Channels</c>) from the one create/settle/messages
+    ///     use (<c>Conversations</c>). Since the 2026-07-23 subsystem-alignment fix moved
+    ///     create to <c>POST /api/conversations</c>, the id handed to deactivate has been
+    ///     a conversation id the channel aggregate cannot resolve — so every close 500'd
+    ///     (unhandled <c>NoDataFoundException</c>), was retried 4x, and was swallowed by
+    ///     the degrade-don't-fail catch. Observed live 2026-08-01 on conversation
+    ///     <c>158efb52-30f6-4eb6-ae4e-ccab859e481f</c>, which still reads
+    ///     <c>phase: "accepted"</c> long after its delivery reached Done.</item>
+    /// </list>
+    /// The conversation phase-advance is therefore the ONE writer for the agent-scoped
+    /// close: same subsystem as every other conversation call, no chat-service change.</para>
     ///
     /// <para>DEGRADE-DON'T-FAIL: a chat blip / disabled auto-create flag / null-or-empty
     /// conversation id is a silent no-op — a chat outage must NEVER turn a committed,
     /// settled delivery completion into a 5xx (mirrors
-    /// <see cref="AdvanceToAcceptedAsync"/>). Idempotent: deactivating an already-closed
-    /// channel is a no-op upstream. Default no-op implementation so existing
-    /// <see cref="IConversationProvisioner"/> fakes need no change (additive-first).</para>
+    /// <see cref="AdvanceToAcceptedAsync"/>). Idempotent: re-advancing an already-closed
+    /// conversation re-assigns the same phase and is a no-op upstream. Default no-op
+    /// implementation so existing <see cref="IConversationProvisioner"/> fakes need no
+    /// change (additive-first).</para>
     /// </summary>
     /// <param name="conversationId">
-    /// The channel id minted at create time and stamped on the delivery row
-    /// (<c>DeliveryRequest.ConversationId</c>). When null/empty the method is a no-op (the
-    /// order never got a broadcasting conversation).
+    /// The CONVERSATION id minted at create time (<c>POST /api/conversations</c>) and
+    /// stamped on the delivery row (<c>DeliveryRequest.ConversationId</c>). When
+    /// null/empty the method is a no-op (the order never got a broadcasting
+    /// conversation).
     /// </param>
     Task CloseConversationAsync(string? conversationId, CancellationToken ct)
         => Task.CompletedTask;

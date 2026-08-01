@@ -218,17 +218,53 @@ public sealed class ChatServiceConversationProvisioner : IConversationProvisione
         try
         {
             await using var scope = _scopeFactory.CreateAsyncScope();
-            var chat = scope.ServiceProvider.GetRequiredService<ServiceChatClient>();
 
-            // E22 / I3 (Q-036): drive the conversation to closed via the CONSUMED
-            // chat-service's EXISTING channel-deactivate verb
-            // (PATCH /api/channels/{id}/deactivate). The channel id IS the delivery
-            // row's ConversationId minted at create time. This consumes chat-service's
-            // own API — no gateway store write (GR-3), no Firestore edit (GR-1), and no
-            // chat-service change (the verb already exists, so no owner-approval gate).
-            // Deactivating an already-closed channel is an upstream no-op (idempotent),
-            // so a duplicate completion signal cannot corrupt state.
-            await chat.DeactivateAsync(conversationId, ct);
+            // SUBSYSTEM-ALIGNMENT FIX (2026-08-01): this close previously targeted
+            // chat-service's legacy CHANNELS subsystem
+            // (PATCH /api/channels/{id}/deactivate, ServiceChatClient.DeactivateAsync).
+            // That was correct only while create also minted a CHANNEL — and the
+            // 2026-07-23 subsystem-alignment fix above moved create to
+            // POST /api/conversations. The close was never moved with it, so it has
+            // been handing a CONVERSATION id to the CHANNEL aggregate ever since:
+            // chat-service looks the id up in the Firestore `Channels` collection,
+            // misses, and Repository<T>.GetByIdAsync throws NoDataFoundException —
+            // surfacing as an unhandled 500, retried 4x by the resilience pipeline,
+            // and swallowed by the catch below. Net effect: EVERY completed delivery
+            // left its conversation open at phase `accepted`, forever, silently.
+            //
+            // Drive the CONVERSATION aggregate instead — the same subsystem that
+            // create/settle/messages already use. Still a pure composition of the
+            // CONSUMED chat-service's own API: no gateway store write (GR-3), no
+            // Firestore edit (GR-1), and NO chat-service change — `phase` is an
+            // opaque caller-owned string upstream (AdvancePhaseAsync validates only
+            // non-empty), so `closed` needs no new upstream capability. This retires
+            // the round-3 (2026-07-07) "AdvancePhase closed vs DeactivateAsync"
+            // disposition, whose premise — that `closed` was a chat-service capability
+            // that did not exist yet — does not hold against the deployed service.
+            //
+            // Re-driving an already-closed conversation re-assigns the same phase and
+            // is an upstream no-op, so a duplicate completion signal cannot corrupt
+            // state (the idempotence the deactivate verb was chosen for is preserved).
+            var conversations = scope.ServiceProvider
+                .GetRequiredService<JeebGateway.Conversations.Client.IJeebConversationClient>();
+
+            await conversations.AdvancePhaseAsync(
+                conversationId,
+                new JeebGateway.Conversations.Client.AdvanceJeebPhaseRequest
+                {
+                    Phase = _options.ClosedPhase,
+
+                    // ROSTER MUST NOT MUTATE ON CLOSE. Both of these are deliberate
+                    // overrides of the DTO's accept-shaped defaults (Phase="accepted",
+                    // RemoveOthers=true): closing is a phase transition only. Left at
+                    // the default, chat-service's else-branch would soft-remove every
+                    // participant whose role maps to Restricted — the losing bidders on
+                    // any conversation that completed without a prior settle — and a
+                    // removed participant loses read access to the thread it is about
+                    // to be asked to rate.
+                    WinnerUserId = null,
+                    RemoveOthers = false,
+                }, ct);
         }
         catch (Exception ex)
         {
