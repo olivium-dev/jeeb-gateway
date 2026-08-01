@@ -36,11 +36,16 @@ namespace JeebGateway.IntegrationTests;
 /// Tests share a single WebApplicationFactory (and thus the same in-memory stores);
 /// each test scopes itself with unique requestIds / userIds to avoid cross-bleed.
 /// </summary>
-public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Program>>
+// GW3 / W3.5(c): the class fixture is now FakeOfferStoreWebApplicationFactory, not a bare
+// WebApplicationFactory<Program>. Program.cs used to register an in-memory offer store and
+// select it whenever FeatureFlags:UseUpstream:Offer was false, so a bare factory silently
+// handed this class a working offer ledger. The gateway ships none now — offer-service is
+// the ledger of record — so the fixture supplies the test-owned double explicitly.
+public class OfferStateMachineSm2Tests : IClassFixture<Fakes.FakeOfferStoreWebApplicationFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly Fakes.FakeOfferStoreWebApplicationFactory _factory;
 
-    public OfferStateMachineSm2Tests(WebApplicationFactory<Program> factory)
+    public OfferStateMachineSm2Tests(Fakes.FakeOfferStoreWebApplicationFactory factory)
     {
         _factory = factory;
     }
@@ -65,7 +70,7 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
         var resp = await ClientActor(clientId).PostAsync($"/offers/{winning.Id}/accept", content: null);
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
 
-        var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        var offers = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
         (await offers.GetAsync(winning.Id, default))!.Status.Should().Be(PendingOfferStatus.Accepted);
         // The competing bids are SUPERSEDED — not withdrawn (the Jeebers did not
         // retract them; the auction closed around a different winner).
@@ -86,7 +91,7 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
         var resp = await ClientActor(clientId).PostAsync($"/offers/{winning.Id}/accept", content: null);
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
 
-        var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        var offers = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
         // An offer on an UNRELATED request must stay pending — supersede is
         // request-scoped, never a global sweep.
         (await offers.GetAsync(unrelated.Id, default))!.Status.Should().Be(PendingOfferStatus.Pending);
@@ -155,8 +160,8 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
     // UseUpstream:Offer == false` ("the gateway is not the offer record-of-truth
     // when the kill-switch is off"), aligning EDIT with the existing REJECT rule
     // and the thin-BFF / ADR-0006 (in-memory-store retirement) direction. The
-    // in-memory edit rule (`EditInMemoryAsync` / `InMemoryPendingOffersStore.
-    // TryEditAsync`) is now unreachable from the HTTP surface.
+    // in-memory edit rule (`EditInMemoryAsync` and the store's own `TryEditAsync`)
+    // is now unreachable from the HTTP surface.
     //
     // The flag-OFF→503 contract is asserted (and PASSES) by
     // `OfferMutationEndpointTests.A3_Edit_FlagOff_Returns_503` /
@@ -184,7 +189,7 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
         e1.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
 
         // The bid is untouched — fee still at the submitted value, EditCount unchanged.
-        var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        var offers = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
         var stored = await offers.GetAsync(offerId, default);
         stored!.Fee.Should().Be(10m);
         stored.EditCount.Should().Be(0);
@@ -205,7 +210,7 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
         resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
 
         // None of the supplied fields were applied — the store is the submitted bid.
-        var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        var offers = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
         var stored = await offers.GetAsync(offerId, default);
         stored!.Fee.Should().Be(8m);
         stored.EtaMinutes.Should().Be(25);
@@ -229,7 +234,7 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
         var resp = await intruder.PutAsJsonAsync($"/v1/offers/{offerId}", new { fee = 99m });
         resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
 
-        var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        var offers = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
         (await offers.GetAsync(offerId, default))!.Fee.Should().Be(7m);
     }
 
@@ -305,7 +310,7 @@ public class OfferStateMachineSm2Tests : IClassFixture<WebApplicationFactory<Pro
     // routing index is not needed).
     private PendingOffer EnqueueOffer(string jeeberId, string requestId)
     {
-        var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        var offers = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
         return offers.EnqueueForTest(jeeberId, requestId);
     }
 

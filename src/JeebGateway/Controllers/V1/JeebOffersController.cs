@@ -16,9 +16,10 @@ namespace JeebGateway.Controllers.V1;
 /// JEB-1431: V1 BFF slice for offer mutations.
 ///
 /// <c>POST /v1/offers/{id}/accept</c> — accept an offer (close auction).
-/// Delegates to the offer-service accept saga when the
-/// <c>FeatureFlags:UseUpstream:Offer</c> flag is on; falls back to the
-/// legacy in-memory store path when the flag is off. The caller is the
+/// Delegates UNCONDITIONALLY to the offer-service accept saga. GW3 / W3.5(c)
+/// deleted the flag-off local accept along with the in-memory offer store that
+/// drove it, so <c>FeatureFlags:UseUpstream:Offer</c> no longer selects an accept
+/// path here and there is nothing left to fall back to. The caller is the
 /// request-owning CLIENT, NOT the jeeber. State (ownership, single-winner
 /// race safety, OTP mint, sibling rejection, chat-thread open) is owned
 /// by the offer-service; the gateway forwards the actor and surfaces the
@@ -89,14 +90,13 @@ public sealed class JeebOffersController : ControllerBase
     /// The caller is the request-owning CLIENT awarding the delivery to one
     /// jeeber's bid.
     ///
-    /// Upstream path (<c>FeatureFlags:UseUpstream:Offer = true</c>): the gateway
-    /// resolves <c>offerId → requestId</c> via the in-process offer routing index,
-    /// then forwards to the offer-service accept saga which owns OTP mint,
-    /// chat-thread open, sibling rejection, and SELECT FOR UPDATE race-safety.
+    /// The gateway resolves <c>offerId → requestId</c> via the in-process offer
+    /// routing index, then forwards to the offer-service accept saga which owns OTP
+    /// mint, chat-thread open, sibling rejection, and SELECT FOR UPDATE race-safety.
     /// The upstream HTTP status is surfaced verbatim.
     ///
-    /// In-memory path (flag off): the local accept guard runs BR-10 and ownership
-    /// checks before committing. This path is legacy/test-only.
+    /// GW3 / W3.5(c): there is no longer a second, flag-off accept path here. The
+    /// local in-memory accept was deleted with the in-memory offer store it drove.
     /// </summary>
     [HttpPost("v1/offers/{id}/accept")]
     // ADR-005 L2 / S07: offer.accept {client} — the CLIENT accepts the bid, not the jeeber.
@@ -115,10 +115,9 @@ public sealed class JeebOffersController : ControllerBase
         if (!UserIdentity.TryGetUserId(HttpContext, out var actorId, out var problem))
             return problem;
 
-        if (_flags.Offer)
-            return await AcceptUpstreamAsync(id, actorId, idempotencyKey, ct);
-
-        return await AcceptInMemoryAsync(id, actorId, ct);
+        // GW3 / W3.5(c): unconditional. The flag used to pick between this and a local
+        // in-memory accept; that branch and the store behind it are deleted.
+        return await AcceptUpstreamAsync(id, actorId, idempotencyKey, ct);
     }
 
     // -----------------------------------------------------------------------
@@ -375,7 +374,7 @@ public sealed class JeebOffersController : ControllerBase
         // upstream accept path — which previously left the local row at its pre-accept
         // status (pending/matched) — made the client poll "pending" forever even though
         // the offer-service saga had committed the canonical accept. Mirror what the
-        // in-memory AcceptInMemoryAsync path does via TryAcceptByJeeberAsync.
+        // now-deleted local accept path did via TryAcceptByJeeberAsync (GW3 / W3.5(c)).
         // DEGRADE-DON'T-FAIL: the saga already committed upstream, so a local projection
         // miss is logged, never a 5xx; we re-read so the 200 body reflects the new status.
         try
@@ -807,100 +806,21 @@ public sealed class JeebOffersController : ControllerBase
         return offers.FirstOrDefault(o => string.Equals(o.Id, offerId, StringComparison.Ordinal))?.Fee;
     }
 
-    private async Task<IActionResult> AcceptInMemoryAsync(string offerId, string actorId, CancellationToken ct)
-    {
-        var offer = await _offers.GetAsync(offerId, ct);
-        if (offer is null)
-            return NotFound();
-
-        // Ownership guard: the acceptor must be the request's owning client.
-        var request = await _requests.GetAsync(offer.RequestId, ct);
-        if (request is not null
-            && !string.Equals(request.ClientId, actorId, StringComparison.Ordinal))
-        {
-            return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
-            {
-                Title = "Only the request owner can accept an offer.",
-                Status = StatusCodes.Status403Forbidden,
-                Type = "https://jeeb.dev/errors/offer-not-owned"
-            });
-        }
-
-        if (offer.Status != PendingOfferStatus.Pending)
-        {
-            // SM-2 / ACC-02 re-accept → 409 already_accepted with the winner.
-            var supersedeOutcome = await _offers.AcceptWithSupersedeAsync(offerId, DateTimeOffset.UtcNow, ct);
-            if (supersedeOutcome.Status == AcceptOfferStatus.AlreadyAccepted)
-            {
-                return Conflict(new ProblemDetails
-                {
-                    Title = "Offer already accepted.",
-                    Detail = $"The auction for this request is closed; the winning Jeeber is {supersedeOutcome.WinnerJeeberId}.",
-                    Status = StatusCodes.Status409Conflict,
-                    Type = "https://jeeb.dev/errors/already-accepted",
-                    Extensions = { ["winnerJeeberId"] = supersedeOutcome.WinnerJeeberId }
-                });
-            }
-
-            return Conflict(new ProblemDetails
-            {
-                Title = $"Offer is no longer pending (current={offer.Status}).",
-                Status = StatusCodes.Status409Conflict,
-                Type = "https://jeeb.dev/errors/offer-not-pending"
-            });
-        }
-
-        DeliveryRequest? accepted;
-        try
-        {
-            accepted = await _requests.TryAcceptByJeeberAsync(
-                offer.RequestId,
-                offer.JeeberId,
-                ActiveDeliveriesLimit,
-                DateTimeOffset.UtcNow,
-                ct);
-        }
-        catch (TooManyActiveDeliveriesException ex)
-        {
-            return Conflict(new ProblemDetails
-            {
-                Title = "Active delivery concurrency is unlimited.",
-                Detail = $"Jeeber has {ex.ActiveCount} active deliveries (limit {ex.Limit}).",
-                Status = StatusCodes.Status409Conflict,
-                Type = "https://jeeb.dev/errors/too-many-active-deliveries"
-            });
-        }
-        catch (RequestNotAcceptableException ex)
-        {
-            return Conflict(new ProblemDetails
-            {
-                Title = $"Request is no longer in a pre-acceptance state (current={ex.CurrentStatus}).",
-                Status = StatusCodes.Status409Conflict,
-                Type = "https://jeeb.dev/errors/request-not-acceptable"
-            });
-        }
-
-        if (accepted is null)
-            return NotFound();
-
-        // ACC-02: supersede every competing bid on the same request.
-        await _offers.AcceptWithSupersedeAsync(offerId, DateTimeOffset.UtcNow, ct);
-
-        // fix/client-visibility (run-22 P1): accepted-fee snapshot — the in-memory
-        // offer carries the agreed fee directly. Never fails the accept.
-        if (offer.Fee > 0m
-            && await _requests.TrySetAcceptedFeeAsync(accepted.Id, offer.Fee, ct))
-        {
-            accepted = await _requests.GetAsync(accepted.Id, ct) ?? accepted;
-        }
-
-        // Gap G4 (run-24 CHECK C) — mint the CUSTOMER's in-app handover code. This path
-        // has already enforced ClientId == actorId above, so it is owner-scoped; the
-        // code rides ONLY this owner's accept response as `handoverCode`.
-        var handoverCode = await IssueHandoverCodeSafeAsync(accepted.Id, ct);
-
-        return Ok(ToRequestDto(accepted, _clock.GetUtcNow(), handoverCode));
-    }
+    // GW3 / W3.5(c): the local in-memory accept helper was deleted here.
+    //
+    // It was the flag-OFF half of Accept above: a ~95-line local re-implementation of
+    // the auction close (ownership guard, already-accepted 409 with the winner,
+    // TryAcceptByJeeberAsync, supersede, accepted-fee snapshot, handover-code mint).
+    // Every deployed overlay sets FeatureFlags:UseUpstream:Offer = true, so the branch
+    // was unreachable in every environment that exists, and the offer ledger it drove
+    // was the in-memory store this batch also removed. GW5 landed the gateway half of
+    // the upstream accept saga (seat-and-settle, reconcile-on-failure), so
+    // AcceptUpstreamAsync is now the only accept path and Accept forwards to it
+    // unconditionally.
+    //
+    // Do NOT reinstate a local accept as a "fallback". Two implementations of one
+    // auction close is how single-winner races get lost; offer-service owns the
+    // SELECT FOR UPDATE.
 
     // P7 (G-E): ServerNow is required on the DTO — ONE clock read per response.
     // The accept surface is post-acceptance, so the offer-deadline fields stay null

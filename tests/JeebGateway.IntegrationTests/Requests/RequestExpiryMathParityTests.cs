@@ -432,9 +432,9 @@ public class RequestExpiryMathParityTests
         services.AddSingleton<InMemoryRequestExpiryNotifier>();
         services.AddSingleton<IRequestExpiryNotifier>(sp =>
             sp.GetRequiredService<InMemoryRequestExpiryNotifier>());
-        services.AddSingleton<JeebGateway.Availability.InMemoryPendingOffersStore>();
+        services.AddSingleton<JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore>();
         services.AddSingleton<JeebGateway.Availability.IPendingOffersStore>(sp =>
-            sp.GetRequiredService<JeebGateway.Availability.InMemoryPendingOffersStore>());
+            sp.GetRequiredService<JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore>());
         if (emptyCatalog)
         {
             services.AddSingleton<JeebGateway.Tiers.ITiersStore, EmptyTiersStore>();

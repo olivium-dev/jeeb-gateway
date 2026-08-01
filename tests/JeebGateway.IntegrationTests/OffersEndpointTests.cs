@@ -21,11 +21,16 @@ namespace JeebGateway.IntegrationTests;
 /// in-memory store across cases; each test scopes itself with unique
 /// userIds and freshly-enqueued offers to avoid cross-test bleed.
 /// </summary>
-public class OffersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
+// GW3 / W3.5(c): the class fixture is now FakeOfferStoreWebApplicationFactory, not a bare
+// WebApplicationFactory<Program>. Program.cs used to register an in-memory offer store and
+// select it whenever FeatureFlags:UseUpstream:Offer was false, so a bare factory silently
+// handed this class a working offer ledger. The gateway ships none now — offer-service is
+// the ledger of record — so the fixture supplies the test-owned double explicitly.
+public class OffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebApplicationFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly Fakes.FakeOfferStoreWebApplicationFactory _factory;
 
-    public OffersEndpointTests(WebApplicationFactory<Program> factory)
+    public OffersEndpointTests(Fakes.FakeOfferStoreWebApplicationFactory factory)
     {
         _factory = factory;
     }
@@ -47,7 +52,7 @@ public class OffersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         body.JeeberId.Should().Be(jeeberId);
         body.AcceptedAt.Should().NotBeNull();
 
-        var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        var offers = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
         var stored = await offers.GetAsync(offerId, default);
         stored!.Status.Should().Be("accepted");
     }
@@ -186,7 +191,7 @@ public class OffersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
             Description = "Pick up the package"
         }, default);
 
-        var offers = _factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        var offers = _factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>();
         var offer = offers.EnqueueForTest(jeeberId, created.Id);
 
         return (ClientActor(clientId), created.Id, offer.Id);

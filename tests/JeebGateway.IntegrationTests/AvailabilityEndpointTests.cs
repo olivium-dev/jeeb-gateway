@@ -67,7 +67,7 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
         });
         goOnline.EnsureSuccessStatusCode();
 
-        var offers = factory.Services.GetRequiredService<InMemoryPendingOffersStore>();
+        var offers = factory.Services.GetRequiredService<JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore>();
         offers.EnqueueForTest(userId, "offer-A");
         offers.EnqueueForTest(userId, "offer-B");
 
@@ -318,6 +318,7 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
                     // without a live Go upstream. The geo-index + sweeper
                     // assertions still come from the mirrored in-memory store.
                     UseFakeDeliveryPresence(services);
+                    UseFakeOfferStore(services);
                 });
             });
 
@@ -335,6 +336,7 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
                     services.AddSingleton<TimeProvider>(new FakeClock(new DateTimeOffset(2026, 5, 15, 12, 0, 0, TimeSpan.Zero)));
 
                     UseFakeDeliveryPresence(services);
+                    UseFakeOfferStore(services);
                 });
             });
 
@@ -343,6 +345,16 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
             services.RemoveAll<IDeliveryServiceClient>();
             services.AddSingleton<IDeliveryServiceClient>(new FakeDeliveryPresenceClient());
         }
+
+        /// <summary>
+        /// GW3 / W3.5(c): the gateway no longer ships an in-memory offer store, so the
+        /// go-offline withdrawal assertions below have to supply one. Without this the
+        /// registered <see cref="IPendingOffersStore"/> is the thin-BFF upstream store,
+        /// whose <c>WithdrawForJeeberAsync</c> throws <c>NotSupportedException</c>.
+        /// </summary>
+        private static void UseFakeOfferStore(IServiceCollection services)
+            => JeebGateway.IntegrationTests.Fakes.FakeOfferStoreWebApplicationFactory
+                .UseFakeOfferStore(services);
     }
 
     private sealed class FakeClock : TimeProvider

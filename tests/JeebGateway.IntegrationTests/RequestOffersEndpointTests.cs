@@ -18,24 +18,31 @@ namespace JeebGateway.IntegrationTests;
 ///   <item>More than 20 live offers are allowed.</item>
 ///   <item>409 when the same Jeeber tries to submit a second live offer.</item>
 ///   <item>DELETE /requests/{id}/offers/{offerId} — withdraw, allows re-offer.</item>
-///   <item>Realtime "new offer" event dispatched on every accepted submission.</item>
+///   <item>GW3 / W3.5(a): the old "realtime new-offer event dispatched on every
+///     accepted submission" criterion is GONE. No such event was ever emitted —
+///     the notifier behind it was an in-process list. The Client's real
+///     notification is the push dispatch (OfferPushNotifierTests).</item>
 /// </list>
 ///
-/// Tests share a single WebApplicationFactory and therefore the same
-/// in-memory stores; each test scopes itself with unique requestIds /
-/// userIds to keep state isolated.
+/// Tests share a single fixture factory and therefore the same test-owned offer
+/// store; each test scopes itself with unique requestIds / userIds to keep state
+/// isolated.
 /// </summary>
-public class RequestOffersEndpointTests : IClassFixture<WebApplicationFactory<Program>>
+// GW3 / W3.5(c): the class fixture is now FakeOfferStoreWebApplicationFactory. Program.cs
+// used to register an in-memory offer store and select it whenever
+// FeatureFlags:UseUpstream:Offer was false, so a bare WebApplicationFactory<Program>
+// silently handed this class a working offer ledger. The gateway ships none now.
+public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebApplicationFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly Fakes.FakeOfferStoreWebApplicationFactory _factory;
 
-    public RequestOffersEndpointTests(WebApplicationFactory<Program> factory)
+    public RequestOffersEndpointTests(Fakes.FakeOfferStoreWebApplicationFactory factory)
     {
         _factory = factory;
     }
 
     [Fact]
-    public async Task Submit_Returns_201_With_Pending_Offer_And_Fires_WS_Event()
+    public async Task Submit_Returns_201_With_Pending_Offer()
     {
         var (clientId, requestId) = await SeedRequestAsync();
         var jeeberId = $"jeeber-{Guid.NewGuid()}";
@@ -54,12 +61,13 @@ public class RequestOffersEndpointTests : IClassFixture<WebApplicationFactory<Pr
         dto.EtaMinutes.Should().Be(30);
         dto.Note.Should().Be("Heading that way");
 
-        var realtime = _factory.Services.GetRequiredService<InMemoryOfferRealtimeNotifier>();
-        realtime.Events.Should().Contain(e =>
-            e.OfferId == dto.Id
-            && e.RequestId == requestId
-            && e.ClientId == clientId
-            && e.JeeberId == jeeberId);
+        // GW3 / W3.5(a): the old assertion here read the in-process realtime
+        // recorder's event list. That recorder is deleted — it was the only
+        // reader of its own writes, so asserting on it proved the gateway had
+        // appended to a list, never that any Client was notified. The Client's
+        // real notification is the push dispatch, covered by
+        // OfferPushNotifierTests / OfferAcceptLifecyclePushTests.
+        clientId.Should().NotBeNullOrWhiteSpace();
     }
 
     [Fact]
@@ -217,10 +225,10 @@ public class RequestOffersEndpointTests : IClassFixture<WebApplicationFactory<Pr
         secondOffer.Id.Should().NotBe(firstOffer.Id);
         secondOffer.Fee.Should().Be(7m);
 
-        // Two WS events expected (one per accepted submission).
-        var realtime = _factory.Services.GetRequiredService<InMemoryOfferRealtimeNotifier>();
-        realtime.Events.Should().Contain(e => e.OfferId == firstOffer.Id);
-        realtime.Events.Should().Contain(e => e.OfferId == secondOffer.Id);
+        // GW3 / W3.5(a): the "two WS events expected" assertion is gone with the
+        // in-process recorder it read. No WS event was ever emitted — the recorder
+        // was the whole implementation. What this test still proves (re-offer after
+        // withdraw yields a NEW offer id at the new fee) is asserted above.
     }
 
     [Fact]

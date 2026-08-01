@@ -142,7 +142,7 @@ public class S09DeliveryReadScopingTests
     [Fact]
     public async Task GetById_CarriesAmount_FromAcceptedOfferFee_And_JeeberName()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        using var factory = new Fakes.FakeOfferStoreWebApplicationFactory();
         var clientId = $"client-{Guid.NewGuid()}";
         var jeeberId = $"jeeber-{Guid.NewGuid()}";
         const decimal acceptedFee = 27.50m;

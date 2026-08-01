@@ -176,6 +176,10 @@ public sealed class RequestOffersSeatTests
                 services.RemoveAll<IJeebConversationClient>();
                 services.AddSingleton<IJeebConversationClient>(fake);
                 services.Configure<UpstreamFeatureFlags>(f => f.Chat = chatEnabled);
+
+                // GW3 / W3.5(c): the gateway ships no in-memory offer store any more, so a test that
+                // needs a working offer ledger registers the test-owned double itself.
+                Fakes.FakeOfferStoreWebApplicationFactory.UseFakeOfferStore(services);
             });
         });
 
