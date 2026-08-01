@@ -212,6 +212,33 @@ CATALOGUE = [
         head=0,
         base=1,
     ),
+    # FC8 — added 2026-08-01 by the durability-guard follow-up, AFTER FC5..FC7. Found by
+    # a reviewer reading JeebOffersController top-to-bottom rather than by any pattern:
+    # none of FC1..FC7 could match it, because it is a SUBORDINATE CLAUSE inside a comment
+    # about something else (handover-code scoping), not a standalone statement about the
+    # in-memory path. Same lesson as FC7's banner, one level smaller: the catalogue's shape
+    # assumptions, not the tree, decide what it can see.
+    dict(
+        id="FC8",
+        item="W3.5c",
+        file="src/JeebGateway/Controllers/V1/JeebOffersController.cs",
+        pattern=r"the in-memory path checks ClientId",
+        why=("A dependent clause inside the Gap-G4 handover-code comment cited 'the in-memory "
+             "path checks ClientId' as one of the TWO reasons the accept response is "
+             "owner-scoped by construction. That path is gone — AcceptInMemoryAsync has zero "
+             "hits in this file since GW3 — so half of a stated safety argument referred to "
+             "code that does not exist. The remaining half (offer-service returns NotOwner -> "
+             "403 before Accepted is ever reached) is load-bearing on its own, which is what "
+             "makes this dangerous rather than merely stale: the sentence still reads as if "
+             "the guarantee were belt-and-braces when it now rests on a single mechanism. "
+             "NOTE ON ITS BASE CONTROL: like FC7 this string was TRUE at PINNED_BASE (the "
+             "in-memory accept still existed and did check ClientId). base=1 is a "
+             "pattern-liveness control, not a claim that it was false at that ref."),
+        probe="// ever reaching Accepted here, and the in-memory path checks ClientId), so this",
+        miss="// ever reaching Accepted here, and the upstream path checks ClientId), so this",
+        head=0,
+        base=1,
+    ),
 ]
 
 

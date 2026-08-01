@@ -232,6 +232,9 @@ public class StoreDurabilityFailClosedTests
         StoreDurabilityGuard.KnownInMemoryBacklog.Should()
             .OnlyContain(t => !criticalIfaces.Contains(t),
                 "a store with a durable target must not also be listed as a known-in-memory exemption");
+        StoreDurabilityGuard.UpstreamContractIncomplete.Should()
+            .OnlyContain(t => !criticalIfaces.Contains(t),
+                "a store with a durable target must not also be listed as an incomplete upstream contract");
     }
 
     // ---- Readiness health check mirrors the gate -----------------------------------------------

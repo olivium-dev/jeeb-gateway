@@ -160,7 +160,8 @@ public class OfferStateMachineSm2Tests : IClassFixture<Fakes.FakeOfferStoreWebAp
     // UseUpstream:Offer == false` ("the gateway is not the offer record-of-truth
     // when the kill-switch is off"), aligning EDIT with the existing REJECT rule
     // and the thin-BFF / ADR-0006 (in-memory-store retirement) direction. The
-    // in-memory edit rule (`EditInMemoryAsync` and the store's own `TryEditAsync`)
+    // in-memory edit rule (the store's own `TryEditAsync`; the `EditInMemoryAsync`
+    // controller helper that also named this rule was deleted 2026-08-01 as unreachable)
     // is now unreachable from the HTTP surface.
     //
     // The flag-OFF→503 contract is asserted (and PASSES) by

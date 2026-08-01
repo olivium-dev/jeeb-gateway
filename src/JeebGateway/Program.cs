@@ -2244,9 +2244,10 @@ builder.Services.AddSingleton<IGeoIndex, InMemoryGeoIndex>();
 //
 // CONSEQUENCE, stated so nobody rediscovers it as a bug: FeatureFlags:UseUpstream:Offer
 // = false no longer selects a second store — there is no second store. The flag still
-// gates the remaining legacy offer branches (OffersController's inline accept and
-// EditInMemoryAsync), which are self-labelled test-only and now run only against a
-// store a TEST supplies. Off + no override = the offer surface is not functional. Every
+// gates the ONE remaining legacy offer branch (OffersController's inline accept), which
+// is self-labelled test-only and now runs only against a store a TEST supplies.
+// (EditInMemoryAsync used to be named here too; it was deleted 2026-08-01 — it had been
+// unreachable, its !_flags.Offer branch returning 503 rather than calling it.) Off + no override = the offer surface is not functional. Every
 // deployed overlay sets it true (appsettings.Production.json); the base false is the
 // test-harness default. Finishing the migration properly — so the flag can be deleted —
 // needs offer-service to grow get-by-id and bulk-withdraw routes (JEBV4-148), which is

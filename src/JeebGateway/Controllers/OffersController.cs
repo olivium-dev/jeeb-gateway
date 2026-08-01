@@ -295,11 +295,13 @@ public class OffersController : ControllerBase
                 statusCode: StatusCodes.Status400BadRequest);
         }
 
-        // Flag-OFF in-memory edit path (SM-2 / OFF-04 amend). The gateway IS the
-        // offer record-of-truth when the Offer kill-switch is off, so the 2-edit
-        // cap (JEB-1474) is enforced here against the in-memory store rather than
-        // forwarded. This makes the cap → 422 edit_limit_reached fully offline-
-        // testable. The upstream forward below owns the cap when the flag is on.
+        // Kill-switch OFF → 503. There is no second edit path to fall back to: GW3
+        // deleted the gateway's in-memory offer store, so offer-service owns the edit
+        // rule and the 2-edit cap (JEB-1474) unconditionally. The comment that used to
+        // sit here claimed "the gateway IS the offer record-of-truth when the Offer
+        // kill-switch is off, so the 2-edit cap is enforced here against the in-memory
+        // store" — untrue since GW3, and untrue of this branch even before it, which
+        // has returned 503 rather than calling the local helper.
         if (!_flags.Offer)
         {
             return OfferUpstreamUnavailable("edit");
@@ -334,82 +336,20 @@ public class OffersController : ControllerBase
         return MapMutation(result, "edit");
     }
 
-    /// <summary>
-    /// Flag-OFF in-memory offer edit (SM-2). Resolves the offer's request via the
-    /// routing index (the PUT route is offer-scoped), then applies the supplied
-    /// fields against the in-memory store with the 2-edit cap. Maps the typed
-    /// <see cref="EditOfferOutcome"/> onto the same RFC-7807 surface the upstream
-    /// path uses, plus the SM-2-specific <c>422 edit_limit_reached</c>.
-    /// </summary>
-    private async Task<IActionResult> EditInMemoryAsync(
-        string offerId, string actorId, EditOfferBody body, CancellationToken ct)
-    {
-        var requestId = _offerRequestIndex.ResolveRequestId(offerId);
-        if (requestId is null)
-        {
-            // Offer never submitted through this gateway instance (or the index was
-            // lost on restart). Fall back to the store's own request-scoping by
-            // reading the offer; if it is unknown there too, it is a phantom → 404.
-            var known = await _offers.GetAsync(offerId, ct);
-            if (known is null) return NotFound();
-            requestId = known.RequestId;
-        }
-
-        var outcome = await _offers.TryEditAsync(
-            offerId, requestId, actorId,
-            body.Fee, body.EtaMinutes,
-            string.IsNullOrWhiteSpace(body.Note) ? body.Note : body.Note.Trim(),
-            OfferEditCap, _clock.GetUtcNow(), ct);
-
-        return outcome.Status switch
-        {
-            EditOfferStatus.Edited => Ok(ToOfferWire(outcome.Offer!)),
-
-            EditOfferStatus.EditLimitReached => UnprocessableEntity(new ProblemDetails
-            {
-                Title = $"Offer edit limit reached (max {OfferEditCap} edits).",
-                Detail = "This offer has already been edited the maximum number of times.",
-                Status = StatusCodes.Status422UnprocessableEntity,
-                Type = "https://jeeb.dev/errors/edit-limit-reached"
-            }),
-
-            EditOfferStatus.NotOwned => StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
-            {
-                Title = "Only the offer's owner can edit it.",
-                Status = StatusCodes.Status403Forbidden,
-                Type = "https://jeeb.dev/errors/offer-not-owned"
-            }),
-
-            EditOfferStatus.NotPending => Conflict(new ProblemDetails
-            {
-                Title = "Offer can no longer be edited.",
-                Detail = "The offer is no longer pending (accepted, withdrawn, or superseded).",
-                Status = StatusCodes.Status409Conflict,
-                Type = "https://jeeb.dev/errors/offer-not-pending"
-            }),
-
-            _ => NotFound()
-        };
-    }
-
-    /// <summary>
-    /// Projects an in-memory <see cref="PendingOffer"/> onto the same
-    /// <see cref="OfferWire"/> shape the upstream edit returns, so the in-memory
-    /// and upstream edit responses are byte-compatible for the mobile app.
-    /// </summary>
-    private static OfferWire ToOfferWire(PendingOffer o) => new()
-    {
-        Id = o.Id,
-        RequestId = o.RequestId,
-        JeeberId = o.JeeberId,
-        Status = o.Status,
-        FeeCents = (long)Math.Round(o.Fee * 100m),
-        EtaMinutes = o.EtaMinutes,
-        Note = o.Note,
-        EditsCount = o.EditCount,
-        CreatedAt = o.CreatedAt,
-        UpdatedAt = o.UpdatedAt,
-    };
+    // GW3 follow-up (2026-08-01): the flag-OFF in-memory offer edit helper
+    // (EditInMemoryAsync) and its response projector (ToOfferWire) were DELETED here.
+    //
+    // EditInMemoryAsync was already UNREACHABLE before this change: its only would-be
+    // caller, Edit() above, returns OfferUpstreamUnavailable("edit") on the !_flags.Offer
+    // branch and never called it. It read and mutated offers through IPendingOffersStore,
+    // whose sole remaining implementation (UpstreamPendingOffersStore) throws
+    // NotSupportedException from both GetAsync and TryEditAsync — so even if something had
+    // reached it, it could not have edited anything. ToOfferWire had exactly one call site,
+    // inside that dead method.
+    //
+    // Do NOT reinstate a local edit as a "fallback". offer-service owns the edit rule and
+    // the 2-edit cap; a second implementation of a capped mutation is how edit-count drift
+    // and lost-update races get introduced.
 
     // -------------------------------------------------------------------------
     // S08 A5 — offer REJECT (request-owning client declines one bid).

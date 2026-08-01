@@ -469,8 +469,7 @@ public sealed class JeebOffersController : ControllerBase
         // Gap G4 (run-24 CHECK C) — mint the CUSTOMER's in-app handover code at accept
         // and ride it ONLY on this owner's accept response as `handoverCode`. The
         // acceptor IS the request owner (offer-service returns NotOwner -> 403 before
-        // ever reaching Accepted here, and the in-memory path checks ClientId), so this
-        // is owner-scoped by construction — the code never reaches the jeeber or any
+        // ever reaching Accepted here), so this is owner-scoped by construction — the code never reaches the jeeber or any
         // non-owner. The gateway matches it at handover (verify-precedence in
         // DeliveriesController). DEGRADE-DON'T-FAIL: a cache blip yields a null code
         // (the SMS/one-time-password handover still works), never a 5xx.
