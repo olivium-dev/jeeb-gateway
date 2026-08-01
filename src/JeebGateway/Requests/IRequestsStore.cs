@@ -90,6 +90,32 @@ public interface IRequestsStore
         CancellationToken ct);
 
     /// <summary>
+    /// GW5 / W1.6-gateway — reconcile candidates for the post-accept chat settlement.
+    /// Returns up to <paramref name="limit"/> requests that have a WINNING JEEBER
+    /// assigned and were created at or after <paramref name="since"/>, newest first.
+    ///
+    /// <para>Filtered on <c>JeeberId</c> rather than <c>status == accepted</c> on
+    /// purpose: a delivery that has moved on to <c>picked_up</c> / <c>at_door</c> still
+    /// needs a settled 1:1 chat, and a status filter would abandon exactly the
+    /// deliveries that are furthest along. An assigned jeeber is the durable evidence
+    /// that an accept committed, and it is written by the accept projection BEFORE the
+    /// chat step runs — which is why a process killed inside that step still leaves a
+    /// findable candidate.</para>
+    ///
+    /// <para>Bounded by BOTH arguments so a sweep can never walk the whole history: the
+    /// look-back keeps the population small and lets a permanently unsettleable row age
+    /// out instead of being retried forever.</para>
+    ///
+    /// <para>On the durable store this MUST read the Postgres mirror, not the volatile
+    /// in-memory projection — a reconciler that reads a projection the restart just
+    /// emptied reports "nothing to do" for exactly the failure it exists to catch.</para>
+    /// </summary>
+    Task<IReadOnlyList<DeliveryRequest>> ListAssignedSinceAsync(
+        DateTimeOffset since,
+        int limit,
+        CancellationToken ct);
+
+    /// <summary>
     /// Atomically moves <paramref name="requestId"/> to <c>expired</c>
     /// when its current status is still pre-acceptance. Returns true when
     /// the transition occurred. Returns false when the request has

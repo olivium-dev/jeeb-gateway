@@ -363,6 +363,129 @@ public sealed class AdvanceJeebPhaseRequest
 }
 
 /// <summary>
+/// GW5 / W1.6-gateway — request body for chat-service's ADDITIVE
+/// <c>POST /api/conversations/{id}/settle</c> (CB4). ONE call that seats the winner,
+/// sets the phase and soft-removes the losing bidders against ONE loaded aggregate,
+/// committed by ONE store write.
+///
+/// <para>Replaces the gateway's <see cref="AddJeebParticipantRequest"/> +
+/// <see cref="AdvanceJeebPhaseRequest"/> pair on the post-accept path. Those two
+/// requests were issued back-to-back from inside a post-commit best-effort block, so
+/// a failure BETWEEN them left the winner seated in a conversation still in its
+/// pre-settlement phase with every losing bidder still active — a silent half-state on
+/// the only coordination channel a cash handover has.</para>
+///
+/// <para>CONVERGENT, NOT INCREMENTAL: every field states a desired END STATE, never a
+/// delta, so a verbatim replay is the intended recovery action (chat-service answers
+/// 200 with <c>already_settled: true</c> and still reconciles its projection). There is
+/// no idempotency key and chat-service accepts none — there is no increment to
+/// de-duplicate. See <c>chat-service/documentation/CONVERSATION-SETTLE-CONTRACT.md</c>
+/// §4, which is the frozen contract this DTO is written against.</para>
+///
+/// <para>Field names are the chat-service wire names (snake_case), forwarded verbatim.
+/// The gateway computes no membership — it names the winner and the phase and lets
+/// chat-service, the membership authority, resolve the roster.</para>
+/// </summary>
+public sealed class SettleJeebConversationRequest
+{
+    /// <summary>
+    /// The phase the conversation must be in when the call RETURNS (not a delta).
+    /// Post-accept the gateway sends <c>accepted</c>. Blank ⇒ chat-service 400.
+    /// </summary>
+    [JsonProperty("phase")]
+    public string Phase { get; set; } = "accepted";
+
+    /// <summary>
+    /// The participant to SEAT — added when absent, re-activated when previously
+    /// removed. This is the field that folds the old separate seat call into the
+    /// phase advance. Blank ⇒ chat-service 400.
+    /// </summary>
+    [JsonProperty("winner_user_id")]
+    public string WinnerUserId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Role the seated participant must carry. <c>jeeber_winner</c> — the SAME token
+    /// the old two-call sequence seated with, so a conversation half-settled by that
+    /// sequence converges rather than being promoted twice under two names.
+    /// </summary>
+    [JsonProperty("winner_role_in_convo")]
+    public string WinnerRoleInConvo { get; set; } = "jeeber_winner";
+
+    /// <summary>
+    /// Soft-remove every OTHER active participant in the restricted lane (the losing
+    /// bidders). chat-service applies the same predicate <c>AdvancePhaseAsync</c> uses,
+    /// and excludes <see cref="WinnerUserId"/> by construction — a single call can
+    /// never seat and remove the same participant.
+    /// </summary>
+    [JsonProperty("remove_others")]
+    public bool RemoveOthers { get; set; } = true;
+}
+
+/// <summary>
+/// GW5 / W1.6-gateway — chat-service's answer to
+/// <c>POST /api/conversations/{id}/settle</c>.
+///
+/// <para><b>READ THIS BEFORE BINDING.</b> The settled conversation is NESTED under
+/// <see cref="Conversation"/>; this is NOT a bare <see cref="JeebConversationResponse"/>.
+/// Deserializing the settle body straight into <see cref="JeebConversationResponse"/>
+/// yields an object with EVERY field empty and throws NOTHING — the members simply are
+/// not there. That silent-empty shape is precisely the failure class this repo has been
+/// bitten by before (the dropped <c>created_at</c> on
+/// <see cref="JeebMessageResponse.CreatedAt"/>, where a 200 carrying the whole thread
+/// decoded to zero messages). <see cref="JeebConversationClient.SettleAsync"/> therefore
+/// asserts a non-blank <c>conversation.conversation_id</c> and raises
+/// <see cref="JeebConversationApiException"/> rather than returning a husk.</para>
+///
+/// <para>Nesting is chat-service's backward-compatibility decision: it adds a surface
+/// without adding one field to <see cref="JeebConversationResponse"/>, the shape every
+/// pre-existing conversation route already returns.</para>
+///
+/// <para>The four outcome flags describe what THIS CALL changed, not what is true of
+/// the conversation. A caller that ignores all of them is still correct — the settled
+/// state is fully described by <see cref="Conversation"/>.</para>
+/// </summary>
+public sealed class JeebConversationSettleResponse
+{
+    /// <summary>
+    /// The settled conversation projection — the same shape every other conversation
+    /// route returns, nested unchanged.
+    /// </summary>
+    [JsonProperty("conversation")]
+    public JeebConversationResponse? Conversation { get; set; }
+
+    /// <summary>True when THIS call made the winner an active participant it was not
+    /// already — added it, or cleared a previous removal.</summary>
+    [JsonProperty("seated")]
+    public bool Seated { get; set; }
+
+    /// <summary>True when THIS call changed the seated participant's role.</summary>
+    [JsonProperty("role_changed")]
+    public bool RoleChanged { get; set; }
+
+    /// <summary>True when THIS call changed the conversation phase.</summary>
+    [JsonProperty("phase_changed")]
+    public bool PhaseChanged { get; set; }
+
+    /// <summary>The participants soft-removed BY THIS CALL. Empty on a replay —
+    /// they were already removed.</summary>
+    [JsonProperty("removed_user_ids")]
+    public IList<string> RemovedUserIds { get; set; } = new List<string>();
+
+    /// <summary>
+    /// True when this call changed no roster state and no phase.
+    ///
+    /// <para><b>This does NOT mean "nothing happened".</b> chat-service reconciles the
+    /// direct-read visibility projection UNCONDITIONALLY on every settle, so a replay
+    /// reporting <c>already_settled: true</c> is exactly how a projection left
+    /// half-written by an earlier partial failure gets repaired. A caller that reads
+    /// this flag as "no-op, skip the retry" disables that repair — which is why
+    /// <c>AcceptChatSettleReconciler</c> never branches on it.</para>
+    /// </summary>
+    [JsonProperty("already_settled")]
+    public bool AlreadySettled { get; set; }
+}
+
+/// <summary>
 /// chat-service's answer to "is {viewer} an active participant of {conversation}?".
 /// The single membership read that backs both the REST 403 gate (N1/N2) and the
 /// WS-ticket issue path. chat-service is the membership authority.

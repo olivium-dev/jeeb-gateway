@@ -149,6 +149,41 @@ public sealed class JeebConversationClient : IJeebConversationClient
         return await SendAsync<JeebConversationResponse>(msg, ct);
     }
 
+    public async Task<JeebConversationSettleResponse> SettleAsync(
+        string conversationId, SettleJeebConversationRequest request, CancellationToken ct)
+    {
+        // chat-service: POST /api/conversations/{id}/settle
+        //   { phase, winner_user_id, winner_role_in_convo, remove_others }
+        // ONE call: seat + phase + loser-removal against one loaded aggregate.
+        var url = $"api/conversations/{Uri.EscapeDataString(conversationId)}/settle";
+        using var msg = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = JsonContent(request),
+        };
+        var settled = await SendAsync<JeebConversationSettleResponse>(msg, ct);
+
+        // THE ENVELOPE GUARD. chat-service nests the settled conversation under
+        // `conversation`; it does NOT return a bare ConversationResponse. Newtonsoft
+        // binds an unknown/absent shape to an all-default object and throws NOTHING, so
+        // without this assertion a contract drift — or a chat-service that answered 200
+        // from some other route — would surface here as a perfectly healthy-looking
+        // response carrying an EMPTY conversation id, and the caller would stamp that
+        // husk onto the request row. Same silent-drop class as the missing `created_at`
+        // that emptied whole chat threads on a 200. Fail here, where the reconciler can
+        // still retry, rather than downstream where nothing can.
+        if (settled.Conversation is null
+            || string.IsNullOrWhiteSpace(settled.Conversation.ConversationId))
+        {
+            throw new JeebConversationApiException(
+                HttpStatusCode.BadGateway,
+                $"chat-service {url} returned a settle envelope with no "
+                + "conversation.conversation_id — the response shape is not the frozen "
+                + "CONVERSATION-SETTLE-CONTRACT envelope.");
+        }
+
+        return settled;
+    }
+
     // -----------------------------------------------------------------
     // transport
     // -----------------------------------------------------------------

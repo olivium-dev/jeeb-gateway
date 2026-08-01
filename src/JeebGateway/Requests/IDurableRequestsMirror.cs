@@ -98,6 +98,24 @@ public interface IDurableRequestsMirror
     Task<IReadOnlyList<DeliveryRequest>> ListForJeeberAsync(string jeeberId, CancellationToken ct);
 
     /// <summary>
+    /// GW5 / W1.6-gateway: durable reconcile candidates for the post-accept chat
+    /// settlement — mirror rows with a non-null <c>gw_jeeber_id</c> created at or after
+    /// <paramref name="since"/>, newest-first, capped at <paramref name="limit"/>.
+    ///
+    /// <para>This is the read that makes the reconciler survive a bounce. The evidence
+    /// that an accept committed — the assigned jeeber — is mirrored by the accept
+    /// projection BEFORE the chat settle is attempted, so a gateway killed inside the
+    /// settle still leaves a findable row here even though the in-memory projection is
+    /// gone.</para>
+    ///
+    /// <para>Deliberately NOT filtered on status: a delivery that has progressed past
+    /// <c>accepted</c> still needs a settled 1:1 chat, and a status filter would abandon
+    /// exactly the deliveries furthest along.</para>
+    /// </summary>
+    Task<IReadOnlyList<DeliveryRequest>> ListAssignedSinceAsync(
+        DateTimeOffset since, int limit, CancellationToken ct);
+
+    /// <summary>
     /// JEBV4-248: durable SINGLE-ROW read by id (mirror rows only) — the by-id
     /// counterpart of <see cref="ListForClientAsync"/>.
     ///

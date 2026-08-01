@@ -113,4 +113,37 @@ public interface IJeebConversationClient
         string conversationId,
         AdvanceJeebPhaseRequest request,
         CancellationToken ct);
+
+    /// <summary>
+    /// GW5 / W1.6-gateway — SEAT AND SETTLE IN ONE CALL. chat-service's additive
+    /// <c>POST /api/conversations/{id}/settle</c> (CB4) seats the winner, sets the
+    /// phase and soft-removes the losing bidders against one loaded aggregate,
+    /// committed by one store write and followed by one projection reconcile.
+    ///
+    /// <para>WHY THIS EXISTS AND WHY THE TWO OLDER CALLS ARE NOT ENOUGH. The
+    /// post-accept path used to issue <see cref="AddParticipantAsync"/> then
+    /// <see cref="AdvancePhaseAsync"/> back-to-back from inside a POST-COMMIT
+    /// best-effort block. The accept is the money-committing step and chat is the only
+    /// coordination channel a cash handover has, so both partial outcomes are silent
+    /// damage: seat-only leaves the winner in a pre-settlement conversation with every
+    /// losing bidder still seated, and neither leaves a committed accept the
+    /// conversation knows nothing about. "Fail loud" cannot fix it — the caller has
+    /// already committed by the time this runs. One request removes the window.</para>
+    ///
+    /// <para>NEITHER OLDER METHOD IS DEPRECATED OR REMOVED. Both remain on this
+    /// interface with their exact previous behaviour, and chat-service keeps both
+    /// routes byte-identical; the offer-SUBMIT seat
+    /// (<see cref="AddParticipantAsync"/> in <c>RequestOffersController</c>) still uses
+    /// the participants route, because seating a bidder mid-auction is not a
+    /// settlement.</para>
+    ///
+    /// <para>CONVERGENT: the request states an end state, so a verbatim replay is the
+    /// intended recovery action and is what <c>AcceptChatSettleReconciler</c> issues.
+    /// chat-service answers 200 with <c>already_settled: true</c> and STILL reconciles
+    /// its direct-read projection — never branch on that flag to skip a retry.</para>
+    /// </summary>
+    Task<JeebConversationSettleResponse> SettleAsync(
+        string conversationId,
+        SettleJeebConversationRequest request,
+        CancellationToken ct);
 }

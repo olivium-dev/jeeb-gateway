@@ -882,6 +882,77 @@ public sealed class DurableRequestsStore : IRequestsStore
         return byId.Values.OrderByDescending(r => r.CreatedAt).ToArray();
     }
 
+    /// <summary>
+    /// GW5 / W1.6-gateway — reconcile candidates for the post-accept chat settlement,
+    /// read DURABLY.
+    ///
+    /// <para>The in-memory projection is emptied by a process bounce, and a bounce
+    /// mid-settle is precisely the fault the reconciler exists to heal, so an
+    /// inner-store-only read would answer "nothing to reconcile" for the one case that
+    /// matters and look perfectly healthy doing it. The Postgres mirror carries
+    /// <c>gw_jeeber_id</c> across the restart, so it is the primary source here and the
+    /// in-memory rows are overlaid on top (live status, full field set).</para>
+    ///
+    /// <para>STRICT SUPERSET of the in-memory answer: with no mirror wired this is
+    /// exactly the inner list. A mirror read fault degrades to the inner list and is
+    /// logged — never an empty result dressed up as "clean".</para>
+    ///
+    /// <para>The <paramref name="limit"/> is applied AFTER the merge so a page of mirror
+    /// rows that the in-memory store also holds cannot silently shrink the page.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<DeliveryRequest>> ListAssignedSinceAsync(
+        DateTimeOffset since, int limit, CancellationToken ct)
+    {
+        if (limit <= 0)
+        {
+            return Array.Empty<DeliveryRequest>();
+        }
+
+        var localRows = await _inner.ListAssignedSinceAsync(since, limit, ct);
+        if (_mirror is null)
+        {
+            return localRows;
+        }
+
+        IReadOnlyList<DeliveryRequest> durableRows;
+        try
+        {
+            durableRows = await _mirror.ListAssignedSinceAsync(since, limit, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "requests-durable: accept-settle reconcile candidate mirror read failed; "
+                + "returning in-memory rows only (a post-bounce backlog will be invisible "
+                + "until the mirror recovers).");
+            return localRows;
+        }
+
+        if (durableRows.Count == 0)
+        {
+            return localRows;
+        }
+
+        var byId = new Dictionary<string, DeliveryRequest>(StringComparer.Ordinal);
+        foreach (var row in durableRows)
+        {
+            byId[row.Id] = row;
+        }
+        foreach (var row in localRows)
+        {
+            byId[row.Id] = row;
+        }
+
+        return byId.Values
+            .OrderByDescending(r => r.CreatedAt)
+            .Take(limit)
+            .ToArray();
+    }
+
     public Task<int> CountActiveForJeeberAsync(string jeeberId, CancellationToken ct)
         => _inner.CountActiveForJeeberAsync(jeeberId, ct);
 

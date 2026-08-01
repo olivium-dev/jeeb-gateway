@@ -39,7 +39,18 @@ namespace JeebGateway.IntegrationTests;
 /// the create→link→seat ordering and the snake_case-shaped payload are asserted
 /// deterministically. DEGRADE-DON'T-FAIL: the accept saga already committed, so any chat blip /
 /// disabled flag is logged and swallowed — the accept stays 200.</para>
+///
+/// <para><b>GW5 / W1.6-gateway.</b> The seat and the phase advance were TWO chat-service
+/// requests; they are now ONE <c>POST /api/conversations/{id}/settle</c>. Every assertion
+/// below therefore comes in a PAIR: the settle carries the right end state, AND the two
+/// older calls were not made. The second half is what makes the first mean something — a
+/// test that only asserted "settle happened" would still pass if the old sequence were
+/// left running alongside it, which is the exact half-state GW5 exists to remove.</para>
 /// </summary>
+// GW5: joins the chat-settle collection so it never runs concurrently with G4's counter
+// deltas — this class drives ChatSettleTelemetry.Failures through the accept controller's
+// degrade-don't-fail catch, and those counters are static and untagged.
+[Collection(JeebGateway.IntegrationTests.Gw5Pack.Gw5ChatSettleCollection.Name)]
 public class S03AcceptConversationSeatTests
 {
     private const string ClientOwner = "client-owner";
@@ -65,22 +76,24 @@ public class S03AcceptConversationSeatTests
         convo.CreateCalls.Single().RequestId.Should().Be(requestId);     // -> correlation_key
         convo.CreateCalls.Single().ClientUserId.Should().Be(ClientOwner); // -> owner_user_id
 
-        // The winning jeeber was SEATED on that conversation as jeeber_winner (so chat opens, no 403).
-        convo.Seats.Should().ContainSingle();
-        convo.Seats.Single().ConversationId.Should().Be(RecordingConversationClient.CreatedId);
-        convo.Seats.Single().UserId.Should().Be(Winner);
-        convo.Seats.Single().Role.Should().Be("jeeber_winner");
+        // GW5 — ONE call carries the whole end state: the winner is seated as
+        // jeeber_winner (so chat opens, no 403), the conversation is advanced OUT of the
+        // auction phase into the settled 1:1, and the losing bidders are removed.
+        convo.Settles.Should().ContainSingle();
+        var settle = convo.Settles.Single();
+        settle.ConversationId.Should().Be(RecordingConversationClient.CreatedId);
+        settle.Phase.Should().Be("accepted");
+        settle.WinnerUserId.Should().Be(Winner);
+        settle.WinnerRoleInConvo.Should().Be("jeeber_winner");
+        settle.RemoveOthers.Should().BeTrue();
 
-        // The conversation was ADVANCED to the settled 1:1 (accepted) phase, promoting the
-        // winner and removing losing bidders — so chat-service can safely let the winner
-        // read the client's messages without any loser left seated. (winner-blind-to-client fix)
-        convo.PhaseAdvances.Should().ContainSingle();
-        var advance = convo.PhaseAdvances.Single();
-        advance.ConversationId.Should().Be(RecordingConversationClient.CreatedId);
-        advance.Phase.Should().Be("accepted");
-        advance.WinnerUserId.Should().Be(Winner);
-        advance.WinnerRoleInConvo.Should().Be("jeeber_winner");
-        advance.RemoveOthers.Should().BeTrue();
+        // THE OTHER HALF, and the one that actually proves the window is gone: the
+        // pre-GW5 add-participant → advance-phase pair is NOT issued. Between those two
+        // requests the winner sat in a pre-settlement conversation with every losing
+        // bidder still active, and the accept had already committed so nothing could be
+        // rolled back. If either of these ever goes non-empty again, that window is back.
+        convo.Seats.Should().BeEmpty("GW5 folds the seat into the settle — two writes is the defect");
+        convo.PhaseAdvances.Should().BeEmpty("GW5 folds the phase advance into the settle");
 
         // The resolved conversationId is LINKED onto the projection the client reads.
         var body = await resp.Content.ReadFromJsonAsync<AcceptBody>();
@@ -102,9 +115,11 @@ public class S03AcceptConversationSeatTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         convo.CreateCalls.Should().BeEmpty("an existing conversation must be reused, not re-created");
-        convo.Seats.Should().ContainSingle();
-        convo.Seats.Single().ConversationId.Should().Be("conv-existing");
-        convo.Seats.Single().UserId.Should().Be(Winner);
+        convo.Settles.Should().ContainSingle();
+        convo.Settles.Single().ConversationId.Should().Be("conv-existing");
+        convo.Settles.Single().WinnerUserId.Should().Be(Winner);
+        convo.Seats.Should().BeEmpty();
+        convo.PhaseAdvances.Should().BeEmpty();
     }
 
     [Fact]
@@ -123,14 +138,18 @@ public class S03AcceptConversationSeatTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         convo.CreateCalls.Should().BeEmpty();
         convo.Seats.Should().BeEmpty();
+        convo.Settles.Should().BeEmpty();
     }
 
     [Fact]
-    public async Task Accept_WhenChatServiceFaultsOnSeat_DegradesToHttp200()
+    public async Task Accept_WhenChatServiceFaultsOnSettle_DegradesToHttp200()
     {
-        // Degrade-don't-fail: the saga already committed upstream, so a chat-service blip on the
-        // seat call must NOT turn a committed accept into a 5xx (the jeeber reads 403 until reconciled).
-        var convo = new RecordingConversationClient { ThrowOnSeat = true };
+        // Degrade-don't-fail: the saga already committed upstream, so a chat-service blip on
+        // the settle call must NOT turn a committed accept into a 5xx. GW5 changes what
+        // happens NEXT, not this: the request row already carries the assignment, so
+        // AcceptChatSettleReconciler can find and heal it (asserted in
+        // Gw5AcceptSettleReconcileTests — this test only pins the 200).
+        var convo = new RecordingConversationClient { ThrowOnSettle = true };
         using var factory = NewFactory(convo, chat: true);
 
         var requestId = await SeedRequestAsync(factory, ClientOwner);
@@ -140,7 +159,8 @@ public class S03AcceptConversationSeatTests
             .PostAsync("/v1/offers/offer-c4/accept", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        convo.SeatAttempts.Should().BeGreaterThanOrEqualTo(1);
+        convo.SettleAttempts.Should().BeGreaterThanOrEqualTo(1);
+        convo.Settles.Should().BeEmpty("the fault means nothing landed on chat-service");
     }
 
     // ---------------------------------------------------------------------
@@ -208,12 +228,14 @@ public class S03AcceptConversationSeatTests
         /// <summary>When set, the by-correlation lookup resolves this id (no create). When null,
         /// the lookup signals 404 (NotFound) so the create path fires.</summary>
         public string? ExistingConversationId { get; init; }
-        public bool ThrowOnSeat { get; init; }
+        public bool ThrowOnSettle { get; init; }
 
         public ConcurrentQueue<CreateJeebConversationRequest> CreateCalls { get; } = new();
         public ConcurrentQueue<SeatRecord> Seats { get; } = new();
         public ConcurrentQueue<AdvanceRecord> PhaseAdvances { get; } = new();
+        public ConcurrentQueue<SettleRecord> Settles { get; } = new();
         public int SeatAttempts { get; private set; }
+        public int SettleAttempts { get; private set; }
 
         public Task<JeebConversationResponse> GetConversationByCorrelationAsync(string correlationKey, CancellationToken ct)
         {
@@ -238,11 +260,12 @@ public class S03AcceptConversationSeatTests
             });
         }
 
+        // KEPT RECORDING, deliberately. The accept path must no longer call this; the
+        // tests assert Seats is EMPTY. A stub that threw here would fail the same tests
+        // for a different reason and hide whether the call was made at all.
         public Task<JeebConversationParticipant> AddParticipantAsync(string conversationId, AddJeebParticipantRequest request, CancellationToken ct)
         {
             SeatAttempts++;
-            if (ThrowOnSeat)
-                throw new JeebConversationApiException(HttpStatusCode.ServiceUnavailable, "chat-service unavailable");
             Seats.Enqueue(new SeatRecord(conversationId, request.UserId, request.RoleInConvo));
             return Task.FromResult(new JeebConversationParticipant
             {
@@ -269,9 +292,40 @@ public class S03AcceptConversationSeatTests
                 Phase = request.Phase,
             });
         }
+
+        public Task<JeebConversationSettleResponse> SettleAsync(
+            string conversationId, SettleJeebConversationRequest request, CancellationToken ct)
+        {
+            SettleAttempts++;
+            if (ThrowOnSettle)
+                throw new JeebConversationApiException(HttpStatusCode.ServiceUnavailable, "chat-service unavailable");
+            Settles.Enqueue(new SettleRecord(
+                conversationId, request.Phase, request.WinnerUserId,
+                request.WinnerRoleInConvo, request.RemoveOthers));
+            return Task.FromResult(new JeebConversationSettleResponse
+            {
+                // The envelope shape chat-service actually returns: the conversation is
+                // NESTED, not flattened. A fake that returned a bare ConversationResponse
+                // here would hide the very binding trap the client guards against.
+                Conversation = new JeebConversationResponse
+                {
+                    ConversationId = conversationId,
+                    Phase = request.Phase,
+                    Participants = new List<JeebConversationParticipant>
+                    {
+                        new() { UserId = request.WinnerUserId, RoleInConvo = request.WinnerRoleInConvo },
+                    },
+                },
+                Seated = true,
+                PhaseChanged = true,
+            });
+        }
     }
 
     private sealed record SeatRecord(string ConversationId, string UserId, string Role);
+
+    private sealed record SettleRecord(
+        string ConversationId, string Phase, string WinnerUserId, string WinnerRoleInConvo, bool RemoveOthers);
 
     private sealed record AdvanceRecord(
         string ConversationId, string Phase, string? WinnerUserId, string WinnerRoleInConvo, bool RemoveOthers);
