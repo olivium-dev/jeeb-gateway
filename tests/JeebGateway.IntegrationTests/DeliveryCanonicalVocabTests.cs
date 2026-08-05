@@ -107,6 +107,27 @@ public class DeliveryCanonicalVocabTests : IClassFixture<WebApplicationFactory<P
     }
 
     [Fact]
+    public async Task PatchStatus_ForwardsProofEvidenceReference()
+    {
+        var fake = new RecordingDeliveryClient();
+        await using var factory = Factory(fake);
+        var http = Driver(factory, "jeeber-proof");
+
+        var resp = await http.PatchAsync(
+            "/deliveries/del-proof/status",
+            JsonContent.Create(new
+            {
+                to = "AtDoor",
+                evidenceUrl = "s3://proof-of-delivery/del-proof.jpg"
+            }));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        fake.TransitionCalls.Should().ContainSingle();
+        fake.TransitionCalls[0].EvidenceUrl.Should()
+            .Be("s3://proof-of-delivery/del-proof.jpg");
+    }
+
+    [Fact]
     public async Task PatchStatus_LegacySnakeStatusAlias_MapsToCanonical_Returns200()
     {
         // S09 drives {status:"in_transit"} expecting canonical InTransit.
@@ -246,6 +267,31 @@ public class DeliveryCanonicalVocabTests : IClassFixture<WebApplicationFactory<P
     }
 
     [Fact]
+    public async Task GetById_ProjectsCanonicalEvidenceAsProofPhotoUrl()
+    {
+        var fake = new RecordingDeliveryClient
+        {
+            ReadReturns = new DeliveryReadUpstream
+            {
+                DeliveryId = "del-proof",
+                ClientId = "client-proof",
+                JeeberId = "jeeber-proof",
+                Status = "Done",
+                EvidenceUrl = "s3://proof-of-delivery/del-proof.jpg",
+                CreatedAt = DateTimeOffset.UtcNow
+            }
+        };
+        await using var factory = Factory(fake);
+        var http = Driver(factory, "client-proof", role: "client");
+
+        var resp = await http.GetAsync("/deliveries/del-proof");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var dto = await resp.Content.ReadFromJsonAsync<ReceiptDto>();
+        dto!.ProofPhotoUrl.Should().Be("s3://proof-of-delivery/del-proof.jpg");
+    }
+
+    [Fact]
     public async Task GetById_FlagOn_UnknownId_Returns404_NotServerError()
     {
         var fake = new RecordingDeliveryClient { ReadReturnsNull = true };
@@ -261,10 +307,11 @@ public class DeliveryCanonicalVocabTests : IClassFixture<WebApplicationFactory<P
     // ---------------- DTOs / recordable fake -------------------------------------
 
     private sealed record StatusDto(string Id, string Status);
+    private sealed record ReceiptDto(string Id, string Status, string? ProofPhotoUrl);
 
     private sealed class RecordingDeliveryClient : IDeliveryServiceClient
     {
-        public List<(string DeliveryId, string To, string PartySource, string ActorId, string ActorRole)> TransitionCalls { get; } = new();
+        public List<(string DeliveryId, string To, string PartySource, string ActorId, string ActorRole, string? EvidenceUrl)> TransitionCalls { get; } = new();
         public List<string> ReadCalls { get; } = new();
         public DeliveryTransitionException? TransitionThrows { get; set; }
         public DeliveryReadUpstream? ReadReturns { get; set; }
@@ -272,8 +319,14 @@ public class DeliveryCanonicalVocabTests : IClassFixture<WebApplicationFactory<P
 
         public Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
             string deliveryId, string to, string partySource, string actorId, string actorRole, CancellationToken ct)
+            => CanonicalTransitionAsync(
+                deliveryId, to, partySource, actorId, actorRole, null, ct);
+
+        public Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
+            string deliveryId, string to, string partySource, string actorId,
+            string actorRole, string? evidenceUrl, CancellationToken ct)
         {
-            TransitionCalls.Add((deliveryId, to, partySource, actorId, actorRole));
+            TransitionCalls.Add((deliveryId, to, partySource, actorId, actorRole, evidenceUrl));
             if (TransitionThrows is not null) throw TransitionThrows;
             return Task.FromResult(new DeliveryTransitionUpstream
             {

@@ -426,6 +426,10 @@ public class DeliveryRequestDto
     public string? Transcription { get; init; }
     public string? AudioUrl { get; init; }
     public IReadOnlyList<string> Photos { get; init; } = Array.Empty<string>();
+
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ProofPhotoUrl { get; init; }
     public string? TierId { get; init; }
     public GeoPoint? PickupLocation { get; init; }
     public GeoPoint? DropoffLocation { get; init; }
@@ -596,4 +600,10 @@ public class PatchStatusBody
     /// <see cref="Trigger"/> when both are present.
     /// </summary>
     public string? To { get; set; }
+
+    /// <summary>
+    /// Optional CDN object reference captured by the Jeeber as proof of delivery.
+    /// Forwarded to delivery-service and persisted with the transition audit row.
+    /// </summary>
+    public string? EvidenceUrl { get; set; }
 }
