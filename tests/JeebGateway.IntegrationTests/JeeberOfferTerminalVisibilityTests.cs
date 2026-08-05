@@ -157,15 +157,14 @@ public class JeeberOfferTerminalVisibilityTests
         mine.Should().ContainSingle(o => o.Id == offerB)
             .Which.Status.Should().Be(PendingOfferStatus.Superseded);
 
-        // CUSTOMER-facing surface unchanged: the owner still reads B's offer through the
-        // legacy three-state fold (rejected → withdrawn), exactly as run-23 observed.
+        // Customer reads preserve the upstream lifecycle status so client-side filters can
+        // distinguish auction-close rejection from an offer withdrawn by its jeeber.
         var customerResp = await Client(factory, clientId, "customer")
             .GetAsync($"/v1/requests/{requestId}/offers");
         customerResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var customerOffers = await customerResp.Content.ReadFromJsonAsync<List<OfferItem>>();
         customerOffers!.Should().ContainSingle(o => o.Id == offerB)
-            .Which.Status.Should().Be(PendingOfferStatus.Withdrawn,
-                "the customer-facing fold is deliberately untouched by this fix");
+            .Which.Status.Should().Be("rejected");
     }
 
     [Fact]
