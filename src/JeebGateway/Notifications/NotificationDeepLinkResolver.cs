@@ -36,6 +36,8 @@ public static class NotificationDeepLinkResolver
             ["offer_received"]      = "jeeb://offers/{id}",
             ["jeeb.offer_accepted"] = "jeeb://offers/{id}",
             ["offer_accepted"]      = "jeeb://offers/{id}",
+            ["jeeb.offer_updated"]  = "jeeb://offers/{id}",
+            ["offer_updated"]       = "jeeb://offers/{id}",
             // NOTE — "jeeb.offer_rejected" / "offer_rejected" are deliberately ABSENT
             // (b02 step 6b, owner ruling D3 = retire). This map exists to deep-link an INBOX
             // ROW, and the notification centre has no route for either spelling

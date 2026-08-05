@@ -577,7 +577,7 @@ builder.Services.AddScoped<JeebGateway.service.ServiceNotification.ServiceNotifi
 // The de-leak relocated the Jeeb notification taxonomy into the gateway
 // (JeebNotificationCatalog) and emptied notification-service's locale catalog, so
 // the running shared service no longer localizes any jeeb.* topic on its own.
-// JeebNotificationCatalogSeeder re-registers every catalog entry (8 jeeb.* keys,
+// JeebNotificationCatalogSeeder re-registers every gateway-owned catalog entry,
 // EN+AR) into the live notification-service via its GENERIC, opaque-key
 // POST /templates/register endpoint at boot — restoring the deprecated jeeb.*
 // alias during the deprecation window without putting any Jeeb literal back into

@@ -14,7 +14,7 @@ namespace JeebGateway.Notifications;
 /// owned by other services), and that endpoint is the inbound door those services use under push
 /// architecture rule 3.</para>
 ///
-/// <para><b>The two offer types are deliberately NOT handled here.</b>
+/// <para><b>Offer callback types are deliberately NOT handled here.</b>
 /// <c>jeeb.offer_received</c> and <c>jeeb.offer_accepted</c> already have live centre writers at
 /// their real in-gateway seats (<see cref="OfferPushNotifier"/>), which read authoritative amounts
 /// and addresses from the request store. Minting them from a caller-supplied flat map as well would
@@ -38,7 +38,7 @@ public static class ServiceCallbackRecordFactory
     /// <summary>
     /// True when <paramref name="templateKey"/> is one of the six types this factory can write.
     /// Used by the callback endpoint to decide whether a centre write is even attempted, so the
-    /// two offer types and any future push-only type are not silently dropped into a default.
+    /// offer types and any future push-only type are not silently dropped into a default.
     /// </summary>
     public static bool CanWrite(string? templateKey) => templateKey switch
     {
@@ -207,7 +207,7 @@ public static class ServiceCallbackRecordFactory
                 ct),
 
             // No writer for this type — the caller checks CanWrite first, so reaching here means a
-            // push-only type (the two offer seats own their own rows). Not an error.
+            // push-only type. Not an error.
             _ => null,
         };
     }
