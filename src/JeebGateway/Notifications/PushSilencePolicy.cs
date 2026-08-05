@@ -148,7 +148,7 @@ public static class PushSilencePolicy
     public const string CategoryChat = "chat";
 
     // ── Categories D4 did not name, classified here to keep the map TOTAL ────────────
-    // These four are the offer-lifecycle events the gateway already emits. They are
+    // These are offer-lifecycle events the gateway emits or receives. They are
     // human-addressed ("a jeeber bid on your request", "your offer was accepted",
     // "your offer wasn't selected", "your request found no coverage"), and two of them
     // already have live notification-centre writers. Classifying them ShadeAndStored is
@@ -160,6 +160,9 @@ public static class PushSilencePolicy
 
     /// <summary>Not named by D4; ShadeAndStored (behaviour-preserving).</summary>
     public const string CategoryOfferAccepted = "offerAccepted";
+
+    /// <summary>Generic offer lifecycle update received from offer-service; ShadeAndStored.</summary>
+    public const string CategoryOfferUpdated = "offerUpdated";
 
     /// <summary>Not named by D4; ShadeAndStored (behaviour-preserving).</summary>
     public const string CategoryOfferLost = "offerLost";
@@ -191,6 +194,7 @@ public static class PushSilencePolicy
             // not named by D4 · shade + stored (behaviour-preserving, see above)
             [CategoryNewOffer] = PushDeliveryMode.ShadeAndStored,
             [CategoryOfferAccepted] = PushDeliveryMode.ShadeAndStored,
+            [CategoryOfferUpdated] = PushDeliveryMode.ShadeAndStored,
             [CategoryOfferLost] = PushDeliveryMode.ShadeAndStored,
             [CategoryRequestExpired] = PushDeliveryMode.ShadeAndStored,
         };
@@ -204,6 +208,7 @@ public static class PushSilencePolicy
         {
             ["jeeb.offer_received"] = CategoryNewOffer,
             ["jeeb.offer_accepted"] = CategoryOfferAccepted,
+            ["jeeb.offer_updated"] = CategoryOfferUpdated,
 
             // "jeeb.offer_rejected" is deliberately ABSENT (b02 step 6b, owner ruling D3 =
             // retire): the notification centre 405s it, so it can never reach a centre writer and

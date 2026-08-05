@@ -25,7 +25,7 @@ namespace JeebGateway.Notifications;
 /// a silent behavioral change GR1 forbids.
 ///
 /// This hosted service re-registers every <see cref="JeebNotificationCatalog.All"/>
-/// entry (all 8 <c>jeeb.*</c> keys, EN+AR title/body) into the running
+/// entry (all gateway-owned <c>jeeb.*</c> keys, EN+AR title/body) into the running
 /// notification-service via its GENERIC <c>POST /templates/register</c> endpoint
 /// (opaque keys — no Jeeb literal lives in the shared service source). The
 /// service persists the registration (idempotent upsert keyed on the opaque key)

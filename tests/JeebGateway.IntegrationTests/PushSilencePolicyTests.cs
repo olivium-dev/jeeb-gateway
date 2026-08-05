@@ -195,10 +195,19 @@ public sealed class PushSilencePolicyTests
     [Theory]
     [InlineData("jeeb.offer_received")]
     [InlineData("jeeb.offer_accepted")]
-    public void TheTwoLiveCentreWriters_StayNonSilent(string templateKey)
+    [InlineData("jeeb.offer_updated")]
+    public void OfferLifecycleCallbacks_StayNonSilent(string templateKey)
         => PushSilencePolicy.IsSilent(templateKey).Should().BeFalse(
-            "these are the gateway's two original in-seat centre writers; silencing them "
-            + "would delete the inbox output that predates step 6");
+            "offer lifecycle updates are visible user notifications");
+
+    [Fact]
+    public void OfferUpdated_MapsToItsVisibleOfferLifecycleCategory()
+    {
+        PushSilencePolicy.CategoryForTemplateKey("jeeb.offer_updated").Should()
+            .Be(PushSilencePolicy.CategoryOfferUpdated);
+        PushSilencePolicy.ModeForTemplateKey("jeeb.offer_updated").Should()
+            .Be(PushDeliveryMode.ShadeAndStored);
+    }
 
     [Fact]
     public void NoCatalogTypeIsSilentToday_AndTheGateIsKeptAnyway()

@@ -20,6 +20,7 @@ public class JeebNotificationCatalogTests
     {
         "jeeb.offer_received",
         "jeeb.offer_accepted",
+        "jeeb.offer_updated",
         // "jeeb.offer_rejected" is deliberately NOT here: b02 step 6b retired it (owner ruling
         // D3) because the notification centre 405s that path, so no inbox row of it can exist.
         // The loser-bidder PUSH is unaffected and its copy is pinned by
@@ -41,6 +42,8 @@ public class JeebNotificationCatalogTests
     [Theory]
     [InlineData("jeeb.offer_received", "en", "New Delivery Offer")]
     [InlineData("jeeb.offer_received", "ar", "عرض توصيل جديد")]
+    [InlineData("jeeb.offer_updated", "en", "Offer Updated")]
+    [InlineData("jeeb.offer_updated", "ar", "تحديث على العرض")]
     [InlineData("jeeb.settlement_paid", "en", "Payment Completed")]
     [InlineData("jeeb.kyc_approved", "ar", "تم الموافقة على التحقق")]
     public void Render_Returns_Localized_Title(string key, string locale, string expectedTitle)

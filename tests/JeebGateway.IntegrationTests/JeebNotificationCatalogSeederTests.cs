@@ -20,8 +20,8 @@ namespace JeebGateway.IntegrationTests;
 ///
 /// Without this seeder, the catalog's <c>Render</c>/<c>All</c> are referenced
 /// only by tests and the live jeeb.* localization is dark in production. These
-/// tests pin that the seeder POSTs every catalog key (all 8 as of b02 step 6b,
-/// which retired <c>jeeb.offer_rejected</c> — the centre 405s that path, so a
+/// tests pin that the seeder POSTs every gateway-owned catalog key,
+/// while <c>jeeb.offer_rejected</c> remains retired — the centre 405s that path, so a
 /// registration for it advertised a type no row could ever use; EN+AR title/body)
 /// to the generic opaque-key <c>POST /templates/register</c> endpoint and that
 /// re-running it is idempotent.
@@ -36,7 +36,7 @@ public class JeebNotificationCatalogSeederTests
     private static int CatalogSize => JeebNotificationCatalog.All.Count;
 
     [Fact]
-    public async Task Seeds_All_Eight_Jeeb_Keys_With_Both_Locales_To_Register_Endpoint()
+    public async Task Seeds_All_Jeeb_Keys_With_Both_Locales_To_Register_Endpoint()
     {
         var handler = new RecordingHandler(HttpStatusCode.Created);
         using var client = NewClient(handler);
@@ -45,10 +45,9 @@ public class JeebNotificationCatalogSeederTests
             client, NullLogger.Instance, CancellationToken.None);
 
         CatalogSize.Should().Be(
-            8,
-            "b02 step 6b retired jeeb.offer_rejected (owner ruling D3): the notification centre "
-            + "answers 405 for it where every served type answers 422, so registering it upstream "
-            + "advertised a taxonomy whose inbox row can never exist");
+            9,
+            "jeeb.offer_updated adds the generic offer lifecycle callback while "
+            + "jeeb.offer_rejected remains retired");
         count.Should().Be(CatalogSize);
         handler.Requests.Should().HaveCount(CatalogSize);
 

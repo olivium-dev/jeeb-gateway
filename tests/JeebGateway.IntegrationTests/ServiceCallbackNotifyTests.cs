@@ -71,6 +71,51 @@ public sealed class ServiceCallbackNotifyTests
         push.RecipientIds.Should().ContainSingle().Which.Should().Be(Recipient);
     }
 
+    [Theory]
+    [InlineData("en", "Offer Updated", "A delivery offer has been updated. Open Jeeb to view the latest details.")]
+    [InlineData("ar", "تحديث على العرض", "تم تحديث عرض توصيل. افتح جيب للاطلاع على أحدث التفاصيل.")]
+    public async Task OfferUpdated_Callback_Uses_Localized_Copy_OfferLink_And_Deduplicates(
+        string locale,
+        string expectedTitle,
+        string expectedBody)
+    {
+        var push = new RecordingPushClient();
+        await using var factory = CreateFactory(push);
+        var client = factory.CreateClient();
+        var key = $"offer-updated:{locale}:{Guid.NewGuid()}";
+
+        object Payload() => new
+        {
+            notificationType = "jeeb.offer_updated",
+            recipientUserId = Recipient,
+            locale,
+            silent = false,
+            idempotencyKey = key,
+            data = new Dictionary<string, string>
+            {
+                ["offerId"] = "offer-42",
+                ["status"] = "expired",
+            },
+        };
+
+        var first = await client.PostAsync(Endpoint, Json(Payload()));
+        var replay = await client.PostAsync(Endpoint, Json(Payload()));
+
+        first.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        replay.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        (await ReadBodyAsync(replay)).WasDeduplicated.Should().BeTrue();
+        push.Attempts.Should().Be(1);
+
+        var sent = push.UserSends.Should().ContainSingle().Which;
+        var payload = sent.Payload.Should().BeAssignableTo<IDictionary<string, object?>>().Subject;
+        payload["title"].Should().Be(expectedTitle);
+        payload["body"].Should().Be(expectedBody);
+        payload["type"].Should().Be("jeeb.offer_updated");
+        payload["deepLink"].Should().Be("jeeb://offers/offer-42");
+        payload["offerId"].Should().Be("offer-42");
+        payload["status"].Should().Be("expired");
+    }
+
     [Fact]
     public async Task Unknown_NotificationType_Returns_400_And_Sends_No_Push()
     {

@@ -46,6 +46,11 @@ public static class JeebNotificationCatalog
                 ["en"] = new("Offer Accepted", "Your delivery offer has been accepted. Get ready to start the delivery process."),
                 ["ar"] = new("تم قبول العرض", "تم قبول عرض التوصيل الخاص بك. استعد لبدء عملية التوصيل."),
             },
+            ["jeeb.offer_updated"] = new Dictionary<string, NotificationTemplate>
+            {
+                ["en"] = new("Offer Updated", "A delivery offer has been updated. Open Jeeb to view the latest details."),
+                ["ar"] = new("تحديث على العرض", "تم تحديث عرض توصيل. افتح جيب للاطلاع على أحدث التفاصيل."),
+            },
             // ── RETIRED: "jeeb.offer_rejected" (b02 step 6b, owner ruling D3 = retire) ──
             //
             // It used to be declared here as the ninth template. It is deliberately GONE and

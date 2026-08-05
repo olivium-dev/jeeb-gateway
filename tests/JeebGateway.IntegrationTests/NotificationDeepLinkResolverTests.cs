@@ -16,6 +16,8 @@ public class NotificationDeepLinkResolverTests
     [InlineData("jeeb.delivery_status_updated", "del_9", "jeeb://deliveries/del_9/tracking")]
     [InlineData("jeeb.offer_received", "off_1", "jeeb://offers/off_1")]
     [InlineData("jeeb.offer_accepted", "off_2", "jeeb://offers/off_2")]
+    [InlineData("jeeb.offer_updated", "off_3", "jeeb://offers/off_3")]
+    [InlineData("offer_updated", "off_4", "jeeb://offers/off_4")]
     [InlineData("jeeb.settlement_paid", "set_3", "jeeb://wallet/settlements/set_3")]
     [InlineData("jeeb.dispute_resolved", "dsp_4", "jeeb://disputes/dsp_4")]
     // bare upstream type aliases
