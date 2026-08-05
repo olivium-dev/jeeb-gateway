@@ -176,9 +176,11 @@ public sealed class JeebOrdersListController : ControllerBase
     }
 
     /// <summary>
-    /// GET /v1/deliveries?status&amp;page&amp;pageSize — the caller's OWN assigned deliveries.
-    /// A delivery is an accepted request stamped with this user's JeeberId. Identity ALWAYS from the
-    /// bearer. Always 200 with a paged envelope (empty when none / on a store blip) — NEVER 404/5xx.
+    /// GET /v1/deliveries?role&amp;status&amp;page&amp;pageSize — the caller's OWN deliveries.
+    /// <c>role=jeeber|driver</c> selects rows assigned to the bearer;
+    /// <c>role=client|customer</c> selects rows owned by the bearer. Omitted or unknown roles retain
+    /// the legacy union for compatibility. Identity ALWAYS comes from the bearer, never the query.
+    /// Always 200 with a paged envelope (empty when none / on a store blip) — NEVER 404/5xx.
     ///
     /// <para>PR-G1 / FIX-2: <c>status</c> selects the bucket the mobile tab wants (see
     /// <see cref="MatchesBucket"/>). Absent/<c>active</c> = the in-flight Jobs tab (default, unchanged —
@@ -193,6 +195,7 @@ public sealed class JeebOrdersListController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> ListDeliveries(
+        [FromQuery] string? role,
         [FromQuery] string? status,
         [FromQuery] int? page,
         [FromQuery] int? pageSize,
@@ -220,13 +223,27 @@ public sealed class JeebOrdersListController : ControllerBase
             // ListForClientAsync(caller) + JeeberId-filter returned nothing for a jeeber and the Jobs
             // tab was always empty. Union the jeeber-assigned rows with the caller's own client rows
             // and de-dupe by id (a user is never both parties on one row, but de-dupe is defensive).
-            var assigned = await _requests.ListForJeeberAsync(userId, ct);
-            var ownClient = await _requests.ListForClientAsync(userId, ct);
-            rows = assigned
-                .Concat(ownClient)
-                .GroupBy(r => r.Id, StringComparer.Ordinal)
-                .Select(g => g.First())
-                .ToList();
+            if (IsJeeberRole(role))
+            {
+                rows = await _requests.ListForJeeberAsync(userId, ct);
+            }
+            else if (IsClientRole(role))
+            {
+                rows = await _requests.ListForClientAsync(userId, ct);
+            }
+            else
+            {
+                // Backward compatibility: callers that omit role (and older callers
+                // that sent an unrecognised value while it was ignored) retain the
+                // legacy union. Every row is still party-scoped to the bearer id.
+                var assigned = await _requests.ListForJeeberAsync(userId, ct);
+                var ownClient = await _requests.ListForClientAsync(userId, ct);
+                rows = assigned
+                    .Concat(ownClient)
+                    .GroupBy(r => r.Id, StringComparer.Ordinal)
+                    .Select(g => g.First())
+                    .ToList();
+            }
         }
         catch (Exception ex)
         {
@@ -276,6 +293,14 @@ public sealed class JeebOrdersListController : ControllerBase
         var sz = pageSize is > 0 ? Math.Min(pageSize.Value, MaxPageSize) : DefaultPageSize;
         return (pg, sz);
     }
+
+    private static bool IsJeeberRole(string? role)
+        => string.Equals(role, "jeeber", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(role, "driver", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsClientRole(string? role)
+        => string.Equals(role, "client", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(role, "customer", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// PR-G1: a row is listable-active when its CANONICAL status is non-terminal and

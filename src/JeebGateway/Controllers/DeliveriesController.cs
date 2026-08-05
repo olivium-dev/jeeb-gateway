@@ -394,6 +394,7 @@ public class DeliveriesController : ControllerBase
     /// Returns:
     /// <list type="bullet">
     ///   <item>200 + <see cref="DeliveryRequestDto"/> when the row exists.</item>
+    ///   <item>403 when the authenticated caller is not the client or assigned jeeber.</item>
     ///   <item>404 for an unknown id — this is the explicit fix for the S13 E5
     ///     quirk where the prior read-by-id surface returned 500 for an unknown
     ///     delivery. Unknown ⇒ 404, never 500.</item>
@@ -401,9 +402,8 @@ public class DeliveriesController : ControllerBase
     /// </list>
     ///
     /// L2 §E coarse {client, jeeber} participation claim applies at the class
-    /// level; WHICH party may read which row stays STATE in the owning service
-    /// when the canonical path is enabled. The gateway does not re-implement
-    /// per-row ownership here — it surfaces the composed mirror.
+    /// level. This BFF additionally intersects the canonical or mirror participant
+    /// ids with the authenticated caller before serializing the row.
     /// </summary>
     // FT-02: the original relative route GET /deliveries/{id} is retained for
     // backward compat; the absolute route GET /v1/deliveries/{id} satisfies
@@ -412,6 +412,7 @@ public class DeliveriesController : ControllerBase
     [HttpGet("/v1/deliveries/{deliveryId}")]
     [ProducesResponseType(typeof(DeliveryRequestDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetById(string deliveryId, CancellationToken ct)
     {
@@ -446,16 +447,19 @@ public class DeliveriesController : ControllerBase
                     // cannot patch it after construction. SAME single read, just earlier.
                     var mirror = await _store.GetAsync(deliveryId, ct);
 
-                    // P3 PRIVACY GUARD — do not simplify away. This canonical branch delegates
-                    // row scoping to delivery-service and deliberately does NOT run
-                    // CallerParticipatesInDelivery (unlike the mirror fallback at :505-508).
-                    // Free text the customer typed is a NEW class of data on this branch, so it
-                    // is surfaced ONLY to a proven participant (the client or the assigned
-                    // jeeber). A non-participant keeps today's empty string — zero widening of
-                    // read access. Locked by GetById_FlagOn_Canonical_NonParticipant_DescriptionStaysEmpty.
-                    var description = mirror is not null && CallerParticipatesInDelivery(mirror, callerId)
-                        ? mirror.Description
-                        : string.Empty;
+                    // The downstream read is service-authenticated, not actor-scoped. Enforce
+                    // per-row ownership at the BFF before projecting any delivery data. The
+                    // mirror is a valid fallback authority when the upstream row predates actor
+                    // fields or its assignment mirror has not caught up yet.
+                    if (!CallerParticipatesInDelivery(canonical, callerId)
+                        && (mirror is null || !CallerParticipatesInDelivery(mirror, callerId)))
+                    {
+                        return NotAPartyProblem();
+                    }
+
+                    var description = mirror?.Description ?? string.Empty;
+                    var pickup = ToGeoPoint(canonical.PickupLat, canonical.PickupLng)
+                        ?? mirror?.PickupLocation;
 
                     var canonicalDto = new DeliveryRequestDto
                     {
@@ -463,11 +467,15 @@ public class DeliveriesController : ControllerBase
                         ServerNow = _clock.GetUtcNow(),
                         ExpiredAt = mirror?.ExpiredAt,
                         Id = canonical.DeliveryId,
-                        ClientId = canonical.ClientId ?? string.Empty,
+                        ClientId = canonical.ClientId ?? mirror?.ClientId ?? string.Empty,
                         Status = canonical.Status,
                         Description = description,
-                        TierId = canonical.TierId,
-                        JeeberId = canonical.JeeberId,
+                        TierId = canonical.TierId ?? mirror?.TierId,
+                        PickupLocation = pickup,
+                        DropoffLocation = mirror?.DropoffLocation,
+                        PickupAddress = mirror?.PickupAddress,
+                        DropoffAddress = mirror?.DropoffAddress,
+                        JeeberId = canonical.JeeberId ?? mirror?.JeeberId,
                         CreatedAt = canonical.CreatedAt
                     };
                     await EnrichWithOfferAndJeeberAsync(
@@ -505,19 +513,14 @@ public class DeliveriesController : ControllerBase
             return NotFound();
         }
 
-        // F8 participant scoping: the local-mirror fallback surfaces a row the
-        // canonical read did not authorise, so it MUST carry the same visibility rule
-        // the list surfaces (IRequestsStore.ListForClientAsync ∪ ListForJeeberAsync):
-        // the caller must be this delivery's client OR its assigned jeeber. A
-        // non-party caller gets the same clean 404 an unknown id yields, so the
-        // fallback never widens read access into an unscoped read-any-delivery-by-id
-        // surface (guards the role-bleed/privacy invariant).
+        // The row exists, but the caller is not a participant. Return an explicit 403;
+        // genuinely missing ids remain 404 above.
         if (!CallerParticipatesInDelivery(delivery, callerId))
         {
             _log.LogInformation(
-                "Delivery {DeliveryId} mirror read denied: caller is neither the client nor the assigned jeeber; returning 404 (F8 scoping).",
+                "Delivery {DeliveryId} mirror read denied: caller is neither the client nor the assigned jeeber; returning 403.",
                 deliveryId);
-            return NotFound();
+            return NotAPartyProblem();
         }
 
         var dto = ToDto(delivery, _clock.GetUtcNow());
@@ -538,6 +541,17 @@ public class DeliveriesController : ControllerBase
         => string.Equals(delivery.ClientId, callerId, StringComparison.Ordinal)
            || (!string.IsNullOrWhiteSpace(delivery.JeeberId)
                && string.Equals(delivery.JeeberId, callerId, StringComparison.Ordinal));
+
+    private static bool CallerParticipatesInDelivery(DeliveryReadUpstream delivery, string callerId)
+        => !string.IsNullOrWhiteSpace(callerId)
+           && (string.Equals(delivery.ClientId, callerId, StringComparison.Ordinal)
+               || (!string.IsNullOrWhiteSpace(delivery.JeeberId)
+                   && string.Equals(delivery.JeeberId, callerId, StringComparison.Ordinal)));
+
+    private static GeoPoint? ToGeoPoint(double? lat, double? lng)
+        => lat.HasValue && lng.HasValue
+            ? new GeoPoint { Lat = lat.Value, Lng = lng.Value }
+            : null;
 
     /// <summary>
     /// fix/client-visibility (run-22 P0 hardening): a shipment stage counts as ACTIVE
@@ -3008,6 +3022,9 @@ public class DeliveriesController : ControllerBase
         ClientId = r.ClientId,
         Status = r.Status,
         Description = r.Description,
+        TierId = r.TierId,
+        PickupLocation = r.PickupLocation,
+        DropoffLocation = r.DropoffLocation,
         PickupAddress = r.PickupAddress,
         DropoffAddress = r.DropoffAddress,
         CreatedAt = r.CreatedAt,
