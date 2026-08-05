@@ -20,6 +20,7 @@ public sealed class DeliveryReadContractTests
           "tier_id": "flash",
           "pickup_lat": 33.8886,
           "pickup_lng": 35.4955,
+          "evidence_url": "s3://proof-of-delivery/delivery-42.jpg",
           "created_at": "2026-08-05T12:00:00Z"
         }
         """;
@@ -34,6 +35,38 @@ public sealed class DeliveryReadContractTests
         result.Should().NotBeNull();
         result!.PickupLat.Should().Be(33.8886);
         result.PickupLng.Should().Be(35.4955);
+        result.EvidenceUrl.Should().Be("s3://proof-of-delivery/delivery-42.jpg");
+    }
+
+    [Fact]
+    public async Task CanonicalTransitionAsync_SerializesProofAsEvidenceUrl()
+    {
+        const string responseJson = """
+        {
+          "delivery_id": "delivery-42",
+          "status": "AtDoor",
+          "transition_id": "transition-1",
+          "transitioned_at": "2026-08-05T12:00:00Z"
+        }
+        """;
+        var handler = new RecordingJsonResponseHandler(responseJson);
+        var http = new HttpClient(handler)
+        {
+            BaseAddress = new Uri("http://delivery.test/")
+        };
+        var client = new DeliveryServiceClient(http);
+
+        await client.CanonicalTransitionAsync(
+            "delivery-42",
+            "AtDoor",
+            "jeeber",
+            "jeeber-karim",
+            "jeeber",
+            "s3://proof-of-delivery/delivery-42.jpg",
+            CancellationToken.None);
+
+        handler.RequestBody.Should().Contain(
+            "\"evidence_url\":\"s3://proof-of-delivery/delivery-42.jpg\"");
     }
 
     private sealed class JsonResponseHandler(string json) : HttpMessageHandler
@@ -46,5 +79,24 @@ public sealed class DeliveryReadContractTests
                 Content = new StringContent(json, Encoding.UTF8, "application/json"),
                 RequestMessage = request,
             });
+    }
+
+    private sealed class RecordingJsonResponseHandler(string json) : HttpMessageHandler
+    {
+        public string RequestBody { get; private set; } = string.Empty;
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestBody = request.Content is null
+                ? string.Empty
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json"),
+                RequestMessage = request,
+            };
+        }
     }
 }

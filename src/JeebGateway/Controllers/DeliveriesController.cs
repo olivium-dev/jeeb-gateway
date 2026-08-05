@@ -475,6 +475,7 @@ public class DeliveriesController : ControllerBase
                         DropoffLocation = mirror?.DropoffLocation,
                         PickupAddress = mirror?.PickupAddress,
                         DropoffAddress = mirror?.DropoffAddress,
+                        ProofPhotoUrl = canonical.EvidenceUrl,
                         JeeberId = canonical.JeeberId ?? mirror?.JeeberId,
                         CreatedAt = canonical.CreatedAt
                     };
@@ -827,7 +828,8 @@ public class DeliveriesController : ControllerBase
             try
             {
                 upstream = await _deliveryClient.CanonicalTransitionAsync(
-                    deliveryId, canonicalTo, partySource, callerId, actorRole, ct);
+                    deliveryId, canonicalTo, partySource, callerId, actorRole,
+                    body.EvidenceUrl, ct);
             }
             catch (DeliveryTransitionException dte)
                 when (dte.StatusCode == StatusCodes.Status403Forbidden)
@@ -848,7 +850,8 @@ public class DeliveriesController : ControllerBase
                 try
                 {
                     upstream = await _deliveryClient.CanonicalTransitionAsync(
-                        deliveryId, canonicalTo, partySource, callerId, actorRole, ct);
+                        deliveryId, canonicalTo, partySource, callerId, actorRole,
+                        body.EvidenceUrl, ct);
                 }
                 catch (DeliveryTransitionException retryDte)
                 {

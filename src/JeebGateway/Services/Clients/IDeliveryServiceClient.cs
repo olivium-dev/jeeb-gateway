@@ -79,6 +79,21 @@ public interface IDeliveryServiceClient
         CancellationToken ct);
 
     /// <summary>
+    /// Canonical transition carrying an optional proof/evidence reference.
+    /// The default keeps existing test doubles source-compatible; the production
+    /// client forwards the value as delivery-service's <c>evidence_url</c>.
+    /// </summary>
+    Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
+        string deliveryId,
+        string to,
+        string partySource,
+        string actorId,
+        string actorRole,
+        string? evidenceUrl,
+        CancellationToken ct)
+        => CanonicalTransitionAsync(deliveryId, to, partySource, actorId, actorRole, ct);
+
+    /// <summary>
     /// Runs a canonical transition with an optional audit <paramref name="reason"/>
     /// (the delivery-service business trigger, e.g. <c>tier_ttl_elapsed</c>) and an
     /// optional <paramref name="idempotencyKey"/>. Blank optional values are omitted
@@ -800,6 +815,9 @@ public sealed class DeliveryReadUpstream
 
     [System.Text.Json.Serialization.JsonPropertyName("pickup_lng")]
     public double? PickupLng { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("evidence_url")]
+    public string? EvidenceUrl { get; init; }
 
     [System.Text.Json.Serialization.JsonPropertyName("created_at")]
     public DateTimeOffset CreatedAt { get; init; }

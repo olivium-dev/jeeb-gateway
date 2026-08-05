@@ -212,13 +212,53 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
             idempotencyKey: null,
             ct: ct);
 
-    /// <inheritdoc />
-    public async Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
+    public Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
         string deliveryId,
         string to,
         string partySource,
         string actorId,
         string actorRole,
+        string? evidenceUrl,
+        CancellationToken ct)
+        => CanonicalTransitionCoreAsync(
+            deliveryId,
+            to,
+            partySource,
+            actorId,
+            actorRole,
+            evidenceUrl,
+            reason: null,
+            idempotencyKey: null,
+            ct);
+
+    /// <inheritdoc />
+    public Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(
+        string deliveryId,
+        string to,
+        string partySource,
+        string actorId,
+        string actorRole,
+        string? reason,
+        string? idempotencyKey,
+        CancellationToken ct)
+        => CanonicalTransitionCoreAsync(
+            deliveryId,
+            to,
+            partySource,
+            actorId,
+            actorRole,
+            evidenceUrl: null,
+            reason,
+            idempotencyKey,
+            ct);
+
+    private async Task<DeliveryTransitionUpstream> CanonicalTransitionCoreAsync(
+        string deliveryId,
+        string to,
+        string partySource,
+        string actorId,
+        string actorRole,
+        string? evidenceUrl,
         string? reason,
         string? idempotencyKey,
         CancellationToken ct)
@@ -236,6 +276,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
                 new CanonicalTransitionRequest(
                     to,
                     partySource,
+                    string.IsNullOrWhiteSpace(evidenceUrl) ? null : evidenceUrl,
                     string.IsNullOrWhiteSpace(reason) ? null : reason,
                     string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey),
                 options: JsonOptions)
@@ -576,6 +617,8 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
     private sealed record CanonicalTransitionRequest(
         [property: System.Text.Json.Serialization.JsonPropertyName("to")] string To,
         [property: System.Text.Json.Serialization.JsonPropertyName("trigger")] string Trigger,
+        [property: System.Text.Json.Serialization.JsonPropertyName("evidence_url")]
+        [property: System.Text.Json.Serialization.JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EvidenceUrl,
         [property: System.Text.Json.Serialization.JsonPropertyName("reason")]
         [property: System.Text.Json.Serialization.JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Reason,
         [property: System.Text.Json.Serialization.JsonPropertyName("idempotency_key")]
