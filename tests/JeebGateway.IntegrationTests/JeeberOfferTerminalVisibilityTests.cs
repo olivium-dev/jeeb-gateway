@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using JeebGateway.Availability;
+using JeebGateway.IntegrationTests.Fakes;
 using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -47,17 +48,19 @@ public class JeeberOfferTerminalVisibilityTests
     {
         using var factory = InMemoryFactory();
 
-        var (clientId, requestId) = await SeedRequestAsync(factory);
+        var (_, requestId) = await SeedRequestAsync(factory);
         var jeeberA = $"jeeber-a-{Guid.NewGuid():N}";
         var jeeberB = $"jeeber-b-{Guid.NewGuid():N}";
 
         var offerA = await SubmitOfferAsync(factory, jeeberA, requestId, fee: 9m);
         var offerB = await SubmitOfferAsync(factory, jeeberB, requestId, fee: 8m);
 
-        // The customer accepts A — the in-memory auction-close supersedes B's bid.
-        var accept = await Client(factory, clientId, "customer")
-            .PostAsync($"/v1/offers/{offerA}/accept", null);
-        accept.StatusCode.Should().Be(HttpStatusCode.OK);
+        // Close the test-owned in-memory auction directly. The live HTTP accept route is
+        // upstream-only; this case verifies the local ledger's terminal list projection.
+        var store = factory.Services.GetRequiredService<IPendingOffersStore>();
+        var accept = await store.AcceptWithSupersedeAsync(
+            offerA, DateTimeOffset.UtcNow, CancellationToken.None);
+        accept.Status.Should().Be(AcceptOfferStatus.Accepted);
 
         // B's flat my-offers surface: the terminal offer is STILL visible, honestly.
         var items = await GetItemsAsync(Client(factory, jeeberB, "driver"),
@@ -209,6 +212,8 @@ public class JeeberOfferTerminalVisibilityTests
             {
                 builder.ConfigureTestServices(services =>
                 {
+                    FakeOfferStoreWebApplicationFactory.UseFakeOfferStore(services);
+
                     // Models the deployed reality even on the flag-off path: the direct
                     // jeeber-scoped upstream route answers nothing (it does not exist),
                     // so the surface must be fed by the store composition.
