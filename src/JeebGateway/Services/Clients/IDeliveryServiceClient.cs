@@ -774,9 +774,9 @@ public sealed class DeliveryTransitionUpstream
 
 /// <summary>
 /// 200 body of the canonical single-read <c>GET /api/v1/deliveries/{id}</c>.
-/// delivery-service (Go) emits <b>snake_case</b>; only the fields the gateway
-/// projects onto its <c>DeliveryRequestDto</c> are bound here. <see cref="Status"/>
-/// is the canonical SM-1 vocab.
+/// delivery-service (Go) emits <b>snake_case</b>; the participant, status, and
+/// stored pickup/dropoff fields projected onto <c>DeliveryRequestDto</c> are bound
+/// here. <see cref="Status"/> is the canonical SM-1 vocab.
 /// </summary>
 public sealed class DeliveryReadUpstream
 {
@@ -794,6 +794,18 @@ public sealed class DeliveryReadUpstream
 
     [System.Text.Json.Serialization.JsonPropertyName("tier_id")]
     public string? TierId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup")]
+    public LatLngUpstream? Pickup { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("dropoff")]
+    public LatLngUpstream? Dropoff { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("pickup_address")]
+    public string? PickupAddress { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("dropoff_address")]
+    public string? DropoffAddress { get; init; }
 
     [System.Text.Json.Serialization.JsonPropertyName("created_at")]
     public DateTimeOffset CreatedAt { get; init; }

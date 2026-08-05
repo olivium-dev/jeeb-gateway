@@ -69,6 +69,64 @@ public class S03JeeberDeliveryListTests
     }
 
     [Fact]
+    public async Task Deliveries_RoleJeeber_ReturnsOnlyRowsAssignedToBearer()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var assignedId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        var clientOwnedId = await SeedAcceptedDeliveryAsync(factory, Jeeber, OtherJeeber);
+
+        var page = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries?role=jeeber");
+
+        page!.Items.Should().ContainSingle(i => i.Id == assignedId);
+        page.Items.Should().NotContain(i => i.Id == clientOwnedId,
+            "role=jeeber must not mix in a separate delivery the bearer owns as customer");
+    }
+
+    [Theory]
+    [InlineData("client")]
+    [InlineData("customer")]
+    public async Task Deliveries_ClientRoleAliases_ReturnOnlyRowsOwnedByBearer(string role)
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var assignedId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        var clientOwnedId = await SeedAcceptedDeliveryAsync(factory, Jeeber, OtherJeeber);
+
+        var page = await ClientActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>($"/v1/deliveries?role={role}");
+
+        page!.Items.Should().ContainSingle(i => i.Id == clientOwnedId);
+        page.Items.Should().NotContain(i => i.Id == assignedId,
+            $"role={role} must not mix in a delivery assigned to the bearer as jeeber");
+    }
+
+    [Fact]
+    public async Task Deliveries_NoRole_PreservesLegacyPartyUnion()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var assignedId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+        var clientOwnedId = await SeedAcceptedDeliveryAsync(factory, Jeeber, OtherJeeber);
+
+        var page = await JeeberActor(factory, Jeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries");
+
+        page!.Items.Select(i => i.Id).Should().Contain(new[] { assignedId, clientOwnedId },
+            "omitting role retains the backward-compatible union of the bearer's two party views");
+    }
+
+    [Fact]
+    public async Task Deliveries_RoleJeeber_AsUnrelatedActor_DoesNotExposeDelivery()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var requestId = await SeedAcceptedDeliveryAsync(factory, Client, Jeeber);
+
+        var page = await JeeberActor(factory, OtherJeeber)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries?role=jeeber");
+
+        page!.Items.Should().NotContain(i => i.Id == requestId);
+    }
+
+    [Fact]
     public async Task Requests_RoleJeeber_AsAssignedJeeber_ReturnsTheAssignedJob()
     {
         using var factory = new WebApplicationFactory<Program>();

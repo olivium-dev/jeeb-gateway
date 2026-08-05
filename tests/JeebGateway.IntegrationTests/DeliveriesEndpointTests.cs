@@ -124,7 +124,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
     }
 
     [Fact]
-    public async Task GetById_FlagOn_CanonicalMissing_NonParty_Returns404_NoMirrorLeak()
+    public async Task GetById_FlagOn_CanonicalMissing_NonParty_Returns403_NoMirrorLeak()
     {
         // F8 scoping: the mirror fallback surfaces a row the canonical read did not
         // authorise, so it MUST carry the list's participant scoping. A caller who is
@@ -139,8 +139,8 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
 
         var resp = await stranger.GetAsync($"/v1/deliveries/{seed.Id}");
 
-        resp.StatusCode.Should().Be(HttpStatusCode.NotFound,
-            "a non-party must not read another delivery via the mirror fallback (F8 scoping)");
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden,
+            "an existing delivery must reject a non-party explicitly without exposing its body");
     }
 
     [Fact]
@@ -162,13 +162,9 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
 
     // -------- P3 (b01-20260725): GetById canonical branch surfaces Description ---
     //
-    // The canonical branch previously hard-coded Description = string.Empty
-    // (DeliveryRequestDto.Description is init-only, so EnrichWithOfferAndJeeberAsync
-    // could never patch it in afterwards). The fix hoists the ALREADY-fetched mirror
-    // row's Description onto the DTO at construction time, gated by
-    // CallerParticipatesInDelivery so a non-participant still gets "" — zero
-    // widening of read access on this canonical branch (which does not itself run
-    // participant scoping upstream).
+    // The canonical branch obtains request description and coordinates from the
+    // already-fetched mirror when the upstream row omits them. The full response is
+    // now gated by participant ownership before any field is serialized.
 
     [Fact]
     public async Task GetById_FlagOn_Canonical_OwningClient_ReturnsRequestDescription()
@@ -210,11 +206,10 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
     }
 
     [Fact]
-    public async Task GetById_FlagOn_Canonical_NonParticipant_DescriptionStaysEmpty()
+    public async Task GetById_FlagOn_Canonical_NonParticipant_Returns403()
     {
-        // PRIVACY LOCK — must be GREEN before and after. If this ever reds, the
-        // CallerParticipatesInDelivery guard in the canonical branch was dropped;
-        // do not merge.
+        // The canonical downstream read is service-authenticated. The gateway must
+        // enforce actor ownership before serializing any part of the row.
         var otp        = new FakeServiceOtpClient();
         var delivery   = new FakeDeliveryServiceClient();
         var logCapture = new CapturingLoggerProvider();
@@ -225,11 +220,49 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
 
         var resp = await stranger.GetAsync($"/v1/deliveries/{seed.Id}");
 
-        // The canonical branch does not itself 404 a stranger — that scoping lives
-        // upstream — but the description must never leak to a non-participant.
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/not-a-party");
+    }
+
+    [Fact]
+    public async Task GetById_PartyAuthorizedMirrorDetail_SerializesStoredCoordinates()
+    {
+        var seed = await SeedAsync(initialStatus: RequestStatus.Accepted);
+
+        var resp = await AuthClient(seed.JeeberId).GetAsync($"/v1/deliveries/{seed.Id}");
+
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var dto = await resp.Content.ReadFromJsonAsync<DeliveryDto>();
-        dto!.Description.Should().BeEmpty();
+        dto!.PickupLocation.Should().Be(new GeoPointDto(33.8886, 35.4955));
+        dto.DropoffLocation.Should().Be(new GeoPointDto(33.9001, 35.5034));
+    }
+
+    [Fact]
+    public async Task GetById_FlagOn_PartyAuthorizedDetail_UsesCanonicalCoordinatesWhenPresent()
+    {
+        var otp = new FakeServiceOtpClient();
+        var delivery = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+        var seed = await SeedAsync(factory, RequestStatus.Accepted);
+        delivery.CanonicalReadReturns = new DeliveryReadUpstream
+        {
+            DeliveryId = seed.Id,
+            ClientId = seed.ClientId,
+            JeeberId = seed.JeeberId,
+            Status = CanonicalDeliveryStatus.InTransit,
+            Pickup = new LatLngUpstream { Lat = 33.9012, Lng = 35.5103 },
+            Dropoff = new LatLngUpstream { Lat = 33.9124, Lng = 35.5225 },
+            CreatedAt = DateTimeOffset.UtcNow,
+        };
+
+        var resp = await AuthClient(factory, seed.ClientId).GetAsync($"/v1/deliveries/{seed.Id}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var dto = await resp.Content.ReadFromJsonAsync<DeliveryDto>();
+        dto!.PickupLocation.Should().Be(new GeoPointDto(33.9012, 35.5103));
+        dto.DropoffLocation.Should().Be(new GeoPointDto(33.9124, 35.5225));
     }
 
     [Fact]
@@ -917,7 +950,12 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         {
             ClientId       = clientId,
             Description    = description,
-            RecipientPhone = recipientPhone
+            RecipientPhone = recipientPhone,
+            TierId = "flash",
+            PickupLocation = new GeoPoint { Lat = 33.8886, Lng = 35.4955 },
+            DropoffLocation = new GeoPoint { Lat = 33.9001, Lng = 35.5034 },
+            PickupAddress = "Hamra, Beirut",
+            DropoffAddress = "Achrafieh, Beirut",
         }, CancellationToken.None);
 
         string? otp = null;
@@ -950,6 +988,8 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         string ClientId,
         string Status,
         string Description,
+        GeoPointDto? PickupLocation,
+        GeoPointDto? DropoffLocation,
         string? PickupAddress,
         string? DropoffAddress,
         DateTimeOffset CreatedAt,
@@ -957,6 +997,8 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         string? JeeberId,
         DateTimeOffset? AcceptedAt,
         bool GpsTrackingActive);
+
+    private sealed record GeoPointDto(double Lat, double Lng);
 
     // T-BE-019 DTOs for external OTP endpoints
     private sealed record OtpTriggerResponseDto(string DeliveryId, bool Triggered, string Message);
