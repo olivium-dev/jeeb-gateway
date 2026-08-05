@@ -343,16 +343,18 @@ public sealed class CentreWritersStep6Tests
 
     /// <summary>
     /// Every notification type the catalog still declares is one the centre serves and one this
-    /// step can account for: eight keys, six with a step-6a writer plus the two offer types that
-    /// write from their own seats. A ninth key appearing without a route is the exact defect
-    /// correction C6 described, and it would land here first.
+    /// step can account for: nine keys, six with a step-6a writer plus the three offer types that
+    /// write from their own seats or arrive through the service callback endpoint. A new key
+    /// appearing without a route is the exact defect correction C6 described, and it would land
+    /// here first.
     /// </summary>
     [Fact]
-    public void Step6b_CatalogIsExactlyTheEightServedTypes()
+    public void Step6b_CatalogIsExactlyTheNineServedTypes()
         => JeebNotificationCatalog.Keys.Should().BeEquivalentTo(new[]
         {
             "jeeb.offer_received",
             "jeeb.offer_accepted",
+            "jeeb.offer_updated",
             "jeeb.delivery_status_updated",
             "jeeb.settlement_paid",
             "jeeb.kyc_approved",
