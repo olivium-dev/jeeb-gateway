@@ -9,7 +9,7 @@ namespace JeebGateway.IntegrationTests;
 public sealed class DeliveryReadContractTests
 {
     [Fact]
-    public async Task GetCanonicalDeliveryAsync_BindsStoredCoordinateObjects()
+    public async Task GetCanonicalDeliveryAsync_BindsRealGoScalarPickupShape()
     {
         const string json = """
         {
@@ -18,10 +18,8 @@ public sealed class DeliveryReadContractTests
           "jeeber_id": "jeeber-karim",
           "status": "InTransit",
           "tier_id": "flash",
-          "pickup": { "lat": 33.8886, "lng": 35.4955 },
-          "dropoff": { "lat": 33.9001, "lng": 35.5034 },
-          "pickup_address": "Hamra, Beirut",
-          "dropoff_address": "Achrafieh, Beirut",
+          "pickup_lat": 33.8886,
+          "pickup_lng": 35.4955,
           "created_at": "2026-08-05T12:00:00Z"
         }
         """;
@@ -34,14 +32,8 @@ public sealed class DeliveryReadContractTests
         var result = await client.GetCanonicalDeliveryAsync("delivery-42", CancellationToken.None);
 
         result.Should().NotBeNull();
-        result!.Pickup.Should().NotBeNull();
-        result.Pickup!.Lat.Should().Be(33.8886);
-        result.Pickup.Lng.Should().Be(35.4955);
-        result.Dropoff.Should().NotBeNull();
-        result.Dropoff!.Lat.Should().Be(33.9001);
-        result.Dropoff.Lng.Should().Be(35.5034);
-        result.PickupAddress.Should().Be("Hamra, Beirut");
-        result.DropoffAddress.Should().Be("Achrafieh, Beirut");
+        result!.PickupLat.Should().Be(33.8886);
+        result.PickupLng.Should().Be(35.4955);
     }
 
     private sealed class JsonResponseHandler(string json) : HttpMessageHandler

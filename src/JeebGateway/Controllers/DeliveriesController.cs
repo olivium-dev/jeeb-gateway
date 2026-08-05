@@ -458,8 +458,8 @@ public class DeliveriesController : ControllerBase
                     }
 
                     var description = mirror?.Description ?? string.Empty;
-                    var pickup = ToGeoPoint(canonical.Pickup) ?? mirror?.PickupLocation;
-                    var dropoff = ToGeoPoint(canonical.Dropoff) ?? mirror?.DropoffLocation;
+                    var pickup = ToGeoPoint(canonical.PickupLat, canonical.PickupLng)
+                        ?? mirror?.PickupLocation;
 
                     var canonicalDto = new DeliveryRequestDto
                     {
@@ -472,9 +472,9 @@ public class DeliveriesController : ControllerBase
                         Description = description,
                         TierId = canonical.TierId ?? mirror?.TierId,
                         PickupLocation = pickup,
-                        DropoffLocation = dropoff,
-                        PickupAddress = canonical.PickupAddress ?? mirror?.PickupAddress,
-                        DropoffAddress = canonical.DropoffAddress ?? mirror?.DropoffAddress,
+                        DropoffLocation = mirror?.DropoffLocation,
+                        PickupAddress = mirror?.PickupAddress,
+                        DropoffAddress = mirror?.DropoffAddress,
                         JeeberId = canonical.JeeberId ?? mirror?.JeeberId,
                         CreatedAt = canonical.CreatedAt
                     };
@@ -548,8 +548,10 @@ public class DeliveriesController : ControllerBase
                || (!string.IsNullOrWhiteSpace(delivery.JeeberId)
                    && string.Equals(delivery.JeeberId, callerId, StringComparison.Ordinal)));
 
-    private static GeoPoint? ToGeoPoint(LatLngUpstream? point)
-        => point is null ? null : new GeoPoint { Lat = point.Lat, Lng = point.Lng };
+    private static GeoPoint? ToGeoPoint(double? lat, double? lng)
+        => lat.HasValue && lng.HasValue
+            ? new GeoPoint { Lat = lat.Value, Lng = lng.Value }
+            : null;
 
     /// <summary>
     /// fix/client-visibility (run-22 P0 hardening): a shipment stage counts as ACTIVE

@@ -239,7 +239,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
     }
 
     [Fact]
-    public async Task GetById_FlagOn_PartyAuthorizedDetail_UsesCanonicalCoordinatesWhenPresent()
+    public async Task GetById_FlagOn_PartyAuthorizedDetail_UsesCanonicalPickupAndMirrorDropoff()
     {
         var otp = new FakeServiceOtpClient();
         var delivery = new FakeDeliveryServiceClient();
@@ -252,8 +252,8 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
             ClientId = seed.ClientId,
             JeeberId = seed.JeeberId,
             Status = CanonicalDeliveryStatus.InTransit,
-            Pickup = new LatLngUpstream { Lat = 33.9012, Lng = 35.5103 },
-            Dropoff = new LatLngUpstream { Lat = 33.9124, Lng = 35.5225 },
+            PickupLat = 33.9012,
+            PickupLng = 35.5103,
             CreatedAt = DateTimeOffset.UtcNow,
         };
 
@@ -262,7 +262,35 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var dto = await resp.Content.ReadFromJsonAsync<DeliveryDto>();
         dto!.PickupLocation.Should().Be(new GeoPointDto(33.9012, 35.5103));
-        dto.DropoffLocation.Should().Be(new GeoPointDto(33.9124, 35.5225));
+        dto.DropoffLocation.Should().Be(new GeoPointDto(33.9001, 35.5034));
+        dto.PickupAddress.Should().Be("Hamra, Beirut");
+        dto.DropoffAddress.Should().Be("Achrafieh, Beirut");
+    }
+
+    [Fact]
+    public async Task GetById_FlagOn_IncompleteCanonicalPickup_UsesCompleteMirrorPoint()
+    {
+        var otp = new FakeServiceOtpClient();
+        var delivery = new FakeDeliveryServiceClient();
+        var logCapture = new CapturingLoggerProvider();
+        await using var factory = ExternalOtpFactory(otp, delivery, logCapture, deliveryUpstream: true);
+        var seed = await SeedAsync(factory, RequestStatus.Accepted);
+        delivery.CanonicalReadReturns = new DeliveryReadUpstream
+        {
+            DeliveryId = seed.Id,
+            ClientId = seed.ClientId,
+            JeeberId = seed.JeeberId,
+            Status = CanonicalDeliveryStatus.InTransit,
+            PickupLat = 33.9012,
+            PickupLng = null,
+            CreatedAt = DateTimeOffset.UtcNow,
+        };
+
+        var resp = await AuthClient(factory, seed.JeeberId).GetAsync($"/v1/deliveries/{seed.Id}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var dto = await resp.Content.ReadFromJsonAsync<DeliveryDto>();
+        dto!.PickupLocation.Should().Be(new GeoPointDto(33.8886, 35.4955));
     }
 
     [Fact]
