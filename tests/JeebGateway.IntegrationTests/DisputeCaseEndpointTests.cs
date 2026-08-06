@@ -23,7 +23,7 @@ namespace JeebGateway.IntegrationTests;
 ///
 /// <list type="bullet">
 ///   <item>AC1: <see cref="Escalate_Attaches_Gps_Polyline_And_Empty_Chat_Transcript"/></item>
-///   <item>AC2: <see cref="Resolve_With_Refund_Triggers_Payment_Gateway_And_Notifies_Both_Parties"/></item>
+///   <item>AC2: <see cref="Resolve_With_Refund_Is_Rejected_Without_Case_Mutation"/></item>
 ///   <item>AC3: <see cref="Resolve_When_Already_Resolved_Returns_409_Already_Resolved"/></item>
 ///   <item>AC4: <see cref="Resolve_As_Non_Admin_Returns_403"/> +
 ///     <see cref="ListMine_Includes_Cases_Where_User_Is_Counterparty"/></item>
@@ -88,11 +88,11 @@ public class DisputeCaseEndpointTests
     }
 
     // ----------------------------------------------------------------
-    // AC2 — admin resolves with refund → unified_payment_gateway records
-    // a refund AND both parties get notifications.
+    // AC2 — Jeeb deliveries are cash-on-delivery, so a refund request is
+    // rejected before any payment or case-state side effect.
     // ----------------------------------------------------------------
     [Fact]
-    public async Task Resolve_With_Refund_Triggers_Payment_Gateway_And_Notifies_Both_Parties()
+    public async Task Resolve_With_Refund_Is_Rejected_Without_Case_Mutation()
     {
         using var factory = new WebApplicationFactory<Program>();
         const string client = "c-ac2";
@@ -116,30 +116,12 @@ public class DisputeCaseEndpointTests
             Notes = "approved"
         });
 
-        resolveResp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var resolved = await resolveResp.Content.ReadFromJsonAsync<DisputeCaseResponse>();
-        resolved!.State.Should().Be(DisputeCaseState.ResolvedRefund);
-        resolved.RefundUsd.Should().Be(12.50m);
-        resolved.RefundLedgerEntryId.Should().NotBeNullOrEmpty();
-        resolved.ResolverAdminId.Should().Be("admin-ac2");
+        resolveResp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
-        // unified_payment_gateway recorded the refund with the case id
-        // as the idempotency key (RECORD-ID lookups against the
-        // InMemoryPaymentRefundClient stand in for the upstream check).
-        var refundClient = factory.Services.GetRequiredService<InMemoryPaymentRefundClient>();
-        refundClient.Entries.Should().ContainSingle(r => r.CaseId == @case.Id
-            && r.AmountUsd == 12.50m
-            && r.IdempotencyKey == $"dispute:{@case.Id}:refund");
-
-        // Both parties received a DisputeUpdate push at resolve time.
-        var tracker = factory.Services.GetRequiredService<InMemoryPushDeliveryTracker>();
-        var openerPushes = await tracker.GetForUserAsync(client, CancellationToken.None);
-        openerPushes.Should().Contain(p => p.Trigger == NotificationTrigger.DisputeUpdate,
-            "filer must receive a DisputeUpdate push on resolution");
-
-        var counterpartyPushes = await tracker.GetForUserAsync(jeeber, CancellationToken.None);
-        counterpartyPushes.Should().Contain(p => p.Trigger == NotificationTrigger.DisputeUpdate,
-            "counter-party must receive a DisputeUpdate push on resolution (AC2 dual fan-out)");
+        var store = factory.Services.GetRequiredService<IDisputeCaseStore>();
+        var unchanged = await store.GetByIdAsync(@case.Id, CancellationToken.None);
+        unchanged!.State.Should().Be(DisputeCaseState.Open);
+        unchanged.ResolverAdminId.Should().BeNull();
     }
 
     // ----------------------------------------------------------------
@@ -170,8 +152,7 @@ public class DisputeCaseEndpointTests
 
         var second = await admin.PostAsJsonAsync($"/admin/v1/disputes/{@case.Id}/resolve", new ResolveCaseRequest
         {
-            Decision = "refund",
-            RefundUsd = 5m
+            Decision = "no_action"
         });
 
         second.StatusCode.Should().Be(HttpStatusCode.Conflict);
@@ -365,11 +346,11 @@ public class DisputeCaseEndpointTests
     }
 
     // ----------------------------------------------------------------
-    // Idempotency — replaying /resolve with the same Idempotency-Key
-    // does NOT double-refund and returns the existing terminal row.
+    // Idempotency — replaying a prohibited refund remains a side-effect-free
+    // rejection; the key cannot turn an invalid COD action into a mutation.
     // ----------------------------------------------------------------
     [Fact]
-    public async Task Resolve_Replay_With_Same_Idempotency_Key_Does_Not_Double_Refund()
+    public async Task Resolve_Refund_Replay_Remains_Rejected()
     {
         using var factory = new WebApplicationFactory<Program>();
         const string client = "c-res-idem";
@@ -387,25 +368,20 @@ public class DisputeCaseEndpointTests
         var admin = AdminClientFor(factory, "admin-res-idem");
         admin.DefaultRequestHeaders.Add("Idempotency-Key", "resolve-key-1");
 
-        (await admin.PostAsJsonAsync($"/admin/v1/disputes/{@case!.Id}/resolve", new ResolveCaseRequest
+        var first = await admin.PostAsJsonAsync($"/admin/v1/disputes/{@case!.Id}/resolve", new ResolveCaseRequest
         {
             Decision = "refund",
             RefundUsd = 7m
-        })).EnsureSuccessStatusCode();
+        });
+        first.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
-        // Replay with the same key — must return 200 and NOT post a second
-        // refund (the refund client also de-dupes on its own key, but we
-        // additionally short-circuit before calling the refund path).
         var replay = await admin.PostAsJsonAsync($"/admin/v1/disputes/{@case.Id}/resolve", new ResolveCaseRequest
         {
             Decision = "refund",
             RefundUsd = 7m
         });
-        replay.StatusCode.Should().Be(HttpStatusCode.OK);
+        replay.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
-        var refundClient = factory.Services.GetRequiredService<InMemoryPaymentRefundClient>();
-        refundClient.Entries.Count(e => e.CaseId == @case.Id).Should().Be(1,
-            "idempotency-key replay must not double-refund");
     }
 
     [Fact]
