@@ -524,6 +524,8 @@ builder.Services.AddSingleton<JeebGateway.Realtime.IRealtimeGuardianTokenIssuer,
 // capacity-int ctor for tests.
 builder.Services.Configure<JeebGateway.Realtime.CourierPositionPublishOptions>(
     builder.Configuration.GetSection(JeebGateway.Realtime.CourierPositionPublishOptions.SectionName));
+builder.Services.Configure<JeebGateway.Services.Clients.GeoHistoryWriteOptions>(
+    builder.Configuration.GetSection(JeebGateway.Services.Clients.GeoHistoryWriteOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Realtime.ICourierPositionQueue>(sp =>
     new JeebGateway.Realtime.CourierPositionQueue(
         sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<

@@ -232,7 +232,7 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
     }
 
     [Fact]
-    public async Task LocationUpdate_GeoFailure_ExactRetry_Persists_LocallyRetained_Fix()
+    public async Task LocationUpdate_GeoFailure_MobileExactRetry_Acknowledges_Durable_Fix()
     {
         var locations = new DuplicateAwareLocationStore();
         var geo = new FailOnceGeoHistoryClient();
@@ -278,8 +278,12 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
 
         failed.StatusCode.Should().Be(HttpStatusCode.BadGateway);
         retried.StatusCode.Should().Be(HttpStatusCode.OK);
-        (await retried.Content.ReadFromJsonAsync<LocationUpdateResponse>(JsonOptions))!
-            .Accepted.Should().Be(0, "the local store recognizes the exact retry as already retained");
+        var retriedBody = (await retried.Content.ReadFromJsonAsync<LocationUpdateResponse>(JsonOptions))!;
+        retriedBody.Accepted.Should().Be(1,
+            "the mobile simulator requires an accepted fix after the history retry becomes durable");
+        retriedBody.Rejected.Should().Be(0);
+        (retriedBody.Accepted < 1).Should().BeFalse(
+            "the successful exact retry must not trigger the mobile simulator's terminal failure path");
         locations.Calls.Should().Be(2);
         geo.Attempts.Should().Be(2);
         geo.Writes.Should().ContainSingle().Which.RecordedAt.Should().Be(recordedAt);
