@@ -236,6 +236,31 @@ public class CourierPositionRealtimeTests : IClassFixture<WebApplicationFactory<
     }
 
     [Fact]
+    public async Task Realtime_Fanout_Continues_While_Durable_History_Honors_Backpressure()
+    {
+        var realtime = new RecordingRealtimeClient();
+        var history = new BlockingGeoHistoryClient();
+        using var factory = Factory(
+            publishEnabled: true,
+            guardianSecret: TestGuardianSecret,
+            realtime: realtime,
+            geoHistory: history);
+        var seed = await SeedDeliveryAsync(factory, RequestStatus.HeadingOff);
+
+        var response = PostFixAsync(factory, seed.JeeberId, seed.Id, 24.7130, 46.6730);
+        await history.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        var published = await realtime.WaitForOneAsync(TimeSpan.FromSeconds(5));
+
+        published.Should().NotBeNull(
+            "the customer's realtime map must not wait behind geo-history Retry-After");
+        response.IsCompleted.Should().BeFalse(
+            "the device still waits for durable 30-day evidence before receiving 200");
+
+        history.Release();
+        (await response).StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
     public async Task Drain_Coalesces_To_Latest_Fix_And_Retries_429_After_Upstream_Delay()
     {
         var realtime = new ThrottledOnceRealtimeClient();
@@ -371,7 +396,8 @@ public class CourierPositionRealtimeTests : IClassFixture<WebApplicationFactory<
     private WebApplicationFactory<Program> Factory(
         bool publishEnabled,
         string? guardianSecret,
-        IRealtimeCommunicationClient? realtime = null)
+        IRealtimeCommunicationClient? realtime = null,
+        IGeoHistoryClient? geoHistory = null)
         => _bare.WithWebHostBuilder(builder =>
         {
             builder.UseSetting("FeatureFlags:UseUpstream:Realtime", "true");
@@ -386,7 +412,7 @@ public class CourierPositionRealtimeTests : IClassFixture<WebApplicationFactory<
                 services.RemoveAll<IDeliveryServiceClient>();
                 services.AddSingleton<IDeliveryServiceClient>(new FakeDeliveryPresenceClient());
                 services.RemoveAll<IGeoHistoryClient>();
-                services.AddSingleton<IGeoHistoryClient>(new NoOpGeoHistoryClient());
+                services.AddSingleton<IGeoHistoryClient>(geoHistory ?? new NoOpGeoHistoryClient());
 
                 // The descriptor gate is [Authorize]d, so it needs a REAL session bearer
                 // carrying sub == userId, not the X-User-Id dev header. Same arrangement
@@ -575,6 +601,44 @@ public class CourierPositionRealtimeTests : IClassFixture<WebApplicationFactory<
                 RetentionDays = 30,
                 RetainedFrom = DateTimeOffset.UtcNow.AddDays(-30),
             });
+    }
+
+    private sealed class BlockingGeoHistoryClient : IGeoHistoryClient
+    {
+        private readonly TaskCompletionSource _entered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Entered => _entered.Task;
+
+        public async Task RecordTrackPointAsync(
+            string trackId,
+            string actorId,
+            double lat,
+            double lng,
+            double? accuracyM,
+            DateTimeOffset recordedAt,
+            CancellationToken cancellationToken = default)
+        {
+            _entered.TrySetResult();
+            await _release.Task.WaitAsync(cancellationToken);
+        }
+
+        public Task<GpsTrackHistoryPage> GetTrackHistoryPageAsync(
+            string trackId,
+            string? cursor,
+            int limit = 500,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new GpsTrackHistoryPage
+            {
+                Available = true,
+                TrackId = trackId,
+                RetentionDays = 30,
+                RetainedFrom = DateTimeOffset.UtcNow.AddDays(-30),
+            });
+
+        public void Release() => _release.TrySetResult();
     }
 
     private sealed class BlockingRealtimeClient : IRealtimeCommunicationClient, IDisposable

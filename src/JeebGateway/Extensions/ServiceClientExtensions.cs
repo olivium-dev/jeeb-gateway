@@ -233,7 +233,9 @@ public static class ServiceClientExtensions
 
         // Case evidence is already authorized at the gateway edge. Keep this
         // canonical history reader on the private network and resilience-only.
-        AttachResilienceOnly(
+        // Its write endpoint uses 429 as normal per-track flow control, so it has
+        // a dedicated breaker predicate that excludes throttles from failures.
+        AttachGeoHistoryResilienceOnly(
             services.AddHttpClient<IGeoHistoryClient, GeoHistoryClient>(http =>
                 BindBaseAddress(http, config, "Services:Geolocation")));
 
@@ -800,6 +802,70 @@ public static class ServiceClientExtensions
     {
         builder.AddResilienceHandler("standard", ConfigureStandardResilience);
         return builder;
+    }
+
+    /// <summary>
+    /// Geo-history uses HTTP 429 + Retry-After as expected per-track flow control.
+    /// The shared pipeline intentionally forwards 429, but its default breaker
+    /// predicate still counts it and can open the client-wide circuit during normal
+    /// movement. This pipeline preserves the standard 5xx/network retry and timeout
+    /// while excluding 429 from breaker accounting. GeoHistoryClient owns the
+    /// bounded, stateless Retry-After policy for each request.
+    /// </summary>
+    internal static IHttpClientBuilder AttachGeoHistoryResilienceOnly(IHttpClientBuilder builder)
+    {
+        builder.AddResilienceHandler("geo-history", ConfigureGeoHistoryResilience);
+        return builder;
+    }
+
+    private static void ConfigureGeoHistoryResilience(ResiliencePipelineBuilder<HttpResponseMessage> b)
+    {
+        b.AddRetry(new HttpRetryStrategyOptions
+        {
+            MaxRetryAttempts = 3,
+            Delay = TimeSpan.FromMilliseconds(200),
+            BackoffType = DelayBackoffType.Exponential,
+            UseJitter = true,
+            ShouldHandle = args => ShouldRetryGeoHistory(args.Outcome.Exception, args.Outcome.Result)
+                ? PredicateResult.True()
+                : PredicateResult.False(),
+        });
+
+        b.AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
+        {
+            SamplingDuration = TimeSpan.FromSeconds(30),
+            FailureRatio = 0.5,
+            MinimumThroughput = 10,
+            BreakDuration = TimeSpan.FromSeconds(30),
+            ShouldHandle = args => ShouldBreakGeoHistory(args.Outcome.Exception, args.Outcome.Result)
+                ? PredicateResult.True()
+                : PredicateResult.False(),
+        });
+
+        b.AddTimeout(new HttpTimeoutStrategyOptions
+        {
+            Timeout = TimeSpan.FromSeconds(10),
+        });
+    }
+
+    internal static bool ShouldRetryGeoHistory(Exception? exception, HttpResponseMessage? response)
+    {
+        // Retrying an already-open circuit only adds latency and log noise; the
+        // next mobile fix is the recovery probe after the breaker permits one.
+        if (exception is Polly.CircuitBreaker.BrokenCircuitException)
+            return false;
+        return ShouldRetryStandard(exception, response);
+    }
+
+    internal static bool ShouldBreakGeoHistory(Exception? exception, HttpResponseMessage? response)
+    {
+        if (exception is not null)
+            return true;
+        if (response is null || response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            return false;
+
+        var code = (int)response.StatusCode;
+        return code >= 500 || code == 408;
     }
 
     /// <summary>

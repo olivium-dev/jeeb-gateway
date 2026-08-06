@@ -191,14 +191,17 @@ public class LocationController : ControllerBase
             Timestamp = result.Latest.DeviceTimestamp
         };
 
-        // Delivery-scoped fixes are evidence, not just a latest-position cache. Persist
-        // the accepted fix under the delivery id in geolocation-service's generic
-        // 30-day track history before reporting it accepted to the device. The shared
-        // service remains product-neutral; the gateway supplies the delivery/actor
-        // composition it already authorized above.
+        // Delivery-scoped fixes are evidence, not just a latest-position cache. Start
+        // persistence under the delivery id in geolocation-service's generic 30-day
+        // history now, but await it after the non-blocking realtime enqueue below. This
+        // keeps the customer map moving during a normal Retry-After delay without
+        // reporting success to the device until this fix is durable.
         var retryingLatestForHistory = latest is not null
             && result.Accepted == 0
+            && result.Rejected == 0
             && points.Any(point => SameFix(point, latest));
+        Task? historyWrite = null;
+        var historyRetryAcknowledged = false;
         if (latest is not null
             && (result.Accepted > 0 || retryingLatestForHistory)
             && !string.IsNullOrWhiteSpace(body?.DeliveryId))
@@ -211,7 +214,7 @@ public class LocationController : ControllerBase
             }
             try
             {
-                await _geoHistory.RecordTrackPointAsync(
+                historyWrite = _geoHistory.RecordTrackPointAsync(
                     body.DeliveryId,
                     jeeberId,
                     latest.Lat,
@@ -220,23 +223,11 @@ public class LocationController : ControllerBase
                     latest.Timestamp,
                     ct);
             }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
             catch (Exception error)
             {
-                _logger.LogError(error,
-                    "Delivery track-history write failed for delivery {DeliveryId}, jeeber {JeeberId}; "
-                    + "the fix is not acknowledged as durable evidence.",
-                    body.DeliveryId, jeeberId);
-                return StatusCode(StatusCodes.Status502BadGateway, new ProblemDetails
-                {
-                    Title = "Delivery tracking history is temporarily unavailable.",
-                    Detail = "The location update was not acknowledged; retry with the latest position.",
-                    Status = StatusCodes.Status502BadGateway,
-                    Type = "https://jeeb.dev/errors/tracking-history-unavailable",
-                });
+                // Keep even a synchronously-failing dependency implementation on
+                // the common await path below so realtime still receives this fix.
+                historyWrite = Task.FromException(error);
             }
         }
 
@@ -312,10 +303,40 @@ public class LocationController : ControllerBase
             }
         }
 
+        if (historyWrite is not null)
+        {
+            try
+            {
+                await historyWrite;
+                // An exact retry can already exist in the latest-position store while its
+                // first history write failed. Once history succeeds, acknowledge that fix
+                // to the mobile caller even though it was not inserted locally a second time.
+                historyRetryAcknowledged = retryingLatestForHistory;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                _logger.LogError(error,
+                    "Delivery track-history write failed for delivery {DeliveryId}, jeeber {JeeberId}; "
+                    + "the fix is not acknowledged as durable evidence.",
+                    body!.DeliveryId, jeeberId);
+                return StatusCode(StatusCodes.Status502BadGateway, new ProblemDetails
+                {
+                    Title = "Delivery tracking history is temporarily unavailable.",
+                    Detail = "The location update was not acknowledged; retry with the latest position.",
+                    Status = StatusCodes.Status502BadGateway,
+                    Type = "https://jeeb.dev/errors/tracking-history-unavailable",
+                });
+            }
+        }
+
         return Ok(new LocationUpdateResponse
         {
-            Accepted = result.Accepted,
-            Rejected = result.Rejected,
+            Accepted = historyRetryAcknowledged ? 1 : result.Accepted,
+            Rejected = historyRetryAcknowledged ? 0 : result.Rejected,
             Latest = latest
         });
     }
