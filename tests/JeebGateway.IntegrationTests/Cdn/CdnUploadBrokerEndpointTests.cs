@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Services.Clients;
+using JeebGateway.StateService.Idempotency;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -160,6 +161,183 @@ public sealed class CdnUploadBrokerEndpointTests
         json.GetProperty("upload_url").GetString().Should().StartWith("https://");
     }
 
+    [Theory]
+    [InlineData("dispute_evidence")]
+    [InlineData("support_attachment")]
+    public async Task BrokerUploadUrl_Case_Attachment_Slots_Use_Existing_Signed_Upload_Path(string slot)
+    {
+        using var factory = CdnEnabledFactory(new StubCdn());
+        var client = ClientFor(factory, $"case-cdn-{slot}", "customer");
+
+        var response = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot,
+            content_type = "image/jpeg",
+        });
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await ReadJsonAsync(response);
+        body.GetProperty("object_ref").GetString().Should().Contain(slot);
+        body.GetProperty("method").GetString().Should().Be("PUT");
+        body.GetProperty("expires_in").GetInt32().Should().BeLessThanOrEqualTo(300);
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_AudioMp4_Is_Accepted_Only_For_Dispute_Evidence()
+    {
+        using var factory = CdnEnabledFactory(new StubCdn());
+        var client = ClientFor(factory, "case-cdn-voice", "customer");
+
+        var dispute = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "dispute_evidence",
+            content_type = "audio/mp4",
+        });
+        var support = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "support_attachment",
+            content_type = "audio/mp4",
+        });
+
+        dispute.StatusCode.Should().Be(HttpStatusCode.OK);
+        support.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Requires_Idempotency_Key()
+    {
+        using var factory = CdnEnabledFactory(new StubCdn());
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", "cdn-no-key");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "customer");
+
+        var response = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "dispute_evidence",
+            content_type = "image/jpeg",
+        });
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Replay_Uses_Distributed_Idempotency_Response()
+    {
+        var cdn = new StubCdn();
+        using var factory = CdnEnabledIdempotentFactory(cdn);
+        var client = ClientFor(factory, "cdn-retry");
+
+        var first = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "dispute_evidence", content_type = "image/jpeg",
+        });
+        var replay = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "dispute_evidence", content_type = "image/jpeg",
+        });
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        replay.StatusCode.Should().Be(HttpStatusCode.OK);
+        replay.Headers.Contains("Idempotency-Replayed").Should().BeTrue();
+        (await ReadJsonAsync(replay)).GetProperty("object_ref").GetString()
+            .Should().Be((await ReadJsonAsync(first)).GetProperty("object_ref").GetString());
+        cdn.MintCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Reused_Key_With_Different_Request_Is_409_Without_Another_Mint()
+    {
+        var cdn = new StubCdn();
+        using var factory = CdnEnabledIdempotentFactory(cdn);
+        var client = ClientFor(factory, "cdn-collision");
+
+        (await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "dispute_evidence", content_type = "image/jpeg",
+        })).StatusCode.Should().Be(HttpStatusCode.OK);
+        var collision = await client.PostAsJsonAsync("/api/cdn/assets", new
+        {
+            slot = "support_attachment", content_type = "image/jpeg",
+        });
+
+        collision.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        cdn.MintCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Scopes_The_Same_Raw_Key_By_User()
+    {
+        var cdn = new StubCdn();
+        using var factory = CdnEnabledIdempotentFactory(cdn);
+        var first = ClientFor(factory, "cdn-user-1");
+        var second = ClientFor(factory, "cdn-user-2");
+        first.DefaultRequestHeaders.Remove("Idempotency-Key");
+        second.DefaultRequestHeaders.Remove("Idempotency-Key");
+        first.DefaultRequestHeaders.Add("Idempotency-Key", "shared-mobile-key");
+        second.DefaultRequestHeaders.Add("Idempotency-Key", "shared-mobile-key");
+
+        (await first.PostAsJsonAsync("/api/cdn/assets", new
+        { slot = "dispute_evidence", content_type = "image/jpeg" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        (await second.PostAsJsonAsync("/api/cdn/assets", new
+        { slot = "dispute_evidence", content_type = "image/jpeg" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        cdn.MintCalls.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Reservation_And_Result_Ttls_Do_Not_Outlive_Ticket()
+    {
+        var store = new RecordingIdempotencyStore();
+        using var factory = CdnEnabledIdempotentFactory(new StubCdn(), store);
+        var response = await ClientFor(factory, "cdn-ttl").PostAsJsonAsync(
+            "/api/cdn/assets", new
+            {
+                slot = "dispute_evidence", content_type = "image/jpeg", ttl_seconds = 60,
+            });
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        store.Puts.Should().HaveCount(2);
+        store.Puts.Should().OnlyContain(item => item.TtlSeconds <= 60);
+        store.Puts.Should().Contain(item => item.StatusCode == 202);
+        store.Puts.Should().Contain(item => item.StatusCode == 200);
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Does_Not_Cache_An_Upstream_Invalid_Ticket_As_Success()
+    {
+        var cdn = new StubCdn { ExpiresInSeconds = 30 };
+        var store = new RecordingIdempotencyStore();
+        using var factory = CdnEnabledIdempotentFactory(cdn, store);
+        var response = await ClientFor(factory, "cdn-invalid").PostAsJsonAsync(
+            "/api/cdn/assets", new
+            {
+                slot = "dispute_evidence", content_type = "image/jpeg", ttl_seconds = 60,
+            });
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        store.Puts.Should().ContainSingle().Which.StatusCode.Should().Be(202);
+        cdn.MintCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task BrokerUploadUrl_Rejects_Process_Local_Idempotency_Fallback()
+    {
+        var cdn = new StubCdn();
+        using var factory = CdnEnabledIdempotentFactory(
+            cdn, new InMemoryIdempotencyStore(TimeProvider.System));
+
+        var response = await ClientFor(factory, "cdn-no-external-store").PostAsJsonAsync(
+            "/api/cdn/assets", new
+            {
+                slot = "dispute_evidence", content_type = "image/jpeg",
+            });
+
+        response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        cdn.MintCalls.Should().Be(0);
+    }
+
     [Fact]
     public async Task BrokerUploadUrl_Chat_Attachment_Slot_Returns_200_For_A_Client()
     {
@@ -300,6 +478,24 @@ public sealed class CdnUploadBrokerEndpointTests
             {
                 services.RemoveAll<ICDNServiceClient>();
                 services.AddSingleton(stub);
+                services.RemoveAll<IIdempotencyStore>();
+                services.AddSingleton<IIdempotencyStore>(new RecordingIdempotencyStore());
+            });
+        });
+
+    private static WebApplicationFactory<Program> CdnEnabledIdempotentFactory(
+        ICDNServiceClient stub, IIdempotencyStore? store = null) =>
+        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("FeatureFlags:UseUpstream:Cdn", "true");
+            builder.UseSetting("JeebStateService:BaseUrl", "http://state.test/");
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<ICDNServiceClient>();
+                services.AddSingleton(stub);
+                services.RemoveAll<IIdempotencyStore>();
+                if (store is null) services.AddSingleton<IIdempotencyStore>(new RecordingIdempotencyStore());
+                else services.AddSingleton(store);
             });
         });
 
@@ -314,6 +510,7 @@ public sealed class CdnUploadBrokerEndpointTests
         var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", userId);
         client.DefaultRequestHeaders.Add("X-User-Roles", role);
+        client.DefaultRequestHeaders.Add("Idempotency-Key", "cdn-upload-" + userId);
         return client;
     }
 
@@ -326,6 +523,8 @@ public sealed class CdnUploadBrokerEndpointTests
 
     private sealed class StubCdn : ICDNServiceClient
     {
+        private int _mintCalls;
+        public int MintCalls => _mintCalls;
         public int ExpiresInSeconds { get; init; } = 300;
 
         /// <summary>JEBV4-259: when set, the stub returns this upload_url (e.g. the
@@ -340,7 +539,9 @@ public sealed class CdnUploadBrokerEndpointTests
             = new Dictionary<string, string>();
 
         public Task<CdnUploadTicket> MintUploadUrlAsync(CdnUploadUrlRequest request, CancellationToken ct)
-            => Task.FromResult(new CdnUploadTicket
+        {
+            Interlocked.Increment(ref _mintCalls);
+            return Task.FromResult(new CdnUploadTicket
             {
                 UploadUrl = UploadUrlOverride ?? $"https://cdn.jeeb.lb/put/{request.Slot}?sig=abc",
                 ObjectRef = $"cdn://obj/{request.Slot}/{Guid.NewGuid():N}",
@@ -348,6 +549,7 @@ public sealed class CdnUploadBrokerEndpointTests
                 Method = TicketMethod,
                 RequiredHeaders = TicketRequiredHeaders,
             });
+        }
 
         public Task<CdnAsset> UploadAsync(CdnUploadRequest request, CancellationToken ct)
             => throw new NotImplementedException();
@@ -357,5 +559,24 @@ public sealed class CdnUploadBrokerEndpointTests
 
         public Task<CdnAsset?> GetAssetAsync(string assetId, CancellationToken ct)
             => Task.FromResult<CdnAsset?>(null);
+    }
+
+    private sealed class RecordingIdempotencyStore : IExternalIdempotencyStore
+    {
+        private readonly InMemoryIdempotencyStore _inner = new(TimeProvider.System);
+        public List<(string Key, int StatusCode, int TtlSeconds)> Puts { get; } = new();
+
+        public Task<IdempotencyOutcome?> GetAsync(string key, CancellationToken ct) =>
+            _inner.GetAsync(key, ct);
+
+        public Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(
+            string prefix, CancellationToken ct) => _inner.FindByPrefixAsync(prefix, ct);
+
+        public Task<IdempotencyOutcome> PutOrGetAsync(
+            string key, int statusCode, string responseBodyJson, int ttlSeconds, CancellationToken ct)
+        {
+            Puts.Add((key, statusCode, ttlSeconds));
+            return _inner.PutOrGetAsync(key, statusCode, responseBodyJson, ttlSeconds, ct);
+        }
     }
 }

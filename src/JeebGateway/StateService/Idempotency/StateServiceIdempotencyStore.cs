@@ -21,7 +21,7 @@ namespace JeebGateway.StateService.Idempotency;
 /// the read-back is redundant in the normal path. It is retained only as a degradation
 /// path for a 2xx that carries no parseable body.</para>
 /// </summary>
-public sealed class StateServiceIdempotencyStore : IIdempotencyStore
+public sealed class StateServiceIdempotencyStore : IExternalIdempotencyStore
 {
     private readonly IJeebStateServiceClient _client;
     private readonly ILogger<StateServiceIdempotencyStore> _log;

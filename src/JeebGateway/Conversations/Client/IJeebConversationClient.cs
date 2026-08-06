@@ -55,6 +55,15 @@ public interface IJeebConversationClient
         string viewerUserId,
         CancellationToken ct);
 
+    Task<JeebConversationExportPage> ExportMessagesForViewerAsync(
+        string conversationId,
+        string viewerUserId,
+        DateTimeOffset? asOf,
+        string? cursor,
+        int limit,
+        CancellationToken ct) => throw new NotSupportedException(
+            "This test double does not implement the canonical paged export route.");
+
     /// <summary>
     /// S08 A6 — viewer-filtered DELTA read. Returns ONLY the messages created
     /// AFTER <paramref name="cursor"/> that the viewer may see. The gateway forwards

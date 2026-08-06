@@ -1,6 +1,60 @@
 # jeeb-gateway
 Jeeb BFF gateway — C#/.NET 8, NSwag-generated clients, aggregates all downstream services.
 
+## Case callback deployment
+
+`jeeb-state-service` and the gateway run on the same MSI host. Configure the
+state service with:
+
+```text
+CaseManagement__GatewayCallbackUrl=http://127.0.0.1:10090/svc-callbacks/cases/events
+```
+
+The canonical callback and its backward-compatible `/v1/case-events` alias are
+intentionally unauthenticated under the owner ruling against inter-service auth.
+Both routes enforce `HttpContext.Connection.RemoteIpAddress` as IPv4/IPv6
+loopback and reject missing or non-loopback peers, so they must not be routed
+through LAN ingress or a reverse proxy.
+
+### Support message pagination
+
+`GET /v1/support/tickets/{id}/messages?limit=N&cursor=...` selects the newest
+available page first. Items inside each page are chronological (oldest to
+newest) for direct rendering. A non-null `nextCursor` walks strictly earlier
+messages; clients prepend that page and continue until `nextCursor` is null.
+The cursor is opaque and scoped to support messages.
+
+### Case list sorting
+
+The state-service case list accepts `sort=recent|sla`. `recent` is the default
+and pages `(created_at, case_id)` newest-first. `sla` pages active cases first,
+then due dates earliest-first with null due dates last, followed by deterministic
+creation/id keys. Cursors are opaque and cannot cross sort modes. Public user
+lists explicitly request `recent`; admin case queues explicitly request `sla`.
+
+### Case and push recovery
+
+Only an authenticated administrator with the dispute-resolution capability can
+use `/admin/v1/case-recovery/*`. The gateway proxies state callback dead-letter
+list/requeue operations and push-dispatch stale/get/manual-resolve operations;
+it stores no recovery state. Push resolve is an operator-observed CAS command:
+send the exact `version` and `updated_at` from the stale/get response as
+`observed_version` and `observed_updated_at`. The gateway does not refresh those
+tokens, and a fresh, terminal, or changed dispatch returns `409 Conflict`.
+
+The generic state recovery endpoints and push operator endpoints remain on
+private MSI ingress (loopback where deployed on the same host), with no service
+authentication. Mobile/public clients reach only the capability-protected
+gateway routes. Public dispute/support list cursors are opaque state-service
+keyset cursors relayed unchanged for the same query scope.
+
+### CDN upload ticket replay
+
+`POST /api/cdn/assets` reserves caller idempotency keys in the existing external
+state-service idempotency store, scoped by user and operation. Request-hash
+collisions return `409`; successful validated tickets replay only until their
+ticket expiry. Failed or invalid CDN responses are never cached as successes.
+
 ## Endpoints
 
 ### Notification preferences (T-backend-031)

@@ -1,309 +1,363 @@
-using JeebGateway.Admin;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Cases;
 using JeebGateway.Disputes;
 using JeebGateway.Requests;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
+using System.Text.Json;
 
 namespace JeebGateway.Controllers;
 
-/// <summary>
-/// T-backend-025 / JEEB-43: dispute reporting API.
-///
-/// <list type="bullet">
-///   <item>POST /deliveries/{id}/dispute — Client or Jeeber files a
-///     dispute against a delivery (one open dispute per delivery).</item>
-///   <item>GET /disputes — returns every dispute the caller filed.</item>
-///   <item>GET /disputes/{id} — single dispute lookup. Filers may read
-///     only their own rows; admins may read any row.</item>
-///   <item>PUT /admin/disputes/{id}/resolve — admin transitions the case
-///     through <c>filed → under_review → resolved | dismissed</c> and
-///     records the resolution notes.</item>
-/// </list>
-///
-/// Photos: the mobile app uploads bytes to upload-service directly and
-/// then hands the resulting URLs to this endpoint, mirroring how parcel
-/// photos already work on <see cref="DeliveryRequest.Photos"/>. The cap
-/// is 3 photos per dispute (<see cref="DisputeService.MaxPhotos"/>).
-///
-/// Notifications: state changes fan out via <see cref="JeebGateway.Push.IPushNotificationService"/>,
-/// the same pipeline every other gateway trigger uses (which proxies
-/// to push-notification in production via the unified push pipeline).
-/// </summary>
+/// <summary>Compatibility adapter over the generic state-service case engine.</summary>
 [ApiController]
-public class DisputesController : ControllerBase
+public sealed class DisputesController : CaseControllerBase
 {
-    private const string EntityType = "dispute";
-    private const string ActionFile = "file_dispute";
-    private const string ActionOpen = "open_dispute_review";
-    private const string ActionResolve = "resolve_dispute";
-    private const string ActionDismiss = "dismiss_dispute";
-
-    private readonly IDisputeService _service;
-    private readonly IDisputeStore _store;
+    private const int LegacyPageSize = 200;
+    private const int HydrationBatchSize = 8;
+    private readonly IGenericCaseGatewayService _cases;
+    private readonly IDisputeService? _legacy;
     private readonly IRequestsStore _requests;
-    private readonly IAdminAuditLog _auditLog;
 
     public DisputesController(
-        IDisputeService service,
-        IDisputeStore store,
+        IGenericCaseGatewayService cases,
         IRequestsStore requests,
-        IAdminAuditLog auditLog)
+        IDisputeService? legacy = null)
     {
-        _service = service;
-        _store = store;
+        _cases = cases;
         _requests = requests;
-        _auditLog = auditLog;
+        _legacy = legacy;
     }
 
     [HttpPost("deliveries/{deliveryId}/dispute")]
     [RequireCapability(Capabilities.DisputeFile)]
-    [ProducesResponseType(typeof(DisputeResponse), StatusCodes.Status201Created)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> File(
-        string deliveryId,
-        [FromBody] FileDisputeRequest? body,
-        CancellationToken ct)
+    public async Task<IActionResult> File(string deliveryId, [FromBody] FileDisputeRequest? body,
+        [FromHeader(Name = "Idempotency-Key")] string? suppliedKey, CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
-
-        if (body is null)
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = "request body is required.",
-                Status = StatusCodes.Status400BadRequest
-            });
-        }
-
-        // Verify the delivery exists. The dispute references a delivery id;
-        // dangling references would muddle the admin queue.
-        var delivery = await _requests.GetAsync(deliveryId, ct);
-        if (delivery is null) return NotFound();
-
+        if (_legacy is not null)
+            return await LegacyFileAsync(deliveryId, body, userId, ct);
         try
         {
-            var dispute = await _service.FileAsync(new FileDisputeInput
+            if (body is null) throw new CaseValidationException("request body is required.");
+            var normalized = NormalizeLegacyCreate(body);
+            var key = string.IsNullOrWhiteSpace(suppliedKey)
+                ? GenericCaseGatewayService.DeterministicKey(
+                    "legacy-dispute-create", userId, deliveryId, CanonicalCreateRequest(normalized))
+                : suppliedKey.Trim();
+            var row = await _cases.CreateDisputeAsync(new CreateDisputeCaseInput
+            {
+                DeliveryId = deliveryId,
+                UserId = userId,
+                UserRole = CanonicalDeliveryVocab.ActorRoleFor(HttpContext),
+                Reason = normalized.Category,
+                Comment = normalized.Description,
+                Attachments = normalized.PhotoUrls,
+                IdempotencyKey = key,
+            }, ct);
+            Response.Headers.ETag = $"\"{row.Case.Version}\"";
+            return CreatedAtAction(nameof(GetOne), new { id = row.Case.CaseId }, Legacy(row));
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        { return CaseProblem(error, GenericCaseKinds.Dispute, "legacy_create"); }
+    }
+
+    [HttpGet("disputes")]
+    [RequireCapability(Capabilities.DisputeReadMine)]
+    public async Task<IActionResult> ListMine(CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+        if (_legacy is not null)
+        {
+            var items = await _legacy.ListForUserAsync(userId, ct);
+            return Ok(new DisputeListResponse
+            {
+                Items = items.Select(DisputeResponse.From).ToArray(), Total = items.Count,
+            });
+        }
+        try
+        {
+            var rows = new List<GenericCaseV1>();
+            var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+            string? cursor = null;
+            do
+            {
+                var page = await _cases.ListForRequesterAsync(GenericCaseKinds.Dispute, userId,
+                    new GenericCaseQueryV1
+                    {
+                        RequesterRef = userId,
+                        Limit = LegacyPageSize,
+                        Cursor = cursor,
+                    }, ct);
+                rows.AddRange(page.Items.Where(row =>
+                    row.Kind == GenericCaseKinds.Dispute
+                    && string.Equals(row.RequesterRef, userId, StringComparison.Ordinal)));
+                cursor = page.NextCursor;
+                if (cursor is not null && !seenCursors.Add(cursor))
+                    throw new InvalidOperationException("State-service case pagination repeated a cursor.");
+            } while (cursor is not null);
+
+            var distinctRows = rows.DistinctBy(row => row.CaseId).ToArray();
+            var details = new GenericCaseDetailV1[distinctRows.Length];
+            for (var offset = 0; offset < distinctRows.Length; offset += HydrationBatchSize)
+            {
+                var end = Math.Min(offset + HydrationBatchSize, distinctRows.Length);
+                var tasks = Enumerable.Range(offset, end - offset).Select(async index =>
+                {
+                    details[index] = await _cases.GetForRequesterAsync(
+                        distinctRows[index].CaseId.ToString("D"), userId, ct);
+                });
+                await Task.WhenAll(tasks);
+            }
+            var items = details.Where(detail =>
+                    detail.Case.Kind == GenericCaseKinds.Dispute
+                    && string.Equals(detail.Case.RequesterRef, userId, StringComparison.Ordinal))
+                .Select(Legacy).ToArray();
+            return Ok(new DisputeListResponse { Items = items, Total = items.Length });
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        { return CaseProblem(error, GenericCaseKinds.Dispute, "legacy_list"); }
+    }
+
+    [HttpGet("disputes/{id}")]
+    [RequireCapability(Capabilities.DisputeReadMine)]
+    public async Task<IActionResult> GetOne(string id, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+        if (_legacy is not null)
+        {
+            var dispute = await _legacy.GetAsync(id, ct);
+            if (dispute is not null)
+            {
+                if (!UserIdentity.IsAdmin(HttpContext)
+                    && !string.Equals(dispute.FiledByUserId, userId, StringComparison.Ordinal))
+                    return Problem("Dispute belongs to another user.", statusCode: StatusCodes.Status403Forbidden);
+                return Ok(DisputeResponse.From(dispute));
+            }
+        }
+        try
+        {
+            var isAdmin = UserIdentity.IsAdmin(HttpContext);
+            var detail = isAdmin
+                ? await _cases.GetForUserAsync(id, userId, isAdmin: true, ct)
+                : await _cases.GetForRequesterAsync(id, userId, ct);
+            if (detail.Case.Kind != GenericCaseKinds.Dispute) return NotFound();
+            if (!isAdmin && !string.Equals(detail.Case.RequesterRef, userId, StringComparison.Ordinal))
+                throw new CaseAccessDeniedException();
+            Response.Headers.ETag = $"\"{detail.Case.Version}\"";
+            return Ok(Legacy(detail));
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        { return CaseProblem(error, GenericCaseKinds.Dispute, "legacy_get"); }
+    }
+
+    [HttpPut("admin/disputes/{id}/resolve")]
+    [RequireCapability(Capabilities.DisputeResolve)]
+    public async Task<IActionResult> Resolve(string id, [FromBody] ResolveDisputeRequest? body,
+        [FromHeader(Name = "Idempotency-Key")] string? suppliedKey, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var unauthorized)) return unauthorized;
+        if (_legacy is not null)
+            return await LegacyResolveAsync(id, body, adminId, ct);
+        try
+        {
+            if (body is null) throw new CaseValidationException("request body is required.");
+            var action = body.Action?.Trim().ToLowerInvariant();
+            var status = action switch
+            {
+                "open" or "under_review" => GenericCaseStatuses.Pending,
+                "resolve" or "resolved" => GenericCaseStatuses.Fixed,
+                "dismiss" or "dismissed" => GenericCaseStatuses.Closed,
+                _ => throw new CaseValidationException("action is required (open, resolve, or dismiss)."),
+            };
+            var resolution = body.Resolution?.Trim();
+            if (status is GenericCaseStatuses.Fixed or GenericCaseStatuses.Closed)
+            {
+                if (string.IsNullOrWhiteSpace(resolution))
+                    throw new CaseValidationException("resolution is required for resolve or dismiss.");
+                if (resolution.Length > DisputeService.MaxResolutionLength)
+                    throw new CaseValidationException(
+                        $"resolution must be {DisputeService.MaxResolutionLength} characters or fewer.");
+            }
+            var publicReason = string.IsNullOrWhiteSpace(resolution)
+                ? "Your dispute is under review."
+                : resolution;
+            var detail = await _cases.GetForUserAsync(id, adminId, true, ct);
+            if (detail.Case.Kind != GenericCaseKinds.Dispute) return NotFound();
+            var existing = Legacy(detail);
+            if (DisputeState.IsTerminal(existing.State))
+            {
+                var targetState = status == GenericCaseStatuses.Fixed
+                    ? DisputeState.Resolved
+                    : status == GenericCaseStatuses.Closed ? DisputeState.Dismissed : DisputeState.UnderReview;
+                if (existing.State == targetState
+                    && string.Equals(existing.Resolution, publicReason, StringComparison.Ordinal))
+                {
+                    Response.Headers.ETag = $"\"{detail.Case.Version}\"";
+                    return Ok(existing);
+                }
+                throw new CaseConflictException("The legacy dispute is already terminal.");
+            }
+            var key = string.IsNullOrWhiteSpace(suppliedKey)
+                ? GenericCaseGatewayService.DeterministicKey(
+                    "legacy-dispute-resolve", adminId, id, CanonicalResolveRequest(action!, resolution))
+                : suppliedKey.Trim();
+            var updated = await _cases.ApplyStatusMessageAsync(
+                id, detail.Case.Version, status, publicReason, adminId,
+                CanonicalDeliveryVocab.ActorRoleFor(HttpContext), key, ct);
+            Response.Headers.ETag = $"\"{updated.Case.Version}\"";
+            return Ok(Legacy(updated));
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        { return CaseProblem(error, GenericCaseKinds.Dispute, "legacy_resolve"); }
+    }
+
+    private static DisputeResponse Legacy(GenericCaseDetailV1 detail)
+    {
+        var row = detail.Case;
+        var projected = CaseApiProjection.Project(detail, includeInternal: false);
+        var review = detail.Audit.LastOrDefault(item =>
+            item.EventType == "case.updated"
+            && item.Data.ValueKind == JsonValueKind.Object
+            && item.Data.TryGetProperty("status", out var status)
+            && status.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(status.GetString()));
+        var publicResolution = detail.Messages.LastOrDefault(message =>
+            message.MessageType != "internal_note"
+            && message.Actor.Role is "admin" or "agent")?.Body;
+        return new DisputeResponse
+        {
+            Id = "dsp_" + row.CaseId.ToString("D"),
+            DeliveryId = row.Subject.Ref,
+            FiledByUserId = row.RequesterRef,
+            Category = LegacyCategory(projected.Reason),
+            Description = projected.Comment ?? string.Empty,
+            PhotoUrls = projected.Photos,
+            State = LegacyState(row.Status, review is not null),
+            FiledAt = row.CreatedAt,
+            ReviewedAt = review?.CreatedAt,
+            ResolverAdminId = review?.Actor.Ref ?? row.AssigneeRef,
+            Resolution = row.Status is GenericCaseStatuses.Fixed or GenericCaseStatuses.Closed
+                ? publicResolution : null,
+        };
+    }
+
+    private static LegacyCreate NormalizeLegacyCreate(FileDisputeRequest body)
+    {
+        var category = body.Category?.Trim() ?? string.Empty;
+        if (!DisputeCategory.IsValid(category))
+            throw new CaseValidationException("category is required and must be supported.");
+        var description = body.Description?.Trim() ?? string.Empty;
+        if (description.Length == 0)
+            throw new CaseValidationException("description is required.");
+        if (description.Length > DisputeService.MaxDescriptionLength)
+            throw new CaseValidationException(
+                $"description must be {DisputeService.MaxDescriptionLength} characters or fewer.");
+        if ((body.PhotoUrls?.Count ?? 0) > 3)
+            throw new CaseValidationException("A maximum of 3 photo URLs is allowed.");
+        var photos = new List<string>();
+        foreach (var value in body.PhotoUrls ?? Enumerable.Empty<string>())
+        {
+            if (string.IsNullOrWhiteSpace(value)) continue;
+            var url = value.Trim();
+            if (!(url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+                  || url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                  || url.StartsWith("s3://", StringComparison.OrdinalIgnoreCase)))
+                throw new CaseValidationException("photo URLs must start with https://, http://, or s3://.");
+            photos.Add(url);
+        }
+        return new LegacyCreate(category, description, photos);
+    }
+
+    private async Task<IActionResult> LegacyFileAsync(
+        string deliveryId, FileDisputeRequest? body, string userId, CancellationToken ct)
+    {
+        if (body is null) return Problem("request body is required.", statusCode: 400);
+        if (await _requests.GetAsync(deliveryId, ct) is null) return NotFound();
+        try
+        {
+            var dispute = await _legacy!.FileAsync(new FileDisputeInput
             {
                 DeliveryId = deliveryId,
                 FiledByUserId = userId,
                 Category = body.Category ?? string.Empty,
                 Description = body.Description ?? string.Empty,
-                PhotoUrls = body.PhotoUrls ?? new List<string>()
+                PhotoUrls = body.PhotoUrls ?? new List<string>(),
             }, ct);
-
-            await _auditLog.AppendAsync(new AdminAuditAppend
-            {
-                AdminUserId = userId,
-                Action = ActionFile,
-                EntityType = EntityType,
-                EntityId = dispute.Id,
-                AfterState = Snapshot(dispute),
-                RequestId = HttpContext.TraceIdentifier
-            }, ct);
-
             return CreatedAtAction(nameof(GetOne), new { id = dispute.Id }, DisputeResponse.From(dispute));
         }
-        catch (DisputeValidationException ex)
+        catch (DisputeValidationException error)
         {
-            return BadRequest(new ProblemDetails
-            {
-                Title = ex.Message,
-                Status = StatusCodes.Status400BadRequest
-            });
+            return Problem(error.Message, statusCode: 400);
         }
-        catch (DisputeConflictException ex)
+        catch (DisputeConflictException error)
         {
-            return Conflict(new ProblemDetails
-            {
-                Title = ex.Message,
-                Status = StatusCodes.Status409Conflict
-            });
+            return Problem(error.Message, statusCode: 409);
         }
     }
 
-    [HttpGet("disputes")]
-    [RequireCapability(Capabilities.DisputeReadMine)]
-    [ProducesResponseType(typeof(DisputeListResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> ListMine(CancellationToken ct)
+    private async Task<IActionResult> LegacyResolveAsync(
+        string id, ResolveDisputeRequest? body, string adminId, CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
-
-        var items = await _service.ListForUserAsync(userId, ct);
-        return Ok(new DisputeListResponse
+        if (body is null) return Problem("request body is required.", statusCode: 400);
+        var action = body.Action?.Trim().ToLowerInvariant() switch
         {
-            Items = items.Select(DisputeResponse.From).ToList(),
-            Total = items.Count
-        });
-    }
-
-    [HttpGet("disputes/{id}")]
-    // ADR-005 L2 §G: coarse cap = dispute.read.mine {client, jeeber, admin}. The own-row-vs-admin
-    // visibility (IsAdmin reads any row, filer reads only their own) is STATE/ownership and
-    // stays in the action body below — never expressed as an L2 policy.
-    [RequireCapability(Capabilities.DisputeReadMine)]
-    [ProducesResponseType(typeof(DisputeResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> GetOne(string id, CancellationToken ct)
-    {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
-
-        var dispute = await _service.GetAsync(id, ct);
-        if (dispute is null) return NotFound();
-
-        // Filers may read only their own rows; admins read any row. This
-        // mirrors the visibility model used by /admin/kyc/queue.
-        var isAdmin = UserIdentity.IsAdmin(HttpContext);
-        if (!isAdmin && !string.Equals(dispute.FiledByUserId, userId, StringComparison.Ordinal))
-        {
-            return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
-            {
-                Title = "Forbidden: dispute belongs to a different user.",
-                Status = StatusCodes.Status403Forbidden,
-                Type = "https://jeeb.dev/errors/forbidden-resource"
-            });
-        }
-
-        return Ok(DisputeResponse.From(dispute));
-    }
-
-    [HttpPut("admin/disputes/{id}/resolve")]
-    [RequireCapability(Capabilities.DisputeResolve)]
-    [ProducesResponseType(typeof(DisputeResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Resolve(
-        string id,
-        [FromBody] ResolveDisputeRequest? body,
-        CancellationToken ct)
-    {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var unauthorized)) return unauthorized;
-
-        if (body is null)
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = "request body is required.",
-                Status = StatusCodes.Status400BadRequest
-            });
-        }
-
-        if (!TryParseAction(body.Action, out var action, out var actionError))
-        {
-            return BadRequest(actionError);
-        }
-
-        var before = await _store.GetByIdAsync(id, ct);
-        if (before is null) return NotFound();
-
-        Dispute? updated;
+            "open" or "under_review" => DisputeResolveAction.Open,
+            "resolve" or "resolved" => DisputeResolveAction.Resolve,
+            "dismiss" or "dismissed" => DisputeResolveAction.Dismiss,
+            _ => (DisputeResolveAction?)null,
+        };
+        if (action is null)
+            return Problem("action is required (open, resolve, or dismiss).", statusCode: 400);
         try
         {
-            updated = await _service.ResolveAsync(id, new ResolveDisputeInput
+            var dispute = await _legacy!.ResolveAsync(id, new ResolveDisputeInput
             {
-                Action = action,
-                AdminUserId = adminId,
-                Resolution = body.Resolution
+                Action = action.Value, AdminUserId = adminId, Resolution = body.Resolution,
             }, ct);
+            return dispute is null ? NotFound() : Ok(DisputeResponse.From(dispute));
         }
-        catch (DisputeValidationException ex)
+        catch (DisputeValidationException error)
         {
-            return BadRequest(new ProblemDetails
-            {
-                Title = ex.Message,
-                Status = StatusCodes.Status400BadRequest
-            });
+            return Problem(error.Message, statusCode: 400);
         }
-        catch (DisputeConflictException ex)
+        catch (DisputeConflictException error)
         {
-            return Conflict(new ProblemDetails
-            {
-                Title = ex.Message,
-                Status = StatusCodes.Status409Conflict
-            });
-        }
-
-        if (updated is null) return NotFound();
-
-        await _auditLog.AppendAsync(new AdminAuditAppend
-        {
-            AdminUserId = adminId,
-            Action = AuditActionFor(action),
-            EntityType = EntityType,
-            EntityId = id,
-            BeforeState = Snapshot(before),
-            AfterState = Snapshot(updated),
-            RequestId = HttpContext.TraceIdentifier
-        }, ct);
-
-        return Ok(DisputeResponse.From(updated));
-    }
-
-    private static bool TryParseAction(string? raw, out DisputeResolveAction action, out ProblemDetails error)
-    {
-        action = default;
-        error = null!;
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            error = new ProblemDetails
-            {
-                Title = "action is required (open, resolve, or dismiss).",
-                Status = StatusCodes.Status400BadRequest
-            };
-            return false;
-        }
-
-        switch (raw.Trim().ToLowerInvariant())
-        {
-            case "open":
-            case "under_review":
-                action = DisputeResolveAction.Open;
-                return true;
-            case "resolve":
-            case "resolved":
-                action = DisputeResolveAction.Resolve;
-                return true;
-            case "dismiss":
-            case "dismissed":
-                action = DisputeResolveAction.Dismiss;
-                return true;
-            default:
-                error = new ProblemDetails
-                {
-                    Title = $"Unknown action '{raw}'. Allowed: open, resolve, dismiss.",
-                    Status = StatusCodes.Status400BadRequest
-                };
-                return false;
+            return Problem(error.Message, statusCode: 409);
         }
     }
 
-    private static string AuditActionFor(DisputeResolveAction action) => action switch
+    private static string CanonicalCreateRequest(LegacyCreate body) => JsonSerializer.Serialize(new
     {
-        DisputeResolveAction.Open => ActionOpen,
-        DisputeResolveAction.Resolve => ActionResolve,
-        DisputeResolveAction.Dismiss => ActionDismiss,
-        _ => action.ToString()
+        category = body.Category,
+        description = body.Description,
+        photoUrls = body.PhotoUrls,
+    });
+
+    private static string CanonicalResolveRequest(string action, string? resolution) => JsonSerializer.Serialize(new
+    {
+        action,
+        resolution,
+    });
+
+    private sealed record LegacyCreate(
+        string Category,
+        string Description,
+        IReadOnlyList<string> PhotoUrls);
+
+    private static string LegacyState(string status, bool reviewed) => status switch
+    {
+        GenericCaseStatuses.Pending => reviewed ? DisputeState.UnderReview : DisputeState.Filed,
+        GenericCaseStatuses.Fixed => DisputeState.Resolved,
+        GenericCaseStatuses.Closed => DisputeState.Dismissed,
+        _ => DisputeState.Filed,
     };
 
-    private static IReadOnlyDictionary<string, object?> Snapshot(Dispute d) =>
-        new Dictionary<string, object?>
-        {
-            ["state"] = d.State,
-            ["category"] = d.Category,
-            ["filed_by_user_id"] = d.FiledByUserId,
-            ["delivery_id"] = d.DeliveryId,
-            ["reviewed_at"] = d.ReviewedAt,
-            ["resolver_admin_id"] = d.ResolverAdminId,
-            ["resolution"] = d.Resolution,
-            ["photo_count"] = d.PhotoUrls.Count
-        };
+    private static string LegacyCategory(string? category) => category switch
+    {
+        "damaged" => DisputeCategory.DamagedGoods,
+        "wrong_item" => DisputeCategory.WrongDelivery,
+        "no_show" => DisputeCategory.NoDelivery,
+        null or "" => "other",
+        _ => category,
+    };
 }

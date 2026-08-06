@@ -48,8 +48,12 @@ internal static class StoreDurabilityGuard
         (typeof(JeebGateway.Users.IUsersStore),                             new[] { typeof(JeebGateway.Users.UpstreamBackedUsersStore) }),
         (typeof(JeebGateway.Tokens.IRefreshTokenStore),                     new[] { typeof(JeebGateway.Tokens.StateServiceRefreshTokenStore) }),
         (typeof(JeebGateway.StateService.Idempotency.IIdempotencyStore),    new[] { typeof(JeebGateway.StateService.Idempotency.StateServiceIdempotencyStore) }),
-        (typeof(JeebGateway.Disputes.IDisputeStore),                        new[] { typeof(JeebGateway.Disputes.StateServiceDisputeStore) }),
-        (typeof(JeebGateway.Disputes.V2.IDisputeCaseStore),                 new[] { typeof(JeebGateway.Disputes.V2.StateServiceDisputeCaseStore) }),
+        // Disputes and support share the canonical generic case authority. The retired
+        // opaque dispute stores must not remain production boot requirements.
+        (typeof(JeebGateway.Services.Clients.IGenericCaseStateClient),      new[] { typeof(JeebGateway.Services.Clients.JeebStateServiceClient) }),
+        // Ambiguous at-most-once push claims require the durable push-service operator
+        // ledger; the gateway client is stateless, but this recovery boundary must resolve.
+        (typeof(JeebGateway.Services.Clients.IPushDispatchRecoveryClient), new[] { typeof(JeebGateway.Services.Clients.PushDispatchRecoveryClient) }),
         (typeof(JeebGateway.Availability.IOfferRequestIndex),               new[] { typeof(JeebGateway.StateService.Durable.StateServiceOfferRequestIndex) }),
         (typeof(JeebGateway.Requests.IRequestsStore),                       new[] { typeof(JeebGateway.Requests.DurableRequestsStore) }),
         (typeof(JeebGateway.Admin.IAdminAuditLog),                          new[] { typeof(JeebGateway.Admin.PostgresAdminAuditLog) }),

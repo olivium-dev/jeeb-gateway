@@ -1,439 +1,249 @@
 using JeebGateway.Admin;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Cases;
 using JeebGateway.Disputes.V2;
+using JeebGateway.Requests;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers.V1;
 
-/// <summary>
-/// T-BE-028 / JEB-64: dispute case orchestration (v1 surface).
-///
-/// <list type="bullet">
-///   <item><c>POST /v1/deliveries/{id}/escalate</c> — opens a dispute
-///     case for a delivery. Synchronously attaches the chat transcript
-///     and GPS polyline as evidence (AC1).</item>
-///   <item><c>GET /v1/disputes</c> — caller's cases (opener or
-///     counter-party).</item>
-///   <item><c>GET /v1/disputes/{id}</c> — single case lookup. Either
-///     party of the delivery or any admin may read (AC4).</item>
-///   <item><c>POST /admin/v1/disputes/{id}/resolve</c> — admin verdict
-///     (<c>refund</c> with amount or <c>no_action</c>). Refund hits
-///     <c>unified_payment_gateway</c>; both parties get a push (AC2).</item>
-/// </list>
-///
-/// Coexists with the legacy <see cref="JeebGateway.Controllers.DisputesController"/>
-/// (T-backend-025 / JEEB-43) — that surface keeps working, this one is
-/// the additive v1 extension policy-aligned with the locked-in olivium
-/// payments path (PO blocker review).
-/// </summary>
 [ApiController]
-public sealed class DisputeCasesController : ControllerBase
+public sealed class DisputeCasesController : CaseControllerBase
 {
-    private const string EntityType = "dispute_case";
-    private const string ActionEscalate = "escalate_case";
-    private const string ActionReview = "review_case";
-    private const string ActionResolve = "resolve_case";
+    private readonly IGenericCaseGatewayService _cases;
+    private readonly IDisputeCaseService? _legacyCases;
+    private readonly IAdminAuditLog? _auditLog;
 
-    private readonly IDisputeCaseService _service;
-    private readonly IAdminAuditLog _auditLog;
-
-    public DisputeCasesController(IDisputeCaseService service, IAdminAuditLog auditLog)
+    public DisputeCasesController(
+        IGenericCaseGatewayService cases,
+        IDisputeCaseService? legacyCases = null,
+        IAdminAuditLog? auditLog = null)
     {
-        _service = service;
+        _cases = cases;
+        _legacyCases = legacyCases;
         _auditLog = auditLog;
     }
 
-    // -----------------------------------------------------------------
-    // Open a case for a delivery (the filer is the authenticated user).
-    // -----------------------------------------------------------------
+    [HttpPost("v1/disputes")]
+    [RequireCapability(Capabilities.DisputeFile)]
+    public Task<IActionResult> Create(
+        [FromBody] CreateDisputeRequestV2? request,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        CancellationToken ct) => CreateCore(null, request, idempotencyKey, ct);
+
     [HttpPost("v1/deliveries/{deliveryId}/escalate")]
     [RequireCapability(Capabilities.DisputeFile)]
-    [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status201Created)]
-    [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Escalate(
+    public Task<IActionResult> Escalate(
         string deliveryId,
-        [FromBody] EscalateDeliveryRequest? body,
+        [FromBody] CreateDisputeRequestV2? request,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        CancellationToken ct) => _legacyCases is null
+            ? CreateCore(deliveryId, request, idempotencyKey, ct)
+            : LegacyEscalate(deliveryId, request, idempotencyKey, ct);
+
+    [HttpGet("v1/disputes")]
+    [RequireCapability(Capabilities.DisputeReadMine)]
+    public async Task<IActionResult> List(
+        [FromQuery] string? status,
+        [FromQuery] string? cursor,
+        [FromQuery] string? deliveryId,
+        [FromQuery] int limit = 20,
+        CancellationToken ct = default)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+        if (_legacyCases is not null)
+        {
+            var legacyItems = await _legacyCases.ListForUserAsync(userId, ct);
+            return Ok(new DisputeCaseListResponse
+            {
+                Items = legacyItems.Select(DisputeCaseResponse.From).ToArray(),
+                Total = legacyItems.Count,
+            });
+        }
+        try
+        {
+            var page = await _cases.ListForUserAsync(GenericCaseKinds.Dispute, userId,
+                new GenericCaseQueryV1
+                {
+                    Status = status, SubjectRef = deliveryId,
+                    Limit = Math.Clamp(limit, 1, 200), Cursor = cursor,
+                }, ct);
+            return Ok(CaseApiProjection.Project(page));
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return CaseProblem(error, GenericCaseKinds.Dispute, "list");
+        }
+    }
+
+    [HttpGet("v1/deliveries/{deliveryId}/disputes/evidence-preview")]
+    [RequireCapability(Capabilities.DisputeFile)]
+    public async Task<IActionResult> PreviewEvidence(string deliveryId, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+        try
+        {
+            return Ok(await _cases.PreviewDisputeEvidenceAsync(deliveryId, userId,
+                CanonicalDeliveryVocab.ActorRoleFor(HttpContext), ct));
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return CaseProblem(error, GenericCaseKinds.Dispute, "evidence_preview");
+        }
+    }
+
+    [HttpGet("v1/disputes/{id}")]
+    [RequireCapability(Capabilities.DisputeReadMine)]
+    public async Task<IActionResult> Get(string id, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+        if (_legacyCases is not null && id.StartsWith("case_", StringComparison.Ordinal))
+            return await LegacyGet(id, userId, ct);
+        try
+        {
+            var detail = await _cases.GetForUserAsync(id, userId, UserIdentity.IsAdmin(HttpContext), ct);
+            if (!string.Equals(detail.Case.Kind, GenericCaseKinds.Dispute, StringComparison.Ordinal)) return NotFound();
+            Response.Headers.ETag = $"\"{detail.Case.Version}\"";
+            return Ok(CaseApiProjection.Project(detail, includeInternal: UserIdentity.IsAdmin(HttpContext)));
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return CaseProblem(error, GenericCaseKinds.Dispute, "get");
+        }
+    }
+
+    [HttpPost("v1/disputes/{id}/reply")]
+    [RequireCapability(Capabilities.DisputeReadMine)]
+    public async Task<IActionResult> Reply(
+        string id,
+        [FromBody] CaseReplyRequestV2? request,
         [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
         CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized))
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+        try
         {
-            return unauthorized;
+            if (request is null || string.IsNullOrWhiteSpace(request.Body)
+                && (request.Attachments is null || request.Attachments.Count == 0))
+                throw new CaseValidationException("A reply requires a body or attachment.");
+            var existing = await _cases.GetForUserAsync(id, userId, isAdmin: false, ct);
+            if (!string.Equals(existing.Case.Kind, GenericCaseKinds.Dispute, StringComparison.Ordinal)) return NotFound();
+            var detail = await _cases.AddMessageAsync(id, checked((int)RequireVersion(request.ExpectedVersion)),
+                request.ReplyToId is null ? "message" : "reply", userId,
+                CanonicalDeliveryVocab.ActorRoleFor(HttpContext), RequireIdempotencyKey(idempotencyKey),
+                request.Body, request.ReplyToId, request.Attachments, ct);
+            Response.Headers.ETag = $"\"{detail.Case.Version}\"";
+            return Ok(CaseApiProjection.Project(detail, includeInternal: false));
         }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return CaseProblem(error, GenericCaseKinds.Dispute, "reply");
+        }
+    }
 
-        if (body is null)
+    private async Task<IActionResult> CreateCore(
+        string? routeDeliveryId,
+        CreateDisputeRequestV2? request,
+        string? idempotencyKey,
+        CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+        try
         {
-            return BadRequest(new ProblemDetails
+            if (request is null) throw new CaseValidationException("request body is required.");
+            var deliveryId = request.ResolveDeliveryId(routeDeliveryId)
+                ?? throw new CaseValidationException("deliveryId is required.");
+            var key = RequireIdempotencyKey(idempotencyKey);
+            var row = await _cases.CreateDisputeAsync(new CreateDisputeCaseInput
             {
-                Title = "request body is required.",
-                Status = StatusCodes.Status400BadRequest
-            });
+                DeliveryId = deliveryId,
+                UserId = userId,
+                UserRole = CanonicalDeliveryVocab.ActorRoleFor(HttpContext),
+                Reason = request.Reason ?? "other",
+                Comment = request.Comment,
+                Attachments = request.ResolveAttachments(),
+                VoiceUrl = request.VoiceUrl,
+                IncidentCommand = request.IncidentCommand,
+                IdempotencyKey = key,
+            }, ct);
+            Response.Headers.ETag = $"\"{row.Case.Version}\"";
+            return CreatedAtAction(nameof(Get), new { id = row.Case.CaseId }, CaseApiProjection.Project(row, false));
         }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return CaseProblem(error, GenericCaseKinds.Dispute, "create");
+        }
+    }
+
+    private async Task<IActionResult> LegacyEscalate(
+        string deliveryId,
+        CreateDisputeRequestV2? request,
+        string? idempotencyKey,
+        CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+        if (request is null)
+            return Problem("request body is required.", statusCode: StatusCodes.Status400BadRequest);
 
         try
         {
-            var result = await _service.EscalateAsync(new EscalateInput
+            var result = await _legacyCases!.EscalateAsync(new EscalateInput
             {
                 DeliveryId = deliveryId,
                 OpenedByUserId = userId,
-                Reason = body.Reason ?? string.Empty,
-                Comment = body.Comment,
-                PhotoUrls = body.Photos ?? new List<string>(),
-                IdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey.Trim()
+                Reason = request.Reason ?? string.Empty,
+                Comment = request.Comment,
+                PhotoUrls = request.ResolveAttachments(),
+                IdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey.Trim(),
             }, ct);
 
-            switch (result.Outcome)
+            if (result.Outcome == EscalateOutcome.DeliveryNotFound)
+                return Problem($"Delivery '{deliveryId}' not found.", statusCode: StatusCodes.Status404NotFound);
+            if (result.Outcome == EscalateOutcome.AlreadyEscalated)
+                return Conflict(new ProblemDetails
+                {
+                    Title = "An active dispute case already exists for this delivery.",
+                    Detail = $"Existing case id: {result.Case!.Id}",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/dispute-already-open",
+                });
+            if (result.Outcome == EscalateOutcome.Replayed)
+                return Ok(DisputeCaseResponse.From(result.Case!));
+
+            if (_auditLog is not null)
             {
-                case EscalateOutcome.DeliveryNotFound:
-                    return NotFound(new ProblemDetails
-                    {
-                        Title = $"Delivery '{deliveryId}' not found.",
-                        Status = StatusCodes.Status404NotFound
-                    });
-
-                case EscalateOutcome.AlreadyEscalated:
-                    return Conflict(new ProblemDetails
-                    {
-                        Title = "An active dispute case already exists for this delivery.",
-                        Detail = $"Existing case id: {result.Case!.Id}",
-                        Status = StatusCodes.Status409Conflict,
-                        Type = "https://jeeb.dev/errors/dispute-already-open"
-                    });
-
-                case EscalateOutcome.Replayed:
-                    return Ok(DisputeCaseResponse.From(result.Case!));
-
-                case EscalateOutcome.Created:
-                default:
-                    await _auditLog.AppendAsync(new AdminAuditAppend
-                    {
-                        AdminUserId = userId,
-                        Action = ActionEscalate,
-                        EntityType = EntityType,
-                        EntityId = result.Case!.Id,
-                        AfterState = Snapshot(result.Case),
-                        RequestId = HttpContext.TraceIdentifier
-                    }, ct);
-
-                    return CreatedAtAction(
-                        nameof(GetOne),
-                        new { id = result.Case.Id },
-                        DisputeCaseResponse.From(result.Case));
+                await _auditLog.AppendAsync(new AdminAuditAppend
+                {
+                    AdminUserId = userId,
+                    Action = "escalate_case",
+                    EntityType = "dispute_case",
+                    EntityId = result.Case!.Id,
+                    RequestId = HttpContext.TraceIdentifier,
+                }, ct);
             }
+            return CreatedAtAction(nameof(Get), new { id = result.Case!.Id }, DisputeCaseResponse.From(result.Case));
         }
-        catch (DisputeCaseValidationException ex)
+        catch (DisputeCaseValidationException error)
         {
-            return BadRequest(new ProblemDetails
-            {
-                Title = ex.Message,
-                Status = StatusCodes.Status400BadRequest
-            });
+            return Problem(error.Message, statusCode: StatusCodes.Status400BadRequest);
         }
     }
 
-    // -----------------------------------------------------------------
-    // List caller's own cases (opener OR counter-party).
-    // -----------------------------------------------------------------
-    [HttpGet("v1/disputes")]
-    [RequireCapability(Capabilities.DisputeReadMine)]
-    [ProducesResponseType(typeof(DisputeCaseListResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> ListMine(CancellationToken ct)
+    private async Task<IActionResult> LegacyGet(string id, string userId, CancellationToken ct)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized))
-        {
-            return unauthorized;
-        }
-
-        var items = await _service.ListForUserAsync(userId, ct);
-        return Ok(new DisputeCaseListResponse
-        {
-            Items = items.Select(DisputeCaseResponse.From).ToList(),
-            Total = items.Count
-        });
-    }
-
-    // -----------------------------------------------------------------
-    // Single case lookup. Visibility: opener, counter-party, or admin.
-    // -----------------------------------------------------------------
-    [HttpGet("v1/disputes/{id}")]
-    // ADR-005 L2 §G: coarse cap = dispute.read.mine {client, jeeber, admin}. Party/admin visibility
-    // (opener|counterparty|admin) is STATE and stays in the action body — not an L2 policy.
-    [RequireCapability(Capabilities.DisputeReadMine)]
-    [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> GetOne(string id, CancellationToken ct)
-    {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized))
-        {
-            return unauthorized;
-        }
-
-        var @case = await _service.GetAsync(id, ct);
-        if (@case is null) return NotFound();
-
-        var isAdmin = UserIdentity.IsAdmin(HttpContext);
-        var isOpener = string.Equals(@case.OpenedByUserId, userId, StringComparison.Ordinal);
-        var isCounterparty = !string.IsNullOrEmpty(@case.CounterpartyUserId)
-            && string.Equals(@case.CounterpartyUserId, userId, StringComparison.Ordinal);
-
-        if (!isAdmin && !isOpener && !isCounterparty)
-        {
-            return StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
+        var item = await _legacyCases!.GetAsync(id, ct);
+        if (item is null) return NotFound();
+        var permitted = UserIdentity.IsAdmin(HttpContext)
+            || string.Equals(item.OpenedByUserId, userId, StringComparison.Ordinal)
+            || string.Equals(item.CounterpartyUserId, userId, StringComparison.Ordinal);
+        return permitted
+            ? Ok(DisputeCaseResponse.From(item))
+            : StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
             {
                 Title = "Forbidden: dispute case belongs to a different delivery.",
                 Status = StatusCodes.Status403Forbidden,
-                Type = "https://jeeb.dev/errors/forbidden-resource"
+                Type = "https://jeeb.dev/errors/forbidden-resource",
             });
-        }
-
-        return Ok(DisputeCaseResponse.From(@case));
     }
-
-    // -----------------------------------------------------------------
-    // Admin triage: move open → under_review (DIS-02). The customer/Jeeber
-    // timeline contracts to surface open / under_review / resolved; this is
-    // the verb that makes under_review reachable. Admin-only, reuses the
-    // dispute.resolve capability (no new coarse claim — the queue-pickup is
-    // part of the same admin resolution authority).
-    // -----------------------------------------------------------------
-    [HttpPost("admin/v1/disputes/{id}/review")]
-    [RequireCapability(Capabilities.DisputeResolve)]
-    [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> MarkUnderReview(string id, CancellationToken ct)
-    {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var unauthorized))
-        {
-            return unauthorized;
-        }
-
-        TransitionResult result;
-        try
-        {
-            result = await _service.MarkUnderReviewAsync(new MarkUnderReviewInput
-            {
-                CaseId = id,
-                AdminUserId = adminId
-            }, ct);
-        }
-        catch (DisputeCaseValidationException ex)
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = ex.Message,
-                Status = StatusCodes.Status400BadRequest
-            });
-        }
-
-        switch (result.Outcome)
-        {
-            case TransitionOutcome.NotFound:
-                return NotFound();
-
-            case TransitionOutcome.AlreadyResolved:
-                return Conflict(new ProblemDetails
-                {
-                    Title = "already_resolved",
-                    Detail = $"Case {id} is in terminal state '{result.Case!.State}' and cannot be moved to under_review.",
-                    Status = StatusCodes.Status409Conflict,
-                    Type = "https://jeeb.dev/errors/dispute-already-resolved"
-                });
-
-            case TransitionOutcome.Transitioned:
-                await _auditLog.AppendAsync(new AdminAuditAppend
-                {
-                    AdminUserId = adminId,
-                    Action = ActionReview,
-                    EntityType = EntityType,
-                    EntityId = id,
-                    AfterState = Snapshot(result.Case!),
-                    RequestId = HttpContext.TraceIdentifier
-                }, ct);
-                return Ok(DisputeCaseResponse.From(result.Case!));
-
-            case TransitionOutcome.NoOp:
-            default:
-                // Already under_review — idempotent 200, no duplicate audit row.
-                return Ok(DisputeCaseResponse.From(result.Case!));
-        }
-    }
-
-    // -----------------------------------------------------------------
-    // Admin resolve. ADR-005 L2: admin-only via [RequireCapability(dispute.resolve)]
-    // (replaces the legacy [RequireRole(Roles.Admin)]). Refund-vs-no_action + payment
-    // routing stay STATE in the owning service.
-    // -----------------------------------------------------------------
-    [HttpPost("admin/v1/disputes/{id}/resolve")]
-    [RequireCapability(Capabilities.DisputeResolve)]
-    [ProducesResponseType(typeof(DisputeCaseResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Resolve(
-        string id,
-        [FromBody] ResolveCaseRequest? body,
-        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
-        CancellationToken ct)
-    {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var unauthorized))
-        {
-            return unauthorized;
-        }
-
-        if (body is null)
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = "request body is required.",
-                Status = StatusCodes.Status400BadRequest
-            });
-        }
-
-        if (!TryParseDecision(body.Decision, out var decision, out var decisionError))
-        {
-            return BadRequest(decisionError);
-        }
-
-        try
-        {
-            var result = await _service.ResolveAsync(new ResolveCaseInput
-            {
-                CaseId = id,
-                AdminUserId = adminId,
-                Decision = decision,
-                RefundUsd = body.RefundUsd,
-                Notes = body.Notes,
-                IdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey.Trim()
-            }, ct);
-
-            switch (result.Outcome)
-            {
-                case ResolveOutcome.NotFound:
-                    return NotFound();
-
-                case ResolveOutcome.AlreadyResolved:
-                    return Conflict(new ProblemDetails
-                    {
-                        Title = "already_resolved",
-                        Detail = $"Case {id} is in terminal state '{result.Case!.State}'.",
-                        Status = StatusCodes.Status409Conflict,
-                        Type = "https://jeeb.dev/errors/dispute-already-resolved"
-                    });
-
-                case ResolveOutcome.RefundFailed:
-                    return StatusCode(StatusCodes.Status502BadGateway, new ProblemDetails
-                    {
-                        Title = "refund_failed",
-                        Detail = result.FailureReason
-                            ?? "Refund could not be issued (Jeeb is cash on delivery — there is no captured payment to "
-                             + "refund); case left open for manual handling.",
-                        Status = StatusCodes.Status502BadGateway,
-                        Type = "https://jeeb.dev/errors/refund-failed"
-                    });
-
-                case ResolveOutcome.Replayed:
-                case ResolveOutcome.Resolved:
-                default:
-                    if (result.Outcome == ResolveOutcome.Resolved)
-                    {
-                        await _auditLog.AppendAsync(new AdminAuditAppend
-                        {
-                            AdminUserId = adminId,
-                            Action = ActionResolve,
-                            EntityType = EntityType,
-                            EntityId = id,
-                            AfterState = Snapshot(result.Case!),
-                            RequestId = HttpContext.TraceIdentifier
-                        }, ct);
-                    }
-                    return Ok(DisputeCaseResponse.From(result.Case!));
-            }
-        }
-        catch (DisputeCaseValidationException ex)
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = ex.Message,
-                Status = StatusCodes.Status400BadRequest
-            });
-        }
-        catch (DisputeCaseConflictException ex)
-        {
-            return Conflict(new ProblemDetails
-            {
-                Title = ex.Message,
-                Status = StatusCodes.Status409Conflict
-            });
-        }
-    }
-
-    private static bool TryParseDecision(string? raw, out ResolveDecision decision, out ProblemDetails error)
-    {
-        decision = default;
-        error = null!;
-
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            error = new ProblemDetails
-            {
-                Title = "decision is required (refund or no_action).",
-                Status = StatusCodes.Status400BadRequest
-            };
-            return false;
-        }
-
-        switch (raw.Trim().ToLowerInvariant())
-        {
-            case "refund":
-            case "resolved_refund":
-                decision = ResolveDecision.Refund;
-                return true;
-            case "no_action":
-            case "no-action":
-            case "noaction":
-            case "resolved_no_action":
-                decision = ResolveDecision.NoAction;
-                return true;
-            default:
-                error = new ProblemDetails
-                {
-                    Title = $"Unknown decision '{raw}'. Allowed: refund, no_action.",
-                    Status = StatusCodes.Status400BadRequest
-                };
-                return false;
-        }
-    }
-
-    private static IReadOnlyDictionary<string, object?> Snapshot(DisputeCase c) =>
-        new Dictionary<string, object?>
-        {
-            ["state"] = c.State,
-            ["reason"] = c.Reason,
-            ["opened_by_user_id"] = c.OpenedByUserId,
-            ["delivery_id"] = c.DeliveryId,
-            ["counterparty_user_id"] = c.CounterpartyUserId,
-            ["resolved_at"] = c.ResolvedAt,
-            ["resolver_admin_id"] = c.ResolverAdminId,
-            ["resolution_notes"] = c.ResolutionNotes,
-            ["refund_usd"] = c.RefundUsd,
-            ["refund_ledger_entry_id"] = c.RefundLedgerEntryId,
-            ["photo_count"] = c.PhotoUrls.Count,
-            ["evidence_chat_messages"] = c.Evidence.ChatTranscriptMessageCount,
-            ["evidence_gps_points"] = c.Evidence.GpsPolyline.Count,
-            ["evidence_degraded"] = c.Evidence.Degraded
-        };
 }

@@ -1,8 +1,14 @@
+using System.Diagnostics;
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Observability;
 using JeebGateway.Services;
 using JeebGateway.Services.Cdn;
 using JeebGateway.Services.Clients;
+using JeebGateway.StateService.Idempotency;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
@@ -74,6 +80,8 @@ public sealed class CdnController : ControllerBase
     // clamps to this regardless of any requested TTL (defence-in-depth; cdn-service
     // is the record-of-truth for the actual expiry it stamps).
     private const int MaxUploadUrlTtlSeconds = 300;
+    private static readonly JsonSerializerOptions CdnIdempotencyJson =
+        new(JsonSerializerDefaults.Web);
 
     // The upload slots the signed-PUT broker accepts: the KYC document slots
     // (DEC1, S03 H2/H3) plus proof_of_delivery (JEBV4-200, companion to
@@ -93,6 +101,8 @@ public sealed class CdnController : ControllerBase
             // allowlist entry differs. cdn-service does NOT validate slots (it
             // sanitizes + uses the value as a storage dir), so no upstream change.
             "chat_attachment",
+            "dispute_evidence",
+            "support_attachment",
         };
 
     private static readonly IReadOnlySet<string> AllowedUploadContentTypes =
@@ -104,11 +114,13 @@ public sealed class CdnController : ControllerBase
             "image/webp",
             "image/heic",
             "application/pdf",
+            "audio/mp4",
         };
 
     private readonly ICDNServiceClient _cdn;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IConfiguration _config;
+    private readonly IIdempotencyStore _idempotency;
 
     /// <summary>
     /// P4/P5 — used ONLY by <see cref="GetAssetContent"/> to dial cdn-service's
@@ -124,12 +136,14 @@ public sealed class CdnController : ControllerBase
         ICDNServiceClient cdn,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         IConfiguration config,
+        IIdempotencyStore idempotency,
         IHttpClientFactory httpClientFactory,
         ILogger<CdnController> logger)
     {
         _cdn = cdn;
         _flags = flags;
         _config = config;
+        _idempotency = idempotency;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
@@ -152,9 +166,18 @@ public sealed class CdnController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> BrokerUploadUrl(
         [FromBody] CdnUploadUrlBody? body,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
         CancellationToken ct = default)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
+
+        if (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > 200)
+        {
+            return Problem(
+                title: "Invalid idempotency key",
+                detail: "Idempotency-Key is required and must be at most 200 characters.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
 
         if (body is null || string.IsNullOrWhiteSpace(body.Slot))
         {
@@ -181,27 +204,116 @@ public sealed class CdnController : ControllerBase
                 detail: $"content_type must be one of: {string.Join(", ", AllowedUploadContentTypes)}.",
                 statusCode: StatusCodes.Status400BadRequest);
         }
+        if (contentType.Equals("audio/mp4", StringComparison.OrdinalIgnoreCase)
+            && !slot.Equals("dispute_evidence", StringComparison.OrdinalIgnoreCase))
+        {
+            return Problem(
+                title: "Invalid content type for upload slot",
+                detail: "audio/mp4 is accepted only for dispute_evidence.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
 
         if (!_flags.CurrentValue.Cdn) return UpstreamDisabled();
+
+        if (_idempotency is not IExternalIdempotencyStore)
+        {
+            RecordCdnOutcome("idempotency_unavailable", slot);
+            _logger.LogError(
+                "CDN upload-ticket reservation has no external idempotency store slot={Slot} user_id={UserId} "
+                + "correlation_id={CorrelationId}",
+                slot, userId, Activity.Current?.TraceId.ToString() ?? "none");
+            return Problem(
+                title: "Upload ticket reservation unavailable",
+                detail: "The external upload-ticket reservation service is unavailable.",
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
 
         // Clamp the TTL to the BR-2 bound before dialing cdn-service.
         var ttl = body.TtlSeconds is > 0 and <= MaxUploadUrlTtlSeconds
             ? body.TtlSeconds.Value
             : MaxUploadUrlTtlSeconds;
 
-        var ticket = await _cdn.MintUploadUrlAsync(new CdnUploadUrlRequest
+        var requestHash = Hash($"{slot.ToLowerInvariant()}\n{contentType.ToLowerInvariant()}\n{ttl}");
+        var operationScope = Hash($"cdn-upload-ticket\n{userId}\n{idempotencyKey.Trim()}");
+        var reservationKey = $"cdn-upload-ticket:{operationScope}:reservation";
+        var resultKey = $"cdn-upload-ticket:{operationScope}:result";
+
+        try
         {
-            Slot = slot,
-            ContentType = contentType,
-            OwnerUserId = userId,
-            TtlSeconds = ttl,
-        }, ct);
+            var stored = await _idempotency.GetAsync(resultKey, ct);
+            if (stored is not null)
+                return ReplayTicket(stored, requestHash, slot);
+
+            var reservationJson = JsonSerializer.Serialize(
+                new CdnUploadReservation(requestHash), CdnIdempotencyJson);
+            var reservation = await _idempotency.PutOrGetAsync(
+                reservationKey, StatusCodes.Status202Accepted, reservationJson, ttl, ct);
+            if (!ReservationMatches(reservation, requestHash))
+                return IdempotencyConflict(slot);
+
+            if (!reservation.Inserted)
+            {
+                stored = await _idempotency.GetAsync(resultKey, ct);
+                if (stored is not null)
+                    return ReplayTicket(stored, requestHash, slot);
+
+                RecordCdnOutcome("reserved", slot);
+                return Problem(
+                    title: "Upload ticket request unresolved",
+                    detail: "This idempotency key already has an in-progress or unresolved upload-ticket reservation. Retry after its ticket window expires if no result becomes available.",
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            RecordCdnOutcome("idempotency_unavailable", slot);
+            _logger.LogError(error,
+                "CDN broker could not reserve upload ticket slot={Slot} user_id={UserId} correlation_id={CorrelationId}",
+                slot, userId, Activity.Current?.TraceId.ToString() ?? "none");
+            return Problem(
+                title: "Upload ticket reservation unavailable",
+                detail: "The durable upload-ticket reservation service is unavailable.",
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        CdnUploadTicket ticket;
+        try
+        {
+            ticket = await _cdn.MintUploadUrlAsync(new CdnUploadUrlRequest
+            {
+                Slot = slot,
+                ContentType = contentType,
+                OwnerUserId = userId,
+                TtlSeconds = ttl,
+            }, ct);
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            RecordCdnOutcome("upstream_failure", slot);
+            _logger.LogError(error,
+                "CDN broker failed to mint upload ticket slot={Slot} user_id={UserId} correlation_id={CorrelationId}",
+                slot, userId, Activity.Current?.TraceId.ToString() ?? "none");
+            return Problem(
+                title: "Upload broker failed",
+                detail: "The asset store could not mint an upload ticket.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
 
         // Defence-in-depth: never advertise an expiry beyond the BR-2 bound even
         // if the upstream returns a larger one.
-        var expiresIn = ticket.ExpiresInSeconds is > 0 and <= MaxUploadUrlTtlSeconds
-            ? ticket.ExpiresInSeconds
-            : MaxUploadUrlTtlSeconds;
+        if (ticket.ExpiresInSeconds < ttl || string.IsNullOrWhiteSpace(ticket.ObjectRef))
+        {
+            RecordCdnOutcome("upstream_invalid", slot);
+            _logger.LogError(
+                "CDN broker received invalid ticket metadata slot={Slot} requested_ttl={RequestedTtl} "
+                + "ticket_ttl={TicketTtl} correlation_id={CorrelationId}",
+                slot, ttl, ticket.ExpiresInSeconds, Activity.Current?.TraceId.ToString() ?? "none");
+            return Problem(
+                title: "Upload broker failed",
+                detail: "The asset store returned an invalid upload ticket.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+        var expiresIn = Math.Min(ttl, Math.Min(ticket.ExpiresInSeconds, MaxUploadUrlTtlSeconds));
 
         // JEBV4-259 — ABSOLUTIZE the upload_url (approach B). cdn-service's Local
         // provider mints a relative, host-less signed-PUT URL the client cannot
@@ -218,6 +330,7 @@ public sealed class CdnController : ControllerBase
         }
         catch (InvalidOperationException ex)
         {
+            RecordCdnOutcome("upstream_invalid", slot);
             _logger.LogError(ex, "CDN broker: cdn-service returned an unusable upload_url for slot {Slot}.", slot);
             return Problem(
                 title: "Upload broker failed",
@@ -240,14 +353,45 @@ public sealed class CdnController : ControllerBase
             requiredHeaders["Content-Type"] = contentType;
         }
 
-        return Ok(new CdnUploadTicketResponse
+        var response = new CdnUploadTicketResponse
         {
             UploadUrl = uploadUrl,
             ObjectRef = ticket.ObjectRef,
             ExpiresIn = expiresIn,
             Method = method,
             RequiredHeaders = requiredHeaders,
-        });
+        };
+
+        try
+        {
+            var resultJson = JsonSerializer.Serialize(
+                new CdnUploadReplay(requestHash, response), CdnIdempotencyJson);
+            var result = await _idempotency.PutOrGetAsync(
+                resultKey, StatusCodes.Status200OK, resultJson, expiresIn, ct);
+            if (!ReplayMatches(result, requestHash, out var storedResponse))
+                return IdempotencyConflict(slot);
+
+            Response.Headers["Idempotency-Replayed"] = result.Inserted ? "false" : "true";
+            RecordCdnOutcome(result.Inserted ? "minted" : "replayed", slot);
+            _logger.LogInformation(
+                "CDN upload ticket {Outcome} slot={Slot} user_id={UserId} expires_in={ExpiresIn} "
+                + "correlation_id={CorrelationId}",
+                result.Inserted ? "minted" : "replayed", slot, userId, expiresIn,
+                Activity.Current?.TraceId.ToString() ?? "none");
+            return Ok(storedResponse);
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            RecordCdnOutcome("result_persist_failed", slot);
+            _logger.LogError(error,
+                "CDN broker minted but could not persist upload ticket result slot={Slot} user_id={UserId} "
+                + "correlation_id={CorrelationId}",
+                slot, userId, Activity.Current?.TraceId.ToString() ?? "none");
+            return Problem(
+                title: "Upload ticket result unavailable",
+                detail: "The upload ticket could not be committed for safe replay.",
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
     }
 
     /// <summary>
@@ -451,6 +595,63 @@ public sealed class CdnController : ControllerBase
         var stream = await upstream.Content.ReadAsStreamAsync(ct);
         return File(stream, contentType);
     }
+
+    private IActionResult ReplayTicket(IdempotencyOutcome stored, string requestHash, string slot)
+    {
+        if (!ReplayMatches(stored, requestHash, out var response))
+            return IdempotencyConflict(slot);
+        Response.Headers["Idempotency-Replayed"] = "true";
+        RecordCdnOutcome("replayed", slot);
+        return Ok(response);
+    }
+
+    private IActionResult IdempotencyConflict(string slot)
+    {
+        RecordCdnOutcome("collision", slot);
+        return Problem(
+            title: "Idempotency key conflict",
+            detail: "This Idempotency-Key was already used for a different upload-ticket request.",
+            statusCode: StatusCodes.Status409Conflict);
+    }
+
+    private static bool ReservationMatches(IdempotencyOutcome stored, string requestHash)
+    {
+        try
+        {
+            var reservation = JsonSerializer.Deserialize<CdnUploadReservation>(
+                stored.ResponseBodyJson, CdnIdempotencyJson);
+            return reservation is not null
+                && string.Equals(reservation.RequestHash, requestHash, StringComparison.Ordinal);
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static bool ReplayMatches(
+        IdempotencyOutcome stored, string requestHash, out CdnUploadTicketResponse response)
+    {
+        response = null!;
+        try
+        {
+            var replay = JsonSerializer.Deserialize<CdnUploadReplay>(
+                stored.ResponseBodyJson, CdnIdempotencyJson);
+            if (replay is null || replay.Response is null
+                || !string.Equals(replay.RequestHash, requestHash, StringComparison.Ordinal))
+                return false;
+            response = replay.Response;
+            return true;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static string Hash(string value) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    private static void RecordCdnOutcome(string outcome, string slot) =>
+        BusinessOutcomeTelemetry.CdnUploadTicketOperations.Add(
+            1, new("outcome", outcome), new("slot", slot.ToLowerInvariant()));
+
+    private sealed record CdnUploadReservation(string RequestHash);
+    private sealed record CdnUploadReplay(string RequestHash, CdnUploadTicketResponse Response);
 
     // JEBV4-113: no fallback by design — see the class-level ESCALATE note. Every
     // action 503s here when the flag is off; there is no degraded/gateway-local

@@ -1,6 +1,7 @@
 using System.Text;
 using JeebGateway.Admin;
 using JeebGateway.Availability;
+using JeebGateway.Cases;
 using JeebGateway.Disputes;
 using JeebGateway.Disputes.V2;
 using JeebGateway.Extensions;
@@ -673,6 +674,8 @@ builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePu
     pushClient.InternalApiKey = builder.Configuration["PushNotificationServiceApi:InternalApiKey"];
     return pushClient;
 });
+builder.Services.AddTransient<JeebGateway.Services.Clients.IPushDispatchRecoveryClient,
+    JeebGateway.Services.Clients.PushDispatchRecoveryClient>();
 ServiceClientExtensions.AttachBreakerAndTimeoutOnly(
     builder.Services.AddHttpClient<JeebGateway.Notifications.JeebNotificationRecordClient>(
         JeebGateway.Notifications.JeebNotificationRecordClient.HttpClientName,
@@ -971,8 +974,7 @@ builder.Services.AddOpenTelemetry()
         tracing
             .AddAspNetCoreInstrumentation()
             .AddHttpClientInstrumentation()
-            // T-BE-028 / JEB-64 — dispute case open / resolve spans.
-            .AddSource(DisputeCaseTelemetry.ActivitySourceName)
+            .AddSource(CaseTelemetry.ActivitySourceName)
             .AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
     })
     .WithMetrics(metrics =>
@@ -982,8 +984,7 @@ builder.Services.AddOpenTelemetry()
             .AddHttpClientInstrumentation()
             // T-backend-050 — Jeeb-owned per-endpoint latency meter.
             .AddMeter(RequestLatencyMetrics.MeterName)
-            // T-BE-028 / JEB-64 — dispute case counters & histograms.
-            .AddMeter(DisputeCaseTelemetry.MeterName)
+            .AddMeter(CaseTelemetry.MeterName)
             // GW12-OBS-6 — business outcome counters for auth and durable writers.
             .AddMeter(BusinessOutcomeTelemetry.MeterName)
             // Explicit buckets keep the 400ms p95 SLO on a bucket boundary so
@@ -1136,7 +1137,7 @@ else
 // exactly what production has been running. The flag branch, the UPG ledger client and its typed
 // transport are deleted, so no configuration value can resurrect the dial.
 //
-// SIDE OF THE ASYMMETRY (see IPaymentRefundClient below for the other side): the LOCAL ledger
+// COD settlement remains independent of disputes: cases never issue a refund or wallet action.
 // TELLS THE TRUTH. Cash was already collected hand-to-hand by the Jeeber; recording it in the
 // gateway's own ledger is the complete operation, not a stand-in for a remote write that did not
 // happen. That is why this one is safe to keep as the permanent implementation while the refund
@@ -1857,67 +1858,29 @@ else
     builder.Services.AddSingleton<IAdminAuditLog, InMemoryAdminAuditLog>();
 }
 
-// Dispute reporting pipeline (T-backend-025 / JEEB-43).
-//
-// POST /deliveries/{id}/dispute files a dispute (one open at a time per
-// delivery). GET /disputes lists the caller's filed disputes; GET /disputes/{id}
-// returns a single dispute (filer-or-admin visibility). PUT /admin/disputes/{id}/resolve
-// transitions the case through filed → under_review → resolved | dismissed
-// and pushes the outcome to the filer.
-//
-// Photos are referenced by URL (already-uploaded via upload-service), the
-// same pattern parcel photos use on DeliveryRequest.Photos. Push fan-out
-// rides the unified IPushNotificationService pipeline.
-//
-// Production swap: InMemoryDisputeStore → Postgres-backed store colocated
-// with admin moderation tables; the photo-URL set acquires upload-service
-// signed-URL validation; resolution-text rendering moves to dynamic-template
-// via the BFF NSwag client.
-builder.Services.AddSingleton<IDisputeStore, InMemoryDisputeStore>();
-builder.Services.AddSingleton<IDisputeService, DisputeService>();
+// Disputes and support are stateless gateway projections over the generic
+// jeeb-state-service /v1/cases engine. Evidence is gathered synchronously with
+// independent source budgets and explicit partial markers. The gateway owns no
+// case database; notifications are driven only by state outbox callbacks.
+builder.Services.Configure<CaseEvidenceOptions>(
+    builder.Configuration.GetSection(CaseEvidenceOptions.SectionName));
+builder.Services.AddScoped<ICaseEvidenceCollector, CaseEvidenceCollector>();
+builder.Services.AddScoped<IGenericCaseGatewayService, GenericCaseGatewayService>();
 
-// ---------------------------------------------------------------------------
-// T-BE-028 / JEB-64: dispute case state machine + chat/GPS evidence
-// orchestration. Additive over T-backend-025; adds the new v1 surface:
-//   POST /v1/deliveries/{id}/escalate
-//   POST /admin/v1/disputes/{id}/resolve
-//
-// The refund path no longer proxies anywhere — see the PAYMENTS block below;
-// under cash-on-delivery there is no capture to refund and the client throws.
-//
-// Evidence orchestrator captures chat transcript + GPS polyline at
-// escalate time with per-call timeouts so the AC6 1s open budget holds
-// even under upstream degradation (PO blocker #3).
-// ---------------------------------------------------------------------------
-builder.Services.Configure<DisputeEvidenceOptions>(
-    builder.Configuration.GetSection(DisputeEvidenceOptions.SectionName));
-builder.Services.AddSingleton<IDisputeCaseStore, InMemoryDisputeCaseStore>();
-// Scoped: the dispute case service depends on the evidence orchestrator and is
-// resolved per-request by DisputeCasesController, so both are scoped together.
-// The orchestrator's deps (ILocationStore, IRequestsStore) are singletons (safe
-// to inject into a scoped service). Chat-transcript capture was removed with the
-// gateway chat BFF client (salehly mirror), so the orchestrator no longer holds a
-// typed chat HttpClient.
-builder.Services.AddScoped<IDisputeEvidenceOrchestrator, DisputeEvidenceOrchestrator>();
-builder.Services.AddScoped<IDisputeCaseService, DisputeCaseService>();
-
-// PAYMENTS — OWNER RULING 2026-07-27: "do not use UPG, jeeb is only cash on delivery".
-//
-// Jeeb settles COD in cash, so there is no captured card payment to refund and therefore no
-// unified_payment_gateway route to keep. The UPG BaseUrl has been removed from committed config
-// (it was the last live 192.168.2.50 destination) and MUST NOT be re-added.
-//
-// The previous shape was a trap worth naming, because it is why this could not simply be deleted
-// earlier: when the BaseUrl was absent it silently fell back to InMemoryPaymentRefundClient, which
-// REPORTS SUCCESS. That turned every dispute refund (real money OUT) into a no-op the system
-// believed had worked. Removing the URL alone would have made a money path lie.
-//
-// So the fallback now FAILS LOUDLY instead. If any dispute-resolve path still reaches
-// IPaymentRefundClient, it throws and the operation surfaces as an error rather than a phantom
-// success. That is the correct behaviour under a COD-only policy: a refund request that cannot be
-// honoured must never be reported as honoured. Removing the remaining call sites in
-// Disputes/V2/DisputeCaseService.cs is tracked separately — see UPG-REMOVAL.md.
-builder.Services.AddSingleton<IPaymentRefundClient, CashOnDeliveryNoRefundClient>();
+// The unchanged legacy endpoint integration suites host the gateway without
+// downstream processes. Keep their pre-migration harness strictly outside
+// Production/Staging; deployed legacy routes always use the generic case engine.
+if (builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing"))
+{
+    builder.Services.AddSingleton<IDisputeStore, InMemoryDisputeStore>();
+    builder.Services.AddSingleton<IDisputeService, DisputeService>();
+    builder.Services.Configure<DisputeEvidenceOptions>(
+        builder.Configuration.GetSection(DisputeEvidenceOptions.SectionName));
+    builder.Services.AddSingleton<IDisputeCaseStore, InMemoryDisputeCaseStore>();
+    builder.Services.AddScoped<IDisputeEvidenceOrchestrator, DisputeEvidenceOrchestrator>();
+    builder.Services.AddSingleton<IPaymentRefundClient, CashOnDeliveryNoRefundClient>();
+    builder.Services.AddScoped<IDisputeCaseService, DisputeCaseService>();
+}
 
 // S10 COD-compose ledger (JEB-56/57/62) — OWNER RULING 2026-07-27: "jeeb is only cash on
 // delivery", no unified_payment_gateway.
@@ -1929,10 +1892,7 @@ builder.Services.AddSingleton<IPaymentRefundClient, CashOnDeliveryNoRefundClient
 // would have selected the HTTP client is already gone from committed config, so this is exactly
 // what production has been running.
 //
-// ASYMMETRY, deliberate — compare IPaymentRefundClient above. There, the in-memory client REPORTED
-// SUCCESS for money that never moved, so its replacement FAILS LOUDLY. Here the in-process ledger
-// records cash ALREADY COLLECTED in person: it tells the truth, so it is the correct permanent
-// implementation. Neither money path is allowed to become a silent no-op.
+// This ledger records cash already collected in person. The case engine does not call it.
 builder.Services.AddSingleton<JeebGateway.Financials.Cod.InProcessCodSettlementLedger>();
 builder.Services.AddSingleton<JeebGateway.Financials.Cod.ICodSettlementLedger>(sp =>
     sp.GetRequiredService<JeebGateway.Financials.Cod.InProcessCodSettlementLedger>());
@@ -2563,11 +2523,9 @@ builder.Services.AddHealthChecks()
 // ---------------------------------------------------------------------------
 // jeeb-state-service durable rewire (ADR-001-rev2, Layer-2 R1–R8).
 //
-// The gateway stays STATELESS: every persisted row lives behind the
-// NSwag-typed IJeebStateServiceClient. Behind a feature flag so local/CI runs
-// (no live state-service) fall back to the legacy in-memory stores. A
-// circuit-breaker (in AddJeebStateServiceClient) degrades gracefully on a
-// state-service blip instead of cascading fleet-wide 500s.
+// Generic cases are always persisted by jeeb-state-service. When that service
+// is not configured, case routes return 503 rather than creating local state.
+// Older unrelated state adapters retain their existing local/CI behavior.
 // ---------------------------------------------------------------------------
 var stateOptions = new JeebGateway.StateService.StateServiceOptions
 {
@@ -2582,15 +2540,12 @@ if (stateServiceWired)
 {
     builder.Services.AddSingleton(stateOptions);
     builder.Services.AddJeebStateServiceClient(stateOptions);
+    builder.Services.AddTransient<IGenericCaseStateClient>(services =>
+        (IGenericCaseStateClient)services.GetRequiredService<IJeebStateServiceClient>());
 
     // R1 — idempotency (full 1:1; GET-by-key ⇒ bounce-survivable).
     builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,
         JeebGateway.StateService.Idempotency.StateServiceIdempotencyStore>();
-
-    // JM-063 — Jeeb support tickets, backed by jeeb-state-service per ADR-0005 (the opaque
-    // KV above). The gateway stays stateless: a ticket is an opaque support-ticket:{id} row.
-    builder.Services.AddSingleton<JeebGateway.JeebSupport.IJeebSupportTicketStore,
-        JeebGateway.JeebSupport.StateServiceSupportTicketStore>();
 
     // S08 (A3/N9) — DURABLE offer→request routing. Re-point IOfferRequestIndex at the
     // write-through decorator so the offerId → (requestId, jeeberId) pairing survives a
@@ -2622,15 +2577,6 @@ if (stateServiceWired)
     builder.Services.AddSingleton<JeebGateway.StateService.Durable.IStateDisputeWriter,
         JeebGateway.StateService.Durable.StateServiceDisputeWriter>();
 
-    // ADR-0001 remediation (run #1 follow-up): the dispute STORE itself is now durable.
-    // Re-points IDisputeStore from the in-memory MVP store (rows lost on every gateway
-    // bounce / replica move — the flagged ADR-0001 violation) to the state-service-backed
-    // store, which persists the full Jeeb dispute row as an opaque KV body + owner/delivery
-    // prefix indexes (the PR #206 support-ticket pattern). Overrides the InMemoryDisputeStore
-    // registered earlier (last-wins DI); a state-service blip is absorbed by the typed
-    // client's circuit-breaker rather than failing the file/list path.
-    builder.Services.AddSingleton<IDisputeStore, StateServiceDisputeStore>();
-
     // Durability register #3 — refresh-token store. Re-points IRefreshTokenStore from the
     // in-memory MVP store (rows lost on every gateway bounce → refresh-reuse detection and
     // active-token revocation evaporate) to the state-service-backed store, which persists
@@ -2638,13 +2584,6 @@ if (stateServiceWired)
     // above). Overrides the InMemoryRefreshTokenStore registered earlier (last-wins DI).
     builder.Services.AddSingleton<IRefreshTokenStore,
         JeebGateway.Tokens.StateServiceRefreshTokenStore>();
-
-    // Durability register #4 — dispute-case (v2) store. Re-points IDisputeCaseStore from the
-    // in-memory MVP store to the state-service-backed store (opaque KV body + delivery/user
-    // prefix indexes), mirroring the sibling StateServiceDisputeStore above so escalated
-    // dispute cases survive a bounce. Overrides InMemoryDisputeCaseStore (last-wins DI).
-    builder.Services.AddSingleton<IDisputeCaseStore,
-        JeebGateway.Disputes.V2.StateServiceDisputeCaseStore>();
 
     // Add jeeb-state-service to the aggregate-health roster (now 18 checks).
     builder.Services.AddHealthChecks()
@@ -2656,14 +2595,11 @@ if (stateServiceWired)
 }
 else
 {
-    // local/CI fallback (no live jeeb-state-service): the support store still needs an
-    // opaque KV to resolve, so back it with the in-process idempotency KV — the SAME
-    // degrade-to-in-memory contract the other durable stores use when unwired. Production
-    // (state-service wired) NEVER takes this path; the support row lives in jeeb-state-service.
+    builder.Services.AddSingleton<IGenericCaseStateClient, UnavailableGenericCaseStateClient>();
+    // Unrelated legacy durability adapters still use this existing local/CI fallback.
+    // Cases never use it; UnavailableGenericCaseStateClient fails them explicitly.
     builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,
         JeebGateway.StateService.Idempotency.InMemoryIdempotencyStore>();
-    builder.Services.AddSingleton<JeebGateway.JeebSupport.IJeebSupportTicketStore,
-        JeebGateway.JeebSupport.StateServiceSupportTicketStore>();
 }
 
 // Global RFC 7807 ProblemDetails + last-line exception handler. Guarantees an

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using JeebGateway.Notifications;
 
 namespace JeebGateway.JeebNotifications;
 
@@ -87,6 +88,8 @@ public static class JeebNotificationsProjection
             Ts = row.Timestamp ?? string.Empty,
             Read = IsRead(row.Status),
             Ref = NullIfBlank(row.Ref),
+            DeepLink = NullIfBlank(row.DeepLink)
+                ?? NotificationDeepLinkResolver.Resolve(row.Type, row.Ref),
         };
     }
 

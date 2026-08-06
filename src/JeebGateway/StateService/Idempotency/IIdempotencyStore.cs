@@ -33,6 +33,13 @@ public interface IIdempotencyStore
     Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(string prefix, CancellationToken ct);
 }
 
+/// <summary>
+/// Marks an idempotency implementation whose records live outside the gateway
+/// process. Operations that cannot safely degrade to process-local replay state
+/// use this marker to fail closed when jeeb-state-service is unavailable.
+/// </summary>
+public interface IExternalIdempotencyStore : IIdempotencyStore;
+
 /// <summary>Result of an idempotency check.</summary>
 public sealed class IdempotencyOutcome
 {

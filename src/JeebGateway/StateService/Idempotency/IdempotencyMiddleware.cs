@@ -188,6 +188,12 @@ public sealed class IdempotencyMiddleware
     {
         clientKey = null;
         if (!MutatingMethods.Contains(context.Request.Method)) return false;
+        // CDN upload tickets use an explicit state-backed reserve/result protocol
+        // whose TTL is bounded by the signed ticket. The generic middleware's
+        // 24-hour check-then-act cache is both too long and not principal-scoped.
+        if (HttpMethods.IsPost(context.Request.Method)
+            && context.Request.Path.Equals("/api/cdn/assets", StringComparison.OrdinalIgnoreCase))
+            return false;
         if (!context.Request.Headers.TryGetValue(HeaderName, out var values)) return false;
 
         var candidate = values.ToString();
