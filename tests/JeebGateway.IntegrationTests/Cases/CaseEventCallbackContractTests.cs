@@ -70,6 +70,7 @@ public sealed class CaseEventCallbackContractTests
         var push = new ServicePushNotificationClient("https://push/",
             new HttpClient(new PushHandler(calls)));
         var controller = new CaseEventCallbacksController(delivery, notification, push,
+            new FakePushRecovery("succeeded"),
             NullLogger<CaseEventCallbacksController>.Instance)
         {
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() },
@@ -222,6 +223,12 @@ public sealed class CaseEventCallbackContractTests
 
         result.Should().BeOfType<AcceptedResult>();
         recovery.QueriedKeys.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void Controller_Has_One_Public_Constructor_For_Runtime_Activation()
+    {
+        typeof(CaseEventCallbacksController).GetConstructors().Should().ContainSingle();
     }
 
     [Fact]

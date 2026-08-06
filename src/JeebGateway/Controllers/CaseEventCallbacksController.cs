@@ -31,11 +31,6 @@ public sealed class CaseEventCallbacksController : ControllerBase
         _pushRecovery = pushRecovery; _log = log;
     }
 
-    public CaseEventCallbacksController(ICaseDeliveryClient delivery,
-        ServiceNotificationClient notifications, ServicePushNotificationClient push,
-        ILogger<CaseEventCallbacksController> log)
-        : this(delivery, notifications, push, new UnavailablePushRecoveryClient(), log) { }
-
     [HttpPost("events")]
     [HttpPost("/v1/case-events")]
     [AllowAnonymous]
@@ -268,17 +263,4 @@ public sealed class CaseEventCallbacksController : ControllerBase
 
     private sealed record CaseRecipient(string UserId, string Role);
 
-    private sealed class UnavailablePushRecoveryClient : IPushDispatchRecoveryClient
-    {
-        private static Task<T> Unavailable<T>() => Task.FromException<T>(
-            new InvalidOperationException("Push recovery client is unavailable."));
-        public Task<PushDispatchListV1> ListStaleAsync(int olderThanSeconds, int limit, CancellationToken ct) =>
-            Unavailable<PushDispatchListV1>();
-        public Task<PushDispatchStatusV1> GetAsync(
-            string idempotencyKey, int staleAfterSeconds, CancellationToken ct) =>
-            Unavailable<PushDispatchStatusV1>();
-        public Task<PushDispatchStatusV1> ResolveAsync(
-            string idempotencyKey, PushDispatchResolutionV1 request, CancellationToken ct) =>
-            Unavailable<PushDispatchStatusV1>();
-    }
 }
