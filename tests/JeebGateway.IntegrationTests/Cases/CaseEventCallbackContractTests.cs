@@ -226,6 +226,28 @@ public sealed class CaseEventCallbackContractTests
     }
 
     [Fact]
+    public async Task Upstream_Timeout_Is_Retryable_When_Request_Was_Not_Cancelled()
+    {
+        var delivery = new CaseDeliveryClient(new HttpClient(new DeliveryHandler())
+            { BaseAddress = new Uri("https://delivery/") });
+        var controller = new CaseEventCallbacksController(delivery,
+            new ServiceNotificationClient("https://notification/",
+                new HttpClient(new TimeoutHandler())),
+            new ServicePushNotificationClient("https://push/",
+                new HttpClient(new PushHandler(new List<CapturedCall>()))),
+            new FakePushRecovery("succeeded"),
+            NullLogger<CaseEventCallbacksController>.Instance)
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() },
+        };
+        controller.HttpContext.Connection.RemoteIpAddress = IPAddress.Loopback;
+
+        var result = await controller.Dispatch(Callback(), CancellationToken.None);
+
+        result.Should().BeOfType<ObjectResult>().Which.StatusCode.Should().Be(502);
+    }
+
+    [Fact]
     public void Controller_Has_One_Public_Constructor_For_Runtime_Activation()
     {
         typeof(CaseEventCallbacksController).GetConstructors().Should().ContainSingle();
@@ -309,6 +331,13 @@ public sealed class CaseEventCallbackContractTests
                 json.RootElement.GetProperty("receiver").GetString()!, body));
             return Json(HttpStatusCode.OK, body);
         }
+    }
+
+    private sealed class TimeoutHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromException<HttpResponseMessage>(new TaskCanceledException("upstream timeout"));
     }
 
     private sealed class PushHandler(List<CapturedCall> calls) : HttpMessageHandler

@@ -174,6 +174,17 @@ public sealed class CaseEventCallbacksController : ControllerBase
                 Activity.Current?.TraceId.ToString() ?? HttpContext.TraceIdentifier);
             return Accepted(new { eventId = callback.EventId, dispatched, degradedPushes });
         }
+        catch (OperationCanceledException error) when (!ct.IsCancellationRequested)
+        {
+            CaseTelemetry.CallbackDispatches.Add(1,
+                new("event_type", callback.EventType), new("outcome", "upstream_timeout"));
+            _log.LogError(error,
+                "event=case.callback_failed reason=upstream_timeout case_id={CaseId} "
+                + "case_event_id={EventId} correlation_id={CorrelationId}",
+                callback.Case.CaseId, callback.EventId,
+                Activity.Current?.TraceId.ToString() ?? HttpContext.TraceIdentifier);
+            return Problem("Case notification dispatch timed out; retry the outbox event.", statusCode: 502);
+        }
         catch (Exception error) when (error is not OperationCanceledException)
         {
             CaseTelemetry.CallbackDispatches.Add(1,
