@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
@@ -135,6 +136,9 @@ public sealed class JeebConversationsBffTests
         fake.LastAppend!.AuthorId.Should().Be(kamalUserId);
         fake.LastAppend.AuthorId.Should().NotBe("SPOOFED-attacker");
         fake.LastAppendConversationId.Should().Be("conv-1");
+        fake.MembershipCalls.Should().Be(1);
+        fake.LastMembershipViewer.Should().Be(kamalUserId);
+        fake.LastMembershipConversationId.Should().Be("conv-1");
         // JEBV4-335: the client key is forwarded as a readable PREFIX, bound to a
         // per-send fingerprint. It is deliberately NOT verbatim — the raw client key
         // is a per-mount counter, and forwarding it verbatim would hand chat-service
@@ -142,6 +146,47 @@ public sealed class JeebConversationsBffTests
         // See ChatSendIdempotencyCollisionTests.
         fake.LastAppend.IdempotencyKey.Should().StartWith("idem-h3-1");
         fake.LastAppend.IdempotencyKey.Should().NotBe("idem-h3-1");
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task Append_NonActiveAuthor_Returns403_WithoutForwardingMessage(
+        bool isMember,
+        bool isRemoved)
+    {
+        var fake = new FakeJeebConversationClient
+        {
+            Membership = new JeebConversationMembership
+            {
+                IsMember = isMember,
+                RemovedAt = isRemoved ? System.DateTimeOffset.UtcNow : null,
+            },
+        };
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, userId) = await MintSession(
+            http, isRemoved ? "+9613001853" : "+9613001852");
+
+        var msg = new HttpRequestMessage(HttpMethod.Post, "/v1/conversations/conv-denied/messages")
+        {
+            Content = JsonContent.Create(new
+            {
+                kind = "text",
+                author_id = "SPOOFED-attacker",
+                body = "must not be forwarded",
+            }),
+        };
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await resp.Content.ReadAsStringAsync()).Should().Contain("not_in_membership");
+        fake.MembershipCalls.Should().Be(1);
+        fake.LastMembershipViewer.Should().Be(userId);
+        fake.AppendCalls.Should().Be(0);
+        fake.LastAppend.Should().BeNull();
     }
 
     [Fact]
@@ -390,16 +435,22 @@ public sealed class JeebConversationsBffTests
         (await resp.Content.ReadAsStringAsync()).Should().Contain("not_in_membership");
     }
 
-    [Fact]
-    public async Task H6_Member_RealtimeGate_Returns200_ChannelDescriptor()
+    [Theory]
+    [InlineData("client")]
+    [InlineData("jeeber_winner")]
+    public async Task H6_Member_RealtimeGate_Returns200_WithActiveRoleInDescriptorAndTicket(
+        string activeRole)
     {
         var fake = new FakeJeebConversationClient
         {
-            Membership = new JeebConversationMembership { IsMember = true, RoleInConvo = "client" },
+            // The deployed chat membership shape has no role field. The role must
+            // come from the authoritative conversation roster, not this DTO.
+            Membership = new JeebConversationMembership { IsMember = true },
         };
         using var factory = MakeFactory(fake, chatEnabled: true);
         var http = factory.CreateClient();
-        var (token, _) = await MintSession(http, "+9613001808");
+        var (token, viewerId) = await MintSession(http, "+9613001808");
+        fake.ConversationById = ConversationWithParticipant("conv-1", viewerId, activeRole);
 
         var msg = new HttpRequestMessage(HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-1");
         msg.Headers.Authorization = Bearer(token);
@@ -411,6 +462,38 @@ public sealed class JeebConversationsBffTests
         // The descriptor maps the suite topic jeeb:chat:{id} -> realtime jeeb_conversation:{id}.
         json["topic"]!.Value<string>().Should().Be("jeeb_conversation:conv-1");
         json["conversationId"]!.Value<string>().Should().Be("conv-1");
+        json["roleInConvo"]!.Value<string>().Should().Be(activeRole);
+
+        var ticket = json["ticket"]!.Value<string>();
+        ticket.Should().NotBeNullOrWhiteSpace();
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(ticket);
+        jwt.Subject.Should().Be(viewerId);
+        jwt.Claims.Should().Contain(claim => claim.Type == "role" && claim.Value == activeRole);
+        fake.LastByIdConversationId.Should().Be("conv-1");
+    }
+
+    [Fact]
+    public async Task RealtimeGate_MemberWithBlankRosterRole_Returns503_NoDescriptor()
+    {
+        var fake = new FakeJeebConversationClient
+        {
+            Membership = new JeebConversationMembership { IsMember = true },
+        };
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, viewerId) = await MintSession(http, "+9613001854");
+        fake.ConversationById = ConversationWithParticipant("conv-blank-role", viewerId, " ");
+
+        var msg = new HttpRequestMessage(
+            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-blank-role");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.Should().Contain("active chat role");
+        body.Should().NotContain("\"topic\"");
     }
 
     // ---------------------------------------------------------------------
@@ -423,7 +506,7 @@ public sealed class JeebConversationsBffTests
         var fake = new FakeJeebConversationClient();
         using var factory = MakeFactory(fake, chatEnabled: true);
         var http = factory.CreateClient();
-        var (token, _) = await MintSession(http, "+9613001809");
+        var (token, userId) = await MintSession(http, "+9613001809");
 
         var msg = new HttpRequestMessage(HttpMethod.Get, "/v1/conversations?correlationKey=req-h2");
         msg.Headers.Authorization = Bearer(token);
@@ -435,6 +518,81 @@ public sealed class JeebConversationsBffTests
         json["phase"]!.Value<string>().Should().Be("broadcasting");
         json["participants"]!.Should().NotBeNull();
         fake.LastCorrelationKey.Should().Be("req-h2");
+        fake.LastMembershipViewer.Should().Be(userId);
+        fake.LastMembershipConversationId.Should().Be("conv-req-h2");
+    }
+
+    [Theory]
+    [InlineData("/v1/conversations?correlationKey=req-private")]
+    [InlineData("/v1/chat/jeeb/conversations/by-request/req-private")]
+    public async Task MetadataByRequest_NonParticipant_Returns403_WithoutRosterLeak(string path)
+    {
+        var fake = new FakeJeebConversationClient
+        {
+            Membership = new JeebConversationMembership { IsMember = false },
+        };
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, viewerId) = await MintSession(http, "+9613001855");
+
+        var msg = new HttpRequestMessage(HttpMethod.Get, path);
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.Should().Contain("not_in_membership");
+        body.Should().NotContain("\"participants\"");
+        body.Should().NotContain("\"correlation_key\"");
+        body.Should().NotContain("\"phase\"");
+        fake.LastMembershipViewer.Should().Be(viewerId);
+        fake.LastMembershipConversationId.Should().Be("conv-req-private");
+    }
+
+    [Fact]
+    public async Task MetadataById_NonParticipant_Returns403_WithoutRosterLeak()
+    {
+        var fake = new FakeJeebConversationClient
+        {
+            Membership = new JeebConversationMembership { IsMember = false },
+        };
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, viewerId) = await MintSession(http, "+9613001856");
+
+        var msg = new HttpRequestMessage(HttpMethod.Get, "/v1/conversations/conv-private");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.Should().NotContain("\"participants\"");
+        fake.ByIdCalls.Should().Be(0,
+            "an id lookup can enforce membership before loading the roster");
+        fake.LastByIdConversationId.Should().BeNull();
+        fake.LastMembershipViewer.Should().Be(viewerId);
+    }
+
+    [Fact]
+    public async Task MetadataById_ActiveParticipant_ReturnsConversation()
+    {
+        var fake = new FakeJeebConversationClient();
+        using var factory = MakeFactory(fake, chatEnabled: true);
+        var http = factory.CreateClient();
+        var (token, viewerId) = await MintSession(http, "+9613001857");
+        fake.ConversationById = ConversationWithParticipant("conv-visible", viewerId, "client");
+
+        var msg = new HttpRequestMessage(HttpMethod.Get, "/v1/conversations/conv-visible");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        json["conversation_id"]!.Value<string>().Should().Be("conv-visible");
+        json["participants"]![0]!["user_id"]!.Value<string>().Should().Be(viewerId);
     }
 
     [Fact]
@@ -691,6 +849,25 @@ public sealed class JeebConversationsBffTests
     private static System.Net.Http.Headers.AuthenticationHeaderValue Bearer(string token) =>
         new("Bearer", token);
 
+    private static JeebConversationResponse ConversationWithParticipant(
+        string conversationId,
+        string userId,
+        string role) => new()
+        {
+            ConversationId = conversationId,
+            CorrelationKey = "req-" + conversationId,
+            Phase = "accepted",
+            Participants = new List<JeebConversationParticipant>
+            {
+                new()
+                {
+                    UserId = userId,
+                    RoleInConvo = role,
+                    RemovedAt = null,
+                },
+            },
+        };
+
     private const string AppId = "jeeb-test-app";
 
     private static WebApplicationFactory<Program> MakeFactory(
@@ -751,8 +928,13 @@ public sealed class JeebConversationsBffTests
         public string? LastCorrelationKey { get; private set; }
 
         public int CreateCalls { get; private set; }
+        public int AppendCalls { get; private set; }
         public int ListCalls { get; private set; }
         public int MembershipCalls { get; private set; }
+        public int ByIdCalls { get; private set; }
+
+        public JeebConversationResponse? ConversationById { get; set; }
+        public string? LastByIdConversationId { get; private set; }
 
         public JeebConversationApiException? ListThrows { get; init; }
 
@@ -760,7 +942,7 @@ public sealed class JeebConversationsBffTests
         public JeebConversationApiException? CorrelationThrows { get; init; }
 
         public JeebConversationMembership Membership { get; init; }
-            = new() { IsMember = true, RoleInConvo = "client" };
+            = new() { IsMember = true };
 
         public Task<JeebConversationResponse> CreateConversationAsync(
             CreateJeebConversationRequest request, CancellationToken ct)
@@ -804,6 +986,7 @@ public sealed class JeebConversationsBffTests
         public Task<JeebMessageResponse> AppendMessageAsync(
             string conversationId, AppendJeebMessageRequest request, CancellationToken ct)
         {
+            AppendCalls++;
             LastAppendConversationId = conversationId;
             LastAppend = request;
             return Task.FromResult(new JeebMessageResponse
@@ -815,6 +998,20 @@ public sealed class JeebConversationsBffTests
                 Audience = request.Audience,
                 Payload = request.Payload,
                 Body = request.Body,
+            });
+        }
+
+        public Task<JeebConversationResponse> GetConversationByIdAsync(
+            string conversationId, CancellationToken ct)
+        {
+            ByIdCalls++;
+            LastByIdConversationId = conversationId;
+            return Task.FromResult(ConversationById ?? new JeebConversationResponse
+            {
+                ConversationId = conversationId,
+                CorrelationKey = "req-" + conversationId,
+                Phase = "broadcasting",
+                Participants = new List<JeebConversationParticipant>(),
             });
         }
 

@@ -168,6 +168,20 @@ public sealed class S08GatewayCloseoutTests
         using var factory = NewRealtimeFactory(chat);
         var http = factory.CreateClient();
         var (token, viewerId) = await MintSession(http, "+9613009801");
+        chat.ConversationById = new JeebConversationResponse
+        {
+            ConversationId = "conv-h6",
+            CorrelationKey = "req-h6",
+            Phase = "broadcasting",
+            Participants = new List<JeebConversationParticipant>
+            {
+                new()
+                {
+                    UserId = viewerId,
+                    RoleInConvo = "jeeber_offerer",
+                },
+            },
+        };
 
         var msg = new HttpRequestMessage(HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-h6");
         msg.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
@@ -177,6 +191,7 @@ public sealed class S08GatewayCloseoutTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var json = JObject.Parse(await resp.Content.ReadAsStringAsync());
         json["topic"]!.Value<string>().Should().Be("jeeb_conversation:conv-h6");
+        json["roleInConvo"]!.Value<string>().Should().Be("jeeber_offerer");
 
         var ticket = json["ticket"]!.Value<string>();
         ticket.Should().NotBeNullOrWhiteSpace("a member's WS join is authorized by a gateway-signed ticket");
@@ -342,6 +357,7 @@ public sealed class S08GatewayCloseoutTests
         public JeebConversationApiException? AddParticipantThrows { get; init; }
         public JeebConversationApiException? AdvancePhaseThrows { get; init; }
         public string AdvancedPhase { get; init; } = "accepted";
+        public JeebConversationResponse? ConversationById { get; set; }
 
         public int AddParticipantCalls { get; private set; }
         public string? LastAddParticipantConversationId { get; private set; }
@@ -407,6 +423,14 @@ public sealed class S08GatewayCloseoutTests
         public Task<JeebConversationResponse> GetConversationByCorrelationAsync(
             string correlationKey, CancellationToken ct)
             => Task.FromResult(new JeebConversationResponse());
+
+        public Task<JeebConversationResponse> GetConversationByIdAsync(
+            string conversationId, CancellationToken ct)
+            => Task.FromResult(ConversationById ?? new JeebConversationResponse
+            {
+                ConversationId = conversationId,
+                Participants = new List<JeebConversationParticipant>(),
+            });
 
         public Task<JeebMessageResponse> AppendMessageAsync(
             string conversationId, AppendJeebMessageRequest request, CancellationToken ct)
