@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Net;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -153,12 +154,13 @@ public sealed class JeebConversationsController : ControllerBase
     [ProducesResponseType(typeof(JeebConversationResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> GetConversationByCorrelation(
         [FromQuery] string? correlationKey,
         CancellationToken ct)
     {
-        if (!TryGetUserId(out _, out var unauthorized))
+        if (!TryGetUserId(out var viewerId, out var unauthorized))
         {
             return unauthorized;
         }
@@ -178,7 +180,8 @@ public sealed class JeebConversationsController : ControllerBase
         try
         {
             var result = await _client.GetConversationByCorrelationAsync(correlationKey, ct);
-            return Ok(result);
+            return await ReturnMetadataForActiveMemberAsync(
+                result, viewerId, "read conversation by correlation", ct);
         }
         catch (JeebConversationApiException ex)
         {
@@ -203,13 +206,14 @@ public sealed class JeebConversationsController : ControllerBase
     [ProducesResponseType(typeof(JeebConversationResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> GetConversationByRequest(
         string requestId,
         CancellationToken ct)
     {
-        if (!TryGetUserId(out _, out var unauthorized))
+        if (!TryGetUserId(out var viewerId, out var unauthorized))
         {
             return unauthorized;
         }
@@ -229,11 +233,72 @@ public sealed class JeebConversationsController : ControllerBase
         try
         {
             var result = await _client.GetConversationByCorrelationAsync(requestId, ct);
-            return Ok(result);
+            return await ReturnMetadataForActiveMemberAsync(
+                result, viewerId, "read conversation by request", ct);
         }
         catch (JeebConversationApiException ex)
         {
             return ForwardUpstream(ex, "read conversation by request");
+        }
+    }
+
+    /// <summary>
+    /// Read conversation metadata by its chat-service id. The roster is returned only
+    /// after chat-service confirms the bearer is an active participant.
+    /// </summary>
+    [HttpGet("v1/conversations/{conversationId}")]
+    [Authorize]
+    [RequireCapability(Capabilities.ChatRead)]
+    [ProducesResponseType(typeof(JeebConversationResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> GetConversationById(
+        string conversationId,
+        CancellationToken ct)
+    {
+        if (!TryGetUserId(out var viewerId, out var unauthorized))
+        {
+            return unauthorized;
+        }
+
+        if (!_flags.Chat)
+        {
+            return UpstreamUnavailable();
+        }
+
+        if (string.IsNullOrWhiteSpace(conversationId))
+        {
+            return Problem(
+                title: "conversationId is required.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        JeebConversationMembership membership;
+        try
+        {
+            membership = await _client.GetMembershipAsync(conversationId, viewerId, ct);
+        }
+        catch (JeebConversationApiException ex)
+        {
+            return ForwardUpstream(ex, "read conversation by id membership check");
+        }
+
+        if (!IsActiveMembership(membership))
+        {
+            return NotInActiveMembership(
+                "The caller is not an active participant of this conversation and "
+                + "may not read its metadata or participant roster.");
+        }
+
+        try
+        {
+            return Ok(await _client.GetConversationByIdAsync(conversationId, ct));
+        }
+        catch (JeebConversationApiException ex)
+        {
+            return ForwardUpstream(ex, "read conversation by id");
         }
     }
 
@@ -280,6 +345,25 @@ public sealed class JeebConversationsController : ControllerBase
             return Problem(
                 title: "A message body is required.",
                 statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        JeebConversationMembership membership;
+        try
+        {
+            membership = await _client.GetMembershipAsync(conversationId, authorId, ct);
+        }
+        catch (JeebConversationApiException ex)
+        {
+            return ForwardUpstream(ex, "append membership check");
+        }
+
+        // Defense in depth: chat-service currently trusts the gateway-stamped author.
+        // Confirm that author is still active before forwarding the append. This does
+        // not replace chat-service membership ownership and stores no gateway state.
+        if (!IsActiveMembership(membership))
+        {
+            return NotInActiveMembership(
+                "The caller is not an active participant of this conversation and may not append messages.");
         }
 
         // JEBV4-335 — NEVER forward the raw client key here. It is a per-mount
@@ -493,13 +577,48 @@ public sealed class JeebConversationsController : ControllerBase
         // REST read (H5/N3) lets a removed member read the up-to-cutoff history, but
         // the live socket is for ACTIVE members only (H7 kick), so the realtime gate
         // is strictly removed_at == null.
-        if (!membership.IsMember || membership.RemovedAt is not null)
+        if (!IsActiveMembership(membership))
         {
-            return Problem(
-                title: "not_in_membership",
-                detail: "The caller is not an active participant of this conversation and "
-                    + "may not join its realtime channel.",
-                statusCode: StatusCodes.Status403Forbidden);
+            return NotInActiveMembership(
+                "The caller is not an active participant of this conversation and "
+                + "may not join its realtime channel.");
+        }
+
+        JeebConversationResponse conversation;
+        try
+        {
+            conversation = await _client.GetConversationByIdAsync(conversationId, ct);
+        }
+        catch (JeebConversationApiException ex)
+        {
+            return ForwardUpstream(ex, "resolve realtime chat role");
+        }
+
+        // chat-service's frozen membership response intentionally contains only the
+        // active-membership decision. Resolve the opaque role from its authoritative
+        // roster and fail closed if the two upstream projections disagree.
+        var participant = conversation.Participants.FirstOrDefault(candidate =>
+            string.Equals(candidate.UserId, viewerId, StringComparison.Ordinal)
+            && candidate.RemovedAt is null);
+        if (participant is null)
+        {
+            return NotInActiveMembership(
+                "The caller has no active participant entry for this conversation and "
+                + "may not join its realtime channel.");
+        }
+
+        var activeRole = participant.RoleInConvo;
+        if (string.IsNullOrWhiteSpace(activeRole))
+        {
+            return StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                new ProblemDetails
+                {
+                    Title = "The active chat role is unavailable.",
+                    Detail = "chat-service confirmed membership but returned no active role; "
+                        + "a realtime descriptor cannot be issued safely.",
+                    Status = StatusCodes.Status503ServiceUnavailable,
+                });
         }
 
         // Member: hand back the channel descriptor the client upgrades to. The
@@ -515,7 +634,7 @@ public sealed class JeebConversationsController : ControllerBase
         string? ticket = null;
         try
         {
-            ticket = _ticketIssuer.Issue(conversationId, viewerId, membership.RoleInConvo);
+            ticket = _ticketIssuer.Issue(conversationId, viewerId, activeRole);
         }
         catch (Exception ex)
         {
@@ -529,7 +648,7 @@ public sealed class JeebConversationsController : ControllerBase
         {
             ConversationId = conversationId,
             Topic = $"jeeb_conversation:{conversationId}",
-            RoleInConvo = membership.RoleInConvo,
+            RoleInConvo = activeRole,
             Ticket = ticket,
         });
     }
@@ -537,6 +656,38 @@ public sealed class JeebConversationsController : ControllerBase
     // ---------------------------------------------------------------------
     // helpers
     // ---------------------------------------------------------------------
+
+    private async Task<IActionResult> ReturnMetadataForActiveMemberAsync(
+        JeebConversationResponse conversation,
+        string viewerId,
+        string action,
+        CancellationToken ct)
+    {
+        JeebConversationMembership membership;
+        try
+        {
+            membership = await _client.GetMembershipAsync(
+                conversation.ConversationId, viewerId, ct);
+        }
+        catch (JeebConversationApiException ex)
+        {
+            return ForwardUpstream(ex, action + " membership check");
+        }
+
+        return IsActiveMembership(membership)
+            ? Ok(conversation)
+            : NotInActiveMembership(
+                "The caller is not an active participant of this conversation and "
+                + "may not read its metadata or participant roster.");
+    }
+
+    private static bool IsActiveMembership(JeebConversationMembership membership) =>
+        membership.IsMember && membership.RemovedAt is null;
+
+    private ObjectResult NotInActiveMembership(string detail) => Problem(
+        title: "not_in_membership",
+        detail: detail,
+        statusCode: StatusCodes.Status403Forbidden);
 
     private IActionResult ForwardUpstream(JeebConversationApiException ex, string action)
     {
@@ -655,7 +806,7 @@ public sealed class RealtimeChannelDescriptor
 {
     public string ConversationId { get; set; } = string.Empty;
     public string Topic { get; set; } = string.Empty;
-    public string? RoleInConvo { get; set; }
+    public string RoleInConvo { get; set; } = string.Empty;
 
     /// <summary>
     /// Signed, short-lived membership ticket scoped to (conversation, viewer, role).

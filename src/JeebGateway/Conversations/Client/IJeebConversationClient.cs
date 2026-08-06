@@ -36,6 +36,16 @@ public interface IJeebConversationClient
         CancellationToken ct);
 
     /// <summary>
+    /// Read the authoritative conversation projection by chat-service id. The BFF
+    /// uses this only behind its bearer membership boundary and for active-role
+    /// resolution; chat-service remains the roster authority.
+    /// </summary>
+    Task<JeebConversationResponse> GetConversationByIdAsync(
+        string conversationId,
+        CancellationToken ct) => throw new NotSupportedException(
+            "This test double does not implement conversation reads by id.");
+
+    /// <summary>
     /// Append a structured/text message. author_id is stamped by the gateway from
     /// the bearer (never the caller body) and forwarded; chat-service persists and
     /// echoes the message projection incl. message_id.

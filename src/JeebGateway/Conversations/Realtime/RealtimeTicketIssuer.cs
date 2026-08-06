@@ -34,7 +34,7 @@ public interface IRealtimeTicketIssuer
     /// the realtime channel for <paramref name="conversationId"/> as
     /// <paramref name="roleInConvo"/>. Caller MUST have verified membership first.
     /// </summary>
-    string Issue(string conversationId, string viewerId, string? roleInConvo);
+    string Issue(string conversationId, string viewerId, string roleInConvo);
 }
 
 /// <summary>
@@ -73,8 +73,10 @@ public sealed class RealtimeTicketIssuer : IRealtimeTicketIssuer
             new SymmetricSecurityKey(keyBytes), SecurityAlgorithms.HmacSha256);
     }
 
-    public string Issue(string conversationId, string viewerId, string? roleInConvo)
+    public string Issue(string conversationId, string viewerId, string roleInConvo)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(roleInConvo);
+
         var now = _clock.GetUtcNow();
         var expires = now.Add(TicketLifetime);
 
@@ -85,11 +87,8 @@ public sealed class RealtimeTicketIssuer : IRealtimeTicketIssuer
             new(JwtRegisteredClaimNames.Iat,
                 now.ToUnixTimeSeconds().ToString(), ClaimValueTypes.Integer64),
             new(ConversationClaim, conversationId),
+            new(RoleClaim, roleInConvo),
         };
-        if (!string.IsNullOrWhiteSpace(roleInConvo))
-        {
-            claims.Add(new Claim(RoleClaim, roleInConvo));
-        }
 
         var jwt = new JwtSecurityToken(
             issuer: _jwt.Issuer,

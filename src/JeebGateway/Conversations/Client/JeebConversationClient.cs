@@ -76,6 +76,15 @@ public sealed class JeebConversationClient : IJeebConversationClient
         return await SendAsync<JeebConversationResponse>(msg, ct);
     }
 
+    public async Task<JeebConversationResponse> GetConversationByIdAsync(
+        string conversationId, CancellationToken ct)
+    {
+        // chat-service: GET /api/conversations/{id}
+        var url = $"api/conversations/{Uri.EscapeDataString(conversationId)}";
+        using var msg = new HttpRequestMessage(HttpMethod.Get, url);
+        return await SendAsync<JeebConversationResponse>(msg, ct);
+    }
+
     public async Task<JeebMessageResponse> AppendMessageAsync(
         string conversationId, AppendJeebMessageRequest request, CancellationToken ct)
     {
