@@ -51,6 +51,7 @@ public class LocationController : ControllerBase
     private readonly IOptionsMonitor<TrackingOptions> _options;
     private readonly TimeProvider _clock;
     private readonly IDeliveryServiceClient _delivery;
+    private readonly IGeoHistoryClient _geoHistory;
     private readonly IDeliveryParticipantResolver _participants;
     private readonly ICourierPositionQueue _positions;
     private readonly IOptionsMonitor<CourierPositionPublishOptions> _publishOptions;
@@ -63,6 +64,7 @@ public class LocationController : ControllerBase
         IOptionsMonitor<TrackingOptions> options,
         TimeProvider clock,
         IDeliveryServiceClient delivery,
+        IGeoHistoryClient geoHistory,
         IDeliveryParticipantResolver participants,
         ICourierPositionQueue positions,
         IOptionsMonitor<CourierPositionPublishOptions> publishOptions,
@@ -74,6 +76,7 @@ public class LocationController : ControllerBase
         _options = options;
         _clock = clock;
         _delivery = delivery;
+        _geoHistory = geoHistory;
         _participants = participants;
         _positions = positions;
         _publishOptions = publishOptions;
@@ -188,6 +191,55 @@ public class LocationController : ControllerBase
             Timestamp = result.Latest.DeviceTimestamp
         };
 
+        // Delivery-scoped fixes are evidence, not just a latest-position cache. Persist
+        // the accepted fix under the delivery id in geolocation-service's generic
+        // 30-day track history before reporting it accepted to the device. The shared
+        // service remains product-neutral; the gateway supplies the delivery/actor
+        // composition it already authorized above.
+        var retryingLatestForHistory = latest is not null
+            && result.Accepted == 0
+            && points.Any(point => SameFix(point, latest));
+        if (latest is not null
+            && (result.Accepted > 0 || retryingLatestForHistory)
+            && !string.IsNullOrWhiteSpace(body?.DeliveryId))
+        {
+            if (retryingLatestForHistory)
+            {
+                _logger.LogInformation(
+                    "Retrying track-history persistence for locally retained delivery fix {DeliveryId}/{JeeberId} at {RecordedAt}.",
+                    body.DeliveryId, jeeberId, latest.Timestamp);
+            }
+            try
+            {
+                await _geoHistory.RecordTrackPointAsync(
+                    body.DeliveryId,
+                    jeeberId,
+                    latest.Lat,
+                    latest.Lng,
+                    latest.Accuracy,
+                    latest.Timestamp,
+                    ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                _logger.LogError(error,
+                    "Delivery track-history write failed for delivery {DeliveryId}, jeeber {JeeberId}; "
+                    + "the fix is not acknowledged as durable evidence.",
+                    body.DeliveryId, jeeberId);
+                return StatusCode(StatusCodes.Status502BadGateway, new ProblemDetails
+                {
+                    Title = "Delivery tracking history is temporarily unavailable.",
+                    Detail = "The location update was not acknowledged; retry with the latest position.",
+                    Status = StatusCodes.Status502BadGateway,
+                    Type = "https://jeeb.dev/errors/tracking-history-unavailable",
+                });
+            }
+        }
+
         // S06 keystone: forward the latest accepted fix to the canonical
         // delivery-service presence store as a heartbeat. This bumps
         // last_heartbeat_at + last-known location in the SAME store the matching
@@ -267,6 +319,12 @@ public class LocationController : ControllerBase
             Latest = latest
         });
     }
+
+    private static bool SameFix(GpsPointDto submitted, GpsPointDto latest) =>
+        submitted.Timestamp == latest.Timestamp
+        && submitted.Lat.Equals(latest.Lat)
+        && submitted.Lng.Equals(latest.Lng)
+        && Nullable.Equals(submitted.Accuracy, latest.Accuracy);
 
     [HttpGet("deliveries/{deliveryId}/tracking")]
     // ADR-005 L2 §C client-only delivery tracking (STATE: party-on-delivery/ownership stays in-action).

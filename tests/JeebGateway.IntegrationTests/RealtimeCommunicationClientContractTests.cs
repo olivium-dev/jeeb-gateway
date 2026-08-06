@@ -98,6 +98,27 @@ public class RealtimeCommunicationClientContractTests
     }
 
     [Fact]
+    public async Task Publish_429_Carries_Json_Throttle_Delay_For_Bounded_Background_Retry()
+    {
+        var client = ClientReturning(
+            HttpStatusCode.TooManyRequests,
+            "{\"error\":\"throttled\",\"next_allowed_ms\":850}",
+            retryAfter: TimeSpan.Zero);
+
+        var action = () => client.PublishAsync(
+            "jeeb:delivery:d-1",
+            "location",
+            new Dictionary<string, object?> { ["jeeberId"] = "courier-1" },
+            null,
+            CancellationToken.None);
+
+        var error = (await action.Should().ThrowAsync<RealtimePublishException>()).Which;
+        error.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        error.RetryAfter.Should().Be(TimeSpan.FromMilliseconds(850),
+            "the precise JSON hint must win over the service's truncated Retry-After header");
+    }
+
+    [Fact]
     public async Task Publish_Rejects_Blank_Recipient()
     {
         var client = ClientReturning(HttpStatusCode.Accepted, """{"ok":true,"id":"x","seq":1}""");
@@ -143,9 +164,12 @@ public class RealtimeCommunicationClientContractTests
     // Fake handler plumbing
     // -----------------------------------------------------------------------
 
-    private static RealtimeCommunicationClient ClientReturning(HttpStatusCode status, string json)
+    private static RealtimeCommunicationClient ClientReturning(
+        HttpStatusCode status,
+        string json,
+        TimeSpan? retryAfter = null)
         => new(
-            new HttpClient(new StubHandler(status, json))
+            new HttpClient(new StubHandler(status, json, retryAfter: retryAfter))
             {
                 BaseAddress = new Uri("http://realtime-service.test/")
             },
@@ -206,6 +230,31 @@ public class RealtimeCommunicationClientContractTests
             .Should().Equal("publish");
     }
 
+    [Fact]
+    public async Task Location_Publish_Uses_PerCourier_Guardian_Subject_For_Rate_Limit_Isolation()
+    {
+        HttpRequestMessage? seen = null;
+        var client = ClientCapturing(
+            HttpStatusCode.Accepted, "{\"ok\":true,\"id\":\"x\",\"seq\":1}",
+            (req, _) => seen = req,
+            guardianSecret: "contract-test-guardian-secret-0123456789-0123456789-abcdef");
+
+        await client.PublishAsync(
+            "jeeb:delivery:d-1", "location",
+            new Dictionary<string, object?>
+            {
+                ["lat"] = 1.0,
+                ["lng"] = 2.0,
+                ["jeeberId"] = "courier-1",
+            }, null, default);
+
+        var payload = seen!.Headers.Authorization!.Parameter!.Split('.')[1]
+            .Replace('-', '+').Replace('_', '/');
+        payload = payload.PadRight(payload.Length + (4 - payload.Length % 4) % 4, '=');
+        var claims = System.Text.Json.JsonDocument.Parse(Convert.FromBase64String(payload)).RootElement;
+        claims.GetProperty("sub").GetString().Should().Be("jeeb-gateway:location:courier-1");
+    }
+
     /// <summary>
     /// NEGATIVE CONTROL for the test above: with no secret configured nothing is minted,
     /// so the assertion above is detecting a real attachment rather than always passing.
@@ -229,13 +278,16 @@ public class RealtimeCommunicationClientContractTests
         private readonly HttpStatusCode _status;
         private readonly string _json;
         private readonly Action<HttpRequestMessage, string?>? _capture;
+        private readonly TimeSpan? _retryAfter;
 
         public StubHandler(HttpStatusCode status, string json,
-            Action<HttpRequestMessage, string?>? capture = null)
+            Action<HttpRequestMessage, string?>? capture = null,
+            TimeSpan? retryAfter = null)
         {
             _status = status;
             _json = json;
             _capture = capture;
+            _retryAfter = retryAfter;
         }
 
         protected override async Task<HttpResponseMessage> SendAsync(
@@ -246,11 +298,15 @@ public class RealtimeCommunicationClientContractTests
                 : await request.Content.ReadAsStringAsync(cancellationToken);
             _capture?.Invoke(request, body);
 
-            return new HttpResponseMessage(_status)
+            var response = new HttpResponseMessage(_status)
             {
                 Content = new StringContent(_json, Encoding.UTF8, "application/json"),
                 RequestMessage = request,
             };
+            if (_retryAfter is not null)
+                response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(
+                    _retryAfter.Value);
+            return response;
         }
     }
 }

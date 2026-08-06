@@ -95,4 +95,16 @@ public sealed class CourierPositionPublishOptions
     /// hold the drain loop; the resilience pipeline's own timeout sits under this.
     /// </summary>
     public int PublishTimeoutMs { get; set; } = 3000;
+
+    /// <summary>Maximum retries after a realtime 429 response.</summary>
+    public int MaxThrottleRetries { get; set; } = 2;
+
+    /// <summary>Delay used when a 429 omits both Retry-After and its JSON retry hint.</summary>
+    public int ThrottleFallbackDelayMs { get; set; } = 1000;
+
+    /// <summary>Upper bound for one server-requested throttle delay.</summary>
+    public int MaxThrottleDelayMs { get; set; } = 6000;
+
+    /// <summary>Bounded parallelism across independent delivery topics.</summary>
+    public int MaxParallelPublishes { get; set; } = 16;
 }

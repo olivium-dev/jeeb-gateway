@@ -111,6 +111,14 @@ public class InMemoryRequestsStore : IRequestsStore
             }
 
             existing.Status = status;
+            if (string.Equals(status, RequestStatus.Accepted, StringComparison.Ordinal)
+                && existing.AcceptedAt is null)
+            {
+                // The upstream accept composer projects through SetStatusAsync. Preserve
+                // the first durable lifecycle observation instead of leaving acceptedAt
+                // null (and never drift it on an idempotent replay).
+                existing.AcceptedAt = _clock.GetUtcNow();
+            }
             return Task.FromResult(true);
         }
     }

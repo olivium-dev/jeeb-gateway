@@ -34,10 +34,10 @@ namespace JeebGateway.Realtime;
 ///     realtime fault reaches the caller, because by then the caller is gone.</item>
 /// </list>
 ///
-/// <para>The publish is deliberately NOT retried. A stale position is worth less than
-/// the fresh one arriving a second behind it, and the realtime service throttles the
-/// <c>location</c> stream to 1 Hz anyway — a retry would spend a token on a fix the
-/// service would drop.</para>
+/// <para>Queued bursts are coalesced by delivery before each drain, so the newest fix
+/// wins. A 429 is the one retried outcome: the publisher honors the upstream delay
+/// within a bounded attempt/time budget. Other failures remain contained and are left
+/// for the next device fix.</para>
 /// </summary>
 public sealed class CourierPositionPublisher : BackgroundService
 {
@@ -62,24 +62,17 @@ public sealed class CourierPositionPublisher : BackgroundService
     {
         try
         {
-            await foreach (var position in _queue.Reader.ReadAllAsync(stoppingToken))
+            while (await _queue.Reader.WaitToReadAsync(stoppingToken))
             {
-                try
-                {
-                    await PublishOneAsync(position, stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    // Property 4: the containment boundary. Nothing a publish can throw
-                    // may end the drain loop, and nothing reaches the (long-gone) caller.
-                    _log.LogWarning(ex,
-                        "Realtime position publish for delivery {DeliveryId} threw; fix not fanned out.",
-                        position.DeliveryId);
-                }
+                var batch = ReadCoalescedBatch();
+                await Parallel.ForEachAsync(
+                    batch,
+                    new ParallelOptions
+                    {
+                        CancellationToken = stoppingToken,
+                        MaxDegreeOfParallelism = Math.Max(1, _options.MaxParallelPublishes),
+                    },
+                    PublishContainedAsync);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -91,13 +84,69 @@ public sealed class CourierPositionPublisher : BackgroundService
     /// <summary>Exposed so an integration test can drive a deterministic single drain.</summary>
     public async Task<int> DrainOnceAsync(CancellationToken ct)
     {
-        var n = 0;
+        var batch = ReadCoalescedBatch();
+        foreach (var position in batch)
+            await PublishWithThrottleRetryAsync(position, ct);
+        return batch.Count;
+    }
+
+    private IReadOnlyList<CourierPosition> ReadCoalescedBatch()
+    {
+        var latestByDelivery = new Dictionary<string, CourierPosition>(StringComparer.Ordinal);
         while (_queue.Reader.TryRead(out var position))
         {
-            await PublishOneAsync(position, ct);
-            n++;
+            if (!latestByDelivery.TryGetValue(position.DeliveryId, out var current)
+                || position.DeviceTimestamp >= current.DeviceTimestamp)
+                latestByDelivery[position.DeliveryId] = position;
         }
-        return n;
+        return latestByDelivery.Values.ToArray();
+    }
+
+    private async ValueTask PublishContainedAsync(CourierPosition position, CancellationToken ct)
+    {
+        try
+        {
+            await PublishWithThrottleRetryAsync(position, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Normal shutdown.
+        }
+        catch (Exception ex)
+        {
+            // Property 4: the containment boundary. Nothing a publish can throw
+            // may end the drain loop, and nothing reaches the (long-gone) caller.
+            _log.LogWarning(ex,
+                "Realtime position publish for delivery {DeliveryId} threw; fix not fanned out.",
+                position.DeliveryId);
+        }
+    }
+
+    private async Task PublishWithThrottleRetryAsync(CourierPosition position, CancellationToken ct)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                await PublishOneAsync(position, ct);
+                return;
+            }
+            catch (RealtimePublishException error)
+                when (error.StatusCode == System.Net.HttpStatusCode.TooManyRequests
+                      && attempt < Math.Max(0, _options.MaxThrottleRetries))
+            {
+                var requested = error.RetryAfter
+                    ?? TimeSpan.FromMilliseconds(Math.Max(1, _options.ThrottleFallbackDelayMs));
+                var delay = TimeSpan.FromMilliseconds(Math.Clamp(
+                    requested.TotalMilliseconds,
+                    1,
+                    Math.Max(1, _options.MaxThrottleDelayMs)));
+                _log.LogInformation(
+                    "Realtime position publish throttled for delivery {DeliveryId}; retry {Retry}/{MaxRetries} in {DelayMs}ms.",
+                    position.DeliveryId, attempt + 1, _options.MaxThrottleRetries, delay.TotalMilliseconds);
+                await Task.Delay(delay, ct);
+            }
+        }
     }
 
     private async Task PublishOneAsync(CourierPosition position, CancellationToken ct)

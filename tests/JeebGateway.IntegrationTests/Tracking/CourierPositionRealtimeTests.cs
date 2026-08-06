@@ -235,6 +235,40 @@ public class CourierPositionRealtimeTests : IClassFixture<WebApplicationFactory<
         published.Data["jeeberId"].Should().Be(seed.JeeberId);
     }
 
+    [Fact]
+    public async Task Drain_Coalesces_To_Latest_Fix_And_Retries_429_After_Upstream_Delay()
+    {
+        var realtime = new ThrottledOnceRealtimeClient();
+        var services = new ServiceCollection()
+            .AddSingleton<IRealtimeCommunicationClient>(realtime)
+            .BuildServiceProvider();
+        var queue = new CourierPositionQueue(capacity: 10);
+        var publisher = new CourierPositionPublisher(
+            services,
+            queue,
+            Options.Create(new CourierPositionPublishOptions
+            {
+                PublishTimeoutMs = 1000,
+                MaxThrottleRetries = 2,
+                ThrottleFallbackDelayMs = 5,
+                MaxThrottleDelayMs = 50,
+            }),
+            NullLogger<CourierPositionPublisher>.Instance);
+        var t0 = DateTimeOffset.Parse("2026-08-06T12:00:00Z");
+        queue.TryEnqueue(new CourierPosition("delivery-1", "courier-1", 1, 1, 5, t0))
+            .Should().BeTrue();
+        queue.TryEnqueue(new CourierPosition("delivery-1", "courier-1", 2, 2, 4, t0.AddSeconds(1)))
+            .Should().BeTrue();
+
+        var drained = await publisher.DrainOnceAsync(CancellationToken.None);
+
+        drained.Should().Be(1, "a burst for one delivery is coalesced before publish");
+        realtime.Attempts.Should().Be(2, "the first 429 is retried within the bounded policy");
+        realtime.Published.Should().ContainSingle();
+        realtime.Published.Single()["lat"].Should().Be(2d,
+            "the newest coalesced position, not its superseded predecessor, is retried");
+    }
+
     /// <summary>NEGATIVE CONTROL: a fix with no delivery has no topic, so nothing is published.</summary>
     [Fact]
     public async Task Fix_Without_A_Delivery_Publishes_Nothing()
@@ -351,6 +385,8 @@ public class CourierPositionRealtimeTests : IClassFixture<WebApplicationFactory<
                 // realtime path under test (same swap LocationTrackingTests makes).
                 services.RemoveAll<IDeliveryServiceClient>();
                 services.AddSingleton<IDeliveryServiceClient>(new FakeDeliveryPresenceClient());
+                services.RemoveAll<IGeoHistoryClient>();
+                services.AddSingleton<IGeoHistoryClient>(new NoOpGeoHistoryClient());
 
                 // The descriptor gate is [Authorize]d, so it needs a REAL session bearer
                 // carrying sub == userId, not the X-User-Id dev header. Same arrangement
@@ -486,6 +522,59 @@ public class CourierPositionRealtimeTests : IClassFixture<WebApplicationFactory<
         public Task<RealtimePublishResult> FanOutChatMessageAsync(
             string recipientId, IReadOnlyDictionary<string, object?> data, CancellationToken ct)
             => PublishAsync("jeeb:chat", $"user:{recipientId}", data, null, ct);
+    }
+
+    private sealed class ThrottledOnceRealtimeClient : IRealtimeCommunicationClient
+    {
+        public int Attempts { get; private set; }
+        public List<IReadOnlyDictionary<string, object?>> Published { get; } = new();
+
+        public Task<RealtimePublishResult> PublishAsync(
+            string topic,
+            string stream,
+            IReadOnlyDictionary<string, object?> data,
+            IReadOnlyDictionary<string, object?>? meta,
+            CancellationToken ct)
+        {
+            Attempts++;
+            if (Attempts == 1)
+                throw new RealtimePublishException(
+                    HttpStatusCode.TooManyRequests,
+                    "throttled",
+                    TimeSpan.FromMilliseconds(5));
+            Published.Add(data);
+            return Task.FromResult(new RealtimePublishResult { Ok = true, Id = "retry-ok", Seq = 1 });
+        }
+
+        public Task<RealtimePublishResult> FanOutChatMessageAsync(
+            string recipientId,
+            IReadOnlyDictionary<string, object?> data,
+            CancellationToken ct) => PublishAsync("jeeb:chat", $"user:{recipientId}", data, null, ct);
+    }
+
+    private sealed class NoOpGeoHistoryClient : IGeoHistoryClient
+    {
+        public Task RecordTrackPointAsync(
+            string trackId,
+            string actorId,
+            double lat,
+            double lng,
+            double? accuracyM,
+            DateTimeOffset recordedAt,
+            CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<GpsTrackHistoryPage> GetTrackHistoryPageAsync(
+            string trackId,
+            string? cursor,
+            int limit = 500,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new GpsTrackHistoryPage
+            {
+                Available = true,
+                TrackId = trackId,
+                RetentionDays = 30,
+                RetainedFrom = DateTimeOffset.UtcNow.AddDays(-30),
+            });
     }
 
     private sealed class BlockingRealtimeClient : IRealtimeCommunicationClient, IDisposable

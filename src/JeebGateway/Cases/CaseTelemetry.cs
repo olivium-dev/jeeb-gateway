@@ -19,6 +19,10 @@ public static class CaseTelemetry
         "jeeb.gateway.cases.evidence_partial",
         description: "Case evidence sources captured with an unavailable/partial marker.");
 
+    public static readonly Counter<long> SecondaryFailures = Meter.CreateCounter<long>(
+        "jeeb.gateway.cases.secondary_failures",
+        description: "Optional post-commit case side effects that failed after the durable case succeeded.");
+
     public static readonly Counter<long> CallbackDispatches = Meter.CreateCounter<long>(
         "jeeb.gateway.cases.callback_dispatches",
         description: "State-service outbox callback dispatch outcomes.");

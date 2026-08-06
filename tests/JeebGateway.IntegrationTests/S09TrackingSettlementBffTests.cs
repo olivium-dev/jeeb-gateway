@@ -38,6 +38,7 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly WebApplicationFactory<Program> _factory;
+    private readonly RecordingGeoHistoryClient _geoHistory = new();
 
     public S09TrackingSettlementBffTests(WebApplicationFactory<Program> factory)
     {
@@ -51,6 +52,8 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
             {
                 services.RemoveAll<IDeliveryServiceClient>();
                 services.AddSingleton<IDeliveryServiceClient>(new FakeDeliveryPresenceClient());
+                services.RemoveAll<IGeoHistoryClient>();
+                services.AddSingleton<IGeoHistoryClient>(_geoHistory);
             });
         });
     }
@@ -218,6 +221,68 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
 
         var store = _factory.Services.GetRequiredService<ILocationStore>();
         (await store.GetLatestAsync(seed.JeeberId))!.Lng.Should().Be(46.71);
+        _geoHistory.Writes.Should().ContainSingle().Which.Should().BeEquivalentTo(new
+        {
+            TrackId = seed.Id,
+            ActorId = seed.JeeberId,
+            Lat = 24.71,
+            Lng = 46.71,
+            AccuracyM = (double?)7.0,
+        });
+    }
+
+    [Fact]
+    public async Task LocationUpdate_GeoFailure_ExactRetry_Persists_LocallyRetained_Fix()
+    {
+        var locations = new DuplicateAwareLocationStore();
+        var geo = new FailOnceGeoHistoryClient();
+        using var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<ILocationStore>();
+                services.AddSingleton<ILocationStore>(locations);
+                services.RemoveAll<IGeoHistoryClient>();
+                services.AddSingleton<IGeoHistoryClient>(geo);
+            });
+        });
+
+        var requests = factory.Services.GetRequiredService<IRequestsStore>();
+        var clientId = $"client-{Guid.NewGuid()}";
+        var jeeberId = $"jeeber-{Guid.NewGuid()}";
+        var created = await requests.CreateAsync(new CreateRequestInput
+        {
+            ClientId = clientId,
+            Description = "Retry track evidence",
+            DropoffLocation = new GeoPoint { Lat = 24.8, Lng = 46.8 },
+        }, default);
+        (await requests.TryAcceptByJeeberAsync(
+            created.Id, jeeberId, int.MaxValue, DateTimeOffset.UtcNow, default)).Should().NotBeNull();
+        await requests.SetStatusAsync(created.Id, RequestStatus.HeadingOff, default);
+
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Add("X-User-Id", jeeberId);
+        http.DefaultRequestHeaders.Add("X-User-Roles", "client,jeeber");
+        var recordedAt = DateTimeOffset.Parse("2026-08-06T08:00:00Z");
+        var payload = new
+        {
+            deliveryId = created.Id,
+            points = new[]
+            {
+                new { lat = 24.71, lng = 46.71, accuracy = (double?)7.0, timestamp = recordedAt },
+            },
+        };
+
+        var failed = await http.PostAsJsonAsync("/location/update", payload);
+        var retried = await http.PostAsJsonAsync("/location/update", payload);
+
+        failed.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        retried.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await retried.Content.ReadFromJsonAsync<LocationUpdateResponse>(JsonOptions))!
+            .Accepted.Should().Be(0, "the local store recognizes the exact retry as already retained");
+        locations.Calls.Should().Be(2);
+        geo.Attempts.Should().Be(2);
+        geo.Writes.Should().ContainSingle().Which.RecordedAt.Should().Be(recordedAt);
     }
 
     [Fact] // legacy batch shape (no deliveryId) is unchanged — no gate
@@ -343,6 +408,104 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
         accepted.Should().NotBeNull();
         await store.SetStatusAsync(created.Id, status, default);
         return new Seed(created.Id, clientId, jeeberId);
+    }
+
+    private sealed class RecordingGeoHistoryClient : IGeoHistoryClient
+    {
+        public List<GeoWrite> Writes { get; } = new();
+
+        public Task RecordTrackPointAsync(
+            string trackId,
+            string actorId,
+            double lat,
+            double lng,
+            double? accuracyM,
+            DateTimeOffset recordedAt,
+            CancellationToken cancellationToken = default)
+        {
+            Writes.Add(new GeoWrite(trackId, actorId, lat, lng, accuracyM, recordedAt));
+            return Task.CompletedTask;
+        }
+
+        public Task<GpsTrackHistoryPage> GetTrackHistoryPageAsync(
+            string trackId,
+            string? cursor,
+            int limit = 500,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new GpsTrackHistoryPage
+            {
+                Available = true,
+                TrackId = trackId,
+                RetentionDays = 30,
+                RetainedFrom = DateTimeOffset.UtcNow.AddDays(-30),
+            });
+    }
+
+    private sealed record GeoWrite(
+        string TrackId,
+        string ActorId,
+        double Lat,
+        double Lng,
+        double? AccuracyM,
+        DateTimeOffset RecordedAt);
+
+    private sealed class DuplicateAwareLocationStore : ILocationStore
+    {
+        private StoredPosition? _latest;
+        public int Calls { get; private set; }
+
+        public Task<LocationStoreUpdateResult> RecordAsync(
+            string jeeberId,
+            IReadOnlyList<GpsPointDto> points,
+            CancellationToken ct = default)
+        {
+            Calls++;
+            var point = points.Single();
+            _latest ??= new StoredPosition(
+                point.Lat, point.Lng, point.Accuracy, point.Timestamp, DateTimeOffset.UtcNow);
+            return Task.FromResult(new LocationStoreUpdateResult(
+                Calls == 1 ? 1 : 0,
+                0,
+                _latest));
+        }
+
+        public Task<StoredPosition?> GetLatestAsync(
+            string jeeberId,
+            CancellationToken ct = default) => Task.FromResult(_latest);
+    }
+
+    private sealed class FailOnceGeoHistoryClient : IGeoHistoryClient
+    {
+        public int Attempts { get; private set; }
+        public List<GeoWrite> Writes { get; } = new();
+
+        public Task RecordTrackPointAsync(
+            string trackId,
+            string actorId,
+            double lat,
+            double lng,
+            double? accuracyM,
+            DateTimeOffset recordedAt,
+            CancellationToken cancellationToken = default)
+        {
+            Attempts++;
+            if (Attempts == 1)
+                throw new HttpRequestException("simulated geolocation outage");
+            Writes.Add(new GeoWrite(trackId, actorId, lat, lng, accuracyM, recordedAt));
+            return Task.CompletedTask;
+        }
+
+        public Task<GpsTrackHistoryPage> GetTrackHistoryPageAsync(
+            string trackId,
+            string? cursor,
+            int limit = 500,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new GpsTrackHistoryPage
+            {
+                Available = true,
+                TrackId = trackId,
+                RetentionDays = 30,
+            });
     }
 
     private sealed record Seed(string Id, string ClientId, string JeeberId);

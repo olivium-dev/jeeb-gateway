@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Cases;
 using JeebGateway.Conversations.Client;
@@ -16,6 +17,27 @@ namespace JeebGateway.IntegrationTests.Cases;
 
 public sealed class CaseEvidenceCollectorContractTests
 {
+    [Fact]
+    public async Task Geo_History_Client_Records_Delivery_Scoped_Point_With_Generic_Track_Contract()
+    {
+        var handler = new GeoWriteHandler();
+        var client = new GeoHistoryClient(Client(handler, "https://geo/"));
+
+        await client.RecordTrackPointAsync(
+            "delivery-1", "courier-1", 52.37, 4.89, 6.5,
+            DateTimeOffset.Parse("2026-08-05T11:01:00Z"));
+
+        handler.Method.Should().Be(HttpMethod.Post);
+        handler.Path.Should().Be("/v1/geo/ping");
+        handler.Authorization.Should().Be("Bearer jeeb-gateway:admin");
+        using var body = JsonDocument.Parse(handler.Body!);
+        body.RootElement.GetProperty("trackId").GetString().Should().Be("delivery-1");
+        body.RootElement.GetProperty("actorId").GetString().Should().Be("courier-1");
+        body.RootElement.GetProperty("lat").GetDouble().Should().Be(52.37);
+        body.RootElement.GetProperty("recordedAt").GetDateTimeOffset()
+            .Should().Be(DateTimeOffset.Parse("2026-08-05T11:01:00Z"));
+    }
+
     [Fact]
     public void Geo_History_Client_Is_Resilience_Only_Without_Forwarded_Or_Service_Auth()
     {
@@ -287,6 +309,30 @@ public sealed class CaseEvidenceCollectorContractTests
               "retainedFrom":"2026-07-06T12:00:00Z"
             }
             """);
+    }
+
+    private sealed class GeoWriteHandler : HttpMessageHandler
+    {
+        public HttpMethod? Method { get; private set; }
+        public string? Path { get; private set; }
+        public string? Authorization { get; private set; }
+        public string? Body { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken ct)
+        {
+            Method = request.Method;
+            Path = request.RequestUri?.AbsolutePath;
+            Authorization = request.Headers.Authorization?.ToString();
+            Body = request.Content is null ? null : await request.Content.ReadAsStringAsync(ct);
+            return new HttpResponseMessage(HttpStatusCode.Created)
+            {
+                Content = new StringContent(
+                    "{\"ping\":{\"id\":\"1a2e908a-e719-4ae3-a51a-e1208d8a82a6\"},\"subscribers\":0}",
+                    Encoding.UTF8,
+                    "application/json"),
+            };
+        }
     }
 
     private sealed class StaticOptionsMonitor<T>(T value) : IOptionsMonitor<T>
