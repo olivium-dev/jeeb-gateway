@@ -155,10 +155,12 @@ public sealed class JeebRequestsController : ControllerBase
         // JEBV4-65: shared tier-exists validation (single source of truth; the
         // JEBV4-62 tier-not-found status coupling point). tierId stays OPTIONAL on
         // this surface — only a present-but-unknown id is rejected.
+        string? resolvedTierId = null;
         if (!string.IsNullOrWhiteSpace(body.TierId))
         {
-            var tierProblem = await RequestCreateValidation.ValidateTierExistsAsync(_tiers, body.TierId, "tierId", ct);
-            if (tierProblem is not null) return NotFound(tierProblem);
+            var tierResolution = await RequestCreateValidation.ResolveTierAsync(_tiers, body.TierId, "tierId", ct);
+            if (tierResolution.Problem is not null) return NotFound(tierResolution.Problem);
+            resolvedTierId = tierResolution.ResolvedTierId;
         }
 
         DeliveryRequest created;
@@ -172,7 +174,7 @@ public sealed class JeebRequestsController : ControllerBase
                     Transcription = body.Transcription,
                     AudioUrl = body.AudioUrl,
                     Photos = body.Photos ?? [],
-                    TierId = body.TierId,
+                    TierId = resolvedTierId,
                     PickupLocation = body.PickupLocation,
                     DropoffLocation = body.DropoffLocation,
                     PickupAddress = body.PickupAddress,

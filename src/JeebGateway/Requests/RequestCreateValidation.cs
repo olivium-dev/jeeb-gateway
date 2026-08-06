@@ -93,18 +93,31 @@ public static class RequestCreateValidation
     public static async Task<ProblemDetails?> ValidateTierExistsAsync(
         ITiersStore tiers, string tierId, string fieldLabel, CancellationToken ct)
     {
-        if (await tiers.ExistsAsync(tierId, ct))
+        var result = await ResolveTierAsync(tiers, tierId, fieldLabel, ct);
+        return result.Problem;
+    }
+
+    /// <summary>
+    /// Validates a client-facing tier and returns the value that downstream
+    /// delivery persistence must use. When delivery-service owns the catalog,
+    /// this is its exact tier id rather than the submitted alias.
+    /// </summary>
+    public static async Task<TierValidationResult> ResolveTierAsync(
+        ITiersStore tiers, string tierId, string fieldLabel, CancellationToken ct)
+    {
+        var resolvedTierId = await tiers.ResolveAsync(tierId, ct);
+        if (resolvedTierId is not null)
         {
-            return null;
+            return new TierValidationResult(resolvedTierId, null);
         }
 
-        return new ProblemDetails
+        return new TierValidationResult(null, new ProblemDetails
         {
             Title = $"{fieldLabel} does not match any active delivery tier.",
             Detail = $"{fieldLabel}={tierId}",
             Status = StatusCodes.Status404NotFound,
             Type = "https://jeeb.dev/errors/tier-not-found",
-        };
+        });
     }
 
     /// <summary>
@@ -151,3 +164,5 @@ public static class RequestCreateValidation
         return null;
     }
 }
+
+public sealed record TierValidationResult(string? ResolvedTierId, ProblemDetails? Problem);

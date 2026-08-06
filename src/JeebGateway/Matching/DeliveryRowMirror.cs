@@ -18,6 +18,7 @@ public sealed class DeliveryRowMirror : IDeliveryRowMirror
 {
     private readonly IRequestsStore _requests;
     private readonly IDeliveryServiceClient _delivery;
+    private readonly ITiersStore _tiers;
     private readonly MatchingMirrorOptions _options;
     private readonly string _tenantId;
     private readonly ILogger<DeliveryRowMirror> _logger;
@@ -25,12 +26,14 @@ public sealed class DeliveryRowMirror : IDeliveryRowMirror
     public DeliveryRowMirror(
         IRequestsStore requests,
         IDeliveryServiceClient delivery,
+        ITiersStore tiers,
         IOptions<MatchingMirrorOptions> options,
         IConfiguration config,
         ILogger<DeliveryRowMirror> logger)
     {
         _requests = requests;
         _delivery = delivery;
+        _tiers = tiers;
         _options = options.Value;
         // Mirror MatchingController's tenant resolution so the seeded row and the
         // matching run resolve under the SAME tenant (delivery-service scopes the
@@ -82,6 +85,15 @@ public sealed class DeliveryRowMirror : IDeliveryRowMirror
 
         try
         {
+            var resolvedTierId = await _tiers.ResolveAsync(request.TierId!, ct);
+            if (resolvedTierId is null)
+            {
+                _logger.LogWarning(
+                    "JIT delivery-row mirror: tier {TierId} for {RequestId} no longer resolves; skipping seed.",
+                    request.TierId, requestId);
+                return MirrorOutcome.Failed;
+            }
+
             // Seed ONLY the matching-resolve columns. The typed client treats a
             // 409 as idempotent success (ON CONFLICT (id) DO NOTHING), so this
             // composes cleanly with the create-time mirror and with a retried run.
@@ -90,7 +102,7 @@ public sealed class DeliveryRowMirror : IDeliveryRowMirror
                 Id = request.Id,
                 TenantId = _tenantId,
                 ClientId = request.ClientId,
-                TierId = request.TierId!,
+                TierId = resolvedTierId,
                 PickupLat = request.PickupLocation.Lat,
                 PickupLng = request.PickupLocation.Lng,
             }, ct);

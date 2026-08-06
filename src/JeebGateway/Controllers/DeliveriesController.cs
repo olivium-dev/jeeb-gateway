@@ -84,6 +84,7 @@ public class DeliveriesController : ControllerBase
     private readonly IOptions<JeebGateway.Auth.OtpSignIn.OtpSignInOptions> _otpSignInOptions;
     private readonly IServiceOTPClient _otpClient;
     private readonly IDeliveryServiceClient _deliveryClient;
+    private readonly ITiersStore _tiers;
     // JEBV4-300 leg (b): tenant the gateway scopes delivery-service rows under, so the
     // 403-recovery assignment re-mirror re-POSTs under the SAME (id, tenant_id) the row
     // was seeded with. Mirrors OffersController/DeliveryRowMirror resolution.
@@ -214,6 +215,7 @@ public class DeliveriesController : ControllerBase
         IOptions<JeebGateway.Auth.OtpSignIn.OtpSignInOptions> otpSignInOptions,
         IServiceOTPClient otpClient,
         IDeliveryServiceClient deliveryClient,
+        ITiersStore tiers,
         IOptions<DeliveryClientOptions> deliveryOptions,
         IConversationProvisioner conversations,
         IDistributedCache cache,
@@ -234,6 +236,7 @@ public class DeliveriesController : ControllerBase
         _otpSignInOptions = otpSignInOptions;
         _otpClient = otpClient;
         _deliveryClient = deliveryClient;
+        _tiers = tiers;
         _deliveryOptions = deliveryOptions.Value;
         _conversations = conversations;
         _cache = cache;
@@ -999,13 +1002,23 @@ public class DeliveriesController : ControllerBase
 
         try
         {
+            var resolvedTierId = await _tiers.ResolveAsync(row.TierId!, ct);
+            if (resolvedTierId is null)
+            {
+                _log.LogWarning(
+                    "Assignment-mirror repair for delivery {DeliveryId}: tier {TierId} no longer resolves; "
+                    + "surfacing the original 403.",
+                    deliveryId, row.TierId);
+                return false;
+            }
+
             await _deliveryClient.CreateDeliveryRowAsync(new CreateDeliveryRowUpstream
             {
                 Id = row.Id,
                 TenantId = _deliveryOptions.TenantId,
                 ClientId = row.ClientId,
                 JeeberId = row.JeeberId,
-                TierId = row.TierId!,
+                TierId = resolvedTierId,
                 PickupLat = row.PickupLocation.Lat,
                 PickupLng = row.PickupLocation.Lng,
             }, ct);

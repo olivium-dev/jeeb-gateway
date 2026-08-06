@@ -38,6 +38,7 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public class JeebOffersAcceptDeliveryLegTests
 {
+    private const string UpstreamFlashTierId = "1a2b3c4d-5e6f-5a1b-8c2d-3e4f5a6b7c8d";
     private const double PickupLat = 33.5138;
     private const double PickupLng = 36.2765;
 
@@ -62,7 +63,8 @@ public class JeebOffersAcceptDeliveryLegTests
         assignment.Should().NotBeNull("the accepted delivery must be assigned to the winning jeeber");
         assignment!.Id.Should().Be(requestId);
         assignment.ClientId.Should().Be("client-owner");
-        assignment.TierId.Should().Be("flash");
+        assignment.TierId.Should().Be(UpstreamFlashTierId,
+            "post-accept upserts must repair legacy tier aliases to the upstream id");
         assignment.PickupLat.Should().Be(PickupLat);
         assignment.PickupLng.Should().Be(PickupLng);
     }
@@ -178,6 +180,7 @@ public class JeebOffersAcceptDeliveryLegTests
                     cfg.AddInMemoryCollection(new Dictionary<string, string?>
                     {
                         { "FeatureFlags:UseUpstream:Offer", "true" },
+                        { "FeatureFlags:UseUpstream:Delivery", "true" },
                     }));
                 builder.ConfigureTestServices(services =>
                 {
@@ -283,7 +286,20 @@ public class JeebOffersAcceptDeliveryLegTests
         }
 
         public Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct)
-            => throw new NotSupportedException();
+            => Task.FromResult<IReadOnlyList<DeliveryTierDto>>(new[]
+            {
+                new DeliveryTierDto
+                {
+                    Id = UpstreamFlashTierId,
+                    Name = "Flash",
+                    SlaHours = 1,
+                    RadiusKm = 8,
+                    CommissionRate = 0.10,
+                    PriceHint = "Fastest dispatch",
+                    CreatedAt = DateTimeOffset.UnixEpoch,
+                    UpdatedAt = DateTimeOffset.UnixEpoch,
+                },
+            });
         public Task<ShipmentsListDto> ListShipmentsAsync(string? orderId, string? stage, int? limit, CancellationToken ct)
             => throw new NotSupportedException();
         public Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct)
