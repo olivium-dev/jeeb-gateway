@@ -13,23 +13,13 @@ using Xunit;
 namespace JeebGateway.IntegrationTests.Disputes;
 
 /// <summary>
-/// JEBV4-44 (PP-5) — the dispute → UPG refund branch (real money OUT) had
-/// ZERO test coverage before this ticket. Pins down DisputeCaseService.cs:275-308:
+/// Cash-on-delivery dispute policy: refund-shaped admin requests must be
+/// rejected at the gateway boundary before payment or durable case mutation.
 /// <list type="bullet">
-///   <item>Successful resolve-with-refund calls the refund client EXACTLY
-///     ONCE with idempotency key <c>dispute:{caseId}:refund</c>, and the
-///     durable resolution write happens AFTER the refund succeeds.</item>
-///   <item>A refund failure aborts the state transition entirely — the case
-///     stays open with <see cref="ResolveOutcome.RefundFailed"/> and NO
-///     durable resolution write is persisted.</item>
-///   <item>An admin retry after "refund succeeded but the durable write
-///     failed" re-sends the SAME idempotency key (UPG would dedupe); the
-///     retry completes and no second refund amount is recorded.</item>
+///   <item>No refund client call is made.</item>
+///   <item>The dispute remains open and unstamped.</item>
+///   <item>Idempotent replays remain side-effect-free rejections.</item>
 /// </list>
-/// All three run against <see cref="InMemoryPaymentRefundClient"/> / a thin
-/// ordering-observing decorator over it — never a real
-/// <c>unified_payment_gateway</c> call, matching the existing fake-client
-/// pattern used by <c>DisputeCaseEndpointTests</c>.
 /// </summary>
 public class DisputeRefundOrderingTests
 {
@@ -41,7 +31,7 @@ public class DisputeRefundOrderingTests
     // store mid-call and observe the case is still 'open'.
     // ------------------------------------------------------------------
     [Fact]
-    public async Task Resolve_With_Refund_Calls_Refund_Once_Before_The_Durable_Write()
+    public async Task Resolve_With_Refund_Is_Rejected_Before_Refund_Or_Durable_Write()
     {
         using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
@@ -72,22 +62,15 @@ public class DisputeRefundOrderingTests
             RefundUsd = 9.50m,
             Notes = "approved"
         });
-        resolveResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        resolveResp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
         var refundClient = factory.Services.GetRequiredService<OrderingObservingRefundClient>();
+        refundClient.Calls.Should().BeEmpty("COD refunds are rejected before payment orchestration");
 
-        refundClient.Calls.Should().HaveCount(1, "the refund must be attempted exactly once");
-        refundClient.Calls[0].IdempotencyKey.Should().Be($"dispute:{@case.Id}:refund",
-            "the idempotency key must be derived deterministically from the case id");
-        refundClient.Calls[0].AmountUsd.Should().Be(9.50m);
-
-        refundClient.CaseStateObservedDuringCall.Should().Be(DisputeCaseState.Open,
-            "the durable resolution write (state → resolved_refund) must NOT have happened yet when " +
-            "the refund call is made — refund-before-write ordering per DisputeCaseService.cs:275-308");
-
-        var resolved = await resolveResp.Content.ReadFromJsonAsync<DisputeCaseResponse>();
-        resolved!.State.Should().Be(DisputeCaseState.ResolvedRefund,
-            "after a successful refund the durable write DOES land, moving the case to its terminal state");
+        var store = factory.Services.GetRequiredService<IDisputeCaseStore>();
+        var unchanged = await store.GetByIdAsync(@case.Id, CancellationToken.None);
+        unchanged!.State.Should().Be(DisputeCaseState.Open);
+        unchanged.ResolverAdminId.Should().BeNull();
     }
 
     // ------------------------------------------------------------------
@@ -103,7 +86,8 @@ public class DisputeRefundOrderingTests
             builder.ConfigureTestServices(services =>
             {
                 services.RemoveAll(typeof(IPaymentRefundClient));
-                services.AddSingleton<IPaymentRefundClient, AlwaysFailingRefundClient>();
+                services.AddSingleton<AlwaysFailingRefundClient>();
+                services.AddSingleton<IPaymentRefundClient>(sp => sp.GetRequiredService<AlwaysFailingRefundClient>());
             });
         });
 
@@ -127,12 +111,9 @@ public class DisputeRefundOrderingTests
             Notes = "should abort"
         });
 
-        // PO blocker #4: the failed-refund path is surfaced, not a bare 200.
-        // The controller maps ResolveOutcome.RefundFailed — assert on the
-        // case's post-attempt state instead of pinning an exact status code
-        // the controller mapping owns.
-        resolveResp.IsSuccessStatusCode.Should().BeFalse(
-            "a refund failure must not report success back to the admin");
+        resolveResp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        factory.Services.GetRequiredService<AlwaysFailingRefundClient>().Calls.Should().Be(0,
+            "the policy boundary must reject the request before consulting the refund client");
 
         var store = factory.Services.GetRequiredService<IDisputeCaseStore>();
         var afterAttempt = await store.GetByIdAsync(@case!.Id, CancellationToken.None);
@@ -154,7 +135,7 @@ public class DisputeRefundOrderingTests
     // failure) and succeeds on every subsequent call.
     // ------------------------------------------------------------------
     [Fact]
-    public async Task Retry_After_Write_Failure_Reuses_Idempotency_Key_And_Does_Not_Double_Refund()
+    public async Task Refund_Replay_With_Same_Key_Remains_Rejected_Without_Refund_Or_Write()
     {
         using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
@@ -187,39 +168,30 @@ public class DisputeRefundOrderingTests
         var admin = AdminClientFor(factory, "admin-ord-3");
         admin.DefaultRequestHeaders.Add("Idempotency-Key", "admin-retry-key-1");
 
-        // First attempt: refund succeeds, but the durable write throws
-        // (WriteOnceFlakyDisputeCaseStore) — the gateway's global exception
-        // handler maps this to a non-2xx; the case must still be 'open'.
         var first = await admin.PostAsJsonAsync($"/admin/v1/disputes/{@case!.Id}/resolve", new ResolveCaseRequest
         {
             Decision = "refund",
             RefundUsd = 15m,
             Notes = "first attempt — write will fail"
         });
-        first.IsSuccessStatusCode.Should().BeFalse("the durable write is simulated to fail on the first attempt");
+        first.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
         var storeAfterFirst = factory.Services.GetRequiredService<IDisputeCaseStore>();
         (await storeAfterFirst.GetByIdAsync(@case.Id, CancellationToken.None))!.State
             .Should().Be(DisputeCaseState.Open, "the failed write must not have landed");
 
-        // Retry with the SAME admin Idempotency-Key header. DisputeCaseService
-        // re-derives the SAME dispute:{caseId}:refund key regardless of the
-        // HTTP-level Idempotency-Key, so UPG (here, InMemoryPaymentRefundClient)
-        // dedupes the refund itself.
         var retry = await admin.PostAsJsonAsync($"/admin/v1/disputes/{@case.Id}/resolve", new ResolveCaseRequest
         {
             Decision = "refund",
             RefundUsd = 15m,
             Notes = "retry — write should succeed now"
         });
-        retry.StatusCode.Should().Be(HttpStatusCode.OK, "the retry's durable write succeeds this time");
-        var resolved = await retry.Content.ReadFromJsonAsync<DisputeCaseResponse>();
-        resolved!.State.Should().Be(DisputeCaseState.ResolvedRefund);
+        retry.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
         var refundClient = (InMemoryPaymentRefundClient)factory.Services.GetRequiredService<IPaymentRefundClient>();
-        refundClient.Entries.Count(e => e.CaseId == @case.Id).Should().Be(1,
-            "the refund must be recorded exactly once across both attempts — UPG's own idempotency-key " +
-            "dedup on 'dispute:{caseId}:refund' must prevent a second refund amount on retry");
+        refundClient.Entries.Should().BeEmpty("refund-shaped replays never reach payment orchestration");
+        (await storeAfterFirst.GetByIdAsync(@case.Id, CancellationToken.None))!.State
+            .Should().Be(DisputeCaseState.Open);
     }
 
     // ------------------------------------------------------------------
@@ -298,8 +270,13 @@ public class DisputeRefundOrderingTests
 
     private sealed class AlwaysFailingRefundClient : IPaymentRefundClient
     {
+        public int Calls { get; private set; }
+
         public Task<RefundResult> RefundAsync(RefundRequest request, CancellationToken ct)
-            => Task.FromResult(new RefundResult { Success = false, FailureReason = "upstream declined (test double)" });
+        {
+            Calls++;
+            return Task.FromResult(new RefundResult { Success = false, FailureReason = "upstream declined (test double)" });
+        }
     }
 
     /// <summary>
