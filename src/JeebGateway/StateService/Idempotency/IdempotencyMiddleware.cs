@@ -1,4 +1,7 @@
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using JeebGateway.Users;
 
 namespace JeebGateway.StateService.Idempotency;
 
@@ -17,6 +20,7 @@ public sealed class IdempotencyMiddleware
 {
     private const string HeaderName = "Idempotency-Key";
     private const int DefaultTtlSeconds = 24 * 60 * 60; // 24h dedup window
+    private const int CaseCreateTtlSeconds = 365 * 24 * 60 * 60;
     private const int MaxKeyLength = 200;
 
     private static readonly HashSet<string> MutatingMethods = new(StringComparer.OrdinalIgnoreCase)
@@ -95,14 +99,28 @@ public sealed class IdempotencyMiddleware
             clientKey = guarded;
         }
 
-        var key = ScopeKey(context, clientKey!);
+        var isCaseCreate = IsCaseCreateMutation(context.Request.Path);
+        string? casePrincipal = null;
+        if (isCaseCreate
+            && !UserIdentity.TryGetUserId(context, out casePrincipal, out _))
+        {
+            await WriteProblemAsync(
+                context,
+                StatusCodes.Status401Unauthorized,
+                "Authenticated principal required for idempotent case creation.",
+                "The case was not created because its idempotency key could not be scoped safely.",
+                "https://jeeb.dev/errors/idempotency-principal-required");
+            return;
+        }
+
+        var key = ScopeKey(context, clientKey!, casePrincipal);
 
         // JEBV4-45: serialize same-key concurrent requests (see KeyStripes doc).
         var stripe = StripeFor(key);
         await stripe.WaitAsync(context.RequestAborted);
         try
         {
-            await InvokeSerializedAsync(context, store, key);
+            await InvokeSerializedAsync(context, store, key, isCaseCreate);
         }
         finally
         {
@@ -110,8 +128,15 @@ public sealed class IdempotencyMiddleware
         }
     }
 
-    private async Task InvokeSerializedAsync(HttpContext context, IIdempotencyStore store, string key)
+    private async Task InvokeSerializedAsync(
+        HttpContext context,
+        IIdempotencyStore store,
+        string key,
+        bool isCaseCreate)
     {
+        if (isCaseCreate && !await BindCaseCreateRequestAsync(context, store, key))
+            return;
+
         // 1. Fast replay path: if we've already stored a response, return it.
         IdempotencyOutcome? existing;
         try
@@ -158,7 +183,9 @@ public sealed class IdempotencyMiddleware
             try
             {
                 var outcome = await store.PutOrGetAsync(
-                    key!, context.Response.StatusCode, bodyJson, DefaultTtlSeconds, context.RequestAborted);
+                    key!, context.Response.StatusCode, bodyJson,
+                    isCaseCreate ? CaseCreateTtlSeconds : DefaultTtlSeconds,
+                    context.RequestAborted);
 
                 // Lost the race: another concurrent caller stored first. Replay
                 // THAT original so both callers observe the same single effect.
@@ -194,13 +221,11 @@ public sealed class IdempotencyMiddleware
         if (HttpMethods.IsPost(context.Request.Method)
             && context.Request.Path.Equals("/api/cdn/assets", StringComparison.OrdinalIgnoreCase))
             return false;
-        // Generic case mutations already use jeeb-state-service's transactional
-        // idempotency contract, which binds the key to the complete request hash
-        // and returns 409 when a caller reuses a key with different input. The
-        // gateway-wide response cache is key-only; allowing it to intercept these
-        // routes would replay the first 2xx response before state-service can detect
-        // that conflict.
-        if (IsCaseMutation(context.Request.Path)) return false;
+        // Updates use state-service's CAS/idempotency contract directly. Creates
+        // additionally carry gateway-only comment, voice and incident fields, so the
+        // complete incoming body is bound before the response-cache replay path.
+        if (IsCaseMutation(context.Request.Path)
+            && !IsCaseCreateMutation(context.Request.Path)) return false;
         if (!context.Request.Headers.TryGetValue(HeaderName, out var values)) return false;
 
         var candidate = values.ToString();
@@ -227,17 +252,120 @@ public sealed class IdempotencyMiddleware
                || value.StartsWith("/admin/disputes/", StringComparison.OrdinalIgnoreCase);
     }
 
+    internal static bool IsCaseCreateMutation(PathString path)
+    {
+        var value = path.Value ?? string.Empty;
+        return value.Equals("/v1/disputes", StringComparison.OrdinalIgnoreCase)
+               || value.Equals("/v1/support/tickets", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/v1/deliveries/", StringComparison.OrdinalIgnoreCase)
+                  && value.EndsWith("/escalate", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/deliveries/", StringComparison.OrdinalIgnoreCase)
+                  && value.EndsWith("/dispute", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<bool> BindCaseCreateRequestAsync(
+        HttpContext context,
+        IIdempotencyStore store,
+        string responseKey)
+    {
+        var requestHash = await HashRequestBodyAsync(context.Request, context.RequestAborted);
+        var bindingBody = JsonSerializer.Serialize(new { requestHash });
+        IdempotencyOutcome binding;
+        try
+        {
+            binding = await store.PutOrGetAsync(
+                responseKey + ".request",
+                StatusCodes.Status200OK,
+                bindingBody,
+                CaseCreateTtlSeconds,
+                context.RequestAborted);
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(error,
+                "Case-create idempotency binding failed for key {Key}; failing closed before mutation",
+                responseKey);
+            await WriteProblemAsync(
+                context,
+                StatusCodes.Status503ServiceUnavailable,
+                "Idempotency service unavailable.",
+                "The request was not executed because its idempotency key could not be bound safely.",
+                "https://jeeb.dev/errors/idempotency-unavailable");
+            return false;
+        }
+
+        if (TryReadRequestHash(binding.ResponseBodyJson) == requestHash)
+            return true;
+
+        _logger.LogWarning(
+            "Case-create idempotency key {Key} was reused with a different request body",
+            responseKey);
+        await WriteProblemAsync(
+            context,
+            StatusCodes.Status409Conflict,
+            "Idempotency key already used with different input.",
+            "Use the original request body or submit this create with a new Idempotency-Key.",
+            "https://jeeb.dev/errors/idempotency-key-reused");
+        return false;
+    }
+
+    private static async Task<string> HashRequestBodyAsync(HttpRequest request, CancellationToken ct)
+    {
+        request.EnableBuffering();
+        request.Body.Position = 0;
+        using var body = new MemoryStream();
+        await request.Body.CopyToAsync(body, ct);
+        request.Body.Position = 0;
+        return Convert.ToHexString(SHA256.HashData(body.GetBuffer().AsSpan(0, checked((int)body.Length))))
+            .ToLowerInvariant();
+    }
+
+    private static string? TryReadRequestHash(string body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            return document.RootElement.TryGetProperty("requestHash", out var value)
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task WriteProblemAsync(
+        HttpContext context,
+        int status,
+        string title,
+        string detail,
+        string type)
+    {
+        context.Response.StatusCode = status;
+        context.Response.ContentType = "application/problem+json";
+        await context.Response.WriteAsJsonAsync(
+            new { type, title, status, detail },
+            context.RequestAborted);
+    }
+
     /// <summary>
-    /// Scope the key by method+path so the same client key on two different
-    /// endpoints cannot collide — but the persisted key must be SLASH-FREE
+    /// Scope the key by method+path and, for case creates, the gateway-verified
+    /// stable principal so two users cannot share a cached response. The persisted key must be SLASH-FREE
     /// because the state-service exposes GET /idempotency/{key} and a raw
     /// request path ("/prohibited-items/scan") would break path routing.
     /// We therefore hash the {method}:{path} scope into a compact, URL-safe
     /// prefix and append the client-supplied key.
     /// </summary>
-    private static string ScopeKey(HttpContext context, string clientKey)
+    private static string ScopeKey(
+        HttpContext context,
+        string clientKey,
+        string? casePrincipal)
     {
-        var scope = ScopeHash($"{context.Request.Method}:{context.Request.Path}");
+        var routeScope = $"{context.Request.Method}:{context.Request.Path}";
+        var scope = ScopeHash(casePrincipal is null
+            ? routeScope
+            : $"{routeScope}:principal:{casePrincipal}");
         return $"{scope}.{clientKey}";
     }
 

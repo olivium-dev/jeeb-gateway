@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -8,6 +9,15 @@ namespace JeebGateway.Services.Clients;
 
 public interface IGeoHistoryClient
 {
+    Task RecordTrackPointAsync(
+        string trackId,
+        string actorId,
+        double lat,
+        double lng,
+        double? accuracyM,
+        DateTimeOffset recordedAt,
+        CancellationToken cancellationToken = default);
+
     Task<GpsTrackHistoryPage> GetTrackHistoryPageAsync(
         string trackId,
         string? cursor,
@@ -16,12 +26,48 @@ public interface IGeoHistoryClient
 }
 
 /// <summary>
-/// Private-network geo evidence reader. The gateway has already authorized the
-/// caller, so this client deliberately carries resilience only and no auth headers.
+/// Generic private-network geo track client. History reads need no auth header;
+/// writes use geolocation-service's existing opaque internal identity contract.
 /// </summary>
 public sealed class GeoHistoryClient(HttpClient httpClient) : IGeoHistoryClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    public async Task RecordTrackPointAsync(
+        string trackId,
+        string actorId,
+        double lat,
+        double lng,
+        double? accuracyM,
+        DateTimeOffset recordedAt,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(trackId))
+            throw new ArgumentException("trackId is required.", nameof(trackId));
+        if (string.IsNullOrWhiteSpace(actorId))
+            throw new ArgumentException("actorId is required.", nameof(actorId));
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "v1/geo/ping")
+        {
+            Content = JsonContent.Create(new GeoTrackPointWrite
+            {
+                TrackId = trackId,
+                ActorId = actorId,
+                Lat = lat,
+                Lng = lng,
+                AccuracyM = accuracyM,
+                RecordedAt = recordedAt,
+            }, options: JsonOptions),
+        };
+
+        // geolocation-service currently exposes its generic private-network ingest
+        // with the documented opaque AuthContext shape. Admin is the integration
+        // role and the actor remains explicit in the product-neutral payload.
+        request.Headers.Authorization = new AuthenticationHeaderValue(
+            "Bearer", "jeeb-gateway:admin");
+        using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+    }
 
     public async Task<GpsTrackHistoryPage> GetTrackHistoryPageAsync(
         string trackId,
@@ -46,6 +92,27 @@ public sealed class GeoHistoryClient(HttpClient httpClient) : IGeoHistoryClient
             JsonOptions, cancellationToken).ConfigureAwait(false);
         return (page ?? new GpsTrackHistoryPage()) with { Available = true };
     }
+}
+
+internal sealed class GeoTrackPointWrite
+{
+    [JsonPropertyName("trackId")]
+    public required string TrackId { get; init; }
+
+    [JsonPropertyName("actorId")]
+    public required string ActorId { get; init; }
+
+    [JsonPropertyName("lat")]
+    public double Lat { get; init; }
+
+    [JsonPropertyName("lng")]
+    public double Lng { get; init; }
+
+    [JsonPropertyName("accuracyM")]
+    public double? AccuracyM { get; init; }
+
+    [JsonPropertyName("recordedAt")]
+    public DateTimeOffset RecordedAt { get; init; }
 }
 
 public sealed record GpsTrackHistoryPage

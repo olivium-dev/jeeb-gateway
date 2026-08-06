@@ -188,7 +188,7 @@ public class SettlementsController : ControllerBase
         // original timestamp.
         var stamped = await _store.MarkReceiptGeneratedAsync(settlement.Id, _clock.GetUtcNow(), ct) ?? settlement;
 
-        var receipt = ReceiptGenerator.Generate(stamped, _clock.GetUtcNow());
+        var receipt = ReceiptGenerator.Generate(stamped);
         return Ok(receipt);
     }
 

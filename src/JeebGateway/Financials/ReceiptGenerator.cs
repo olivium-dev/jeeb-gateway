@@ -9,11 +9,11 @@ namespace JeebGateway.Financials;
 public static class ReceiptGenerator
 {
     /// <summary>
-    /// Builds a receipt for <paramref name="settlement"/>. The
-    /// <paramref name="issuedAt"/> stamp is supplied by the caller so the
-    /// generator stays time-pure for tests.
+    /// Builds a receipt for <paramref name="settlement"/>. The issue stamp comes
+    /// from the persisted receipt-generation lifecycle, falling back to the
+    /// persisted settlement time for rows created before that field existed.
     /// </summary>
-    public static ReceiptResponse Generate(Settlement settlement, DateTimeOffset issuedAt)
+    public static ReceiptResponse Generate(Settlement settlement)
     {
         ArgumentNullException.ThrowIfNull(settlement);
 
@@ -43,7 +43,7 @@ public static class ReceiptGenerator
             Total = settlement.Total,
             Currency = settlement.Currency,
             PaymentMethod = settlement.PaymentMethod,
-            IssuedAt = issuedAt,
+            IssuedAt = settlement.ReceiptGeneratedAt ?? settlement.SettledAt,
         };
     }
 

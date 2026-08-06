@@ -216,7 +216,7 @@ public sealed class GenericCaseGatewayServiceTests
     }
 
     [Fact]
-    public async Task Selected_Incident_Failure_Is_Retry_Visible_Instead_Of_Silently_Dropped()
+    public async Task Selected_Incident_Failure_Preserves_Durable_Create_And_Is_Audited_Once()
     {
         var state = new FakeCaseStateClient();
         var input = Clone(Input("client-1"), GenericCaseGatewayService.ActivateIncidentCommand);
@@ -224,20 +224,34 @@ public sealed class GenericCaseGatewayServiceTests
         var evidence = new CountingEvidence();
         var service = Service(state, delivery, evidence);
 
-        var action = () => service.CreateDisputeAsync(input, default);
+        var created = await service.CreateDisputeAsync(input, default);
+        var replayed = await service.CreateDisputeAsync(input, default);
 
-        await action.Should().ThrowAsync<DeliveryTransitionException>();
-        state.Messages.Should().NotContain(item =>
-            item.Body != null && item.Body.StartsWith("{\"type\":\"delivery_incident\"", StringComparison.Ordinal));
-
-        delivery.FailTransition = false;
-        var retried = await service.CreateDisputeAsync(input, default);
-
-        retried.Case.Version.Should().Be(4);
+        created.Case.Version.Should().Be(4,
+            "the durable case plus safe secondary-failure audit are returned instead of a false 502");
+        replayed.Case.Version.Should().Be(4);
         evidence.Calls.Should().Be(1, "persisted metadata makes evidence capture replay-safe");
         state.Messages.Count(item => item.Body?.StartsWith(CaseApiProjection.MetadataPrefix,
             StringComparison.Ordinal) == true).Should().Be(1);
-        delivery.TransitionBodies.Should().HaveCount(2);
+        state.Messages.Should().ContainSingle(item => item.Body != null
+            && item.Body.Contains("\"type\":\"delivery_incident_activation_failed\"", StringComparison.Ordinal));
+        delivery.TransitionBodies.Should().ContainSingle(
+            "an exact create replay must not repeat an optional incident command that already failed durably");
+    }
+
+    [Fact]
+    public async Task Selected_Incident_Upstream_Timeout_Still_Returns_Durable_Create()
+    {
+        var state = new FakeCaseStateClient();
+        var delivery = new DeliveryHandler { TimeoutTransition = true };
+        var service = Service(state, delivery, new CountingEvidence());
+
+        var created = await service.CreateDisputeAsync(
+            Clone(Input("client-1"), GenericCaseGatewayService.ActivateIncidentCommand), default);
+
+        created.Case.Version.Should().Be(4);
+        state.Messages.Should().ContainSingle(item => item.Body != null
+            && item.Body.Contains("\"type\":\"delivery_incident_activation_failed\"", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -785,6 +799,7 @@ public sealed class GenericCaseGatewayServiceTests
     private sealed class DeliveryHandler : HttpMessageHandler
     {
         public bool FailTransition { get; set; }
+        public bool TimeoutTransition { get; set; }
         public DeliveryReadMode ReadMode { get; init; }
         public int StatusReads { get; private set; }
         public List<string> TransitionBodies { get; } = new();
@@ -807,6 +822,8 @@ public sealed class GenericCaseGatewayServiceTests
                 });
             }
             TransitionBodies.Add(await request.Content!.ReadAsStringAsync(ct));
+            if (TimeoutTransition)
+                throw new TaskCanceledException("delivery transition timed out");
             if (FailTransition)
                 return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
                 { Content = new StringContent("{\"reason\":\"temporarily_unavailable\"}") };

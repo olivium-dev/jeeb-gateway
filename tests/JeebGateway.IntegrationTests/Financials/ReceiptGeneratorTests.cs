@@ -43,7 +43,7 @@ public class ReceiptGeneratorTests
         // Flat-10% COD loop: $100 collected → $10 commission → $90 Jeeber payout.
         var settlement = SettledRow(codAmount: 100m, commission: 10m);
 
-        var receipt = ReceiptGenerator.Generate(settlement, DateTimeOffset.UtcNow);
+        var receipt = ReceiptGenerator.Generate(settlement);
 
         receipt.CodAmount.Should().Be(100m, "the receipt header surfaces the COD cash collected");
         receipt.Commission.Should().Be(10m, "the platform commission is quoted explicitly");
@@ -62,8 +62,21 @@ public class ReceiptGeneratorTests
         // $12.34 COD → $1.234 commission stored as $1.23 → payout $11.11 (2-dp).
         var settlement = SettledRow(codAmount: 12.34m, commission: 1.23m);
 
-        var receipt = ReceiptGenerator.Generate(settlement, DateTimeOffset.UtcNow);
+        var receipt = ReceiptGenerator.Generate(settlement);
 
         receipt.Payout.Should().Be(11.11m, "payout is rounded to whole cents, never a fractional-cent value");
+    }
+
+    [Fact]
+    public void Generate_Uses_Persisted_Receipt_Time_And_Is_Stable_Across_Reads()
+    {
+        var settlement = SettledRow(codAmount: 10m, commission: 1m);
+        settlement.ReceiptGeneratedAt = DateTimeOffset.Parse("2026-07-14T09:05:00Z");
+
+        var first = ReceiptGenerator.Generate(settlement);
+        var second = ReceiptGenerator.Generate(settlement);
+
+        first.IssuedAt.Should().Be(settlement.ReceiptGeneratedAt);
+        second.IssuedAt.Should().Be(first.IssuedAt);
     }
 }

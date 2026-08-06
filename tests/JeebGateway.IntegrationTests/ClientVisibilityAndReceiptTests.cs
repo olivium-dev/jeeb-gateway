@@ -100,6 +100,8 @@ public class ClientVisibilityAndReceiptTests
         var acceptResp = await HeaderClient(factory, clientId, "customer")
             .PostAsync($"/v1/offers/{offer.Id}/accept", null);
         acceptResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await store.GetAsync(created.Id, CancellationToken.None))!.AcceptedAt.Should().NotBeNull(
+            "the acceptedAt lifecycle projection must be present in the request ledger itself");
 
         // ---- GET /v1/requests?role=client — the Orders tab ----------------------
         var ordersResp = await HeaderClient(factory, clientId, "customer")
@@ -110,6 +112,8 @@ public class ClientVisibilityAndReceiptTests
             "the client's own accepted request must stay visible on the role=client list");
         orders.Items.Single(i => i.Id == created.Id).Status.Should().Be("Ordered",
             "accepted surfaces as the canonical post-accept token");
+        orders.Items.Single(i => i.Id == created.Id).AcceptedAt.Should().NotBeNull(
+            "the upstream accept projection must stamp the request's first accepted lifecycle time");
 
         // ---- flat GET /requests — the legacy client history surface -------------
         var flatResp = await HeaderClient(factory, clientId, "customer").GetAsync("/requests");
@@ -471,6 +475,7 @@ public class ClientVisibilityAndReceiptTests
         [JsonPropertyName("id")] public string Id { get; set; } = string.Empty;
         [JsonPropertyName("status")] public string Status { get; set; } = string.Empty;
         [JsonPropertyName("jeeberId")] public string? JeeberId { get; set; }
+        [JsonPropertyName("acceptedAt")] public DateTimeOffset? AcceptedAt { get; set; }
     }
 
     private sealed class FlatRequestRow

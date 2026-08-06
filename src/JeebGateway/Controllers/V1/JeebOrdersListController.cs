@@ -388,6 +388,7 @@ public sealed class JeebOrdersListController : ControllerBase
         Pickup = new AddressBlock { Address = r.PickupAddress },
         Dropoff = new AddressBlock { Address = r.DropoffAddress },
         CreatedAt = r.CreatedAt,
+        AcceptedAt = r.AcceptedAt,
     };
 }
 
@@ -481,6 +482,11 @@ public sealed class OrderListItem
 
     [JsonPropertyName("createdAt")]
     public DateTimeOffset CreatedAt { get; init; }
+
+    /// <summary>The first durable acceptance instant. Never recomputed by a read.</summary>
+    [JsonPropertyName("acceptedAt")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? AcceptedAt { get; init; }
 
     /// <summary>
     /// P7: absolute UTC instant the offer-wait window closes (createdAt + resolved tier

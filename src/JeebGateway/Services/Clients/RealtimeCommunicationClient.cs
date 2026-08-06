@@ -82,7 +82,7 @@ public sealed class RealtimeCommunicationClient : IRealtimeCommunicationClient
         // this wins over the inbound bearer; when no secret is configured we set nothing
         // and behaviour is exactly what it was before this path existed.
         var credential = _guardian.Issue(
-            subject: "jeeb-gateway",
+            subject: PublishSubject(stream, data),
             topic: topic,
             scopes: RealtimeGuardianTokenIssuer.PublishOnly);
         if (credential is not null)
@@ -97,9 +97,11 @@ public sealed class RealtimeCommunicationClient : IRealtimeCommunicationClient
         // them to RFC 7807 without re-reading the body.
         if (!response.IsSuccessStatusCode)
         {
+            var retryAfter = await ReadRetryAfterAsync(response, ct);
             throw new RealtimePublishException(
                 response.StatusCode,
-                $"realtime-comunication-service ingest {topic}/{stream} returned {(int)response.StatusCode}.");
+                $"realtime-comunication-service ingest {topic}/{stream} returned {(int)response.StatusCode}.",
+                retryAfter);
         }
 
         var payload = await response.Content.ReadFromJsonAsync<IngestResultWire>(JsonOptions, ct);
@@ -133,6 +135,57 @@ public sealed class RealtimeCommunicationClient : IRealtimeCommunicationClient
         return PublishAsync(ChatTopic, stream, data, meta: null, ct);
     }
 
+    private static string PublishSubject(
+        string stream,
+        IReadOnlyDictionary<string, object?> data)
+    {
+        // HTTP ingest rate limiting is keyed by Guardian subject. A single fixed
+        // gateway subject makes every courier share one 100/minute bucket, so GPS
+        // publication is partitioned by the already-authorized courier identity.
+        if (string.Equals(stream, CourierPositionTopic.Stream, StringComparison.Ordinal)
+            && data.TryGetValue("jeeberId", out var value)
+            && value is not null
+            && !string.IsNullOrWhiteSpace(value.ToString()))
+        {
+            return "jeeb-gateway:location:" + value;
+        }
+
+        return "jeeb-gateway";
+    }
+
+    private static async Task<TimeSpan?> ReadRetryAfterAsync(
+        HttpResponseMessage response,
+        CancellationToken ct)
+    {
+        try
+        {
+            var body = await response.Content.ReadAsStringAsync(ct);
+            using var document = JsonDocument.Parse(body);
+            foreach (var property in new[] { "next_allowed_ms", "retry_after_ms", "retryAfterMs" })
+            {
+                if (document.RootElement.TryGetProperty(property, out var value)
+                    && value.TryGetInt32(out var milliseconds))
+                    return TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
+            }
+        }
+        catch (JsonException)
+        {
+            // A malformed error envelope still maps to the original status.
+        }
+
+        // The deployed service emits an exact millisecond JSON hint and an RFC header
+        // truncated to whole seconds. Prefer JSON so sub-second backoff is not lost.
+        if (response.Headers.RetryAfter?.Delta is { } delta)
+            return delta;
+        if (response.Headers.RetryAfter?.Date is { } date)
+        {
+            var delay = date - DateTimeOffset.UtcNow;
+            return delay > TimeSpan.Zero ? delay : TimeSpan.Zero;
+        }
+
+        return null;
+    }
+
     // --- wire DTOs ---
 
     private sealed class IngestBody
@@ -157,12 +210,18 @@ public sealed class RealtimeCommunicationClient : IRealtimeCommunicationClient
 /// </summary>
 public sealed class RealtimePublishException : HttpRequestException
 {
-    public RealtimePublishException(HttpStatusCode statusCode, string message)
+    public RealtimePublishException(
+        HttpStatusCode statusCode,
+        string message,
+        TimeSpan? retryAfter = null)
         : base(message)
     {
         StatusCode = statusCode;
+        RetryAfter = retryAfter;
     }
 
     /// <summary>The upstream HTTP status that triggered the failure.</summary>
     public new HttpStatusCode StatusCode { get; }
+
+    public TimeSpan? RetryAfter { get; }
 }

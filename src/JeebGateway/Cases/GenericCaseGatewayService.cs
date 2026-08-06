@@ -125,8 +125,8 @@ public sealed class GenericCaseGatewayService : IGenericCaseGatewayService
         }
 
         if (!string.IsNullOrWhiteSpace(input.IncidentCommand)
-            && !persistedMessages.Any(IsDeliveryIncidentAudit))
-            row = await ActivateIncidentAsync(row, input, actorRole, delivery, ct);
+            && !persistedMessages.Any(IsDeliveryIncidentOutcomeAudit))
+            row = await ActivateIncidentSafelyAsync(row, input, actorRole, delivery, ct);
 
         row = await _cases.GetCaseAsync(created.CaseId, ct);
 
@@ -540,6 +540,73 @@ public sealed class GenericCaseGatewayService : IGenericCaseGatewayService
         return row.WithVersion(result.CaseVersion);
     }
 
+    private async Task<GenericCaseV1> ActivateIncidentSafelyAsync(GenericCaseV1 row,
+        CreateDisputeCaseInput input, string actorRole,
+        DeliveryCaseContextUpstream delivery, CancellationToken ct)
+    {
+        try
+        {
+            return await ActivateIncidentAsync(row, input, actorRole, delivery, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            int? statusCode = error is DeliveryTransitionException transition
+                ? transition.StatusCode
+                : null;
+            CaseTelemetry.SecondaryFailures.Add(1,
+                new("kind", GenericCaseKinds.Dispute),
+                new("operation", "activate_delivery_incident"),
+                new("status_code", statusCode));
+            Activity.Current?.SetTag("case.secondary_failure", "activate_delivery_incident");
+            Activity.Current?.SetTag("case.secondary_failure.status_code", statusCode);
+            _log.LogWarning(error,
+                "event=case.secondary_failure case_id={CaseId} case_kind=dispute "
+                + "delivery_id={DeliveryId} operation=activate_delivery_incident status_code={StatusCode} "
+                + "correlation_id={CorrelationId}; durable case remains authoritative",
+                row.CaseId, delivery.DeliveryId, statusCode, CorrelationId());
+
+            // The case has already committed. Record a safe, admin-visible outcome when
+            // possible, but never let this optional audit write turn that durable success
+            // back into a 5xx either.
+            try
+            {
+                var key = $"case:{row.CaseId:D}:incident:activate";
+                var result = await _cases.AddCaseMessageAsync(row.CaseId,
+                    new CreateGenericCaseMessageRequestV1
+                    {
+                        ExpectedVersion = row.Version,
+                        MessageType = "internal_note",
+                        Body = JsonSerializer.Serialize(new
+                        {
+                            type = "delivery_incident_activation_failed",
+                            command = ActivateIncidentCommand,
+                            statusCode,
+                            failureType = error.GetType().Name,
+                            observedAt = _clock.GetUtcNow(),
+                        }, Json),
+                    }, DeterministicKey(key, "failure-audit"), "jeeb-gateway", "system", ct);
+                return row.WithVersion(result.CaseVersion);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception auditError)
+            {
+                _log.LogWarning(auditError,
+                    "event=case.secondary_failure_audit_failed case_id={CaseId} "
+                    + "operation=activate_delivery_incident correlation_id={CorrelationId}; "
+                    + "durable case remains authoritative",
+                    row.CaseId, CorrelationId());
+                return row;
+            }
+        }
+    }
+
     private async Task<GenericCaseDetailV1> LoadDetailAsync(GenericCaseV1 row, CancellationToken ct)
     {
         var newestMessages = _cases.GetCaseMessagesPageAsync(row.CaseId, includeInternal: true,
@@ -602,7 +669,7 @@ public sealed class GenericCaseGatewayService : IGenericCaseGatewayService
         catch (JsonException) { return false; }
     }
 
-    private static bool IsDeliveryIncidentAudit(GenericCaseMessageV1 message)
+    private static bool IsDeliveryIncidentOutcomeAudit(GenericCaseMessageV1 message)
     {
         if (message.MessageType != "internal_note" || string.IsNullOrWhiteSpace(message.Body)
             || message.Body[0] != '{') return false;
@@ -610,7 +677,7 @@ public sealed class GenericCaseGatewayService : IGenericCaseGatewayService
         {
             using var document = JsonDocument.Parse(message.Body);
             return document.RootElement.TryGetProperty("type", out var type)
-                && type.GetString() == "delivery_incident";
+                && type.GetString() is "delivery_incident" or "delivery_incident_activation_failed";
         }
         catch (JsonException) { return false; }
     }
