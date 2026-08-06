@@ -1540,7 +1540,8 @@ if (durableRequests.Enabled)
         // _mirror is non-null in prod (registered inside the GatewayPostgres block, [A]).
         // GetService (not GetRequiredService): null when Postgres is not configured, which
         // degrades the durable owner-list to the in-memory snapshot (today's behaviour).
-        sp.GetService<JeebGateway.Requests.IDurableRequestsMirror>()));
+        sp.GetService<JeebGateway.Requests.IDurableRequestsMirror>(),
+        sp.GetRequiredService<JeebGateway.Requests.ITiersStore>()));
 }
 else
 {

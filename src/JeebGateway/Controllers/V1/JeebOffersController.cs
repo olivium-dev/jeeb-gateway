@@ -39,6 +39,7 @@ public sealed class JeebOffersController : ControllerBase
     private readonly IOfferServiceClient _offerService;
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly IDeliveryServiceClient _deliveryService;
+    private readonly ITiersStore _tiers;
     // GW5 / W1.6-gateway: the post-accept chat step is delegated to the settler, which
     // the reconciler shares. This controller no longer holds IJeebConversationClient —
     // it composed the two-call seat/advance sequence that the settle replaces, and a
@@ -60,6 +61,7 @@ public sealed class JeebOffersController : ControllerBase
         IOfferServiceClient offerService,
         IOfferRequestIndex offerRequestIndex,
         IDeliveryServiceClient deliveryService,
+        ITiersStore tiers,
         IAcceptChatSettler settler,
         IOfferPushNotifier offerPush,
         IDetachedPushDispatcher detachedPush,
@@ -74,6 +76,7 @@ public sealed class JeebOffersController : ControllerBase
         _offerService = offerService;
         _offerRequestIndex = offerRequestIndex;
         _deliveryService = deliveryService;
+        _tiers = tiers;
         _settler = settler;
         _offerPush = offerPush;
         _detachedPush = detachedPush;
@@ -701,13 +704,23 @@ public sealed class JeebOffersController : ControllerBase
 
         try
         {
+            var resolvedTierId = await _tiers.ResolveAsync(request.TierId!, ct);
+            if (resolvedTierId is null)
+            {
+                _logger.LogWarning(
+                    "Post-accept delivery-leg sync for request {RequestId}: tier {TierId} no longer resolves; "
+                    + "skipping the assignment mirror (accept stays 200).",
+                    request.Id, request.TierId);
+                return;
+            }
+
             await _deliveryService.CreateDeliveryRowAsync(new CreateDeliveryRowUpstream
             {
                 Id = request.Id,
                 TenantId = _deliveryOptions.TenantId,
                 ClientId = request.ClientId,
                 JeeberId = winningJeeberId,
-                TierId = request.TierId!,
+                TierId = resolvedTierId,
                 PickupLat = request.PickupLocation.Lat,
                 PickupLng = request.PickupLocation.Lng,
             }, ct);

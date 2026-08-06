@@ -64,6 +64,7 @@ public sealed class DurableRequestsStore : IRequestsStore
     private readonly IBroadcastEventRecorder _broadcasts;
     private readonly DurableRequestsOptions _options;
     private readonly ILogger<DurableRequestsStore> _logger;
+    private readonly ITiersStore? _tiers;
 
     /// <summary>
     /// requests-durable: OPTIONAL gateway-Postgres owner-list mirror. Registered
@@ -82,7 +83,8 @@ public sealed class DurableRequestsStore : IRequestsStore
         IBroadcastEventRecorder broadcasts,
         IOptions<DurableRequestsOptions> options,
         ILogger<DurableRequestsStore> logger,
-        IDurableRequestsMirror? mirror = null)
+        IDurableRequestsMirror? mirror = null,
+        ITiersStore? tiers = null)
     {
         _inner = inner;
         _delivery = delivery;
@@ -92,6 +94,7 @@ public sealed class DurableRequestsStore : IRequestsStore
         _options = options.Value;
         _logger = logger;
         _mirror = mirror;
+        _tiers = tiers;
     }
 
     // -----------------------------------------------------------------------
@@ -106,7 +109,7 @@ public sealed class DurableRequestsStore : IRequestsStore
         // 1) Mint ONE stable id up front (honour a caller-supplied id — the S04
         //    voice-create idempotency anchor — so durable + voice paths agree).
         var stableId = string.IsNullOrWhiteSpace(input.Id) ? Guid.NewGuid().ToString() : input.Id;
-        var stamped = WithId(input, stableId);
+        var stamped = WithId(input, stableId, await ResolveTierIdAsync(input.TierId, ct));
 
         // 2) Enforce BR-9 atomically in the inner store FIRST. A cap rejection
         //    throws here, BEFORE any upstream side-effect — so a rejected create
@@ -121,7 +124,7 @@ public sealed class DurableRequestsStore : IRequestsStore
     public async Task<DeliveryRequest> CreateAsync(CreateRequestInput input, CancellationToken ct)
     {
         var stableId = string.IsNullOrWhiteSpace(input.Id) ? Guid.NewGuid().ToString() : input.Id;
-        var stamped = WithId(input, stableId);
+        var stamped = WithId(input, stableId, await ResolveTierIdAsync(input.TierId, ct));
 
         var created = await _inner.CreateAsync(stamped, ct);
         await PersistSagaAsync(created, ct);
@@ -264,7 +267,18 @@ public sealed class DurableRequestsStore : IRequestsStore
         }
     }
 
-    private static CreateRequestInput WithId(CreateRequestInput input, string id) => new()
+    private async Task<string?> ResolveTierIdAsync(string? tierId, CancellationToken ct)
+    {
+        if (_tiers is null || string.IsNullOrWhiteSpace(tierId)) return tierId;
+
+        var resolved = await _tiers.ResolveAsync(tierId, ct);
+        if (resolved is not null) return resolved;
+
+        throw new InvalidOperationException(
+            $"Tier '{tierId}' no longer resolves in the authoritative delivery catalog.");
+    }
+
+    private static CreateRequestInput WithId(CreateRequestInput input, string id, string? tierId) => new()
     {
         ClientId = input.ClientId,
         Description = input.Description,
@@ -273,7 +287,7 @@ public sealed class DurableRequestsStore : IRequestsStore
         TranscriptionConfidence = input.TranscriptionConfidence,
         AudioUrl = input.AudioUrl,
         Photos = input.Photos,
-        TierId = input.TierId,
+        TierId = tierId,
         PickupLocation = input.PickupLocation,
         DropoffLocation = input.DropoffLocation,
         PickupAddress = input.PickupAddress,

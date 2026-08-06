@@ -28,6 +28,16 @@ public interface ITiersStore
     /// semantics; blank input is false.
     /// </summary>
     Task<bool> ExistsAsync(string tierCode, CancellationToken ct);
+
+    /// <summary>
+    /// Resolves an accepted client-facing tier value to the identifier that must
+    /// be persisted and sent to delivery-service. Implementations backed by the
+    /// upstream catalog return the exact upstream tier id; local-only
+    /// implementations preserve the accepted input so flag-off behavior does not
+    /// change. The default keeps existing test/local implementations compatible.
+    /// </summary>
+    async Task<string?> ResolveAsync(string tierCode, CancellationToken ct)
+        => await ExistsAsync(tierCode, ct) ? tierCode : null;
 }
 
 /// <summary>
@@ -81,8 +91,11 @@ public class CatalogBackedTiersStore : ITiersStore
     }
 
     public async Task<bool> ExistsAsync(string tierCode, CancellationToken ct)
+        => await ResolveAsync(tierCode, ct) is not null;
+
+    public async Task<string?> ResolveAsync(string tierCode, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(tierCode)) return false;
+        if (string.IsNullOrWhiteSpace(tierCode)) return null;
 
         // Consistency with the read path (JeebTiersController.List): when
         // delivery-service is the authoritative tier source, a supplied tierId is
@@ -95,11 +108,17 @@ public class CatalogBackedTiersStore : ITiersStore
 
             // (a) The faithful path: the mobile tier-picker submits the exact
             // UUIDv5 id GET /v1/tiers rendered. Case-insensitive id match.
-            if (upstreamTiers.Any(t =>
-                    string.Equals(t.Id, trimmed, StringComparison.OrdinalIgnoreCase)))
-            {
-                return true;
-            }
+            var exactId = upstreamTiers.FirstOrDefault(t =>
+                string.Equals(t.Id, trimmed, StringComparison.OrdinalIgnoreCase));
+            if (exactId is not null) return exactId.Id;
+
+            // A legacy tier code is also the upstream display name for the three
+            // delivery tiers (flash/express/standard). Prefer that exact match so
+            // flash and express remain distinct even though both canonicalize to
+            // the gateway's broader "urgent" catalog alias.
+            var exactName = upstreamTiers.FirstOrDefault(t =>
+                string.Equals(t.Name, trimmed, StringComparison.OrdinalIgnoreCase));
+            if (exactName is not null) return exactName.Id;
 
             // (b) F1 / JEBV4-300 — legacy/Dart-enum tier CODE fallback so an older
             // client that submits a code (flash/express/standard/onTheWay/…) instead
@@ -112,14 +131,19 @@ public class CatalogBackedTiersStore : ITiersStore
             // "Flash"/"Express" -> "urgent". Unknown codes canonicalize to
             // themselves, so genuine garbage still finds no match and 404s.
             var canonicalCode = JeebGateway.Tiers.LegacyTierCodes.Canonicalize(trimmed);
-            return upstreamTiers.Any(t => string.Equals(
-                JeebGateway.Tiers.LegacyTierCodes.Canonicalize(t.Name),
-                canonicalCode,
-                StringComparison.OrdinalIgnoreCase));
+            var aliasMatch = upstreamTiers
+                .Where(t => string.Equals(
+                    JeebGateway.Tiers.LegacyTierCodes.Canonicalize(t.Name),
+                    canonicalCode,
+                    StringComparison.OrdinalIgnoreCase))
+                .OrderBy(t => t.SlaHours)
+                .ThenBy(t => t.Id, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+            return aliasMatch?.Id;
         }
 
         // Delivery upstream off: local catalog + LegacyTierCodes canonicalization.
         var canonical = JeebGateway.Tiers.LegacyTierCodes.Canonicalize(tierCode);
-        return await _catalog.GetAsync(canonical, ct) is not null;
+        return await _catalog.GetAsync(canonical, ct) is not null ? tierCode : null;
     }
 }

@@ -115,6 +115,31 @@ public sealed class DurableRequestsStoreTests
     }
 
     [Fact]
+    public async Task Create_resolves_legacy_tier_before_inner_persistence_and_delivery_seed()
+    {
+        const string authoritativeTierId = "1a2b3c4d-5e6f-5a1b-8c2d-3e4f5a6b7c8d";
+        var inner = new InMemoryRequestsStore(Clock);
+        var delivery = new RecordingDeliveryClient();
+        var store = new DurableRequestsStore(
+            inner,
+            delivery,
+            new RecordingBundleRecorder(SagaBundleRecordOutcome.Recorded),
+            new RecordingConversationProvisioner(null),
+            new RecordingBroadcastEventRecorder(BroadcastEventRecordOutcome.Recorded),
+            Options.Create(new DurableRequestsOptions { Enabled = true }),
+            NullLogger<DurableRequestsStore>.Instance,
+            mirror: null,
+            tiers: new FixedTierResolver("flash", authoritativeTierId));
+
+        var created = await store.TryCreateWithLimitAsync(ValidInput(), limit: 3, CancellationToken.None);
+
+        created.TierId.Should().Be(authoritativeTierId);
+        (await inner.GetAsync(created.Id, CancellationToken.None))!.TierId.Should().Be(authoritativeTierId);
+        delivery.CreatedRows.Should().ContainSingle()
+            .Which.TierId.Should().Be(authoritativeTierId);
+    }
+
+    [Fact]
     public async Task Cap_rejection_throws_and_seeds_no_upstream_row_or_bundle()
     {
         var store = Build(out _, out var delivery, out var bundles);
@@ -1082,6 +1107,17 @@ public sealed class DurableRequestsStoreTests
 
         public override Task<ShipmentsListDto> ListShipmentsAsync(string? orderId, string? stage, int? limit, CancellationToken ct)
             => Task.FromResult(new ShipmentsListDto { Shipments = OrderedShipments, Count = OrderedShipments.Count });
+    }
+
+    private sealed class FixedTierResolver(string accepted, string resolved)
+        : JeebGateway.Requests.ITiersStore
+    {
+        public Task<bool> ExistsAsync(string tierCode, CancellationToken ct)
+            => Task.FromResult(string.Equals(tierCode, accepted, StringComparison.OrdinalIgnoreCase));
+
+        public Task<string?> ResolveAsync(string tierCode, CancellationToken ct)
+            => Task.FromResult<string?>(
+                string.Equals(tierCode, accepted, StringComparison.OrdinalIgnoreCase) ? resolved : null);
     }
 
     /// <summary>

@@ -335,6 +335,15 @@ public class InMemoryTiersStoreTests
     }
 
     [Fact]
+    public async Task ResolveAsync_UpstreamOff_PreservesAcceptedLegacyValue()
+    {
+        var store = NewStore();
+
+        (await store.ResolveAsync("flash", CancellationToken.None)).Should().Be("flash",
+            "flag-off persistence and response semantics must remain unchanged");
+    }
+
+    [Fact]
     public async Task Deleting_A_Catalog_Row_Retires_Its_Legacy_Aliases_Too()
     {
         // Single-source-of-truth proof: retiring "urgent" from the catalog must
@@ -385,6 +394,8 @@ public class InMemoryTiersStoreTests
 /// </summary>
 public class CatalogBackedTiersStoreUpstreamOnTests
 {
+    private const string UpstreamFlashTierId = "1a2b3c4d-5e6f-5a1b-8c2d-3e4f5a6b7c8d";
+    private const string UpstreamExpressTierId = "9f1c0e6b-1b2a-5c3d-8e4f-0a1b2c3d4e5f";
     // The live delivery-service Standard tier id (UUIDv5), exactly as
     // GET /api/v1/tiers returns it and the mobile tier-picker submits it.
     private const string UpstreamStandardTierId = "2bd0d5df-db76-5d14-9e4d-741d60b2fa12";
@@ -429,6 +440,42 @@ public class CatalogBackedTiersStoreUpstreamOnTests
         (await store.ExistsAsync(tierId, CancellationToken.None)).Should().BeFalse();
     }
 
+    [Theory]
+    [InlineData(UpstreamFlashTierId, UpstreamFlashTierId)]
+    [InlineData("flash", UpstreamFlashTierId)]
+    [InlineData("express", UpstreamExpressTierId)]
+    [InlineData("standard", UpstreamStandardTierId)]
+    [InlineData("urgent", UpstreamFlashTierId)]
+    [InlineData("same-day", UpstreamStandardTierId)]
+    public async Task ResolveAsync_UpstreamOn_ReturnsExactAuthoritativeTierId(
+        string submittedTierId, string expectedTierId)
+    {
+        var store = UpstreamOnStore();
+
+        var resolved = await store.ResolveAsync(submittedTierId, CancellationToken.None);
+
+        resolved.Should().Be(expectedTierId);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_UpstreamOn_PrefersExactIdOverAliasMatching()
+    {
+        var store = UpstreamOnStore();
+
+        var resolved = await store.ResolveAsync(UpstreamExpressTierId.ToUpperInvariant(), CancellationToken.None);
+
+        resolved.Should().Be(UpstreamExpressTierId,
+            "the exact upstream id must be returned with its authoritative wire casing");
+    }
+
+    [Fact]
+    public async Task ResolveAsync_UpstreamOn_ReturnsNullForUnknownInput()
+    {
+        var store = UpstreamOnStore();
+
+        (await store.ResolveAsync("platinum_super_fast", CancellationToken.None)).Should().BeNull();
+    }
+
     // Serves the delivery-service tier catalog (UUIDv5 ids + Flash/Express/Standard
     // names, exactly like the live upstream) at GET /api/v1/tiers.
     private sealed class UpstreamTiersHandler : HttpMessageHandler
@@ -447,13 +494,13 @@ public class CatalogBackedTiersStoreUpstreamOnTests
                 {
                     new JeebGateway.Tiers.DeliveryTierDto
                     {
-                        Id = "1a2b3c4d-5e6f-5a1b-8c2d-3e4f5a6b7c8d", Name = "Flash", SlaHours = 1,
+                        Id = UpstreamFlashTierId, Name = "Flash", SlaHours = 1,
                         RadiusKm = 8.0, CommissionRate = 0.10, PriceHint = "Fastest dispatch",
                         CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
                     },
                     new JeebGateway.Tiers.DeliveryTierDto
                     {
-                        Id = "9f1c0e6b-1b2a-5c3d-8e4f-0a1b2c3d4e5f", Name = "Express", SlaHours = 4,
+                        Id = UpstreamExpressTierId, Name = "Express", SlaHours = 4,
                         RadiusKm = 8.0, CommissionRate = 0.10, PriceHint = "Faster dispatch",
                         CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
                     },

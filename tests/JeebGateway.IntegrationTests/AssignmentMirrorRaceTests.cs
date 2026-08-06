@@ -35,6 +35,7 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public class AssignmentMirrorRaceTests
 {
+    private const string UpstreamFlashTierId = "1a2b3c4d-5e6f-5a1b-8c2d-3e4f5a6b7c8d";
     private const double PickupLat = 33.5138;
     private const double PickupLng = 36.2765;
 
@@ -59,6 +60,8 @@ public class AssignmentMirrorRaceTests
         delivery.TransitionAttempts.Should().Be(2, "exactly one retry after the re-mirror (bounded)");
         delivery.AssignmentUpserts.Should().ContainSingle()
             .Which.JeeberId.Should().Be(jeeberId, "the re-mirror carried the winning jeeber from the local ledger");
+        delivery.AssignmentUpserts.Single().TierId.Should().Be(UpstreamFlashTierId,
+            "repairing a legacy row must send delivery-service its authoritative tier id");
     }
 
     /// <summary>
@@ -203,7 +206,21 @@ public class AssignmentMirrorRaceTests
                 CreatedAt = DateTimeOffset.UtcNow
             });
 
-        public Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct) => throw new NotSupportedException();
+        public Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct)
+            => Task.FromResult<IReadOnlyList<DeliveryTierDto>>(new[]
+            {
+                new DeliveryTierDto
+                {
+                    Id = UpstreamFlashTierId,
+                    Name = "Flash",
+                    SlaHours = 1,
+                    RadiusKm = 8,
+                    CommissionRate = 0.10,
+                    PriceHint = "Fastest dispatch",
+                    CreatedAt = DateTimeOffset.UnixEpoch,
+                    UpdatedAt = DateTimeOffset.UnixEpoch,
+                },
+            });
         public Task<ShipmentsListDto> ListShipmentsAsync(string? orderId, string? stage, int? limit, CancellationToken ct) => throw new NotSupportedException();
         public Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct) => throw new NotSupportedException();
         public Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct) => throw new NotSupportedException();

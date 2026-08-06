@@ -200,8 +200,8 @@ public class RequestsController : ControllerBase
         // JEBV4-65: shared tier-exists validation (single source of truth; the
         // JEBV4-62 tier-not-found status coupling point). fieldLabel "tierId"
         // preserves this surface's exact Title/Detail wording.
-        var tierProblem = await RequestCreateValidation.ValidateTierExistsAsync(_tiers, body.TierId, "tierId", ct);
-        if (tierProblem is not null) return NotFound(tierProblem);
+        var tierResolution = await RequestCreateValidation.ResolveTierAsync(_tiers, body.TierId, "tierId", ct);
+        if (tierResolution.Problem is not null) return NotFound(tierResolution.Problem);
 
         // JEBV4-65: shared audio/photo URL-shape + photo-count validation (single
         // source of truth). Preserves the exact order and envelopes.
@@ -224,7 +224,7 @@ public class RequestsController : ControllerBase
             Transcription = string.IsNullOrWhiteSpace(body.Transcription) ? null : body.Transcription.Trim(),
             AudioUrl = body.AudioUrl,
             Photos = photos.ToArray(),
-            TierId = body.TierId,
+            TierId = tierResolution.ResolvedTierId,
             PickupLocation = body.PickupLocation,
             DropoffLocation = body.DropoffLocation,
             PickupAddress = body.PickupAddress,

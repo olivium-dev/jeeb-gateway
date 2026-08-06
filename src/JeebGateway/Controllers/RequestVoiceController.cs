@@ -175,8 +175,8 @@ public sealed class RequestVoiceController : ControllerBase
         // JEBV4-65: shared tier-exists validation (single source of truth; the
         // JEBV4-62 tier-not-found status coupling point). fieldLabel "tier"
         // preserves this surface's exact Title/Detail wording.
-        var tierProblem = await RequestCreateValidation.ValidateTierExistsAsync(_tiers, tierId, "tier", ct);
-        if (tierProblem is not null) return NotFound(tierProblem);
+        var tierResolution = await RequestCreateValidation.ResolveTierAsync(_tiers, tierId, "tier", ct);
+        if (tierResolution.Problem is not null) return NotFound(tierResolution.Problem);
 
         byte[] bytes;
         await using (var stream = audio.OpenReadStream())
@@ -233,7 +233,7 @@ public sealed class RequestVoiceController : ControllerBase
             TranscriptionConfidence = confidence,
             AudioUrl = null,
             Photos = Array.Empty<string>(),
-            TierId = tierId,
+            TierId = tierResolution.ResolvedTierId,
             // S04 treats geolocation as a downstream black box; the voice slice uses
             // the same valid Beirut default the scenario pins for the typed path so
             // the create satisfies the store's WGS84 precondition.

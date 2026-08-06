@@ -262,6 +262,8 @@ public class TierUnificationTests
     // The live delivery-service Standard tier id (UUIDv5), exactly as
     // GET /api/v1/tiers returns it and the mobile tier-picker submits it.
     private const string UpstreamStandardTierId = "2bd0d5df-db76-5d14-9e4d-741d60b2fa12";
+    private const string UpstreamFlashTierId = "1a2b3c4d-5e6f-5a1b-8c2d-3e4f5a6b7c8d";
+    private const string UpstreamExpressTierId = "9f1c0e6b-1b2a-5c3d-8e4f-0a1b2c3d4e5f";
 
     [Fact]
     public async Task V1Create_DeliveryUpstreamOn_AcceptsUpstreamTierId_Returns201()
@@ -277,6 +279,55 @@ public class TierUnificationTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created,
             "an upstream tier id the tier-picker rendered from must not 400 at create time");
+    }
+
+    [Theory]
+    [InlineData(UpstreamStandardTierId, UpstreamStandardTierId)]
+    [InlineData("flash", UpstreamFlashTierId)]
+    [InlineData("express", UpstreamExpressTierId)]
+    [InlineData("standard", UpstreamStandardTierId)]
+    [InlineData("urgent", UpstreamFlashTierId)]
+    [InlineData("same-day", UpstreamStandardTierId)]
+    public async Task V1Create_DeliveryUpstreamOn_PersistsAndForwardsAuthoritativeTierId(
+        string submittedTierId, string expectedTierId)
+    {
+        var push = new RecordingTopicPushClient();
+        var upstream = new UpstreamTiersStubHandler();
+        using var factory = NewUpstreamDeliveryFactory(push, upstream);
+        var client = ClientFor(factory, $"client-{Guid.NewGuid()}");
+
+        var resp = await client.PostAsJsonAsync(
+            "/v1/requests", ValidPayload("Pick up keys", submittedTierId));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var created = await resp.Content.ReadFromJsonAsync<JeebGateway.Requests.DeliveryRequestDto>();
+        created!.TierId.Should().Be(expectedTierId);
+
+        var read = await client.GetFromJsonAsync<JeebGateway.Requests.DeliveryRequestDto>(
+            $"/v1/requests/{created.Id}");
+        read!.TierId.Should().Be(expectedTierId, "the persisted request must carry the delivery-resolvable id");
+
+        upstream.DeliveryCreates.Should().ContainSingle();
+        using var payload = JsonDocument.Parse(upstream.DeliveryCreates.Single());
+        payload.RootElement.GetProperty("tier_id").GetString().Should().Be(expectedTierId);
+    }
+
+    [Theory]
+    [InlineData("urgent", UpstreamFlashTierId)]
+    [InlineData("same-day", UpstreamStandardTierId)]
+    public async Task LegacyCreate_DeliveryUpstreamOn_PersistsAuthoritativeTierId(
+        string submittedTierId, string expectedTierId)
+    {
+        var push = new RecordingTopicPushClient();
+        using var factory = NewUpstreamDeliveryFactory(push);
+        var client = ClientFor(factory, $"client-{Guid.NewGuid()}");
+
+        var resp = await client.PostAsJsonAsync(
+            "/requests", ValidPayload("Legacy create", submittedTierId));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var created = await resp.Content.ReadFromJsonAsync<JeebGateway.Requests.DeliveryRequestDto>();
+        created!.TierId.Should().Be(expectedTierId);
     }
 
     [Fact]
@@ -357,7 +408,9 @@ public class TierUnificationTests
     // JeebTiersController.List uses — plus a benign 201 for the best-effort
     // POST /api/v1/deliveries row seed. This drives the whole fixed path end-to-end:
     // flag -> CatalogBackedTiersStore -> IDeliveryServiceClient.ListTiersAsync -> id match.
-    private static WebApplicationFactory<Program> NewUpstreamDeliveryFactory(RecordingTopicPushClient push)
+    private static WebApplicationFactory<Program> NewUpstreamDeliveryFactory(
+        RecordingTopicPushClient push,
+        UpstreamTiersStubHandler? upstream = null)
         => new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
@@ -371,7 +424,7 @@ public class TierUnificationTests
                     // Replace the production typed delivery client with the REAL client
                     // over a canned-catalog handler (mirrors UpstreamProxyTests).
                     services.RemoveAll<IDeliveryServiceClient>();
-                    var http = new HttpClient(new UpstreamTiersStubHandler())
+                    var http = new HttpClient(upstream ?? new UpstreamTiersStubHandler())
                     {
                         BaseAddress = new Uri("http://upstream-delivery.test/")
                     };
@@ -420,8 +473,9 @@ public class TierUnificationTests
     private sealed class UpstreamTiersStubHandler : HttpMessageHandler
     {
         private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+        public ConcurrentQueue<string> DeliveryCreates { get; } = new();
 
-        protected override Task<HttpResponseMessage> SendAsync(
+        protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri!.AbsolutePath;
@@ -433,32 +487,39 @@ public class TierUnificationTests
                 {
                     new DeliveryTierDto
                     {
+                        Id = UpstreamFlashTierId, Name = "Flash", SlaHours = 1,
+                        RadiusKm = 8.0, CommissionRate = 0.10, PriceHint = "Fastest dispatch",
+                        CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
+                    },
+                    new DeliveryTierDto
+                    {
                         Id = UpstreamStandardTierId, Name = "Standard", SlaHours = 24,
                         RadiusKm = 5.0, CommissionRate = 0.10, PriceHint = "Standard rate",
                         CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
                     },
                     new DeliveryTierDto
                     {
-                        Id = "9f1c0e6b-1b2a-5c3d-8e4f-0a1b2c3d4e5f", Name = "Express", SlaHours = 4,
+                        Id = UpstreamExpressTierId, Name = "Express", SlaHours = 4,
                         RadiusKm = 8.0, CommissionRate = 0.10, PriceHint = "Faster dispatch",
                         CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
                     },
                 };
-                return Task.FromResult(Ok(JsonSerializer.Serialize(tiers, Json)));
+                return Ok(JsonSerializer.Serialize(tiers, Json));
             }
 
             if (request.Method == HttpMethod.Post
                 && path.EndsWith("/api/v1/deliveries", StringComparison.Ordinal))
             {
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Created)
+                DeliveryCreates.Enqueue(await request.Content!.ReadAsStringAsync(cancellationToken));
+                return new HttpResponseMessage(HttpStatusCode.Created)
                 {
                     Content = new StringContent(
                         """{"delivery_id":"seeded","status":"Ordered"}""",
                         Encoding.UTF8, "application/json"),
-                });
+                };
             }
 
-            return Task.FromResult(Ok("{}"));
+            return Ok("{}");
         }
 
         private static HttpResponseMessage Ok(string json) => new(HttpStatusCode.OK)
