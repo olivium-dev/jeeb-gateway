@@ -77,7 +77,13 @@ public static class NotificationDeepLinkResolver
             return InboxRoot;
         }
 
-        if (!Routes.TryGetValue(notificationType.Trim(), out var template))
+        var normalized = notificationType.Trim();
+        if (normalized.StartsWith("jeeb.dispute.", StringComparison.OrdinalIgnoreCase))
+            return CaseLink("jeeb://disputes/{id}", entityId);
+        if (normalized.StartsWith("jeeb.support.", StringComparison.OrdinalIgnoreCase))
+            return CaseLink("jeeb://support/tickets/{id}", entityId);
+
+        if (!Routes.TryGetValue(normalized, out var template))
         {
             return InboxRoot;
         }
@@ -96,4 +102,9 @@ public static class NotificationDeepLinkResolver
 
         return template.Replace("{id}", entityId.Trim(), StringComparison.Ordinal);
     }
+
+    private static string CaseLink(string template, string? caseId) =>
+        string.IsNullOrWhiteSpace(caseId)
+            ? InboxRoot
+            : template.Replace("{id}", caseId.Trim(), StringComparison.Ordinal);
 }

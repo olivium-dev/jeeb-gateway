@@ -56,6 +56,14 @@ public static class BusinessOutcomeTelemetry
         Meter.CreateCounter<long>("durable.read_failures",
             description: "Number of handled durable READ failures that were degraded to an in-memory/empty/null answer, tagged by bounded store name. Compare against durable.write_failures on the same store; a flat zero on its own proves nothing unless the store is also being read.");
 
+    public static readonly Counter<long> CdnUploadTicketOperations =
+        Meter.CreateCounter<long>("cdn.upload_ticket.operations",
+            description: "CDN upload-ticket reservation, replay, collision, and mint outcomes.");
+
+    public static readonly Counter<long> CaseRecoveryOperations =
+        Meter.CreateCounter<long>("case.recovery.operations",
+            description: "Admin case-callback and push-dispatch recovery operation outcomes.");
+
     // JEBV4-47 (M3/R7): the settlement -> UPG generic-settlement ledger post is
     // best-effort. When it fails at settle time the row persists but the ledger
     // diverges until the SettlementLedgerReconciler replays it. These counters make

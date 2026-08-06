@@ -320,6 +320,35 @@ public sealed class JeebMessageListResponse
         = new List<JeebMessageResponse>();
 }
 
+public sealed class JeebConversationExportPage
+{
+    [JsonProperty("conversation_id")]
+    [Stj.JsonPropertyName("conversation_id")]
+    public string ConversationId { get; set; } = string.Empty;
+
+    [JsonProperty("viewer_id")]
+    [Stj.JsonPropertyName("viewer_id")]
+    public string ViewerId { get; set; } = string.Empty;
+
+    [JsonProperty("as_of")]
+    [Stj.JsonPropertyName("as_of")]
+    public DateTimeOffset AsOf { get; set; }
+
+    [JsonProperty("limit")]
+    public int Limit { get; set; }
+
+    [JsonProperty("has_more")]
+    [Stj.JsonPropertyName("has_more")]
+    public bool HasMore { get; set; }
+
+    [JsonProperty("next_cursor")]
+    [Stj.JsonPropertyName("next_cursor")]
+    public string? NextCursor { get; set; }
+
+    [JsonProperty("messages")]
+    public IList<JeebMessageResponse> Messages { get; set; } = new List<JeebMessageResponse>();
+}
+
 /// <summary>
 /// S08 (B) — add-participant body for chat-service's
 /// <c>POST /api/conversations/{id}/participants</c> (AddParticipantAsync). The

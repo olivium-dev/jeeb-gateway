@@ -421,7 +421,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         Timestamp = Str(obj, "ts", "timestamp", "createdAt", "created_at"),
         Status = Str(obj, "status", "read_status", "readStatus"),
         Ref = Str(obj, "ref", "targetId", "target_id", "deliveryId", "delivery_id",
-            "entityId", "entity_id", "referenceId", "reference_id"),
+            "entityId", "entity_id", "referenceId", "reference_id", "caseId", "case_id"),
     };
 
     internal static (IReadOnlyList<UpstreamNotificationRow> Rows, int? Total)
@@ -433,9 +433,22 @@ public sealed class JeebNotificationsInboxController : ControllerBase
 
     private static string? NormalizeMappedRow(UpstreamNotificationRow row, JObject obj)
     {
-        row.Type = NormalizeType(row.Type);
         var payload = obj["payload"] as JObject;
+        var metadata = obj["metadata"] as JObject;
+        if (string.Equals(row.Type?.Trim(), "text_message", StringComparison.OrdinalIgnoreCase))
+        {
+            row.Type = StrScalar(metadata, "event_type", "business_type", "notification_type")
+                ?? StrScalar(payload, "businessType", "business_type", "notificationType",
+                    "notification_type", "message_type")
+                ?? row.Type;
+        }
+        row.Type = NormalizeType(row.Type);
+        row.DeepLink = StrScalar(metadata, "deep_link", "deepLink")
+            ?? StrScalar(payload, "deepLink", "deep_link");
         row.Timestamp ??= StrScalar(payload, "created_at");
+        if (row.Type?.StartsWith("jeeb.dispute.", StringComparison.OrdinalIgnoreCase) == true
+            || row.Type?.StartsWith("jeeb.support.", StringComparison.OrdinalIgnoreCase) == true)
+            row.Ref ??= StrScalar(metadata, "case_id", "caseId");
         if (row.Ref is null && string.Equals(row.Type, "offer", StringComparison.Ordinal))
         {
             var payloadOfferId = StrScalar(payload, "offer_id");
@@ -474,6 +487,9 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         }
 
         var jeebType = trimmed["jeeb.".Length..].Trim().ToLowerInvariant();
+        if (jeebType.StartsWith("dispute.", StringComparison.Ordinal)
+            || jeebType.StartsWith("support.", StringComparison.Ordinal))
+            return "jeeb." + jeebType;
         return jeebType == "offer_received" ? "offer" : jeebType;
     }
 
@@ -484,6 +500,9 @@ public sealed class JeebNotificationsInboxController : ControllerBase
             "dispute_resolved" => StrScalar(payload, "dispute_id"),
             "settlement_paid" => StrScalar(payload, "settlement_id"),
             "kyc_approved" or "kyc_rejected" => StrScalar(payload, "kyc_id"),
+            _ when type?.StartsWith("jeeb.dispute.", StringComparison.OrdinalIgnoreCase) == true
+                || type?.StartsWith("jeeb.support.", StringComparison.OrdinalIgnoreCase) == true
+                => StrScalar(payload, "caseId", "case_id", "member_id"),
             _ => null,
         };
 

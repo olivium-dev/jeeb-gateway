@@ -177,6 +177,68 @@ public class JeebNotificationsProjectionTests
         rows[0].Ref.Should().Be("TOP-LEVEL-DELIVERY");
     }
 
+    [Theory]
+    [InlineData("jeeb.dispute.reply", "jeeb://disputes/case-42")]
+    [InlineData("jeeb.support.fixed", "jeeb://support/tickets/case-42")]
+    public void Dotted_Case_Notification_Derives_Ref_And_Deep_Link(
+        string notificationType, string expectedDeepLink)
+    {
+        var wire = JObject.Parse($$"""
+        {
+          "messages": [{
+            "notification_id": "case-event-1",
+            "notification_type": "{{notificationType}}",
+            "title": "Case updated",
+            "description": "There is an update",
+            "status": "delivered",
+            "payload": { "caseId": "case-42" }
+          }],
+          "total": 1
+        }
+        """);
+
+        var (rows, _) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+        var item = JeebNotificationsProjection.ProjectItem(rows.Single());
+
+        item.Type.Should().Be(notificationType);
+        item.Ref.Should().Be("case-42");
+        item.DeepLink.Should().Be(expectedDeepLink);
+    }
+
+    [Fact]
+    public void TextMessage_Storage_Taxonomy_Projects_Case_Metadata_And_DeepLink()
+    {
+        var wire = JObject.Parse("""
+        {
+          "messages": [{
+            "notification_id": "489660be-7844-42bc-a48f-f5c707b85b25",
+            "notification_type": "text_message",
+            "title": "Case updated",
+            "description": "There is an update",
+            "status": "delivered",
+            "metadata": {
+              "event_type": "jeeb.support.reply",
+              "case_id": "case-42",
+              "deep_link": "jeeb://support/tickets/case-42"
+            },
+            "payload": {
+              "message_type": "jeeb.support.reply",
+              "caseId": "case-42",
+              "businessType": "jeeb.support.reply"
+            }
+          }],
+          "total": 1
+        }
+        """);
+
+        var (rows, _) = JeebNotificationsInboxController.ExtractRowsForTests(wire);
+        var item = JeebNotificationsProjection.ProjectItem(rows.Single());
+
+        item.Type.Should().Be("jeeb.support.reply");
+        item.Ref.Should().Be("case-42");
+        item.DeepLink.Should().Be("jeeb://support/tickets/case-42");
+    }
+
     [Fact]
     public void AC17d_OfferAcceptedPayloadOfferIdIsNeverHoistedIntoChatRef()
     {

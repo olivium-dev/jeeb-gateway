@@ -188,6 +188,19 @@ public sealed class IdempotencyMiddleware
     {
         clientKey = null;
         if (!MutatingMethods.Contains(context.Request.Method)) return false;
+        // CDN upload tickets use an explicit state-backed reserve/result protocol
+        // whose TTL is bounded by the signed ticket. The generic middleware's
+        // 24-hour check-then-act cache is both too long and not principal-scoped.
+        if (HttpMethods.IsPost(context.Request.Method)
+            && context.Request.Path.Equals("/api/cdn/assets", StringComparison.OrdinalIgnoreCase))
+            return false;
+        // Generic case mutations already use jeeb-state-service's transactional
+        // idempotency contract, which binds the key to the complete request hash
+        // and returns 409 when a caller reuses a key with different input. The
+        // gateway-wide response cache is key-only; allowing it to intercept these
+        // routes would replay the first 2xx response before state-service can detect
+        // that conflict.
+        if (IsCaseMutation(context.Request.Path)) return false;
         if (!context.Request.Headers.TryGetValue(HeaderName, out var values)) return false;
 
         var candidate = values.ToString();
@@ -195,6 +208,23 @@ public sealed class IdempotencyMiddleware
 
         clientKey = candidate;
         return true;
+    }
+
+    internal static bool IsCaseMutation(PathString path)
+    {
+        var value = path.Value ?? string.Empty;
+        return value.Equals("/v1/disputes", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/v1/disputes/", StringComparison.OrdinalIgnoreCase)
+               || value.Equals("/v1/support/tickets", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/v1/support/tickets/", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/v1/deliveries/", StringComparison.OrdinalIgnoreCase)
+                  && value.EndsWith("/escalate", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/admin/v1/cases/", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/admin/v1/disputes/", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/admin/v1/support/tickets/", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/deliveries/", StringComparison.OrdinalIgnoreCase)
+                  && value.EndsWith("/dispute", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/admin/disputes/", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

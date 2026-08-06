@@ -45,6 +45,9 @@ public sealed class JeebNotificationItemResponse
     [JsonPropertyName("ref")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Ref { get; set; }
+
+    [JsonPropertyName("deepLink")]
+    public string DeepLink { get; set; } = string.Empty;
 }
 
 /// <summary>
@@ -89,4 +92,5 @@ public sealed class UpstreamNotificationRow
     /// <summary>The upstream status string ("read", "delivered", "unread", …); "read" (any case) ⇒ read.</summary>
     public string? Status { get; set; }
     public string? Ref { get; set; }
+    public string? DeepLink { get; set; }
 }

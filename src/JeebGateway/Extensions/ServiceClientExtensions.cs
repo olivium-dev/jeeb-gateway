@@ -158,6 +158,12 @@ public static class ServiceClientExtensions
         AttachStandardPipeline(
             services.AddHttpClient<IDeliveryServiceClient, DeliveryServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Delivery")));
+        // Cases authorize delivery membership at the gateway edge. Their
+        // history/incident client stays on the private network and deliberately
+        // carries neither caller bearer nor X-Service-Auth headers.
+        AttachResilienceOnly(
+            services.AddHttpClient<ICaseDeliveryClient, CaseDeliveryClient>(http =>
+                BindBaseAddress(http, config, "Services:Delivery")));
         // IMatchingServiceClient typed registration — REMOVED (JEBV4-220 / E25).
         // The standalone matching-service read path is retired; nothing dials
         // Services:Matching anymore.
@@ -223,6 +229,12 @@ public static class ServiceClientExtensions
             services.AddHttpClient<
                 JeebGateway.Services.Generated.GeolocationService.IGeolocationServiceClient,
                 JeebGateway.Services.Generated.GeolocationService.GeolocationServiceClient>(http =>
+                BindBaseAddress(http, config, "Services:Geolocation")));
+
+        // Case evidence is already authorized at the gateway edge. Keep this
+        // canonical history reader on the private network and resilience-only.
+        AttachResilienceOnly(
+            services.AddHttpClient<IGeoHistoryClient, GeoHistoryClient>(http =>
                 BindBaseAddress(http, config, "Services:Geolocation")));
 
         // feedback-service: the gateway now mirrors salehly-gateway's

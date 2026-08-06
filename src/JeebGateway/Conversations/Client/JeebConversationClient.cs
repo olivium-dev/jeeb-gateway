@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -33,9 +34,9 @@ public sealed class JeebConversationApiException : Exception
 /// chat-service's Jeeb conversation aggregate contract (see
 /// <c>JeebConversationContracts</c> for the why), mirroring the
 /// <c>BanServiceClient</c> / <c>NotificationServiceClient</c> hand-coded
-/// precedent. The named HttpClient injected here supplies BaseAddress + the
-/// org-standard bearer / X-Service-Auth forwarding + resilience pipeline, so this
-/// class never thinks about retry/timeout/auth — it only marshals JSON and maps
+/// precedent. The typed HttpClient injected here supplies the private-network
+/// BaseAddress and deliberately carries no bearer or service-auth handler. This
+/// class only marshals JSON and maps
 /// the upstream status onto <see cref="JeebConversationApiException"/> so the BFF
 /// can forward it verbatim.
 ///
@@ -100,6 +101,24 @@ public sealed class JeebConversationClient : IJeebConversationClient
                 + $"?viewer={Uri.EscapeDataString(viewerUserId)}";
         using var msg = new HttpRequestMessage(HttpMethod.Get, url);
         return await SendAsync<JeebMessageListResponse>(msg, ct);
+    }
+
+    public async Task<JeebConversationExportPage> ExportMessagesForViewerAsync(
+        string conversationId, string viewerUserId, DateTimeOffset? asOf,
+        string? cursor, int limit, CancellationToken ct)
+    {
+        var query = new List<string>
+        {
+            "viewer=" + Uri.EscapeDataString(viewerUserId),
+            "limit=" + Math.Clamp(limit, 1, 500).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        };
+        if (asOf is not null)
+            query.Add("asOf=" + Uri.EscapeDataString(asOf.Value.ToUniversalTime().ToString("o")));
+        if (!string.IsNullOrWhiteSpace(cursor))
+            query.Add("cursor=" + Uri.EscapeDataString(cursor));
+        var url = $"api/conversations/{Uri.EscapeDataString(conversationId)}/export?{string.Join("&", query)}";
+        using var msg = new HttpRequestMessage(HttpMethod.Get, url);
+        return await SendAsync<JeebConversationExportPage>(msg, ct);
     }
 
     public async Task<JeebMessageListResponse> ListMessagesSinceForViewerAsync(
