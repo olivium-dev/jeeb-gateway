@@ -1,0 +1,9 @@
+extends:
+  - recommended
+
+# The OIDC authorization-code endpoints intentionally return redirects (302),
+# not a 2xx payload. The API is private/proprietary and has no public license
+# URL. Both shapes are valid OpenAPI; disable only these two stylistic rules.
+rules:
+  operation-2xx-response: off
+  info-license-strict: off

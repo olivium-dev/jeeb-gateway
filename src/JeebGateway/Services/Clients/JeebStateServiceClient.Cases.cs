@@ -137,6 +137,7 @@ public partial class JeebStateServiceClient : IGenericCaseStateClient
     public Task<GenericCasePageV1> ListCasesAsync(GenericCaseQueryV1 query, CancellationToken ct)
     {
         var values = new List<KeyValuePair<string, string>>();
+        Add("query", query.Query);
         Add("kind", query.Kind);
         Add("status", query.Status);
         Add("priority", query.Priority);

@@ -80,6 +80,11 @@ public sealed class CaseDetailResponseV2
     public string? AssignedTo { get; init; }
     public DateTimeOffset? DueAt { get; init; }
     public string? RequesterRef { get; init; }
+    /// <summary>
+    /// Canonical case participants from the state owner. Admin detail uses this
+    /// to identify every party without inferring them from messages.
+    /// </summary>
+    public IReadOnlyList<string> ParticipantRefs { get; init; } = Array.Empty<string>();
     public string? UserId { get; init; }
     public string? DeliveryId { get; init; }
     public string? RequestId { get; init; }
@@ -174,7 +179,9 @@ public static class CaseApiProjection
         var row = detail.Case;
         var metadata = ReadMetadata(detail.Messages);
         var publicMessages = detail.Messages
-            .Where(message => includeInternal || message.MessageType != "internal_note").ToArray();
+            .Where(message => !IsSyntheticMetadataMessage(message)
+                              && (includeInternal || message.MessageType != "internal_note"))
+            .ToArray();
         var timeline = detail.Audit
             .Where(item => includeInternal || !IsInternalNoteAudit(item))
             .ToArray();
@@ -191,6 +198,7 @@ public static class CaseApiProjection
             TicketId = row.Kind == GenericCaseKinds.Support ? row.CaseId.ToString("D") : null,
             Kind = row.Kind, Status = row.Status, State = row.Status, Priority = row.Priority,
             AssignedTo = row.AssigneeRef, DueAt = row.DueAt, RequesterRef = row.RequesterRef,
+            ParticipantRefs = row.ParticipantRefs,
             UserId = row.RequesterRef,
             DeliveryId = row.Subject.Type == "delivery" ? row.Subject.Ref : null,
             RequestId = row.Kind == GenericCaseKinds.Dispute ? row.Subject.Ref : null,
@@ -246,6 +254,10 @@ public static class CaseApiProjection
         && item.Data.ValueKind == JsonValueKind.Object
         && item.Data.TryGetProperty("messageType", out var messageType)
         && messageType.GetString() == "internal_note";
+
+    internal static bool IsSyntheticMetadataMessage(GenericCaseMessageV1 message) =>
+        message.MessageType == "internal_note"
+        && message.Body.StartsWith(MetadataPrefix, StringComparison.Ordinal);
 }
 
 public sealed class CaseGatewayMetadataV1

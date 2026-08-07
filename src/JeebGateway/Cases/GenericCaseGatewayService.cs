@@ -279,7 +279,7 @@ public sealed class GenericCaseGatewayService : IGenericCaseGatewayService
     {
         var id = ParseCaseId(caseId);
         var row = await MeasureAsync("get", () => _cases.GetCaseAsync(id, ct), ct);
-        if (!string.Equals(row.Kind, GenericCaseKinds.Support, StringComparison.Ordinal))
+        if (!isAdmin && !string.Equals(row.Kind, GenericCaseKinds.Support, StringComparison.Ordinal))
             throw new CaseNotFoundException("Case was not found.");
         if (!isAdmin && !row.ParticipantRefs.Contains(userId, StringComparer.Ordinal))
             throw new CaseAccessDeniedException();
@@ -311,6 +311,7 @@ public sealed class GenericCaseGatewayService : IGenericCaseGatewayService
             throw new CaseValidationException("assignedTo and unassigned=true cannot be combined.");
         var upstreamQuery = new GenericCaseQueryV1
         {
+            Query = query.Query,
             Kind = query.Kind, Status = query.Status, Priority = query.Priority,
             AssigneeRef = query.AssigneeRef,
             Assigned = unassigned is null ? query.Assigned : !unassigned.Value,
@@ -318,7 +319,7 @@ public sealed class GenericCaseGatewayService : IGenericCaseGatewayService
             ParticipantRef = query.ParticipantRef,
             SubjectType = query.SubjectType, SubjectRef = query.SubjectRef,
             DueBefore = query.DueBefore, Active = query.Active,
-            Sort = GenericCaseSorts.Sla,
+            Sort = string.IsNullOrWhiteSpace(query.Sort) ? GenericCaseSorts.Sla : query.Sort,
             Limit = Math.Clamp(query.Limit, 1, 200), Cursor = query.Cursor,
         };
         return await MeasureAsync("queue", () => _cases.ListCasesAsync(upstreamQuery, ct), ct);

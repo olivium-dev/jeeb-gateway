@@ -15,9 +15,13 @@ public sealed class EscalateDeliveryRequest
 /// </summary>
 public sealed class ResolveCaseRequest
 {
-    /// <summary>One of <c>refund</c> or <c>no_action</c>.</summary>
+    /// <summary>
+    /// COD deployments accept <c>no_action</c>. The legacy <c>refund</c> value is retained only
+    /// for input compatibility and is rejected by the registered COD policy.
+    /// </summary>
     public string? Decision { get; set; }
 
+    /// <summary>Rejected legacy automated-refund amount; COD reimbursement is a manual process.</summary>
     public decimal? RefundUsd { get; set; }
 
     public string? Notes { get; set; }

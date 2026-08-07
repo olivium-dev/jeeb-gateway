@@ -103,6 +103,16 @@ public static class Capabilities
     public const string SupportCreateSelf = "support.create.self";    // {client, jeeber, admin}
     public const string SupportReadOwn = "support.read.own";          // {client, jeeber, admin}; own-vs-any = STATE
 
+    // ── G3. Back-office essentials ────────────────────────────────────────────
+    public const string AdminPortalAccess = "admin.portal.access";
+    public const string AdminCasesRead = "admin.cases.read";
+    public const string AdminCasesUpdate = "admin.cases.update";
+    public const string AdminCasesClose = "admin.cases.close";
+    public const string AdminDeliveriesRead = "admin.deliveries.read";
+    public const string AdminDeliveriesOperate = "admin.deliveries.operate";
+    public const string AdminSettlementsRead = "admin.settlements.read";
+    public const string AdminSettlementsManage = "admin.settlements.manage";
+
     // ── H–J. Misc participant caps {client, jeeber} ───────────────────────────────────
     public const string ProhibitedAck = "prohibited.ack";
     public const string ProhibitedScan = "prohibited.scan";

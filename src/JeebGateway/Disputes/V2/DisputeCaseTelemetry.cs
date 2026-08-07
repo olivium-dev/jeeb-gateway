@@ -50,7 +50,6 @@ public static class DisputeCaseTelemetry
 
     public static readonly Counter<long> RefundFailures =
         Meter.CreateCounter<long>("jeeb.dispute.case.refund_failures",
-            description: "Refund attempts that failed during resolve. Under the cash-on-delivery policy "
-                          + "(no unified_payment_gateway) every attempt fails loudly by design — see "
-                          + "CashOnDeliveryNoRefundClient.");
+            description: "Automated refund attempts refused by the cash-on-delivery policy. "
+                          + "Settlement tracking remains durable; cash reimbursement is manual.");
 }
