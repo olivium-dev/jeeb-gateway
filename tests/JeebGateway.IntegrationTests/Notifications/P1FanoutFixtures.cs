@@ -8,6 +8,7 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using JeebGateway.Availability;
 using JeebGateway.Notifications;
+using JeebGateway.Users;
 using JeebGateway.service.ServicePushNotification;
 using Microsoft.Extensions.Logging;
 
@@ -142,6 +143,86 @@ internal sealed class FakeAvailabilityStore : IAvailabilityStore
         LastKnownSince = since;
         return Task.FromResult(Known);
     }
+}
+
+/// <summary>Settable <see cref="IUsersStore"/> for the fallback rung's send-time role re-check
+/// (RC-2). Only <c>GetByIdAsync</c> answers; every other member throws — the fan-out only reads.</summary>
+internal sealed class FakeUsersStore : IUsersStore
+{
+    private readonly ConcurrentDictionary<string, UserProfile> _profiles = new();
+
+    private int _lookups;
+
+    /// <summary>Fail every lookup — proves a users-store fault keeps, never drops, candidates.</summary>
+    public bool Throw { get; init; }
+
+    public int Lookups => Volatile.Read(ref _lookups);
+
+    public FakeUsersStore WithActiveRole(string userId, string activeRole)
+    {
+        _profiles[userId] = new UserProfile
+        {
+            Id = userId,
+            Phone = "+9610000000",
+            Name = userId,
+            ActiveRole = activeRole,
+        };
+        return this;
+    }
+
+    public Task<UserProfile?> GetByIdAsync(string userId, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _lookups);
+        if (Throw)
+        {
+            throw new InvalidOperationException($"users store unavailable for {userId}");
+        }
+
+        _profiles.TryGetValue(userId, out var profile);
+        return Task.FromResult(profile);
+    }
+
+    public Task<UserProfile> GetOrCreateAsync(string userId, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task UpsertProjectionAsync(UserProfile profile, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<UserProfile> UpdateProfileAsync(string userId, ProfilePatch patch, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<IReadOnlyList<SavedAddress>> ListAddressesAsync(string userId, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<SavedAddress?> GetAddressAsync(string userId, string addressId, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<SavedAddress> CreateAddressAsync(string userId, AddressUpsert input, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<SavedAddress?> UpdateAddressAsync(string userId, string addressId, AddressUpsert patch, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<bool> DeleteAddressAsync(string userId, string addressId, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<UserSearchResult> SearchAsync(UserSearchQuery query, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<UserProfile?> SuspendAsync(string userId, string reason, string adminId, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<UserProfile?> UnsuspendAsync(string userId, string adminId, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<UserProfile?> SwitchRoleAsync(string userId, string newRole, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<UserProfile?> GrantRoleAsync(string userId, string role, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
+    public Task<bool> PurgePiiAsync(string userId, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
 }
 
 /// <summary>

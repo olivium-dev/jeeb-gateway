@@ -153,6 +153,7 @@ public class TierUnificationTests
             new InMemoryTiersStore(),
             NullLogger<NewRequestPushNotifier>.Instance,
             new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber("jeeberA") } },
+            new FakeUsersStore(),
             new RecordingFanoutQueue(),
             Options.Create(new NewRequestFanoutOptions()),
             TimeProvider.System);

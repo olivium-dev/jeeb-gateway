@@ -91,19 +91,12 @@ public class InMemoryAvailabilityStore : IAvailabilityStore
 
     public Task RecordInteractionAsync(string userId, DateTimeOffset at, CancellationToken ct)
     {
-        _records.AddOrUpdate(
-            userId,
-            _ =>
-            {
-                var fresh = NewDefault(userId);
-                fresh.LastInteractionAt = at;
-                return fresh;
-            },
-            (_, existing) =>
-            {
-                existing.LastInteractionAt = at;
-                return existing;
-            });
+        // Touch-existing-only, in lockstep with PostgresAvailabilityStore: a plain GET must
+        // never seed the roster — row creation is GoOnlineAsync's alone.
+        if (_records.TryGetValue(userId, out var existing))
+        {
+            existing.LastInteractionAt = at;
+        }
 
         return Task.CompletedTask;
     }

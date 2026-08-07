@@ -17,8 +17,8 @@ public interface IAvailabilityStore
     Task<GoOfflineResult> GoOfflineAsync(string userId, GoOfflineReason reason, CancellationToken ct);
 
     /// <summary>
-    /// Records a non-toggle interaction (GPS heartbeat or in-app event)
-    /// that pushes the auto-offline deadline forward.
+    /// Records a non-toggle interaction that pushes the auto-offline deadline forward.
+    /// Touches an EXISTING row only — never creates one; row creation is GoOnlineAsync's alone.
     /// </summary>
     Task RecordInteractionAsync(string userId, DateTimeOffset at, CancellationToken ct);
 
@@ -30,10 +30,7 @@ public interface IAvailabilityStore
 
     /// <summary>
     /// Every Jeeber this gateway has seen interact since <paramref name="since"/>, ONLINE OR NOT.
-    /// Backs the new-request fan-out's never-starve fallback (P1): when nobody is currently online,
-    /// notifying the known jeeber roster is strictly better than notifying nobody, and is still a
-    /// per-user send (so a non-jeeber can never receive it — every row here was written behind
-    /// <c>[RequireCapability(AvailabilityToggle)]</c>).
+    /// Rows are ever-was-a-jeeber; the fan-out re-checks ActiveRole at send time before pushing.
     /// </summary>
     Task<IReadOnlyList<JeeberAvailability>> ListKnownJeebersAsync(DateTimeOffset since, CancellationToken ct);
 }

@@ -23,8 +23,9 @@ public class NewRequestFanoutOptions
     /// </summary>
     public bool FallbackToKnownJeebers { get; set; } = true;
 
-    /// <summary>How far back the known-jeeber roster reaches. Default 30 days.</summary>
-    public TimeSpan KnownJeeberWindow { get; set; } = TimeSpan.FromDays(30);
+    /// <summary>How far back the known-jeeber roster reaches. Default 7 days — bounds the tail
+    /// to weekly-active accounts without starving a fleet whose online_now is 0. Env-tunable.</summary>
+    public TimeSpan KnownJeeberWindow { get; set; } = TimeSpan.FromDays(7);
 
     /// <summary>
     /// Geo narrowing around the request pickup point. NULL = disabled (the shipped default —

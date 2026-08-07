@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using JeebGateway.Availability;
 using JeebGateway.Push;
+using JeebGateway.Users;
 using JeebGateway.service.ServicePushNotification;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -107,6 +108,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     private readonly JeebGateway.Tiers.ITiersStore _tiers;
     private readonly ILogger<NewRequestPushNotifier> _logger;
     private readonly IAvailabilityStore _availability;
+    private readonly IUsersStore _users;
     private readonly INewRequestFanoutQueue _queue;
     private readonly NewRequestFanoutOptions _options;
     private readonly TimeProvider _clock;
@@ -116,6 +118,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         JeebGateway.Tiers.ITiersStore tiers,
         ILogger<NewRequestPushNotifier> logger,
         IAvailabilityStore availability,
+        IUsersStore users,
         INewRequestFanoutQueue queue,
         IOptions<NewRequestFanoutOptions> options,
         TimeProvider clock)
@@ -124,6 +127,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         _tiers = tiers;
         _logger = logger;
         _availability = availability;
+        _users = users;
         _queue = queue;
         _options = options.Value;
         _clock = clock;
@@ -203,10 +207,11 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
             _logger.LogInformation(
                 "newreq-fanout requestId={RequestId} source={Source} candidates={Candidates} recipients={Recipients} "
-                + "initiatorExcluded={InitiatorExcluded} sent={Sent} failed={Failed} "
+                + "initiatorExcluded={InitiatorExcluded} roleFiltered={RoleFiltered} roleUnknown={RoleUnknown} "
+                + "sent={Sent} failed={Failed} "
                 + "fcmAcceptedRows={AcceptedRows} fcmRejectedRows={RejectedRows} elapsedMs={ElapsedMs}",
                 n.RequestId, resolved.Source, resolved.CandidateCount, resolved.Recipients.Count,
-                resolved.InitiatorExcluded, tally.Sent, tally.Failed,
+                resolved.InitiatorExcluded, resolved.RoleFiltered, resolved.RoleUnknown, tally.Sent, tally.Failed,
                 tally.DeviceRowsAccepted, tally.DeviceRowsRejected,
                 (int)(_clock.GetUtcNow() - started).TotalMilliseconds);
         }
@@ -224,7 +229,9 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         IReadOnlyList<string> Recipients,
         string Source,
         int CandidateCount,
-        int InitiatorExcluded);
+        int InitiatorExcluded,
+        int RoleFiltered,
+        int RoleUnknown);
 
     private async Task<ResolvedRecipients> ResolveRecipientsAsync(
         NewRequestNotification n, CancellationToken ct)
@@ -259,12 +266,15 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         }
 
         // 3. never-starve fallback: the known-jeeber roster (R1).
+        var roleFiltered = 0;
+        var roleUnknown = 0;
         if (candidates.Count == 0 && _options.FallbackToKnownJeebers)
         {
             var since = _clock.GetUtcNow() - _options.KnownJeeberWindow;
             candidates = await _availability.ListKnownJeebersAsync(since, ct)
                 ?? Array.Empty<JeeberAvailability>();
             source = "known";
+            (candidates, roleFiltered, roleUnknown) = await FilterKnownByActiveRoleAsync(candidates, ct);
         }
 
         var candidateCount = candidates.Count;
@@ -306,7 +316,59 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
             recipients = recipients.GetRange(0, cap);
         }
 
-        return new ResolvedRecipients(recipients, source, candidateCount, initiatorExcluded);
+        return new ResolvedRecipients(
+            recipients, source, candidateCount, initiatorExcluded, roleFiltered, roleUnknown);
+    }
+
+    // RC-2 send-time re-validation, FALLBACK RUNG ONLY: the known roster is ever-was-a-jeeber.
+    // Drop only on positive evidence (profile found, ActiveRole non-jeeber); shrink-only, never fail.
+    private async Task<(IReadOnlyList<JeeberAvailability> Kept, int RoleFiltered, int RoleUnknown)>
+        FilterKnownByActiveRoleAsync(IReadOnlyList<JeeberAvailability> candidates, CancellationToken ct)
+    {
+        var kept = new List<JeeberAvailability>(candidates.Count);
+        var filtered = 0;
+        var unknown = 0;
+
+        foreach (var row in candidates)
+        {
+            var userId = row?.UserId?.Trim();
+            if (string.IsNullOrWhiteSpace(userId))
+            {
+                kept.Add(row!);
+                continue;
+            }
+
+            UserProfile? profile;
+            try
+            {
+                profile = await _users.GetByIdAsync(userId, ct);
+            }
+            catch (Exception)
+            {
+                profile = null;
+            }
+
+            if (profile is null)
+            {
+                unknown++;
+                kept.Add(row!);
+                continue;
+            }
+
+            if (string.Equals(
+                    JeebRoleTranslator.ToContract(profile.ActiveRole),
+                    JeebRoleTranslator.ContractJeeber,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                kept.Add(row!);
+            }
+            else
+            {
+                filtered++;
+            }
+        }
+
+        return (kept, filtered, unknown);
     }
 
     /// <summary>

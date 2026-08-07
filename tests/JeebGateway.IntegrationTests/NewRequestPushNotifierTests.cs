@@ -18,6 +18,7 @@ using JeebGateway.Whisper;
 using JeebGateway.service.ServicePushNotification;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -62,12 +63,14 @@ public class NewRequestPushNotifierTests
         FakeAvailabilityStore? availability = null,
         NewRequestFanoutOptions? options = null,
         INewRequestFanoutQueue? queue = null,
-        ILogger<NewRequestPushNotifier>? logger = null)
+        ILogger<NewRequestPushNotifier>? logger = null,
+        FakeUsersStore? users = null)
         => new(
             push,
             new JeebGateway.Tiers.InMemoryTiersStore(),
             logger ?? NullLogger<NewRequestPushNotifier>.Instance,
             availability ?? new FakeAvailabilityStore(),
+            users ?? new FakeUsersStore(),
             queue ?? new RecordingFanoutQueue(),
             Options.Create(options ?? new NewRequestFanoutOptions()),
             TimeProvider.System);
@@ -411,6 +414,177 @@ public class NewRequestPushNotifierTests
         await act.Should().NotThrowAsync();
         queue.PendingCount.Should().Be(1, "the buffer is capacity-1 and was never drained");
         log.Has(LogLevel.Warning, "queue full").Should().BeTrue();
+    }
+
+    // ── RC-2 — send-time role re-validation, KNOWN fallback rung only ────────
+
+    [Fact] // RC-2(a) — a dual-role account acting as customer is exactly the complaint population.
+    public async Task KnownFallback_Drops_Candidate_Whose_ActiveRole_Is_Customer()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Online = Array.Empty<JeeberAvailability>(),
+            Known = new[] { P1Fanout.Jeeber("acting-jeeber"), P1Fanout.Jeeber("acting-customer") }
+        };
+        var users = new FakeUsersStore()
+            .WithActiveRole("acting-jeeber", JeebGateway.Users.Roles.Jeeber)
+            .WithActiveRole("acting-customer", JeebGateway.Users.Roles.Client);
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(push, store, logger: log, users: users);
+
+        await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "acting-jeeber" },
+            "an ever-was-a-jeeber roster row whose CURRENT ActiveRole is customer must not be pushed");
+        log.Has(LogLevel.Information, "roleFiltered=1").Should().BeTrue(
+            "the drop must be auditable on the newreq-fanout summary line");
+    }
+
+    [Fact] // RC-2(b) — opaque 'driver' AND contract 'jeeber' spellings both keep, case-insensitively.
+    public async Task KnownFallback_Keeps_Driver_And_Jeeber_ActiveRole_Spellings()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Known = new[] { P1Fanout.Jeeber("opaque"), P1Fanout.Jeeber("contract"), P1Fanout.Jeeber("cased") }
+        };
+        var users = new FakeUsersStore()
+            .WithActiveRole("opaque", "driver")
+            .WithActiveRole("contract", "jeeber")
+            .WithActiveRole("cased", "JEEBER");
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(push, store, logger: log, users: users);
+
+        await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "opaque", "contract", "cased" });
+        log.Has(LogLevel.Information, "roleFiltered=0").Should().BeTrue();
+    }
+
+    [Fact] // RC-2(c) — no positive evidence, no drop: the filter may only ever shrink on proof.
+    public async Task KnownFallback_Keeps_ProfileMissing_Candidate_And_Counts_RoleUnknown()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Known = new[] { P1Fanout.Jeeber("jeeberA"), P1Fanout.Jeeber("ghost-no-profile") }
+        };
+        var users = new FakeUsersStore().WithActiveRole("jeeberA", "driver");
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(push, store, logger: log, users: users);
+
+        await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "jeeberA", "ghost-no-profile" },
+            "a candidate with no readable profile is KEPT — degrade-don't-fail, never under-notify");
+        log.Has(LogLevel.Information, "roleUnknown=1").Should().BeTrue();
+    }
+
+    [Fact] // RC-2(d) — a users-store outage must never fail or empty the fan-out.
+    public async Task KnownFallback_UsersStore_Fault_Keeps_Candidates_And_Fanout_Completes()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Known = new[] { P1Fanout.Jeeber("A"), P1Fanout.Jeeber("B") }
+        };
+        var users = new FakeUsersStore { Throw = true };
+        var log = new CapturingLogger<NewRequestPushNotifier>();
+        var notifier = NewNotifier(push, store, logger: log, users: users);
+
+        var act = async () => await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "A", "B" },
+            "the role filter may only ever SHRINK the set on positive evidence, never on a fault");
+        log.Has(LogLevel.Information, "roleUnknown=2").Should().BeTrue();
+        log.Has(LogLevel.Information, "sent=2").Should().BeTrue("the fan-out itself must still complete");
+    }
+
+    [Fact] // RC-2(e) — an online row is a deliberate jeeber-mode act; the online rung stays unfiltered.
+    public async Task Online_Rung_Is_Never_RoleFiltered()
+    {
+        var push = new RecordingPushClient();
+        var store = new FakeAvailabilityStore
+        {
+            Online = new[] { P1Fanout.Jeeber("online-now-customer") }
+        };
+        var users = new FakeUsersStore().WithActiveRole("online-now-customer", "customer");
+        var notifier = NewNotifier(push, store, users: users);
+
+        await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "online-now-customer" });
+        users.Lookups.Should().Be(0, "no per-candidate profile lookup may run on the online rung");
+    }
+
+    [Fact] // RC-2(h) — the fallback window default.
+    public async Task KnownJeeberWindow_Defaults_To_7_Days()
+    {
+        new NewRequestFanoutOptions().KnownJeeberWindow.Should().Be(TimeSpan.FromDays(7));
+
+        var store = new FakeAvailabilityStore { Known = new[] { P1Fanout.Jeeber("a") } };
+        await NewNotifier(new RecordingPushClient(), store)
+            .FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
+
+        store.LastKnownSince.Should().NotBeNull();
+        store.LastKnownSince!.Value.Should().BeCloseTo(
+            DateTimeOffset.UtcNow - TimeSpan.FromDays(7), TimeSpan.FromMinutes(1));
+    }
+
+    // ── C-6 — options validated at startup: fail-to-start, never invert ──────
+
+    [Fact] // C-6(g) — MaxRecipients<=0 would empty the set into the TopicFallbackWhenEmpty hatch.
+    public void Gateway_Refuses_To_Start_When_MaxRecipients_Is_NonPositive()
+    {
+        var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["Notifications:NewRequestFanout:MaxRecipients"] = "0",
+                })));
+
+        var boot = () => factory.CreateClient();
+
+        boot.Should().Throw<OptionsValidationException>()
+            .WithMessage("*Notifications:NewRequestFanout:MaxRecipients*",
+                "the failure must name the key an operator has to fix");
+    }
+
+    [Fact] // C-6(g)
+    public void Gateway_Refuses_To_Start_When_KnownJeeberWindow_Is_NonPositive()
+    {
+        var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["Notifications:NewRequestFanout:KnownJeeberWindow"] = "00:00:00",
+                })));
+
+        var boot = () => factory.CreateClient();
+
+        boot.Should().Throw<OptionsValidationException>()
+            .WithMessage("*Notifications:NewRequestFanout:KnownJeeberWindow*");
+    }
+
+    [Fact] // C-6(g) — deploy-safe: MSI env sets only PerSendTimeout/TotalBudget; defaults must pass.
+    public void Gateway_Boots_With_MsiEnvShape_And_Defaults_Pass_Validation()
+    {
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["Notifications:NewRequestFanout:PerSendTimeout"] = "00:00:10",
+                    ["Notifications:NewRequestFanout:TotalBudget"] = "00:01:00",
+                })));
+
+        var boot = () => factory.CreateClient();
+
+        boot.Should().NotThrow();
+        var opts = factory.Services.GetRequiredService<IOptions<NewRequestFanoutOptions>>().Value;
+        opts.MaxRecipients.Should().Be(500);
+        opts.KnownJeeberWindow.Should().Be(TimeSpan.FromDays(7));
     }
 
     // =====================================================================
