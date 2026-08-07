@@ -309,29 +309,9 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         return new ResolvedRecipients(recipients, source, candidateCount, initiatorExcluded);
     }
 
-    /// <summary>
-    /// The initiator match. Required because <c>PostgresAvailabilityStore.MapRow</c> emits
-    /// <c>Guid.ToString()</c> (lowercase "D" format) while the initiator id comes from the JWT
-    /// <c>sub</c> and may differ in case/format. When BOTH sides parse as a <see cref="Guid"/>
-    /// the comparison is Guid equality; otherwise it is a trimmed case-insensitive string match.
-    /// </summary>
-    private static bool SameUser(string? a, string? b)
-    {
-        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b))
-        {
-            return false;
-        }
-
-        var left = a.Trim();
-        var right = b.Trim();
-
-        if (Guid.TryParse(left, out var leftGuid) && Guid.TryParse(right, out var rightGuid))
-        {
-            return leftGuid == rightGuid;
-        }
-
-        return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
-    }
+    /// <summary>The initiator match — delegates to the shared hardened comparator,
+    /// <see cref="UserIdComparison.SameUser"/> (Guid-parse both sides, else OrdinalIgnoreCase).</summary>
+    private static bool SameUser(string? a, string? b) => UserIdComparison.SameUser(a, b);
 
     private static bool HasCoordinates(JeeberAvailability r)
         => r.Latitude is not null && r.Longitude is not null;

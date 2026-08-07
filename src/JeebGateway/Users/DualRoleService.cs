@@ -1,3 +1,4 @@
+using JeebGateway.Notifications;
 using JeebGateway.Requests;
 
 namespace JeebGateway.Users;
@@ -90,11 +91,11 @@ public class DualRoleService : IDualRoleService
         if (request is null) return false;
 
         // User is the Client of this delivery → cannot also be its Jeeber.
-        if (string.Equals(request.ClientId, userId, StringComparison.Ordinal))
+        if (UserIdComparison.SameUser(request.ClientId, userId))
             return true;
 
         // User is already the Jeeber of this delivery → cannot also be its Client.
-        if (string.Equals(request.JeeberId, userId, StringComparison.Ordinal))
+        if (UserIdComparison.SameUser(request.JeeberId, userId))
             return true;
 
         return false;

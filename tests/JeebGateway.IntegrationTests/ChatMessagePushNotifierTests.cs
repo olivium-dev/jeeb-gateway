@@ -100,6 +100,41 @@ public class ChatMessagePushNotifierTests
     }
 
     [Fact]
+    public async Task AuthorGuidCaseSkew_IsStillExcluded_CounterpartyStillNotified()
+    {
+        // Author id arrives as the UPPERCASE D-format of the client's lowercase Guid id:
+        // same user, so no self-push; the jeeber (other party) still gets the message push.
+        var clientGuid = Guid.NewGuid().ToString("D");
+        var store = new InMemoryRequestsStore(TimeProvider.System);
+        var created = await store.CreateAsync(NewInput(clientGuid), CancellationToken.None);
+        (await store.TryAcceptByJeeberAsync(created.Id, Jeeber, limit: 2, DateTimeOffset.UtcNow, CancellationToken.None))
+            .Should().NotBeNull();
+        (await store.GetAsync(created.Id, CancellationToken.None))!.ConversationId = ConversationId;
+        var push = new RecordingPushClient();
+        var notifier = new ChatMessagePushNotifier(store, push, NullLogger<ChatMessagePushNotifier>.Instance);
+
+        await notifier.NotifyNewMessageAsync(
+            ConversationId, authorUserId: clientGuid.ToUpperInvariant(), "hi", CancellationToken.None);
+
+        push.Sends.Should().ContainSingle("the case-skewed author is the client — only the jeeber remains");
+        push.Sends.Single().UserId.Should().Be(Jeeber);
+    }
+
+    [Fact]
+    public async Task AuthorNonGuidCaseSkew_IsStillExcluded()
+    {
+        var (store, _) = await SeedAcceptedAsync();
+        var push = new RecordingPushClient();
+        var notifier = new ChatMessagePushNotifier(store, push, NullLogger<ChatMessagePushNotifier>.Instance);
+
+        await notifier.NotifyNewMessageAsync(
+            ConversationId, authorUserId: Client.ToUpperInvariant(), "hello", CancellationToken.None);
+
+        push.Sends.Should().ContainSingle("a case-skewed non-Guid author id is the same user");
+        push.Sends.Single().UserId.Should().Be(Jeeber);
+    }
+
+    [Fact]
     public async Task PushServiceFault_IsSwallowed_NeverThrows()
     {
         var (store, _) = await SeedAcceptedAsync();
