@@ -127,6 +127,14 @@ var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOption
 // signing key outside Development/Testing. Bakes no key — only asserts a real secret was injected.
 JeebGateway.Tokens.JwtSigningKeyGuard.EnsureNotPlaceholder(jwt.SigningKey, builder.Environment, "Jwt:SigningKey");
 
+// AdminEvidence:TokenKey is a dedicated secret boundary, enforced only once the
+// admin portal is on: the live BFF keeps booting with zero new config.
+if (builder.Configuration.GetValue<bool>("AdminOidc:Enabled"))
+{
+    JeebGateway.Tokens.JwtSigningKeyGuard.EnsureNotPlaceholder(
+        builder.Configuration["AdminEvidence:TokenKey"], builder.Environment, "AdminEvidence:TokenKey");
+}
+
 var signingBytes = Encoding.UTF8.GetBytes(jwt.SigningKey);
 
 // UM trust config (optional, no fail-closed: an absent UmJwt section is fine).
@@ -235,6 +243,14 @@ builder.Services
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationHandler,
     JeebGateway.Auth.GatewayAudienceHandler>();
+builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationHandler,
+    JeebGateway.Auth.Oidc.ExternalAdminSessionAuthorizationHandler>();
+builder.Services.Configure<JeebGateway.Auth.Oidc.AdminOidcOptions>(
+    builder.Configuration.GetSection(JeebGateway.Auth.Oidc.AdminOidcOptions.SectionName));
+builder.Services.AddHttpClient("AdminOidc", client =>
+    client.Timeout = TimeSpan.FromSeconds(10))
+    .ConfigurePrimaryHttpMessageHandler(
+        JeebGateway.Auth.Oidc.AdminOidcHttpTransport.CreateHandler);
 
 builder.Services.AddAuthorization(options =>
 {
@@ -270,8 +286,9 @@ builder.Services.AddAuthorization(options =>
     {
         options.AddPolicy(
             JeebGateway.Auth.Capabilities.Capabilities.PolicyFor(capability),
-            policy => policy
-                .AddAuthenticationSchemes(GatewayBearerScheme)
+            policy =>
+            {
+                policy.AddAuthenticationSchemes(GatewayBearerScheme)
                 // Layer 1 identity check — accepts a validated GatewayBearer principal OR the trusted
                 // edge X-User-Id header, IDENTICALLY to the ADR-004 FallbackPolicy. Using
                 // GatewayAudienceRequirement (not bare RequireAuthenticatedUser()) is what preserves
@@ -280,7 +297,17 @@ builder.Services.AddAuthorization(options =>
                 // it and break the path the ADR mandates keeping. Layer 1 here -> 401 on failure.
                 .AddRequirements(new JeebGateway.Auth.GatewayAudienceRequirement())
                 // Layer 2 user-type capability check -> 403 on failure (CapabilityForbiddenResultHandler).
-                .AddRequirements(new JeebGateway.Auth.Capabilities.CapabilityRequirement(capability)));
+                .AddRequirements(new JeebGateway.Auth.Capabilities.CapabilityRequirement(capability));
+
+                // Back-office essentials have a third, issuer-bound layer. They
+                // require a gateway bearer minted from the configured external
+                // OIDC ceremony; ordinary gateway/mobile tokens and the trusted
+                // edge-header compatibility path never satisfy admin.*.
+                if (JeebGateway.Auth.Oidc.AdminCapabilityBoundary
+                    .RequiresExternalOperatorSession(capability))
+                    policy.AddRequirements(
+                        new JeebGateway.Auth.Oidc.ExternalAdminSessionRequirement());
+            });
     }
 });
 
@@ -328,8 +355,23 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "Jeeb Gateway",
         Version = "v1",
-        Description = "BFF gateway aggregating downstream Jeeb services."
+        Description = "BFF gateway aggregating downstream Jeeb services.",
+        License = new Microsoft.OpenApi.Models.OpenApiLicense
+        {
+            Name = "Proprietary",
+        },
     });
+    options.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        Type = Microsoft.OpenApi.Models.SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        Description = "Gateway-issued administrator access token."
+    });
+    options.OperationFilter<JeebGateway.Security.BearerSecurityOperationFilter>();
+    options.OperationFilter<JeebGateway.OpenApi.GatewayOperationSummaryFilter>();
+    options.DocumentFilter<JeebGateway.OpenApi.GatewayServerDocumentFilter>();
+    options.SchemaFilter<JeebGateway.OpenApi.GatewayEvidenceSchemaFilter>();
     // Render [FromForm] IFormFile actions (e.g. POST /kyc/submit) as a
     // multipart/form-data request body instead of letting Swashbuckle throw
     // "[FromForm] attribute used with IFormFile" — which otherwise 500s the
@@ -351,7 +393,11 @@ builder.Services.AddSwaggerGen(options =>
 // downstream-service probes are wired below via AddDownstreamHealthChecks and
 // only run under the readiness predicate.
 builder.Services.AddHealthChecks()
-    .AddCheck("self", () => HealthCheckResult.Healthy("process alive"), tags: new[] { "live" });
+    .AddCheck("self", () => HealthCheckResult.Healthy("process alive"), tags: new[] { "live" })
+    .AddCheck<JeebGateway.Auth.Oidc.AdminOidcConfigurationHealthCheck>(
+        "admin-oidc-configuration",
+        failureStatus: HealthStatus.Unhealthy,
+        tags: new[] { "ready" });
 
 // ---------------------------------------------------------------------------
 // BFF aggregation (JEB-67 / T-BE-031) + skeleton (T-migrate-gateway-shell)
@@ -2099,6 +2145,21 @@ builder.Services.AddSingleton<TimeProvider>(
 builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
 builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
+builder.Services.AddSingleton<IUmAuthenticationContextValidator, UmAuthenticationContextValidator>();
+
+// Admin portal settlement reads/reconcile over the in-gateway COD owner
+// (extracted from PR #364; replaces the PR's retired UPG proxy).
+builder.Services.AddSingleton<JeebGateway.Financials.IAdminSettlementPortalService,
+    JeebGateway.Financials.AdminSettlementPortalService>();
+
+// Admin delivery reads relay to the delivery-service owner contract.
+ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient("admin-deliveries-owner", client =>
+{
+    var baseUrl = builder.Configuration["Services:Delivery:BaseUrl"];
+    if (Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
+        client.BaseAddress = new Uri(uri.ToString().TrimEnd('/') + "/");
+    client.Timeout = TimeSpan.FromSeconds(8);
+}));
 
 // ===========================================================================
 // User-management integration — EXACT mirror of the salehly-gateway sibling.
@@ -2628,6 +2689,11 @@ builder.Services.AddExceptionHandler<JeebGateway.Infrastructure.UpstreamExceptio
 
 var app = builder.Build();
 
+// Fails closed at startup when the external administrator identity is switched
+// on but incomplete; a disabled AdminOidc section keeps the live BFF untouched.
+JeebGateway.Auth.Oidc.AdminOidcStartupGuard.EnsureConfigured(
+    app.Configuration, app.Environment);
+
 if (app.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
 {
     app.Logger.LogCritical(
@@ -2782,6 +2848,10 @@ app.UseMiddleware<ApiKeyAuthenticationMiddleware>();
 var swaggerEnabled = builder.Configuration
     .GetSection(JeebGateway.Security.SwaggerOptions.SectionName)
     .Get<JeebGateway.Security.SwaggerOptions>()?.Enabled ?? false;
+
+// OpenAPI.NET omits an empty Security collection. Preserve the operation
+// filter's explicit anonymous semantics as `security: []` on the wire.
+app.UseMiddleware<JeebGateway.OpenApi.ExplicitAnonymousOpenApiSecurityMiddleware>();
 
 if (app.Environment.IsDevelopment()
     || string.Equals(app.Environment.EnvironmentName, "Testing", StringComparison.OrdinalIgnoreCase))

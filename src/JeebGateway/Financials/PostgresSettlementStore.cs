@@ -319,6 +319,71 @@ public sealed class PostgresSettlementStore : ISettlementStore
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task<IReadOnlyList<Settlement>> ListPageForAdminAsync(
+        AdminSettlementPortalFilter filter, int limit, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var clauses = new List<string>();
+        var cmd = new NpgsqlCommand { Connection = conn };
+        await using var _ = cmd;
+
+        if (filter.JeeberId is not null)
+        {
+            clauses.Add("jeeber_id = @JeeberId");
+            cmd.Parameters.AddWithValue("JeeberId", filter.JeeberId);
+        }
+        if (filter.DeliveryId is not null)
+        {
+            clauses.Add("delivery_id = @DeliveryId");
+            cmd.Parameters.AddWithValue("DeliveryId", filter.DeliveryId);
+        }
+        if (filter.State is not null)
+        {
+            clauses.Add("state = @State");
+            cmd.Parameters.AddWithValue("State", filter.State);
+        }
+        if (filter.CodState is not null)
+        {
+            clauses.Add("cod_state = @CodState");
+            cmd.Parameters.AddWithValue("CodState", filter.CodState);
+        }
+        if (filter.ExcludeIntent)
+        {
+            clauses.Add("state <> 'pending_settlement'");
+        }
+        if (filter.From is not null)
+        {
+            clauses.Add("settled_at >= @From");
+            cmd.Parameters.AddWithValue("From", filter.From.Value);
+        }
+        if (filter.To is not null)
+        {
+            clauses.Add("settled_at <= @To");
+            cmd.Parameters.AddWithValue("To", filter.To.Value);
+        }
+        if (!string.IsNullOrWhiteSpace(filter.Query))
+        {
+            clauses.Add("(id::text ILIKE @Query OR delivery_id ILIKE @Query "
+                        + "OR jeeber_id ILIKE @Query OR client_id ILIKE @Query)");
+            cmd.Parameters.AddWithValue(
+                "Query", "%" + filter.Query.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_") + "%");
+        }
+        if (filter.CursorSettledAt is not null && filter.CursorId is not null)
+        {
+            clauses.Add(filter.Ascending
+                ? "(settled_at, id::text) > (@CursorSettledAt, @CursorId)"
+                : "(settled_at, id::text) < (@CursorSettledAt, @CursorId)");
+            cmd.Parameters.AddWithValue("CursorSettledAt", filter.CursorSettledAt.Value);
+            cmd.Parameters.AddWithValue("CursorId", filter.CursorId);
+        }
+
+        var where = clauses.Count > 0 ? "WHERE " + string.Join(" AND ", clauses) : string.Empty;
+        var order = filter.Ascending ? "ORDER BY settled_at, id::text" : "ORDER BY settled_at DESC, id::text DESC";
+        cmd.CommandText = $"SELECT * FROM settlements {where} {order} LIMIT @Limit";
+        cmd.Parameters.AddWithValue("Limit", Math.Clamp(limit, 1, 200));
+        return await ReadListAsync(cmd, ct);
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private static async Task<Settlement?> QuerySingleAsync(

@@ -1,8 +1,15 @@
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using JeebGateway.Admin;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Cases;
 using JeebGateway.Disputes;
 using JeebGateway.Disputes.V2;
 using JeebGateway.Requests;
+using JeebGateway.Services.Cdn;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 
@@ -11,43 +18,59 @@ namespace JeebGateway.Controllers;
 [ApiController]
 public sealed class AdminCasesController : CaseControllerBase
 {
+    private static readonly JsonSerializerOptions AdminJson = new(JsonSerializerDefaults.Web);
     private readonly IGenericCaseGatewayService _cases;
     private readonly IDisputeCaseService? _legacyCases;
+    private readonly IHttpClientFactory _clients;
+    private readonly IConfiguration _configuration;
 
-    public AdminCasesController(IGenericCaseGatewayService cases, IDisputeCaseService? legacyCases = null)
+    public AdminCasesController(
+        IGenericCaseGatewayService cases,
+        IHttpClientFactory clients,
+        IConfiguration configuration,
+        IDisputeCaseService? legacyCases = null)
     {
         _cases = cases;
+        _clients = clients;
+        _configuration = configuration;
         _legacyCases = legacyCases;
     }
 
     [HttpGet("admin/v1/cases")]
-    [RequireCapability(Capabilities.DisputeResolve)]
-    public Task<IActionResult> Queue([FromQuery] string? kind, [FromQuery] string? status,
+    [RequireCapability(Capabilities.AdminCasesRead)]
+    [ProducesResponseType(typeof(CasePageResponseV2), StatusCodes.Status200OK)]
+    public Task<IActionResult> Queue([FromQuery] string? query, [FromQuery] string? kind, [FromQuery] string? status,
         [FromQuery] string? priority, [FromQuery] string? assignedTo, [FromQuery] bool? unassigned,
         [FromQuery] DateTimeOffset? dueBefore, [FromQuery] bool? active,
-        [FromQuery] int limit = 100, [FromQuery] string? cursor = null, CancellationToken ct = default) =>
-        QueueCore(kind, status, priority, assignedTo, unassigned, dueBefore, active, limit, cursor, ct);
+        [FromQuery] string? sort = null, [FromQuery] int limit = 100,
+        [FromQuery] string? cursor = null, CancellationToken ct = default) =>
+        QueueCore(query, kind, status, priority, assignedTo, unassigned, dueBefore, active, sort, limit, cursor, ct);
 
     [HttpGet("admin/v1/disputes")]
-    [RequireCapability(Capabilities.DisputeResolve)]
-    public Task<IActionResult> DisputeQueue([FromQuery] string? status, [FromQuery] string? priority,
+    [RequireCapability(Capabilities.AdminCasesRead)]
+    [ProducesResponseType(typeof(CasePageResponseV2), StatusCodes.Status200OK)]
+    public Task<IActionResult> DisputeQueue([FromQuery] string? query, [FromQuery] string? status, [FromQuery] string? priority,
         [FromQuery] string? assignedTo, [FromQuery] bool? unassigned, [FromQuery] DateTimeOffset? dueBefore,
-        [FromQuery] bool? active, [FromQuery] int limit = 100, [FromQuery] string? cursor = null,
-        CancellationToken ct = default) => QueueCore(GenericCaseKinds.Dispute, status, priority,
-            assignedTo, unassigned, dueBefore, active, limit, cursor, ct);
+        [FromQuery] bool? active, [FromQuery] string? sort = null, [FromQuery] int limit = 100,
+        [FromQuery] string? cursor = null, CancellationToken ct = default) =>
+        QueueCore(query, GenericCaseKinds.Dispute, status, priority,
+            assignedTo, unassigned, dueBefore, active, sort, limit, cursor, ct);
 
     [HttpGet("admin/v1/support/tickets")]
-    [RequireCapability(Capabilities.DisputeResolve)]
-    public Task<IActionResult> SupportQueue([FromQuery] string? status, [FromQuery] string? priority,
+    [RequireCapability(Capabilities.AdminCasesRead)]
+    [ProducesResponseType(typeof(CasePageResponseV2), StatusCodes.Status200OK)]
+    public Task<IActionResult> SupportQueue([FromQuery] string? query, [FromQuery] string? status, [FromQuery] string? priority,
         [FromQuery] string? assignedTo, [FromQuery] bool? unassigned, [FromQuery] DateTimeOffset? dueBefore,
-        [FromQuery] bool? active, [FromQuery] int limit = 100, [FromQuery] string? cursor = null,
-        CancellationToken ct = default) => QueueCore(GenericCaseKinds.Support, status, priority,
-            assignedTo, unassigned, dueBefore, active, limit, cursor, ct);
+        [FromQuery] bool? active, [FromQuery] string? sort = null, [FromQuery] int limit = 100,
+        [FromQuery] string? cursor = null, CancellationToken ct = default) =>
+        QueueCore(query, GenericCaseKinds.Support, status, priority,
+            assignedTo, unassigned, dueBefore, active, sort, limit, cursor, ct);
 
     [HttpGet("admin/v1/cases/{id}")]
     [HttpGet("admin/v1/disputes/{id}")]
     [HttpGet("admin/v1/support/tickets/{id}")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesRead)]
+    [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public async Task<IActionResult> Detail(string id, CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var unauthorized)) return unauthorized;
@@ -56,15 +79,103 @@ public sealed class AdminCasesController : CaseControllerBase
             var detail = await _cases.GetForUserAsync(id, adminId, true, ct);
             EnsureRouteKind(detail);
             Response.Headers.ETag = $"\"{detail.Case.Version}\"";
-            return Ok(CaseApiProjection.Project(detail, true));
+            return Ok(AdminProjection(detail));
         }
         catch (Exception error) when (error is not OperationCanceledException) { return CaseProblem(error); }
+    }
+
+    [HttpGet("admin/v1/cases/{id}/messages")]
+    [RequireCapability(Capabilities.AdminCasesRead)]
+    [ProducesResponseType(typeof(CaseMessagePageResponseV2), StatusCodes.Status200OK)]
+    public async Task<IActionResult> Messages(string id, [FromQuery] int limit = 100,
+        [FromQuery] string? cursor = null, CancellationToken ct = default)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var unauthorized)) return unauthorized;
+        try
+        {
+            var page = await _cases.ListMessagesForUserAsync(id, adminId, isAdmin: true, limit, cursor, ct);
+            var visibleItems = page.Items
+                .Where(message => !CaseApiProjection.IsSyntheticMetadataMessage(message))
+                .ToArray();
+            var response = new CaseMessagePageResponseV2
+            {
+                Items = visibleItems,
+                Total = visibleItems.Length,
+                NextCursor = page.NextCursor,
+            };
+            var node = JsonSerializer.SerializeToNode(response, AdminJson);
+            if (node is not null) RewriteCaseEvidence(node, id);
+            return Ok(node);
+        }
+        catch (Exception error) when (error is not OperationCanceledException) { return CaseProblem(error); }
+    }
+
+    [HttpGet("admin/v1/cases/{id}/evidence/{token}")]
+    [RequireCapability(Capabilities.AdminCasesRead)]
+    public async Task<IActionResult> Evidence(string id, string token, CancellationToken ct)
+    {
+        if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var unauthorized))
+            return unauthorized;
+        if (string.IsNullOrWhiteSpace(token) || token.Length > 128
+            || string.IsNullOrWhiteSpace(EvidenceTokenKey()))
+            return BadRequest();
+
+        GenericCaseDetailV1 detail;
+        try
+        {
+            detail = await _cases.GetForUserAsync(id, adminId, true, ct);
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return CaseProblem(error);
+        }
+
+        var projection = JsonSerializer.SerializeToNode(CaseApiProjection.Project(detail, true), AdminJson);
+        var reference = projection is null
+            ? null
+            : EnumerateCaseEvidenceReferences(projection)
+                .FirstOrDefault(candidate => TokenMatches(token, CreateEvidenceToken(id, candidate)));
+        if (reference is null) return NotFound();
+
+        var cdn = _clients.CreateClient(CdnUploadUrlResolver.ProxyHttpClientName);
+        if (cdn.BaseAddress is null || !TryGetOwnedObjectReference(reference, cdn.BaseAddress, out var objectReference))
+            return NotFound();
+        var upstreamUri = new Uri(
+            cdn.BaseAddress,
+            CdnUploadUrlResolver.CdnFetchPathPrefix + Uri.EscapeDataString(objectReference));
+        if (!CdnUploadUrlResolver.IsOnFetchPrefix(upstreamUri, cdn.BaseAddress)) return BadRequest();
+
+        HttpResponseMessage upstream;
+        try
+        {
+            upstream = await cdn.GetAsync(upstreamUri, HttpCompletionOption.ResponseHeadersRead, ct);
+        }
+        catch (Exception error) when (error is HttpRequestException
+                                      || (error is TaskCanceledException && !ct.IsCancellationRequested))
+        {
+            return Problem("The case evidence source is unavailable.", statusCode: 503);
+        }
+
+        HttpContext.Response.RegisterForDispose(upstream);
+        Response.Headers.CacheControl = "private, no-store";
+        if (upstream.StatusCode == HttpStatusCode.NotFound) return NotFound();
+        if (!upstream.IsSuccessStatusCode)
+            return Problem("The case evidence source is unavailable.", statusCode: 503);
+        if (!AdminEvidenceResponsePolicy.HasSafeLength(upstream.Content.Headers.ContentLength))
+            return StatusCode(StatusCodes.Status413PayloadTooLarge);
+        if (!AdminEvidenceResponsePolicy.TryApply(
+                Response, upstream.Content.Headers.ContentType?.ToString(), out var contentType))
+            return StatusCode(StatusCodes.Status415UnsupportedMediaType);
+        var declaredLength = upstream.Content.Headers.ContentLength!.Value;
+        var stream = await upstream.Content.ReadAsStreamAsync(ct);
+        return File(AdminEvidenceResponsePolicy.EnforceDeclaredLength(stream, declaredLength), contentType);
     }
 
     [HttpPost("admin/v1/cases/{id}/claim")]
     [HttpPost("admin/v1/disputes/{id}/claim")]
     [HttpPost("admin/v1/support/tickets/{id}/claim")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesUpdate)]
+    [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Claim(string id, [FromBody] CaseClaimRequestV1? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct) =>
         Patch(id, request?.ExpectedVersion, key,
@@ -73,7 +184,8 @@ public sealed class AdminCasesController : CaseControllerBase
     [HttpPost("admin/v1/cases/{id}/reassign")]
     [HttpPost("admin/v1/disputes/{id}/reassign")]
     [HttpPost("admin/v1/support/tickets/{id}/reassign")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesUpdate)]
+    [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Reassign(string id, [FromBody] CaseReassignRequestV1? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct) =>
         Patch(id, request?.ExpectedVersion, key, (version, _) => new PatchGenericCaseRequestV1
@@ -86,7 +198,8 @@ public sealed class AdminCasesController : CaseControllerBase
     [HttpPost("admin/v1/cases/{id}/priority")]
     [HttpPost("admin/v1/disputes/{id}/priority")]
     [HttpPost("admin/v1/support/tickets/{id}/priority")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesUpdate)]
+    [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Priority(string id, [FromBody] CasePriorityRequestV1? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct)
     {
@@ -99,7 +212,8 @@ public sealed class AdminCasesController : CaseControllerBase
     [HttpPost("admin/v1/cases/{id}/due")]
     [HttpPost("admin/v1/disputes/{id}/due")]
     [HttpPost("admin/v1/support/tickets/{id}/due")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesUpdate)]
+    [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Due(string id, [FromBody] CaseDueRequestV1? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct) =>
         Patch(id, request?.ExpectedVersion, key, (version, _) => new PatchGenericCaseRequestV1
@@ -111,7 +225,8 @@ public sealed class AdminCasesController : CaseControllerBase
     [HttpPost("admin/v1/cases/{id}/reply")]
     [HttpPost("admin/v1/disputes/{id}/reply")]
     [HttpPost("admin/v1/support/tickets/{id}/reply")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesUpdate)]
+    [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Reply(string id, [FromBody] CaseReplyRequestV2? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct) =>
         Message(id, request?.ExpectedVersion, key, request?.ReplyToId is null ? "message" : "reply",
@@ -120,7 +235,8 @@ public sealed class AdminCasesController : CaseControllerBase
     [HttpPost("admin/v1/cases/{id}/note")]
     [HttpPost("admin/v1/disputes/{id}/note")]
     [HttpPost("admin/v1/support/tickets/{id}/note")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesUpdate)]
+    [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Note(string id, [FromBody] CaseNoteRequestV1? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct) =>
         Message(id, request?.ExpectedVersion, key, "internal_note", request?.Body, null, null, ct);
@@ -128,7 +244,8 @@ public sealed class AdminCasesController : CaseControllerBase
     [HttpPost("admin/v1/cases/{id}/mark-fixed")]
     [HttpPost("admin/v1/disputes/{id}/mark-fixed")]
     [HttpPost("admin/v1/support/tickets/{id}/mark-fixed")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesUpdate)]
+    [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> MarkFixed(string id, [FromBody] CaseStatusRequestV1? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct) =>
         Status(id, GenericCaseStatuses.Fixed, request, key, ct);
@@ -136,7 +253,8 @@ public sealed class AdminCasesController : CaseControllerBase
     [HttpPost("admin/v1/cases/{id}/close")]
     [HttpPost("admin/v1/disputes/{id}/close")]
     [HttpPost("admin/v1/support/tickets/{id}/close")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesClose)]
+    [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Close(string id, [FromBody] CaseStatusRequestV1? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct) =>
         Status(id, GenericCaseStatuses.Closed, request, key, ct);
@@ -144,7 +262,8 @@ public sealed class AdminCasesController : CaseControllerBase
     [HttpPost("admin/v1/cases/{id}/reopen")]
     [HttpPost("admin/v1/disputes/{id}/reopen")]
     [HttpPost("admin/v1/support/tickets/{id}/reopen")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesClose)]
+    [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public async Task<IActionResult> Reopen(string id, [FromBody] CaseStatusRequestV1? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct)
     {
@@ -153,20 +272,20 @@ public sealed class AdminCasesController : CaseControllerBase
         {
             await EnsureRouteKindAsync(id, adminId, ct);
             var detail = await _cases.ReopenAsync(id, checked((int)RequireVersion(request?.ExpectedVersion)),
-                adminId, "admin", RequireIdempotencyKey(key), request?.Reason, ct);
+                adminId, CaseActorRole(), RequireIdempotencyKey(key), request?.Reason, ct);
             if (!string.Equals(detail.Case.CaseId.ToString("D"), id, StringComparison.OrdinalIgnoreCase))
             {
                 Response.Headers.Location = $"/admin/v1/cases/{detail.Case.CaseId:D}";
                 Response.Headers["X-Reopened-From"] = id;
             }
             Response.Headers.ETag = $"\"{detail.Case.Version}\"";
-            return Ok(CaseApiProjection.Project(detail, true));
+            return Ok(AdminProjection(detail));
         }
         catch (Exception error) when (error is not OperationCanceledException) { return CaseProblem(error); }
     }
 
     [HttpPost("admin/v1/disputes/{id}/review")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesUpdate)]
     public Task<IActionResult> LegacyReview(string id, [FromBody] CaseStatusRequestV1? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct) =>
         IsLegacyCase(id)
@@ -174,7 +293,7 @@ public sealed class AdminCasesController : CaseControllerBase
             : LegacyPatch(id, GenericCaseStatuses.Pending, request?.Reason, request?.ExpectedVersion, key, ct);
 
     [HttpPost("admin/v1/disputes/{id}/resolve")]
-    [RequireCapability(Capabilities.DisputeResolve)]
+    [RequireCapability(Capabilities.AdminCasesClose)]
     public Task<IActionResult> LegacyResolve(string id, [FromBody] LegacyCaseResolutionRequest? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct)
     {
@@ -275,16 +394,16 @@ public sealed class AdminCasesController : CaseControllerBase
         }
     }
 
-    private async Task<IActionResult> QueueCore(string? kind, string? status, string? priority,
+    private async Task<IActionResult> QueueCore(string? query, string? kind, string? status, string? priority,
         string? assignedTo, bool? unassigned, DateTimeOffset? dueBefore, bool? active,
-        int limit, string? cursor, CancellationToken ct)
+        string? sort, int limit, string? cursor, CancellationToken ct)
     {
         try
         {
             var page = await _cases.ListAdminAsync(new GenericCaseQueryV1
             {
-                Kind = kind, Status = status, Priority = priority, AssigneeRef = assignedTo,
-                DueBefore = dueBefore, Active = active, Limit = limit, Cursor = cursor,
+                Query = query, Kind = kind, Status = status, Priority = priority, AssigneeRef = assignedTo,
+                DueBefore = dueBefore, Active = active, Sort = sort, Limit = limit, Cursor = cursor,
             }, unassigned, ct);
             return Ok(CaseApiProjection.Project(page));
         }
@@ -315,7 +434,7 @@ public sealed class AdminCasesController : CaseControllerBase
             if (detail.Case.Status == status && (reason is null || publicReasonAlreadyPresent))
             {
                 Response.Headers.ETag = $"\"{detail.Case.Version}\"";
-                return Ok(CaseApiProjection.Project(detail, true));
+                return Ok(AdminProjection(detail));
             }
             var version = suppliedVersion ?? detail.Case.Version;
             var key = string.IsNullOrWhiteSpace(suppliedKey)
@@ -341,15 +460,15 @@ public sealed class AdminCasesController : CaseControllerBase
             if (!string.IsNullOrWhiteSpace(note) && patch.Status is not null)
             {
                 detail = await _cases.ApplyStatusMessageAsync(
-                    id, version, patch.Status, note, adminId, "admin", key, ct);
+                    id, version, patch.Status, note, adminId, CaseActorRole(), key, ct);
             }
             else
             {
                 detail = await _cases.PatchAsync(id, patch, adminId,
-                    CanonicalDeliveryVocab.ActorRoleFor(HttpContext), key, ct);
+                    CaseActorRole(), key, ct);
             }
             Response.Headers.ETag = $"\"{detail.Case.Version}\"";
-            return Ok(CaseApiProjection.Project(detail, true));
+            return Ok(AdminProjection(detail));
         }
         catch (Exception error) when (error is not OperationCanceledException) { return CaseProblem(error); }
     }
@@ -364,10 +483,10 @@ public sealed class AdminCasesController : CaseControllerBase
             if (string.IsNullOrWhiteSpace(body) && (attachments is null || attachments.Count == 0))
                 throw new CaseValidationException("A message requires a body or attachment.");
             var detail = await _cases.AddMessageAsync(id, checked((int)RequireVersion(suppliedVersion)),
-                messageType, adminId, "admin", RequireIdempotencyKey(suppliedKey), body,
+                messageType, adminId, CaseActorRole(), RequireIdempotencyKey(suppliedKey), body,
                 replyToId, attachments, ct);
             Response.Headers.ETag = $"\"{detail.Case.Version}\"";
-            return Ok(CaseApiProjection.Project(detail, true));
+            return Ok(AdminProjection(detail));
         }
         catch (Exception error) when (error is not OperationCanceledException) { return CaseProblem(error); }
     }
@@ -378,11 +497,156 @@ public sealed class AdminCasesController : CaseControllerBase
         EnsureRouteKind(await _cases.GetForUserAsync(id, adminId, true, ct));
     }
 
+    private string CaseActorRole()
+    {
+        if (UserIdentity.HasRole(HttpContext, Roles.Admin)) return "admin";
+        if (UserIdentity.HasRole(HttpContext, Roles.Support)
+            || UserIdentity.HasRole(HttpContext, Roles.SupportLead)) return "agent";
+        return "system";
+    }
+
     private void EnsureRouteKind(GenericCaseDetailV1 detail)
     {
         var expected = ExpectedRouteKind();
         if (expected is not null && !string.Equals(detail.Case.Kind, expected, StringComparison.Ordinal))
             throw new CaseNotFoundException("Case was not found.");
+    }
+
+    private JsonNode? AdminProjection(GenericCaseDetailV1 detail)
+    {
+        var node = JsonSerializer.SerializeToNode(CaseApiProjection.Project(detail, true), AdminJson);
+        if (node is not null) RewriteCaseEvidence(node, detail.Case.CaseId.ToString("D"));
+        return node;
+    }
+
+    private void RewriteCaseEvidence(JsonNode node, string caseId)
+    {
+        if (node is JsonObject obj)
+        {
+            foreach (var property in obj.ToList())
+            {
+                if (property.Value is JsonValue value
+                    && value.TryGetValue<string>(out var reference)
+                    && IsSingleEvidenceProperty(property.Key))
+                {
+                    obj[property.Key] = EvidencePath(caseId, reference);
+                    continue;
+                }
+
+                if (property.Value is JsonArray array && IsEvidenceArrayProperty(property.Key))
+                {
+                    for (var index = 0; index < array.Count; index++)
+                    {
+                        if (array[index] is JsonValue item
+                            && item.TryGetValue<string>(out var arrayReference))
+                            array[index] = EvidencePath(caseId, arrayReference);
+                        else if (array[index] is not null)
+                            RewriteCaseEvidence(array[index]!, caseId);
+                    }
+                    continue;
+                }
+
+                if (property.Value is not null) RewriteCaseEvidence(property.Value, caseId);
+            }
+        }
+        else if (node is JsonArray array)
+        {
+            foreach (var child in array)
+                if (child is not null) RewriteCaseEvidence(child, caseId);
+        }
+    }
+
+    private static IEnumerable<string> EnumerateCaseEvidenceReferences(JsonNode node)
+    {
+        if (node is JsonObject obj)
+        {
+            foreach (var property in obj)
+            {
+                if (property.Value is JsonValue value
+                    && value.TryGetValue<string>(out var reference)
+                    && IsSingleEvidenceProperty(property.Key)
+                    && !string.IsNullOrWhiteSpace(reference))
+                    yield return reference;
+
+                if (property.Value is JsonArray array && IsEvidenceArrayProperty(property.Key))
+                    foreach (var item in array)
+                        if (item is JsonValue arrayValue
+                            && arrayValue.TryGetValue<string>(out var arrayReference)
+                            && !string.IsNullOrWhiteSpace(arrayReference))
+                            yield return arrayReference;
+
+                if (property.Value is not null)
+                    foreach (var child in EnumerateCaseEvidenceReferences(property.Value))
+                        yield return child;
+            }
+        }
+        else if (node is JsonArray array)
+        {
+            foreach (var childNode in array)
+                if (childNode is not null)
+                    foreach (var child in EnumerateCaseEvidenceReferences(childNode))
+                        yield return child;
+        }
+    }
+
+    private string? EvidencePath(string caseId, string? reference) =>
+        string.IsNullOrWhiteSpace(reference) || string.IsNullOrWhiteSpace(EvidenceTokenKey())
+            ? null
+            : $"/gateway/admin/v1/cases/{Uri.EscapeDataString(caseId)}/evidence/{CreateEvidenceToken(caseId, reference)}";
+
+    private string CreateEvidenceToken(string caseId, string reference)
+    {
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(EvidenceTokenKey()));
+        var digest = hmac.ComputeHash(Encoding.UTF8.GetBytes($"{caseId}\n{reference}"));
+        return Convert.ToBase64String(digest).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
+
+    private string EvidenceTokenKey() =>
+        _configuration["AdminEvidence:TokenKey"] ?? string.Empty;
+
+    private static bool TokenMatches(string supplied, string expected)
+    {
+        var suppliedBytes = Encoding.ASCII.GetBytes(supplied);
+        var expectedBytes = Encoding.ASCII.GetBytes(expected);
+        return suppliedBytes.Length == expectedBytes.Length
+               && CryptographicOperations.FixedTimeEquals(suppliedBytes, expectedBytes);
+    }
+
+    private static bool IsSingleEvidenceProperty(string name) =>
+        string.Equals(name, "cdnRef", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "voiceUrl", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsEvidenceArrayProperty(string name) =>
+        string.Equals(name, "photos", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "attachments", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "objectRefs", StringComparison.OrdinalIgnoreCase);
+
+    private static bool TryGetOwnedObjectReference(
+        string reference, Uri cdnBaseAddress, out string objectReference)
+    {
+        objectReference = string.Empty;
+        var candidate = reference.Trim();
+        if (Uri.TryCreate(candidate, UriKind.Absolute, out var absolute))
+        {
+            if ((absolute.Scheme != Uri.UriSchemeHttp && absolute.Scheme != Uri.UriSchemeHttps)
+                || !string.Equals(absolute.Host, cdnBaseAddress.Host, StringComparison.OrdinalIgnoreCase)
+                || absolute.Port != cdnBaseAddress.Port)
+                return false;
+            var marker = "/" + CdnUploadUrlResolver.CdnFetchPathPrefix;
+            if (!absolute.AbsolutePath.StartsWith(marker, StringComparison.Ordinal)) return false;
+            candidate = Uri.UnescapeDataString(absolute.AbsolutePath[marker.Length..]);
+        }
+
+        candidate = candidate.TrimStart('/');
+        if (candidate.Length is not (> 0 and <= 512)
+            || candidate.Contains("..", StringComparison.Ordinal)
+            || candidate.Contains('%')
+            || candidate.Contains('\\')
+            || candidate.Contains('?')
+            || candidate.Contains('#'))
+            return false;
+        objectReference = candidate;
+        return true;
     }
 
     private string? ExpectedRouteKind()
@@ -401,6 +665,10 @@ public sealed class LegacyCaseResolutionRequest
     public string? Action { get; init; }
     public string? Outcome { get; init; }
     public string? Decision { get; init; }
+    /// <summary>
+    /// Rejected legacy input retained for wire compatibility. Jeeb COD cases have no automated
+    /// refund or card-chargeback action; approved cash reimbursement is arranged manually.
+    /// </summary>
     public decimal? RefundUsd { get; init; }
     public string? Resolution { get; init; }
     public string? Reason { get; init; }

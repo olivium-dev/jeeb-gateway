@@ -187,6 +187,40 @@ public sealed class InMemorySettlementStore : ISettlementStore
         return Task.CompletedTask;
     }
 
+    public Task<IReadOnlyList<Settlement>> ListPageForAdminAsync(
+        AdminSettlementPortalFilter filter, int limit, CancellationToken ct)
+    {
+        var rows = _byId.Values
+            .Where(s => filter.JeeberId is null || string.Equals(s.JeeberId, filter.JeeberId, StringComparison.Ordinal))
+            .Where(s => filter.DeliveryId is null || string.Equals(s.DeliveryId, filter.DeliveryId, StringComparison.Ordinal))
+            .Where(s => filter.State is null || string.Equals(s.State, filter.State, StringComparison.Ordinal))
+            .Where(s => filter.CodState is null || string.Equals(s.CodState, filter.CodState, StringComparison.Ordinal))
+            .Where(s => !filter.ExcludeIntent || s.State != SettlementState.PendingSettlement)
+            .Where(s => (filter.From is null || s.SettledAt >= filter.From.Value)
+                     && (filter.To is null || s.SettledAt <= filter.To.Value))
+            .Where(s => filter.Query is null
+                     || s.Id.Contains(filter.Query, StringComparison.OrdinalIgnoreCase)
+                     || s.DeliveryId.Contains(filter.Query, StringComparison.OrdinalIgnoreCase)
+                     || s.JeeberId.Contains(filter.Query, StringComparison.OrdinalIgnoreCase)
+                     || s.ClientId.Contains(filter.Query, StringComparison.OrdinalIgnoreCase));
+
+        rows = filter.Ascending
+            ? rows.OrderBy(s => s.SettledAt).ThenBy(s => s.Id, StringComparer.Ordinal)
+            : rows.OrderByDescending(s => s.SettledAt).ThenByDescending(s => s.Id, StringComparer.Ordinal);
+
+        if (filter.CursorSettledAt is not null && filter.CursorId is not null)
+            rows = rows.Where(s => filter.Ascending
+                ? s.SettledAt > filter.CursorSettledAt
+                  || s.SettledAt == filter.CursorSettledAt
+                  && string.CompareOrdinal(s.Id, filter.CursorId) > 0
+                : s.SettledAt < filter.CursorSettledAt
+                  || s.SettledAt == filter.CursorSettledAt
+                  && string.CompareOrdinal(s.Id, filter.CursorId) < 0);
+
+        return Task.FromResult<IReadOnlyList<Settlement>>(
+            rows.Take(Math.Clamp(limit, 1, 200)).Select(Clone).ToList());
+    }
+
     private static Settlement Clone(Settlement s) => new()
     {
         Id = s.Id,

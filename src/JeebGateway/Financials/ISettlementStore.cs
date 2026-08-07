@@ -113,4 +113,29 @@ public interface ISettlementStore
     /// <c>paid</c> state are skipped (idempotent).
     /// </summary>
     Task MarkPaidByBatchAsync(Guid batchId, DateTimeOffset paidAt, CancellationToken ct);
+
+    /// <summary>
+    /// Admin-portal read (extracted from PR #364): newest-first keyset page over
+    /// settlement rows. Default keeps existing fakes compiling and returns empty.
+    /// </summary>
+    Task<IReadOnlyList<Settlement>> ListPageForAdminAsync(
+        AdminSettlementPortalFilter filter, int limit, CancellationToken ct)
+        => Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
 }
+
+/// <summary>
+/// Bounded admin-portal listing filter. <see cref="CursorSettledAt"/> +
+/// <see cref="CursorId"/> form the exclusive keyset cursor in the active order.
+/// </summary>
+public sealed record AdminSettlementPortalFilter(
+    string? Query = null,
+    string? JeeberId = null,
+    string? DeliveryId = null,
+    string? State = null,
+    string? CodState = null,
+    bool ExcludeIntent = false,
+    DateTimeOffset? From = null,
+    DateTimeOffset? To = null,
+    bool Ascending = false,
+    DateTimeOffset? CursorSettledAt = null,
+    string? CursorId = null);

@@ -26,11 +26,10 @@ namespace JeebGateway.Disputes.V2;
 /// Side-effects committed inside <see cref="ResolveAsync"/>:
 /// <list type="bullet">
 ///   <item>State transition through <see cref="DisputeCaseState"/>.</item>
-///   <item>When <c>decision = refund</c>, a single call to
-///     <see cref="IPaymentRefundClient.RefundAsync"/> with the case id
-///     as the idempotency key. A failed refund aborts the state
-///     transition and surfaces <see cref="ResolveOutcome.RefundFailed"/>
-///     (PO blocker #4 — no half-resolved cases).</item>
+///   <item>The legacy <c>decision = refund</c> branch calls the injected
+///     <see cref="IPaymentRefundClient"/> policy. Production registers
+///     <see cref="CashOnDeliveryNoRefundClient"/>, which rejects automated refunds and aborts
+///     the transition; COD reimbursement is reviewed and arranged manually outside this path.</item>
 ///   <item>Two push notifications — one to each delivery party (AC2).</item>
 ///   <item>Structured <c>dispute.resolved</c> log line + metric.</item>
 /// </list>

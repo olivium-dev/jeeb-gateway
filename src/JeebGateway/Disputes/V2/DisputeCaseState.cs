@@ -12,13 +12,15 @@ namespace JeebGateway.Disputes.V2;
 /// Valid transitions:
 /// <code>
 ///   open → under_review                   (admin queues for triage)
-///   open | under_review → resolved_refund     (admin closes WITH refund)
+///   open | under_review → resolved_refund     (legacy manual-reimbursement outcome)
 ///   open | under_review → resolved_no_action  (admin closes without action)
 ///   resolved_refund | resolved_no_action → closed (terminal seal)
 /// </code>
 ///
-/// <c>open</c>, <c>under_review</c> and the two <c>resolved_*</c> states
-/// are addressable from the admin queue. <c>closed</c> is purely a
+/// <c>resolved_refund</c> is retained for stored compatibility only; production
+/// COD routes reject automated refund and card-chargeback actions. <c>open</c>,
+/// <c>under_review</c> and the two <c>resolved_*</c> states are addressable from
+/// the admin queue. <c>closed</c> is purely a
 /// post-resolution archival flag and is set automatically when the
 /// resolution lands — the API does not expose a separate "close" verb.
 /// </summary>

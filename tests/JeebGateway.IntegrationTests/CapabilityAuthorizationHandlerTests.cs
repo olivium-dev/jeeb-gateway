@@ -180,8 +180,12 @@ public sealed class CapabilityAuthorizationHandlerTests
         {
             var roles = CapabilityRolePolicy.RolesFor(cap);
             roles.Should().NotBeEmpty($"capability '{cap}' must map to at least one role");
+            // Back-office operator roles pass through JeebRoleTranslator verbatim
+            // (same opaque-role treatment as partner), so they are canonical here.
             roles.Should().OnlyContain(
-                r => r == "client" || r == "jeeber" || r == "admin" || r == "partner",
+                r => r == "client" || r == "jeeber" || r == "admin" || r == "partner"
+                     || r == "support" || r == "support_lead" || r == "operations"
+                     || r == "finance_viewer" || r == "finance_approver",
                 $"capability '{cap}' must key on canonical roles only");
         }
     }
