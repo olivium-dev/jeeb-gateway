@@ -24,6 +24,10 @@ namespace JeebGateway.IntegrationTests;
 /// canonical <c>DeliveriesController.Cancel</c> action (deliveryId == requestId by
 /// construction), so they inherit the PR-G2 canonical phase sets, counterparty push, and
 /// best-effort upstream propagation unchanged.
+///
+/// <para>The shipped app also posts the DELIVERY-keyed
+/// <c>POST /v1/deliveries/{id}/cancel</c> to cancel POST-ACCEPT, which had no template at
+/// all and 404'd; it is now a fourth template on the same action, covered below.</para>
 /// </summary>
 public class RequestKeyedCancelV1Tests
 {
@@ -110,6 +114,61 @@ public class RequestKeyedCancelV1Tests
     }
 
     [Fact]
+    public async Task PostV1DeliveriesCancel_PreAccept_ByOwner_CancelsImmediately()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var (clientId, requestId) = await SeedRequestAsync(factory);
+
+        var resp = await Client(factory, clientId, "customer")
+            .PostAsJsonAsync($"/v1/deliveries/{requestId}/cancel", new { reason = "changed my mind" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var payload = await resp.Content.ReadFromJsonAsync<CancelDeliveryResponse>();
+        payload!.DeliveryId.Should().Be(requestId);
+        payload.Status.Should().Be(RequestStatus.Cancelled);
+        payload.PendingApproval.Should().BeFalse();
+        payload.Reason.Should().Be("changed my mind");
+
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
+        var row = await store.GetAsync(requestId, CancellationToken.None);
+        row!.Status.Should().Be(RequestStatus.Cancelled);
+    }
+
+    [Fact]
+    public async Task PostV1DeliveriesCancel_AcceptedByClient_CancelsImmediately()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var (clientId, requestId) = await SeedRequestAsync(factory);
+        await BindJeeberAsync(factory, requestId, $"jeeber-{Guid.NewGuid():N}");
+
+        var resp = await Client(factory, clientId, "customer")
+            .PostAsJsonAsync($"/v1/deliveries/{requestId}/cancel", new { reason = "no longer needed" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var payload = await resp.Content.ReadFromJsonAsync<CancelDeliveryResponse>();
+        payload!.Status.Should().Be(RequestStatus.Cancelled,
+            "a client cancel of an ACCEPTED pre-pickup delivery commits immediately");
+        payload.PreviousStatus.Should().Be(RequestStatus.Accepted);
+        payload.PendingApproval.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task PostV1DeliveriesCancel_EmptyBody_Binds()
+    {
+        using var factory = new WebApplicationFactory<Program>();
+        var (clientId, requestId) = await SeedRequestAsync(factory);
+
+        // Bodyless POST, no Content-Type — must bind an absent body, never 400/415.
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/v1/deliveries/{requestId}/cancel");
+        var resp = await Client(factory, clientId, "customer").SendAsync(req);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var payload = await resp.Content.ReadFromJsonAsync<CancelDeliveryResponse>();
+        payload!.Status.Should().Be(RequestStatus.Cancelled);
+    }
+
+    [Fact]
     public async Task LegacyDeliveriesCancelRoute_IsUnchanged()
     {
         // Guard: adding the V1 templates must not disturb the existing route.
@@ -140,6 +199,17 @@ public class RequestKeyedCancelV1Tests
             Description = "request-keyed cancel parcel",
         }, default);
         return (clientId, created.Id);
+    }
+
+    private static async Task BindJeeberAsync(
+        WebApplicationFactory<Program> factory, string requestId, string jeeberId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
+        var accepted = await store.TryAcceptByJeeberAsync(
+            requestId, jeeberId, limit: int.MaxValue, at: DateTimeOffset.UtcNow, ct: default);
+        accepted.Should().NotBeNull();
+        accepted!.Status.Should().Be(RequestStatus.Accepted);
     }
 
     private static HttpClient Client(WebApplicationFactory<Program> factory, string userId, string role)

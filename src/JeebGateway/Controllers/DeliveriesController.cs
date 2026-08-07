@@ -1146,6 +1146,7 @@ public class DeliveriesController : ControllerBase
     /// mandatory only for the driver path, enforced by the service.</para>
     /// </summary>
     [HttpPost("{deliveryId}/cancel")]
+    [HttpPost("/v1/deliveries/{deliveryId}/cancel")]
     [HttpPost("/v1/requests/{deliveryId}/cancel")]
     [HttpDelete("/v1/requests/{deliveryId}")]
     [ProducesResponseType(typeof(CancelDeliveryResponse), StatusCodes.Status200OK)]
