@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
 using FluentAssertions;
+using JeebGateway.Auth.Oidc;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -43,12 +44,36 @@ internal static class CapabilityTestHarness
     internal static string MintBearer(WebApplicationFactory<Program> f, params string[] roles)
         => MintWithAudience(f, AudienceOf(f), roles);
 
+    /// <summary>A gateway bearer carrying the issuer-bound external OIDC operator marker.</summary>
+    internal static string MintExternalOperatorBearer(
+        WebApplicationFactory<Program> f, params string[] roles)
+    {
+        var configuration = f.Services.GetRequiredService<IConfiguration>();
+        return Mint(
+            f,
+            AudienceOf(f),
+            roles,
+            new Claim(ExternalAdminSessionRequirement.SessionClaim,
+                ExternalAdminSessionRequirement.SessionClaimValue),
+            new Claim("idp", configuration["AdminOidc:Issuer"]!),
+            new Claim("auth_time", DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(),
+                ClaimValueTypes.Integer64),
+            new Claim("amr", "mfa"));
+    }
+
     /// <summary>
     /// Mint a bearer with an EXPLICIT audience. Used by the L1-boundary case (wrong audience must be
     /// rejected at Layer 1 → 401, so Layer 2 never runs).
     /// </summary>
     internal static string MintWithAudience(
         WebApplicationFactory<Program> f, string audience, params string[] roles)
+        => Mint(f, audience, roles);
+
+    private static string Mint(
+        WebApplicationFactory<Program> f,
+        string audience,
+        IReadOnlyList<string> roles,
+        params Claim[] additionalClaims)
     {
         var cfg = f.Services.GetRequiredService<IConfiguration>();
         var signingKey = cfg["Jwt:SigningKey"]!;
@@ -64,6 +89,7 @@ internal static class CapabilityTestHarness
             new(ClaimTypes.Sid, UserId),
         };
         claims.AddRange(roles.Select(r => new Claim("roles", r))); // multivalued, verbatim
+        claims.AddRange(additionalClaims);
 
         var jwt = new JwtSecurityToken(
             issuer: issuer,

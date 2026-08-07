@@ -19,6 +19,14 @@ public static class Roles
     /// <summary>Internal operator with access to /admin/** endpoints.</summary>
     public const string Admin = "admin";
 
+    // Back-office operator roles. user-management persists these opaque values
+    // without interpreting them; the gateway maps them to exact capabilities.
+    public const string Support = "support";
+    public const string SupportLead = "support_lead";
+    public const string Operations = "operations";
+    public const string FinanceViewer = "finance_viewer";
+    public const string FinanceApprover = "finance_approver";
+
     /// <summary>
     /// Jeeb Partner (cash shop / agent) who accepts cash offline and tops up jeeber
     /// wallets digitally through the Partner Portal (JEBV4 partner-wallet-bff).

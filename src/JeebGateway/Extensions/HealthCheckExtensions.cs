@@ -37,6 +37,22 @@ namespace JeebGateway.Extensions;
 public static class HealthCheckExtensions
 {
     /// <summary>
+    /// Gates readiness on the durable state owner used by administrator sessions
+    /// and case operations. A degraded state owner is not a functional CMS.
+    /// </summary>
+    public static IServiceCollection AddEssentialStateServiceHealthCheck(
+        this IServiceCollection services,
+        Uri baseUri)
+    {
+        services.AddHealthChecks().AddUrlGroup(
+            new Uri(baseUri, "health"),
+            name: "jeeb-state-service",
+            failureStatus: HealthStatus.Unhealthy,
+            tags: new[] { "ready", "downstream" });
+        return services;
+    }
+
+    /// <summary>
     /// Adds a URL-group readiness probe per deployed upstream service. The BaseUrl
     /// keys match <see cref="ServiceClientExtensions.AddDownstreamClients"/>. An
     /// unset BaseUrl skips the probe entirely (the service is not aggregated in
@@ -84,15 +100,11 @@ public static class HealthCheckExtensions
         AddDownstreamProbe(checks, config, "offer-service",           "Services:Offer:BaseUrl",           healthPath: "health");
         AddDownstreamProbe(checks, config, "ban-service",             "Services:Ban:BaseUrl",             healthPath: "health");
 
-        // unified-payment-gateway (Elixir UPG) was decoupled (sha-553711610c2a /
-        // main 9f05a991): the old GET /health route was REMOVED (now 404) and the
-        // new decoupled surface is GET /api/v1/gateways (verified 200 on the swarm,
-        // trailing-slash variant also 200). Probe the readiness path it actually
-        // serves; bare /health here 404s and falsely 503s the gateway aggregate.
-        // UPG probe REMOVED 2026-07-27 by owner ruling: "do not use UPG, jeeb is only cash on
-        // delivery". Services:UnifiedPayment:BaseUrl is gone from committed config (it was the last
-        // live 192.168.2.50 destination), so probing it would dial a banned host and fail a
-        // CRITICAL readiness check for a service Jeeb deliberately no longer uses. Do not re-add.
+        // Cash-on-delivery reads and administration cannot function without
+        // their durable owner. The owner readiness route verifies its database,
+        // so a failed probe is fatal to gateway readiness.
+        AddDownstreamProbe(checks, config, "unified-payment-gateway",
+            "UnifiedPaymentGateway:BaseUrl", healthPath: "health/ready");
 
         // voice-transcription serves /healthz (not /health).
         AddDownstreamProbe(checks, config, "voice-transcription",     "Services:VoiceTranscription:BaseUrl", healthPath: "healthz");

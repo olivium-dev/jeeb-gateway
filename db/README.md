@@ -83,8 +83,6 @@ points at a host whose name contains `prod`, `production`, or `live`. Set
 | `prohibited_items`          | Admin-moderated catalog of disallowed items (active/CRUD)     |
 | `admin_actions`             | Append-only audit log of admin mutations across entities      |
 | `notification_preferences`  | Per-user per-category notification opt-in flags               |
-| `delivery_financials`       | Per-delivery money trail — goods, fee, commission, payout     |
-| `settlement_batches`        | Weekly Jeeber payout batches — totals, method, status         |
 | `ratings`                   | Two-sided 1-5 star ratings per delivery, blind-reveal model   |
 | `disputes`                  | Admin-handled dispute escalations on a delivery (FR-13)       |
 | `schema_migrations`         | Applied-migration ledger                                      |
@@ -133,24 +131,13 @@ constrains the value domain only. Three indexes back the hot paths:
 `(jeeber_id, created_at DESC)` for the Jeeber dashboard, and a partial
 `(request_id) WHERE status = 'pending'` for the auction-expiry sweep.
 
-### Financial ledger
+### Cash-on-delivery settlement ownership
 
-`delivery_financials` is the per-delivery money trail: `goods_cost`,
-`delivery_fee`, the `commission_rate` snapshot, the computed
-`commission_amount`, and a generated `jeeber_payout` column
-(`delivery_fee − commission_amount`). One row per delivery, enforced
-by a unique index on `delivery_id`. Earnings aggregation rides on
-`(jeeber_id, created_at DESC)`; the batch builder picks unsettled rows
-via a partial index `(jeeber_id, created_at) WHERE settlement_batch_id
-IS NULL`.
-
-`settlement_batches` rolls a Jeeber's commission into a weekly payout.
-`(jeeber_id, period_start, period_end)` is unique so a period is opened
-exactly once. `payout_method` is `bank_transfer | mobile_wallet | cash`;
-`settlement_status` is `pending → processing → paid | failed |
-cancelled`. The actual disbursement goes through
-`unified_payment_gateway` (locked-in payments policy) — the
-`external_reference` column stores the gateway transaction id.
+The gateway owns no settlement tables, ledger entries, batches, outbox,
+scheduled processing, or PostgreSQL connection. The existing generic
+`unified_payment_gateway` is the durable system of record for Jeeb's
+cash-on-delivery intents and reconciliation. Gateway settlement endpoints are
+stateless, authorized projections over that owner.
 
 ### Ratings (blind reveal)
 

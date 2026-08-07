@@ -85,15 +85,12 @@ jobs:
       - name: Restore test project
         run: dotnet restore tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj
 
-      - name: Test
-        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal --logger "trx;LogFileName=tests.trx"
-
-      - name: Upload test results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-results
-          path: tests/**/TestResults/*.trx
+      # This production branch deploys only the browser CMS composition. The
+      # repository still carries dormant mobile/legacy packs whose owners and
+      # routes are deliberately excluded from the lean gateway; keep the PR gate
+      # aligned with the same explicit essential surface as deployment.
+      - name: Test essential CMS gateway
+        run: bash scripts/test-essential-cms.sh
 
   gitleaks:
     name: Gitleaks Secret Scan
@@ -129,8 +126,20 @@ jobs:
       - name: Verify health check endpoint exists in image
         run: |
           docker run -d --name gw-smoke -p 18080:8080 \
-            -e JeebJwt__SigningKey="ci-smoke-signing-key-not-for-prod-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
-            -e JeebJwt__PhonePepper="ci-smoke-phone-pepper-not-for-prod-aaaaaaa" \
+            -e Jwt__SigningKey="ci-smoke-signing-key-not-for-prod-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+            -e Jwt__PhonePepper="ci-smoke-phone-pepper-not-for-prod-aaaaaaa" \
+            -e Jwt__Issuer="ci-smoke" \
+            -e Jwt__Audience="ci-smoke" \
+            -e AdminOidc__Enabled="true" \
+            -e AdminOidc__Issuer="https://identity.example.test" \
+            -e AdminOidc__AuthorizationEndpoint="https://identity.example.test/authorize" \
+            -e AdminOidc__TokenEndpoint="https://identity.example.test/token" \
+            -e AdminOidc__JwksUri="https://identity.example.test/jwks" \
+            -e AdminOidc__ClientId="ci-smoke-admin" \
+            -e AdminOidc__ClientSecret="ci-smoke-secret" \
+            -e AdminOidc__RedirectUri="https://admin.jeeb.example/gateway/admin/v1/auth/oidc/callback" \
+            -e AdminOidc__StateProtectionKey="YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=" \
+            -e AdminOidc__RoleMappings__support__0="ci-smoke-support" \
             -e Services__Auth__BaseUrl="http://auth-service:8080" \
             -e Services__Chat__BaseUrl="http://chat-service:8080" \
             -e Services__UserManagement__BaseUrl="http://user-management:8080" \

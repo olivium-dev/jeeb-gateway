@@ -111,10 +111,9 @@ public interface IEarningsAggregationService
 }
 
 /// <summary>
-/// Sums the gateway-owned settlement rows into the canonical earnings
-/// projection (T-backend-018). This is the in-memory aggregation; the swap to
-/// the wallet-service earnings projection (UseUpstreamWalletEarnings) lands
-/// behind the same interface without changing the controller.
+/// Sums UPG's authoritative COD settlement projection into the canonical
+/// earnings response (T-backend-018). The gateway retains no settlement rows;
+/// <see cref="ISettlementStore"/> is a compatibility read seam over UPG.
 ///
 /// <para>net = gross(goodsCost) - commission, per settled delivery; the period
 /// totals are the sums. Currency is always USD (the gateway's single

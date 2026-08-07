@@ -14,15 +14,13 @@ namespace JeebGateway.Controllers;
 /// serves the corresponding route from <see cref="ICodSettlementLedger"/>:
 ///
 ///   * POST /api/v1/payments/cod/record               — record COD intent (party).
-///   * GET  /api/v1/payments/cod_jeeb/by-delivery/{id} — read COD record (party/admin).
+///   * GET  /api/v1/payments/cod/by-delivery/{id} — read COD record (party/admin).
 ///   * POST /admin/v1/settlements/{batchId}/mark-paid  — bank-confirmation (admin).
 ///
-/// OWNER RULING 2026-07-27 — "jeeb is only cash on delivery": these three routes
-/// were previously a thin composition over unified_payment_gateway. UPG is gone;
-/// the ledger is now in-process (InProcessCodSettlementLedger). The ROUTES,
-/// status codes and body shapes are unchanged — this is a change of WHERE the
-/// COD record lives, never of WHETHER it is written. Authorization is unchanged
-/// too: a non-party still never reaches the ledger.
+/// The ledger is owned by unified-payment-gateway. Route, status, and body
+/// compatibility remain at this boundary while all durable settlement state,
+/// idempotency, and batch processing live in the owner. A non-party still never
+/// reaches the ledger.
 ///
 /// LAWS honored:
 ///   * The gateway NEVER touches a payment provider — under cash-on-delivery
@@ -50,7 +48,7 @@ public sealed class CodSettlementComposeController : ControllerBase
     /// <summary>
     /// POST /api/v1/payments/cod/record — records the COD settlement intent for a
     /// delivery. The recording Jeeber must be a party to the delivery (or admin);
-    /// the amounts are taken from the gateway-side settlement row so the caller
+    /// the amounts are taken from the durable owner's settlement projection so the caller
     /// cannot choose the commission (copied verbatim, BR-16).
     /// </summary>
     [HttpPost("api/v1/payments/cod/record")]
@@ -94,9 +92,9 @@ public sealed class CodSettlementComposeController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/v1/payments/cod_jeeb/by-delivery/{deliveryId} — reads the COD
-    /// record, authorized by the USER JWT at the gateway boundary. The caller must
-    /// be a party to the delivery (or admin).
+    /// Reads the COD record through the owner's generic by-delivery contract,
+    /// authorized by the user JWT at the gateway boundary. The route below is a
+    /// legacy compatibility alias and is not part of the production CMS surface.
     /// </summary>
     [HttpGet("api/v1/payments/cod_jeeb/by-delivery/{deliveryId}")]
     [RequireCapability(Capabilities.DeliveryParticipate)] // {client, jeeber}; party/admin is STATE in-action
@@ -110,7 +108,7 @@ public sealed class CodSettlementComposeController : ControllerBase
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
 
         // Authorize against the gateway's view of the delivery parties first so a
-        // non-party never reaches the ledger. The settlement row (if any) is the
+        // non-party never reaches the owner. Its settlement projection (if any) is the
         // strongest party source; fall back to the delivery participant resolver.
         var settlement = await _settlements.GetByDeliveryAsync(deliveryId, ct);
         var isParty =
@@ -160,8 +158,7 @@ public sealed class CodSettlementComposeController : ControllerBase
 
     private IActionResult Passthrough(CodLedgerResult result)
     {
-        // Defensive only — the in-process ledger is always available. Retained so
-        // the mapping stays total if the ledger is ever backed by a durable store.
+        // The durable owner is remote; transport failure maps to a stable 502.
         if (!result.Available)
             return StatusCode(StatusCodes.Status502BadGateway,
                 Problem("cod-ledger-unavailable", "The COD settlement ledger could not be reached."));

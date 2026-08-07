@@ -56,6 +56,42 @@ public sealed class StateServiceRefreshTokenStoreTests
     }
 
     [Fact]
+    public async Task VerifiedCeremonyContextSurvivesDurableColdInstanceRoundTrip()
+    {
+        var kv = new FakeIdempotencyStore();
+        var original = Token("ceremony-1", "operator-1", "hash-ceremony");
+        original = new RefreshToken
+        {
+            TokenId = original.TokenId,
+            UserId = original.UserId,
+            TokenHash = original.TokenHash,
+            IssuedAt = original.IssuedAt,
+            ExpiresAt = original.ExpiresAt,
+            AuthenticationTime = 1_786_086_000,
+            AuthenticationMethods = new[] { "pwd", "mfa" },
+            IdentityProvider = "https://identity.example.test",
+            AuthenticationSessionExpiresAt = DateTimeOffset.Parse("2026-08-07T20:00:00Z"),
+            DisplayName = "Finance Operator",
+            Email = "finance@example.test",
+            RoleSnapshot = new[] { "finance_approver" },
+            ActiveRoleSnapshot = "finance_approver",
+        };
+        await NewStore(kv).AddAsync(original, CancellationToken.None);
+
+        var rehydrated = await NewStore(kv).FindByHashAsync("hash-ceremony", CancellationToken.None);
+
+        rehydrated.Should().NotBeNull();
+        rehydrated!.AuthenticationTime.Should().Be(1_786_086_000);
+        rehydrated.AuthenticationMethods.Should().Equal("pwd", "mfa");
+        rehydrated.IdentityProvider.Should().Be("https://identity.example.test");
+        rehydrated.AuthenticationSessionExpiresAt.Should().Be(DateTimeOffset.Parse("2026-08-07T20:00:00Z"));
+        rehydrated.DisplayName.Should().Be("Finance Operator");
+        rehydrated.Email.Should().Be("finance@example.test");
+        rehydrated.RoleSnapshot.Should().Equal("finance_approver");
+        rehydrated.ActiveRoleSnapshot.Should().Be("finance_approver");
+    }
+
+    [Fact]
     public async Task FindByHash_ReHydrates_On_A_Cold_Instance()
     {
         // Instance A persists into the shared KV.

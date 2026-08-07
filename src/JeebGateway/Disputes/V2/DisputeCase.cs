@@ -54,16 +54,14 @@ public sealed class DisputeCase
     public string? ResolutionNotes { get; set; }
 
     /// <summary>
-    /// USD refund amount handed to <c>unified_payment_gateway</c> at
-    /// resolve time when <c>decision = refund</c>. Null for
-    /// no-action resolutions.
+    /// Legacy requested reimbursement amount. COD has no automated refund;
+    /// production cases remain open for manual resolution outside the system.
     /// </summary>
     public decimal? RefundUsd { get; set; }
 
     /// <summary>
-    /// The ledger / refund id returned by <c>unified_payment_gateway</c>
-    /// when the refund landed. Null on no-action resolutions or when the
-    /// refund failed and was rolled back (PO review blocker #4).
+    /// Legacy compatibility field. It remains null under the COD-only policy
+    /// because no automated refund or synthetic ledger entry is created.
     /// </summary>
     public string? RefundLedgerEntryId { get; set; }
 

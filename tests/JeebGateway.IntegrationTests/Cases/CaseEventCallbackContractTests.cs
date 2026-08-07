@@ -9,6 +9,7 @@ using JeebGateway.service.ServiceNotification;
 using JeebGateway.service.ServicePushNotification;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -148,6 +149,23 @@ public sealed class CaseEventCallbackContractTests
     }
 
     [Fact]
+    public async Task Callback_Accepts_Configured_Private_Owner_Network()
+    {
+        var calls = new List<CapturedCall>();
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["AdminCallbacks:TrustedNetworks:0"] = "10.40.0.0/16",
+        }).Build();
+        var controller = Controller(calls, new PushHandler(calls), new FakePushRecovery("succeeded"), configuration);
+        controller.HttpContext.Connection.RemoteIpAddress = IPAddress.Parse("10.40.2.7");
+
+        var result = await controller.Dispatch(Callback(), default);
+
+        result.Should().BeOfType<AcceptedResult>();
+        calls.Should().HaveCount(4);
+    }
+
+    [Fact]
     public async Task Callback_Retry_Propagates_Identical_Downstream_Dedupe_Identifiers()
     {
         var calls = new List<CapturedCall>();
@@ -270,7 +288,8 @@ public sealed class CaseEventCallbackContractTests
         => Controller(calls, new PushHandler(calls), new FakePushRecovery("succeeded"));
 
     private static CaseEventCallbacksController Controller(
-        List<CapturedCall> calls, HttpMessageHandler pushHandler, IPushDispatchRecoveryClient recovery)
+        List<CapturedCall> calls, HttpMessageHandler pushHandler, IPushDispatchRecoveryClient recovery,
+        IConfiguration? configuration = null)
     {
         var delivery = new CaseDeliveryClient(new HttpClient(new DeliveryHandler())
             { BaseAddress = new Uri("https://delivery/") });
@@ -280,7 +299,8 @@ public sealed class CaseEventCallbackContractTests
             new ServicePushNotificationClient("https://push/",
                 new HttpClient(pushHandler)),
             recovery,
-            NullLogger<CaseEventCallbacksController>.Instance)
+            NullLogger<CaseEventCallbacksController>.Instance,
+            configuration)
         {
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() },
         };

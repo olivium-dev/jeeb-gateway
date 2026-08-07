@@ -15,7 +15,6 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <PackageReference Include="FluentAssertions" Version="6.12.1" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="8.0.21" />
-    <PackageReference Include="Testcontainers.PostgreSql" Version="3.10.0" />
 
     <!--
       JEB-471 / T-BE-001 — additional packages for the OTP sign-in
@@ -25,7 +24,7 @@
       directly against HmacShaPhoneHasher (PR #32 review B1).
     -->
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="8.10.0" />
-    <PackageReference Include="OpenTelemetry" Version="1.9.0" />
+    <PackageReference Include="OpenTelemetry" Version="1.17.0" />
     <PackageReference Include="libphonenumber-csharp" Version="8.13.51" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.19.1" />
     <PackageReference Include="coverlet.collector" Version="6.0.4" />

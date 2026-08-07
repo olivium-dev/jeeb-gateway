@@ -128,7 +128,8 @@ public class DisputeRefundOrderingTests
 
     // ------------------------------------------------------------------
     // AC3 — admin retries after "refund succeeded but the durable write
-    // failed": the SAME idempotency key is re-sent (UPG would dedupe), the
+    // failed": the SAME idempotency key is re-sent (a future reimbursement owner
+    // would dedupe), the
     // retry completes, and no second refund amount is recorded. Simulated
     // via a decorator over InMemoryDisputeCaseStore that throws on the
     // FIRST ApplyResolutionAsync call per case (modelling a transient write

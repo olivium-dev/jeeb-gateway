@@ -13,17 +13,16 @@ namespace JeebGateway.Controllers;
 /// <list type="bullet">
 ///   <item>POST /deliveries/{id}/settle — the assigned Jeeber records the
 ///         cash they collected. The gateway computes the fee breakdown
-///         (flat 10% commission, no insurance or floor) and posts a single
-///         ledger entry to wallet-service.</item>
-///   <item>GET /deliveries/{id}/receipt — returns the persisted settlement
-///         as a render-ready receipt. The state machine advances from
+///         (flat 10% commission, no insurance or floor) and forwards the COD
+///         record to unified-payment-gateway.</item>
+///   <item>GET /deliveries/{id}/receipt — returns the owner-backed settlement
+///         as a render-ready receipt. The durable state advances from
 ///         <c>settled</c> to <c>receipt_generated</c> on the first read.</item>
 /// </list>
 ///
 /// All Jeeb business logic — fee policy, tier-to-commission mapping,
 /// authorization — lives behind <see cref="ISettlementService"/>. The
-/// controller is intentionally a thin HTTP adapter so the boundary with
-/// wallet-service stays generic.
+/// controller is intentionally a thin HTTP adapter over the generic COD owner.
 /// </summary>
 [ApiController]
 [Route("deliveries")]
@@ -117,6 +116,13 @@ public class SettlementsController : ControllerBase
                     Type = "https://jeeb.dev/errors/settlement-invalid-payment-method",
                 });
 
+            case SettlementOutcome.DependencyUnavailable:
+                return Problem(
+                    type: "https://jeeb.dev/errors/settlement-owner-unavailable",
+                    title: "A settlement dependency is unavailable.",
+                    detail: result.Reason,
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+
             case SettlementOutcome.AlreadySettled:
             case SettlementOutcome.Settled:
                 return Ok(ToResponse(result.Settlement!));
@@ -150,13 +156,13 @@ public class SettlementsController : ControllerBase
             // Done, or the customer's PATCH → Done) — there is no manual
             // "record cash" step in the apps. BOTH completion legs fire that
             // settlement strictly BEST-EFFORT and SWALLOW every fault (a
-            // settlement/ledger hiccup must never turn a committed handover into
+            // settlement-owner hiccup must never turn a committed handover into
             // a 5xx), so a transient miss leaves a completed delivery with NO
             // settlement row and the receipt read 404s even though the money
             // moved. Drive the same idempotent, server-authoritative completion
             // settlement here on read so the receipt materialises. Exactly-once
             // is preserved: SettleOnCompletionAsync short-circuits an
-            // already-settled row and never double-posts the ledger; when the
+            // already-settled owner record and never double-records COD; when the
             // delivery is genuinely not settle-able (unknown / not Done / no
             // assigned Jeeber) no row is created and the read still 404s, which
             // is the correct answer.
@@ -198,7 +204,7 @@ public class SettlementsController : ControllerBase
     /// The settlement-intent READ. Returns the open commission intent for a
     /// delivery (idempotent on deliveryId — a repeat read never double-creates
     /// and the duplicate verify after Done does NOT double-settle, A7/N11). S09
-    /// asserts only the enqueue + window-open; the fee math + ledger posting are
+    /// asserts only the enqueue + window-open; owner-side COD finalization is
     /// the S10 concern behind POST /deliveries/{id}/settle.
     ///
     /// <para>
@@ -223,35 +229,10 @@ public class SettlementsController : ControllerBase
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauthorized)) return unauthorized;
 
-        // A persisted settlement (the Jeeber already recorded the cash) is the
-        // authoritative party + state source — read it first so a settled
-        // delivery reflects the real row verbatim and the read is idempotent.
-        var settlement = await _settlements.GetByDeliveryAsync(deliveryId, ct);
-        if (settlement is not null)
-        {
-            var isClient = string.Equals(settlement.ClientId, userId, StringComparison.Ordinal);
-            var isJeeber = string.Equals(settlement.JeeberId, userId, StringComparison.Ordinal);
-            if (!isClient && !isJeeber && !UserIdentity.IsAdmin(HttpContext))
-            {
-                return Forbidden();
-            }
-
-            return Ok(new SettlementIntentResponse
-            {
-                DeliveryId = settlement.DeliveryId,
-                State = settlement.State,
-                Created = true,
-                SettlementId = settlement.Id,
-                Total = settlement.Total,
-                Currency = settlement.Currency,
-            });
-        }
-
-        // No persisted settlement yet — resolve the delivery to authorize the
-        // caller and to decide whether the commission window has opened. The
-        // intent is "open" (pending_settlement) once the delivery reaches the
-        // settle-able terminal state (Done / delivered); before that there is
-        // no intent to read.
+        // Resolve the delivery owner first. Authorization must not depend on a
+        // financial-owner lookup: otherwise an unknown/non-party delivery can
+        // dial the COD owner and leak availability (or return 502 instead of the
+        // stable 404/403 contract).
         var participants = await _participants.ResolveAsync(deliveryId, ct);
         if (participants is null)
         {
@@ -264,11 +245,37 @@ public class SettlementsController : ControllerBase
         }
 
         var windowOpen = IsSettleable(participants.Status);
+        if (!windowOpen)
+        {
+            return Ok(new SettlementIntentResponse
+            {
+                DeliveryId = participants.DeliveryId,
+                State = "not_ready",
+                Created = false,
+            });
+        }
+
+        // The durable owner is consulted only after delivery authorization and
+        // once the settlement window is open.
+        var settlement = await _settlements.GetByDeliveryAsync(deliveryId, ct);
+        if (settlement is not null)
+        {
+            return Ok(new SettlementIntentResponse
+            {
+                DeliveryId = settlement.DeliveryId,
+                State = settlement.State,
+                Created = true,
+                SettlementId = settlement.Id,
+                Total = settlement.Total,
+                Currency = settlement.Currency,
+            });
+        }
+
         return Ok(new SettlementIntentResponse
         {
             DeliveryId = participants.DeliveryId,
-            State = windowOpen ? SettlementState.PendingSettlement : "not_ready",
-            Created = windowOpen,
+            State = SettlementState.PendingSettlement,
+            Created = true,
         });
     }
 

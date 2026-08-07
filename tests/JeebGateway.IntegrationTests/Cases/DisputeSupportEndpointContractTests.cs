@@ -4,6 +4,7 @@ using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Cases;
 using JeebGateway.Disputes;
+using JeebGateway.IntegrationTests.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -90,6 +91,87 @@ public sealed class DisputeSupportEndpointContractTests
             new { action = "fixed", refundUsd = 1.0m, expectedVersion = 4 });
         refund.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         cases.Patches.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Admin_Case_Evidence_Uses_Case_Scoped_Opaque_Paths_Without_Raw_Cdn_Refs()
+    {
+        const string rawReference = "dispute_evidence/private-proof.jpg";
+        var cases = new FakeCases
+        {
+            EvidenceRef = rawReference,
+            InternalNote = CaseApiProjection.MetadataBody(new CaseGatewayMetadataV1
+            {
+                VoiceUrl = rawReference,
+                Evidence = new[]
+                {
+                    new GenericCaseEvidenceV1
+                    {
+                        Source = "cdn",
+                        Status = "complete",
+                        CapturedAt = DateTimeOffset.Parse("2026-08-05T09:00:00Z"),
+                        Payload = JsonSerializer.SerializeToElement(new { cdnRef = rawReference }),
+                    },
+                },
+            }),
+        };
+        using var factory = Factory(cases);
+        var admin = Client(factory, "admin-1", "admin");
+
+        var response = await admin.GetAsync($"/admin/v1/cases/{CaseId:D}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().NotContain(rawReference);
+        body.Should().NotContain(CaseApiProjection.MetadataPrefix);
+        using var json = JsonDocument.Parse(body);
+        var path = json.RootElement.GetProperty("attachments")[0].GetString();
+        path.Should().StartWith($"/gateway/admin/v1/cases/{CaseId:D}/evidence/");
+        var token = path!.Split('/').Last();
+
+        var otherCase = Guid.Parse("589660be-7844-42bc-a48f-f5c707b85b25");
+        var crossCase = await admin.GetAsync($"/admin/v1/cases/{otherCase:D}/evidence/{token}");
+        crossCase.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task Admin_Message_Page_Removes_Synthetic_Metadata_Without_Dropping_Internal_Notes_Or_Cursor()
+    {
+        const string rawReference = "dispute_evidence/private-page-proof.jpg";
+        var cases = new FakeCases
+        {
+            Kind = GenericCaseKinds.Support,
+            InternalNote = CaseApiProjection.MetadataBody(new CaseGatewayMetadataV1
+            {
+                VoiceUrl = rawReference,
+                Evidence = new[]
+                {
+                    new GenericCaseEvidenceV1
+                    {
+                        Source = "cdn",
+                        Status = "complete",
+                        CapturedAt = DateTimeOffset.Parse("2026-08-05T09:00:00Z"),
+                        Payload = JsonSerializer.SerializeToElement(new { cdnRef = rawReference }),
+                    },
+                },
+            }),
+            LegitimateInternalNote = "finance review complete",
+            MessagePageNextCursor = "owner-cursor-2",
+        };
+        using var factory = Factory(cases);
+        var admin = Client(factory, "admin-1", "admin");
+
+        var response = await admin.GetAsync($"/admin/v1/cases/{CaseId:D}/messages?limit=10");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().NotContain(CaseApiProjection.MetadataPrefix);
+        body.Should().NotContain(rawReference);
+        body.Should().Contain("finance review complete");
+        using var json = JsonDocument.Parse(body);
+        json.RootElement.GetProperty("nextCursor").GetString().Should().Be("owner-cursor-2");
+        json.RootElement.GetProperty("items").EnumerateArray().Should()
+            .Contain(message => message.GetProperty("body").GetString() == "finance review complete");
     }
 
     [Fact]
@@ -273,16 +355,25 @@ public sealed class DisputeSupportEndpointContractTests
     }
 
     private static WebApplicationFactory<Program> Factory(IGenericCaseGatewayService cases) =>
-        new WebApplicationFactory<Program>().WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
-            services.RemoveAll<IDisputeService>();
-            services.RemoveAll<IGenericCaseGatewayService>();
-            services.AddSingleton(cases);
-        }));
+            builder.UseSetting("AdminEvidence:TokenKey", "case-evidence-test-key-32-bytes-minimum");
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IDisputeService>();
+                services.RemoveAll<IGenericCaseGatewayService>();
+                services.AddSingleton(cases);
+            });
+        });
 
     private static HttpClient Client(WebApplicationFactory<Program> factory, string user, string role)
     {
         var client = factory.CreateClient();
+        if (string.Equals(role, "admin", StringComparison.Ordinal))
+        {
+            return client.WithBearer(
+                CapabilityTestHarness.MintExternalOperatorBearer(factory, role));
+        }
         client.DefaultRequestHeaders.Add("X-User-Id", user);
         client.DefaultRequestHeaders.Add("X-User-Roles", role);
         return client;
@@ -297,6 +388,9 @@ public sealed class DisputeSupportEndpointContractTests
         public string Kind { get; set; } = GenericCaseKinds.Dispute;
         public bool ActiveConflict { get; init; }
         public string? InternalNote { get; init; }
+        public string? LegitimateInternalNote { get; init; }
+        public string? MessagePageNextCursor { get; init; }
+        public string? EvidenceRef { get; init; }
         public int LegacyRowCount { get; init; } = 1;
         public int DetailReads { get; private set; }
         public CreateDisputeCaseInput? Created { get; private set; }
@@ -357,6 +451,13 @@ public sealed class DisputeSupportEndpointContractTests
         public Task<GenericCasePageV1> ListAdminAsync(
             GenericCaseQueryV1 query, bool? unassigned, CancellationToken ct) =>
             Task.FromResult(new GenericCasePageV1 { Items = new[] { Row() } });
+        public Task<GenericCaseMessagePageV1> ListMessagesForUserAsync(
+            string caseId, string userId, bool isAdmin, int limit, string? cursor, CancellationToken ct) =>
+            Task.FromResult(new GenericCaseMessagePageV1
+            {
+                Items = Detail(ParseCaseId(caseId)).Messages,
+                NextCursor = MessagePageNextCursor,
+            });
         public Task<DisputeEvidencePreviewResponseV1> PreviewDisputeEvidenceAsync(
             string deliveryId, string userId, string userRole, CancellationToken ct)
         {
@@ -403,6 +504,9 @@ public sealed class DisputeSupportEndpointContractTests
                     Body = $"description-{id:D}",
                     Actor = new GenericCaseActorV1 { Ref = "client-1", Role = "client" },
                     CaseVersion = 1, CreatedAt = DateTimeOffset.Parse("2026-08-05T09:00:00Z"),
+                    Attachments = EvidenceRef is null
+                        ? Array.Empty<GenericCaseAttachmentV1>()
+                        : new[] { Attachment(id, MessageId(id, 1), EvidenceRef) },
                 },
             };
             if (InternalNote is not null)
@@ -412,6 +516,16 @@ public sealed class DisputeSupportEndpointContractTests
                     MessageId = MessageId(id, 2), CaseId = id, MessageType = "internal_note", Body = InternalNote,
                     Actor = new GenericCaseActorV1 { Ref = "admin-1", Role = "admin" },
                     CaseVersion = 4, CreatedAt = DateTimeOffset.Parse("2026-08-05T10:00:00Z"),
+                });
+            }
+            if (LegitimateInternalNote is not null)
+            {
+                messages.Add(new GenericCaseMessageV1
+                {
+                    MessageId = MessageId(id, 4), CaseId = id, MessageType = "internal_note",
+                    Body = LegitimateInternalNote,
+                    Actor = new GenericCaseActorV1 { Ref = "admin-1", Role = "admin" },
+                    CaseVersion = 4, CreatedAt = DateTimeOffset.Parse("2026-08-05T10:30:00Z"),
                 });
             }
             if (_publicResolution is not null)
@@ -427,8 +541,21 @@ public sealed class DisputeSupportEndpointContractTests
             {
                 Case = Row(id),
                 Messages = messages,
+                Attachments = EvidenceRef is null
+                    ? Array.Empty<GenericCaseAttachmentV1>()
+                    : new[] { Attachment(id, null, EvidenceRef) },
             };
         }
+
+        private static GenericCaseAttachmentV1 Attachment(Guid caseId, Guid? messageId, string cdnRef) => new()
+        {
+            AttachmentId = Guid.Parse("689660be-7844-42bc-a48f-f5c707b85b25"),
+            CaseId = caseId,
+            MessageId = messageId,
+            CdnRef = cdnRef,
+            AddedBy = "client-1",
+            CreatedAt = DateTimeOffset.Parse("2026-08-05T09:00:00Z"),
+        };
 
         private GenericCaseV1 Row(Guid? caseId = null) => new()
         {

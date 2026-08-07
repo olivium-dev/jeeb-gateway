@@ -230,7 +230,37 @@ public interface IOfferServiceClient
         string requestId,
         CancellationToken ct)
         => Task.FromResult<IReadOnlyList<OfferWire>>(Array.Empty<OfferWire>());
+
+    /// <summary>
+    /// Money-safe variant of the request-offer read. Unlike the UI-oriented
+    /// <see cref="ListForRequestAsync"/>, transport, authorization, HTTP and
+    /// decode failures are preserved instead of degrading to an empty list.
+    /// COD orchestration must be able to distinguish "no accepted offer" from
+    /// "the offer owner could not be consulted" and fail closed in both cases.
+    ///
+    /// The default delegates to existing fakes for source compatibility. The
+    /// production client overrides this method with status-preserving HTTP.
+    /// </summary>
+    async Task<OfferRequestReadResult> ListForRequestStrictAsync(
+        string actingUserId,
+        string requestId,
+        CancellationToken ct)
+        => new(OfferRequestReadStatus.Ok,
+            await ListForRequestAsync(actingUserId, requestId, ct));
 }
+
+public enum OfferRequestReadStatus
+{
+    Ok,
+    Forbidden,
+    NotFound,
+    InvalidResponse,
+    Unavailable,
+}
+
+public sealed record OfferRequestReadResult(
+    OfferRequestReadStatus Status,
+    IReadOnlyList<OfferWire> Offers);
 
 /// <summary>
 /// GAP-2 — one of the jeeber's own offers, decoded from offer-service

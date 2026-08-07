@@ -32,20 +32,14 @@ public sealed class AccountDeletionPurgeOptions
 /// a <see cref="BackgroundService"/> that ticks on a configured interval, resolves
 /// its collaborators from a fresh <see cref="IServiceScope"/> per tick (so it never
 /// captures a dependency at a narrower lifetime than its own), and exposes a public
-/// force-runnable entry point (<see cref="PurgeOnceAsync"/>) for tests / an eventual
-/// test-console hook — the same role <c>SweepOnceAsync</c> /
-/// <c>WeeklySettlementBatch.RunBatchAsync</c> play for their stores.
+/// force-runnable entry point (<see cref="PurgeOnceAsync"/>) for tests and the
+/// local test console.
 ///
-/// Registered ONLY when <c>GatewayPostgres:ConnectionString</c> is configured (i.e.
-/// alongside <see cref="PostgresAccountDeletionStore"/>) — there is no equivalent
-/// worker for <see cref="InMemoryAccountDeletionStore"/> today (nothing currently
-/// calls <see cref="IAccountDeletionStore.AdvanceAsync"/> in production), so adding
-/// this worker is additive and does not change the in-memory fallback's behavior.
+/// This legacy worker is registered only by the Development/Testing composition.
 ///
 /// All the actual state-machine logic — including which side effects run exactly
 /// once — lives in <see cref="IAccountDeletionStore.AdvanceAsync"/> (state-guarded
-/// UPDATEs on <see cref="PostgresAccountDeletionStore"/>); this class only owns the
-/// scheduling loop.
+/// transitions); this class only owns the scheduling loop.
 /// </summary>
 public sealed class AccountDeletionPurgeWorker : BackgroundService
 {
@@ -113,7 +107,7 @@ public sealed class AccountDeletionPurgeWorker : BackgroundService
     /// active deliveries move to <c>scheduled</c>; <c>scheduled</c> rows whose
     /// <c>scheduled_purge_at</c> is due move to <c>completed</c> and have their PII
     /// hard-deleted. Safe to call repeatedly / concurrently — every transition in
-    /// <see cref="PostgresAccountDeletionStore.AdvanceAsync"/> is state-guarded, so a
+    /// <see cref="IAccountDeletionStore.AdvanceAsync"/> is state-guarded, so a
     /// redundant call is a no-op for rows already advanced.
     /// </summary>
     public async Task PurgeOnceAsync(CancellationToken ct)

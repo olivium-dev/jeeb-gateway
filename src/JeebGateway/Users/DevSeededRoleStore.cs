@@ -42,6 +42,14 @@ public interface IDevSeededRoleStore
     IReadOnlyList<string>? Resolve(string? userId, string? email);
 }
 
+/// <summary>Production implementation: no mutable dev-role bridge is allocated.</summary>
+public sealed class NoOpDevSeededRoleStore : IDevSeededRoleStore
+{
+    public void Record(string? userId, string? email, IReadOnlyList<string> roles) { }
+
+    public IReadOnlyList<string>? Resolve(string? userId, string? email) => null;
+}
+
 /// <inheritdoc cref="IDevSeededRoleStore"/>
 public sealed class DevSeededRoleStore : IDevSeededRoleStore
 {

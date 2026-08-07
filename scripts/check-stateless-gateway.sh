@@ -1,132 +1,89 @@
 #!/usr/bin/env bash
-# R9 — gateway no-DB / no-volatile-store CI gate (ADR-001-rev2 confirmation).
-#
-# Asserts two invariants that keep jeeb-gateway a STATELESS BFF:
-#   (1) GR-3 RATCHET — the gateway opens a database only through the seams that
-#       D1 (JEBV4-190) already inventoried. Any NEW db seam (raw Npgsql, or EF
-#       DbContext / UseNpgsql / UseSqlServer / UseSqlite) hard-fails CI. The
-#       allowlist may only SHRINK (JEBV4-193 / D4).
-#   (2) No in-memory store is REGISTERED in DI for the 10 durable domains; those
-#       must be backed by jeeb-state-service via the NSwag-typed client.
-#
-# Invariant (1) — the RATCHET (JEBV4-193):
-#   Older revisions of this gate grepped only for EF markers (DbContext /
-#   UseNpgsql / ...), so the ~24 files that open the DB via RAW Npgsql slipped
-#   through and the gate green-washed a gateway that in fact owns ~25 DB seams.
-#   The ratchet fixes that: it enumerates EVERY DB seam in the source (raw
-#   Npgsql imports included) and compares the set against an explicit allowlist
-#   seeded from the D1 matrix — scripts/gateway-db-seam-allowlist.txt.
-#     * A seam file NOT on the allowlist  => HARD FAIL (new seam, or a D5-removed
-#       seam reappeared: removals delete their allowlist line, so a reappearance
-#       is no longer allowlisted and trips the gate).
-#     * The allowlist is monotonically non-increasing — each D5 (JEBV4-194) store
-#       elimination deletes that store's allowlist line in the same PR.
-#     * When the allowlist is EMPTY the ratchet enforces absolute zero: ANY DB
-#       seam then hard-fails. Emptying the allowlist is the FINAL step of D5
-#       (Q-010 RATIFIED / GR-3 absolute). No separate "enforce zero" flag is
-#       needed — the subset check degenerates to zero-seam enforcement for free.
-#
-# Invariant (2) is reported as a tracked-debt INVENTORY while the Layer-2 rewire
-# is in progress (R2/R3/R4/R5/R6/R7 reconstruction is blocked on missing
-# read-by-domain-key endpoints in jeeb-state-service — see SPECS-STATUS). It
-# flips to HARD-FAIL by setting R9_ENFORCE_NO_INMEMORY=1 once those endpoints
-# land and the InMemory fallbacks are deleted. This keeps the gate honest: it
-# never green-washes the DB-free invariant, and it never falsely claims the
-# durable rewire is complete.
+# Hard CI gate for the production Jeeb gateway boundary.
 set -euo pipefail
-ENFORCE_NO_INMEMORY="${R9_ENFORCE_NO_INMEMORY:-0}"
 
-SRC="src/JeebGateway"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC="$ROOT/src/JeebGateway"
+PROJECT="$SRC/JeebGateway.csproj"
 PROGRAM="$SRC/Program.cs"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ALLOWLIST="$SCRIPT_DIR/gateway-db-seam-allowlist.txt"
+ALLOWLIST="$ROOT/scripts/gateway-db-seam-allowlist.txt"
+WORKFLOW="$ROOT/.github/workflows/deploy-to-jeeb.yml"
+COMPOSE="$ROOT/docker-compose.yml"
 fail=0
+gate_tmp="$(mktemp -d)"
+trap 'rm -rf "$gate_tmp"' EXIT
 
-echo "== R9 gate: stateless jeeb-gateway =="
-
-# ---- Invariant (1): GR-3 db-seam RATCHET vs the D1 allowlist -----------------
-echo "-- (1) GR-3 ratchet: no gateway DB seam outside the D1 allowlist"
-if [ ! -f "$ALLOWLIST" ]; then
-  echo "FAIL: allowlist not found at $ALLOWLIST"
-  exit 1
-fi
-
-# Detected seams: source files that IMPORT the Npgsql namespace (real DB access,
-# not a comment mention) or use an EF DbContext / provider. `using Npgsql;` is
-# the low-false-positive signal — doc-comment references to NpgsqlException or
-# INpgsqlConnectionFactory in the composition root do not import the namespace.
-DETECTED="$(grep -rlE '^[[:space:]]*using[[:space:]]+Npgsql|UseNpgsql|UseSqlServer|UseSqlite|:[[:space:]]*DbContext|DbContextOptions' \
-  "$SRC" --include='*.cs' | sed 's#^\./##' | sort -u || true)"
-
-# Allowed seams: uncommented, non-blank lines from the allowlist.
-ALLOWED="$(grep -vE '^[[:space:]]*(#|$)' "$ALLOWLIST" | sed 's/[[:space:]]*$//' | sort -u || true)"
-
-# (1a) any detected seam not on the allowlist => NEW/REAPPEARED seam => FAIL.
-new_seams="$(comm -23 <(printf '%s\n' "$DETECTED") <(printf '%s\n' "$ALLOWED") || true)"
-if [ -n "$new_seams" ]; then
-  echo "FAIL: gateway DB seam(s) not on the GR-3 allowlist (new seam, or a"
-  echo "      D5-removed seam reappeared). This violates GR-3. Offending files:"
-  printf '  %s\n' $new_seams
-  echo "      Do NOT add to the allowlist — move the store to its owning service."
+report_matches() {
+  local message="$1"
+  shift
+  echo "FAIL: $message"
+  "$@" || true
   fail=1
+}
+
+echo "== Stateless gateway hard gate =="
+
+if grep -vE '^[[:space:]]*(#|$)' "$ALLOWLIST" | grep -q .; then
+  report_matches "the database seam allowlist must remain empty" \
+    grep -n -vE '^[[:space:]]*(#|$)' "$ALLOWLIST"
+else
+  echo "OK: database seam allowlist is absolute zero"
 fi
 
-# (1b) allowlist entries no longer detected => the ratchet should have shrunk.
-# Soft NOTE (not a fail) so a D5 removal PR that deletes the store before pruning
-# its line still goes green; the follow-up prune keeps the list honest.
-stale="$(comm -13 <(printf '%s\n' "$DETECTED") <(printf '%s\n' "$ALLOWED") || true)"
-if [ -n "$stale" ]; then
-  echo "NOTE: allowlist entries no longer present as DB seams — prune these lines"
-  echo "      from $ALLOWLIST (the ratchet only shrinks):"
-  printf '  %s\n' $stale
+db_source_pattern='^[[:space:]]*using[[:space:]]+(Npgsql|Microsoft\.EntityFrameworkCore)|Npgsql(Connection|Command|DataSource|Transaction)|Use(Npgsql|SqlServer|Sqlite)|:[[:space:]]*DbContext|DbContextOptions'
+if grep -RInE "$db_source_pattern" "$SRC" --include='*.cs' > "$gate_tmp/db-source.matches"; then
+  report_matches "database provider code exists in the gateway source" \
+    sed -n '1,120p' "$gate_tmp/db-source.matches"
+else
+  echo "OK: source contains no database provider code"
 fi
 
-allowed_n="$(printf '%s\n' "$ALLOWED" | grep -cE '.' || true)"
-detected_n="$(printf '%s\n' "$DETECTED" | grep -cE '.' || true)"
-if [ "$fail" -eq 0 ]; then
-  if [ "$allowed_n" -eq 0 ]; then
-    echo "OK: allowlist empty — GR-3 absolute-zero enforced and $detected_n seams present."
-  else
-    echo "OK: $detected_n DB seam(s), all within the $allowed_n-entry D1 allowlist (ratchet holds)."
-  fi
+db_package_pattern='PackageReference[[:space:]]+Include="(Npgsql|Npgsql\.|Microsoft\.EntityFrameworkCore|Pomelo\.EntityFrameworkCore|MySqlConnector|Microsoft\.Data\.SqlClient)'
+if grep -RInE "$db_package_pattern" "$ROOT/src" --include='*.csproj' > "$gate_tmp/db-package.matches"; then
+  report_matches "database provider package is referenced by the gateway" \
+    sed -n '1,120p' "$gate_tmp/db-package.matches"
+else
+  echo "OK: production project has no database provider package"
 fi
 
-# ---- Invariant (2): no durable-domain InMemory* registered in DI ------------
-# These are the 10 durable domains rewired to jeeb-state-service (R1–R8).
-echo "-- (2) no durable-domain InMemory* registration in Program.cs DI"
-FORBIDDEN_REGS=(
-  "IRefreshTokenStore, *InMemoryRefreshTokenStore"   # R2
-  "IKycStore, *InMemoryKycStore"                     # R3
-  "IRatingStore, *InMemoryRatingStore"               # R4
-  "IDisputeCaseStore, *InMemoryDisputeCaseStore"     # R5
-  "IDisputeStore, *InMemoryDisputeStore"             # R5
-  "IJeeberRestrictionStore, *InMemoryJeeberRestrictionStore" # R6
-  "IAdminEscalationStore, *InMemoryAdminEscalationStore"     # R7
-)
-inmemory_found=0
-for pat in "${FORBIDDEN_REGS[@]}"; do
-  if grep -nE "AddSingleton<[^>]*$pat" "$PROGRAM" | grep -vE '^\s*//' >/dev/null 2>&1; then
-    inmemory_found=1
-    if [ "$ENFORCE_NO_INMEMORY" = "1" ]; then
-      echo "FAIL: forbidden durable-domain registration still active: $pat"
-      grep -nE "AddSingleton<[^>]*$pat" "$PROGRAM" | grep -vE '^\s*//'
-      fail=1
-    else
-      echo "DEBT: durable-domain InMemory still registered (rewire in progress): $pat"
-    fi
-  fi
-done
-if [ "$inmemory_found" -eq 0 ]; then
-  echo "OK: no durable-domain InMemory registration remains."
-elif [ "$ENFORCE_NO_INMEMORY" != "1" ]; then
-  echo "NOTE: set R9_ENFORCE_NO_INMEMORY=1 to hard-fail once jeeb-state-service"
-  echo "      exposes read-by-domain-key endpoints and the fallbacks are removed."
+if grep -nE 'builder\.Configuration\[[^]]*(GatewayPostgres|WalletPostgres|ConnectionStrings:Default|DATABASE_URL|JEEB_DATABASE_URL)' "$PROGRAM" > "$gate_tmp/db-config.matches"; then
+  report_matches "Program.cs reads a gateway database credential" \
+    sed -n '1,120p' "$gate_tmp/db-config.matches"
+else
+  echo "OK: composition root reads no database credential"
+fi
+
+if grep -nE 'db/apply\.sh|postgresql-client|JEEB_DATABASE_URL.*secrets|DATABASE_URL:.*secrets' "$WORKFLOW" > "$gate_tmp/db-deploy.matches"; then
+  report_matches "deployment workflow still connects to or migrates a gateway database" \
+    sed -n '1,120p' "$gate_tmp/db-deploy.matches"
+else
+  echo "OK: deployment applies no gateway database migration"
+fi
+
+if grep -nE 'postgres:|ConnectionStrings__Default|postgres-data|POSTGRES_(DB|USER|PASSWORD)' "$COMPOSE" > "$gate_tmp/db-compose.matches"; then
+  report_matches "docker-compose still provisions or configures a gateway database" \
+    sed -n '1,120p' "$gate_tmp/db-compose.matches"
+else
+  echo "OK: docker-compose contains no gateway database"
+fi
+
+if ! grep -q 'append_env Settlements__CodOwnerVerified true' "$WORKFLOW"; then
+  echo "FAIL: deployment does not explicitly drive the COD owner-readiness gate"
+  fail=1
+else
+  echo "OK: deployment drives the fail-closed COD owner-readiness gate"
+fi
+
+if ! grep -q 'StatelessGatewayGuard.EnsureStateless' "$PROGRAM"; then
+  echo "FAIL: production startup does not enforce the runtime stateless guard"
+  fail=1
+else
+  echo "OK: production startup enforces the runtime stateless guard"
 fi
 
 if [ "$fail" -ne 0 ]; then
-  echo ""
-  echo "R9 gate FAILED — gateway is not stateless. See ADR-001-rev2."
+  echo "Stateless gateway gate FAILED"
   exit 1
 fi
-echo ""
-echo "R9 gate PASSED — gateway holds no DB and no forbidden volatile store."
+
+echo "Stateless gateway gate PASSED"

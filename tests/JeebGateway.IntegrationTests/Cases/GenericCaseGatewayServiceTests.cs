@@ -409,6 +409,7 @@ public sealed class GenericCaseGatewayServiceTests
         var projected = CaseApiProjection.Project(detail, includeInternal: false);
 
         detail.Messages.Should().HaveCount(200);
+        projected.ParticipantRefs.Should().Equal("client-1");
         detail.Messages.Should().ContainSingle(message =>
             message.Body.StartsWith(CaseApiProjection.MetadataPrefix, StringComparison.Ordinal));
         detail.Messages.First().Body.Should().Be("opening-description");
@@ -453,8 +454,23 @@ public sealed class GenericCaseGatewayServiceTests
         query.Assigned.Should().BeFalse();
         query.Limit.Should().Be(17);
         query.Cursor.Should().Be("state-queue-cursor");
-        query.Sort.Should().Be(GenericCaseSorts.Sla);
+        query.Sort.Should().Be(GenericCaseSorts.Recent);
         page.NextCursor.Should().Be("next-state-cursor");
+    }
+
+    [Fact]
+    public async Task Admin_Queue_Defaults_To_Sla_Sort_When_Caller_Omits_Sort()
+    {
+        var state = new FakeCaseStateClient();
+        state.SeedSupport();
+
+        await Service(state, new DeliveryHandler()).ListAdminAsync(
+            new GenericCaseQueryV1 { Query = "delivery-42", Limit = 20 },
+            unassigned: null, default);
+
+        var query = state.ListQueries.Should().ContainSingle().Subject;
+        query.Query.Should().Be("delivery-42");
+        query.Sort.Should().Be(GenericCaseSorts.Sla);
     }
 
     private static GenericCaseGatewayService Service(FakeCaseStateClient state, HttpMessageHandler handler,

@@ -3,11 +3,9 @@ using System.Collections.Concurrent;
 namespace JeebGateway.Users;
 
 /// <summary>
-/// Account-deletion seam for the financial ledger. The actual ledger
-/// (db/migrations/0008) lives behind the payment/finance services; the
-/// gateway only needs a contract that says "replace this user id with
-/// the pseudonym on every retained row". Production wiring proxies to
-/// unified_payment_gateway via an NSwag-generated client.
+/// Legacy account-deletion contract retained for isolated compatibility tests.
+/// The gateway owns no financial ledger. Durable COD records and their retention
+/// or pseudonymization policy belong to unified-payment-gateway.
 ///
 /// Returns the number of rows rewritten so the deletion store and
 /// integration tests can assert "financial records retained for
@@ -28,10 +26,7 @@ public interface IFinancialLedgerAnonymizer
 }
 
 /// <summary>
-/// MVP stand-in. Holds a single counter per (user id) so the deletion
-/// flow has a real target to anonymize and tests can seed financial
-/// rows without depending on the downstream service. Swap for the
-/// unified_payment_gateway client in production.
+/// Test-only stand-in. Production CMS routes never use this process-local fixture.
 /// </summary>
 public class InMemoryFinancialLedger : IFinancialLedgerAnonymizer
 {

@@ -87,50 +87,17 @@ bounce because the service is keyed by its own opaque ids:
 
 ---
 
-## unified-payment-gateway (UPG) — contract REMOVED 2026-07-26
+## Cash-on-delivery owner contract
 
-**Owner directive, 2026-07-26:** Jeeb no longer treats `unified_payment_gateway`
-as a mandated payments destination. The prior "payments only via UPG" constraint
-is **withdrawn for Jeeb** (it remains in force for other olivium product lines,
-and the UPG service itself is untouched).
+Unified-payment-gateway is the existing durable owner for COD intents,
+settlements, batches, audit events, idempotent administrative mutations, and
+transactional notifications. The gateway is a stateless browser facade: it
+authorizes the operator and forwards generic `/payments/cod/*` owner operations.
 
-The following were deleted from this repo because they had **zero call sites**:
+The public owner contract is an OpenAPI 3 document with API version 2.0.0 and
+uses provider-neutral paths and fields. Older storage identifiers and route aliases remain internal runtime
+compatibility details; they are intentionally absent from new documentation and
+generated-client contracts.
 
-- `contracts/unified-payment-gateway.openapi.json` — the committed UPG spec.
-- `Services/Generated/ServiceUnifiedPaymentGatewayClient.cs` — its NSwag client.
-  Its only consumer was `Services/Clients/UpgRefundAdapter.cs`, which was itself
-  never registered in DI (and asked `IHttpClientFactory` for a named client,
-  `"UnifiedPaymentGateway"`, that was never registered anywhere).
-- `Services/Clients/UpgRefundAdapter.cs` — dead adapter, never wired.
-- `nswag-upg.json` and its row in `scripts/regenerate-clients.sh` — the
-  generation config whose only output was the deleted client.
-
-### What was NOT removed, and why
-
-Deleting the remaining references would delete the *evidence* of a dependency
-that still exists at runtime, not the dependency itself. These are still LIVE
-and are documented in `docs/batches/b02-20260726/UPG-REMOVAL.md`:
-
-- `Controllers/CodSettlementComposeController.cs` — three routed endpoints
-  (`POST api/v1/payments/cod/record`, `GET api/v1/payments/cod_jeeb/by-delivery/{id}`,
-  `POST admin/v1/settlements/{batchId}/mark-paid`) that dial UPG through
-  `Financials/Cod/IUnifiedPaymentCodClient`.
-- `Services/Clients/HttpPaymentRefundClient.cs` — the dispute-resolve refund
-  (money OUT), consumed by `Disputes/V2/DisputeCaseService.cs`.
-- Both light up whenever `Services:UnifiedPayment:BaseUrl` is set — and it **is**
-  set in `appsettings.Production.json` (port `10066`). It is the **only** value in
-  the repo still pointing at the banned legacy swarm host: the `.50` purge
-  (batch `b02-20260726`, P0) deliberately left it alone, because blanking it swaps
-  `HttpPaymentRefundClient` for the in-memory no-op and turns production refunds
-  into silent successes. Tracked as the one payments exception in
-  `scripts/no-50-allowlist.txt`, pending an owner decision.
-- `Financials/IUpgSettlementClient.cs` + `UpgSettlementClient.cs` +
-  `UpgSettlementLedgerClient.cs` — the settlement-ledger post, gated by
-  `FeatureFlags:UseUpstream:Payments` (default **false**, so dormant, but one
-  env var — `FeatureFlags__UseUpstream__Payments=true` — arms it).
-- `Extensions/HealthCheckExtensions.cs` — UPG is a **critical** readiness probe;
-  removing it changes the gateway's deploy health gate (guarded by
-  `tests/JeebGateway.IntegrationTests/Bff/UpgHealthProbePathTests.cs`).
-
-Retiring these requires a decision on what replaces the COD-settlement and
-dispute-refund destinations. Until then the code stays and stays documented.
+Cash creates no reversible card capture. Dispute records remain durable, while
+any cash reimbursement is handled manually outside the automated refund path.

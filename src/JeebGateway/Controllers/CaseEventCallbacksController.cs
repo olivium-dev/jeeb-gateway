@@ -7,6 +7,7 @@ using JeebGateway.Cases;
 using JeebGateway.Services.Clients;
 using JeebGateway.service.ServiceNotification;
 using JeebGateway.service.ServicePushNotification;
+using JeebGateway.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -21,24 +22,27 @@ public sealed class CaseEventCallbacksController : ControllerBase
     private readonly ServicePushNotificationClient _push;
     private readonly IPushDispatchRecoveryClient _pushRecovery;
     private readonly ILogger<CaseEventCallbacksController> _log;
+    private readonly IConfiguration _configuration;
 
     public CaseEventCallbacksController(ICaseDeliveryClient delivery,
         ServiceNotificationClient notifications, ServicePushNotificationClient push,
         IPushDispatchRecoveryClient pushRecovery,
-        ILogger<CaseEventCallbacksController> log)
+        ILogger<CaseEventCallbacksController> log,
+        IConfiguration? configuration = null)
     {
         _delivery = delivery; _notifications = notifications; _push = push;
         _pushRecovery = pushRecovery; _log = log;
+        _configuration = configuration ?? new ConfigurationBuilder().Build();
     }
 
     [HttpPost("events")]
     [HttpPost("/v1/case-events")]
     [AllowAnonymous]
-    [PublicEndpoint("Canonical jeeb-state-service case outbox callback; unauthenticated but admitted only from a loopback peer on the shared MSI host.")]
+    [PublicEndpoint("Canonical jeeb-state-service case outbox callback; unauthenticated but admitted only from the configured private owner network.")]
     public async Task<IActionResult> Dispatch([FromBody] GenericCaseCallbackV1? callback, CancellationToken ct)
     {
         var remoteAddress = HttpContext.Connection.RemoteIpAddress;
-        if (remoteAddress is null || !IPAddress.IsLoopback(remoteAddress))
+        if (!PrivateCallbackIngressPolicy.IsTrusted(HttpContext, _configuration))
         {
             CaseTelemetry.CallbackDispatches.Add(1,
                 new("event_type", callback?.EventType ?? "unknown"), new("outcome", "non_loopback_rejected"));
@@ -46,7 +50,7 @@ public sealed class CaseEventCallbacksController : ControllerBase
                 "event=case.callback_rejected reason=non_loopback remote_ip={RemoteIp} correlation_id={CorrelationId}",
                 remoteAddress?.ToString() ?? "missing", HttpContext.TraceIdentifier);
             return Problem(
-                "Case callbacks are admitted only from a loopback connection on the shared MSI host.",
+                "Case callbacks are admitted only from the configured private owner network.",
                 statusCode: StatusCodes.Status403Forbidden);
         }
 

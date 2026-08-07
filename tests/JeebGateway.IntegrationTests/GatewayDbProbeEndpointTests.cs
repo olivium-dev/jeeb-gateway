@@ -38,11 +38,8 @@ public class GatewayDbProbeEndpointTests
     {
         new object[] { "/api/notification/notifications?receiver=" + TestUserId, "db-probe-notification" },
         new object[] { $"/locations/user/{TestUserId}", "db-probe-geolocation" },
-        // NOTE: /api/v1/payments/cod_jeeb/by-delivery/{id} MOVED to the S10
-        // COD-compose controller (CodSettlementComposeController) — it is now
-        // user-JWT party-authorized (delivery.participate + party membership)
-        // and proxies UPG with UPG's own api-key, NOT the db-probe service token
-        // (which UPG's :api pipeline 401s). Covered by S10CodSettlementEarningsTests.
+        // COD uses its dedicated owner transport and is intentionally absent from
+        // the generic DB-probe controller.
         new object[] { $"/api/compliments/list?userId={TestUserId}", "db-probe-compliment" },
         new object[] { $"/api/ban/{TestUserId}/status", "db-probe-ban" },
         new object[] { "/api/otp/status/+9613001234", "db-probe-otp" },
@@ -199,8 +196,6 @@ public class GatewayDbProbeEndpointTests
                 {
                     foreach (var name in new[]
                     {
-                        // "db-probe-unified-payment" removed 2026-07-27 (cash-on-delivery only):
-                        // the named client it stubbed no longer exists in the gateway.
                         "db-probe-notification", "db-probe-geolocation",
                         "db-probe-realtime", "db-probe-compliment", "db-probe-ban", "db-probe-otp",
                     })

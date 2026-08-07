@@ -320,15 +320,10 @@ item_begin "HYGIENE" "batch-wide rules that belong to no single member item"
   assert_eq H2 "no .github/ path changed by this branch" 0 \
             "$(git diff --name-only "$BASE"..HEAD -- .github/ | wc -l | tr -d ' ')"
 
-  # H3/H4 — the two standing bans, scoped to lines this branch ADDED. A whole-tree
-  # count reds on the pre-existing inert mentions the batch never touched.
+  # H3 — private-host ban, scoped to lines this branch added.
   run_script H3 "no LIVE 192.168.2.50 reference added by this branch" \
              python3 "$GW1LIB/added-lines-inert.py" "$BASE" 192.168.2.50 \
              --allow tests/gw3-pack/ -- src/ db/ tests/
-  run_script H4 "no LIVE unified_payment_gateway reference added by this branch" \
-             python3 "$GW1LIB/added-lines-inert.py" "$BASE" unified_payment_gateway \
-             --allow tests/gw3-pack/ -- src/ db/ tests/
-
 item_end
 fi
 

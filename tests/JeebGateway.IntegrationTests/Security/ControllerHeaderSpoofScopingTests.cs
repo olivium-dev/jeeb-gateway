@@ -4,7 +4,6 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
@@ -109,7 +108,7 @@ public sealed class ControllerHeaderSpoofScopingTests
     }
 
     [Fact]
-    public async Task Cms_Publish_Actor_Comes_From_Token_Not_The_Forged_XUserId_In_Production()
+    public async Task Cms_Publish_Is_Not_Exposed_In_The_Essential_Production_Surface()
     {
         const string surface = "ofl-cms-orders-mfe";
         const string @base = "/gateway/admin/v1/cms";
@@ -118,8 +117,8 @@ public sealed class ControllerHeaderSpoofScopingTests
 
         using var factory = ProdFactory();
         var client = factory.CreateClient();
-        // An authenticated caller (valid bearer) clears the CMS capability/TOTP gates, then tries to
-        // forge the publish actor/audit id via a raw X-User-Id header pointing at ANOTHER user.
+        // Content publishing is outside the lean back-office scope. Even a valid legacy bearer and
+        // step-up header must not make that controller reachable in Production.
         client.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", MintGatewayBearer(factory, principalUserId));
         client.DefaultRequestHeaders.Add("X-User-Id", ForgedUserId);
@@ -127,15 +126,8 @@ public sealed class ControllerHeaderSpoofScopingTests
 
         var resp = await client.PostAsync($"{@base}/config/{surface}/publish", content: null);
 
-        resp.StatusCode.Should().Be(HttpStatusCode.OK,
-            "an authenticated caller passing the CMS capability/TOTP gates is admitted to publish");
-        var publishBody = await resp.Content.ReadFromJsonAsync<JsonElement>();
-        var actor = publishBody.GetProperty("publishedByUserId").GetString();
-
-        actor.Should().Be(principalUserId,
-            "the publish actor/audit id must come from the validated principal (token sub/sid)");
-        actor.Should().NotBe(ForgedUserId,
-            "the raw X-User-Id header must never override the validated principal as the audit actor");
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound,
+            "nonessential content-management controllers are removed from the Production surface");
     }
 
     private static string MintGatewayBearer(WebApplicationFactory<Program> factory, string userId)

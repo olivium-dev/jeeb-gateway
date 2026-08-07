@@ -241,14 +241,6 @@ item_begin "HYGIENE" "batch-wide rules that belong to no single member item"
   assert_eq H2 "no .github/ path changed by this branch" 0 \
             "$(git diff --name-only "$BASE"..HEAD -- .github/ | wc -l | tr -d ' ')"
 
-  # H3 — cash-only. Same shape as H1, and it MUST be, because GW1 legitimately adds
-  # one line naming the token: migration 0044's "NOT a payments-gateway surface.
-  # There is no unified_payment_gateway dependency here and none may be added." A
-  # bare added-line count reds on a comment that states the policy it obeys.
-  run_script H3 "no LIVE unified_payment_gateway reference added by this branch" \
-             python3 "$LIB/added-lines-inert.py" "$BASE" unified_payment_gateway \
-             --allow tests/gw1-pack/ -- src/ db/ tests/
-
 item_end
 fi
 

@@ -506,19 +506,10 @@ public static class ServiceClientExtensions
         heartBeatBuilder.AddHttpMessageHandler<Services.Clients.HeartBeatServiceAuthKeyHandler>();
         heartBeatBuilder.AddResilienceHandler("standard", ConfigureStandardResilience);
 
-        // REMOVED 2026-07-27 (owner ruling — "jeeb is only cash on delivery", no
-        // unified_payment_gateway): the typed IUpgSettlementClient /
-        // UpgSettlementClient pair that dialed UPG's generic external-settlement
-        // endpoint (POST /api/v1/payments/settlements/record), bound via
-        // BindBaseAddress(http, config, "Services:UnifiedPayment").
-        //
-        // This registration was UNCONDITIONAL even though its only consumer
-        // (UpgSettlementLedgerClient) was behind FeatureFlags:UseUpstream:Payments,
-        // so "Services:UnifiedPayment:BaseUrl" stayed a live configuration string
-        // compiled into the shipped assembly. Both the clients and this binding are
-        // deleted — the cash-settlement ledger is now in-process unconditionally
-        // (see Program.cs / InProcessCodSettlementLedger). Do NOT re-add a payments
-        // HttpClient here; see docs/batches/b02-20260726/UPG-REMOVAL.md.
+        // COD settlement ownership is registered separately in Program.cs as the
+        // narrow "admin-settlements" transport. It is mandatory, not a
+        // FeatureFlags:UseUpstream branch, and is intentionally absent from this
+        // broad legacy downstream client inventory.
 
         AddDbProbeClients(services, config);
 
@@ -552,11 +543,9 @@ public static class ServiceClientExtensions
         // geolocation-service (PG read) — GET /locations/user/{user_id}.
         AddNamedDownstreamClient(services, config, "db-probe-geolocation", "Services:Geolocation:BaseUrl");
 
-        // REMOVED 2026-07-27 (owner ruling — cash on delivery only): the
-        // "db-probe-unified-payment" named client bound to
-        // "Services:UnifiedPayment:BaseUrl". Read-only or not, it was a configured
-        // route to a payment gateway and the second reason that config key survived
-        // into the compiled assembly. The COD record it probed now lives in-process.
+        // Unified-payment-gateway is deliberately not exposed through this generic
+        // DB-probe surface. COD uses its dedicated stateless transport and readiness
+        // probe; the durable record remains in unified-payment-gateway.
 
         // realtime-comunication-service (PG read) — GET /admin/topics.
         AddNamedDownstreamClient(services, config, "db-probe-realtime", "Services:Realtime:BaseUrl");

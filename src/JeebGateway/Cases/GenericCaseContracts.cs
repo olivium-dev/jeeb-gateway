@@ -181,6 +181,7 @@ public sealed class GenericCaseDetailV1
 
 public sealed class GenericCaseQueryV1
 {
+    public string? Query { get; init; }
     public string? Kind { get; init; }
     public string? Status { get; init; }
     public string? Priority { get; init; }

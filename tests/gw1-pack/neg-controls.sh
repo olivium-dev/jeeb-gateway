@@ -477,16 +477,6 @@ PY
 }
 control N21 HYGIENE H1 "a LIVE http://192.168.2.50:10040 BaseUrl is introduced" m_N21
 
-m_N22() {  # a LIVE payments-gateway dial
-  py <<'PY' "$WORK/src/JeebGateway/Financials/PostgresSettlementLedgerClient.cs"
-import io,sys
-p=sys.argv[1]; s=io.open(p,encoding="utf-8").read()
-i=s.rindex("}")
-io.open(p,"w",encoding="utf-8").write(s[:i]+'    public const string Upg = "http://unified_payment_gateway:8080";\n'+s[i:])
-PY
-}
-control N22 HYGIENE H3 "a LIVE unified_payment_gateway BaseUrl is introduced (cash-only policy)" m_N22
-
 # =============================================================================
 echo
 echo "isolated tree left at: $WORK"

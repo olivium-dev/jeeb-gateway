@@ -10,21 +10,13 @@ using Xunit;
 namespace JeebGateway.IntegrationTests.Payments;
 
 /// <summary>
-/// Standing regression gate for the owner ruling of 2026-07-27 — "jeeb is only
-/// cash on delivery", no unified_payment_gateway.
+/// Regression gate for the COD ownership boundary. Unified-payment-gateway owns
+/// the generic durable COD records; the stateless gateway must retain both the
+/// owner transport and its database-backed readiness dependency.
 ///
-/// <para>This file REPLACES <c>Bff/UpgHealthProbePathTests</c>, which asserted the
-/// opposite: that a unified-payment-gateway readiness probe MUST be registered.
-/// That guard had inverted from a safety net into pressure to re-add UPG, so it
-/// is deleted and its inverse pinned here.</para>
-///
-/// <para>WHY A BYTE SCAN. The claim "UPG is removed" was made and was wrong four
-/// times in this batch. The most recent false absence came from grepping the
-/// DEPLOYED assembly for <c>Services:UnifiedPayment</c> with an ASCII-only
-/// search, which returned 0 — while the string was present as UTF-16, because
-/// that is how the CLR stores string literals (ECMA-335 #US heap). A source grep
-/// also cannot see it: source is not what ships. So this test scans the compiled
-/// gateway assembly the way the runtime stores it.</para>
+/// <para>The byte scan verifies the owner configuration key in the compiled
+/// artifact rather than inferring production behavior from source text. CLR
+/// string literals are stored as UTF-16 in the #US heap.</para>
 ///
 /// <para>POSITIVE CONTROL. A scanner that finds nothing is indistinguishable from
 /// a scanner that is broken, so <see cref="Scanner_Finds_A_Config_Key_That_Is_Still_Present"/>
@@ -32,10 +24,10 @@ namespace JeebGateway.IntegrationTests.Payments;
 /// ever goes green-by-absence, the absence assertions below are meaningless and
 /// the control fails first and loudly.</para>
 /// </summary>
-public class NoPaymentGatewayDialGuardTests
+public class CodOwnerBoundaryGuardTests
 {
-    /// <summary>The configuration prefix every UPG destination was bound through.</summary>
-    private const string UpgConfigPrefix = "Services:UnifiedPayment";
+    /// <summary>The canonical durable COD-owner configuration key.</summary>
+    private const string CodOwnerConfigKey = "UnifiedPaymentGateway:BaseUrl";
 
     /// <summary>A key that is still registered — proves the scanner can find things.</summary>
     private const string StillPresentControlKey = "Services:Geolocation:BaseUrl";
@@ -51,36 +43,19 @@ public class NoPaymentGatewayDialGuardTests
     }
 
     [Fact]
-    public void Compiled_Gateway_Assembly_Contains_No_UnifiedPayment_Config_Key()
+    public void Compiled_Gateway_Assembly_Contains_The_PrivateCodOwner_Config_Key()
     {
-        // The real check: no UPG destination survives into the shipped assembly,
-        // in either encoding. UTF-16 is the one that matters (string literals);
-        // UTF-8 is checked too so an embedded resource or attribute cannot hide.
-        AssemblyContains(UpgConfigPrefix, Encoding.Unicode).Should().BeFalse(
-            $"'{UpgConfigPrefix}' must not be a live configuration string in the built gateway "
-            + "(UTF-16 is how the CLR stores literals — an ASCII-only grep previously returned a false absence)");
-
-        AssemblyContains(UpgConfigPrefix, Encoding.UTF8).Should().BeFalse(
-            $"'{UpgConfigPrefix}' must not appear as UTF-8 bytes in the built gateway either");
+        AssemblyContains(CodOwnerConfigKey, Encoding.Unicode).Should().BeTrue(
+            $"'{CodOwnerConfigKey}' is the durable COD owner configured by production code");
     }
 
     [Fact]
-    public void No_UnifiedPayment_Readiness_Probe_Is_Registered_Even_When_A_BaseUrl_Is_Configured()
+    public void CodOwnerReadinessProbeIsRegisteredWhenBaseUrlIsConfigured()
     {
-        // Adversarial: hand the gateway the very config key that used to light the
-        // probe up. Nothing may register — the binding must be gone from the CODE,
-        // not merely absent from committed config (config can be re-added by env).
-        //
-        // The control BaseUrl is set alongside it deliberately. Without it this
-        // harness registers ZERO probes, and "no payment probe" would pass
-        // vacuously — including if AddDownstreamHealthChecks stopped working
-        // altogether. The control proves probes DO register here, so the absence
-        // of the payment one is a real result rather than an empty list.
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                [$"{UpgConfigPrefix}:BaseUrl"] = "http://127.0.0.1:10066",
-                [StillPresentControlKey] = "http://127.0.0.1:10052",
+                ["UnifiedPaymentGateway:BaseUrl"] = "http://127.0.0.1:10066",
             })
             .Build();
 
@@ -94,13 +69,8 @@ public class NoPaymentGatewayDialGuardTests
             .GetRequiredService<Microsoft.Extensions.Options.IOptions<HealthCheckServiceOptions>>()
             .Value.Registrations;
 
-        registrations.Should().Contain(r => r.Name == "geolocation-service",
-            "POSITIVE CONTROL — a configured downstream must produce a probe in this harness; "
-            + "if it does not, the payment-probe assertion below is vacuous");
-
-        registrations.Should().NotContain(
-            r => r.Name.Contains("payment", StringComparison.OrdinalIgnoreCase),
-            "no readiness probe may dial a payment gateway under a cash-only policy");
+        registrations.Should().ContainSingle(r => r.Name == "unified-payment-gateway",
+            "the essential COD owner must gate production readiness");
     }
 
     private static bool AssemblyContains(string needle, Encoding encoding)

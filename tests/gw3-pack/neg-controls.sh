@@ -612,15 +612,6 @@ PY
 }
 control N19 HYGIENE H3 "a LIVE http://192.168.2.50 reference is added by the branch" m_N19
 
-m_N20() {
-  py <<'PY' "$WORK/src/JeebGateway/Program.cs"
-import io,sys
-p=sys.argv[1]; s=io.open(p,encoding="utf-8").read()
-io.open(p,"w",encoding="utf-8").write(s+'\nvar _upg = "http://unified_payment_gateway:8080/refund";\n')
-PY
-}
-control N20 HYGIENE H4 "a LIVE unified_payment_gateway reference is added by the branch" m_N20
-
 # =============================================================================
 echo
 echo "controls behaved   : $BEHAVED"

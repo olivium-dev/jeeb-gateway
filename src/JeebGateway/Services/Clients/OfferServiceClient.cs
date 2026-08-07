@@ -476,6 +476,43 @@ public sealed class OfferServiceClient : IOfferServiceClient
         }
     }
 
+    /// <inheritdoc />
+    public async Task<OfferRequestReadResult> ListForRequestStrictAsync(
+        string actingUserId,
+        string requestId,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get, $"api/v1/requests/{Uri.EscapeDataString(requestId)}/offers");
+            SetUser(request, actingUserId);
+
+            using var response = await _http.SendAsync(request, ct);
+            if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                return new(OfferRequestReadStatus.Forbidden, Array.Empty<OfferWire>());
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                return new(OfferRequestReadStatus.NotFound, Array.Empty<OfferWire>());
+            if (!response.IsSuccessStatusCode)
+                return new(OfferRequestReadStatus.Unavailable, Array.Empty<OfferWire>());
+
+            var offers = await ReadRequestOffersAsync(response, ct, strict: true);
+            return new(OfferRequestReadStatus.Ok, offers);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (JsonException)
+        {
+            return new(OfferRequestReadStatus.InvalidResponse, Array.Empty<OfferWire>());
+        }
+        catch (Exception ex) when (ex is HttpRequestException or NotSupportedException or OperationCanceledException)
+        {
+            return new(OfferRequestReadStatus.Unavailable, Array.Empty<OfferWire>());
+        }
+    }
+
     /// <summary>
     /// Tolerant decode of offer-service's request-offers response into the gateway <see cref="OfferWire"/>.
     /// Accepts the contract <c>{ offers:[...] }</c> envelope, the <c>{ data|items:[...] }</c> alias, or a
@@ -483,11 +520,12 @@ public sealed class OfferServiceClient : IOfferServiceClient
     /// preferred over the deprecated <c>jeeber_id</c> alias, mirroring <see cref="DeserializeOfferAsync"/>.
     /// </summary>
     private static async Task<IReadOnlyList<OfferWire>> ReadRequestOffersAsync(
-        HttpResponseMessage response, CancellationToken ct)
+        HttpResponseMessage response, CancellationToken ct, bool strict = false)
     {
         var json = await response.Content.ReadAsStringAsync(ct);
         if (string.IsNullOrWhiteSpace(json))
         {
+            if (strict) throw new JsonException("Offer owner returned an empty response.");
             return Array.Empty<OfferWire>();
         }
 
@@ -509,6 +547,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
         }
         else
         {
+            if (strict) throw new JsonException("Offer owner returned an invalid offers envelope.");
             return Array.Empty<OfferWire>();
         }
 

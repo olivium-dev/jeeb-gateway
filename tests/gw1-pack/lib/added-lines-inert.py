@@ -1,30 +1,8 @@
 #!/usr/bin/env python3
 """
-GW1 test pack, HYGIENE leg — every ADDED line carrying a banned token must be INERT.
-
-Two tokens are banned by owner directive and both already exist, inertly, on
-`origin/main`: `192.168.2.50` (62 lines / 18 files) and `unified_payment_gateway`
-(22 hits). So a whole-tree count reds on work this batch never did, and a bare
-"no added line contains the token" reds on a line whose entire content is the
-policy REFUSING the token — which is what GW1 actually added:
-
-    +--            NOT a payments-gateway surface. There is no unified_payment_gateway
-
-That line is documentation of the ban. Deleting it would make the tree quieter and
-the code no safer. The question worth asking is AGENTS.md's own: does anything
-DIAL? So the classifier applies exactly the rule AGENTS.md itself applies when it
-counts 22 surviving `unified_payment_gateway` hits as harmless — a line is LIVE
-only if it carries **a scheme, a host:port, a BaseUrl, or an HttpClient binding**.
-
-An earlier cut of this script also required the line to be a COMMENT, and that was
-wrong in a way worth recording: it reported
-
-    tests/.../W18_SettlementLedgerDurableTests.cs  ::  sql.Should().NotContain("unified_payment_gateway",
-
-as LIVE. That line is the assertion FORBIDDING the token. AGENTS.md hit the same
-case from the other side and resolved it the same way — one of its 22 hits is an
-OpenTelemetry counter `description:` string, "not a dial path, so the conclusion
-stands". A rule that reds on the code enforcing it is a rule that gets deleted.
+GW1 test pack, HYGIENE leg — every added line carrying a prohibited private-host
+token must be inert. The classifier treats a line as live when it carries a
+scheme, host:port, BaseUrl, or HttpClient binding.
 
 `--allow <path-substring>` exists for exactly one reason and it is the reason
 `scripts/no-50-allowlist.txt` exists in this repo: **a gate must name what it
@@ -35,7 +13,7 @@ never hidden — each is printed as [ALLOWED] with its path, and the count is in
 summary, so the allowlist can be audited rather than trusted.
 
 Also note, and this is why the check is a script rather than a shell one-liner:
-`git diff … | grep -c` returned **0** for the migration comment above when run
+`git diff … | grep -c` returned **0** for a matching line when run
 through this machine's rtk git proxy, and **1** when git was invoked directly. A
 shell pipeline here is not a reliable instrument.
 

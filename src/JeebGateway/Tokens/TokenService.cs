@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using JeebGateway.Auth.Oidc;
 using JeebGateway.Observability;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -45,13 +46,36 @@ public class TokenService : ITokenService
 
     public async Task<TokenPair> IssueAsync(string userId, IEnumerable<string> roles, CancellationToken ct)
     {
-        var now = _clock.GetUtcNow();
-        var accessExpires = now.AddMinutes(_options.AccessTokenMinutes);
-        var refreshExpires = now.AddDays(_options.RefreshTokenDays);
-
         var activeRole = await _users.GetActiveRoleAsync(userId, ct);
-        var access = BuildAccessToken(userId, roles, activeRole, now, accessExpires);
-        var (refreshRaw, refreshRecord) = NewRefreshToken(userId, now, refreshExpires);
+        return await IssueAsync(userId, roles, activeRole, null, ct);
+    }
+
+    public async Task<TokenPair> IssueAsync(
+        string userId,
+        IEnumerable<string> roles,
+        string activeRole,
+        VerifiedAuthenticationContext? authentication,
+        CancellationToken ct)
+    {
+        var now = _clock.GetUtcNow();
+        var normalizedRoles = roles
+            .Where(static role => !string.IsNullOrWhiteSpace(role))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (authentication?.PersistRoleContext == true)
+            ValidateExternalAuthenticationContext(
+                authentication, normalizedRoles, activeRole, now);
+
+        var accessExpires = BoundExpiry(
+            now.AddMinutes(_options.AccessTokenMinutes), authentication?.SessionExpiresAt);
+        var refreshExpires = BoundExpiry(
+            now.AddDays(_options.RefreshTokenDays), authentication?.SessionExpiresAt);
+        if (accessExpires <= now || refreshExpires <= now)
+            throw new InvalidOperationException("The verified authentication session has expired.");
+
+        var access = BuildAccessToken(userId, normalizedRoles, activeRole, authentication, now, accessExpires);
+        var (refreshRaw, refreshRecord) = NewRefreshToken(
+            userId, now, refreshExpires, authentication, normalizedRoles, activeRole);
         await _store.AddAsync(refreshRecord, ct);
 
         return new TokenPair
@@ -63,7 +87,18 @@ public class TokenService : ITokenService
         };
     }
 
-    public async Task<RefreshResult> RefreshAsync(string refreshToken, CancellationToken ct)
+    public Task<RefreshResult> RefreshAsync(string refreshToken, CancellationToken ct) =>
+        RefreshCoreAsync(refreshToken, null, ct);
+
+    public Task<RefreshResult> RefreshAsync(
+        string refreshToken,
+        Func<string, CancellationToken, Task<TokenRoleContext?>> roleResolver,
+        CancellationToken ct) => RefreshCoreAsync(refreshToken, roleResolver, ct);
+
+    private async Task<RefreshResult> RefreshCoreAsync(
+        string refreshToken,
+        Func<string, CancellationToken, Task<TokenRoleContext?>>? roleResolver,
+        CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(refreshToken))
         {
@@ -91,18 +126,54 @@ public class TokenService : ITokenService
             return new RefreshResult { Outcome = RefreshOutcome.Revoked };
         }
 
+        if (existing.AuthenticationSessionExpiresAt is not null
+            && existing.AuthenticationSessionExpiresAt <= now)
+            return new RefreshResult { Outcome = RefreshOutcome.AuthenticationExpired };
+
         if (existing.ExpiresAt <= now)
         {
             return new RefreshResult { Outcome = RefreshOutcome.Expired };
         }
 
-        var accessExpires = now.AddMinutes(_options.AccessTokenMinutes);
-        var refreshExpires = now.AddDays(_options.RefreshTokenDays);
+        TokenRoleContext roleContext;
+        VerifiedAuthenticationContext? persistedAuthentication;
+        if (HasExternalSessionFields(existing))
+        {
+            if (!TryExternalSession(
+                    existing, now, out roleContext, out persistedAuthentication))
+                return new RefreshResult { Outcome = RefreshOutcome.AuthenticationExpired };
+        }
+        else
+        {
+            if (roleResolver is null)
+            {
+                var roles = await _users.GetRolesAsync(existing.UserId, ct);
+                var activeRole = await _users.GetActiveRoleAsync(existing.UserId, ct);
+                roleContext = new TokenRoleContext(roles, activeRole);
+            }
+            else
+            {
+                var resolved = await roleResolver(existing.UserId, ct);
+                if (resolved is null)
+                    return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
+                roleContext = resolved;
+            }
+            persistedAuthentication = AuthenticationFrom(existing);
+        }
 
-        var roles = await _users.GetRolesAsync(existing.UserId, ct);
-        var activeRole = await _users.GetActiveRoleAsync(existing.UserId, ct);
-        var access = BuildAccessToken(existing.UserId, roles, activeRole, now, accessExpires);
-        var (refreshRaw, replacement) = NewRefreshToken(existing.UserId, now, refreshExpires);
+        // External records reach this point only with the complete, verified
+        // provider+roles+active-role+methods+auth-time+deadline tuple. A partial
+        // record never receives the ordinary 30-day fallback below.
+        var accessExpires = BoundExpiry(
+            now.AddMinutes(_options.AccessTokenMinutes), existing.AuthenticationSessionExpiresAt);
+        var refreshExpires = BoundExpiry(
+            now.AddDays(_options.RefreshTokenDays), existing.AuthenticationSessionExpiresAt);
+        var access = BuildAccessToken(
+            existing.UserId, roleContext.Roles, roleContext.ActiveRole,
+            persistedAuthentication, now, accessExpires);
+        var (refreshRaw, replacement) = NewRefreshToken(
+            existing.UserId, now, refreshExpires, persistedAuthentication,
+            roleContext.Roles, roleContext.ActiveRole);
 
         var rotated = await _store.RotateAsync(existing.TokenId, replacement, ct);
         if (!rotated)
@@ -176,7 +247,13 @@ public class TokenService : ITokenService
     public Task<int> RevokeAllForUserAsync(string userId, RevocationReason reason, CancellationToken ct) =>
         _store.RevokeAllForUserAsync(userId, reason, ct);
 
-    private string BuildAccessToken(string userId, IEnumerable<string> roles, string activeRole, DateTimeOffset now, DateTimeOffset expires)
+    private string BuildAccessToken(
+        string userId,
+        IEnumerable<string> roles,
+        string activeRole,
+        VerifiedAuthenticationContext? authentication,
+        DateTimeOffset now,
+        DateTimeOffset expires)
     {
         var claims = new List<Claim>
         {
@@ -190,6 +267,24 @@ public class TokenService : ITokenService
         {
             claims.Add(new Claim("roles", r));
         }
+        if (authentication is not null)
+        {
+            claims.Add(new Claim("auth_time", authentication.AuthTime.ToString(), ClaimValueTypes.Integer64));
+            foreach (var method in authentication.Methods
+                         .Where(static method => !string.IsNullOrWhiteSpace(method))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+                claims.Add(new Claim("amr", method));
+            if (!string.IsNullOrWhiteSpace(authentication.Provider))
+                claims.Add(new Claim("idp", authentication.Provider));
+            if (authentication.PersistRoleContext)
+                claims.Add(new Claim(
+                    ExternalAdminSessionRequirement.SessionClaim,
+                    ExternalAdminSessionRequirement.SessionClaimValue));
+            if (!string.IsNullOrWhiteSpace(authentication.DisplayName))
+                claims.Add(new Claim("name", authentication.DisplayName));
+            if (!string.IsNullOrWhiteSpace(authentication.Email))
+                claims.Add(new Claim("email", authentication.Email));
+        }
 
         var jwt = new JwtSecurityToken(
             issuer: _options.Issuer,
@@ -202,7 +297,13 @@ public class TokenService : ITokenService
         return new JwtSecurityTokenHandler().WriteToken(jwt);
     }
 
-    private (string raw, RefreshToken record) NewRefreshToken(string userId, DateTimeOffset now, DateTimeOffset expires)
+    private (string raw, RefreshToken record) NewRefreshToken(
+        string userId,
+        DateTimeOffset now,
+        DateTimeOffset expires,
+        VerifiedAuthenticationContext? authentication,
+        IReadOnlyList<string> roles,
+        string activeRole)
     {
         Span<byte> buffer = stackalloc byte[32];
         RandomNumberGenerator.Fill(buffer);
@@ -213,9 +314,130 @@ public class TokenService : ITokenService
             UserId = userId,
             TokenHash = HashToken(raw),
             IssuedAt = now,
-            ExpiresAt = expires
+            ExpiresAt = expires,
+            AuthenticationTime = authentication?.AuthTime,
+            AuthenticationMethods = authentication?.Methods
+                .Where(static method => !string.IsNullOrWhiteSpace(method) && method.Length <= 64)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(8)
+                .ToArray(),
+            IdentityProvider = authentication?.Provider,
+            AuthenticationSessionExpiresAt = authentication?.SessionExpiresAt,
+            DisplayName = authentication?.DisplayName,
+            Email = authentication?.Email,
+            RoleSnapshot = authentication?.PersistRoleContext == true
+                ? roles.Where(static role => !string.IsNullOrWhiteSpace(role))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(16)
+                    .ToArray()
+                : null,
+            ActiveRoleSnapshot = authentication?.PersistRoleContext == true ? activeRole : null,
         };
         return (raw, record);
+    }
+
+    private static VerifiedAuthenticationContext? AuthenticationFrom(RefreshToken token)
+    {
+        if (token.AuthenticationTime is null
+            || token.AuthenticationMethods is not { Count: > 0 })
+            return null;
+        var methods = token.AuthenticationMethods
+            .Where(static method => !string.IsNullOrWhiteSpace(method) && method.Length <= 64)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(8)
+            .ToArray();
+        return methods.Length == 0
+            ? null
+            : new VerifiedAuthenticationContext(
+                token.AuthenticationTime.Value,
+                methods,
+                token.IdentityProvider,
+                token.AuthenticationSessionExpiresAt,
+                token.DisplayName,
+                token.Email,
+                token.RoleSnapshot is { Count: > 0 });
+    }
+
+    private static bool HasExternalSessionFields(RefreshToken token) =>
+        token.IdentityProvider is not null
+        || token.AuthenticationSessionExpiresAt is not null
+        || token.RoleSnapshot is not null
+        || token.ActiveRoleSnapshot is not null;
+
+    private static bool TryExternalSession(
+        RefreshToken token,
+        DateTimeOffset now,
+        out TokenRoleContext roleContext,
+        out VerifiedAuthenticationContext? authentication)
+    {
+        roleContext = null!;
+        authentication = null;
+
+        var rawRoles = token.RoleSnapshot ?? [];
+        var roles = rawRoles
+            .Where(static role => !string.IsNullOrWhiteSpace(role) && role.Length <= 128)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(17)
+            .ToArray();
+        var rawMethods = token.AuthenticationMethods ?? [];
+        var methods = rawMethods
+            .Where(static method => !string.IsNullOrWhiteSpace(method) && method.Length <= 64)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(9)
+            .ToArray();
+        if (string.IsNullOrWhiteSpace(token.IdentityProvider)
+            || token.IdentityProvider.Length > 2_048
+            || token.AuthenticationTime is null or <= 0
+            || token.AuthenticationTime > now.AddSeconds(30).ToUnixTimeSeconds()
+            || token.AuthenticationSessionExpiresAt is null
+            || token.AuthenticationSessionExpiresAt <= now
+            || rawRoles.Count != roles.Length
+            || roles.Length is 0 or > 16
+            || string.IsNullOrWhiteSpace(token.ActiveRoleSnapshot)
+            || token.ActiveRoleSnapshot.Length > 128
+            || !roles.Contains(token.ActiveRoleSnapshot, StringComparer.OrdinalIgnoreCase)
+            || rawMethods.Count != methods.Length
+            || methods.Length is 0 or > 8
+            || !methods.Contains("mfa", StringComparer.OrdinalIgnoreCase))
+            return false;
+
+        roleContext = new TokenRoleContext(roles, token.ActiveRoleSnapshot);
+        authentication = new VerifiedAuthenticationContext(
+            token.AuthenticationTime.Value,
+            methods,
+            token.IdentityProvider,
+            token.AuthenticationSessionExpiresAt,
+            token.DisplayName,
+            token.Email,
+            persistRoleContext: true);
+        return true;
+    }
+
+    private static void ValidateExternalAuthenticationContext(
+        VerifiedAuthenticationContext authentication,
+        IReadOnlyList<string> roles,
+        string activeRole,
+        DateTimeOffset now)
+    {
+        var normalizedMethods = authentication.Methods?
+            .Where(static method => !string.IsNullOrWhiteSpace(method) && method.Length <= 64)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray() ?? [];
+        if (string.IsNullOrWhiteSpace(authentication.Provider)
+            || authentication.Provider.Length > 2_048
+            || authentication.AuthTime <= 0
+            || authentication.AuthTime > now.AddSeconds(30).ToUnixTimeSeconds()
+            || authentication.Methods is not { Count: > 0 }
+            || authentication.Methods.Count != normalizedMethods.Length
+            || normalizedMethods.Length > 8
+            || !normalizedMethods.Contains("mfa", StringComparer.OrdinalIgnoreCase)
+            || authentication.SessionExpiresAt is null
+            || authentication.SessionExpiresAt <= now
+            || roles.Count is 0 or > 16
+            || string.IsNullOrWhiteSpace(activeRole)
+            || !roles.Contains(activeRole, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                "The external operator authentication context is incomplete.");
     }
 
     internal static string HashToken(string raw)
@@ -231,6 +453,13 @@ public class TokenService : ITokenService
             .TrimEnd('=')
             .Replace('+', '-')
             .Replace('/', '_');
+
+    private static DateTimeOffset BoundExpiry(
+        DateTimeOffset requested,
+        DateTimeOffset? authenticationSessionExpiresAt) =>
+        authenticationSessionExpiresAt is not null && authenticationSessionExpiresAt < requested
+            ? authenticationSessionExpiresAt.Value
+            : requested;
 }
 
 /// <summary>

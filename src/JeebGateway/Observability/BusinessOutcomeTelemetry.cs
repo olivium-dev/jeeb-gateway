@@ -64,15 +64,13 @@ public static class BusinessOutcomeTelemetry
         Meter.CreateCounter<long>("case.recovery.operations",
             description: "Admin case-callback and push-dispatch recovery operation outcomes.");
 
-    // JEBV4-47 (M3/R7): the settlement -> UPG generic-settlement ledger post is
-    // best-effort. When it fails at settle time the row persists but the ledger
-    // diverges until the SettlementLedgerReconciler replays it. These counters make
-    // that divergence observable (ties into JEBV4-59 business counters).
+    // Legacy metric names retained for dashboard compatibility. Durable COD state
+    // and any retries are owned by UPG; the gateway records only transport outcomes.
     public static readonly Counter<long> SettlementLedgerPostFailures =
         Meter.CreateCounter<long>("settlement.ledger.post_failures",
-            description: "Number of settlement ledger posts that failed at settle time and were left for the reconciler.");
+            description: "Number of COD owner transport operations that failed at settle time.");
 
     public static readonly Counter<long> SettlementLedgerReconciled =
         Meter.CreateCounter<long>("settlement.ledger.reconciled",
-            description: "Number of previously-unposted settlement ledger entries the reconciler successfully replayed.");
+            description: "Legacy dashboard counter retained for compatibility; gateway reconciliation is disabled.");
 }

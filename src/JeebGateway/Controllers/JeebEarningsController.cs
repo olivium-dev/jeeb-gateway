@@ -26,12 +26,9 @@ public sealed class JeebEarningsController : ControllerBase
     /// <summary>
     /// JEBV4-283: COD states that count as EARNED commission for the jeeber. <c>recorded</c>
     /// IS included — the jeeber earns the commission the moment COD is collected at delivery
-    /// completion, independent of the platform-side settlement lifecycle (<c>recorded →
-    /// batched → paid</c>). Excluding it made the earnings projection structurally empty on
-    /// every environment where the weekly settlement-batch loop has not yet produced a batch
-    /// (on MSI settlement_batches=0), so jeebers never saw the commission they had already
-    /// earned. Batching/paying is a downstream payout concern, not a precondition for the
-    /// earning to be shown.
+    /// completion, independent of UPG's later settlement lifecycle (<c>recorded →
+    /// batched → paid</c>). Batching and payment remain UPG-owned payout concerns,
+    /// not preconditions for displaying an earning.
     /// </summary>
     private static readonly string[] EarningsCodStates = CodSettlementState.EarningsStates;
 

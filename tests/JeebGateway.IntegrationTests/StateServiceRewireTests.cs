@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using FluentAssertions;
 using JeebGateway.Services.Clients;
+using JeebGateway.Extensions;
 using JeebGateway.StateService;
 using JeebGateway.StateService.Idempotency;
 using JeebGateway.StateService.RateLimiting;
@@ -13,6 +14,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
 using Xunit;
 
@@ -25,6 +27,20 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public class StateServiceRewireTests
 {
+    [Fact]
+    public void EssentialStateServiceFailureIsReadinessFatal()
+    {
+        var services = new ServiceCollection();
+        services.AddEssentialStateServiceHealthCheck(new Uri("http://127.0.0.1:10073/"));
+
+        var registration = services.BuildServiceProvider()
+            .GetRequiredService<Microsoft.Extensions.Options.IOptions<HealthCheckServiceOptions>>()
+            .Value.Registrations.Single(item => item.Name == "jeeb-state-service");
+
+        registration.FailureStatus.Should().Be(HealthStatus.Unhealthy);
+        registration.Tags.Should().Contain("ready");
+    }
+
     // ----------------------------------------------------------------------
     // R1 — Idempotency-Key middleware
     // ----------------------------------------------------------------------

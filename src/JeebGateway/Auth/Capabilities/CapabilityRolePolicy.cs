@@ -27,6 +27,18 @@ public static class CapabilityRolePolicy
     private static string[] ClientOnly => new[] { JeebRoleTranslator.ContractClient };
     private static string[] JeeberOnly => new[] { JeebRoleTranslator.ContractJeeber };
     private static string[] AdminOnly => new[] { Roles.Admin };
+    private static string[] PortalOperators => new[]
+    {
+        Roles.Admin, Roles.Support, Roles.SupportLead, Roles.Operations,
+        Roles.FinanceViewer, Roles.FinanceApprover,
+    };
+    private static string[] CaseReaders => new[] { Roles.Admin, Roles.Support, Roles.SupportLead };
+    private static string[] CaseWorkers => new[] { Roles.Admin, Roles.Support, Roles.SupportLead };
+    private static string[] CaseClosers => new[] { Roles.Admin, Roles.SupportLead };
+    private static string[] DeliveryReaders => new[] { Roles.Admin, Roles.Support, Roles.SupportLead, Roles.Operations };
+    private static string[] DeliveryOperators => new[] { Roles.Operations };
+    private static string[] SettlementReaders => new[] { Roles.Admin, Roles.FinanceViewer, Roles.FinanceApprover };
+    private static string[] SettlementManagers => new[] { Roles.FinanceApprover };
     // Jeeb Partner Portal (partner-wallet-bff): the partner user type. The opaque `partner`
     // role passes through JeebRoleTranslator.ToContract verbatim (non-{customer,driver}),
     // so the handler intersects it against this set unchanged. Additive — no existing entry moves.
@@ -125,6 +137,17 @@ public static class CapabilityRolePolicy
             // static categories catalog shares the read cap.
             [Capabilities.SupportCreateSelf] = AnyAuthenticated,
             [Capabilities.SupportReadOwn] = AnyAuthenticated,   // own-vs-any = STATE
+
+            // G3. Back-office capabilities. Legacy `admin` remains a support lead
+            // and finance reader, but is not a delivery or finance superuser.
+            [Capabilities.AdminPortalAccess] = PortalOperators,
+            [Capabilities.AdminCasesRead] = CaseReaders,
+            [Capabilities.AdminCasesUpdate] = CaseWorkers,
+            [Capabilities.AdminCasesClose] = CaseClosers,
+            [Capabilities.AdminDeliveriesRead] = DeliveryReaders,
+            [Capabilities.AdminDeliveriesOperate] = DeliveryOperators,
+            [Capabilities.AdminSettlementsRead] = SettlementReaders,
+            [Capabilities.AdminSettlementsManage] = SettlementManagers,
 
             // H–J. Misc participant caps {client, jeeber}
             [Capabilities.ProhibitedAck] = Participant,

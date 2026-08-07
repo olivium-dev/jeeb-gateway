@@ -1,12 +1,7 @@
 namespace JeebGateway.Financials;
 
 /// <summary>
-/// Persistence seam for Jeeb settlement rows. The MVP implementation
-/// (<see cref="InMemorySettlementStore"/>) keeps the same shape as every
-/// other in-memory store under the gateway: one ConcurrentDictionary,
-/// short critical sections, and Task-returning APIs so the swap to
-/// Postgres (paired with wallet-service / unified_payment_gateway
-/// migrations) lands without changing call sites.
+/// Stateless projection seam for COD rows owned by unified-payment-gateway.
 ///
 /// One settlement per delivery — the store rejects a second insert for
 /// the same <see cref="Settlement.DeliveryId"/> so retries cannot
@@ -49,24 +44,6 @@ public interface ISettlementStore
     Task<Settlement?> GetByIdAsync(string settlementId, CancellationToken ct);
 
     /// <summary>
-    /// Stamps <see cref="Settlement.LedgerEntryId"/> after wallet-service
-    /// has accepted the ledger post. Returns false when the settlement is
-    /// unknown.
-    /// </summary>
-    Task<bool> SetLedgerEntryAsync(string settlementId, string ledgerEntryId, CancellationToken ct);
-
-    /// <summary>
-    /// JEBV4-47 (M3/R7): returns truly-settled rows whose ledger post never landed
-    /// (<see cref="Settlement.LedgerEntryId"/> IS NULL, state IN
-    /// (<c>settled</c>, <c>receipt_generated</c>)) — the divergence the
-    /// SettlementLedgerReconciler heals. Bounded page (LIMIT + stable
-    /// <c>ORDER BY settled_at, id</c> — GW12-F1 lesson) so a large backlog cannot
-    /// wedge a sweep. A <c>pending_settlement</c> placeholder has no ledger post by
-    /// design and is deliberately excluded.
-    /// </summary>
-    Task<IReadOnlyList<Settlement>> ListUnpostedLedgerAsync(int limit, CancellationToken ct);
-
-    /// <summary>
     /// Flips the row from <see cref="SettlementState.Settled"/> to
     /// <see cref="SettlementState.ReceiptGenerated"/> on first receipt
     /// read. Idempotent — repeat calls do not advance the timestamp.
@@ -83,34 +60,4 @@ public interface ISettlementStore
     /// </summary>
     Task<bool> ReplacePendingAsync(string deliveryId, Settlement settled, CancellationToken ct);
 
-    // ── JEB-56/57 batch lifecycle ─────────────────────────────────────────────
-
-    /// <summary>
-    /// Returns all settlement rows in the <c>recorded</c> COD state whose
-    /// <see cref="Settlement.SettledAt"/> falls within the given window.
-    /// Used by the weekly batch cron to gather settlements for the closing window.
-    /// </summary>
-    Task<IReadOnlyList<Settlement>> ListRecordedInWindowAsync(
-        DateTimeOffset windowStart,
-        DateTimeOffset windowEnd,
-        int limit,
-        CancellationToken ct);
-
-    /// <summary>
-    /// Atomically transitions a batch of settlement rows from <c>recorded</c> to
-    /// <c>batched</c>, setting <c>batch_id</c> and <c>batched_at</c>. Rows already
-    /// in a later state are skipped (idempotent).
-    /// </summary>
-    Task MarkBatchedAsync(
-        IReadOnlyList<string> settlementIds,
-        Guid batchId,
-        DateTimeOffset at,
-        CancellationToken ct);
-
-    /// <summary>
-    /// Atomically transitions all settlements linked to <paramref name="batchId"/>
-    /// from <c>batched</c> to <c>paid</c>, setting <c>paid_at</c>. Rows already in
-    /// <c>paid</c> state are skipped (idempotent).
-    /// </summary>
-    Task MarkPaidByBatchAsync(Guid batchId, DateTimeOffset paidAt, CancellationToken ct);
 }

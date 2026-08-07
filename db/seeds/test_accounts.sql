@@ -69,7 +69,7 @@ ON CONFLICT (phone) DO NOTHING;
 
 -- ---------------------------------------------------------------------
 -- P4 — Khaled, full-time courier. Power-user Jeeber persona. Drives the
--- earnings-dashboard tests (FR-11) and weekly settlement (FR-10.3).
+-- delivery and earnings fixture tests.
 -- ---------------------------------------------------------------------
 INSERT INTO users (id, phone, email, name, roles, language, rating, rating_count)
 VALUES (

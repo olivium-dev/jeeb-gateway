@@ -10,12 +10,12 @@ namespace JeebGateway.Financials;
 ///   <item>Validating the row is in <c>delivered</c> (post-OTP handover).</item>
 ///   <item>Re-computing fees via <see cref="CommissionCalculator"/> from the
 ///         row's tier — the caller never gets to pick the rate.</item>
-///   <item>Posting a ledger entry to wallet-service.</item>
-///   <item>Persisting the settlement so the receipt endpoint can render it.</item>
+///   <item>Forwarding the authoritative COD record to unified-payment-gateway.</item>
+///   <item>Reading the durable owner projection so the receipt endpoint can render it.</item>
 /// </list>
 ///
-/// All Jeeb business logic lives here; downstream services only see the
-/// generic ledger primitive.
+/// Jeeb authorization and composition live here; unified-payment-gateway owns
+/// settlement persistence, idempotency, audit, outbox, and scheduled work.
 /// </summary>
 public interface ISettlementService
 {
@@ -44,6 +44,16 @@ public interface ISettlementService
     /// Returns true only when a fresh pending snapshot was inserted.
     /// </summary>
     Task<bool> TrySnapshotPendingCodAsync(string deliveryId, CancellationToken ct);
+
+    /// <summary>
+    /// Verifies an already-existing owner intent against fresh authoritative
+    /// delivery and accepted-offer state. Used only for an AtDoor retry after
+    /// <see cref="TrySnapshotPendingCodAsync"/> reports that it did not insert.
+    /// </summary>
+    Task<bool> IsAuthoritativeCodIntentAsync(
+        string deliveryId,
+        string? deliveryStatusBeforeTransition,
+        CancellationToken ct);
 
     Task<Settlement?> GetByDeliveryAsync(string deliveryId, CancellationToken ct);
 }

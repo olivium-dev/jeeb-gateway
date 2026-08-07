@@ -11,21 +11,18 @@ namespace JeebGateway.Controllers;
 /// that its POST endpoint returned 200/202. In reality no such endpoint was
 /// registered, so any caller received HTTP 405 Method Not Allowed.
 ///
-/// This controller adds the minimal surface WS-A JEB-57 (weekly batch
-/// notifications) depends on:
+/// This controller retains the typed operator dispatch surface:
 ///
 ///   POST /v1/notifications/dispatch
 ///
 /// The endpoint accepts a typed dispatch request, routes it through the
 /// gateway's existing <see cref="IPushNotificationService"/> pipeline
 /// (preference-filtering, device-token resolution, FCM/APNs transport,
-/// retry queue) and returns 202 Accepted with the delivery outcome so the
-/// weekly batch can log per-notification results without blocking.
+/// retry queue) and returns 202 Accepted with the delivery outcome.
 ///
-/// Authorization: service-to-service calls (admin scope or system-internal
-/// service token). The endpoint is NOT consumer-facing — it is called by the
-/// gateway's own batch jobs (WeeklySettlementBatch → JEB-57) and by
-/// operator tooling.
+/// Authorization: the endpoint is not consumer-facing and requires the
+/// operator notification-dispatch capability. UPG settlement callbacks use
+/// their dedicated callback route; the gateway runs no settlement batch job.
 /// </summary>
 [ApiController]
 [Route("v1/notifications")]
@@ -50,8 +47,8 @@ public sealed class NotificationDispatchController : ControllerBase
     /// Returns 202 Accepted with the <see cref="DispatchOutcomeDto"/> so the
     /// caller can log per-notification results. The underlying push is
     /// best-effort: a transport failure does NOT 5xx this endpoint — it returns
-    /// 202 with <c>delivered=false</c> + the failure reason so batch callers
-    /// can collect non-delivery telemetry without aborting the batch.
+    /// 202 with <c>delivered=false</c> plus the failure reason so operator
+    /// tooling can record non-delivery telemetry.
     /// </summary>
     [HttpPost("dispatch")]
     [RequireCapability(Capabilities.NotificationDispatch)]

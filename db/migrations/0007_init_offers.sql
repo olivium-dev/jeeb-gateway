@@ -44,7 +44,8 @@ END$$;
 --
 -- One row per (request, jeeber) bid. `fee` is the gross amount the
 -- Jeeber is asking the Client to pay; commission math happens at
--- settlement time against delivery_tiers.commission_rate.
+-- COD reconciliation time by the durable settlement owner against the
+-- delivery_tiers.commission_rate snapshot.
 -- `eta_minutes` is the Jeeber's quoted pickup-to-dropoff estimate
 -- (NOT pickup-from-now), per FR-6.2.
 -- `note` is an optional free-text message from Jeeber to Client.

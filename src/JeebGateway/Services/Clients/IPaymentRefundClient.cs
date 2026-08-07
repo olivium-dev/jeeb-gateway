@@ -5,13 +5,9 @@ namespace JeebGateway.Services.Clients;
 /// exactly when an admin resolves with <c>decision=refund</c>, supplying the case
 /// id as the idempotency key so a retried resolve does not double-refund.
 ///
-/// <para>THERE IS NO LONGER A DESTINATION BEHIND THIS INTERFACE. Owner ruling
-/// 2026-07-27 — "jeeb is only cash on delivery", no unified_payment_gateway. The
-/// UPG OpenAPI spec and NSwag client went on 2026-07-26; the hand-coded
-/// <c>HttpPaymentRefundClient</c> went on 2026-07-27 along with the
-/// <c>Services:UnifiedPayment:BaseUrl</c> key that used to select it. The single
-/// registered implementation is now
-/// <see cref="CashOnDeliveryNoRefundClient"/>.</para>
+/// <para>Unified-payment-gateway owns durable COD settlement tracking, but COD
+/// creates no reversible card capture. The registered implementation is
+/// therefore <see cref="CashOnDeliveryNoRefundClient"/> and fails closed.</para>
 ///
 /// <para>The interface is deliberately KEPT rather than deleted along with its
 /// transport. Deleting it would silently erase the call sites in
@@ -19,8 +15,7 @@ namespace JeebGateway.Services.Clients;
 /// refund was ever requested". Keeping it means the request is still made and
 /// still FAILS LOUDLY, which is the honest outcome: cash was handed over in
 /// person, so there is no capture to reverse. A replacement refund destination
-/// is an OWNER decision — record it in
-/// docs/batches/b02-20260726/UPG-REMOVAL.md before wiring one.</para>
+/// requires an explicit, separately designed cash-reimbursement workflow.</para>
 /// </summary>
 public interface IPaymentRefundClient
 {

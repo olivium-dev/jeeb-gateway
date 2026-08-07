@@ -12,11 +12,10 @@ namespace JeebGateway.Disputes.V2;
 ///     admin).</item>
 ///   <item><see cref="ListForUserAsync"/> returns every case the caller
 ///     either opened or is a counter-party on (AC4).</item>
-///   <item><see cref="ResolveAsync"/> applies an admin's decision. When
-///     <c>RefundUsd &gt; 0</c> the orchestrator hits
-///     <c>unified_payment_gateway</c> through
-///     <see cref="JeebGateway.Services.Clients.IPaymentRefundClient"/>
-///     and rolls back state if the refund fails (AC2 + PO blocker #4).
+///   <item><see cref="ResolveAsync"/> applies an admin's decision. COD has no
+///     automated refund; a refund-shaped legacy request fails closed through
+///     <see cref="JeebGateway.Services.Clients.IPaymentRefundClient"/> and the
+///     case remains available for manual resolution.
 ///     A second resolve on a terminal case throws
 ///     <see cref="DisputeCaseConflictException"/> (AC3).</item>
 /// </list>

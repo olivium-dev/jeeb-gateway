@@ -42,29 +42,3 @@
 .github/workflows/deploy-to-jeeb.yml:delivery_base_url:           { description: 'Delivery service base URL (live Jeeb swarm publishes on :10055 — S07 H6c accept->delivery-create)', required: true, default: 'http://192.168.2.50:10055' }
 .github/workflows/deploy-to-jeeb.yml:kyc_base_url:                { description: 'Services__Kyc__BaseUrl — owning kyc-service (live swarm host)',  required: true, default: 'http://192.168.2.50:10074' }
 .github/workflows/deploy-to-jeeb.yml:cdn_base_url:                { description: 'Services__Cdn__BaseUrl — cdn-service signed-PUT broker (live swarm host)', required: true, default: 'http://192.168.2.50:10072' }
-#
-# ---------------------------------------------------------------------------
-# EXCEPTION 2 — Services:UnifiedPayment:BaseUrl — RESOLVED / CLOSED 2026-07-27
-#
-# This exception no longer exists. It described the one genuinely load-bearing
-# .50 value in the repo: the UPG BaseUrl that selected HttpPaymentRefundClient
-# for real dispute refunds (money OUT), which could not simply be blanked because
-# blanking it swapped in a client that REPORTED SUCCESS for a refund that never
-# happened.
-#
-# The owner ruled on 2026-07-27: "jeeb is only cash on delivery", no
-# unified_payment_gateway. The resolution was NOT to blank the URL:
-#   * the refund path now fails LOUDLY (CashOnDeliveryNoRefundClient throws) —
-#     a refund that cannot be honoured must never be reported as honoured;
-#   * HttpPaymentRefundClient, the UPG settlement client + its typed transport,
-#     the db-probe-unified-payment client and the readiness probe are DELETED;
-#   * the COD settlement ledger, which records cash ALREADY collected in person,
-#     is served in-process — it tells the truth, so it is permanent, not a stub.
-#
-# No allowlist line is needed because no Services:UnifiedPayment key survives in
-# committed config OR in the compiled assembly (verified with a UTF-16-aware
-# scan of the built DLL — an ASCII-only grep previously produced a FALSE
-# absence here). The standing guard is
-# tests/JeebGateway.IntegrationTests/Payments/NoPaymentGatewayDialGuardTests.cs.
-# Decision recorded in docs/batches/b02-20260726/UPG-REMOVAL.md.
-# ---------------------------------------------------------------------------

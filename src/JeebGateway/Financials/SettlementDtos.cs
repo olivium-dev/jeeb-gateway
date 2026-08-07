@@ -7,8 +7,8 @@ namespace JeebGateway.Financials;
 ///
 /// A delivery enters <see cref="PendingSettlement"/> the moment the OTP
 /// handover completes (status = delivered). The Jeeber records the cash
-/// they collected via POST /deliveries/{id}/settle which flips the row to
-/// <see cref="Settled"/> and posts the ledger entry to wallet-service.
+/// they collected via POST /deliveries/{id}/settle which asks the durable COD
+/// owner to advance the intent to <see cref="Settled"/>.
 /// GET /deliveries/{id}/receipt returns the rendered receipt and stamps
 /// <see cref="ReceiptGenerated"/> once the first read happens.
 /// </summary>
@@ -20,9 +20,9 @@ public static class SettlementState
 }
 
 /// <summary>
-/// Persisted settlement row. One per delivery — the store enforces
+/// Owner-backed settlement projection. One per delivery — the owner enforces
 /// uniqueness on <see cref="DeliveryId"/> so a re-submitted settle call is
-/// idempotent rather than duplicating ledger entries.
+/// idempotent rather than duplicating COD records.
 /// </summary>
 public sealed class Settlement
 {
@@ -66,9 +66,8 @@ public sealed class SettleDeliveryRequest
     public decimal GoodsCost { get; set; }
 
     /// <summary>
-    /// Only "cash" is accepted in MVP — the gateway's payment policy
-    /// routes card transactions through unified_payment_gateway. Defaults
-    /// to "cash" when omitted.
+    /// Only "cash" is accepted. Cash-on-delivery settlement records are owned
+    /// by unified-payment-gateway. Defaults to "cash" when omitted.
     /// </summary>
     public string? PaymentMethod { get; set; }
 }
@@ -146,7 +145,7 @@ public sealed record ReceiptLine(string Label, decimal Amount);
 /// The settlement-intent READ surface. S09 asserts only that a single
 /// settlement intent exists for the delivery — the commission window opened
 /// at handover (Done) — and that it is idempotent on <see cref="DeliveryId"/>.
-/// The fee math + ledger posting are the S10 concern, exposed by the
+/// The fee math and owner-side COD finalization are the S10 concern, exposed by the
 /// POST /deliveries/{id}/settle action; this read never mutates and never
 /// double-creates. <see cref="State"/> is:
 /// <list type="bullet">
@@ -190,7 +189,8 @@ public enum SettlementOutcome
     NotDelivered,
     NotAuthorized,
     InvalidAmount,
-    InvalidPaymentMethod
+    InvalidPaymentMethod,
+    DependencyUnavailable,
 }
 
 public sealed record SettlementResult(
