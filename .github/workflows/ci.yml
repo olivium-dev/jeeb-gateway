@@ -130,6 +130,7 @@ jobs:
             -e Jwt__PhonePepper="ci-smoke-phone-pepper-not-for-prod-aaaaaaa" \
             -e Jwt__Issuer="ci-smoke" \
             -e Jwt__Audience="ci-smoke" \
+            -e AdminEvidence__TokenKey="ci-smoke-evidence-token-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
             -e AdminOidc__Enabled="true" \
             -e AdminOidc__Issuer="https://identity.example.test" \
             -e AdminOidc__AuthorizationEndpoint="https://identity.example.test/authorize" \
@@ -143,12 +144,16 @@ jobs:
             -e Services__Auth__BaseUrl="http://auth-service:8080" \
             -e Services__Chat__BaseUrl="http://chat-service:8080" \
             -e Services__UserManagement__BaseUrl="http://user-management:8080" \
+            -e UserManagementServiceApi__BaseUrl="http://user-management:8080" \
             -e Services__Wallet__BaseUrl="http://wallet-service:8080" \
             -e Services__Matching__BaseUrl="http://matching:8080" \
             -e Services__Notification__BaseUrl="http://notification-service:8080" \
             -e Services__Geolocation__BaseUrl="http://geolocation-service:8080" \
             -e Services__PushNotification__BaseUrl="http://push-notification:8080" \
             -e Services__Delivery__BaseUrl="http://delivery-service:8080" \
+            -e JeebStateService__BaseUrl="http://jeeb-state-service:8080" \
+            -e UnifiedPaymentGateway__BaseUrl="http://unified-payment-gateway:8080" \
+            -e Settlements__CodOwnerVerified="true" \
             jeeb-gateway:ci-${{ github.sha }}
           sleep 5
           curl -sf http://localhost:18080/health/live || (docker logs gw-smoke && exit 1)
