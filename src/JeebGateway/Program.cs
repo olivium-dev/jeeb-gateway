@@ -742,8 +742,16 @@ builder.Services.AddScoped<JeebGateway.Notifications.INewRequestPushNotifier,
 // ServicePushNotificationClient = Scoped, INewRequestPushNotifier = Scoped.
 // Singleton-into-scoped is safe; scoped-into-singleton is the captive-dependency bug the
 // per-job scope in NewRequestFanoutProcessor avoids.
-builder.Services.Configure<JeebGateway.Notifications.NewRequestFanoutOptions>(
-    builder.Configuration.GetSection(JeebGateway.Notifications.NewRequestFanoutOptions.SectionName));
+builder.Services
+    .AddOptions<JeebGateway.Notifications.NewRequestFanoutOptions>()
+    .Bind(builder.Configuration.GetSection(JeebGateway.Notifications.NewRequestFanoutOptions.SectionName))
+    .Validate(
+        o => o.MaxRecipients >= 1,
+        "Notifications:NewRequestFanout:MaxRecipients must be >= 1 — a non-positive cap empties the per-user set and hands control to the TopicFallbackWhenEmpty topic-blast hatch.")
+    .Validate(
+        o => o.KnownJeeberWindow > TimeSpan.Zero,
+        "Notifications:NewRequestFanout:KnownJeeberWindow must be greater than zero.")
+    .ValidateOnStart();
 // Explicit factory: NewRequestFanoutQueue exposes a second, capacity-int ctor for tests,
 // so an open AddSingleton<I,T>() would leave constructor selection to reflection.
 builder.Services.AddSingleton<JeebGateway.Notifications.INewRequestFanoutQueue>(sp =>

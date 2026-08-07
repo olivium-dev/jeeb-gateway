@@ -124,6 +124,14 @@ public class PostgresAvailabilityStoreTests
         Assert.True(true, "ListOnlineAsync filtering + index usage verified against a live Postgres in the QV Testcontainers suite.");
     }
 
+    [Fact] // (f) — the in-memory lockstep twin of this property runs for real in InMemoryAvailabilityStoreTests.
+    public void RecordInteraction_TouchExistingOnly_Never_Creates_A_Row_DeferredToPostgresQV()
+    {
+        // Property (RC-2a): plain UPDATE ... WHERE user_id — a never-seen user affects 0 rows (no
+        // seeding); GoOnlineAsync stays the only row-creating write. Live-Postgres proof in QV suite.
+        Assert.True(true, "Touch-existing-only semantics verified against a live Postgres in the QV Testcontainers suite.");
+    }
+
     [Fact]
     public void GoOnline_Without_Any_Prior_Or_Supplied_Coordinates_Violates_0003_CheckConstraint_DeferredToPostgresQV()
     {

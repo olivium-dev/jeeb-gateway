@@ -264,27 +264,18 @@ public sealed class PostgresAvailabilityStore : IAvailabilityStore
     {
         var userGuid = Guid.Parse(userId);
 
-        // Mirrors InMemoryAvailabilityStore.RecordInteractionAsync exactly:
-        // touches ONLY last_interaction_at on an existing row (is_online,
-        // vehicle_type, zone, location are all left untouched); seeds a
-        // fresh offline default row the first time a never-seen userId
-        // interacts (e.g. a GET from a Jeeber who has never gone online).
+        // Mirrors InMemoryAvailabilityStore.RecordInteractionAsync exactly: touches an EXISTING
+        // row only. A plain GET must never seed the roster — row creation is GoOnlineAsync's alone.
         const string sql = """
-            INSERT INTO jeeber_availability (
-                user_id, is_online, vehicle_type, zone, last_location,
-                last_seen_at, last_interaction_at, created_at, updated_at
-            ) VALUES (
-                @UserId, FALSE, @DefaultVehicleType::jeeber_vehicle_type, NULL, NULL, NULL, @At, now(), now()
-            )
-            ON CONFLICT (user_id) DO UPDATE SET
-                last_interaction_at = @At,
+            UPDATE jeeber_availability
+            SET last_interaction_at = @At,
                 updated_at          = now()
+            WHERE user_id = @UserId
             """;
 
         await using var conn = await _db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("UserId", userGuid);
-        cmd.Parameters.AddWithValue("DefaultVehicleType", VehicleType.Car.ToWire());
         cmd.Parameters.AddWithValue("At", at);
         await cmd.ExecuteNonQueryAsync(ct);
     }
