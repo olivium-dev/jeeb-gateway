@@ -672,7 +672,8 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
     // -------- T-BE-019 downstream compose path (FeatureFlags:UseUpstream:Delivery on) --
     //
     // Flag-on rewires the durable gate (at_door gate, attempt counter, 423-lock,
-    // AtDoor→Done + settlement) to delivery-service. The gateway keeps ONLY the
+    // AtDoor→Done + local non-financial handover marker) to delivery-service.
+    // UPG owns the durable COD record. The gateway keeps only the
     // SMS round-trip (issue) and the code-validation hop (verify), then forwards
     // a success boolean. The raw code never reaches delivery-service (AC5).
 

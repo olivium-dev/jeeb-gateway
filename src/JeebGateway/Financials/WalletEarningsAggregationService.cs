@@ -117,8 +117,8 @@ public sealed class WalletEarningsAggregationService : IEarningsAggregationServi
         }
         catch (ApiException)
         {
-            // Best-effort: wallet unreachable → return zero (mirrors InMemorySettlementStore
-            // behaviour on a cold start before any deliveries are settled).
+            // Legacy alternative only: wallet unreachable returns zero. This
+            // service is not the COD owner; production earnings use UPG's projection.
             return 0m;
         }
     }

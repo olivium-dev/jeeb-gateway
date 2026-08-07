@@ -478,7 +478,7 @@ public class DisputeCaseEndpointTests
         var fromClient = await http.GetFromJsonAsync<DisputeCaseResponse>($"/v1/disputes/{@case.Id}");
         fromClient!.State.Should().Be(DisputeCaseState.UnderReview);
 
-        // under_review → resolved_refund is a valid onward transition.
+        // under_review → resolved_no_action is the supported COD transition.
         var resolveResp = await admin.PostAsJsonAsync($"/admin/v1/disputes/{@case.Id}/resolve", new ResolveCaseRequest
         {
             Decision = "no_action",
@@ -788,14 +788,14 @@ public class DisputeCaseCanonicalStatusGuardTests
     [Fact]
     public void Full_Lifecycle_Create_Review_Resolve_Close_Only_Touches_Canonical_Values()
     {
-        // create → open ; review → under_review ; resolve → resolved_refund ;
+        // create → open ; review → under_review ; resolve → resolved_no_action ;
         // close → closed (the archival seal). Every state the record passes
         // through is one of the five canonical values.
         var lifecycle = new[]
         {
             DisputeCaseState.Open,           // create (POST /v1/deliveries/{id}/escalate)
             DisputeCaseState.UnderReview,    // review (POST /admin/v1/disputes/{id}/review)
-            DisputeCaseState.ResolvedRefund, // resolve (POST /admin/v1/disputes/{id}/resolve)
+            DisputeCaseState.ResolvedNoAction, // supported COD resolve action
             DisputeCaseState.Closed          // close (automatic archival seal)
         };
 
@@ -803,13 +803,13 @@ public class DisputeCaseCanonicalStatusGuardTests
 
         // The verb-driven hops are legal on the machine …
         DisputeCaseState.CanTransition(DisputeCaseState.Open, DisputeCaseState.UnderReview).Should().BeTrue();
-        DisputeCaseState.CanTransition(DisputeCaseState.UnderReview, DisputeCaseState.ResolvedRefund).Should().BeTrue();
+        DisputeCaseState.CanTransition(DisputeCaseState.UnderReview, DisputeCaseState.ResolvedNoAction).Should().BeTrue();
 
         // … and the resolved→closed hop is the store's automatic seal, NOT a
         // client-reachable transition: once resolved, the record is terminal
         // for CanTransition and the seal is applied out-of-band.
-        DisputeCaseState.IsResolved(DisputeCaseState.ResolvedRefund).Should().BeTrue();
-        DisputeCaseState.CanTransition(DisputeCaseState.ResolvedRefund, DisputeCaseState.Closed).Should().BeFalse();
+        DisputeCaseState.IsResolved(DisputeCaseState.ResolvedNoAction).Should().BeTrue();
+        DisputeCaseState.CanTransition(DisputeCaseState.ResolvedNoAction, DisputeCaseState.Closed).Should().BeFalse();
         DisputeCaseState.IsResolved(DisputeCaseState.Closed).Should().BeTrue();
 
         // closed is fully terminal — no onward transition to any canonical value.

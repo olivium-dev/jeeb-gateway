@@ -18,15 +18,14 @@ namespace JeebGateway.IntegrationTests;
 ///
 /// ROOT CAUSE: with <c>FeatureFlags:UseUpstream:Delivery=true</c> (the live gateway
 /// config) the handover OTP verify returns early into
-/// <c>VerifyOtpViaDeliveryServiceAsync</c>, which — before this fix — NEVER created a
-/// settlement row. The only settlement-creating code lived on the flag-OFF in-memory
-/// branch, stranded behind the early return. So a completed COD delivery credited the
-/// jeeber NOTHING: no settlement row, <c>POST /api/v1/payments/cod/record</c> 404'd,
-/// no wallet <c>cash_settlement</c> ledger entry, $0 earnings.
+/// <c>VerifyOtpViaDeliveryServiceAsync</c>, which — before this fix — never submitted
+/// the authoritative COD record to UPG. The only record path lived on the flag-OFF
+/// branch, stranded behind the early return, so a completed COD delivery had no
+/// owner-backed earnings projection.
 ///
 /// THE FIX: on completion (OTP verify → Done, and the customer PATCH → Done) the
-/// gateway fires <c>ISettlementService.SettleOnCompletionAsync</c>, which credits the
-/// assigned jeeber using the SERVER-AUTHORITATIVE COD amount from the delivery row
+/// gateway calls <c>ISettlementService.SettleOnCompletionAsync</c>, which records the
+/// assigned jeeber's server-authoritative COD amount in UPG
 /// (<see cref="DeliveryRequest.AcceptedFee"/>, BR-16) — no manual "record cash" step,
 /// no client-supplied amount. Idempotent / exactly-once.
 ///
@@ -49,9 +48,8 @@ public class JeeberEarningsOnCompleteTests
 
     /// <summary>
     /// KEYSTONE: an OTP verify that completes the handover on the flag-ON upstream path
-    /// CREDITS the jeeber — a settled settlement row is created with the
-    /// server-authoritative amount, a wallet ledger entry is posted, and the earnings
-    /// summary reflects the gross. Before the fix this produced NO row and $0 earnings.
+    /// records COD for the jeeber — an owner-backed projection carries the
+    /// server-authoritative amount and the earnings summary reflects the gross.
     /// </summary>
     [Fact]
     public async Task Otp_Verify_Completion_Credits_Jeeber_And_Surfaces_Earnings()
@@ -64,10 +62,10 @@ public class JeeberEarningsOnCompleteTests
         var verify = await jeeber.PostAsJsonAsync($"/deliveries/{deliveryId}/otp/verify", new { code = ValidCode });
         verify.StatusCode.Should().Be(HttpStatusCode.OK, "the handover completes on the upstream path");
 
-        // (1) A settlement row now exists — server-authoritative amount, jeeber credited.
+        // (1) The UPG-backed projection now exists with the server-authoritative amount.
         var store = factory.Services.GetRequiredService<ISettlementStore>();
         var settlement = await store.GetByDeliveryAsync(deliveryId, default);
-        settlement.Should().NotBeNull("completion must create the gateway settlement row (the regression)");
+        settlement.Should().NotBeNull("completion must create the UPG-owned COD record (the regression)");
         settlement!.State.Should().Be(SettlementState.Settled);
         settlement.JeeberId.Should().Be(jeeberId);
         settlement.GoodsCost.Should().Be(AcceptedFee, "BR-16: the amount is sourced server-side from the delivery row, not a client body");
@@ -75,7 +73,7 @@ public class JeeberEarningsOnCompleteTests
         settlement.Insurance.Should().Be(ExpectedInsurance);
         settlement.Total.Should().Be(ExpectedTotal);
         settlement.PaymentMethod.Should().Be(SettlementService.PaymentMethodCash);
-        settlement.LedgerEntryId.Should().NotBeNullOrEmpty("the wallet cash_settlement credit was posted");
+        settlement.LedgerEntryId.Should().NotBeNullOrEmpty("the compatibility projection includes the owner reference");
 
         // (2) Earnings now reflect the credit (gross = the server-authoritative amount).
         var from = Uri.EscapeDataString(DateTimeOffset.UtcNow.AddDays(-1).ToString("O"));

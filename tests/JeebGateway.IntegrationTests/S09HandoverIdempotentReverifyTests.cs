@@ -46,7 +46,7 @@ public class S09HandoverIdempotentReverifyTests
     /// A7 (positive): a second verify on an ALREADY-`Done` delivery returns the
     /// idempotent 200 replay <c>{ verified:true, status:"Done" }</c>, NOT a 409.
     /// The replay path must NOT re-validate the OTP and must NOT re-run the SM
-    /// transition (BR-OTP-6: exactly-once settlement).
+    /// transition (BR-OTP-6: exactly-once local marker and UPG COD record).
     /// </summary>
     [Fact]
     public async Task Second_Verify_After_Done_Returns_Idempotent_200_Replay_Not_409()
@@ -78,7 +78,7 @@ public class S09HandoverIdempotentReverifyTests
 
         // BR-OTP-6 / exactly-once: the replay reads the canonical state but must NOT
         // re-validate the OTP code against one-time-password (OTP-used-once law) and
-        // must NOT re-run the AtDoor→Done verify hop (no second settlement).
+        // must not re-run the AtDoor→Done verify hop (no duplicate marker/UPG record).
         delivery.VerifyCalls.Should().Be(1, "the verify hop is attempted exactly once");
         delivery.CanonicalReads.Should().Be(1, "exactly one canonical state read disambiguates the 409");
     }

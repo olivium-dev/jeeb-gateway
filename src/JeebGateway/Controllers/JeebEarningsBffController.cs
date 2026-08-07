@@ -23,9 +23,9 @@ namespace JeebGateway.Controllers;
 /// The mobile app calls the gateway-relative <c>/v1/jeeb/earnings</c>, but the gateway only
 /// exposed <c>/v1/jeebers/me/earnings</c> (<see cref="JeebEarningsController"/>) and
 /// <c>/api/earnings/*</c> (<c>EarningsController</c>) — so the app's path 404'd. This
-/// controller adds the missing mobile-contract path, wired to the OWNING surfaces:
-/// the SUMMARY serves the gateway's OWN settlement aggregation
-/// (<see cref="IEarningsAggregationService"/>, the SAME service + earned-COD states
+/// controller adds the missing mobile-contract path, wired to the owner-backed surfaces:
+/// the SUMMARY aggregates UPG's authoritative COD settlement projection
+/// (<see cref="IEarningsAggregationService"/>, the same service + earned-COD states
 /// <see cref="JeebEarningsController"/> uses); the EXPORT reuses the gateway's existing
 /// <see cref="IEarningsPdfGenerator"/> (the same generator <c>EarningsController</c> serves),
 /// since wallet-service exposes no PDF statement endpoint.
@@ -33,10 +33,10 @@ namespace JeebGateway.Controllers;
 ///
 /// <para>
 /// JEBV4-283: the SUMMARY previously RELAYED wallet-service's
-/// <c>GET /v1/wallet/jeeb/earnings</c>, but wallet-service does not own COD settlements — the
-/// gateway does — so that relay returned an empty summary and the Earnings screen showed
-/// commission 0 / "No earnings yet" despite recorded settlements. It now reads the gateway's
-/// OWN settlement aggregation (<see cref="EarningsAggregationService"/>) DIRECTLY — the concrete
+/// <c>GET /v1/wallet/jeeb/earnings</c>, but wallet-service does not own COD settlements — UPG
+/// does — so that relay returned an empty summary and the Earnings screen showed commission 0 /
+/// "No earnings yet" despite recorded settlements. It now reads the gateway's UPG-backed
+/// settlement aggregation (<see cref="EarningsAggregationService"/>) directly — the concrete
 /// service, NOT the flag-swapped <see cref="IEarningsAggregationService"/> — so recorded COD
 /// earnings surface even when <c>FeatureFlags:UseUpstream:Earnings=true</c> routes that interface
 /// to <see cref="WalletEarningsAggregationService"/> (which reads wallet gross credit-revenue,
@@ -46,8 +46,9 @@ namespace JeebGateway.Controllers;
 /// <para>
 /// ADR-0001 (STATELESS &amp; THIN): authenticates, scopes the read to the caller's OWN jeeber
 /// id from the bearer (a client-supplied <c>jeeberId</c> query is NOT trusted), and returns the
-/// gateway's canonical earnings projection (summary) / generates the statement (export). It
-/// holds NO state and NO persistence beyond the settlement rows the aggregation reads.
+/// UPG-backed canonical earnings projection (summary) / generates the statement (export). It
+/// holds no settlement state or persistence; the aggregation reads UPG through the compatibility
+/// seam.
 /// </para>
 /// </summary>
 [ApiController]
@@ -82,8 +83,8 @@ public sealed class JeebEarningsBffController : ControllerBase
     /// caller's earnings summary, scoped to the bearer's own jeeber id.
     ///
     /// <para>
-    /// JEBV4-283: serves the GATEWAY's OWN settlement aggregation
-    /// (<see cref="EarningsAggregationService"/>, injected as the CONCRETE type and read directly so
+    /// JEBV4-283: serves the gateway's UPG-backed settlement aggregation
+    /// (<see cref="EarningsAggregationService"/>, injected as the concrete type and read directly so
     /// it is independent of the <c>FeatureFlags:UseUpstream:Earnings</c> flag) with the earned-COD
     /// states (<see cref="CodSettlementState.EarningsStates"/>, which INCLUDE <c>recorded</c>) —
     /// instead of relaying to wallet-service (which does not own COD settlements and returned an

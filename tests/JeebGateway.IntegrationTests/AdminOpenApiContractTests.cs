@@ -69,6 +69,13 @@ public sealed class AdminOpenApiContractTests
 
         var schemas = root.GetProperty("components").GetProperty("schemas");
         schemas.TryGetProperty("AdminLoginRequest", out _).Should().BeFalse();
+        var legacyResolve = paths.GetProperty("/admin/v1/disputes/{id}/resolve").GetProperty("post");
+        legacyResolve.GetProperty("description").GetString().Should().Contain("refundUsd and refund actions are rejected");
+        schemas.GetProperty("LegacyCaseResolutionRequest").GetProperty("description").GetString()
+            .Should().Contain("Automated refund and card-chargeback actions are not supported");
+        schemas.GetProperty("LegacyCaseResolutionRequest").GetProperty("properties")
+            .GetProperty("refundUsd").GetProperty("description").GetString()
+            .Should().Contain("Rejected legacy input");
         schemas.GetProperty("AdminAccessTokenResponse").GetProperty("properties")
             .EnumerateObject().Select(property => property.Name)
             .Should().Equal("accessToken");

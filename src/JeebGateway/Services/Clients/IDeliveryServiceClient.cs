@@ -707,7 +707,8 @@ public sealed class DeliveryHandoverIssueResult
 /// <c>delivery_id</c>/<c>verified</c>/<c>status</c> under the shared web-default
 /// options without mutating the global naming policy. Without them STJ throws on
 /// the SUCCESS path — after delivery-service has already committed
-/// AtDoor→Done + settlement — surfacing as an unhandled 500.
+/// AtDoor→Done + its local non-financial handover marker — surfacing as an
+/// unhandled 500. UPG remains the durable COD settlement owner.
 /// </summary>
 public sealed class DeliveryHandoverVerifyResult
 {

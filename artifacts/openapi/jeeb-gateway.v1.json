@@ -2775,6 +2775,7 @@
           "AdminCases"
         ],
         "summary": "Admin cases: Legacy resolve",
+        "description": "Compatibility-only case resolution route. Jeeb is cash on delivery: refundUsd and refund actions are rejected, and any approved cash reimbursement is arranged manually after review.",
         "operationId": "AdminCasesController_LegacyResolve_POST_admin_v1_disputes_id_resolve",
         "parameters": [
           {
@@ -7137,6 +7138,7 @@
           },
           "refundUsd": {
             "type": "number",
+            "description": "Rejected legacy input. Approved COD cash reimbursement is arranged manually.",
             "format": "double",
             "nullable": true
           },
@@ -7158,7 +7160,8 @@
             "nullable": true
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "description": "Compatibility input for non-financial case closure. Automated refund and card-chargeback actions are not supported for Jeeb COD."
       },
       "OtpRequestDto": {
         "type": "object",

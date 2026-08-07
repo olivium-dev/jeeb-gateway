@@ -16,7 +16,8 @@ namespace JeebGateway.IntegrationTests;
 /// Sprint-003 Gate-C FIX 1 — terminal <c>delivered</c> projection on the FLAG-ON
 /// (upstream) OTP-verify success path.
 ///
-/// The canonical AtDoor→Done transition + settlement commit in delivery-service; the
+/// The canonical AtDoor→Done transition + local non-financial handover marker commit
+/// in delivery-service; UPG owns COD. The
 /// gateway must then mirror the terminal flip onto its local request read-model so the
 /// client-facing <c>GET /v1/requests/{id}</c> reads <c>delivered</c> (not the last
 /// PATCH-status value, e.g. AtDoor). Before the fix the flag-OFF path projected (it

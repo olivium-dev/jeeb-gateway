@@ -135,7 +135,7 @@ public sealed class SettlementService : ISettlementService
             delivery.DeliveryId, delivery.ClientId ?? string.Empty, delivery.JeeberId!, delivery.TierId,
             existing?.Id, breakdown, paymentMethod, SettlementState.Settled);
 
-        return await PersistAndCreditAsync(settlement, ct);
+        return await PersistWithOwnerAsync(settlement, ct);
     }
 
     /// <summary>
@@ -235,7 +235,7 @@ public sealed class SettlementService : ISettlementService
         var settlement = BuildSettlement(
             deliveryId, clientId, jeeberId, tierId, existing?.Id, breakdown,
             PaymentMethodCash, SettlementState.Settled);
-        return await PersistAndCreditAsync(settlement, ct);
+        return await PersistWithOwnerAsync(settlement, ct);
     }
 
     /// <summary>
@@ -415,7 +415,7 @@ public sealed class SettlementService : ISettlementService
     /// a replay returns <see cref="SettlementOutcome.AlreadySettled"/> without a
     /// duplicate durable record.
     /// </summary>
-    private async Task<SettlementResult> PersistAndCreditAsync(Settlement settlement, CancellationToken ct)
+    private async Task<SettlementResult> PersistWithOwnerAsync(Settlement settlement, CancellationToken ct)
     {
         // FT-07: if a pending-settlement placeholder was created at OTP-verify time,
         // replace it atomically instead of inserting a duplicate. Falls through to

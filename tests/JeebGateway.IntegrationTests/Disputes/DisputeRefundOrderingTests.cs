@@ -24,11 +24,8 @@ namespace JeebGateway.IntegrationTests.Disputes;
 public class DisputeRefundOrderingTests
 {
     // ------------------------------------------------------------------
-    // AC1 — refund is called exactly once with the documented idempotency
-    // key, and the refund happens BEFORE the durable resolution write
-    // (DisputeCaseService.cs:275-308: refund first, ApplyResolutionAsync
-    // second). Proven by having the refund client itself query the case
-    // store mid-call and observe the case is still 'open'.
+    // COD policy guard — a refund-shaped request is rejected before the
+    // compatibility refund client or durable case store is touched.
     // ------------------------------------------------------------------
     [Fact]
     public async Task Resolve_With_Refund_Is_Rejected_Before_Refund_Or_Durable_Write()
@@ -74,9 +71,8 @@ public class DisputeRefundOrderingTests
     }
 
     // ------------------------------------------------------------------
-    // AC2 — refund failure aborts the resolution: case stays open with
-    // RefundFailed, and NO durable write happens (state never advances,
-    // ResolverAdminId / ResolvedAt never stamped).
+    // The rejection is policy-driven, independent of the injected refund
+    // client's behavior: the case stays open and no durable write lands.
     // ------------------------------------------------------------------
     [Fact]
     public async Task Resolve_With_Refund_Failure_Aborts_Resolution_And_Persists_No_Write()
@@ -127,13 +123,8 @@ public class DisputeRefundOrderingTests
     }
 
     // ------------------------------------------------------------------
-    // AC3 — admin retries after "refund succeeded but the durable write
-    // failed": the SAME idempotency key is re-sent (a future reimbursement owner
-    // would dedupe), the
-    // retry completes, and no second refund amount is recorded. Simulated
-    // via a decorator over InMemoryDisputeCaseStore that throws on the
-    // FIRST ApplyResolutionAsync call per case (modelling a transient write
-    // failure) and succeeds on every subsequent call.
+    // Idempotent retries remain side-effect-free rejections. Test doubles that
+    // would mutate payment or case state prove neither seam is consulted.
     // ------------------------------------------------------------------
     [Fact]
     public async Task Refund_Replay_With_Same_Key_Remains_Rejected_Without_Refund_Or_Write()
@@ -234,11 +225,8 @@ public class DisputeRefundOrderingTests
     }
 
     /// <summary>
-    /// Wraps <see cref="InMemoryPaymentRefundClient"/>'s success behaviour but
-    /// additionally captures, for each call, the calling case's state as read
-    /// from <see cref="IDisputeCaseStore"/> AT THE MOMENT the refund call is
-    /// made — proving the durable write has not happened yet (refund-before-write
-    /// ordering).
+    /// Compatibility test double that records any unexpected refund-client call.
+    /// COD policy requires the collection to remain empty.
     /// </summary>
     private sealed class OrderingObservingRefundClient : IPaymentRefundClient
     {
@@ -247,10 +235,8 @@ public class DisputeRefundOrderingTests
         public IReadOnlyList<RefundRequest> Calls => _calls;
         public string? CaseStateObservedDuringCall { get; private set; }
 
-        // Constructor-injected root IServiceProvider so RefundAsync can read
-        // the CURRENT persisted case state (via IDisputeCaseStore) at the
-        // exact moment the refund call happens — proving refund-before-write
-        // ordering without needing a second, hand-rolled store fake.
+        // The state observation is diagnostic only: this method must never be
+        // reached by a production COD resolution request.
         public OrderingObservingRefundClient(IServiceProvider services) => _services = services;
 
         public async Task<RefundResult> RefundAsync(RefundRequest request, CancellationToken ct)
@@ -281,11 +267,8 @@ public class DisputeRefundOrderingTests
     }
 
     /// <summary>
-    /// Decorator over any <see cref="IDisputeCaseStore"/> that throws on the
-    /// FIRST <see cref="ApplyResolutionAsync"/> call for a given case id
-    /// (modelling a transient durable-write failure AFTER a refund has
-    /// already succeeded) and delegates normally on every subsequent call for
-    /// that same case.
+    /// Defensive store double that throws if a rejected refund-shaped request
+    /// unexpectedly reaches durable resolution mutation.
     /// </summary>
     private sealed class WriteOnceFlakyDisputeCaseStore : IDisputeCaseStore
     {

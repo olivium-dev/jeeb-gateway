@@ -665,6 +665,10 @@ public sealed class LegacyCaseResolutionRequest
     public string? Action { get; init; }
     public string? Outcome { get; init; }
     public string? Decision { get; init; }
+    /// <summary>
+    /// Rejected legacy input retained for wire compatibility. Jeeb COD cases have no automated
+    /// refund or card-chargeback action; approved cash reimbursement is arranged manually.
+    /// </summary>
     public decimal? RefundUsd { get; init; }
     public string? Resolution { get; init; }
     public string? Reason { get; init; }

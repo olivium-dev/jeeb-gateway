@@ -25,7 +25,8 @@ namespace JeebGateway.IntegrationTests;
 /// <c>JsonSerializerDefaults.Web</c> (camelCase), so the snake_case
 /// <c>delivery_id</c> did not bind onto the <c>required</c> DeliveryId and STJ
 /// threw a JsonException on the SUCCESS path — surfacing as an unhandled 500
-/// even though delivery-service had already committed AtDoor→Done + settlement.
+/// even though delivery-service had already committed AtDoor→Done + its local
+/// non-financial handover marker. UPG remains the durable COD owner.
 /// These tests FAIL without the explicit <c>[JsonPropertyName]</c> attributes.
 /// </summary>
 public class DeliveryHandoverContractTests

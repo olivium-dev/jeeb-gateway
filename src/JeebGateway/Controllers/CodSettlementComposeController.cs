@@ -66,10 +66,10 @@ public sealed class CodSettlementComposeController : ControllerBase
         if (body is null || string.IsNullOrWhiteSpace(body.DeliveryId))
             return BadRequest(Problem("cod-record-body-required", "deliveryId is required."));
 
-        // The settlement row is the authoritative amount + party source. A COD
-        // record requires the Jeeber to have already settled the cash on the
-        // gateway (POST /deliveries/{id}/settle) — that row holds the verbatim
-        // commission the COD record must copy.
+        // UPG's settlement projection is the authoritative amount + party source.
+        // This compatibility route requires the Jeeber to have already recorded
+        // the cash through POST /deliveries/{id}/settle, which delegates to UPG;
+        // the gateway retains no settlement row.
         var settlement = await _settlements.GetByDeliveryAsync(body.DeliveryId, ct);
         if (settlement is null)
             return NotFound();

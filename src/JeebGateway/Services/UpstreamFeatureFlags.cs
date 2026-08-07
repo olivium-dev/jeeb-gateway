@@ -261,9 +261,9 @@ public sealed class UpstreamFeatureFlags
     /// <summary>
     /// JEB-1434 / JEB-1465: when true, the earnings aggregation reads live gross
     /// revenue from the shared wallet-service (Transaction/holder/{id}/credit-revenue)
-    /// via <c>WalletEarningsAggregationService</c> instead of summing the in-memory
-    /// settlement rows (which are zero on a cold start). DEFAULTS OFF — flip to true
-    /// in Production once wallet-service is confirmed healthy.
+    /// via <c>WalletEarningsAggregationService</c> instead of projecting UPG's
+    /// authoritative COD records. This legacy alternative does not own COD and
+    /// defaults off; the production Jeeb CMS path remains UPG-backed.
     /// </summary>
     public bool Earnings { get; set; }
 

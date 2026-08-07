@@ -26,11 +26,10 @@ namespace JeebGateway.Disputes.V2;
 /// Side-effects committed inside <see cref="ResolveAsync"/>:
 /// <list type="bullet">
 ///   <item>State transition through <see cref="DisputeCaseState"/>.</item>
-///   <item>When <c>decision = refund</c>, a single call to
-///     <see cref="IPaymentRefundClient.RefundAsync"/> with the case id
-///     as the idempotency key. A failed refund aborts the state
-///     transition and surfaces <see cref="ResolveOutcome.RefundFailed"/>
-///     (PO blocker #4 — no half-resolved cases).</item>
+///   <item>The legacy <c>decision = refund</c> branch calls the injected
+///     <see cref="IPaymentRefundClient"/> policy. Production registers
+///     <see cref="CashOnDeliveryNoRefundClient"/>, which rejects automated refunds and aborts
+///     the transition; COD reimbursement is reviewed and arranged manually outside this path.</item>
 ///   <item>Two push notifications — one to each delivery party (AC2).</item>
 ///   <item>Structured <c>dispute.resolved</c> log line + metric.</item>
 /// </list>
@@ -449,10 +448,10 @@ public sealed class DisputeCaseService : IDisputeCaseService
     private async Task NotifyResolveAsync(DisputeCase @case, CancellationToken ct)
     {
         var openerTitle = @case.State == DisputeCaseState.ResolvedRefund
-            ? "Dispute resolved with refund"
+            ? "Manual reimbursement approved"
             : "Dispute closed";
         var openerBody = @case.State == DisputeCaseState.ResolvedRefund
-            ? $"Your dispute has been resolved. A refund of ${@case.RefundUsd:0.00} is on the way."
+            ? $"Your dispute has been reviewed. Operations will arrange a cash reimbursement of ${@case.RefundUsd:0.00} manually."
             : "Your dispute has been reviewed and closed.";
 
         await SendBestEffortAsync(BuildPush(
@@ -461,10 +460,10 @@ public sealed class DisputeCaseService : IDisputeCaseService
         if (!string.IsNullOrEmpty(@case.CounterpartyUserId))
         {
             var counterTitle = @case.State == DisputeCaseState.ResolvedRefund
-                ? "Dispute resolved with refund"
+                ? "Manual reimbursement approved"
                 : "Dispute closed";
             var counterBody = @case.State == DisputeCaseState.ResolvedRefund
-                ? $"A dispute on one of your deliveries was resolved with a ${@case.RefundUsd:0.00} refund."
+                ? $"A reviewed dispute on one of your deliveries was approved for a manual cash reimbursement of ${@case.RefundUsd:0.00}."
                 : "A dispute on one of your deliveries was reviewed and closed.";
 
             await SendBestEffortAsync(BuildPush(

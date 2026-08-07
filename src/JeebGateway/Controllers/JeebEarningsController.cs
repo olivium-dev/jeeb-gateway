@@ -26,9 +26,9 @@ public sealed class JeebEarningsController : ControllerBase
     /// <summary>
     /// JEBV4-283: COD states that count as EARNED commission for the jeeber. <c>recorded</c>
     /// IS included — the jeeber earns the commission the moment COD is collected at delivery
-    /// completion, independent of UPG's later settlement lifecycle (<c>recorded →
-    /// batched → paid</c>). Batching and payment remain UPG-owned payout concerns,
-    /// not preconditions for displaying an earning.
+    /// completion, independent of UPG's later COD lifecycle (<c>recorded →
+    /// batched → paid</c>). Those are UPG-owned reconciliation states, not
+    /// preconditions for displaying an earning; any operational payout is separate.
     /// </summary>
     private static readonly string[] EarningsCodStates = CodSettlementState.EarningsStates;
 

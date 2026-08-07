@@ -213,7 +213,8 @@ public class SettlementsController : ControllerBase
     /// delivery-service-backed <see cref="IDeliveryParticipantResolver"/> — the
     /// authority for who is bound to the delivery — so a non-party gets 403 and
     /// an unknown delivery gets 404. No cross-service DB read: the gateway
-    /// composes the delivery-service party verdict with its own settlement store.
+    /// composes the delivery-service party verdict with its UPG-backed
+    /// settlement projection seam.
     /// </para>
     /// </summary>
     [HttpGet("/v1/deliveries/{deliveryId}/settlement")]

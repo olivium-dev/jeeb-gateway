@@ -57,6 +57,15 @@ public sealed class GatewayOperationSummaryFilter : IOperationFilter
             operation.OperationId = SanitizeIdentifier(source);
         }
 
+        if (context.MethodInfo.DeclaringType == typeof(AdminCasesController)
+            && context.MethodInfo.Name == nameof(AdminCasesController.LegacyResolve))
+        {
+            operation.Description =
+                "Compatibility-only case resolution route. Jeeb is cash on delivery: " +
+                "refundUsd and refund actions are rejected, and any approved cash reimbursement " +
+                "is arranged manually after review.";
+        }
+
         // Every route can reject malformed client input with 400. Use a
         // concrete status because NSwag 14.2 emits invalid TypeScript for the
         // otherwise-valid OpenAPI ranged key "4XX".
@@ -126,6 +135,15 @@ public sealed class GatewayEvidenceSchemaFilter : ISchemaFilter
         else if (context.Type == typeof(SettlementEventMoneyV1))
             foreach (var property in new[] { "gross_amount", "commission_amount", "net_amount" })
                 RepairArbitraryJson(schema, property);
+        else if (context.Type == typeof(LegacyCaseResolutionRequest))
+        {
+            schema.Description =
+                "Compatibility input for non-financial case closure. Automated refund and " +
+                "card-chargeback actions are not supported for Jeeb COD.";
+            if (schema.Properties.TryGetValue("refundUsd", out var legacyRefund))
+                legacyRefund.Description =
+                    "Rejected legacy input. Approved COD cash reimbursement is arranged manually.";
+        }
     }
 
     private static void RepairArbitraryJson(OpenApiSchema schema, string property)

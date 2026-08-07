@@ -1917,8 +1917,9 @@ public class DeliveriesController : ControllerBase
         // ---- T-BE-019 downstream compose path (FeatureFlags:UseUpstream:Delivery) ----
         // When the kill-switch is on, the gateway owns ONLY the code-validation
         // hop against one-time-password; the durable attempt counter, 423-lock,
-        // at_door gate, AtDoor→Done transition and single-tx settlement all live
-        // in delivery-service. The gateway forwards a success boolean and maps
+        // at_door gate, AtDoor→Done transition and local non-financial handover
+        // marker all live in delivery-service. UPG remains the durable COD owner.
+        // The gateway forwards a success boolean and maps
         // delivery-service's 200/401/423/409/404 straight through as RFC 7807.
         // The raw code never leaves the gateway↔one-time-password hop (AC5).
         if (_flags.CurrentValue.Delivery)
@@ -2362,8 +2363,9 @@ public class DeliveriesController : ControllerBase
     /// <summary>
     /// Verify path, flag-on: gateway validates the raw code against
     /// one-time-password (success boolean), then hands the durable
-    /// attempt-counter / 423-lock / AtDoor→Done / settlement to
-    /// delivery-service via <c>/otp/verify {success}</c>. delivery-service's
+    /// attempt-counter / 423-lock / AtDoor→Done / local non-financial handover marker
+    /// to delivery-service via <c>/otp/verify {success}</c>. UPG remains the durable
+    /// COD owner. delivery-service's
     /// 200/401/423/409/404 are mapped straight through as RFC 7807. The raw
     /// code never reaches delivery-service (AC5).
     /// </summary>
@@ -2452,7 +2454,8 @@ public class DeliveriesController : ControllerBase
         activity?.SetTag("otp.code_valid", success ? "true" : "false");
 
         // 2) Durable gate in delivery-service: it owns the attempt counter,
-        //    the 423-lock, the AtDoor→Done transition and single-tx settlement.
+        //    the 423-lock, the AtDoor→Done transition and an atomic local handover
+        //    marker. The marker is non-financial; UPG owns COD settlement.
         DeliveryHandoverVerifyResult result;
         try
         {
@@ -2467,13 +2470,14 @@ public class DeliveriesController : ControllerBase
             // genuinely never-at-door delivery — the gateway cannot tell them apart
             // from the 409 alone. The scenario contract (CP-H / N11 / row A7) requires
             // the duplicate verify to SHORT-CIRCUIT on already-`done` and return the
-            // REPLAYED 200 { verified:true, status:"Done" } with NO second settlement.
+            // REPLAYED 200 { verified:true, status:"Done" } with no second marker or
+            // COD-owner record.
             //
             // So on a 409 we do ONE canonical state read-through: if the delivery is
             // terminally `Done`, this is the A7 replay — return the prior terminal
             // success. We do NOT re-validate the OTP (already discarded above) and we
             // do NOT re-run the SM transition (we never call verify again), so the
-            // OTP-used-once law and exactly-once settlement are preserved. Any other
+            // OTP-used-once law and exactly-once COD-owner recording are preserved. Any other
             // 409 (or non-Done state) keeps the existing not_at_door mapping.
             if (dhx.StatusCode == StatusCodes.Status409Conflict)
             {
@@ -2490,13 +2494,13 @@ public class DeliveriesController : ControllerBase
         {
             // Belt-and-suspenders: delivery-service returned 200 but the body
             // failed to deserialize (e.g. a contract drift). CRITICAL: a 200
-            // means the durable AtDoor→Done transition + settlement ALREADY
+            // means the durable AtDoor→Done transition + local handover marker already
             // committed upstream — we must NOT let this surface as a bare 500.
             // Map it to a 502 ProblemDetails and log loudly so the on-call can
             // reconcile (the delivery is very likely already Done).
             _log.LogError(
                 jx,
-                "handover.verify_deserialization_failed deliveryId={DeliveryId} correlationId={CorrelationId} — delivery-service returned 200 but the body did not bind; the AtDoor->Done transition + settlement may have ALREADY committed upstream. Reconcile manually.",
+                "handover.verify_deserialization_failed deliveryId={DeliveryId} correlationId={CorrelationId} — delivery-service returned 200 but the body did not bind; the AtDoor->Done transition + local handover marker may have already committed upstream. Reconcile manually.",
                 deliveryId, correlationId);
             activity?.SetTag("otp.verify_deserialization_failed", "true");
             return Problem(
@@ -2522,8 +2526,8 @@ public class DeliveriesController : ControllerBase
             deliveryId, correlationId, result.Status ?? RequestStatus.Delivered);
 
         // S03 — terminal read-model projection on the FLAG-ON upstream path.
-        // The canonical AtDoor→Done transition + settlement already committed in
-        // delivery-service above; this mirrors the terminal flip onto the gateway's
+        // The canonical AtDoor→Done transition + local non-financial handover marker
+        // already committed in delivery-service above; this mirrors the terminal flip onto the gateway's
         // local request read-model so the client-facing GET /v1/requests/{id} reads
         // `delivered` (not the last PATCH-status value, e.g. AtDoor). deliveryId ==
         // requestId, so this lands on the right request row. This is the same
@@ -2611,16 +2615,14 @@ public class DeliveriesController : ControllerBase
     }
 
     /// <summary>
-    /// JEB (jeeber-earnings-on-complete): fire the SERVER-DRIVEN settlement that
-    /// credits the assigned jeeber the moment the delivery reaches the
-    /// handover-complete state. Delegates to
-    /// <see cref="ISettlementService.SettleOnCompletionAsync"/> — which sources the
-    /// COD amount server-authoritatively from the delivery row (BR-16), posts the
-    /// wallet <c>cash_settlement</c> credit, and is idempotent/exactly-once so it is
-    /// safe to fire from BOTH completion legs (OTP verify + customer PATCH → Done).
-    /// Best-effort: every fault is swallowed + logged so a settlement hiccup can
-    /// never turn a committed, verified handover into a 5xx (the settlement row is
-    /// the gateway system of record and the ledger reconciler replays a missed post).
+    /// JEB (jeeber-earnings-on-complete): submit the server-driven COD record to UPG
+    /// when the delivery reaches the handover-complete state. Delegates to
+    /// <see cref="ISettlementService.SettleOnCompletionAsync"/>, which sources the
+    /// amount server-authoritatively from delivery/offer owners (BR-16) and uses
+    /// UPG's idempotent record/finalize contract. It is safe to call from both
+    /// completion legs (OTP verify + customer PATCH → Done). Best-effort: an owner
+    /// fault is logged for operator replay and never turns a committed handover into
+    /// a 5xx; the gateway retains no financial row or retry job.
     /// </summary>
     private async Task CreditJeeberOnCompletionAsync(string deliveryId, string correlationId, CancellationToken ct)
     {
@@ -2636,7 +2638,7 @@ public class DeliveriesController : ControllerBase
         {
             _log.LogError(ex,
                 "settlement.on_complete_failed deliveryId={DeliveryId} correlationId={CorrelationId}; "
-                + "the handover stays complete, the jeeber credit will be reconciled/retried.",
+                + "the handover stays complete, but the UPG COD record requires operator replay.",
                 deliveryId, correlationId);
         }
 
@@ -2711,7 +2713,7 @@ public class DeliveriesController : ControllerBase
         }
 
         // Already-Done → A7 idempotent 200 replay. No OTP re-validation, no SM
-        // re-transition, no second settlement (BR-OTP-6).
+        // re-transition, no duplicate marker or UPG COD record (BR-OTP-6).
         _log.LogInformation(
             "handover.verify_idempotent_replay deliveryId={DeliveryId} correlationId={CorrelationId} status={Status}",
             deliveryId, correlationId, CanonicalDeliveryStatus.Done);
