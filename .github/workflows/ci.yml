@@ -141,6 +141,7 @@ jobs:
             -e AdminOidc__RedirectUri="https://admin.jeeb.example/gateway/admin/v1/auth/oidc/callback" \
             -e AdminOidc__StateProtectionKey="YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=" \
             -e AdminOidc__RoleMappings__support__0="ci-smoke-support" \
+            -e FeatureFlags__UseUpstream__Otp="false" \
             -e Services__Auth__BaseUrl="http://auth-service:8080" \
             -e Services__Chat__BaseUrl="http://chat-service:8080" \
             -e Services__UserManagement__BaseUrl="http://user-management:8080" \
