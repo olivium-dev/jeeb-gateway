@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Cases;
+using JeebGateway.Notifications;
 using JeebGateway.Services.Clients;
 using JeebGateway.service.ServiceNotification;
 using JeebGateway.service.ServicePushNotification;
@@ -224,17 +225,21 @@ public sealed class CaseEventCallbacksController : ControllerBase
     private async Task<IReadOnlyList<CaseRecipient>> ResolveRecipientsAsync(
         GenericCaseCallbackV1 callback, CancellationToken ct)
     {
+        // The acting party never receives its own event; admin refs match no party id.
+        var actorRef = callback.Actor?.Ref;
         if (callback.Case.Kind != GenericCaseKinds.Dispute)
-            return new[] { new CaseRecipient(callback.Case.RequesterRef, "requester") };
+            return UserIdComparison.SameUser(callback.Case.RequesterRef, actorRef)
+                ? Array.Empty<CaseRecipient>()
+                : new[] { new CaseRecipient(callback.Case.RequesterRef, "requester") };
         if (callback.Case.Subject.Type != "delivery")
             throw new InvalidOperationException("A dispute callback must reference a delivery subject.");
         var context = await _delivery.GetDeliveryCaseContextAsync(callback.Case.Subject.Ref, ct)
             ?? throw new InvalidOperationException("The callback delivery no longer exists.");
-        var recipients = new List<CaseRecipient>
-        {
-            new(context.PartyIds.ClientId, "client"),
-        };
-        if (!string.IsNullOrWhiteSpace(context.PartyIds.CourierId))
+        var recipients = new List<CaseRecipient>();
+        if (!UserIdComparison.SameUser(context.PartyIds.ClientId, actorRef))
+            recipients.Add(new CaseRecipient(context.PartyIds.ClientId, "client"));
+        if (!string.IsNullOrWhiteSpace(context.PartyIds.CourierId)
+            && !UserIdComparison.SameUser(context.PartyIds.CourierId, actorRef))
             recipients.Add(new CaseRecipient(context.PartyIds.CourierId, "jeeber"));
         return recipients.DistinctBy(item => item.UserId).ToArray();
     }

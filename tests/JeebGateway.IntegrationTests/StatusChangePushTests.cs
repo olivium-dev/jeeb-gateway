@@ -65,9 +65,8 @@ public class StatusChangePushTests
 
     /// <summary>
     /// KEYSTONE (PATCH live path): a flag-ON PATCH /status transition that commits
-    /// upstream fans a <see cref="NotificationTrigger.StatusChange"/> push to BOTH the
-    /// client and the jeeber (the counterparties). Before the fix this path emitted
-    /// nothing.
+    /// upstream fans a <see cref="NotificationTrigger.StatusChange"/> push to the
+    /// counterparty ONLY — the acting user is excluded (the self-notify defect).
     /// </summary>
     [Fact]
     public async Task PatchStatus_Transition_On_Live_Emits_StatusChange_Push_To_Counterparty()
@@ -92,13 +91,76 @@ public class StatusChangePushTests
         var statusPushes = push.Sent.Where(n => n.DeliveryId == deliveryId).ToList();
 
         statusPushes.Should().NotBeEmpty("the committed transition must fan a StatusChange push (the regression)");
-        statusPushes.Should().OnlyContain(n => n.Recipients.Contains(clientId), "the client is a counterparty");
-        statusPushes.Should().OnlyContain(n => n.Recipients.Contains(jeeberId), "the jeeber is a counterparty");
+        statusPushes.Should().OnlyContain(n => n.Recipients.Contains(clientId), "the client is the counterparty");
+        statusPushes.Should().OnlyContain(n => !n.Recipients.Contains(jeeberId),
+            "the acting jeeber must NOT be pushed a notification about their own tap");
         statusPushes.Should().OnlyContain(n => n.Status == CanonicalDeliveryStatus.InTransit,
             "the push carries the fresh upstream target status");
         statusPushes.Should().OnlyContain(n => n.PreviousStatus != n.Status,
             "\"Status changed from X to X.\" is never a true sentence — the caller must snapshot "
             + "the pre-transition status before the store mirror advances the live row in place");
+    }
+
+    /// <summary>
+    /// Symmetric proof: the CLIENT acting ("received it") excludes the client and the
+    /// jeeber still receives the push.
+    /// </summary>
+    [Fact]
+    public async Task PatchStatus_By_Client_Notifies_Jeeber_Not_The_Acting_Client()
+    {
+        var push = new CapturingDeliveryStatusPush();
+        var delivery = new ConfigurableDeliveryClient
+        {
+            TransitionOutcome = to => new DeliveryTransitionUpstream { DeliveryId = "overwritten", Status = to }
+        };
+        await using var factory = UpstreamFactory(delivery, push);
+        var (deliveryId, clientId, jeeberId) = await SeedPickedUpWithJeeberAsync(factory);
+
+        var client = ClientFor(factory, clientId, "customer");
+        var patch = await client.PatchAsJsonAsync(
+            $"/deliveries/{deliveryId}/status", new { to = CanonicalDeliveryStatus.InTransit });
+
+        patch.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await push.WaitForAttemptsAsync(1, DetachedPushWait)).Should().BeTrue();
+
+        var statusPushes = push.Sent.Where(n => n.DeliveryId == deliveryId).ToList();
+        statusPushes.Should().NotBeEmpty();
+        statusPushes.Should().OnlyContain(n => n.Recipients.Contains(jeeberId), "the jeeber is the counterparty");
+        statusPushes.Should().OnlyContain(n => !n.Recipients.Contains(clientId),
+            "the acting client must NOT be pushed a notification about their own tap");
+    }
+
+    /// <summary>
+    /// Exclusion must hold under Guid case/format skew: the caller header carries the
+    /// UPPERCASE D-format of the same Guid the store row holds in lowercase.
+    /// </summary>
+    [Fact]
+    public async Task PatchStatus_Actor_Guid_Case_Skew_Is_Still_Excluded()
+    {
+        var push = new CapturingDeliveryStatusPush();
+        var delivery = new ConfigurableDeliveryClient
+        {
+            TransitionOutcome = to => new DeliveryTransitionUpstream { DeliveryId = "overwritten", Status = to }
+        };
+        await using var factory = UpstreamFactory(delivery, push);
+        var clientGuid = Guid.NewGuid().ToString("D");
+        var jeeberGuid = Guid.NewGuid().ToString("D");
+        var (deliveryId, clientId, jeeberId) = await SeedWithJeeberAsync(
+            factory, RequestStatus.PickedUp, clientGuid, jeeberGuid);
+
+        var jeeber = ClientFor(factory, jeeberId.ToUpperInvariant(), "driver");
+        var patch = await jeeber.PatchAsJsonAsync(
+            $"/deliveries/{deliveryId}/status", new { to = CanonicalDeliveryStatus.InTransit });
+
+        patch.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await push.WaitForAttemptsAsync(1, DetachedPushWait)).Should().BeTrue();
+
+        var statusPushes = push.Sent.Where(n => n.DeliveryId == deliveryId).ToList();
+        statusPushes.Should().NotBeEmpty();
+        statusPushes.Should().OnlyContain(n => n.Recipients.Contains(clientId));
+        statusPushes.Should().OnlyContain(
+            n => n.Recipients.All(r => !string.Equals(r, jeeberId, StringComparison.OrdinalIgnoreCase)),
+            "a case-skewed caller id is the SAME user — raw Ordinal comparison must not leak a self-push");
     }
 
     /// <summary>
@@ -135,9 +197,85 @@ public class StatusChangePushTests
 
         completionPushes.Should().NotBeEmpty("handover completion must fan a StatusChange push");
         completionPushes.Should().OnlyContain(n => n.Recipients.Contains(clientId));
-        completionPushes.Should().OnlyContain(n => n.Recipients.Contains(jeeberId));
+        completionPushes.Should().OnlyContain(n => !n.Recipients.Contains(jeeberId),
+            "the verifying jeeber must NOT be pushed a notification about their own handover");
         completionPushes.Should().OnlyContain(n => n.Status == CanonicalDeliveryStatus.Done,
             "the completion push carries the Done terminal status");
+    }
+
+    /// <summary>
+    /// Legacy flag-OFF in-memory verify (POST /deliveries/{id}/verify-otp): the verifying
+    /// jeeber is excluded; the client still gets the completion push.
+    /// </summary>
+    [Fact]
+    public async Task LegacyVerifyOtp_Notifies_Client_Not_The_Verifying_Jeeber()
+    {
+        var push = new CapturingDeliveryStatusPush();
+        await using var factory = PlainFactoryWithPush(push);
+        var (deliveryId, clientId, jeeberId, otp) = await SeedHeadingOffWithOtpAsync(factory);
+
+        var jeeber = ClientFor(factory, jeeberId, "driver");
+        var verify = await jeeber.PostAsJsonAsync(
+            $"/deliveries/{deliveryId}/verify-otp", new { otpCode = otp });
+
+        verify.StatusCode.Should().Be(HttpStatusCode.OK, "the correct OTP completes the handover");
+        (await push.WaitForAttemptsAsync(1, DetachedPushWait)).Should().BeTrue();
+
+        var completionPushes = push.Sent.Where(n => n.DeliveryId == deliveryId).ToList();
+        completionPushes.Should().NotBeEmpty();
+        completionPushes.Should().OnlyContain(n => n.Recipients.Contains(clientId));
+        completionPushes.Should().OnlyContain(n => !n.Recipients.Contains(jeeberId));
+    }
+
+    /// <summary>
+    /// Cancel: the cancelling client is excluded; the bound jeeber still gets the push.
+    /// </summary>
+    [Fact]
+    public async Task Cancel_By_Client_Notifies_Jeeber_Not_The_Cancelling_Client()
+    {
+        var push = new CapturingDeliveryStatusPush();
+        await using var factory = PlainFactoryWithPush(push);
+        var (deliveryId, clientId, jeeberId, _) = await SeedAcceptedWithJeeberAsync(factory);
+
+        var client = ClientFor(factory, clientId, "customer");
+        var cancel = await client.PostAsJsonAsync($"/deliveries/{deliveryId}/cancel", new { });
+
+        cancel.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await push.WaitForAttemptsAsync(1, DetachedPushWait)).Should().BeTrue();
+
+        var cancelPushes = push.Sent.Where(n => n.DeliveryId == deliveryId).ToList();
+        cancelPushes.Should().NotBeEmpty();
+        cancelPushes.Should().OnlyContain(n => n.Recipients.Contains(jeeberId),
+            "the jeeber is the counterparty of a client cancel");
+        cancelPushes.Should().OnlyContain(n => !n.Recipients.Contains(clientId),
+            "a customer who cancels their own delivery must not be pushed \"Delivery cancelled\"");
+    }
+
+    /// <summary>
+    /// Empty-recipients skip: a pre-accept client cancel leaves nobody to notify after
+    /// actor exclusion — the notifier must never be invoked at all.
+    /// </summary>
+    [Fact]
+    public async Task Cancel_PreAccept_By_Client_Dispatches_No_Push_At_All()
+    {
+        var push = new CapturingDeliveryStatusPush();
+        await using var factory = PlainFactoryWithPush(push);
+        var store = factory.Services.GetRequiredService<IRequestsStore>();
+        var clientId = $"push-client-{Guid.NewGuid()}";
+        var created = await store.CreateAsync(new CreateRequestInput
+        {
+            ClientId = clientId,
+            Description = "Pick up the parcel",
+            RecipientPhone = RecipientPhone
+        }, default);
+
+        var client = ClientFor(factory, clientId, "customer");
+        var cancel = await client.PostAsJsonAsync($"/deliveries/{created.Id}/cancel", new { });
+
+        cancel.StatusCode.Should().Be(HttpStatusCode.OK, "the pre-accept cancel itself must still succeed");
+        (await push.WaitForAttemptsAsync(1, TimeSpan.FromSeconds(2)))
+            .Should().BeFalse("with the only party excluded there is no recipient — no notifier call, ever");
+        push.Sent.Should().BeEmpty();
     }
 
     /// <summary>
@@ -192,6 +330,17 @@ public class StatusChangePushTests
             });
         });
 
+    /// <summary>Default-flag factory (in-memory delivery paths) with only the push notifier swapped.</summary>
+    private WebApplicationFactory<Program> PlainFactoryWithPush(CapturingDeliveryStatusPush push)
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IDeliveryStatusPushNotifier>();
+                services.AddSingleton<IDeliveryStatusPushNotifier>(push);
+            });
+        });
+
     private static async Task<(string deliveryId, string clientId, string jeeberId)> SeedPickedUpWithJeeberAsync(
         WebApplicationFactory<Program> factory)
         => await SeedWithJeeberAsync(factory, RequestStatus.PickedUp);
@@ -200,12 +349,27 @@ public class StatusChangePushTests
         WebApplicationFactory<Program> factory)
         => await SeedWithJeeberAsync(factory, RequestStatus.AtDoor);
 
+    private static async Task<(string deliveryId, string clientId, string jeeberId, string? otp)>
+        SeedHeadingOffWithOtpAsync(WebApplicationFactory<Program> factory)
+        => await SeedFullAsync(factory, RequestStatus.HeadingOff, clientId: null, jeeberId: null);
+
+    private static async Task<(string deliveryId, string clientId, string jeeberId, string? otp)>
+        SeedAcceptedWithJeeberAsync(WebApplicationFactory<Program> factory)
+        => await SeedFullAsync(factory, RequestStatus.Accepted, clientId: null, jeeberId: null);
+
     private static async Task<(string deliveryId, string clientId, string jeeberId)> SeedWithJeeberAsync(
-        WebApplicationFactory<Program> factory, string status)
+        WebApplicationFactory<Program> factory, string status, string? clientId = null, string? jeeberId = null)
+    {
+        var (deliveryId, client, jeeber, _) = await SeedFullAsync(factory, status, clientId, jeeberId);
+        return (deliveryId, client, jeeber);
+    }
+
+    private static async Task<(string deliveryId, string clientId, string jeeberId, string? otp)> SeedFullAsync(
+        WebApplicationFactory<Program> factory, string status, string? clientId, string? jeeberId)
     {
         var store = factory.Services.GetRequiredService<IRequestsStore>();
-        var clientId = $"push-client-{Guid.NewGuid()}";
-        var jeeberId = $"push-jeeber-{Guid.NewGuid()}";
+        clientId ??= $"push-client-{Guid.NewGuid()}";
+        jeeberId ??= $"push-jeeber-{Guid.NewGuid()}";
 
         var created = await store.CreateAsync(new CreateRequestInput
         {
@@ -213,10 +377,14 @@ public class StatusChangePushTests
             Description = "Pick up the parcel",
             RecipientPhone = RecipientPhone
         }, default);
-        (await store.TryAcceptByJeeberAsync(created.Id, jeeberId, int.MaxValue, DateTimeOffset.UtcNow, default))
-            .Should().NotBeNull();
-        (await store.SetStatusAsync(created.Id, status, default)).Should().BeTrue();
-        return (created.Id, clientId, jeeberId);
+        var accepted = await store.TryAcceptByJeeberAsync(
+            created.Id, jeeberId, int.MaxValue, DateTimeOffset.UtcNow, default);
+        accepted.Should().NotBeNull();
+        if (status != RequestStatus.Accepted)
+        {
+            (await store.SetStatusAsync(created.Id, status, default)).Should().BeTrue();
+        }
+        return (created.Id, clientId, jeeberId, accepted!.DeliveryOtp);
     }
 
     private static HttpClient ClientFor(WebApplicationFactory<Program> factory, string userId, string role)

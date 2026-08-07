@@ -140,7 +140,7 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
             // The two delivery principals minus the author. JeeberId is null until accept.
             var recipients = new[] { request.ClientId, request.JeeberId }
                 .Where(id => !string.IsNullOrWhiteSpace(id)
-                          && !string.Equals(id, authorUserId, StringComparison.Ordinal))
+                          && !UserIdComparison.SameUser(id, authorUserId))
                 .Select(id => id!)
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();

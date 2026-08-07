@@ -40,7 +40,7 @@ public sealed class CaseEventCallbackContractTests
             "createdAt": "2026-08-05T09:00:00Z",
             "updatedAt": "2026-08-05T10:15:30Z"
           },
-          "actor": { "ref": "client-1", "role": "client" },
+          "actor": { "ref": "admin-ops-1", "role": "admin" },
           "data": {
             "messageId": "f2f92a8d-5ad0-48ef-8a8e-72e510f497ec",
             "messageType": "reply"
@@ -110,6 +110,82 @@ public sealed class CaseEventCallbackContractTests
             pushJson.RootElement.GetProperty("payload").GetProperty("deepLink").GetString()
                 .Should().Be("jeeb://disputes/489660be-7844-42bc-a48f-f5c707b85b25");
         }
+    }
+
+    [Fact]
+    public async Task Dispute_Client_Actor_Is_Excluded_Courier_Still_Notified()
+    {
+        var calls = new List<CapturedCall>();
+        var controller = Controller(calls);
+        controller.HttpContext.Connection.RemoteIpAddress = IPAddress.Loopback;
+
+        var result = await controller.Dispatch(Callback(actorRef: "client-1", actorRole: "client"), default);
+
+        result.Should().BeOfType<AcceptedResult>();
+        calls.Select(call => call.Service).Should().Equal("notification", "push");
+        calls.Select(call => call.Recipient).Should().Equal("courier-1", "courier-1");
+    }
+
+    [Fact]
+    public async Task Dispute_Courier_Actor_Is_Excluded_Client_Still_Notified()
+    {
+        var calls = new List<CapturedCall>();
+        var controller = Controller(calls);
+        controller.HttpContext.Connection.RemoteIpAddress = IPAddress.Loopback;
+
+        var result = await controller.Dispatch(Callback(actorRef: "courier-1", actorRole: "jeeber"), default);
+
+        result.Should().BeOfType<AcceptedResult>();
+        calls.Select(call => call.Service).Should().Equal("notification", "push");
+        calls.Select(call => call.Recipient).Should().Equal("client-1", "client-1");
+    }
+
+    [Fact]
+    public async Task Dispute_Actor_Guid_Case_Skew_Is_Still_Excluded()
+    {
+        const string clientGuid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        const string courierGuid = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+        var calls = new List<CapturedCall>();
+        var controller = Controller(calls, new PushHandler(calls), new FakePushRecovery("succeeded"),
+            new GuidPartyDeliveryHandler(clientGuid, courierGuid));
+        controller.HttpContext.Connection.RemoteIpAddress = IPAddress.Loopback;
+
+        var result = await controller.Dispatch(
+            Callback(actorRef: courierGuid.ToUpperInvariant(), actorRole: "jeeber"), default);
+
+        result.Should().BeOfType<AcceptedResult>();
+        calls.Select(call => call.Service).Should().Equal("notification", "push");
+        calls.Select(call => call.Recipient).Should().OnlyContain(r => r == clientGuid,
+            "an uppercase D-format actor ref is the SAME user as the lowercase courier party id");
+    }
+
+    [Fact]
+    public async Task NonDispute_Requester_Actor_Dispatches_Nothing_And_Does_Not_Throw()
+    {
+        var calls = new List<CapturedCall>();
+        var controller = Controller(calls);
+        controller.HttpContext.Connection.RemoteIpAddress = IPAddress.Loopback;
+
+        var result = await controller.Dispatch(
+            SupportCallback(actorRef: "client-1", actorRole: "client"), default);
+
+        result.Should().BeOfType<AcceptedResult>("zero recipients must degrade to a clean no-op accept");
+        calls.Should().BeEmpty("the requester acting on their own case has no counterparty to notify");
+    }
+
+    [Fact]
+    public async Task NonDispute_Admin_Reply_Still_Notifies_The_Requester()
+    {
+        var calls = new List<CapturedCall>();
+        var controller = Controller(calls);
+        controller.HttpContext.Connection.RemoteIpAddress = IPAddress.Loopback;
+
+        var result = await controller.Dispatch(
+            SupportCallback(actorRef: "admin-ops-1", actorRole: "admin"), default);
+
+        result.Should().BeOfType<AcceptedResult>();
+        calls.Select(call => call.Service).Should().Equal("notification", "push");
+        calls.Select(call => call.Recipient).Should().Equal("client-1", "client-1");
     }
 
     [Theory]
@@ -270,9 +346,10 @@ public sealed class CaseEventCallbackContractTests
         => Controller(calls, new PushHandler(calls), new FakePushRecovery("succeeded"));
 
     private static CaseEventCallbacksController Controller(
-        List<CapturedCall> calls, HttpMessageHandler pushHandler, IPushDispatchRecoveryClient recovery)
+        List<CapturedCall> calls, HttpMessageHandler pushHandler, IPushDispatchRecoveryClient recovery,
+        HttpMessageHandler? deliveryHandler = null)
     {
-        var delivery = new CaseDeliveryClient(new HttpClient(new DeliveryHandler())
+        var delivery = new CaseDeliveryClient(new HttpClient(deliveryHandler ?? new DeliveryHandler())
             { BaseAddress = new Uri("https://delivery/") });
         return new CaseEventCallbacksController(delivery,
             new ServiceNotificationClient("https://notification/",
@@ -286,17 +363,25 @@ public sealed class CaseEventCallbackContractTests
         };
     }
 
-    private static GenericCaseCallbackV1 Callback() => JsonSerializer.Deserialize<GenericCaseCallbackV1>("""
+    private static GenericCaseCallbackV1 Callback(
+        string actorRef = "admin-ops-1", string actorRole = "admin")
+        => ParseCallback(kind: "dispute", actorRef, actorRole);
+
+    private static GenericCaseCallbackV1 SupportCallback(string actorRef, string actorRole)
+        => ParseCallback(kind: "support", actorRef, actorRole);
+
+    private static GenericCaseCallbackV1 ParseCallback(string kind, string actorRef, string actorRole)
+        => JsonSerializer.Deserialize<GenericCaseCallbackV1>($$"""
         {
           "eventId":"b86d460d-7b8e-4f2b-b46e-f4fbb595890f",
           "eventType":"case.message_added",
           "occurredAt":"2026-08-05T10:15:30Z",
-          "case":{"caseId":"489660be-7844-42bc-a48f-f5c707b85b25","kind":"dispute",
+          "case":{"caseId":"489660be-7844-42bc-a48f-f5c707b85b25","kind":"{{kind}}",
             "category":"damaged","subject":{"type":"delivery","ref":"delivery-1"},
             "requesterRef":"client-1","participantRefs":["client-1","courier-1"],
             "status":"pending","priority":"normal","version":4,
             "createdAt":"2026-08-05T09:00:00Z","updatedAt":"2026-08-05T10:15:30Z"},
-          "actor":{"ref":"client-1","role":"client"},
+          "actor":{"ref":"{{actorRef}}","role":"{{actorRole}}"},
           "data":{"messageType":"reply"}
         }
         """, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
@@ -315,6 +400,20 @@ public sealed class CaseEventCallbackContractTests
                 }
                 """));
         }
+    }
+
+    /// <summary>Delivery context whose party ids are lowercase D-format Guids (skew coverage).</summary>
+    private sealed class GuidPartyDeliveryHandler(string clientId, string courierId) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            => Task.FromResult(Json(HttpStatusCode.OK, $$"""
+                {
+                  "delivery_id":"delivery-1",
+                  "party_ids":{"client_id":"{{clientId}}","courier_id":"{{courierId}}"},
+                  "current_status":"InTransit",
+                  "status_history":[]
+                }
+                """));
     }
 
     private sealed class NotificationHandler(List<CapturedCall> calls) : HttpMessageHandler

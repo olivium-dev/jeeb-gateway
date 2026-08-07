@@ -909,7 +909,7 @@ public class DeliveriesController : ControllerBase
                     // "Status changed from Picked to Picked."
                     var previousStatus = preTransitionStatus ?? string.Empty;
                     notifyRow.Status = upstream.Status;
-                    await NotifyOtherPartyAsync(notifyRow, previousStatus, ct);
+                    await NotifyOtherPartyAsync(notifyRow, previousStatus, callerId, ct);
                 }
                 catch (Exception ex)
                 {
@@ -1210,7 +1210,8 @@ public class DeliveriesController : ControllerBase
             case CancellationOutcome.CancelledImmediately:
             case CancellationOutcome.CancelledByJeeber:
             case CancellationOutcome.PendingAdminApproval:
-                await NotifyCancellationCounterpartyAsync(result.Request!, result.PreviousStatus!, result.Outcome, ct);
+                await NotifyCancellationCounterpartyAsync(
+                    result.Request!, result.PreviousStatus!, result.Outcome, callerId, ct);
 
                 // PR-G2: when the gateway commit landed the row TERMINALLY cancelled
                 // (immediate client cancel / jeeber cancel), best-effort drive the
@@ -1351,12 +1352,22 @@ public class DeliveriesController : ControllerBase
         DeliveryRequest req,
         string previousStatus,
         CancellationOutcome outcome,
+        string actorUserId,
         CancellationToken ct)
     {
-        var recipients = new List<string> { req.ClientId };
-        if (!string.IsNullOrEmpty(req.JeeberId))
+        // Counterparty only — the cancelling user needs no push; skip when nobody remains.
+        var recipients = new List<string>();
+        if (!UserIdComparison.SameUser(req.ClientId, actorUserId))
+        {
+            recipients.Add(req.ClientId);
+        }
+        if (!string.IsNullOrEmpty(req.JeeberId) && !UserIdComparison.SameUser(req.JeeberId, actorUserId))
         {
             recipients.Add(req.JeeberId);
+        }
+        if (recipients.Count == 0)
+        {
+            return Task.CompletedTask;
         }
 
         var title = outcome == CancellationOutcome.PendingAdminApproval
@@ -1398,17 +1409,14 @@ public class DeliveriesController : ControllerBase
     }
 
     /// <summary>
-    /// Pushes a <see cref="NotificationTrigger.StatusChange"/> to the user
-    /// on the opposite side of the delivery. Pre-accept transitions
-    /// (pending → matched) have no Jeeber bound yet — those notify the
-    /// Client only. Post-accept transitions notify both directions of the
-    /// pair when applicable; the canonical "other party" for a Jeeber
-    /// action is the Client and vice versa.
+    /// Pushes a <see cref="NotificationTrigger.StatusChange"/> to the delivery
+    /// principals other than the acting user; no-op when nobody else remains.
     /// </summary>
     // JEBV4-281: the `ct` parameter is deliberately NOT forwarded to the push send —
     // see the fire-and-forget block below (the push MUST outlive the request scope).
     private Task NotifyOtherPartyAsync(
-        DeliveryRequest req, string previousStatus, CancellationToken ct, string? pushStatus = null)
+        DeliveryRequest req, string previousStatus, string actorUserId, CancellationToken ct,
+        string? pushStatus = null)
     {
         // pushStatus decouples the PUSH-facing status vocabulary from the request
         // read-model (req.Status). Existing callers omit it, so effectiveStatus falls back
@@ -1418,16 +1426,20 @@ public class DeliveriesController : ControllerBase
         // See fix/ci-red-delivery-status-clobber (PR #248).
         var effectiveStatus = pushStatus ?? req.Status;
 
-        // The counterparty depends on the transition:
-        //   * pending → matched: notify Client (no Jeeber yet).
-        //   * everything else:   notify Client and Jeeber both, since the
-        //     PATCH could come from either side and the spec says
-        //     "notification to the other party". We send to both so the
-        //     gateway doesn't need to know who initiated the patch.
-        var recipients = new List<string> { req.ClientId };
-        if (!string.IsNullOrEmpty(req.JeeberId))
+        // Both delivery principals minus the acting user; skip the send entirely when
+        // the actor was the only party (e.g. a pre-accept client-initiated transition).
+        var recipients = new List<string>();
+        if (!UserIdComparison.SameUser(req.ClientId, actorUserId))
+        {
+            recipients.Add(req.ClientId);
+        }
+        if (!string.IsNullOrEmpty(req.JeeberId) && !UserIdComparison.SameUser(req.JeeberId, actorUserId))
         {
             recipients.Add(req.JeeberId);
+        }
+        if (recipients.Count == 0)
+        {
+            return Task.CompletedTask;
         }
 
         var title = "Delivery status updated";
@@ -1598,10 +1610,10 @@ public class DeliveriesController : ControllerBase
 
             case OtpVerificationOutcome.Verified:
             {
-                // Status flipped to 'delivered'. Fan out the status-change
-                // push to both parties, mirroring the PATCH /status path.
+                // Status flipped to 'delivered'. Fan the status-change push to
+                // the counterparty, mirroring the PATCH /status path.
                 var req = result.Request!;
-                await NotifyOtherPartyAsync(req, RequestStatus.HeadingOff, ct);
+                await NotifyOtherPartyAsync(req, RequestStatus.HeadingOff, callerId, ct);
 
                 // FT-07: enqueue a pending-settlement placeholder so the
                 // financial pipeline has a record immediately at handover-
@@ -2573,7 +2585,7 @@ public class DeliveriesController : ControllerBase
             //     the read-model untouched. read-model=delivered AND push data=Done now
             //     both hold.
             await NotifyOtherPartyAsync(
-                delivery, preCompletionStatus, ct,
+                delivery, preCompletionStatus, actorId, ct,
                 pushStatus: result.Status ?? CanonicalDeliveryStatus.Done);
         }
         catch (Exception ex)
