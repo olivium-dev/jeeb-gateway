@@ -148,10 +148,16 @@ public class OffersController : ControllerBase
             var currentFeeCents = await ResolveCurrentFeeCentsAsync(actorId, offerId, ct);
             if (currentFeeCents is long cur && newFeeCents > cur)
             {
-                var required = Math.Round(newFeeCents / 100m * CommissionCalculator.FlatRate, 2);
+                var required = WalletGuardContract.RequiredCommission(newFeeCents / 100m);
                 var guard = await _walletGuard.CheckAsync(jeeberGuid, required, ct);
                 if (!guard.Allowed)
                 {
+                    if (guard.DegradedByUpstreamFailure)
+                    {
+                        return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                            WalletGuardContract.WalletUnavailableProblem());
+                    }
+
                     return StatusCode(StatusCodes.Status402PaymentRequired, new ProblemDetails
                     {
                         Title = "Wallet balance does not cover the raised offer's commission.",

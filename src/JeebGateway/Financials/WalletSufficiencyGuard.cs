@@ -43,6 +43,23 @@ public interface IWalletSufficiencyGuard
     Task<WalletGuardResult> CheckAsync(Guid holderId, decimal requiredFee, CancellationToken ct);
 }
 
+/// <summary>Shared pieces of the three guard call sites so they cannot drift apart.</summary>
+public static class WalletGuardContract
+{
+    /// <summary>Same constant AND same rounding as CommissionCalculator (AwayFromZero).</summary>
+    public static decimal RequiredCommission(decimal fee) =>
+        Math.Round(fee * CommissionCalculator.FlatRate, 2, MidpointRounding.AwayFromZero);
+
+    /// <summary>Fail-closed on a wallet-service outage is a distinct 503 — never a
+    /// fabricated 402/409 "insufficient balance" the caller would act on.</summary>
+    public static Microsoft.AspNetCore.Mvc.ProblemDetails WalletUnavailableProblem() => new()
+    {
+        Title = "Wallet service is unavailable; the balance check could not run.",
+        Status = StatusCodes.Status503ServiceUnavailable,
+        Type = "https://jeeb.dev/errors/wallet-service-unavailable",
+    };
+}
+
 /// <summary>
 /// F1 — shared balance-sufficiency primitive for the submit/accept/edit guards.
 /// Reuses the already-DI-wired <see cref="ServiceWalletClient"/>, no new client.

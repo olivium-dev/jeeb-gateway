@@ -168,10 +168,17 @@ public sealed class JeebOffersController : ControllerBase
             var offerFee = await ResolveAcceptedFeeAsync(requestId, offerId, ct);
             if (offerFee is > 0m)
             {
-                var required = Math.Round(offerFee.Value * CommissionCalculator.FlatRate, 2);
+                var required = WalletGuardContract.RequiredCommission(offerFee.Value);
                 var guard = await _walletGuard.CheckAsync(winningJeeberGuid, required, ct);
                 if (!guard.Allowed)
                 {
+                    // An outage is NOT insufficiency: 503, and never withdraw the offer.
+                    if (guard.DegradedByUpstreamFailure)
+                    {
+                        return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                            WalletGuardContract.WalletUnavailableProblem());
+                    }
+
                     await AutoWithdrawInsufficientBalanceOfferAsync(offerId, requestId, winningJeeberId, ct);
 
                     return Conflict(new ProblemDetails
@@ -861,11 +868,8 @@ public sealed class JeebOffersController : ControllerBase
         return offers.FirstOrDefault(o => string.Equals(o.Id, offerId, StringComparison.Ordinal))?.Fee;
     }
 
-    /// <summary>
-    /// F1 guard 2 side effect, best-effort: withdraw the now-unaffordable offer and
-    /// reuse the "offer wasn't selected" push. Correction 7: a replay of an already-
-    /// accepted offer reads NotPending here — swallowed, never surfaced as a failure.
-    /// </summary>
+    /// <summary>F1 guard 2, best-effort: withdraw the unaffordable offer + reuse the lost
+    /// push. Correction 7: NotPending (replay of accepted offer) is swallowed.</summary>
     private async Task AutoWithdrawInsufficientBalanceOfferAsync(
         string offerId, string requestId, string jeeberId, CancellationToken ct)
     {

@@ -19,12 +19,8 @@ using SwServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletCli
 
 namespace JeebGateway.IntegrationTests;
 
-/// <summary>
-/// F1 — jeeber cannot offer/win without wallet balance covering the 10% commission.
-/// Covers all three guards (submit / accept / edit) plus the shared
-/// <see cref="WalletSufficiencyGuard"/> primitive in isolation (fail-open/closed, breaker,
-/// multi-currency).
-/// </summary>
+/// <summary>F1 — the three offer wallet guards (submit/accept/edit) plus the shared
+/// <see cref="WalletSufficiencyGuard"/> primitive (fail modes, breaker, multi-currency).</summary>
 public class WalletGuardOfferTests
 {
     // -----------------------------------------------------------------
@@ -178,7 +174,19 @@ public class WalletGuardOfferTests
         var resp = await JeeberClient(factory, jeeberId).PostAsJsonAsync(
             $"/requests/{requestId}/offers", new { fee = 100m, etaMinutes = 30, note = (string?)null });
 
-        resp.StatusCode.Should().Be(HttpStatusCode.PaymentRequired);
+        // An outage is a distinct 503, never a fabricated "insufficient balance" 402.
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        var body = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/wallet-service-unavailable");
+    }
+
+    [Fact]
+    public void RequiredCommission_RoundsAwayFromZero_MatchingCommissionCalculator()
+    {
+        // fee=100.25 → 10.025; banker's rounding would give 10.02, settlement charges 10.03.
+        WalletGuardContract.RequiredCommission(100.25m).Should().Be(10.03m);
+        WalletGuardContract.RequiredCommission(100.25m)
+            .Should().Be(CommissionCalculator.Calculate(100.25m, CommissionTier.Standard).Commission);
     }
 
     // -----------------------------------------------------------------
@@ -232,6 +240,33 @@ public class WalletGuardOfferTests
         var offer = (await offers.ListForRequestAsync(requestId, CancellationToken.None))
             .Single(o => o.Id == offerId);
         offer.Status.Should().Be(PendingOfferStatus.Withdrawn);
+    }
+
+    [Fact]
+    public async Task Accept_Returns503_AndDoesNotWithdraw_WhenWalletUnreachable_FailClosed()
+    {
+        var wallet = new FakeWalletClient { Balance = 10.0 };
+        var offerService = new RecordingOfferServiceClient();
+        await using var factory = NewFactory(wallet, offerService: offerService);
+
+        var (clientId, requestId) = await SeedRequestAsync(factory);
+        var jeeberId = Guid.NewGuid().ToString();
+
+        var submitResp = await JeeberClient(factory, jeeberId).PostAsJsonAsync(
+            $"/requests/{requestId}/offers", new { fee = 100m, etaMinutes = 30, note = (string?)null });
+        var offerId = (await submitResp.Content.ReadFromJsonAsync<OfferDto>())!.Id;
+
+        wallet.Unreachable = true; // outage, NOT insufficiency
+
+        var acceptResp = await ClientActor(factory, clientId).PostAsync(
+            $"/v1/offers/{offerId}/accept", content: null);
+
+        acceptResp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        offerService.AcceptWithStatusCalled.Should().BeFalse();
+        var offer = (await factory.Services.GetRequiredService<FakePendingOffersStore>()
+                .ListForRequestAsync(requestId, CancellationToken.None))
+            .Single(o => o.Id == offerId);
+        offer.Status.Should().Be(PendingOfferStatus.Pending, "an outage must never withdraw the offer");
     }
 
     [Fact]

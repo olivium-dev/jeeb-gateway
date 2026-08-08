@@ -208,10 +208,16 @@ public class RequestOffersController : ControllerBase
         // invalid caller guid (never expected post-auth), never on the fee compare.
         if (Guid.TryParse(jeeberId, out var jeeberGuid))
         {
-            var required = Math.Round(body.Fee.Value * CommissionCalculator.FlatRate, 2);
+            var required = WalletGuardContract.RequiredCommission(body.Fee.Value);
             var guard = await _walletGuard.CheckAsync(jeeberGuid, required, ct);
             if (!guard.Allowed)
             {
+                if (guard.DegradedByUpstreamFailure)
+                {
+                    return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                        WalletGuardContract.WalletUnavailableProblem());
+                }
+
                 return StatusCode(StatusCodes.Status402PaymentRequired, new ProblemDetails
                 {
                     Title = "Wallet balance does not cover the offer's commission.",

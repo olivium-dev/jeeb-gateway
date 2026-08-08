@@ -41,9 +41,8 @@ public class FakeOfferStoreWebApplicationFactory : WebApplicationFactory<Program
         services.AddSingleton<IPendingOffersStore>(
             sp => sp.GetRequiredService<FakePendingOffersStore>());
 
-        // F1 — the real ServiceWalletClient points at a wallet-service that isn't
-        // running in tests; swap a generous-balance double so the new wallet guards
-        // don't trip existing offer tests that never intended to exercise them.
+        // F1 — swap a generous-balance wallet double so the new wallet guards don't
+        // trip existing offer tests (the real client's upstream is down in tests).
         services.RemoveAll<SwServiceWalletClient>();
         services.AddScoped<SwServiceWalletClient>(_ => new FakeWalletClient());
     }

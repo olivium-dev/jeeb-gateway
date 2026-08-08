@@ -2,11 +2,8 @@ using JeebGateway.service.ServiceWallet;
 
 namespace JeebGateway.IntegrationTests.Fakes;
 
-/// <summary>
-/// F1 — wallet-service test double. Defaults to a balance far above any test fee so
-/// the new wallet guards never trip unless a test explicitly lowers <see cref="Balance"/>
-/// or sets <see cref="Unreachable"/> to simulate an outage.
-/// </summary>
+/// <summary>F1 wallet-service double: generous default balance so the guards never trip
+/// unless a test lowers <see cref="Balance"/> or sets <see cref="Unreachable"/>.</summary>
 public sealed class FakeWalletClient : ServiceWalletClient
 {
     public double Balance { get; set; } = 1_000_000;
