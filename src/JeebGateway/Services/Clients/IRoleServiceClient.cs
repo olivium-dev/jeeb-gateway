@@ -21,8 +21,8 @@ public interface IRoleServiceClient
         string idempotencyKey, CancellationToken ct);
 
     /// <summary>
-    /// POST .../revoke. Not called on any origin/main path today (no gateway
-    /// revoke exists); exposed for parity with the contract and future callers.
+    /// POST .../revoke. Reached only via RoleServiceBackedDualRoleClient with the
+    /// RoleService flag on (F3 unregister-as-jeeber); dark while the flag is off.
     /// </summary>
     Task<RoleServiceRevokeResult> RevokeAsync(
         string appId, string subjectId, string roleKey, string revokedBy,

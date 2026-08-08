@@ -6,7 +6,7 @@ namespace JeebGateway.Users;
 
 /// <summary>
 /// Decorates IUserManagementDualRoleClient: flag off forwards to inner unchanged;
-/// flag on routes grant/read to role-service. Identity + role-switch stay on UM always.
+/// flag on routes grant/revoke/read to role-service. Identity + role-switch stay on UM always.
 /// </summary>
 public sealed class RoleServiceBackedDualRoleClient : IUserManagementDualRoleClient
 {
@@ -58,6 +58,35 @@ public sealed class RoleServiceBackedDualRoleClient : IUserManagementDualRoleCli
                 "role-service grant failed for userId={UserId} role={Role} (status {Status})",
                 userId, opaqueRole, ex.StatusCode);
             throw new UserManagementCallException("role-service/grant", ex.StatusCode);
+        }
+    }
+
+    public async Task<RoleGrantResult> RemoveAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
+    {
+        if (!_flags.CurrentValue.RoleService)
+        {
+            return await _inner.RemoveAvailableRoleAsync(userId, opaqueRole, ct);
+        }
+
+        try
+        {
+            // Fresh key per call: revoke is idempotent at the DB layer. Active role is
+            // reassigned to Client, matching the gateway's own local mirror.
+            var idempotencyKey = $"self-unregister:{userId}:{opaqueRole}:{Guid.NewGuid():n}";
+            var result = await _roleService.RevokeAsync(
+                AppId, userId, opaqueRole, "self-unregister", Roles.Client, idempotencyKey, ct);
+
+            var roles = result.Subject.Roles.Select(r => r.RoleKey).ToArray();
+            var removed = !roles.Contains(opaqueRole, StringComparer.OrdinalIgnoreCase);
+            return new RoleGrantResult(userId, roles, removed);
+        }
+        catch (RoleServiceCallException ex)
+        {
+            // Same contract preservation as the grant path: callers catch UserManagementCallException.
+            _log.LogWarning(ex,
+                "role-service revoke failed for userId={UserId} role={Role} (status {Status})",
+                userId, opaqueRole, ex.StatusCode);
+            throw new UserManagementCallException("role-service/revoke", ex.StatusCode);
         }
     }
 
