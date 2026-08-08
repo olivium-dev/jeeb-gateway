@@ -1,6 +1,7 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations.Client;
+using JeebGateway.Financials;
 using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Services;
@@ -72,6 +73,7 @@ public class RequestOffersController : ControllerBase
     private readonly IJeebConversationClient _conversations;
     private readonly IOfferPushNotifier _offerPush;
     private readonly IDetachedPushDispatcher _detachedPush;
+    private readonly IWalletSufficiencyGuard _walletGuard;
     private readonly UpstreamFeatureFlags _flags;
     private readonly TimeProvider _clock;
     private readonly ILogger<RequestOffersController> _logger;
@@ -84,6 +86,7 @@ public class RequestOffersController : ControllerBase
         IJeebConversationClient conversations,
         IOfferPushNotifier offerPush,
         IDetachedPushDispatcher detachedPush,
+        IWalletSufficiencyGuard walletGuard,
         IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         ILogger<RequestOffersController> logger)
@@ -95,6 +98,7 @@ public class RequestOffersController : ControllerBase
         _conversations = conversations;
         _offerPush = offerPush;
         _detachedPush = detachedPush;
+        _walletGuard = walletGuard;
         _flags = flags.Value;
         _clock = clock;
         _logger = logger;
@@ -198,6 +202,30 @@ public class RequestOffersController : ControllerBase
                 Status = StatusCodes.Status409Conflict,
                 Type = "https://jeeb.dev/errors/request-not-open-for-offers"
             });
+        }
+
+        // F1 guard 1 — wallet must cover the offer's commission. Skips only on an
+        // invalid caller guid (never expected post-auth), never on the fee compare.
+        if (Guid.TryParse(jeeberId, out var jeeberGuid))
+        {
+            var required = Math.Round(body.Fee.Value * CommissionCalculator.FlatRate, 2);
+            var guard = await _walletGuard.CheckAsync(jeeberGuid, required, ct);
+            if (!guard.Allowed)
+            {
+                return StatusCode(StatusCodes.Status402PaymentRequired, new ProblemDetails
+                {
+                    Title = "Wallet balance does not cover the offer's commission.",
+                    Status = StatusCodes.Status402PaymentRequired,
+                    Type = "https://jeeb.dev/errors/insufficient-wallet-balance",
+                    Extensions =
+                    {
+                        // Correction 5: top-level, matching DioOfferSubmissionRepository._parseBalance.
+                        ["needed"] = guard.Required,
+                        ["available"] = guard.Available,
+                        ["currency"] = guard.Currency,
+                    }
+                });
+            }
         }
 
         PendingOffer created;

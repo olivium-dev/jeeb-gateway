@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using SwServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
 
 namespace JeebGateway.IntegrationTests.Fakes;
 
@@ -39,5 +40,11 @@ public class FakeOfferStoreWebApplicationFactory : WebApplicationFactory<Program
         services.AddSingleton<FakePendingOffersStore>();
         services.AddSingleton<IPendingOffersStore>(
             sp => sp.GetRequiredService<FakePendingOffersStore>());
+
+        // F1 — the real ServiceWalletClient points at a wallet-service that isn't
+        // running in tests; swap a generous-balance double so the new wallet guards
+        // don't trip existing offer tests that never intended to exercise them.
+        services.RemoveAll<SwServiceWalletClient>();
+        services.AddScoped<SwServiceWalletClient>(_ => new FakeWalletClient());
     }
 }
