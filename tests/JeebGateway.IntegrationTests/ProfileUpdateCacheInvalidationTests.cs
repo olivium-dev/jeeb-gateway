@@ -1,5 +1,7 @@
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -97,14 +99,48 @@ public sealed class ProfileUpdateCacheInvalidationTests
             });
         });
 
+    /// <summary>
+    /// A genuine gateway session bearer (sub/sid = userId) — required because
+    /// UsersMeController's class-level [Authorize] pins the GatewayBearerScheme
+    /// (ADR-004); the edge X-User-Id/X-User-Roles header path CdnController's
+    /// tests use does not satisfy that scheme and 403s here. Mirrors
+    /// JeeberNameProjectionTests.AuthedClient/MintGatewayBearer, which already
+    /// covers both /v1/users/me and /api/User/profile with this exact token shape.
+    /// </summary>
     private static HttpClient ClientFor(WebApplicationFactory<Program> factory, string userId)
     {
-        var client = factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-User-Id", userId);
-        // Opaque UM role "customer" == contract role "client"; ProfileReadSelf/
-        // ProfileWriteSelf are granted to any-authenticated {client, jeeber, admin}.
-        client.DefaultRequestHeaders.Add("X-User-Roles", "customer");
-        return client;
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", MintGatewayBearer(factory, userId));
+        return http;
+    }
+
+    private static string MintGatewayBearer(WebApplicationFactory<Program> factory, string userId)
+    {
+        var config = factory.Services.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>();
+        var signingKey = config["Jwt:SigningKey"]!;
+
+        var creds = new Microsoft.IdentityModel.Tokens.SigningCredentials(
+            new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey)),
+            Microsoft.IdentityModel.Tokens.SecurityAlgorithms.HmacSha256);
+
+        var claims = new List<System.Security.Claims.Claim>
+        {
+            new("sub", userId),
+            new(System.Security.Claims.ClaimTypes.Sid, userId),
+            new("active_role", Roles.Client),
+            new("roles", Roles.Client),
+        };
+
+        var token = new System.IdentityModel.Tokens.Jwt.JwtSecurityToken(
+            issuer: config["Jwt:Issuer"]!,
+            audience: config["Jwt:Audience"]!,
+            claims: claims,
+            notBefore: DateTime.UtcNow.AddMinutes(-1),
+            expires: DateTime.UtcNow.AddMinutes(30),
+            signingCredentials: creds);
+
+        return new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler().WriteToken(token);
     }
 
     /// <summary>
