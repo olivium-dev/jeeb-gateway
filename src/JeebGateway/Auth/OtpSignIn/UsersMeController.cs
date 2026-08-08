@@ -425,9 +425,8 @@ public sealed class UsersMeController : ControllerBase
                 "v1/users/me/role/unregister: best-effort offer withdraw failed for {UserId}.", userId);
         }
 
-        // Deliberately NOT touched: push device tokens (account-scoped, not role-scoped —
-        // clearing them would worsen the standing zombie-token backlog item), chat threads
-        // (survive naturally), GPS position (12h self-expiring TTL, no delete seam exists).
+        // Deliberately NOT touched: push tokens (account-scoped; clearing worsens the
+        // zombie-token backlog), chat threads (survive), GPS position (self-expiring TTL).
 
         try
         {

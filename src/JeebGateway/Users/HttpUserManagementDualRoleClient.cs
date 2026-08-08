@@ -155,11 +155,8 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
 
     public async Task<RoleGrantResult> RemoveAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
     {
-        // F3 — POST /api/User/role/revoke does not exist on UM today (see interface
-        // doc, plan correction 9). Dial it anyway (fully wired, fully testable) so the
-        // seam is a one-line swap once UM ships; any response — including the 404 a
-        // live call gets today — that isn't 2xx surfaces as UserManagementCallException,
-        // which the caller maps to a documented 502 upstream_fault (dark, not fabricated).
+        // F3 — UM has no revoke op today (correction 9); a live call 404s → non-2xx →
+        // UserManagementCallException → the caller's documented 502 (dark, not fabricated).
         using var resp = await _http.PostAsJsonAsync(
             "api/User/role/revoke",
             new RoleGrantBody { UserId = userId, Role = opaqueRole },
