@@ -45,9 +45,10 @@ public sealed class HttpRoleServiceClient : IRoleServiceClient
         using var resp = await _http.SendAsync(req, ct);
         await ThrowIfError(resp, "grant", ct);
 
-        var dto = await resp.Content.ReadFromJsonAsync<SubjectDto>(Json, ct)
-            ?? throw new RoleServiceCallException("grant", (int)HttpStatusCode.BadGateway, null);
-        return new RoleServiceGrantResult(resp.StatusCode == HttpStatusCode.Created, ToModel(dto));
+        // Mutations return a single-op body (RoleStore.GrantAsync), NOT the subject
+        // envelope — re-read the authoritative subject view after success.
+        var subject = await GetOrCreateAsync(appId, subjectId, ct);
+        return new RoleServiceGrantResult(resp.StatusCode == HttpStatusCode.Created, subject);
     }
 
     public async Task<RoleServiceRevokeResult> RevokeAsync(
@@ -65,9 +66,8 @@ public sealed class HttpRoleServiceClient : IRoleServiceClient
         using var resp = await _http.SendAsync(req, ct);
         await ThrowIfError(resp, "revoke", ct);
 
-        var dto = await resp.Content.ReadFromJsonAsync<SubjectDto>(Json, ct)
-            ?? throw new RoleServiceCallException("revoke", (int)HttpStatusCode.BadGateway, null);
-        return new RoleServiceRevokeResult(ToModel(dto));
+        // Same single-op-body contract as grant: re-read the subject after success.
+        return new RoleServiceRevokeResult(await GetOrCreateAsync(appId, subjectId, ct));
     }
 
     public async Task<RoleServiceActiveRoleResult> SetActiveRoleAsync(
@@ -83,9 +83,8 @@ public sealed class HttpRoleServiceClient : IRoleServiceClient
         using var resp = await _http.SendAsync(req, ct);
         await ThrowIfError(resp, "active-role", ct);
 
-        var dto = await resp.Content.ReadFromJsonAsync<SubjectDto>(Json, ct)
-            ?? throw new RoleServiceCallException("active-role", (int)HttpStatusCode.BadGateway, null);
-        return new RoleServiceActiveRoleResult(ToModel(dto));
+        // Same single-op-body contract as grant: re-read the subject after success.
+        return new RoleServiceActiveRoleResult(await GetOrCreateAsync(appId, subjectId, ct));
     }
 
     public async Task<RoleServiceSubjectPage> ListByRoleAsync(
@@ -133,7 +132,8 @@ public sealed class HttpRoleServiceClient : IRoleServiceClient
         try
         {
             var err = await resp.Content.ReadFromJsonAsync<ErrorDto>(Json, ct);
-            errorCode = err?.Error;
+            // role-service errors are RFC7807 problem+json with type "urn:problem:<code>".
+            errorCode = err?.Error ?? StripProblemPrefix(err?.Type);
         }
         catch (JsonException)
         {
@@ -204,8 +204,12 @@ public sealed class HttpRoleServiceClient : IRoleServiceClient
         [JsonPropertyName("next_cursor")] public string? NextCursor { get; set; }
     }
 
+    private static string? StripProblemPrefix(string? type) =>
+        type is null ? null : (type.StartsWith("urn:problem:", StringComparison.Ordinal) ? type["urn:problem:".Length..] : type);
+
     private sealed class ErrorDto
     {
         [JsonPropertyName("error")] public string? Error { get; set; }
+        [JsonPropertyName("type")] public string? Type { get; set; }
     }
 }
