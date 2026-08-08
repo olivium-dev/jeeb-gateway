@@ -221,6 +221,9 @@ internal sealed class FakeUsersStore : IUsersStore
     public Task<UserProfile?> GrantRoleAsync(string userId, string role, CancellationToken ct)
         => throw new NotSupportedException("the new-request fan-out must only read user profiles");
 
+    public Task<UserProfile?> RevokeRoleAsync(string userId, string role, CancellationToken ct)
+        => throw new NotSupportedException("the new-request fan-out must only read user profiles");
+
     public Task<bool> PurgePiiAsync(string userId, CancellationToken ct)
         => throw new NotSupportedException("the new-request fan-out must only read user profiles");
 }

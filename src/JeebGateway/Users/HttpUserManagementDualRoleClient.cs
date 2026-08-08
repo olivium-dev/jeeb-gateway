@@ -153,6 +153,35 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         return new RoleGrantResult(dto.UserId ?? userId, roles, added);
     }
 
+    public async Task<RoleGrantResult> RemoveAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
+    {
+        // F3 — POST /api/User/role/revoke does not exist on UM today (see interface
+        // doc, plan correction 9). Dial it anyway (fully wired, fully testable) so the
+        // seam is a one-line swap once UM ships; any response — including the 404 a
+        // live call gets today — that isn't 2xx surfaces as UserManagementCallException,
+        // which the caller maps to a documented 502 upstream_fault (dark, not fabricated).
+        using var resp = await _http.PostAsJsonAsync(
+            "api/User/role/revoke",
+            new RoleGrantBody { UserId = userId, Role = opaqueRole },
+            Json, ct);
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            _log.LogWarning(
+                "user-management role revoke returned {Status} for userId={UserId} role={Role}",
+                (int)resp.StatusCode, userId, opaqueRole);
+            throw new UserManagementCallException("role/revoke", (int)resp.StatusCode);
+        }
+
+        var dto = await resp.Content.ReadFromJsonAsync<RoleGrantBodyResponse>(Json, ct)
+            ?? throw new UserManagementCallException("role/revoke", (int)HttpStatusCode.BadGateway);
+
+        var roles = dto.AvailableRoles ?? Array.Empty<string>();
+        var removed = dto.Added ?? true;
+
+        return new RoleGrantResult(dto.UserId ?? userId, roles, removed);
+    }
+
     // ---- wire DTOs (snake_case where UM emits snake_case; PascalCase request fields) ----
 
     private sealed class RoleGrantBody

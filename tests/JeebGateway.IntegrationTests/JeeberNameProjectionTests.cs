@@ -331,6 +331,7 @@ public class JeeberNameProjectionTests
         public Task<UserProfile?> UnsuspendAsync(string userId, string adminId, CancellationToken ct) => throw Boom();
         public Task<UserProfile?> SwitchRoleAsync(string userId, string newRole, CancellationToken ct) => throw Boom();
         public Task<UserProfile?> GrantRoleAsync(string userId, string role, CancellationToken ct) => throw Boom();
+        public Task<UserProfile?> RevokeRoleAsync(string userId, string role, CancellationToken ct) => throw Boom();
         public Task<bool> PurgePiiAsync(string userId, CancellationToken ct) => throw Boom();
     }
 }

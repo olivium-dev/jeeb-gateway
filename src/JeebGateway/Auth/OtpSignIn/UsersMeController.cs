@@ -1,4 +1,7 @@
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Availability;
+using JeebGateway.JeebWallet;
+using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
@@ -12,6 +15,9 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using UmServiceClient = JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient;
 using UmApiException = JeebGateway.service.ServiceUserManagement.ApiException;
+using ServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
+using WalletApiException = JeebGateway.service.ServiceWallet.ApiException;
+using GetHolderWallets = JeebGateway.service.ServiceWallet.GetHolderWallets;
 
 namespace JeebGateway.Auth.OtpSignIn;
 
@@ -61,6 +67,10 @@ public sealed class UsersMeController : ControllerBase
     private readonly IUserManagementDualRoleClient _dualRole;
     private readonly IDevSeededRoleStore _seededRoles;
     private readonly ITokenService _tokens;
+    private readonly IRequestsStore _requests;
+    private readonly ServiceWalletClient _wallet;
+    private readonly IJeeberForceOfflineOnUnregister _forceOffline;
+    private readonly IPendingOffersStore _pendingOffers;
     private readonly ILogger<UsersMeController> _log;
 
     public UsersMeController(
@@ -71,6 +81,10 @@ public sealed class UsersMeController : ControllerBase
         IUserManagementDualRoleClient dualRole,
         IDevSeededRoleStore seededRoles,
         ITokenService tokens,
+        IRequestsStore requests,
+        ServiceWalletClient wallet,
+        IJeeberForceOfflineOnUnregister forceOffline,
+        IPendingOffersStore pendingOffers,
         ILogger<UsersMeController> log)
     {
         _umProfile = umProfile;
@@ -80,6 +94,10 @@ public sealed class UsersMeController : ControllerBase
         _dualRole = dualRole;
         _seededRoles = seededRoles;
         _tokens = tokens;
+        _requests = requests;
+        _wallet = wallet;
+        _forceOffline = forceOffline;
+        _pendingOffers = pendingOffers;
         _log = log;
     }
 
@@ -305,6 +323,167 @@ public sealed class UsersMeController : ControllerBase
             _log.LogWarning("v1/users/me/role/switch UM call failed (status {Status})", ex.StatusCode);
             return Problem(StatusCodes.Status502BadGateway, "upstream_fault", "Role switch upstream failure",
                 "The user-management service returned an unexpected status while switching the active role.");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // F3 — POST /v1/users/me/role/unregister (unregister-as-jeeber, NOT account deletion)
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Self-only Jeeber-role removal (not account deletion — design §3). Guards mirror
+    /// <see cref="DualRoleService"/>'s BR-1 shape; UM has no revoke op yet (correction 9),
+    /// so this ships DARK behind 502 <c>upstream_fault</c> until UM adds one.
+    /// </summary>
+    [HttpPost("role/unregister")]
+    // Write-adjacent self-mutation, matching account-deletion's capability choice
+    // (UserController.cs:951), not ProfileReadSelf which SwitchRole uses.
+    [RequireCapability(Caps.ProfileWriteSelf)]
+    [ProducesResponseType(typeof(RoleSwitchResponseDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> UnregisterAsJeeber(CancellationToken ct)
+    {
+        if (!_flags.CurrentValue.UserManagement)
+            return UpstreamDisabled();
+
+        // I4 — identity ALWAYS from the bearer, never body/query.
+        if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauth))
+            return unauth;
+
+        // Must currently hold the jeeber role — fires before RevokeRoleAsync's own no-op
+        // semantics are reachable, so a second call is 404, not a silent 200 (correction 10).
+        var opaqueRoles = await ResolveAvailableRolesAsync(userId, ct);
+        if (!opaqueRoles.Contains(Roles.Jeeber, StringComparer.OrdinalIgnoreCase))
+        {
+            return Problem(StatusCodes.Status404NotFound, "not_a_jeeber", "Not a jeeber",
+                "This account does not currently hold the jeeber role.");
+        }
+
+        // Guard 1 — active jeeber deliveries, counted regardless of ActiveRole (unlike
+        // ValidateRoleSwitchAsync, which only counts when ActiveRole==Jeeber).
+        var activeDeliveries = await _requests.CountActiveForJeeberAsync(userId, ct);
+        if (activeDeliveries > 0)
+        {
+            return Problem(StatusCodes.Status409Conflict, "active_delivery", "Active delivery in progress",
+                $"Complete or hand off {activeDeliveries} active delivery(ies) as jeeber before unregistering.");
+        }
+
+        // Guard 2 — positive wallet/earnings balance.
+        if (Guid.TryParse(userId, out var holderId))
+        {
+            GetHolderWallets? holder;
+            try
+            {
+                holder = await _wallet.WalletsAsync(holderId, ct);
+            }
+            catch (WalletApiException ex) when (ex.StatusCode == StatusCodes.Status404NotFound)
+            {
+                holder = null; // no wallet provisioned yet — an honest zero balance.
+            }
+            catch (Exception ex)
+            {
+                // Money-adjacent guard fails CLOSED: an unreachable wallet-service must never
+                // silently let a real positive balance through (mirrors F1's OQ1 posture).
+                _log.LogWarning(ex,
+                    "v1/users/me/role/unregister: wallet balance read failed for {UserId}.", userId);
+                return Problem(StatusCodes.Status503ServiceUnavailable, "wallet_service_unavailable",
+                    "Wallet balance could not be verified",
+                    "The wallet balance check could not run; try again shortly.");
+            }
+
+            if (JeebWalletProjection.ProjectBalance(holder).AvailableBalance > 0)
+            {
+                return Problem(StatusCodes.Status409Conflict, "positive_wallet_balance", "Positive wallet balance",
+                    "Settle or withdraw your wallet balance before unregistering as a jeeber.");
+            }
+        }
+        else
+        {
+            // Permissive non-UUID ids (the OTP UM-down phone-keyed fallback) have no
+            // wallet-service holder row by construction — nothing to guard against.
+            _log.LogWarning(
+                "v1/users/me/role/unregister: userId {UserId} is not a GUID; wallet guard skipped.", userId);
+        }
+
+        // Guard 3 — mandatory force-offline BEFORE the revoke (correction 6): matching reads
+        // presence, not roles, so an online jeeber must stop being a candidate immediately.
+        await _forceOffline.ForceOfflineAsync(userId, ct);
+
+        // Best-effort withdraw of outstanding pre-accept offers — offer-service exposes no
+        // bulk withdraw-for-jeeber route in production (JEBV4-148); never blocks the 200.
+        try
+        {
+            await _pendingOffers.WithdrawForJeeberAsync(userId, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "v1/users/me/role/unregister: best-effort offer withdraw failed for {UserId}.", userId);
+        }
+
+        // Deliberately NOT touched: push device tokens (account-scoped, not role-scoped —
+        // clearing them would worsen the standing zombie-token backlog item), chat threads
+        // (survive naturally), GPS position (12h self-expiring TTL, no delete seam exists).
+
+        try
+        {
+            // UM remains the role authority (same split as the KYC-grant). 404s live today
+            // (correction 9); the catch below turns that into a documented 502, never a fake success.
+            var result = await _dualRole.RemoveAvailableRoleAsync(userId, Roles.Jeeber, ct);
+
+            // Local mirror ONLY after UM succeeds (no partial apply). RevokeRoleAsync
+            // durably mirrors into Postgres (correction 2) and flips ActiveRole off Jeeber.
+            await _users.RevokeRoleAsync(userId, Roles.Jeeber, ct);
+            _cache.Remove(ProfileCacheKey(userId));
+
+            var contractAvailable = JeebRoleTranslator.ToContract(result.AvailableRoles);
+            if (contractAvailable.Length == 0)
+                contractAvailable = new[] { JeebRoleTranslator.ContractClient };
+
+            var localProfile = await _users.GetByIdAsync(userId, ct);
+            var contractActive = JeebRoleTranslator.ToContract(localProfile?.ActiveRole);
+            if (string.IsNullOrWhiteSpace(contractActive))
+                contractActive = JeebRoleTranslator.ContractClient;
+
+            var accessToken = string.Empty;
+            var refreshToken = string.Empty;
+            try
+            {
+                var pair = await _tokens.IssueAsync(userId, result.AvailableRoles, ct);
+                accessToken = pair.AccessToken;
+                refreshToken = pair.RefreshToken;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "v1/users/me/role/unregister re-mint failed for {UserId}; returning empty tokens so the caller keeps its existing session.",
+                    userId);
+            }
+
+            return Ok(new RoleSwitchResponseDto
+            {
+                UserId = userId,
+                AccessToken = accessToken,
+                RefreshToken = refreshToken,
+                ActiveRole = contractActive,
+                AvailableRoles = contractAvailable,
+                User = new RoleSwitchUserBlock
+                {
+                    UserId = userId,
+                    ActiveRole = contractActive,
+                    AvailableRoles = contractAvailable,
+                },
+            });
+        }
+        catch (UserManagementCallException ex)
+        {
+            _log.LogWarning("v1/users/me/role/unregister UM call failed (status {Status})", ex.StatusCode);
+            return Problem(StatusCodes.Status502BadGateway, "upstream_fault", "Unregister upstream failure",
+                "The user-management service does not yet support removing the jeeber role.");
         }
     }
 
