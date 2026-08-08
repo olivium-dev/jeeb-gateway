@@ -1,6 +1,7 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations;
+using JeebGateway.Financials;
 using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Requests.OtpHandover;
@@ -48,6 +49,7 @@ public sealed class JeebOffersController : ControllerBase
     private readonly IAcceptChatSettler _settler;
     private readonly IOfferPushNotifier _offerPush;
     private readonly IDetachedPushDispatcher _detachedPush;
+    private readonly IWalletSufficiencyGuard _walletGuard;
     private readonly IHandoverCodeStore _handoverCodes;
     private readonly UpstreamFeatureFlags _flags;
     private readonly DeliveryClientOptions _deliveryOptions;
@@ -65,6 +67,7 @@ public sealed class JeebOffersController : ControllerBase
         IAcceptChatSettler settler,
         IOfferPushNotifier offerPush,
         IDetachedPushDispatcher detachedPush,
+        IWalletSufficiencyGuard walletGuard,
         IHandoverCodeStore handoverCodes,
         IOptions<UpstreamFeatureFlags> flags,
         IOptions<DeliveryClientOptions> deliveryOptions,
@@ -80,6 +83,7 @@ public sealed class JeebOffersController : ControllerBase
         _settler = settler;
         _offerPush = offerPush;
         _detachedPush = detachedPush;
+        _walletGuard = walletGuard;
         _handoverCodes = handoverCodes;
         _flags = flags.Value;
         _deliveryOptions = deliveryOptions.Value;
@@ -156,6 +160,42 @@ public sealed class JeebOffersController : ControllerBase
         var winningJeeberId = routing.Value.JeeberId;
         // Retired BR-10 active-delivery cap: do not pre-count delivery-service
         // assignments here. Offer-service still owns real accept conflicts below.
+
+        // F1 guard 2 — re-check the winning jeeber's balance before forwarding accept.
+        // Skips (never 500s) when bidder/fee are unresolvable, mirroring BR-1 below.
+        if (!string.IsNullOrWhiteSpace(winningJeeberId) && Guid.TryParse(winningJeeberId, out var winningJeeberGuid))
+        {
+            var offerFee = await ResolveAcceptedFeeAsync(requestId, offerId, ct);
+            if (offerFee is > 0m)
+            {
+                var required = WalletGuardContract.RequiredCommission(offerFee.Value);
+                var guard = await _walletGuard.CheckAsync(winningJeeberGuid, required, ct);
+                if (!guard.Allowed)
+                {
+                    // An outage is NOT insufficiency: 503, and never withdraw the offer.
+                    if (guard.DegradedByUpstreamFailure)
+                    {
+                        return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                            WalletGuardContract.WalletUnavailableProblem());
+                    }
+
+                    await AutoWithdrawInsufficientBalanceOfferAsync(offerId, requestId, winningJeeberId, ct);
+
+                    return Conflict(new ProblemDetails
+                    {
+                        Title = "The winning jeeber's wallet balance no longer covers the offer's commission.",
+                        Status = StatusCodes.Status409Conflict,
+                        Type = "https://jeeb.dev/errors/offer-jeeber-insufficient-balance",
+                        Extensions =
+                        {
+                            ["needed"] = guard.Required,
+                            ["available"] = guard.Available,
+                            ["currency"] = guard.Currency,
+                        }
+                    });
+                }
+            }
+        }
 
         // JEBV4-83 (F5) — BR-1 self-offer guard (defense-in-depth), porting the legacy
         // route's check (OffersController.AcceptViaUpstreamAsync:553-564) so the two live
@@ -826,6 +866,33 @@ public sealed class JeebOffersController : ControllerBase
     {
         var offers = await _offers.ListForRequestAsync(requestId, ct);
         return offers.FirstOrDefault(o => string.Equals(o.Id, offerId, StringComparison.Ordinal))?.Fee;
+    }
+
+    /// <summary>F1 guard 2, best-effort: withdraw the unaffordable offer + reuse the lost
+    /// push. Correction 7: NotPending (replay of accepted offer) is swallowed.</summary>
+    private async Task AutoWithdrawInsufficientBalanceOfferAsync(
+        string offerId, string requestId, string jeeberId, CancellationToken ct)
+    {
+        try
+        {
+            var outcome = await _offers.TryWithdrawAsync(offerId, requestId, jeeberId, _clock.GetUtcNow(), ct);
+            if (outcome != WithdrawOfferOutcome.Withdrawn)
+            {
+                return;
+            }
+
+            _detachedPush.Dispatch(
+                "offer.insufficient_balance", recipientCount: 1, correlationId: requestId,
+                work: (sp, token) => sp.GetRequiredService<IOfferPushNotifier>()
+                    .NotifyOfferLostAsync(jeeberId, requestId, offerId, token));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "F1 guard 2 auto-withdraw for offer {OfferId} (insufficient balance) failed; "
+                + "the 409 already returned to the caller, the stale offer may resurface until reconciled.",
+                offerId);
+        }
     }
 
     // GW3 / W3.5(c): the local in-memory accept helper was deleted here.

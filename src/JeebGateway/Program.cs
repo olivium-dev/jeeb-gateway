@@ -1323,6 +1323,13 @@ builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient
     return new JeebGateway.service.ServiceWallet.ServiceWalletClient(baseUrl, client);
 });
 
+// F1 — offer-submit/accept/edit wallet-sufficiency guard (OQ1 unresolved: see
+// WalletGuardOptions). Reuses the ServiceWalletClient registered immediately above.
+builder.Services.Configure<JeebGateway.Financials.WalletGuardOptions>(
+    builder.Configuration.GetSection(JeebGateway.Financials.WalletGuardOptions.SectionName));
+builder.Services.AddScoped<JeebGateway.Financials.IWalletSufficiencyGuard,
+    JeebGateway.Financials.WalletSufficiencyGuard>();
+
 // Jeeb Partner Portal wallet BFF (partner-wallet-bff) — validated options + the thin
 // saga-orchestration service. Reuses the scoped ServiceWalletClient registered above and the
 // IJeebWalletLedgerReader wired below; adds no new HttpClient (all partner money moves flow through

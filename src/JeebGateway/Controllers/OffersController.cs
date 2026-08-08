@@ -1,5 +1,6 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
+using JeebGateway.Financials;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
@@ -59,17 +60,20 @@ public class OffersController : ControllerBase
 
     private readonly IOfferServiceClient _offerService;
     private readonly IOfferRequestIndex _offerRequestIndex;
+    private readonly IWalletSufficiencyGuard _walletGuard;
     private readonly UpstreamFeatureFlags _flags;
     private readonly ILogger<OffersController> _logger;
 
     public OffersController(
         IOfferServiceClient offerService,
         IOfferRequestIndex offerRequestIndex,
+        IWalletSufficiencyGuard walletGuard,
         IOptions<UpstreamFeatureFlags> flags,
         ILogger<OffersController> logger)
     {
         _offerService = offerService;
         _offerRequestIndex = offerRequestIndex;
+        _walletGuard = walletGuard;
         _flags = flags.Value;
         _logger = logger;
     }
@@ -137,6 +141,39 @@ public class OffersController : ControllerBase
         // Dollars → cents on the wire (offer-service is cents-based, mirroring submit).
         long? feeCents = body.Fee is decimal fee ? (long)Math.Round(fee * 100m) : null;
 
+        // F1 guard 3 (API-only hardening — mobile never calls this route). Only a RAISED
+        // fee needs a re-check; a lowered/unchanged fee needs no more balance than before.
+        if (feeCents is long newFeeCents && Guid.TryParse(actorId, out var jeeberGuid))
+        {
+            var currentFeeCents = await ResolveCurrentFeeCentsAsync(actorId, offerId, ct);
+            if (currentFeeCents is long cur && newFeeCents > cur)
+            {
+                var required = WalletGuardContract.RequiredCommission(newFeeCents / 100m);
+                var guard = await _walletGuard.CheckAsync(jeeberGuid, required, ct);
+                if (!guard.Allowed)
+                {
+                    if (guard.DegradedByUpstreamFailure)
+                    {
+                        return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                            WalletGuardContract.WalletUnavailableProblem());
+                    }
+
+                    return StatusCode(StatusCodes.Status402PaymentRequired, new ProblemDetails
+                    {
+                        Title = "Wallet balance does not cover the raised offer's commission.",
+                        Status = StatusCodes.Status402PaymentRequired,
+                        Type = "https://jeeb.dev/errors/insufficient-wallet-balance",
+                        Extensions =
+                        {
+                            ["needed"] = guard.Required,
+                            ["available"] = guard.Available,
+                            ["currency"] = guard.Currency,
+                        }
+                    });
+                }
+            }
+        }
+
         OfferMutationResult result;
         try
         {
@@ -150,6 +187,14 @@ public class OffersController : ControllerBase
         }
 
         return MapMutation(result, "edit");
+    }
+
+    /// <summary>F1 guard 3: the offer's current fee, read via the jeeber-scoped feed list
+    /// (the actor here IS the jeeber). Null when unresolvable — the guard then skips.</summary>
+    private async Task<long?> ResolveCurrentFeeCentsAsync(string jeeberId, string offerId, CancellationToken ct)
+    {
+        var offers = await _offerService.ListOffersForJeeberAsync(jeeberId, status: null, ct);
+        return offers.FirstOrDefault(o => string.Equals(o.OfferId, offerId, StringComparison.Ordinal))?.FeeCents;
     }
 
     // GW3 follow-up (2026-08-01): the flag-OFF in-memory offer edit helper
