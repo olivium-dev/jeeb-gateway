@@ -8,9 +8,11 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Auth.SuperLogin;
 using JeebGateway.service.ServiceUserManagement;
 using JeebGateway.Tokens;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using GwUsersStore = JeebGateway.Users.IUsersStore;
 using GwUserProfile = JeebGateway.Users.UserProfile;
@@ -35,6 +37,7 @@ namespace JeebGateway.Controllers
         private readonly IOptions<SuperLoginOptions> _superLogin;
         private readonly JeebGateway.Users.IAccountDeletionStore _accountDeletion;
         private readonly JeebGateway.Requests.IRequestsStore _requests;
+        private readonly IMemoryCache _cache;
         private readonly ILogger<UserController> _logger;
 
         public UserController(
@@ -46,6 +49,7 @@ namespace JeebGateway.Controllers
             IOptions<SuperLoginOptions> superLogin,
             JeebGateway.Users.IAccountDeletionStore accountDeletion,
             JeebGateway.Requests.IRequestsStore requests,
+            IMemoryCache cache,
             ILogger<UserController> logger)
         {
             _serviceUserManagementClient = serviceUserManagementClient;
@@ -56,6 +60,7 @@ namespace JeebGateway.Controllers
             _superLogin = superLogin;
             _accountDeletion = accountDeletion;
             _requests = requests;
+            _cache = cache;
             _logger = logger;
         }
 
@@ -891,6 +896,14 @@ namespace JeebGateway.Controllers
         /// by the upstream-confirmed user id (falling back to the request body's id,
         /// then the caller's own claims). BEST-EFFORT: the upstream update already
         /// succeeded, so a local mirror fault only logs — it never flips the 200.</para>
+        ///
+        /// <para>F5 validator correction — <c>GET /v1/users/me</c> caches the UM
+        /// profile for 30s (<see cref="UsersMeController"/>) and, before this fix,
+        /// NEITHER this route nor its twin <c>/api/User/profile/update</c> ever
+        /// invalidated that key: a name/avatar change served stale here for up to
+        /// 30s after a successful upstream write. Invalidate unconditionally
+        /// (before the local-mirror early-return below) so a blank-field update
+        /// that skips the local projection write still busts the /me cache.</para>
         /// </summary>
         private async Task MirrorProfileUpdateToLocalProjectionAsync(
             UpdateUserProfileRequest request, UpdateUserProfileResponse? response)
@@ -907,6 +920,8 @@ namespace JeebGateway.Controllers
                              ?? User.FindFirst("sub")?.Value;
                 }
                 if (string.IsNullOrWhiteSpace(userId)) return;
+
+                _cache.Remove(ProfileCacheKeys.ForUser(userId));
 
                 // Prefer the upstream-echoed values (what UM actually persisted) and
                 // fall back to the submitted ones. Null patch fields are left untouched

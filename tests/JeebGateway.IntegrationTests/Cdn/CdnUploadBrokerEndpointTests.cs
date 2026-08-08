@@ -164,6 +164,9 @@ public sealed class CdnUploadBrokerEndpointTests
     [Theory]
     [InlineData("dispute_evidence")]
     [InlineData("support_attachment")]
+    // F5 — profile_avatar reuses the identical bearer-gated signed-PUT broker path;
+    // only the allowlist entry differs, exactly like the other post-launch slots above.
+    [InlineData("profile_avatar")]
     public async Task BrokerUploadUrl_Case_Attachment_Slots_Use_Existing_Signed_Upload_Path(string slot)
     {
         using var factory = CdnEnabledFactory(new StubCdn());

@@ -120,7 +120,7 @@ public sealed class UsersMeController : ControllerBase
         var opaqueRoles = await ResolveAvailableRolesAsync(userId, ct);
         var contractRoles = JeebRoleTranslator.ToContract(opaqueRoles);
 
-        var cacheKey = ProfileCacheKey(userId);
+        var cacheKey = ProfileCacheKeys.ForUser(userId);
         if (!_cache.TryGetValue(cacheKey, out ProfileDisplay? display))
         {
             // The dual-role identity (the load-bearing snake_case roles) comes from the
@@ -241,7 +241,7 @@ public sealed class UsersMeController : ControllerBase
             // TokenService.IssueAsync reads active_role from THIS store, so the switch MUST be
             // persisted locally before the re-mint below for the new JWT to carry the new role.
             await _users.SwitchRoleAsync(userId, result.ActiveRole, ct);
-            _cache.Remove(ProfileCacheKey(userId));
+            _cache.Remove(ProfileCacheKeys.ForUser(userId));
 
             // Resolve the user's FULL available-role set for the response body (the re-issued
             // UM token carries only the now-active role; available_roles must be the full set).
@@ -408,8 +408,6 @@ public sealed class UsersMeController : ControllerBase
                 "v1/users/me local display-name hydration failed for {UserId}; read is unaffected.", userId);
         }
     }
-
-    private static string ProfileCacheKey(string userId) => $"v1:users:me:profile:{userId}";
 
     private ObjectResult UpstreamDisabled() => Problem(
         StatusCodes.Status503ServiceUnavailable, "user_management_unavailable",

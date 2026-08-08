@@ -103,6 +103,13 @@ public sealed class CdnController : ControllerBase
             "chat_attachment",
             "dispute_evidence",
             "support_attachment",
+            // F5 — profile picture upload. Same brokered signed-PUT path; the
+            // caller-scoped POST here is unchanged (bearer-authenticated,
+            // OwnerUserId = the caller's own userId). Public serving of the
+            // uploaded bytes is a SEPARATE, narrowly-scoped route
+            // (AvatarController) — this allowlist entry only lets an
+            // authenticated caller broker an upload ticket for their own avatar.
+            "profile_avatar",
         };
 
     private static readonly IReadOnlySet<string> AllowedUploadContentTypes =
