@@ -414,6 +414,11 @@ public class DualRoleBffTests
         public Task<RoleGrantResult> AppendAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
             => Task.FromResult(new RoleGrantResult(userId, new[] { opaqueRole }, true));
 
+        // F3: this fixture predates the revoke seam and does not exercise it — models
+        // today's live UM (no revoke op), matching the plan's dark-path default.
+        public Task<RoleGrantResult> RemoveAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
+            => throw new UserManagementCallException("role/revoke", 404);
+
         // Null = this stub does not model the authoritative UM roles-read, so the
         // /v1/users/me resolver falls through to its local-projection / session-claims
         // fallback (the bearer's per-role claims these tests set up). Returning a fixed

@@ -509,6 +509,7 @@ public class JeebFeedTests
         public Task<UserProfile?> UnsuspendAsync(string userId, string adminId, CancellationToken ct) => _inner.UnsuspendAsync(userId, adminId, ct);
         public Task<UserProfile?> SwitchRoleAsync(string userId, string newRole, CancellationToken ct) => _inner.SwitchRoleAsync(userId, newRole, ct);
         public Task<UserProfile?> GrantRoleAsync(string userId, string role, CancellationToken ct) => _inner.GrantRoleAsync(userId, role, ct);
+        public Task<UserProfile?> RevokeRoleAsync(string userId, string role, CancellationToken ct) => _inner.RevokeRoleAsync(userId, role, ct);
         public Task<bool> PurgePiiAsync(string userId, CancellationToken ct) => _inner.PurgePiiAsync(userId, ct);
     }
 }

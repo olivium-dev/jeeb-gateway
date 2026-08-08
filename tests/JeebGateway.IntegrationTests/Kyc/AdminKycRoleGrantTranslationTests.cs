@@ -176,6 +176,9 @@ public sealed class AdminKycRoleGrantTranslationTests
         public Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct)
             => Task.FromResult(new PhoneFindOrCreateResult(phone, false, new[] { Roles.Client }, Roles.Client));
 
+        public Task<RoleGrantResult> RemoveAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
+            => throw new UserManagementCallException("role/revoke", 404);
+
         public Task<RoleSwitchReissueResult> RoleSwitchAsync(string userId, string opaqueRole, CancellationToken ct)
             => Task.FromResult(new RoleSwitchReissueResult(userId, "a", "r", opaqueRole));
 
