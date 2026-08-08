@@ -147,6 +147,43 @@ public sealed class UpstreamBackedUsersStoreTests
         got.ActiveRole.Should().Be("driver");
     }
 
+    // ── F3: revoke mirrors durably (plan correction 2 — the Postgres-projection gap) ─
+
+    [Fact]
+    public async Task RevokeRole_IsDurable_ColdInstanceNoLongerSeesTheRole()
+    {
+        var projection = new FakeUserProjectionStore();
+        var writer = NewStore(projection);
+        var id = Guid.NewGuid().ToString();
+        await writer.UpsertProjectionAsync(
+            Profile(id, phone: "+9611234567", name: "Rana", roles: new[] { "customer", "driver" }, activeRole: "driver"), Ct);
+
+        var revoked = await writer.RevokeRoleAsync(id, "driver", Ct);
+        revoked.Should().NotBeNull();
+        revoked!.Roles.Should().NotContain("driver");
+        revoked.ActiveRole.Should().Be("customer", "ActiveRole must flip off the revoked role");
+
+        // A revoke that only touched in-memory would resurrect "driver" here.
+        var cold = NewStore(projection);
+        var durable = await cold.GetByIdAsync(id, Ct);
+        durable!.Roles.Should().NotContain("driver", "the revoke must mirror into the durable projection");
+        durable.ActiveRole.Should().Be("customer");
+    }
+
+    [Fact]
+    public async Task RevokeRole_UserDoesNotHoldRole_IsIdempotentNoOp()
+    {
+        var writer = NewStore(new FakeUserProjectionStore());
+        var id = Guid.NewGuid().ToString();
+        await writer.UpsertProjectionAsync(
+            Profile(id, phone: "+9611234567", name: "Rana", roles: new[] { "customer" }), Ct);
+
+        var result = await writer.RevokeRoleAsync(id, "driver", Ct);
+
+        result.Should().NotBeNull();
+        result!.Roles.Should().BeEquivalentTo(new[] { "customer" });
+    }
+
     // ── Behaviour preserved: saved addresses still delegate to the in-memory store ─
 
     [Fact]

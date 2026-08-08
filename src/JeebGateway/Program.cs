@@ -2340,6 +2340,11 @@ else
 }
 builder.Services.AddHostedService<AutoOfflineSweeper>();
 
+// F3 (unregister-as-jeeber) guard 3 — forces presence offline through whichever
+// path is authoritative, same branch AvailabilityController itself uses.
+builder.Services.AddSingleton<JeebGateway.Users.IJeeberForceOfflineOnUnregister,
+    JeebGateway.Users.JeeberForceOfflineOnUnregister>();
+
 // GPS location tracking (T-backend-014).
 // The store is an in-memory ConcurrentDictionary keyed by Jeeber id.
 //
