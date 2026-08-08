@@ -162,6 +162,28 @@ public sealed class AvatarControllerTests
             "a malformed/traversing stored ref must fail closed before the gateway dials cdn");
     }
 
+    [Theory]
+    // A CLEAN (non-traversing) cross-slot ref passes the traversal guard, so slot
+    // confinement is the only thing stopping this public route from re-serving a
+    // bearer-gated KYC/dispute/chat/proof asset whose ref lands in ProfilePic.
+    [InlineData("id_document_front/known-guid.jpg")]
+    [InlineData("dispute_evidence/known-guid.jpg")]
+    [InlineData("chat_attachment/known-guid.jpg")]
+    [InlineData("proof_of_delivery/known-guid.jpg")]
+    public async Task GetAvatar_CrossSlotStoredRef_Never_Dials_Cdn_Fails_Closed_404(string crossSlotRef)
+    {
+        var um = new StubUmClient { ProfilePic = crossSlotRef };
+        var upstream = new StubUpstreamHandler(HttpStatusCode.OK, "image/jpeg", JpegBytes);
+        using var factory = AvatarFactory(um, upstream);
+        var client = factory.CreateClient();
+
+        var resp = await client.GetAsync("/api/users/user-1/avatar");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        upstream.WasCalled.Should().BeFalse(
+            "a non-avatar-slot stored ref must fail closed — this public route serves the profile_avatar slot only");
+    }
+
     [Fact]
     public async Task GetAvatar_CannotBeRedirectedToAnotherUsersKycAsset_ByAnyClientSuppliedInput()
     {

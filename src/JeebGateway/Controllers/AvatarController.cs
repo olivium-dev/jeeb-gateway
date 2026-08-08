@@ -67,6 +67,9 @@ public sealed class AvatarController : ControllerBase
     // route). Kept well under CdnController's MaxSignedUrlTtlSeconds (3600) bound.
     private const int AvatarCacheMaxAgeSeconds = 600;
 
+    // The one CDN slot this public route is allowed to serve (see CdnController.AllowedUploadSlots).
+    private const string AvatarSlotPrefix = "profile_avatar/";
+
     private readonly UmServiceClient _umProfile;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IHttpClientFactory _httpClientFactory;
@@ -128,6 +131,16 @@ public sealed class AvatarController : ControllerBase
             _logger.LogError(
                 "Avatar route: stored ProfilePic for {UserId} failed the traversal guard; refusing to dial cdn.",
                 userId);
+            return NoAvatar();
+        }
+
+        // Slot-confinement: this PUBLIC route may only ever serve the avatar slot. ProfilePic
+        // is client-writable (PUT /api/User/profile), so a cross-slot ref must never be dialled.
+        if (!objectPath.StartsWith(AvatarSlotPrefix, StringComparison.Ordinal))
+        {
+            _logger.LogError(
+                "Avatar route: stored ProfilePic for {UserId} is outside the {Slot} slot; refusing to dial cdn.",
+                userId, AvatarSlotPrefix);
             return NoAvatar();
         }
 
