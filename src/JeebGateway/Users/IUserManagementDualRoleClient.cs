@@ -58,6 +58,14 @@ public interface IUserManagementDualRoleClient
     Task<RoleGrantResult> AppendAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct);
 
     /// <summary>
+    /// F3 — inverse of <see cref="AppendAvailableRoleAsync"/> (<c>POST /api/User/role/revoke</c>).
+    /// CROSS-TEAM BLOCKER (plan correction 9): UM has no revoke op today, so every call 404s;
+    /// the caller maps that to 502 <c>upstream_fault</c> rather than a fabricated success.
+    /// </summary>
+    /// <exception cref="UserManagementCallException">Any non-success status (today: always).</exception>
+    Task<RoleGrantResult> RemoveAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct);
+
+    /// <summary>
     /// JEEBER-SPINE Defect 1. READ <paramref name="userId"/>'s PERSISTED role set
     /// (<c>GET /api/User/{userId}/roles</c> → <c>UserRolesResponse</c>: available_roles +
     /// active_role) so a gateway-minted OTP session reflects an already-granted driver role

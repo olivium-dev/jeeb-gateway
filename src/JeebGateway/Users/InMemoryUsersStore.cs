@@ -233,6 +233,30 @@ public class InMemoryUsersStore : IUsersStore
         }
     }
 
+    public Task<UserProfile?> RevokeRoleAsync(string userId, string role, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_users.TryGetValue(userId, out var existing))
+            {
+                return Task.FromResult<UserProfile?>(null);
+            }
+
+            var removed = existing.Roles.RemoveAll(r => string.Equals(r, role, StringComparison.OrdinalIgnoreCase)) > 0;
+            if (removed)
+            {
+                // ActiveRole must never point at a role no longer in Roles (design §3).
+                if (string.Equals(existing.ActiveRole, role, StringComparison.OrdinalIgnoreCase))
+                {
+                    existing.ActiveRole = existing.Roles.FirstOrDefault() ?? Roles.Client;
+                    existing.RoleSwitchedAt = DateTimeOffset.UtcNow;
+                }
+                existing.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+            return Task.FromResult<UserProfile?>(Clone(existing));
+        }
+    }
+
     public Task<UserProfile?> UnsuspendAsync(string userId, string adminId, CancellationToken ct)
     {
         lock (_writeLock)

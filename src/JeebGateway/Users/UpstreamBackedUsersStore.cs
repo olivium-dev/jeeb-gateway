@@ -213,6 +213,15 @@ public sealed class UpstreamBackedUsersStore : IUsersStore
         return updated;
     }
 
+    public async Task<UserProfile?> RevokeRoleAsync(string userId, string role, CancellationToken ct)
+    {
+        // Same durability contract as GrantRoleAsync (correction 2) — a revoke that
+        // skipped the durable mirror would resurrect the role on the next Postgres read.
+        var updated = await _inner.RevokeRoleAsync(userId, role, ct);
+        if (updated is not null) await SafeUpsertAsync(updated, ct);
+        return updated;
+    }
+
     public async Task<bool> PurgePiiAsync(string userId, CancellationToken ct)
     {
         var removed = await _inner.PurgePiiAsync(userId, ct);

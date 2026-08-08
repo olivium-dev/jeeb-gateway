@@ -77,6 +77,12 @@ public interface IUsersStore
     Task<UserProfile?> GrantRoleAsync(string userId, string role, CancellationToken ct);
 
     /// <summary>
+    /// F3 — inverse of <see cref="GrantRoleAsync"/>. Also flips ActiveRole off the
+    /// removed role (to a remaining role, or <see cref="Roles.Client"/> if none left).
+    /// </summary>
+    Task<UserProfile?> RevokeRoleAsync(string userId, string role, CancellationToken ct);
+
+    /// <summary>
     /// Hard-delete every piece of PII for <paramref name="userId"/>:
     ///   * name → empty
     ///   * phone → empty
