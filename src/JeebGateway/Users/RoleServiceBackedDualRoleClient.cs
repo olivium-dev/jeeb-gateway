@@ -70,11 +70,15 @@ public sealed class RoleServiceBackedDualRoleClient : IUserManagementDualRoleCli
 
         try
         {
-            // Fresh key per call: revoke is idempotent at the DB layer. Active role is
-            // reassigned to Client, matching the gateway's own local mirror.
+            // reassign_active_role_to is ALWAYS validated: role-service 409s
+            // (role.active_role_not_held) unless the target is a role already held.
+            var before = await _roleService.GetOrCreateAsync(AppId, userId, ct);
+            var reassignTo = PickReassignTarget(before, opaqueRole);
+
+            // Fresh key per call: an already-revoked role 200s with already_revoked.
             var idempotencyKey = $"self-unregister:{userId}:{opaqueRole}:{Guid.NewGuid():n}";
             var result = await _roleService.RevokeAsync(
-                AppId, userId, opaqueRole, "self-unregister", Roles.Client, idempotencyKey, ct);
+                AppId, userId, opaqueRole, "self-unregister", reassignTo, idempotencyKey, ct);
 
             var roles = result.Subject.Roles.Select(r => r.RoleKey).ToArray();
             var removed = !roles.Contains(opaqueRole, StringComparer.OrdinalIgnoreCase);
@@ -88,6 +92,21 @@ public sealed class RoleServiceBackedDualRoleClient : IUserManagementDualRoleCli
                 userId, opaqueRole, ex.StatusCode);
             throw new UserManagementCallException("role-service/revoke", ex.StatusCode);
         }
+    }
+
+    /// <summary>
+    /// Active-role successor for a revoke: Client when still held, else any other held
+    /// role, else null (valid whenever the revoked role is not the active one).
+    /// </summary>
+    private static string? PickReassignTarget(RoleServiceSubjectRoles subject, string revokedRole)
+    {
+        var remaining = subject.Roles
+            .Select(r => r.RoleKey)
+            .Where(k => !string.Equals(k, revokedRole, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        return remaining.FirstOrDefault(k => string.Equals(k, Roles.Client, StringComparison.OrdinalIgnoreCase))
+            ?? remaining.FirstOrDefault();
     }
 
     public async Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct)
