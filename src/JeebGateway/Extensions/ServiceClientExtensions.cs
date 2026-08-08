@@ -61,6 +61,9 @@ public static class ServiceClientExtensions
         // this static key. No-op when the key is unconfigured (flag-off default).
         services.AddTransient<Services.Clients.HeartBeatServiceAuthKeyHandler>();
 
+        // role-service (net-new grant/revoke seam) — static X-Api-Key auth.
+        services.AddTransient<Services.Clients.RoleServiceApiKeyHandler>();
+
         // TODO(T-backend-bff-auth): auth-service — wire NSwag-generated AuthServiceClient
         //   contract: src/JeebGateway/contracts/auth-service.openapi.json
         //   migrates: AuthController, TokensController (currently in-memory)
@@ -505,6 +508,16 @@ public static class ServiceClientExtensions
         heartBeatBuilder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
         heartBeatBuilder.AddHttpMessageHandler<Services.Clients.HeartBeatServiceAuthKeyHandler>();
         heartBeatBuilder.AddResilienceHandler("standard", ConfigureStandardResilience);
+
+        // role-service (olivium-dev/role-service, PR #1) — KYC-approve role grant/read
+        // seam. LIVE-DARK; FeatureFlags:UseUpstream:RoleService defaults OFF everywhere.
+        AddNamedDownstreamClient(services, config, "role-service", "Services:RoleService:BaseUrl");
+        var roleServiceBuilder = services.AddHttpClient<IRoleServiceClient, HttpRoleServiceClient>(http =>
+            BindBaseAddress(http, config, "Services:RoleService"));
+        roleServiceBuilder.AddHttpMessageHandler<BearerForwardingHandler>();
+        roleServiceBuilder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
+        roleServiceBuilder.AddHttpMessageHandler<Services.Clients.RoleServiceApiKeyHandler>();
+        roleServiceBuilder.AddResilienceHandler("standard", ConfigureStandardResilience);
 
         // REMOVED 2026-07-27 (owner ruling — "jeeb is only cash on delivery", no
         // unified_payment_gateway): the typed IUpgSettlementClient /

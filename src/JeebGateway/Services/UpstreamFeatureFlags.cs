@@ -281,4 +281,10 @@ public sealed class UpstreamFeatureFlags
     /// Mirrors the cdn-service / contract-signing-service net-new kill-switch shape exactly.
     /// </summary>
     public bool Compliment { get; set; }
+
+    /// <summary>
+    /// When true, the KYC-approve role grant/read/switch seam routes through the
+    /// dedicated role-service instead of user-management. Default false everywhere.
+    /// </summary>
+    public bool RoleService { get; set; }
 }

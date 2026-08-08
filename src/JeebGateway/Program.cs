@@ -2213,8 +2213,7 @@ builder.Services.AddScoped<JeebGateway.service.ServiceUserManagement.ServiceUser
 // ---------------------------------------------------------------------------
 builder.Services.AddMemoryCache();
 builder.Services
-    .AddHttpClient<JeebGateway.Users.IUserManagementDualRoleClient,
-                   JeebGateway.Users.HttpUserManagementDualRoleClient>(client =>
+    .AddHttpClient<JeebGateway.Users.HttpUserManagementDualRoleClient>(client =>
     {
         var apiUrl = builder.Configuration["UserManagementServiceApi:BaseUrl"];
         if (!string.IsNullOrEmpty(apiUrl))
@@ -2225,6 +2224,17 @@ builder.Services
     })
     .AddHttpMessageHandler<JeebGateway.Services.Bff.BearerForwardingHandler>()
     .AddStandardResilienceHandler();
+
+// role-service adapter (net-new, flagged) — single swap point for IUserManagementDualRoleClient.
+// Flag off (FeatureFlags:UseUpstream:RoleService): byte-identical to the prior direct registration.
+builder.Services.Configure<JeebGateway.Services.Clients.RoleServiceOptions>(
+    builder.Configuration.GetSection(JeebGateway.Services.Clients.RoleServiceOptions.SectionName));
+builder.Services.AddScoped<JeebGateway.Users.IUserManagementDualRoleClient>(sp =>
+    new JeebGateway.Users.RoleServiceBackedDualRoleClient(
+        sp.GetRequiredService<JeebGateway.Users.HttpUserManagementDualRoleClient>(),
+        sp.GetRequiredService<JeebGateway.Services.Clients.IRoleServiceClient>(),
+        sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<JeebGateway.Services.UpstreamFeatureFlags>>(),
+        sp.GetRequiredService<ILogger<JeebGateway.Users.RoleServiceBackedDualRoleClient>>()));
 
 // Jeeber availability toggle + auto-offline sweeper (T-backend-023).
 // In-memory implementations stand in for the durable Postgres row, the
