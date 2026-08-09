@@ -1,0 +1,291 @@
+name: jeeb-staging-deploy
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: jeeb-staging-${{ github.event.repository.name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-22.04
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push immutable image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}
+
+      - name: Install cloudflared and configure strict SSH
+        env:
+          SSH_HOST: ${{ secrets.JEEB_STAGING_SSH_HOST }}
+          SSH_USER: ${{ secrets.JEEB_STAGING_DEPLOY_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.JEEB_STAGING_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.JEEB_STAGING_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${SSH_HOST:?JEEB_STAGING_SSH_HOST is required}"
+          : "${SSH_USER:?JEEB_STAGING_DEPLOY_USER is required}"
+          : "${SSH_PRIVATE_KEY:?JEEB_STAGING_SSH_PRIVATE_KEY is required}"
+          : "${SSH_KNOWN_HOSTS:?JEEB_STAGING_SSH_KNOWN_HOSTS is required}"
+          curl -fsSL --retry 3 -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
+          install -d -m 700 "$HOME/.ssh"
+          if printf '%s' "$SSH_PRIVATE_KEY" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          else
+            printf '%s' "$SSH_PRIVATE_KEY" | base64 --decode > "$HOME/.ssh/id_ed25519"
+          fi
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "$SSH_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null || {
+            echo '::error::Known-hosts secret does not pin JEEB_STAGING_SSH_HOST'
+            exit 1
+          }
+          {
+            printf '%s\n' 'Host jeeb-staging'
+            printf '  HostName %s\n' "$SSH_HOST"
+            printf '  User %s\n' "$SSH_USER"
+            printf '%s\n' \
+              '  IdentityFile ~/.ssh/id_ed25519' \
+              '  ProxyCommand cloudflared access ssh --hostname %h' \
+              '  UserKnownHostsFile ~/.ssh/known_hosts' \
+              '  StrictHostKeyChecking yes'
+          } > "$HOME/.ssh/config"
+          chmod 600 "$HOME/.ssh/config"
+
+      - name: Assert exact staging host
+        run: |
+          ssh jeeb-staging 'set -eu
+            [ "$(hostname -s)" = "olivium-ephemerals" ] || exit 91
+            ip -4 -o addr show scope global \
+              | awk '\''{ split($4, address, "/"); print address[1] }'\'' \
+              | grep -Fxq "192.168.2.20" || exit 92'
+
+      - name: Log remote Docker in to GHCR
+        run: |
+          printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
+            | ssh jeeb-staging "docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
+
+      - name: Deploy Swarm service
+        env:
+          REPOSITORY: ${{ github.event.repository.name }}
+          JEEB_DATABASE_URL: ${{ secrets.JEEB_DATABASE_URL }}
+          JEEB_DB_USERNAME: ${{ secrets.JEEB_DB_USERNAME }}
+          JEEB_DB_PASSWORD: ${{ secrets.JEEB_DB_PASSWORD }}
+          JEEB_DB_HOST: ${{ secrets.JEEB_DB_HOST }}
+          JEEB_DB_PORT: ${{ secrets.JEEB_DB_PORT }}
+          JEEB_RTC_DATABASE_URL: ${{ secrets.JEEB_RTC_DATABASE_URL }}
+          JEEB_RTC_SECRET_KEY_BASE: ${{ secrets.JEEB_RTC_SECRET_KEY_BASE }}
+          JEEB_RTC_GUARDIAN_SECRET_KEY: ${{ secrets.JEEB_RTC_GUARDIAN_SECRET_KEY }}
+          JEEB_REDIS_URL: ${{ secrets.JEEB_REDIS_URL }}
+          OPENAI_API_KEY_PRIMARY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEY_FALLBACK: ${{ secrets.OLIVIUM_OPEN_AI_KEY }}
+          JEEB_SECRET_KEY_BASE: ${{ secrets.JEEB_SECRET_KEY_BASE }}
+          JEEB_INTERNAL_SERVICE_TOKEN: ${{ secrets.JEEB_INTERNAL_SERVICE_TOKEN }}
+          HEARTBEAT_REDIS_URL: ${{ secrets.HEARTBEAT_REDIS_URL }}
+          HEARTBEAT_SERVICE_AUTH_KEY: ${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}
+          HEARTBEAT_JWKS_URL: ${{ secrets.HEARTBEAT_JWKS_URL }}
+          JWT_SIGNING_KEY: ${{ secrets.JEEB_JWT_SIGNING_KEY }}
+          UMJWT_SIGNING_KEY: ${{ secrets.UMJWT_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          delivery_database_url=''
+          if [ "$REPOSITORY" = delivery-service ]; then
+            : "${JEEB_DB_USERNAME:?JEEB_DB_USERNAME is required}"
+            : "${JEEB_DB_PASSWORD:?JEEB_DB_PASSWORD is required}"
+            : "${JEEB_DB_HOST:?JEEB_DB_HOST is required}"
+            : "${JEEB_DB_PORT:?JEEB_DB_PORT is required}"
+            db_user=$(jq -rn --arg value "$JEEB_DB_USERNAME" '$value | @uri')
+            db_password=$(jq -rn --arg value "$JEEB_DB_PASSWORD" '$value | @uri')
+            delivery_database_url="postgresql://${db_user}:${db_password}@${JEEB_DB_HOST}:${JEEB_DB_PORT}/delivery"
+          fi
+          openai_api_key="${OPENAI_API_KEY_PRIMARY:-$OPENAI_API_KEY_FALLBACK}"
+          {
+            for variable in IMAGE REPOSITORY JEEB_DATABASE_URL JEEB_DB_PASSWORD \
+              JEEB_RTC_DATABASE_URL JEEB_RTC_SECRET_KEY_BASE \
+              JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_REDIS_URL openai_api_key \
+              JEEB_SECRET_KEY_BASE JEEB_INTERNAL_SERVICE_TOKEN \
+              HEARTBEAT_REDIS_URL HEARTBEAT_SERVICE_AUTH_KEY HEARTBEAT_JWKS_URL \
+              delivery_database_url JWT_SIGNING_KEY UMJWT_SIGNING_KEY; do
+              printf '%s=%q\n' "$variable" "${!variable}"
+            done
+            cat <<'REMOTE'
+          set -euo pipefail
+          network=jeeb-staging-net
+          mount_args=()
+          update_env=()
+          create_env=()
+          add_env() { update_env+=(--env-add "$1=$2"); create_env+=(--env "$1=$2"); }
+          case "$REPOSITORY" in
+            jeeb-gateway)
+              service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
+              : "${JWT_SIGNING_KEY:?JEEB_JWT_SIGNING_KEY is required}"
+              add_env ASPNETCORE_ENVIRONMENT Staging
+              add_env ASPNETCORE_URLS http://+:8080
+              add_env Jwt__SigningKey "$JWT_SIGNING_KEY"
+              add_env Jwt__Issuer https://jeeb-staging.fds-1.com
+              add_env Jwt__Audience jeeb-mobile
+              [ -z "$UMJWT_SIGNING_KEY" ] || add_env UmJwt__SigningKey "$UMJWT_SIGNING_KEY"
+              add_env UmJwt__Issuer user-management
+              add_env UmJwt__Audience user-management
+              add_env AdminOidc__Enabled false
+              add_env Settlements__CodOwnerVerified true
+              # The existing gateway deploy is native and uses host loopback.
+              # This staging gateway is containerized, so retain the same fleet
+              # endpoints through the staging host's LAN address instead.
+              add_env Services__Delivery__BaseUrl http://192.168.2.20:10055
+              add_env Services__Geolocation__BaseUrl http://192.168.2.20:10060
+              add_env Services__VoiceTranscription__BaseUrl http://192.168.2.20:10062
+              add_env Services__Offer__BaseUrl http://192.168.2.20:10063
+              add_env Services__Cdn__BaseUrl http://192.168.2.20:10072
+              add_env Services__Compliment__BaseUrl http://192.168.2.20:10036
+              add_env Services__Realtime__BaseUrl http://192.168.2.20:10069
+              add_env Services__ContractSigning__BaseUrl http://192.168.2.20:10071
+              add_env Services__FormBuilder__BaseUrl http://192.168.2.20:10070
+              add_env Services__HeartBeat__BaseUrl http://192.168.2.20:10075
+              add_env UnifiedPaymentGateway__BaseUrl http://192.168.2.20:10066/
+              add_env JeebStateService__BaseUrl http://192.168.2.20:10073
+              add_env RemoteUserPreferencesServiceApi__BaseUrl http://192.168.2.20:10067/
+              add_env FeedbackServiceApi__BaseUrl http://192.168.2.20:10064
+              add_env UserManagementServiceApi__BaseUrl http://192.168.2.20:10001/
+              add_env WalletServiceApi__BaseUrl http://192.168.2.20:10014
+              add_env ServiceOTPApi__BaseUrl http://192.168.2.20:10037
+              add_env ChatServiceApi__BaseUrl http://192.168.2.20:10028
+              add_env ServiceNotificationClient__BaseUrl http://192.168.2.20:10026
+              add_env PushNotificationServiceApi__BaseUrl http://192.168.2.20:10040
+              ;;
+            delivery-service)
+              service=jeeb-staging-delivery-service; published=10055; target=8080; health=/health
+              : "${delivery_database_url:?database configuration is required}"
+              add_env DATABASE_URL "$delivery_database_url"
+              add_env DB_PASSWORD "$JEEB_DB_PASSWORD"
+              add_env PORT "$target"
+              add_env SKIP_DB_INIT true
+              ;;
+            realtime-comunication-service)
+              service=jeeb-staging-realtime-comunication-service; published=10069; target=4000; health=/health
+              : "${JEEB_RTC_DATABASE_URL:?JEEB_RTC_DATABASE_URL is required}"
+              : "${JEEB_RTC_SECRET_KEY_BASE:?JEEB_RTC_SECRET_KEY_BASE is required}"
+              : "${JEEB_RTC_GUARDIAN_SECRET_KEY:?JEEB_RTC_GUARDIAN_SECRET_KEY is required}"
+              add_env DATABASE_URL "$JEEB_RTC_DATABASE_URL"
+              add_env SECRET_KEY_BASE "$JEEB_RTC_SECRET_KEY_BASE"
+              add_env GUARDIAN_SECRET_KEY "$JEEB_RTC_GUARDIAN_SECRET_KEY"
+              add_env REDIS_URL redis://192.168.2.20:6379
+              add_env PHX_HOST 192.168.2.20
+              add_env PHX_SERVER true
+              add_env PORT "$target"
+              ;;
+            cdn-service)
+              service=jeeb-staging-cdn-service; published=10072; target=8080; health=/health/ready
+              install -d -m 750 /opt/jeeb-staging-cdn/uploads
+              mount_args=(--mount type=bind,source=/opt/jeeb-staging-cdn/uploads,target=/app/uploads)
+              ;;
+            voice-transcription-service)
+              service=jeeb-staging-voice-transcription-service; published=10062; target=8080; health=/healthz
+              : "${JEEB_REDIS_URL:?JEEB_REDIS_URL is required}"
+              add_env REDIS_URL "$JEEB_REDIS_URL"
+              add_env APP_ENV production
+              add_env OPENAI_API_KEY "$openai_api_key"
+              add_env WHISPER_FAKE_TRANSCRIBE 1
+              ;;
+            contract-signing-service)
+              service=jeeb-staging-contract-signing-service; published=10071; target=8000; health=/health
+              : "${JEEB_DATABASE_URL:?JEEB_DATABASE_URL is required}"
+              add_env DATABASE_URL "$JEEB_DATABASE_URL"
+              add_env PORT "$target"
+              ;;
+            form-builder-service)
+              service=jeeb-staging-form-builder-service; published=10070; target=8000; health=/openapi.json
+              : "${JEEB_DATABASE_URL:?JEEB_DATABASE_URL is required}"
+              add_env DATABASE_URL "$JEEB_DATABASE_URL"
+              add_env TEMPLATE_JSON_FILES jeeb_kyc_form_builder.json
+              add_env ROOT_PATH /formbuilder
+              add_env API_BASE_URL http://192.168.2.20:10000
+              add_env GATEWAY_URL_OVERRIDE http://192.168.2.20:10000
+              ;;
+            compliment-service)
+              service=jeeb-staging-compliment-service; published=10036; target=6070; health=/health
+              : "${JEEB_DATABASE_URL:?JEEB_DATABASE_URL is required}"
+              case "$JEEB_DATABASE_URL" in *@192.168.2.20:*) ;; *) echo 'DATABASE_URL must target staging datastore 192.168.2.20' >&2; exit 1;; esac
+              add_env DATABASE_URL "$JEEB_DATABASE_URL"
+              add_env ENVIRONMENT production
+              add_env STRICT_DB_INIT true
+              ;;
+            offer-service)
+              service=jeeb-staging-offer-service; published=10063; target=4040; health=/health
+              : "${JEEB_DATABASE_URL:?JEEB_DATABASE_URL is required}"
+              : "${JEEB_SECRET_KEY_BASE:?JEEB_SECRET_KEY_BASE is required}"
+              : "${JEEB_INTERNAL_SERVICE_TOKEN:?JEEB_INTERNAL_SERVICE_TOKEN is required}"
+              add_env DATABASE_URL "$JEEB_DATABASE_URL"
+              add_env SECRET_KEY_BASE "$JEEB_SECRET_KEY_BASE"
+              add_env CHAT_SERVICE_URL http://192.168.2.20:10028
+              add_env NOTIFICATION_SERVICE_URL http://192.168.2.20:10026
+              add_env INTERNAL_SERVICE_TOKEN "$JEEB_INTERNAL_SERVICE_TOKEN"
+              add_env FORCE_EXPIRE_SEAM_ENABLED true
+              add_env PHX_SERVER true
+              add_env APP_ENV production
+              ;;
+            heart-beat)
+              service=jeeb-staging-heart-beat; published=10075; target=8080; health=/health/ready
+              : "${HEARTBEAT_REDIS_URL:?HEARTBEAT_REDIS_URL is required}"
+              : "${HEARTBEAT_SERVICE_AUTH_KEY:?HEARTBEAT_SERVICE_AUTH_KEY is required}"
+              add_env REDIS_URL "$HEARTBEAT_REDIS_URL"
+              add_env HEARTBEAT_SERVICE_AUTH_KEY "$HEARTBEAT_SERVICE_AUTH_KEY"
+              add_env HEARTBEAT_JWKS_URL "$HEARTBEAT_JWKS_URL"
+              add_env HEARTBEAT_ADMIN_SWEEP_ENABLED false
+              add_env HEARTBEAT_KEYSPACE_SWEEPER_ENABLED false
+              add_env HEARTBEAT_DEFAULT_IDLE_TTL 0
+              add_env HTTP_ADDR ":$target"
+              ;;
+            *) echo "Unsupported repository: $REPOSITORY" >&2; exit 1 ;;
+          esac
+          docker pull "$IMAGE"
+          docker network create --driver overlay --attachable "$network" 2>/dev/null || true
+          [ "$(docker network inspect -f '{{.Driver}}' "$network")" = overlay ]
+          common=(--limit-cpu 0.75 --limit-memory 768M --reserve-cpu 0.10 --reserve-memory 64M
+            --log-driver json-file --log-opt max-size=10m --log-opt max-file=3
+            --update-order stop-first --update-failure-action rollback
+            --rollback-order stop-first --update-monitor 20s)
+          if docker service inspect "$service" >/dev/null 2>&1; then
+            docker service update --image "$IMAGE" --with-registry-auth \
+              "${update_env[@]}" "${common[@]}" "$service"
+          else
+            docker service create --name "$service" --replicas 1 --network "$network" \
+              --publish "published=$published,target=$target,mode=host" \
+              --with-registry-auth "${mount_args[@]}" "${create_env[@]}" \
+              "${common[@]}" "$IMAGE"
+          fi
+          ports=$(docker service inspect -f '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}' "$service")
+          [ "$ports" = "${published}:${target}:host" ] || { echo "Unexpected ports: $ports" >&2; exit 1; }
+          for attempt in $(seq 1 40); do
+            curl -fsS --max-time 5 "http://127.0.0.1:${published}${health}" >/dev/null && exit 0
+            sleep 4
+          done
+          docker service ps --no-trunc "$service" | head -n 8 || true
+          docker service rollback "$service" || true
+          exit 1
+          REMOTE
+          } | ssh jeeb-staging bash -se
