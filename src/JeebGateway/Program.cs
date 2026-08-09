@@ -1140,19 +1140,15 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 // Cash settlement + receipt API (T-backend-016 / JEEB-34 → JEB-56).
 //
 // JEB-56: PostgresSettlementStore replaces InMemorySettlementStore when
-// GatewayPostgres:ConnectionString is configured. The store is the durable
-// COD settlement ledger (settlements table, migration 0015). When the
+// GatewayPostgres:ConnectionString is configured. During wallet cutover this row is the durable
+// product receipt/outbox projection (settlements table, migration 0015), never a balance ledger. When the
 // connection string is absent (local dev / CI without Postgres), the in-memory
 // fallback keeps the vertical exercisable.
 //
 // SettlementService re-computes the Jeeb fee (flat 10% commission,
-// no insurance or floor) from the row's tier and posts a single
-// best-effort ledger entry via ISettlementLedgerClient. The settlement row
-// is the gateway-side system of record; the ledger post is idempotent on the
-// settlement id. Cash settlement is a Jeeb product concern and keeps its own
-// slim ledger contract in the Financials module — it does NOT ride on the
-// wallet integration, which now mirrors the salehly-gateway sibling's
-// upstream wallet API byte-for-byte (WalletController + ServiceWalletClient).
+// no insurance or floor) from the row's tier and posts explicit accounting legs through
+// ISettlementLedgerClient. Wallet-service is the financial system of record; the temporary local
+// row makes an interrupted post replayable under the same settlement id.
 var gatewayPostgresCs = builder.Configuration["GatewayPostgres:ConnectionString"];
 if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 {
@@ -1189,45 +1185,29 @@ else
     builder.Services.AddSingleton<ISettlementEnqueueStore, InMemorySettlementEnqueueStore>();
 }
 
-// Cash-settlement ledger — OWNER RULING 2026-07-27: "jeeb is only cash on delivery", no UPG.
-//
-// This was a FeatureFlags:UseUpstream:Payments swap between UpgSettlementLedgerClient (which
-// posted the settlement THROUGH unified_payment_gateway's generic external-settlement endpoint)
-// and the in-process ledger. The flag defaulted OFF and the UPG BaseUrl is gone from committed
-// config, so registering the in-process ledger UNCONDITIONALLY is behaviour-preserving — it is
-// exactly what production has been running. The flag branch, the UPG ledger client and its typed
-// transport are deleted, so no configuration value can resurrect the dial.
-//
-// COD settlement remains independent of disputes: cases never issue a refund or wallet action.
-// TELLS THE TRUTH. Cash was already collected hand-to-hand by the Jeeber; recording it in the
-// gateway's own ledger is the complete operation, not a stand-in for a remote write that did not
-// happen. That is why this one is safe to keep as the permanent implementation while the refund
-// client had to be made to fail loudly. SettlementService still treats the post as best-effort and
-// idempotent on the settlement id.
-//
-// b05/GW1 W1.8 + W3.5(b) — OWNER RULING 2026-07-31 "PROMOTE": local no longer means volatile.
-// The ledger is now Postgres-backed (settlement_ledger_entries, migration 0044) whenever
-// GatewayPostgres is configured, and ISettlementLedgerClient is a Critical store under
-// StoreDurabilityGuard, so a prod-like boot REFUSES the in-memory fallback rather than serving
-// money bookkeeping out of process memory.
-//
-// The specific hole this closes is NOT "the settlement row was lost" — that row is in Postgres
-// already. It is the IDEMPOTENCY MEMO. InMemorySettlementLedgerClient's whole correctness
-// argument was GetOrAdd(IdempotencyKey): replay the same settlement id, get the ORIGINAL entry
-// back. That memo was a ConcurrentDictionary, so a restart emptied it — and the 60 s
-// SettlementLedgerReconciler then replays every settlement row with a NULL ledger_entry_id using
-// that same key, minting a SECOND entry id for one cash collection and overwriting the first
-// stamp. Nothing throws; the books just disagree with themselves. The PK on idempotency_key
-// moves that memo into the database, where a restart cannot reach it.
-if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+// Wallet-service is the sole financial ledger and balance owner for COD settlements. The gateway
+// supplies a generic, explicit multi-leg transaction (gross system -> Jeeber, then commission /
+// insurance Jeeber -> system) and reuses the settlement id as wallet-service's durable
+// idempotency key. No UPG or gateway-Postgres writer remains on the active path.
+builder.Services.AddSingleton<WalletSettlementLedgerClient>();
+var settlementShadowCompareEnabled = builder.Configuration.GetValue<bool>(
+    "WalletLedgerMigration:SettlementShadowCompareEnabled");
+if (settlementShadowCompareEnabled)
 {
-    builder.Services.AddSingleton<ISettlementLedgerClient, PostgresSettlementLedgerClient>();
+    // Temporary read-only migration comparator. It never inserts into the old table and can never
+    // replace/suppress a wallet response. The flag therefore requires the legacy DSN explicitly.
+    if (string.IsNullOrWhiteSpace(gatewayPostgresCs))
+    {
+        throw new InvalidOperationException(
+            "WalletLedgerMigration:SettlementShadowCompareEnabled requires GatewayPostgres:ConnectionString.");
+    }
+    builder.Services.AddSingleton<ISettlementLedgerShadowReader, PostgresSettlementLedgerShadowReader>();
+    builder.Services.AddSingleton<ISettlementLedgerClient, ShadowComparingSettlementLedgerClient>();
 }
 else
 {
-    // Dev/CI/test only. In a prod-like env the fail-closed guard refuses this fallback by name
-    // (StoreDurabilityGuard.Critical) — it does not merely warn.
-    builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
+    builder.Services.AddSingleton<ISettlementLedgerClient>(sp =>
+        sp.GetRequiredService<WalletSettlementLedgerClient>());
 }
 
 // JEBV4-302: shared per-jeeber earnings-cache invalidation registry. Singleton so the
@@ -1239,10 +1219,9 @@ builder.Services.AddSingleton<JeebGateway.Financials.IEarningsCacheInvalidator,
 
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
 
-// JEBV4-47 (M3/R7): the settlement -> UPG generic-settlement ledger post is
-// best-effort; when UPG is down at settle time the row persists with
+// The settlement -> wallet transaction post is replayable; when wallet-service is down the row persists with
 // ledger_entry_id NULL. This hosted reconciler periodically replays those unposted
-// rows (idempotent on the settlement id) so the gateway settlement rows and the UPG
+// rows (idempotent on the settlement id) so the temporary gateway outbox projection and wallet
 // ledger reconverge instead of diverging silently forever. Safe defaults; a no-op
 // when there are no unposted rows.
 builder.Services.Configure<JeebGateway.Financials.SettlementLedgerReconcilerOptions>(
@@ -1296,6 +1275,22 @@ void ConfigureNamedClient(string name, string configKey)
 }
 
 ConfigureNamedClient("ServiceWalletClient", "WalletServiceApi");
+
+// Dedicated settlement writer. Initiation and execution are both application-idempotent, but
+// transport retry is intentionally withheld: the durable reconciler replays the whole two-step
+// operation under the same wallet idempotency key after any ambiguous response. No caller bearer
+// or service-auth header is attached; access is restricted by the private overlay.
+ServiceClientExtensions.AttachBreakerAndTimeoutOnly(builder.Services.AddHttpClient(
+    JeebGateway.Financials.WalletSettlementLedgerClient.HttpClientName,
+    client =>
+    {
+        var apiUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
+        if (!string.IsNullOrWhiteSpace(apiUrl))
+        {
+            client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
+        }
+        client.Timeout = TimeSpan.FromSeconds(30);
+    }));
 
 // JEEBER-SPINE Defect 3 — dedicated named HttpClient for the Jeeb earnings BFF
 // (JeebEarningsBffController). Bound to the SAME WalletServiceApi:BaseUrl as the generated

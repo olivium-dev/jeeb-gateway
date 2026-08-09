@@ -64,8 +64,8 @@ public static class BusinessOutcomeTelemetry
         Meter.CreateCounter<long>("case.recovery.operations",
             description: "Admin case-callback and push-dispatch recovery operation outcomes.");
 
-    // JEBV4-47 (M3/R7): the settlement -> UPG generic-settlement ledger post is
-    // best-effort. When it fails at settle time the row persists but the ledger
+    // The settlement -> wallet transaction post is replayable. When it fails at settle time the
+    // temporary outbox row persists but the authoritative ledger
     // diverges until the SettlementLedgerReconciler replays it. These counters make
     // that divergence observable (ties into JEBV4-59 business counters).
     public static readonly Counter<long> SettlementLedgerPostFailures =

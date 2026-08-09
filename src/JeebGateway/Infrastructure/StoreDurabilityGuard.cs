@@ -126,21 +126,10 @@ internal static class StoreDurabilityGuard
         // delivery_id PK + INSERT ON CONFLICT DO NOTHING); in a prod-like env it MUST resolve
         // to PostgresSettlementEnqueueStore, never InMemorySettlementEnqueueStore.
         (typeof(JeebGateway.Financials.ISettlementEnqueueStore),            new[] { typeof(JeebGateway.Financials.PostgresSettlementEnqueueStore) }),
-        // b05/GW1 W1.8 + W3.5(b) — OWNER RULING 2026-07-31 "PROMOTE": the cash-settlement
-        // LEDGER itself. MONEY, not money-adjacent. The old rationale for leaving it in
-        // memory ("the settlements row is the system of record, the post is best-effort")
-        // was true about the ROW and silent about the IDEMPOTENCY MEMO: the whole safety of
-        // a best-effort, replayable post was InMemorySettlementLedgerClient's
-        // GetOrAdd(IdempotencyKey), held in a process ConcurrentDictionary. A restart
-        // emptied it, and the 60 s SettlementLedgerReconciler then replays every settlement
-        // row with a NULL ledger_entry_id under the same key — minting a SECOND ledger entry
-        // id for one hand-to-hand cash collection and overwriting the first stamp, silently.
-        // Now Postgres-backed (settlement_ledger_entries, migration 0044, idempotency_key PK
-        // + INSERT ON CONFLICT DO NOTHING RETURNING, same shape as PostgresSettlementStore);
-        // in a prod-like env it MUST resolve to PostgresSettlementLedgerClient, never
-        // InMemorySettlementLedgerClient. It is deliberately NOT on IntentionalInMemory —
-        // that would be an automatic FAIL under the owner's ruling.
-        (typeof(JeebGateway.Financials.ISettlementLedgerClient),            new[] { typeof(JeebGateway.Financials.PostgresSettlementLedgerClient) }),
+        // Wallet-service owns settlement transaction headers, details, idempotency and balances.
+        // The gateway boundary must therefore resolve to the wallet client (optionally wrapped by
+        // the read-only cutover comparator), never to either legacy local ledger implementation.
+        (typeof(JeebGateway.Financials.ISettlementLedgerClient),            new[] { typeof(JeebGateway.Financials.WalletSettlementLedgerClient), typeof(JeebGateway.Financials.ShadowComparingSettlementLedgerClient) }),
         // partner-wallet-bff money-safety state is owned by jeeb-state-service. The gateway adapter
         // uses the shared atomic idempotency KV and holds no DB row or volatile partner-domain store.
         (typeof(JeebGateway.Partner.IPartnerWalletOperationStore),          new[] { typeof(JeebGateway.Partner.StateServicePartnerWalletOperationStore) }),

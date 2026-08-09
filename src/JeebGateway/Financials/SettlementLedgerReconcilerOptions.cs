@@ -2,8 +2,8 @@ namespace JeebGateway.Financials;
 
 /// <summary>
 /// JEBV4-47 (M3/R7): tuning for the <see cref="SettlementLedgerReconciler"/> that
-/// replays settlement UPG ledger posts left unposted (ledger_entry_id NULL) when
-/// UPG was down at settle time. Safe defaults require no appsettings change.
+/// replays wallet-service settlement transactions left unposted (ledger_entry_id NULL) when
+/// wallet-service was down at settle time. Safe defaults require no appsettings change.
 /// </summary>
 public sealed class SettlementLedgerReconcilerOptions
 {

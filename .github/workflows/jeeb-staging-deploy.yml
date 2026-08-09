@@ -205,6 +205,7 @@ jobs:
           export DOCKER_CONFIG="$REMOTE_DOCKER_CONFIG"
           trap 'rm -rf "$DOCKER_CONFIG"' EXIT
           network=jeeb-staging-net
+          wallet_network=''
           mount_args=()
           update_env=()
           create_env=()
@@ -212,6 +213,7 @@ jobs:
           case "$REPOSITORY" in
             jeeb-gateway)
               service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
+              wallet_network=jeeb-net
               : "${JWT_SIGNING_KEY:?JEEB_JWT_SIGNING_KEY is required}"
               : "${gateway_postgres_cs:?gateway Postgres connection string is required}"
               add_env ASPNETCORE_ENVIRONMENT Staging
@@ -250,11 +252,12 @@ jobs:
               add_env Services__FormBuilder__BaseUrl http://192.168.2.20:10070
               add_env Services__HeartBeat__BaseUrl http://192.168.2.20:10075
               add_env Services__Ban__BaseUrl http://192.168.2.20:10065
-              add_env UnifiedPaymentGateway__BaseUrl http://192.168.2.20:10066/
               add_env RemoteUserPreferencesServiceApi__BaseUrl http://192.168.2.20:10067/
               add_env FeedbackServiceApi__BaseUrl http://192.168.2.20:10064
               add_env UserManagementServiceApi__BaseUrl http://192.168.2.20:10001/
-              add_env WalletServiceApi__BaseUrl http://192.168.2.20:10014
+              # Wallet is internal-only. The gateway joins wallet's private overlay below and
+              # resolves it by Swarm DNS; no LAN-published wallet port or service-auth header.
+              add_env WalletServiceApi__BaseUrl http://wallet-service:8080/
               add_env ServiceOTPApi__BaseUrl http://192.168.2.20:10037
               add_env ChatServiceApi__BaseUrl http://192.168.2.20:10028
               add_env ServiceNotificationClient__BaseUrl http://192.168.2.20:10026
@@ -348,15 +351,26 @@ jobs:
           docker pull "$IMAGE"
           docker network create --driver overlay --attachable "$network" 2>/dev/null || true
           [ "$(docker network inspect -f '{{.Driver}}' "$network")" = overlay ]
+          if [ -n "$wallet_network" ]; then
+            docker network create --driver overlay --attachable "$wallet_network" 2>/dev/null || true
+            [ "$(docker network inspect -f '{{.Driver}}' "$wallet_network")" = overlay ]
+          fi
           common=(--limit-cpu 0.75 --limit-memory 768M --reserve-cpu 0.10 --reserve-memory 64M
             --log-driver json-file --log-opt max-size=10m --log-opt max-file=3
             --update-order stop-first --update-failure-action rollback
             --rollback-order stop-first --update-monitor 20s)
           if docker service inspect "$service" >/dev/null 2>&1; then
+            if [ -n "$wallet_network" ] && ! docker service inspect "$service" \
+              --format '{{range .Spec.TaskTemplate.Networks}}{{.Target}} {{end}}' | \
+              grep -q "$(docker network inspect --format '{{.Id}}' "$wallet_network")"; then
+              docker service update --network-add "$wallet_network" "$service"
+            fi
             docker service update --image "$IMAGE" --with-registry-auth \
               "${update_env[@]}" "${common[@]}" "$service"
           else
-            docker service create --name "$service" --replicas 1 --network "$network" \
+            network_args=(--network "$network")
+            [ -z "$wallet_network" ] || network_args+=(--network "$wallet_network")
+            docker service create --name "$service" --replicas 1 "${network_args[@]}" \
               --publish "published=$published,target=$target,mode=host" \
               --with-registry-auth "${mount_args[@]}" "${create_env[@]}" \
               "${common[@]}" "$IMAGE"

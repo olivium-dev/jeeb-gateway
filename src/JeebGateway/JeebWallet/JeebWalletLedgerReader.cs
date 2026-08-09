@@ -23,7 +23,21 @@ public interface IJeebWalletLedgerReader
     Task<JeebWalletLedgerEntry?> ReadEntryAsync(
         Guid holderId, string detailId, CancellationToken ct) =>
         Task.FromResult<JeebWalletLedgerEntry?>(null);
+
+    /// <summary>
+    /// Cursor-aware generic wallet page. Existing page-number consumers keep using
+    /// <see cref="ReadLedgerAsync"/>; migration probes can exercise the wallet cursor contract
+    /// without changing the mobile response shape.
+    /// </summary>
+    async Task<JeebWalletLedgerReadPage> ReadLedgerPageAsync(
+        Guid holderId, int page, int pageSize, string? cursor, string? type,
+        DateOnly? from, DateOnly? to, CancellationToken ct) =>
+        new(await ReadLedgerAsync(holderId, page, pageSize, type, from, to, ct), null);
 }
+
+public sealed record JeebWalletLedgerReadPage(
+    IReadOnlyList<JeebWalletLedgerEntry> Items,
+    string? NextCursor);
 
 public sealed class WalletLedgerUnavailableException : Exception
 {
@@ -42,6 +56,12 @@ public sealed class WalletLedgerMigrationOptions
     /// comparison is observational only and never changes the API response.
     /// </summary>
     public bool ShadowCompareEnabled { get; set; }
+
+    /// <summary>
+    /// Temporarily compare wallet-backed settlement posts with an existing read-only gateway
+    /// settlement-ledger row. Missing rows and mismatches are logged; wallet remains authoritative.
+    /// </summary>
+    public bool SettlementShadowCompareEnabled { get; set; }
 }
 
 /// <summary>
@@ -68,17 +88,30 @@ public sealed class WalletServiceJeebWalletLedgerReader : IJeebWalletLedgerReade
         Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to,
         CancellationToken ct)
     {
+        var result = await ReadLedgerPageAsync(
+            holderId, page, pageSize, cursor: null, type, from, to, ct);
+        return result.Items;
+    }
+
+    public async Task<JeebWalletLedgerReadPage> ReadLedgerPageAsync(
+        Guid holderId, int page, int pageSize, string? cursor, string? type,
+        DateOnly? from, DateOnly? to, CancellationToken ct)
+    {
         var safePage = Math.Max(page, 1);
         var safeSize = pageSize is < 1 or > 200 ? 20 : pageSize;
-        var path = BuildListPath(holderId, safePage, safeSize, type, from, to);
+        var path = BuildListPath(holderId, safePage, safeSize, cursor, type, from, to);
         var response = await SendAsync(path, ct);
         try
         {
             await using var body = await response.Content.ReadAsStreamAsync(ct);
             var pageResponse = await JsonSerializer.DeserializeAsync<WalletLedgerPage>(
                 body, JsonOptions, ct);
-            return pageResponse?.Items?.Select(Project).ToArray()
-                ?? Array.Empty<JeebWalletLedgerEntry>();
+            return new JeebWalletLedgerReadPage(
+                pageResponse?.Items?.Select(Project).ToArray()
+                    ?? Array.Empty<JeebWalletLedgerEntry>(),
+                string.IsNullOrWhiteSpace(pageResponse?.NextCursor)
+                    ? null
+                    : pageResponse.NextCursor);
         }
         catch (Exception ex) when (ex is JsonException or NotSupportedException)
         {
@@ -166,13 +199,16 @@ public sealed class WalletServiceJeebWalletLedgerReader : IJeebWalletLedgerReade
     }
 
     private static string BuildListPath(
-        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to)
+        Guid holderId, int page, int pageSize, string? cursor, string? type,
+        DateOnly? from, DateOnly? to)
     {
         var query = new List<string>
         {
             $"page={page.ToString(CultureInfo.InvariantCulture)}",
             $"pageSize={pageSize.ToString(CultureInfo.InvariantCulture)}",
         };
+        if (!string.IsNullOrWhiteSpace(cursor))
+            query.Add($"cursor={Uri.EscapeDataString(cursor.Trim())}");
         if (!string.IsNullOrWhiteSpace(type))
             query.Add($"type={Uri.EscapeDataString(type.Trim())}");
         if (from.HasValue)
@@ -200,6 +236,9 @@ public sealed class WalletServiceJeebWalletLedgerReader : IJeebWalletLedgerReade
     {
         [JsonPropertyName("items")]
         public List<WalletLedgerEntry>? Items { get; set; }
+
+        [JsonPropertyName("nextCursor")]
+        public string? NextCursor { get; set; }
     }
 
     private sealed class WalletLedgerEntry
@@ -397,6 +436,35 @@ public sealed class ShadowComparingJeebWalletLedgerReader : IJeebWalletLedgerRea
         catch (Exception ex)
         {
             _log.LogWarning(ex, "Wallet ledger shadow detail read failed for holder {HolderId}.", holderId);
+        }
+        return primary;
+    }
+
+    public async Task<JeebWalletLedgerReadPage> ReadLedgerPageAsync(
+        Guid holderId, int page, int pageSize, string? cursor, string? type,
+        DateOnly? from, DateOnly? to, CancellationToken ct)
+    {
+        var primary = await _primary.ReadLedgerPageAsync(
+            holderId, page, pageSize, cursor, type, from, to, ct);
+        if (!string.IsNullOrWhiteSpace(cursor))
+        {
+            // The legacy projection has no compatible opaque cursor. Skipping is explicit and
+            // never falls back to a page-number comparison that could report a false mismatch.
+            _log.LogInformation(
+                "WalletLedgerShadowSkipped holder={HolderId} scope=cursor reason=legacy_cursor_unsupported",
+                holderId);
+            return primary;
+        }
+
+        try
+        {
+            var shadow = await _shadow.ReadLedgerAsync(
+                holderId, page, pageSize, type, from, to, ct);
+            LogComparison(holderId, "page", primary.Items, shadow);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Wallet ledger shadow read failed for holder {HolderId}.", holderId);
         }
         return primary;
     }

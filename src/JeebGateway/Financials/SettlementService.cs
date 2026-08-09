@@ -428,13 +428,13 @@ public sealed class SettlementService : ISettlementService
         }
         catch (Exception ex)
         {
-            // JEBV4-47 (M3/R7): the UPG generic-settlement ledger post is best-effort
-            // at the gateway boundary — the settlement row is the gateway-side system
+            // The wallet transaction post is replayable at the gateway boundary. This row is a
+            // temporary durable outbox/projection; wallet-service remains the financial system
             // of record and the ledger client is idempotent on the settlement id
             // (IdempotencyKey = row.Id). The row is left with ledger_entry_id NULL and
             // the SettlementLedgerReconciler (BackgroundService) replays the post on its
             // next tick via ISettlementStore.ListUnpostedLedgerAsync, so the gateway
-            // settlement rows and the UPG ledger reconverge automatically. The failure
+            // gateway projection and wallet ledger reconverge automatically. The failure
             // is counted so the (transient) divergence is observable, not silent.
             BusinessOutcomeTelemetry.SettlementLedgerPostFailures.Add(1);
             _log.LogWarning(ex,

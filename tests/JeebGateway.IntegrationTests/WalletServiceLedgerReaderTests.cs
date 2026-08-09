@@ -10,7 +10,60 @@ namespace JeebGateway.IntegrationTests;
 public sealed class WalletServiceLedgerReaderTests
 {
     [Fact]
-    public async Task List_UsesGenericHolderLedger_AndPreservesDecimalAndUtc()
+    public async Task List_With_Null_Optional_Filters_Omits_Them_From_The_Wallet_Request()
+    {
+        Uri? requested = null;
+        var sut = NewReader(new DelegateHandler(request =>
+        {
+            requested = request.RequestUri;
+            return Json(HttpStatusCode.OK, """{ "items": [], "nextCursor": null }""");
+        }));
+
+        var result = await sut.ReadLedgerAsync(
+            Guid.Parse("11111111-1111-1111-1111-111111111111"),
+            1, 20, type: null, from: null, to: null, CancellationToken.None);
+
+        result.Should().BeEmpty();
+        var query = requested!.Query;
+        query.Should().Contain("page=1").And.Contain("pageSize=20");
+        query.Should().NotContain("cursor=")
+            .And.NotContain("type=")
+            .And.NotContain("from=")
+            .And.NotContain("to=")
+            .And.NotContain("serviceName=")
+            .And.NotContain("status=");
+    }
+
+    [Fact]
+    public async Task Cursor_Page_Forwards_The_Opaque_NextCursor_Without_Interpreting_It()
+    {
+        var requested = new List<Uri>();
+        var opaque = "MjAyNi0wOC0xMFQwMTowMjowMy4wMDAwMDAwWnw0NDQ0";
+        var calls = 0;
+        var sut = NewReader(new DelegateHandler(request =>
+        {
+            requested.Add(request.RequestUri!);
+            calls++;
+            return calls == 1
+                ? Json(HttpStatusCode.OK, $$"""{ "items": [], "nextCursor": "{{opaque}}" }""")
+                : Json(HttpStatusCode.OK, """{ "items": [], "nextCursor": null }""");
+        }));
+
+        var first = await sut.ReadLedgerPageAsync(
+            Guid.Parse("11111111-1111-1111-1111-111111111111"),
+            1, 1, cursor: null, type: null, from: null, to: null, CancellationToken.None);
+        var second = await sut.ReadLedgerPageAsync(
+            Guid.Parse("11111111-1111-1111-1111-111111111111"),
+            1, 1, first.NextCursor, type: null, from: null, to: null, CancellationToken.None);
+
+        first.NextCursor.Should().Be(opaque);
+        second.NextCursor.Should().BeNull();
+        requested[0].Query.Should().NotContain("cursor=");
+        Uri.UnescapeDataString(requested[1].Query).Should().Contain($"cursor={opaque}");
+    }
+
+    [Fact]
+    public async Task List_Uses_Combined_Filters_And_Preserves_Decimal_And_Utc()
     {
         Uri? requested = null;
         var detailId = Guid.NewGuid();

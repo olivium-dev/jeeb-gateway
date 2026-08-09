@@ -10,11 +10,10 @@ namespace JeebGateway.Financials;
 /// JEBV4-47 (M3/R7): the background reconciler the misleading "will replay" comment
 /// in <see cref="SettlementService"/> used to promise but that did not exist.
 ///
-/// <para>When the UPG generic-settlement ledger post fails at settle time, the
-/// settlement row is persisted with <c>ledger_entry_id</c> NULL (the gateway is the
-/// system of record) and the failure is counted
+/// <para>When the wallet-service transaction post fails at settle time, the temporary
+/// gateway outbox/projection row is persisted with <c>ledger_entry_id</c> NULL and the failure is counted
 /// (<see cref="BusinessOutcomeTelemetry.SettlementLedgerPostFailures"/>). Left alone
-/// the gateway settlement rows and the UPG ledger diverge forever. This hosted
+/// the gateway projection and authoritative wallet ledger diverge forever. This hosted
 /// service periodically re-posts those unposted rows and stamps
 /// <c>ledger_entry_id</c> on success so the two reconverge.</para>
 ///
@@ -24,7 +23,7 @@ namespace JeebGateway.Financials;
 /// existing entry — never a double credit. Each sweep pulls a bounded page
 /// (<see cref="SettlementLedgerReconcilerOptions.PageSize"/>) with a stable
 /// <c>ORDER BY settled_at, id</c>, and every row is isolated in its own try/catch so
-/// one still-failing row (UPG still down) cannot wedge the sweep.</para>
+/// one still-failing row (wallet-service still down) cannot wedge the sweep.</para>
 /// </summary>
 public sealed class SettlementLedgerReconciler : BackgroundService
 {
@@ -127,7 +126,7 @@ public sealed class SettlementLedgerReconciler : BackgroundService
             }
             catch (Exception ex)
             {
-                // Per-row isolation: UPG may still be down for this row. Leave it
+                // Per-row isolation: wallet-service may still be down for this row. Leave it
                 // unposted and try again next tick — never wedge the whole sweep.
                 _logger.LogWarning(ex,
                     "Settlement {SettlementId} ledger replay still failing; leaving unposted for the next sweep.",
