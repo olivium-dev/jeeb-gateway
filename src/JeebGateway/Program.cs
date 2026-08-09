@@ -702,6 +702,12 @@ if (notificationUpstreamEnabled && notificationSeederEnabled)
 // 500 on api/v1/sent-payload/user/{id} from breaker accounting, so one poisoned
 // recipient can no longer pin the breaker open and deny pushes to everyone else.
 // Rationale + accepted residual risk: ServiceClientExtensions.ConfigurePushBreakerAndTimeout.
+// SINGLE-PRODUCER CUTOVER — direct send routes are fail-closed by default. Deploy
+// this gateway state before enabling notification-service's durable webhook
+// dispatcher. Registration/deletion and idempotency recovery remain reachable.
+builder.Services.Configure<GatewayDirectPushDispatchOptions>(
+    builder.Configuration.GetSection(GatewayDirectPushDispatchOptions.SectionName));
+builder.Services.AddTransient<GatewayDirectPushDispatchGuardHandler>();
 ServiceClientExtensions.AttachPushBreakerAndTimeout(builder.Services.AddHttpClient("ServicePushNotificationClient", client =>
 {
     var apiUrl = builder.Configuration["PushNotificationServiceApi:BaseUrl"];
@@ -710,7 +716,7 @@ ServiceClientExtensions.AttachPushBreakerAndTimeout(builder.Services.AddHttpClie
         client.BaseAddress = new Uri(apiUrl);
     }
     client.Timeout = TimeSpan.FromSeconds(30);
-}));
+}).AddHttpMessageHandler<GatewayDirectPushDispatchGuardHandler>());
 builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePushNotificationClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
