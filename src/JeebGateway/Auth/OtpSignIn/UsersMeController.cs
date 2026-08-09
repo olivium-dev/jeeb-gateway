@@ -71,6 +71,7 @@ public sealed class UsersMeController : ControllerBase
     private readonly ServiceWalletClient _wallet;
     private readonly IJeeberForceOfflineOnUnregister _forceOffline;
     private readonly IPendingOffersStore _pendingOffers;
+    private readonly IOptions<GatewayPublicOptions> _publicOptions;
     private readonly ILogger<UsersMeController> _log;
 
     public UsersMeController(
@@ -85,6 +86,7 @@ public sealed class UsersMeController : ControllerBase
         ServiceWalletClient wallet,
         IJeeberForceOfflineOnUnregister forceOffline,
         IPendingOffersStore pendingOffers,
+        IOptions<GatewayPublicOptions> publicOptions,
         ILogger<UsersMeController> log)
     {
         _umProfile = umProfile;
@@ -98,6 +100,7 @@ public sealed class UsersMeController : ControllerBase
         _wallet = wallet;
         _forceOffline = forceOffline;
         _pendingOffers = pendingOffers;
+        _publicOptions = publicOptions;
         _log = log;
     }
 
@@ -150,7 +153,12 @@ public sealed class UsersMeController : ControllerBase
             try
             {
                 var profile = await _umProfile.ProfileAsync(userId);
-                display = new ProfileDisplay(profile?.Username, profile?.Email, profile?.ProfilePic);
+                // F5: ProfilePic is a bare CDN object ref — project it to a loadable URL.
+                display = new ProfileDisplay(
+                    profile?.Username,
+                    profile?.Email,
+                    AvatarUrlResolver.Absolutize(
+                        profile?.ProfilePic, userId, _publicOptions.Value.PublicBaseUrl));
 
                 // jeeberName gap fix: user-management's username is the ONLY display
                 // name real (OTP-minted) accounts carry anywhere in the flow, and the

@@ -40,7 +40,7 @@ namespace JeebGateway.Controllers.V1;
 /// <para><b>G1 sender identity (owner-approved 2026-07-21).</b> A single, deliberately narrow
 /// exception to the strip-all-identity stance: each item additionally carries a DISPLAY-SAFE
 /// sender annotation — <c>senderName</c> (given name + last initial, e.g. "Nour K.") and
-/// <c>senderAvatarUrl</c> (absolute https) — resolved from the request's client via the gateway's
+/// <c>senderAvatarUrl</c> (absolute URL) — resolved from the request's client via the gateway's
 /// existing user-profile lookup so a jeeber can see who a request is from before accepting. The
 /// raw <c>clientId</c>, phone, and email are still never projected; both fields degrade to
 /// <c>null</c> (never a feed error) when the profile does not resolve.</para>
@@ -56,6 +56,7 @@ public sealed class JeebFeedController : ControllerBase
     private readonly TimeProvider _clock;
     // P7 (G-H): the offer-wait countdown projection for feed cards.
     private readonly OfferDeadlineProjector _deadlines;
+    private readonly GatewayPublicOptions _publicOptions;
     private readonly ILogger<JeebFeedController> _logger;
 
     public JeebFeedController(
@@ -66,8 +67,10 @@ public sealed class JeebFeedController : ControllerBase
         IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         OfferDeadlineProjector deadlines,
+        IOptions<GatewayPublicOptions> publicOptions,
         ILogger<JeebFeedController> logger)
     {
+        _publicOptions = publicOptions.Value;
         _requests = requests;
         _delivery = delivery;
         _offerService = offerService;
@@ -267,8 +270,8 @@ public sealed class JeebFeedController : ControllerBase
 
     /// <summary>
     /// Looks up one client's profile via the gateway's existing user-profile store and projects it
-    /// to the DISPLAY-SAFE shape: a short name (given name + last initial) and an absolute-https
-    /// avatar. Degrade-don't-fail — a null profile or a lookup fault yields <c>null</c> (no sender
+    /// to the DISPLAY-SAFE shape: a short name (given name + last initial) and a loadable avatar
+    /// URL projected by <see cref="AvatarUrlResolver"/>. Degrade-don't-fail — a null profile or a lookup fault yields <c>null</c> (no sender
     /// annotation) rather than a feed error. The raw clientId is never returned or echoed.
     /// </summary>
     private async Task<FeedSenderIdentity?> ResolveOneSenderAsync(string clientId, CancellationToken ct)
@@ -282,7 +285,8 @@ public sealed class JeebFeedController : ControllerBase
             }
 
             var name = ToShortDisplayName(profile.Name);
-            var avatar = ToAbsoluteHttpsAvatar(profile.AvatarUrl);
+            var avatar = AvatarUrlResolver.Absolutize(
+                profile.AvatarUrl, clientId, _publicOptions.PublicBaseUrl);
             return name is null && avatar is null ? null : new FeedSenderIdentity(name, avatar);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -320,24 +324,6 @@ public sealed class JeebFeedController : ControllerBase
         var given = parts[0];
         var initial = System.Globalization.StringInfo.GetNextTextElement(parts[^1], 0);
         return string.IsNullOrEmpty(initial) ? given : $"{given} {initial.ToUpperInvariant()}.";
-    }
-
-    /// <summary>
-    /// Returns the avatar URL only when it is an ABSOLUTE https URL (the shape the mobile app can
-    /// load directly); a blank, relative, or non-https value degrades to <c>null</c>.
-    /// </summary>
-    private static string? ToAbsoluteHttpsAvatar(string? avatarUrl)
-    {
-        if (string.IsNullOrWhiteSpace(avatarUrl))
-        {
-            return null;
-        }
-
-        var trimmed = avatarUrl.Trim();
-        return Uri.TryCreate(trimmed, UriKind.Absolute, out var uri)
-               && string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-            ? trimmed
-            : null;
     }
 
     /// <summary>G1 — resolved display-safe sender identity for one client (both fields nullable).</summary>
