@@ -91,6 +91,42 @@ jobs:
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
             | ssh jeeb-staging "DOCKER_CONFIG='$REMOTE_DOCKER_CONFIG' docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
 
+      - name: Apply gateway database migrations on staging host
+        env:
+          DATABASE_URL: ${{ secrets.JEEB_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          : "${DATABASE_URL:?JEEB_DATABASE_URL is required}"
+          case "$DATABASE_URL" in
+            postgres://*|postgresql://*) ;;
+            *) echo 'JEEB_DATABASE_URL must be a PostgreSQL DSN' >&2; exit 1 ;;
+          esac
+          case "$DATABASE_URL" in
+            *@192.168.2.20:*) ;;
+            *) echo 'JEEB_DATABASE_URL must target staging Postgres at 192.168.2.20' >&2; exit 1 ;;
+          esac
+          case "${DATABASE_URL%%\?*}" in
+            */jeeb_gateway) ;;
+            *) echo 'JEEB_DATABASE_URL must target the jeeb_gateway database' >&2; exit 1 ;;
+          esac
+          archive="/tmp/jeeb-gateway-db-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+          tar -czf gateway-db.tar.gz db
+          scp gateway-db.tar.gz "jeeb-staging:$archive"
+          {
+            printf 'DATABASE_URL=%q\n' "$DATABASE_URL"
+            printf 'ARCHIVE=%q\n' "$archive"
+            cat <<'REMOTE'
+          set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "$work" "$ARCHIVE"' EXIT
+          tar -C "$work" -xzf "$ARCHIVE"
+          DATABASE_URL="$DATABASE_URL" bash "$work/db/apply.sh"
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -At \
+            -c "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0044_init_settlement_ledger_entries') AND to_regclass('public.settlement_ledger_entries') IS NOT NULL;" \
+            | grep -Fxq t
+          REMOTE
+          } | ssh jeeb-staging bash -se
+
       - name: Deploy Swarm service
         env:
           REPOSITORY: ${{ github.event.repository.name }}
@@ -115,6 +151,7 @@ jobs:
         run: |
           set -euo pipefail
           delivery_database_url=''
+          gateway_postgres_cs=''
           if [ "$REPOSITORY" = delivery-service ]; then
             : "${JEEB_DB_USERNAME:?JEEB_DB_USERNAME is required}"
             : "${JEEB_DB_PASSWORD:?JEEB_DB_PASSWORD is required}"
@@ -124,6 +161,21 @@ jobs:
             db_password=$(jq -rn --arg value "$JEEB_DB_PASSWORD" '$value | @uri')
             delivery_database_url="postgresql://${db_user}:${db_password}@${JEEB_DB_HOST}:${JEEB_DB_PORT}/delivery"
           fi
+          if [ "$REPOSITORY" = jeeb-gateway ]; then
+            : "${JEEB_DATABASE_URL:?JEEB_DATABASE_URL is required}"
+            : "${JEEB_DB_USERNAME:?JEEB_DB_USERNAME is required}"
+            : "${JEEB_DB_PASSWORD:?JEEB_DB_PASSWORD is required}"
+            : "${JEEB_DB_HOST:?JEEB_DB_HOST is required}"
+            : "${JEEB_DB_PORT:?JEEB_DB_PORT is required}"
+            [ "$JEEB_DB_HOST" = 192.168.2.20 ] || {
+              echo 'JEEB_DB_HOST must be staging Postgres at 192.168.2.20' >&2
+              exit 1
+            }
+            npgsql_quote() {
+              jq -rn --arg value "$1" '"\"" + ($value | gsub("\""; "\"\"")) + "\""'
+            }
+            gateway_postgres_cs="Host=$(npgsql_quote "$JEEB_DB_HOST");Port=$(npgsql_quote "$JEEB_DB_PORT");Database=\"jeeb_gateway\";Username=$(npgsql_quote "$JEEB_DB_USERNAME");Password=$(npgsql_quote "$JEEB_DB_PASSWORD");SSL Mode=Disable"
+          fi
           openai_api_key="${OPENAI_API_KEY_PRIMARY:-$OPENAI_API_KEY_FALLBACK}"
           {
             for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY JEEB_DATABASE_URL JEEB_DB_PASSWORD \
@@ -131,7 +183,7 @@ jobs:
               JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_REDIS_URL openai_api_key \
               JEEB_SECRET_KEY_BASE JEEB_INTERNAL_SERVICE_TOKEN \
               HEARTBEAT_REDIS_URL HEARTBEAT_SERVICE_AUTH_KEY HEARTBEAT_JWKS_URL \
-              delivery_database_url JWT_SIGNING_KEY UMJWT_SIGNING_KEY; do
+              delivery_database_url gateway_postgres_cs JWT_SIGNING_KEY UMJWT_SIGNING_KEY; do
               printf '%s=%q\n' "$variable" "${!variable}"
             done
             cat <<'REMOTE'
@@ -147,6 +199,7 @@ jobs:
             jeeb-gateway)
               service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
               : "${JWT_SIGNING_KEY:?JEEB_JWT_SIGNING_KEY is required}"
+              : "${gateway_postgres_cs:?gateway Postgres connection string is required}"
               add_env ASPNETCORE_ENVIRONMENT Staging
               add_env ASPNETCORE_URLS http://+:8080
               add_env Jwt__SigningKey "$JWT_SIGNING_KEY"
@@ -157,6 +210,18 @@ jobs:
               add_env UmJwt__Audience user-management
               add_env AdminOidc__Enabled false
               add_env Settlements__CodOwnerVerified true
+              # StoreDurabilityGuard selectors. These select durable concrete
+              # implementations; no FailClosedDisabled bypass is permitted.
+              add_env GatewayPostgres__ConnectionString "$gateway_postgres_cs"
+              add_env Redis__ConnectionString 192.168.2.20:6379
+              add_env GatewayRateLimit__RedisConnectionString 192.168.2.20:6379
+              add_env JeebStateService__BaseUrl http://192.168.2.20:10073
+              add_env JeebStateService__TimeoutSeconds 5
+              add_env JeebStateService__Enabled true
+              add_env FeatureFlags__DurableRequests__Enabled true
+              add_env FeatureFlags__UseUpstream__RemoteUserPreferences true
+              add_env FeatureFlags__UseUpstream__Ratings true
+              add_env FeatureFlags__UseUpstream__Ban true
               # The existing gateway deploy is native and uses host loopback.
               # This staging gateway is containerized, so retain the same fleet
               # endpoints through the staging host's LAN address instead.
@@ -170,8 +235,8 @@ jobs:
               add_env Services__ContractSigning__BaseUrl http://192.168.2.20:10071
               add_env Services__FormBuilder__BaseUrl http://192.168.2.20:10070
               add_env Services__HeartBeat__BaseUrl http://192.168.2.20:10075
+              add_env Services__Ban__BaseUrl http://192.168.2.20:10065
               add_env UnifiedPaymentGateway__BaseUrl http://192.168.2.20:10066/
-              add_env JeebStateService__BaseUrl http://192.168.2.20:10073
               add_env RemoteUserPreferencesServiceApi__BaseUrl http://192.168.2.20:10067/
               add_env FeedbackServiceApi__BaseUrl http://192.168.2.20:10064
               add_env UserManagementServiceApi__BaseUrl http://192.168.2.20:10001/
