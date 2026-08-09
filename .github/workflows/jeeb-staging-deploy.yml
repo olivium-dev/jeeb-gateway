@@ -163,18 +163,32 @@ jobs:
           fi
           if [ "$REPOSITORY" = jeeb-gateway ]; then
             : "${JEEB_DATABASE_URL:?JEEB_DATABASE_URL is required}"
-            : "${JEEB_DB_USERNAME:?JEEB_DB_USERNAME is required}"
-            : "${JEEB_DB_PASSWORD:?JEEB_DB_PASSWORD is required}"
-            : "${JEEB_DB_HOST:?JEEB_DB_HOST is required}"
-            : "${JEEB_DB_PORT:?JEEB_DB_PORT is required}"
-            [ "$JEEB_DB_HOST" = 192.168.2.20 ] || {
-              echo 'JEEB_DB_HOST must be staging Postgres at 192.168.2.20' >&2
-              exit 1
-            }
-            npgsql_quote() {
-              jq -rn --arg value "$1" '"\"" + ($value | gsub("\""; "\"\"")) + "\""'
-            }
-            gateway_postgres_cs="Host=$(npgsql_quote "$JEEB_DB_HOST");Port=$(npgsql_quote "$JEEB_DB_PORT");Database=\"jeeb_gateway\";Username=$(npgsql_quote "$JEEB_DB_USERNAME");Password=$(npgsql_quote "$JEEB_DB_PASSWORD");SSL Mode=Disable"
+            gateway_postgres_cs=$(python3 <<'PY'
+          import os
+          from urllib.parse import unquote, urlsplit
+
+          dsn = urlsplit(os.environ["JEEB_DATABASE_URL"])
+          if dsn.scheme not in {"postgres", "postgresql"}:
+              raise SystemExit("JEEB_DATABASE_URL must be a PostgreSQL DSN")
+          if dsn.hostname != "192.168.2.20":
+              raise SystemExit("JEEB_DATABASE_URL must target staging Postgres at 192.168.2.20")
+          if dsn.path != "/jeeb_gateway":
+              raise SystemExit("JEEB_DATABASE_URL must target the jeeb_gateway database")
+          username = unquote(dsn.username or "")
+          password = unquote(dsn.password or "")
+          if not username:
+              raise SystemExit("JEEB_DATABASE_URL must include a username")
+
+          def quote(value: str) -> str:
+              return '"' + value.replace('"', '""') + '"'
+
+          print(
+              f"Host={quote(dsn.hostname)};Port={dsn.port or 5432};"
+              f"Database={quote(dsn.path.removeprefix('/'))};"
+              f"Username={quote(username)};Password={quote(password)};SSL Mode=Disable"
+          )
+          PY
+            )
           fi
           openai_api_key="${OPENAI_API_KEY_PRIMARY:-$OPENAI_API_KEY_FALLBACK}"
           {
