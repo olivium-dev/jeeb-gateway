@@ -1337,6 +1337,21 @@ builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient
     return new JeebGateway.service.ServiceWallet.ServiceWalletClient(baseUrl, client);
 });
 
+// Read-only generic wallet ledger client. Unlike the generated wallet client above, this named
+// client only issues GETs, so retry/breaker/timeout resilience is safe. It carries no service-auth
+// header: wallet-service is protected by the private overlay/network boundary.
+ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
+    JeebGateway.JeebWallet.WalletServiceJeebWalletLedgerReader.HttpClientName,
+    client =>
+    {
+        var apiUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
+        if (!string.IsNullOrWhiteSpace(apiUrl))
+        {
+            client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
+        }
+        client.Timeout = TimeSpan.FromSeconds(30);
+    }));
+
 // F1 — offer-submit/accept/edit wallet-sufficiency guard (OQ1 unresolved: see
 // WalletGuardOptions). Reuses the ServiceWalletClient registered immediately above.
 builder.Services.Configure<JeebGateway.Financials.WalletGuardOptions>(
@@ -1350,32 +1365,39 @@ builder.Services.AddScoped<JeebGateway.Financials.IWalletSufficiencyGuard,
 // the same reused wallet-service saga). See Extensions/PartnerWalletExtensions.cs.
 builder.Services.AddPartnerWallet(builder.Configuration);
 
-// REALAPP fix — GET /v1/jeeb/wallet/ledger reads the holder's OWN transactions
-// directly from the wallet DB (transactionheader + transactiondetails, joined via
-// wallets.holderid), because the generic wallet-service exposes no ledger LIST
-// endpoint. When WalletPostgres:ConnectionString is configured, use the Postgres
-// reader; otherwise fall back to the empty-page reader (dev/CI/tests, no regression).
-// Mirrors the GatewayPostgres direct-Postgres seam already used for COD settlements.
+// Wallet-service is always authoritative. During cutover, an explicitly enabled read-only
+// WalletPostgres shadow is compared for observability; it can never serve or replace the response.
+builder.Services.Configure<JeebGateway.JeebWallet.WalletLedgerMigrationOptions>(
+    builder.Configuration.GetSection(
+        JeebGateway.JeebWallet.WalletLedgerMigrationOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.JeebWallet.WalletServiceJeebWalletLedgerReader>();
 var walletPostgresCs = builder.Configuration["WalletPostgres:ConnectionString"];
-if (!string.IsNullOrWhiteSpace(walletPostgresCs))
+var walletShadowEnabled = builder.Configuration.GetValue<bool>(
+    "WalletLedgerMigration:ShadowCompareEnabled");
+if (walletShadowEnabled)
 {
-    builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader>(sp =>
-        new JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader(
-            walletPostgresCs!,
-            sp.GetRequiredService<ILogger<JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader>>()));
+    if (string.IsNullOrWhiteSpace(walletPostgresCs))
+    {
+        throw new InvalidOperationException(
+            "WalletLedgerMigration:ShadowCompareEnabled requires WalletPostgres:ConnectionString.");
+    }
+    builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerShadowReader>(
+        _ => new JeebGateway.JeebWallet.PostgresJeebWalletLedgerShadowReader(walletPostgresCs!));
+    builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader,
+        JeebGateway.JeebWallet.ShadowComparingJeebWalletLedgerReader>();
 }
 else
 {
-    builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader,
-        JeebGateway.JeebWallet.NullJeebWalletLedgerReader>();
+    builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader>(sp =>
+        sp.GetRequiredService<JeebGateway.JeebWallet.WalletServiceJeebWalletLedgerReader>());
 }
 
-// GW12-OBS-2 (Leg-12) — readiness depth for the gateway-owned Postgres databases.
-// The durability Leg made 9+ stores depend on GatewayPostgres (and the wallet ledger
-// reader on WalletPostgres), but nothing probed those databases, so /health/ready and
+// GW12-OBS-2 (Leg-12) — readiness depth for gateway-owned Postgres and the temporary
+// wallet migration shadow. The durability Leg made 9+ stores depend on GatewayPostgres,
+// but nothing probed those databases, so /health/ready and
 // /health/aggregate stayed green through a DB outage / pool exhaustion / credential
 // rotation while every durable read/write threw. Register a SELECT-1 check per
-// configured database, tagged "ready" (readiness only — a DB blip must not fail the
+// configured/active database, tagged "ready" (readiness only — a DB blip must not fail the
 // liveness probe and pull the process out of rotation). Gated on the same
 // !IsNullOrWhiteSpace(...) guard as the durable-store wiring, so dev/CI/test (no
 // connection string) register no check and keep the existing green readiness surface.
@@ -1387,7 +1409,7 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
             new JeebGateway.Infrastructure.PostgresHealthCheck(gatewayPostgresCs!, "GatewayPostgres"),
             tags: new[] { "ready" });
 }
-if (!string.IsNullOrWhiteSpace(walletPostgresCs))
+if (walletShadowEnabled)
 {
     builder.Services.AddHealthChecks()
         .AddCheck(

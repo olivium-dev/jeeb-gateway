@@ -1,8 +1,9 @@
-using System;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-using JeebGateway.JeebWallet;
+using System.Globalization;
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
@@ -10,176 +11,434 @@ using NpgsqlTypes;
 namespace JeebGateway.JeebWallet;
 
 /// <summary>
-/// REALAPP fix — the read seam behind <c>GET /v1/jeeb/wallet/ledger</c>.
-///
-/// <para>The generic wallet-service exposes a holder-BALANCE read
-/// (<c>GET /Wallet/holder/{id}/wallets</c>) and a transaction-WRITE surface
-/// (<c>POST /Transaction/initiate|execute</c>), but NO transaction-LIST / ledger
-/// endpoint. The ledger lives in the wallet DB's <c>transactionheader</c> +
-/// <c>transactiondetails</c> tables, joined to a holder through
-/// <c>wallets.holderid</c>. Until wallet-service ships a Jeeb-shaped ledger LIST
-/// read, the gateway reads those rows directly (READ-ONLY) and projects them into
-/// the mobile-facing ledger page. This mirrors the existing direct-Postgres seam the
-/// gateway already carries for COD settlements
-/// (<see cref="JeebGateway.Infrastructure.INpgsqlConnectionFactory"/> /
-/// <c>PostgresSettlementStore</c>).</para>
-///
-/// <para>ADR-0001 spirit preserved: this is a pure, read-only projection of the
-/// holder's OWN transactions — no money moves, no balance is stored, no domain rule
-/// is applied here. It is request-scoped and side-effect-free.</para>
+/// Holder-scoped ledger boundary. The wallet API is the authoritative source; callers never read
+/// wallet tables directly through this interface.
 /// </summary>
 public interface IJeebWalletLedgerReader
 {
-    /// <summary>
-    /// Read one page (newest-first) of the holder's transaction ledger. Returns an
-    /// EMPTY list when the holder has no wallet / no transactions (never throws on a
-    /// no-data holder).
-    /// </summary>
-    /// <param name="type">
-    /// OPTIONAL exact operation-type filter, matched against the SAME string surfaced as each
-    /// row's <c>type</c> (e.g. <c>partner-topup</c> / <c>partner-cash-credit</c>). <c>null</c> → no
-    /// type filter; an unknown value naturally yields an empty page (a miss, never an error).
-    /// </param>
-    /// <param name="from">OPTIONAL inclusive lower bound (UTC calendar date); <c>null</c> → unbounded below.</param>
-    /// <param name="to">OPTIONAL inclusive upper bound (UTC calendar date, the whole day); <c>null</c> → unbounded above.</param>
     Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
-        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to, CancellationToken ct);
+        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to,
+        CancellationToken ct);
+
+    Task<JeebWalletLedgerEntry?> ReadEntryAsync(
+        Guid holderId, string detailId, CancellationToken ct) =>
+        Task.FromResult<JeebWalletLedgerEntry?>(null);
+}
+
+public sealed class WalletLedgerUnavailableException : Exception
+{
+    public WalletLedgerUnavailableException(string message, Exception? innerException = null)
+        : base(message, innerException)
+    {
+    }
+}
+
+public sealed class WalletLedgerMigrationOptions
+{
+    public const string SectionName = "WalletLedgerMigration";
+
+    /// <summary>
+    /// Temporarily compare wallet API results with the legacy WalletPostgres projection. The
+    /// comparison is observational only and never changes the API response.
+    /// </summary>
+    public bool ShadowCompareEnabled { get; set; }
 }
 
 /// <summary>
-/// Postgres-backed <see cref="IJeebWalletLedgerReader"/>. Reads the wallet DB
-/// directly via the connection string at <c>WalletPostgres:ConnectionString</c>.
-/// Registered only when that key is configured; otherwise the controller falls back
-/// to the correctly-shaped empty page (no behaviour regression in dev/CI).
+/// Authoritative generic wallet-service reader. Failures are surfaced so the BFF returns 502;
+/// an upstream outage must never be misrepresented as an empty financial ledger.
 /// </summary>
-public sealed class PostgresJeebWalletLedgerReader : IJeebWalletLedgerReader
+public sealed class WalletServiceJeebWalletLedgerReader : IJeebWalletLedgerReader
 {
-    private readonly string _connectionString;
-    private readonly ILogger<PostgresJeebWalletLedgerReader> _log;
+    public const string HttpClientName = "wallet-ledger-api";
 
-    public PostgresJeebWalletLedgerReader(string connectionString, ILogger<PostgresJeebWalletLedgerReader> log)
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly IHttpClientFactory _clients;
+    private readonly ILogger<WalletServiceJeebWalletLedgerReader> _log;
+
+    public WalletServiceJeebWalletLedgerReader(
+        IHttpClientFactory clients,
+        ILogger<WalletServiceJeebWalletLedgerReader> log)
     {
-        if (string.IsNullOrWhiteSpace(connectionString))
-            throw new ArgumentException("Wallet Postgres connection string must be configured.", nameof(connectionString));
-        _connectionString = connectionString;
+        _clients = clients;
         _log = log;
     }
 
     public async Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
-        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to, CancellationToken ct)
+        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to,
+        CancellationToken ct)
     {
-        var safePage = page < 1 ? 1 : page;
+        var safePage = Math.Max(page, 1);
         var safeSize = pageSize is < 1 or > 200 ? 20 : pageSize;
-        var offset = (safePage - 1) * safeSize;
-
-        // Normalize an empty/whitespace type to "no filter" (defensive — the controller
-        // already collapses it) so ?type= behaves identically to an absent param.
-        var typeFilter = string.IsNullOrWhiteSpace(type) ? null : type.Trim();
-
-        // The holder's transactions = every transactiondetails row whose source OR
-        // destination wallet belongs to the holder. sign is derived per-row: +1 when
-        // the holder is the DESTINATION (credit / money in), -1 when the SOURCE
-        // (debit / money out). type/ref/ts come from the transaction header.
-        //
-        // PP-8 server-side filters (all OPTIONAL, applied in this same read path — no
-        // extra round-trip, no new table). Each is a null-guarded predicate so an absent
-        // filter binds DBNull and the WHERE reduces to the exact pre-PP-8 query (backward
-        // compatible): type matches the SAME projected string surfaced as each row's `type`
-        // (so an unknown value is a natural empty result, not an error); from/to compare the
-        // UTC calendar date and are BOTH inclusive (>= from-day, <= to-day / whole to-day).
-        const string sql = """
-            SELECT
-                d.txid::text                                         AS id,
-                COALESCE(NULLIF(h.tag, ''), 'transaction')           AS type,
-                d.amount                                             AS amount,
-                CASE WHEN d.destinationwalletid = ANY(@WalletIds) THEN 1 ELSE -1 END AS sign,
-                COALESCE(NULLIF(h.summary, ''), NULLIF(h.notes, ''), '') AS ref,
-                h.createdat                                          AS ts
-            FROM transactiondetails d
-            JOIN transactionheader  h ON h.txid = d.txheaderid
-            WHERE (d.sourcewalletid = ANY(@WalletIds)
-                OR d.destinationwalletid = ANY(@WalletIds))
-              AND (@Type IS NULL OR COALESCE(NULLIF(h.tag, ''), 'transaction') = @Type)
-              AND (@FromDate IS NULL OR h.createdat::date >= @FromDate)
-              AND (@ToDate   IS NULL OR h.createdat::date <= @ToDate)
-            ORDER BY h.createdat DESC, d.txid
-            LIMIT @Limit OFFSET @Offset
-            """;
-
+        var path = BuildListPath(holderId, safePage, safeSize, type, from, to);
+        var response = await SendAsync(path, ct);
         try
         {
-            await using var conn = new NpgsqlConnection(_connectionString);
-            await conn.OpenAsync(ct);
-
-            // 1) Resolve the holder's wallet ids (the join key into the transaction tables).
-            var walletIds = await ReadWalletIdsAsync(conn, holderId, ct);
-            if (walletIds.Count == 0) return Array.Empty<JeebWalletLedgerEntry>();
-
-            // 2) Page the holder's transactions.
-            await using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("WalletIds", walletIds.ToArray());
-            cmd.Parameters.AddWithValue("Limit", safeSize);
-            cmd.Parameters.AddWithValue("Offset", offset);
-            // Null-guarded PP-8 filters — typed so DBNull resolves the (@Param IS NULL) branch.
-            cmd.Parameters.Add(new NpgsqlParameter("Type", NpgsqlDbType.Text) { Value = (object?)typeFilter ?? DBNull.Value });
-            cmd.Parameters.Add(new NpgsqlParameter("FromDate", NpgsqlDbType.Date) { Value = (object?)from ?? DBNull.Value });
-            cmd.Parameters.Add(new NpgsqlParameter("ToDate", NpgsqlDbType.Date) { Value = (object?)to ?? DBNull.Value });
-
-            var items = new List<JeebWalletLedgerEntry>();
-            await using var reader = await cmd.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                items.Add(new JeebWalletLedgerEntry
-                {
-                    Id = reader.GetString(0),
-                    Type = reader.GetString(1),
-                    // JEBV4-49 (M4): keep money as decimal end-to-end — read the
-                    // NUMERIC column straight into the decimal DTO, no (double) cast
-                    // (a double cast can lose integer precision past 2^53 and
-                    // reintroduce fractional artifacts on large LBP amounts).
-                    Amount = reader.GetDecimal(2),
-                    Sign = reader.GetInt32(3),
-                    Ref = reader.GetString(4),
-                    Ts = reader.GetFieldValue<DateTime>(5).ToUniversalTime().ToString("o"),
-                });
-            }
-            return items;
+            await using var body = await response.Content.ReadAsStreamAsync(ct);
+            var pageResponse = await JsonSerializer.DeserializeAsync<WalletLedgerPage>(
+                body, JsonOptions, ct);
+            return pageResponse?.Items?.Select(Project).ToArray()
+                ?? Array.Empty<JeebWalletLedgerEntry>();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is JsonException or NotSupportedException)
         {
-            // Graceful degrade (ADR-0001): the ledger is a non-critical read; a DB blip
-            // returns the empty page the mobile parser tolerates rather than a 5xx.
-            _log.LogWarning(ex, "wallet ledger read for holder {HolderId} degraded to empty", holderId);
-            return Array.Empty<JeebWalletLedgerEntry>();
+            throw new WalletLedgerUnavailableException(
+                "Wallet-service returned an invalid ledger response.", ex);
+        }
+        finally
+        {
+            response.Dispose();
         }
     }
 
-    private static async Task<List<Guid>> ReadWalletIdsAsync(NpgsqlConnection conn, Guid holderId, CancellationToken ct)
+    public async Task<JeebWalletLedgerEntry?> ReadEntryAsync(
+        Guid holderId, string detailId, CancellationToken ct)
     {
-        const string walletSql = "SELECT walletid FROM wallets WHERE holderid = @HolderId";
-        await using var cmd = new NpgsqlCommand(walletSql, conn);
-        cmd.Parameters.AddWithValue("HolderId", holderId);
+        if (!Guid.TryParse(detailId, out var parsedDetailId)) return null;
 
+        var client = _clients.CreateClient(HttpClientName);
+        var path = $"Transaction/holder/{holderId:D}/ledger/{parsedDetailId:D}";
+        HttpResponseMessage response;
+        try
+        {
+            response = await client.GetAsync(path, HttpCompletionOption.ResponseHeadersRead, ct);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new WalletLedgerUnavailableException("Wallet-service ledger read failed.", ex);
+        }
+        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            throw new WalletLedgerUnavailableException("Wallet-service ledger read timed out.", ex);
+        }
+
+        using (response)
+        {
+            if (response.StatusCode == HttpStatusCode.NotFound) return null;
+            EnsureSuccess(response);
+            try
+            {
+                await using var body = await response.Content.ReadAsStreamAsync(ct);
+                var entry = await JsonSerializer.DeserializeAsync<WalletLedgerEntry>(
+                    body, JsonOptions, ct);
+                return entry is null ? null : Project(entry);
+            }
+            catch (Exception ex) when (ex is JsonException or NotSupportedException)
+            {
+                throw new WalletLedgerUnavailableException(
+                    "Wallet-service returned an invalid ledger entry response.", ex);
+            }
+        }
+    }
+
+    private async Task<HttpResponseMessage> SendAsync(string path, CancellationToken ct)
+    {
+        try
+        {
+            var response = await _clients.CreateClient(HttpClientName)
+                .GetAsync(path, HttpCompletionOption.ResponseHeadersRead, ct);
+            EnsureSuccess(response);
+            return response;
+        }
+        catch (WalletLedgerUnavailableException)
+        {
+            throw;
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new WalletLedgerUnavailableException("Wallet-service ledger read failed.", ex);
+        }
+        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            throw new WalletLedgerUnavailableException("Wallet-service ledger read timed out.", ex);
+        }
+    }
+
+    private void EnsureSuccess(HttpResponseMessage response)
+    {
+        if (response.IsSuccessStatusCode) return;
+        _log.LogWarning(
+            "Wallet-service ledger read failed with upstream status {StatusCode}.",
+            (int)response.StatusCode);
+        response.Dispose();
+        throw new WalletLedgerUnavailableException(
+            $"Wallet-service ledger read failed with status {(int)response.StatusCode}.");
+    }
+
+    private static string BuildListPath(
+        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to)
+    {
+        var query = new List<string>
+        {
+            $"page={page.ToString(CultureInfo.InvariantCulture)}",
+            $"pageSize={pageSize.ToString(CultureInfo.InvariantCulture)}",
+        };
+        if (!string.IsNullOrWhiteSpace(type))
+            query.Add($"type={Uri.EscapeDataString(type.Trim())}");
+        if (from.HasValue)
+            query.Add($"from={Uri.EscapeDataString(ToUtcStart(from.Value).ToString("O", CultureInfo.InvariantCulture))}");
+        if (to.HasValue && to.Value != DateOnly.MaxValue)
+            query.Add($"to={Uri.EscapeDataString(ToUtcStart(to.Value.AddDays(1)).ToString("O", CultureInfo.InvariantCulture))}");
+
+        return $"Transaction/holder/{holderId:D}/ledger?{string.Join('&', query)}";
+    }
+
+    private static DateTimeOffset ToUtcStart(DateOnly value) =>
+        new(value.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc), TimeSpan.Zero);
+
+    private static JeebWalletLedgerEntry Project(WalletLedgerEntry source) => new()
+    {
+        Id = source.Id.ToString("D"),
+        Type = source.Type ?? string.Empty,
+        Amount = source.Amount,
+        Sign = source.Sign,
+        Ref = source.Reference ?? string.Empty,
+        Ts = source.CreatedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+    };
+
+    private sealed class WalletLedgerPage
+    {
+        [JsonPropertyName("items")]
+        public List<WalletLedgerEntry>? Items { get; set; }
+    }
+
+    private sealed class WalletLedgerEntry
+    {
+        public Guid Id { get; set; }
+        public string? Type { get; set; }
+        public decimal Amount { get; set; }
+        public int Sign { get; set; }
+        public string? Reference { get; set; }
+        public DateTimeOffset CreatedAt { get; set; }
+    }
+}
+
+/// <summary>Temporary read-only adapter used only as a migration shadow.</summary>
+public interface IJeebWalletLedgerShadowReader
+{
+    Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
+        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to,
+        CancellationToken ct);
+
+    Task<JeebWalletLedgerEntry?> ReadEntryAsync(Guid holderId, string detailId, CancellationToken ct);
+}
+
+public sealed class PostgresJeebWalletLedgerShadowReader : IJeebWalletLedgerShadowReader
+{
+    private readonly string _connectionString;
+
+    public PostgresJeebWalletLedgerShadowReader(string connectionString)
+    {
+        if (string.IsNullOrWhiteSpace(connectionString))
+            throw new ArgumentException("Wallet shadow Postgres connection string is required.", nameof(connectionString));
+        _connectionString = connectionString;
+    }
+
+    public async Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
+        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to,
+        CancellationToken ct)
+    {
+        var safePage = Math.Max(page, 1);
+        var safeSize = pageSize is < 1 or > 200 ? 20 : pageSize;
+        var walletIds = await ReadWalletIdsAsync(holderId, ct);
+        if (walletIds.Count == 0) return Array.Empty<JeebWalletLedgerEntry>();
+
+        const string sql = """
+            SELECT
+                d.txid::text,
+                COALESCE(NULLIF(h.tag, ''), 'transaction'),
+                d.amount,
+                CASE WHEN d.destinationwalletid = ANY(@WalletIds) THEN 1 ELSE -1 END,
+                COALESCE(NULLIF(h.summary, ''), NULLIF(h.notes, ''), ''),
+                h.createdat
+            FROM transactiondetails d
+            JOIN transactionheader h ON h.txid = d.txheaderid
+            WHERE (d.sourcewalletid = ANY(@WalletIds) OR d.destinationwalletid = ANY(@WalletIds))
+              AND (@Type IS NULL OR COALESCE(NULLIF(h.tag, ''), 'transaction') = @Type)
+              AND (@FromDate IS NULL OR h.createdat::date >= @FromDate)
+              AND (@ToDate IS NULL OR h.createdat::date <= @ToDate)
+            ORDER BY h.createdat DESC, d.txid DESC
+            LIMIT @Limit OFFSET @Offset
+            """;
+
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("WalletIds", walletIds.ToArray());
+        cmd.Parameters.AddWithValue("Limit", safeSize);
+        cmd.Parameters.AddWithValue("Offset", (safePage - 1) * safeSize);
+        cmd.Parameters.Add(new NpgsqlParameter("Type", NpgsqlDbType.Text)
+            { Value = string.IsNullOrWhiteSpace(type) ? DBNull.Value : type.Trim() });
+        cmd.Parameters.Add(new NpgsqlParameter("FromDate", NpgsqlDbType.Date)
+            { Value = (object?)from ?? DBNull.Value });
+        cmd.Parameters.Add(new NpgsqlParameter("ToDate", NpgsqlDbType.Date)
+            { Value = (object?)to ?? DBNull.Value });
+        return await ReadEntriesAsync(cmd, ct);
+    }
+
+    public async Task<JeebWalletLedgerEntry?> ReadEntryAsync(
+        Guid holderId, string detailId, CancellationToken ct)
+    {
+        if (!Guid.TryParse(detailId, out var parsedDetailId)) return null;
+        var walletIds = await ReadWalletIdsAsync(holderId, ct);
+        if (walletIds.Count == 0) return null;
+
+        const string sql = """
+            SELECT
+                d.txid::text,
+                COALESCE(NULLIF(h.tag, ''), 'transaction'),
+                d.amount,
+                CASE WHEN d.destinationwalletid = ANY(@WalletIds) THEN 1 ELSE -1 END,
+                COALESCE(NULLIF(h.summary, ''), NULLIF(h.notes, ''), ''),
+                h.createdat
+            FROM transactiondetails d
+            JOIN transactionheader h ON h.txid = d.txheaderid
+            WHERE d.txid = @DetailId
+              AND (d.sourcewalletid = ANY(@WalletIds) OR d.destinationwalletid = ANY(@WalletIds))
+            LIMIT 1
+            """;
+
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("WalletIds", walletIds.ToArray());
+        cmd.Parameters.AddWithValue("DetailId", parsedDetailId);
+        return (await ReadEntriesAsync(cmd, ct)).SingleOrDefault();
+    }
+
+    private async Task<List<Guid>> ReadWalletIdsAsync(Guid holderId, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT walletid FROM wallets WHERE holderid = @HolderId", conn);
+        cmd.Parameters.AddWithValue("HolderId", holderId);
         var ids = new List<Guid>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) ids.Add(reader.GetGuid(0));
+        return ids;
+    }
+
+    private static async Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadEntriesAsync(
+        NpgsqlCommand cmd, CancellationToken ct)
+    {
+        var items = new List<JeebWalletLedgerEntry>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            ids.Add(reader.GetGuid(0));
+            var timestamp = reader.GetFieldValue<DateTime>(5);
+            var utc = timestamp.Kind == DateTimeKind.Unspecified
+                ? DateTime.SpecifyKind(timestamp, DateTimeKind.Utc)
+                : timestamp.ToUniversalTime();
+            items.Add(new JeebWalletLedgerEntry
+            {
+                Id = reader.GetString(0),
+                Type = reader.GetString(1),
+                Amount = reader.GetDecimal(2),
+                Sign = reader.GetInt32(3),
+                Ref = reader.GetString(4),
+                Ts = utc.ToString("O", CultureInfo.InvariantCulture),
+            });
         }
-        return ids;
+        return items;
     }
 }
 
 /// <summary>
-/// The dev/CI fallback <see cref="IJeebWalletLedgerReader"/>: returns the empty
-/// ledger page the mobile parser tolerates, used when
-/// <c>WalletPostgres:ConnectionString</c> is unset (no wallet DB to read). Keeps the
-/// controller's dependency satisfiable in tests / local runs without Postgres —
-/// identical to the pre-fix behaviour, so there is no regression when unconfigured.
+/// Returns wallet API data and compares it with the legacy direct read. Shadow failures and
+/// mismatches are observable but can never replace or suppress the authoritative response.
 /// </summary>
-public sealed class NullJeebWalletLedgerReader : IJeebWalletLedgerReader
+public sealed class ShadowComparingJeebWalletLedgerReader : IJeebWalletLedgerReader
 {
-    public Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
-        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to, CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<JeebWalletLedgerEntry>>(Array.Empty<JeebWalletLedgerEntry>());
+    private readonly WalletServiceJeebWalletLedgerReader _primary;
+    private readonly IJeebWalletLedgerShadowReader _shadow;
+    private readonly ILogger<ShadowComparingJeebWalletLedgerReader> _log;
+
+    public ShadowComparingJeebWalletLedgerReader(
+        WalletServiceJeebWalletLedgerReader primary,
+        IJeebWalletLedgerShadowReader shadow,
+        ILogger<ShadowComparingJeebWalletLedgerReader> log)
+    {
+        _primary = primary;
+        _shadow = shadow;
+        _log = log;
+    }
+
+    public async Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
+        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to,
+        CancellationToken ct)
+    {
+        var primary = await _primary.ReadLedgerAsync(holderId, page, pageSize, type, from, to, ct);
+        try
+        {
+            var shadow = await _shadow.ReadLedgerAsync(holderId, page, pageSize, type, from, to, ct);
+            LogComparison(holderId, "page", primary, shadow);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Wallet ledger shadow read failed for holder {HolderId}.", holderId);
+        }
+        return primary;
+    }
+
+    public async Task<JeebWalletLedgerEntry?> ReadEntryAsync(
+        Guid holderId, string detailId, CancellationToken ct)
+    {
+        var primary = await _primary.ReadEntryAsync(holderId, detailId, ct);
+        try
+        {
+            var shadow = await _shadow.ReadEntryAsync(holderId, detailId, ct);
+            LogComparison(
+                holderId,
+                "detail",
+                primary is null ? Array.Empty<JeebWalletLedgerEntry>() : new[] { primary },
+                shadow is null ? Array.Empty<JeebWalletLedgerEntry>() : new[] { shadow });
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Wallet ledger shadow detail read failed for holder {HolderId}.", holderId);
+        }
+        return primary;
+    }
+
+    private void LogComparison(
+        Guid holderId,
+        string scope,
+        IReadOnlyList<JeebWalletLedgerEntry> primary,
+        IReadOnlyList<JeebWalletLedgerEntry> shadow)
+    {
+        var primaryDigest = Digest(primary);
+        var shadowDigest = Digest(shadow);
+        if (primary.Count == shadow.Count
+            && string.Equals(primaryDigest, shadowDigest, StringComparison.Ordinal))
+        {
+            _log.LogInformation(
+                "WalletLedgerShadowMatch holder={HolderId} scope={Scope} count={Count} digest={Digest}",
+                holderId, scope, primary.Count, primaryDigest);
+            return;
+        }
+
+        _log.LogWarning(
+            "WalletLedgerShadowMismatch holder={HolderId} scope={Scope} primaryCount={PrimaryCount} " +
+            "shadowCount={ShadowCount} primaryDigest={PrimaryDigest} shadowDigest={ShadowDigest}",
+            holderId, scope, primary.Count, shadow.Count, primaryDigest, shadowDigest);
+    }
+
+    private static string Digest(IEnumerable<JeebWalletLedgerEntry> items)
+    {
+        var canonical = string.Join('\n', items.Select(item => string.Join('|',
+            item.Id,
+            item.Type,
+            item.Amount.ToString(CultureInfo.InvariantCulture),
+            item.Sign.ToString(CultureInfo.InvariantCulture),
+            item.Ref,
+            NormalizeTimestamp(item.Ts))));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))
+            .ToLowerInvariant();
+    }
+
+    private static string NormalizeTimestamp(string value) =>
+        DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed)
+            ? parsed.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)
+            : value;
 }
