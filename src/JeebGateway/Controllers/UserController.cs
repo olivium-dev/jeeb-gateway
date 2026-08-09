@@ -835,6 +835,8 @@ namespace JeebGateway.Controllers
                     });
                 }
 
+                await NormalizeSelfReferentialProfilePicAsync(request);
+
                 var response = await _serviceUserManagementClient.UpdateAsync(request);
 
                 // jeeberName gap fix: mirror the updated display fields into the
@@ -868,6 +870,8 @@ namespace JeebGateway.Controllers
                     });
                 }
 
+                await NormalizeSelfReferentialProfilePicAsync(request);
+
                 var response = await _serviceUserManagementClient.UpdateAsync(request);
 
                 // jeeberName gap fix: same local-projection mirror as PUT /profile.
@@ -878,6 +882,40 @@ namespace JeebGateway.Controllers
             catch (UserManagementApiException ex)
             {
                 return UpstreamProblem(ex);
+            }
+        }
+
+        // F5/A2: writers that post back the display avatar URL must not overwrite the stored ref.
+        // Empty string is NOT self-referential (legitimate clear) and forwards verbatim.
+        private async Task NormalizeSelfReferentialProfilePicAsync(UpdateUserProfileRequest request)
+        {
+            if (!JeebGateway.Users.AvatarUrlResolver.IsSelfReferentialAvatarUrl(request.ProfilePic))
+            {
+                return;
+            }
+
+            var userId = request.UserId;
+            if (string.IsNullOrWhiteSpace(userId))
+            {
+                userId = User.FindFirst(ClaimTypes.Sid)?.Value
+                         ?? User.FindFirst("sid")?.Value
+                         ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                         ?? User.FindFirst("sub")?.Value;
+            }
+            if (string.IsNullOrWhiteSpace(userId))
+            {
+                return;
+            }
+
+            try
+            {
+                var stored = await _serviceUserManagementClient.ProfileAsync(userId);
+                request.ProfilePic = stored?.ProfilePic;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "user.profile self-referential profilePic normalization could not read the stored ref; forwarding unchanged.");
             }
         }
 

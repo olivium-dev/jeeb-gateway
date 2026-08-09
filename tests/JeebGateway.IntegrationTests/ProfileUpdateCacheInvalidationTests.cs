@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using FluentAssertions;
 using JeebGateway.Services;
 using JeebGateway.Users;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -33,12 +34,20 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public sealed class ProfileUpdateCacheInvalidationTests
 {
+    // F5: ProfilePic now holds a bare CDN ref that /me projects through AvatarUrlResolver.
+    private const string PublicBaseUrl = "http://gw.test";
+    private const string OldRef = "profile_avatar/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg";
+    private const string NewRef = "profile_avatar/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jpg";
+
+    private static string ExpectedAvatarUrl(string userId, string token)
+        => $"{PublicBaseUrl}/api/users/{userId}/avatar?v={token}";
+
     [Theory]
     [InlineData("/api/User/profile")]
     [InlineData("/api/User/profile/update")]
     public async Task ProfileUpdate_InvalidatesUsersMeCache_SoNewAvatarIsVisibleImmediately(string route)
     {
-        var um = new StatefulUmClient { ProfilePic = "old-avatar.png" };
+        var um = new StatefulUmClient { ProfilePic = OldRef };
         using var factory = MakeFactory(um);
         var userId = $"user-{Guid.NewGuid():n}";
         var http = ClientFor(factory, userId);
@@ -47,17 +56,17 @@ public sealed class ProfileUpdateCacheInvalidationTests
         var before = await http.GetAsync("/v1/users/me");
         before.StatusCode.Should().Be(HttpStatusCode.OK);
         (await before.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>())
-            .GetProperty("avatarUrl").GetString().Should().Be("old-avatar.png");
+            .GetProperty("avatarUrl").GetString().Should().Be(ExpectedAvatarUrl(userId, "aaaaaaaaaaaa"));
 
-        var put = await http.PutAsJsonAsync(route, new { userId, profilePic = "new-avatar.png" });
+        var put = await http.PutAsJsonAsync(route, new { userId, profilePic = NewRef });
         put.StatusCode.Should().Be(HttpStatusCode.OK);
 
         // Without the cache-invalidation fix this would still read the cached
-        // "old-avatar.png" for up to ProfileCacheSeconds.
+        // OLD avatar for up to ProfileCacheSeconds.
         var after = await http.GetAsync("/v1/users/me");
         after.StatusCode.Should().Be(HttpStatusCode.OK);
         (await after.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>())
-            .GetProperty("avatarUrl").GetString().Should().Be("new-avatar.png",
+            .GetProperty("avatarUrl").GetString().Should().Be(ExpectedAvatarUrl(userId, "bbbbbbbbbbbb"),
                 $"{route} must invalidate the /me profile cache, not just forward the write upstream");
     }
 
@@ -91,6 +100,7 @@ public sealed class ProfileUpdateCacheInvalidationTests
     private static WebApplicationFactory<Program> MakeFactory(StatefulUmClient um) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
+            builder.UseSetting("Gateway:PublicBaseUrl", PublicBaseUrl);
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<UmClient>();

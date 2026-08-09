@@ -1,3 +1,5 @@
+using JeebGateway.Users;
+using Microsoft.Extensions.Options;
 using FeedbackClient = JeebGateway.service.ServiceFeedback.ServiceFeedbackClient;
 using UserManagementClient = JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient;
 using UserManagementProfile = JeebGateway.service.ServiceUserManagement.UserProfileResponse;
@@ -25,15 +27,18 @@ public sealed class OfferJeeberEnricher : IOfferJeeberEnricher
 
     private readonly UserManagementClient _profiles;
     private readonly FeedbackClient _reviews;
+    private readonly IOptions<GatewayPublicOptions> _publicOptions;
     private readonly ILogger<OfferJeeberEnricher> _logger;
 
     public OfferJeeberEnricher(
         UserManagementClient profiles,
         FeedbackClient reviews,
+        IOptions<GatewayPublicOptions> publicOptions,
         ILogger<OfferJeeberEnricher> logger)
     {
         _profiles = profiles;
         _reviews = reviews;
+        _publicOptions = publicOptions;
         _logger = logger;
     }
 
@@ -72,10 +77,12 @@ public sealed class OfferJeeberEnricher : IOfferJeeberEnricher
         var profile = await profileTask;
         var rating = await ratingTask;
 
+        // F5: ProfilePic is a bare CDN object ref — project it to a loadable URL.
         return new JeeberDetails(
             jeeberId,
             Clean(profile?.Username),
-            Clean(profile?.ProfilePic),
+            AvatarUrlResolver.Absolutize(
+                Clean(profile?.ProfilePic), jeeberId, _publicOptions.Value.PublicBaseUrl),
             rating.Average,
             rating.Count);
     }

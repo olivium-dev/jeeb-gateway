@@ -899,6 +899,11 @@ builder.Services.AddScoped<JeebGateway.Services.ITechnicianReviewService, JeebGa
 builder.Services.AddScoped<JeebGateway.Availability.IOfferJeeberEnricher,
     JeebGateway.Availability.OfferJeeberEnricher>();
 
+// F5 avatar contract: the externally reachable origin used to project stored
+// profile_avatar/ refs into loadable avatar URLs (Gateway__PublicBaseUrl).
+builder.Services.Configure<JeebGateway.Users.GatewayPublicOptions>(
+    builder.Configuration.GetSection(JeebGateway.Users.GatewayPublicOptions.SectionName));
+
 // T-migrate-gateway-proxies (PR-A): per-service kill switches. Each
 // controller migrated in this PR checks the matching flag and falls
 // back to the in-memory store when false. PR-B flips defaults to true
