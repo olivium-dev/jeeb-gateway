@@ -13,6 +13,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}
+  REMOTE_DOCKER_CONFIG: /tmp/jeeb-ghcr-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   deploy:
@@ -86,8 +87,9 @@ jobs:
 
       - name: Log remote Docker in to GHCR
         run: |
+          ssh jeeb-staging "install -d -m 700 '$REMOTE_DOCKER_CONFIG'"
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
-            | ssh jeeb-staging "docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
+            | ssh jeeb-staging "DOCKER_CONFIG='$REMOTE_DOCKER_CONFIG' docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
 
       - name: Deploy Swarm service
         env:
@@ -124,7 +126,7 @@ jobs:
           fi
           openai_api_key="${OPENAI_API_KEY_PRIMARY:-$OPENAI_API_KEY_FALLBACK}"
           {
-            for variable in IMAGE REPOSITORY JEEB_DATABASE_URL JEEB_DB_PASSWORD \
+            for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY JEEB_DATABASE_URL JEEB_DB_PASSWORD \
               JEEB_RTC_DATABASE_URL JEEB_RTC_SECRET_KEY_BASE \
               JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_REDIS_URL openai_api_key \
               JEEB_SECRET_KEY_BASE JEEB_INTERNAL_SERVICE_TOKEN \
@@ -134,6 +136,8 @@ jobs:
             done
             cat <<'REMOTE'
           set -euo pipefail
+          export DOCKER_CONFIG="$REMOTE_DOCKER_CONFIG"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
           network=jeeb-staging-net
           mount_args=()
           update_env=()
@@ -289,3 +293,8 @@ jobs:
           exit 1
           REMOTE
           } | ssh jeeb-staging bash -se
+
+      - name: Clean up isolated remote Docker credentials
+        if: always()
+        continue-on-error: true
+        run: ssh jeeb-staging "rm -rf '$REMOTE_DOCKER_CONFIG'"
