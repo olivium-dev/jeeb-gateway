@@ -1,4 +1,5 @@
 using JeebGateway.Financials;
+using JeebGateway.ProhibitedItems;
 using JeebGateway.Services.Bff;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Http.Resilience;
@@ -52,6 +53,7 @@ public static class ServiceClientExtensions
         services.AddHttpContextAccessor();
         services.AddTransient<BearerForwardingHandler>();
         services.AddTransient<ServiceAuthSigningHandler>();
+        services.AddTransient<DeliveryServiceCredentialHandler>();
 
         // S06 / ADR-HB-001 AUTH CONTRACT — the heart-beat-only static
         // X-Service-Auth-Key handler (attached to the heart-beat typed client
@@ -127,7 +129,8 @@ public static class ServiceClientExtensions
         //   migrates: DeliveriesController, RequestsController, RequestOffersController,
         //             OffersController, CancellationController, OtpHandoverController
         //             (currently IRequestsStore + InMemoryRequestsStore)
-        AddNamedDownstreamClient(services, config, "delivery", "Services:Delivery:BaseUrl");
+        AddNamedDownstreamClient(services, config, "delivery", "Services:Delivery:BaseUrl")
+            .AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
 
         // score-taking-service — DELETED (owner directive: remove completely, never use).
         // Jeeb ratings are owned by the in-gateway mutual-blind state machine with the
@@ -160,13 +163,15 @@ public static class ServiceClientExtensions
                 BindBaseAddress(http, config, "Services:Auth")));
         AttachStandardPipeline(
             services.AddHttpClient<IDeliveryServiceClient, DeliveryServiceClient>(http =>
-                BindBaseAddress(http, config, "Services:Delivery")));
+                BindBaseAddress(http, config, "Services:Delivery")))
+            .AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
         // Cases authorize delivery membership at the gateway edge. Their
         // history/incident client stays on the private network and deliberately
         // carries neither caller bearer nor X-Service-Auth headers.
         AttachResilienceOnly(
             services.AddHttpClient<ICaseDeliveryClient, CaseDeliveryClient>(http =>
-                BindBaseAddress(http, config, "Services:Delivery")));
+                BindBaseAddress(http, config, "Services:Delivery")))
+            .AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
         // IMatchingServiceClient typed registration — REMOVED (JEBV4-220 / E25).
         // The standalone matching-service read path is retired; nothing dials
         // Services:Matching anymore.
@@ -386,13 +391,18 @@ public static class ServiceClientExtensions
             services.AddHttpClient<IBanServiceClient, BanServiceClient>(http =>
                 BindBaseAddress(http, config, "Services:Ban")));
 
+        // Prohibited-items catalog + acknowledgement ledger are also owned by
+        // ban-service's generic /v1/moderation surface. This is unconditional
+        // runtime wiring: the gateway keeps no Postgres/in-memory owner branch.
+        AttachAuthenticatedNoRetryPipeline(
+            services.AddHttpClient<IProhibitedItemsStore, BanServiceProhibitedItemsStore>(http =>
+                BindBaseAddress(http, config, "Services:Ban")));
+
         // thin-BFF fan-out (3 of 4): typed client over voice-transcription-service
         // (FastAPI, host port 10062, health /healthz, ready /readyz). NET-NEW thin
-        // client — the upstream's route POST /v1/transcribe differs materially from
-        // the OpenAI route the in-process WhisperClient calls, so this is NOT a
-        // repoint of WhisperClient. TranscriptionController consumes this when
-        // FeatureFlags:UseUpstream:Voice is true and falls back to the in-process
-        // resilient Whisper path (ITranscriptionService) when false. BindBaseAddress
+        // client — the upstream owns transcription, audio persistence, retry
+        // leases, status, and DLQ. There is no gateway Whisper/fallback branch or
+        // feature-flagged local owner. BindBaseAddress
         // resolves Services:VoiceTranscription[:BaseUrl] with a trailing slash so the
         // relative "v1/transcribe" resolves under the host; AttachStandardPipeline
         // gives this typed client its own bearer + X-Service-Auth + resilience chain
@@ -559,7 +569,7 @@ public static class ServiceClientExtensions
     {
         // notification-service (Mongo read) — GET /notifications. Reuse the same
         // upstream base the salehly-mirrored ServiceNotificationClient targets
-        // (host port 10026) so the probe and the passthrough agree on the host.
+        // so the probe and the passthrough agree on the configured owner host.
         AddNamedDownstreamClient(services, config, "db-probe-notification", "ServiceNotificationClient:BaseUrl");
 
         // geolocation-service (PG read) — GET /locations/user/{user_id}.
@@ -691,6 +701,19 @@ public static class ServiceClientExtensions
         builder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
         builder.AddResilienceHandler("standard", ConfigureStandardResilience);
         return builder;
+    }
+
+    /// <summary>
+    /// Authenticated typed-client pipeline for an owner surface that mixes
+    /// reads/idempotent PUTs with a non-idempotent POST lacking an idempotency
+    /// key. A timed-out catalog create must not be replayed by the gateway.
+    /// </summary>
+    private static IHttpClientBuilder AttachAuthenticatedNoRetryPipeline(
+        IHttpClientBuilder builder)
+    {
+        builder.AddHttpMessageHandler<BearerForwardingHandler>();
+        builder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
+        return AttachBreakerAndTimeoutOnly(builder);
     }
 
     /// <summary>

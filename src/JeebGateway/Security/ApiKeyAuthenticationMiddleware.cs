@@ -68,6 +68,11 @@ public class ApiKeyAuthenticationMiddleware
 
     private static bool IsInternalRoute(PathString path)
     {
+        // Scheduled durable executors carry their own dedicated mounted-secret
+        // token. Never make them depend on (or accidentally accept) the broad
+        // legacy internal API-key map as an alternate authentication path.
+        if (path.StartsWithSegments("/internal/jobs", StringComparison.OrdinalIgnoreCase))
+            return false;
         return path.StartsWithSegments("/internal", StringComparison.OrdinalIgnoreCase);
     }
 

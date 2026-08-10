@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
+using JeebGateway.IntegrationTests.Fakes;
 using JeebGateway.ProhibitedItems;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -38,6 +39,7 @@ public class FT04ModerationGateTests : IClassFixture<WebApplicationFactory<Progr
         {
             builder.ConfigureServices(services =>
             {
+                OwnerServiceFakes.AllowAllAccounts(services);
                 services.RemoveAll<IProhibitedItemsStore>();
                 services.AddSingleton<IProhibitedItemsStore>(new EmptyProhibitedItemsStore());
             });
@@ -70,8 +72,17 @@ public class FT04ModerationGateTests : IClassFixture<WebApplicationFactory<Progr
     [Fact]
     public async Task LoadedLexicon_BenignDescription_Allows_Create()
     {
-        // Default factory has the seeded lexicon; benign description passes.
-        var http = _factory.CreateClient();
+        // The local catalog is an explicit test owner double; runtime has no
+        // gateway seeder or local catalog fallback.
+        var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                OwnerServiceFakes.AllowAllAccounts(services);
+                OwnerServiceFakes.UseSeededModerationCatalog(services);
+            });
+        });
+        var http = factory.CreateClient();
         http.DefaultRequestHeaders.Add("X-User-Id",    $"client-{Guid.NewGuid()}");
         http.DefaultRequestHeaders.Add("X-User-Roles", "customer");
 
@@ -98,15 +109,9 @@ public class FT04ModerationGateTests : IClassFixture<WebApplicationFactory<Progr
 /// lexicon at request time. This is the precise condition the fail-closed gate
 /// must catch (an empty lexicon must 503, not let traffic through).
 ///
-/// <para>NOTE: writes (<see cref="CreateAsync"/> / <see cref="AcknowledgeAsync"/>)
-/// are accepted as harmless no-ops rather than throwing. The gateway registers
-/// <c>DefaultLexiconSeeder</c> (an <see cref="Microsoft.Extensions.Hosting.IHostedService"/>)
-/// which runs at host startup and calls <c>CreateAsync</c> for each default term.
-/// If the double threw, the host would fail to start and the test could never
-/// reach the request under assertion. Because <c>ListActiveAsync</c> still returns
-/// empty regardless of what was "created", the double faithfully models a lexicon
-/// whose writes appear to succeed but whose active set never materialises — exactly
-/// the unloadable-lexicon fail-closed scenario.</para>
+/// <para>Writes are accepted as harmless no-ops because this double models only
+/// the owner read-path failure. <c>ListActiveAsync</c> remains empty regardless,
+/// faithfully exercising the unloadable-catalog fail-closed scenario.</para>
 /// </summary>
 file sealed class EmptyProhibitedItemsStore : IProhibitedItemsStore
 {

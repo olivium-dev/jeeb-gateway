@@ -154,7 +154,6 @@ public class TierUnificationTests
             NullLogger<NewRequestPushNotifier>.Instance,
             new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber("jeeberA") } },
             new FakeUsersStore(),
-            new RecordingFanoutQueue(),
             Options.Create(new NewRequestFanoutOptions()),
             TimeProvider.System);
 
@@ -224,9 +223,8 @@ public class TierUnificationTests
         // End-to-end proof of the original defect fix: a create with a LEGACY code
         // flows through to the jeebers push with a resolved display name (previously
         // the suffix was silently dropped because the code never hit a catalog row).
-        // P1: the create now ENQUEUES; the recorded job is then driven through the app's
-        // OWN notifier (real tier catalog, real DI) so the assertion stays end-to-end
-        // without racing the hosted processor.
+        // Notification shutdown: the create now awaits the owner fan-out directly;
+        // no gateway queue or hosted processor is involved.
         var push = new RecordingPushClient();
         var queue = new RecordingFanoutQueue();
         var availability = new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber("jeeberA") } };
@@ -236,13 +234,7 @@ public class TierUnificationTests
         var resp = await client.PostAsJsonAsync("/v1/requests", ValidPayload("Deliver documents", "flash"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
-        queue.Jobs.Should().ContainSingle();
-
-        using (var scope = factory.Services.CreateScope())
-        {
-            var notifier = scope.ServiceProvider.GetRequiredService<INewRequestPushNotifier>();
-            await notifier.FanOutAsync(queue.Jobs.Single(), CancellationToken.None);
-        }
+        queue.Jobs.Should().BeEmpty("the stateless gateway owns no notification queue");
 
         push.UserSends.Should().ContainSingle();
         var payload = (IDictionary<string, object?>)push.UserSends.Single().Payload;

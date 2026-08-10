@@ -92,6 +92,7 @@ public sealed class KycTosStatusShadowingTests
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:UseUpstream:ContractSigning", "true");
             builder.ConfigureServices(services =>
             {

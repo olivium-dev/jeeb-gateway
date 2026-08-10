@@ -35,7 +35,7 @@ public class PostgresAccountDeletionStoreTests
     // ── DI wiring (real, runs without Postgres) ────────────────────────────
 
     [Fact]
-    public void AccountDeletionStore_Resolves_To_Postgres_When_GatewayPostgres_Configured()
+    public void AccountDeletionStore_Resolves_To_StateService_When_GatewayPostgres_Configured()
     {
         using var factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(b =>
@@ -62,18 +62,18 @@ public class PostgresAccountDeletionStoreTests
         using var scope = factory.Services.CreateScope();
         var act = () => scope.ServiceProvider.GetRequiredService<IAccountDeletionStore>();
 
-        act.Should().NotThrow("PostgresAccountDeletionStore's constructor stores its collaborators and does no I/O");
+        act.Should().NotThrow("the state-service facade stores its collaborators and does no I/O");
         scope.ServiceProvider.GetRequiredService<IAccountDeletionStore>()
-            .Should().BeOfType<PostgresAccountDeletionStore>(
-                "GatewayPostgres:ConnectionString is configured, so the durable store must be selected");
+            .Should().BeOfType<StateServiceAccountDeletionStore>(
+                "gateway Postgres must not retake ownership of deletion workflow metadata");
 
         factory.Services.GetServices<IHostedService>()
-            .Should().Contain(s => s is AccountDeletionPurgeWorker,
-                "the purge worker must be hosted alongside the durable store so the 30-day SLA is actually enforced");
+            .Should().NotContain(s => s is AccountDeletionPurgeWorker,
+                "deployment invokes the bounded leased executor; the gateway runs no deletion worker");
     }
 
     [Fact]
-    public void AccountDeletionStore_Resolves_To_InMemory_When_GatewayPostgres_Absent()
+    public void AccountDeletionStore_Resolves_To_StateService_When_GatewayPostgres_Absent()
     {
         // Default test config carries no GatewayPostgres:ConnectionString
         // (committed appsettings*.json omit it — see Program.cs's gatewayPostgresCs
@@ -83,12 +83,12 @@ public class PostgresAccountDeletionStoreTests
 
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<IAccountDeletionStore>()
-            .Should().BeOfType<InMemoryAccountDeletionStore>(
-                "no connection string is configured, so local/CI runs must keep exercising the in-memory fallback");
+            .Should().BeOfType<StateServiceAccountDeletionStore>(
+                "the stateless owner boundary has no gateway-local fallback");
 
         factory.Services.GetServices<IHostedService>()
-            .Should().Contain(s => s is AccountDeletionPurgeWorker,
-                "the deletion state machine is active in every environment and must keep advancing pending requests");
+            .Should().NotContain(s => s is AccountDeletionPurgeWorker,
+                "the deletion state machine advances only through the authenticated external sweep");
     }
 
     // ── Store properties (deferred to Testcontainers QV) ───────────────────

@@ -144,8 +144,9 @@ public class W35c_OfferStoreAndLocalAcceptDeletedTests
     }
 
     // ---------------------------------------------------------------------
-    // C13 — cross-batch regression guard. GW1 sealed Critical at 33
-    // (OWNER-DECISIONS.md 2026-07-31). GW3 must not move it, and must not quietly
+    // C13 — cross-batch regression guard. Six stores later moved to their
+    // owning services, leaving 26 gateway durability requirements after the
+    // GDPR data-export store was retired. GW3 must not
     // drop the offer ledger off the guard just because the in-memory store went
     // away — the remaining implementation still throws on 5 of its 9 members.
     //
@@ -156,14 +157,14 @@ public class W35c_OfferStoreAndLocalAcceptDeletedTests
     // UpstreamContractIncomplete. The assertion now tests C13's actual INTENT ("not
     // quietly dropped", "not silently promoted") rather than the bucket's name, so it
     // still fails loudly if anyone deletes the entry outright, while no longer pinning
-    // a miscategorisation in place. GW1's sealed Critical==33 is untouched, and this
+    // a miscategorisation in place. The owner-cutover Critical==26 is untouched, and this
     // reclassification cannot affect it: both lists are log-only.
     // ---------------------------------------------------------------------
     [Fact]
     public void C13_StoreDurabilityGuard_IsUnchangedByGw3()
     {
-        StoreDurabilityGuard.Critical.Should().HaveCount(33,
-            "GW1's sealed predicate (SEALED-PREDICATES.md, owner ruling 2026-07-31)");
+        StoreDurabilityGuard.Critical.Should().HaveCount(26,
+            "owner services and state-work replaced gateway-owned runtime stores");
 
         StoreDurabilityGuard.UpstreamContractIncomplete.Should().Contain(typeof(IPendingOffersStore),
             "GW3 changed the shape of the offer gap (no more restart-drops-bids) but did not close "
@@ -198,10 +199,11 @@ public class W35c_OfferStoreAndLocalAcceptDeletedTests
                         { "FeatureFlags:UseUpstream:Offer", offerFlag },
                         { "FeatureFlags:UseUpstream:Delivery", "false" },
                     }));
-                if (extra is not null)
+                builder.ConfigureTestServices(services =>
                 {
-                    builder.ConfigureTestServices(extra);
-                }
+                    Fakes.OwnerServiceFakes.AllowAllAccounts(services);
+                    extra?.Invoke(services);
+                });
             });
 
     /// <summary>Records the accept forward. Every other member throws, so a test that

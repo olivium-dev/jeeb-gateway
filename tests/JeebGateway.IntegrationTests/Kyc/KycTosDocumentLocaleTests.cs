@@ -100,6 +100,7 @@ public sealed class KycTosDocumentLocaleTests
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:UseUpstream:Kyc", "true");
             builder.UseSetting("FeatureFlags:UseUpstream:ContractSigning", "true");
             builder.ConfigureServices(services =>

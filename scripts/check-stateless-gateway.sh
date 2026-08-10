@@ -1,132 +1,134 @@
 #!/usr/bin/env bash
-# R9 — gateway no-DB / no-volatile-store CI gate (ADR-001-rev2 confirmation).
-#
-# Asserts two invariants that keep jeeb-gateway a STATELESS BFF:
-#   (1) GR-3 RATCHET — the gateway opens a database only through the seams that
-#       D1 (JEBV4-190) already inventoried. Any NEW db seam (raw Npgsql, or EF
-#       DbContext / UseNpgsql / UseSqlServer / UseSqlite) hard-fails CI. The
-#       allowlist may only SHRINK (JEBV4-193 / D4).
-#   (2) No in-memory store is REGISTERED in DI for the 10 durable domains; those
-#       must be backed by jeeb-state-service via the NSwag-typed client.
-#
-# Invariant (1) — the RATCHET (JEBV4-193):
-#   Older revisions of this gate grepped only for EF markers (DbContext /
-#   UseNpgsql / ...), so the ~24 files that open the DB via RAW Npgsql slipped
-#   through and the gate green-washed a gateway that in fact owns ~25 DB seams.
-#   The ratchet fixes that: it enumerates EVERY DB seam in the source (raw
-#   Npgsql imports included) and compares the set against an explicit allowlist
-#   seeded from the D1 matrix — scripts/gateway-db-seam-allowlist.txt.
-#     * A seam file NOT on the allowlist  => HARD FAIL (new seam, or a D5-removed
-#       seam reappeared: removals delete their allowlist line, so a reappearance
-#       is no longer allowlisted and trips the gate).
-#     * The allowlist is monotonically non-increasing — each D5 (JEBV4-194) store
-#       elimination deletes that store's allowlist line in the same PR.
-#     * When the allowlist is EMPTY the ratchet enforces absolute zero: ANY DB
-#       seam then hard-fails. Emptying the allowlist is the FINAL step of D5
-#       (Q-010 RATIFIED / GR-3 absolute). No separate "enforce zero" flag is
-#       needed — the subset check degenerates to zero-seam enforcement for free.
-#
-# Invariant (2) is reported as a tracked-debt INVENTORY while the Layer-2 rewire
-# is in progress (R2/R3/R4/R5/R6/R7 reconstruction is blocked on missing
-# read-by-domain-key endpoints in jeeb-state-service — see SPECS-STATUS). It
-# flips to HARD-FAIL by setting R9_ENFORCE_NO_INMEMORY=1 once those endpoints
-# land and the InMemory fallbacks are deleted. This keeps the gate honest: it
-# never green-washes the DB-free invariant, and it never falsely claims the
-# durable rewire is complete.
+# Hard production boundary for jeeb-gateway. There is no allowlist and no
+# warning-only mode: any gateway database, local owner fallback, durable worker,
+# or retired UPG wiring fails CI.
 set -euo pipefail
-ENFORCE_NO_INMEMORY="${R9_ENFORCE_NO_INMEMORY:-0}"
 
-SRC="src/JeebGateway"
-PROGRAM="$SRC/Program.cs"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ALLOWLIST="$SCRIPT_DIR/gateway-db-seam-allowlist.txt"
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$root"
+
+source_root=src/JeebGateway
+program=$source_root/Program.cs
+project=$source_root/JeebGateway.csproj
+allowlist=scripts/gateway-db-seam-allowlist.txt
 fail=0
 
-echo "== R9 gate: stateless jeeb-gateway =="
+report_matches() {
+  local title=$1
+  shift
+  local matches
+  matches=$("$@" || true)
+  if [ -n "$matches" ]; then
+    echo "FAIL: $title"
+    printf '%s\n' "$matches"
+    fail=1
+  fi
+}
 
-# ---- Invariant (1): GR-3 db-seam RATCHET vs the D1 allowlist -----------------
-echo "-- (1) GR-3 ratchet: no gateway DB seam outside the D1 allowlist"
-if [ ! -f "$ALLOWLIST" ]; then
-  echo "FAIL: allowlist not found at $ALLOWLIST"
-  exit 1
-fi
+echo '== stateless gateway hard gate =='
 
-# Detected seams: source files that IMPORT the Npgsql namespace (real DB access,
-# not a comment mention) or use an EF DbContext / provider. `using Npgsql;` is
-# the low-false-positive signal — doc-comment references to NpgsqlException or
-# INpgsqlConnectionFactory in the composition root do not import the namespace.
-DETECTED="$(grep -rlE '^[[:space:]]*using[[:space:]]+Npgsql|UseNpgsql|UseSqlServer|UseSqlite|:[[:space:]]*DbContext|DbContextOptions' \
-  "$SRC" --include='*.cs' | sed 's#^\./##' | sort -u || true)"
-
-# Allowed seams: uncommented, non-blank lines from the allowlist.
-ALLOWED="$(grep -vE '^[[:space:]]*(#|$)' "$ALLOWLIST" | sed 's/[[:space:]]*$//' | sort -u || true)"
-
-# (1a) any detected seam not on the allowlist => NEW/REAPPEARED seam => FAIL.
-new_seams="$(comm -23 <(printf '%s\n' "$DETECTED") <(printf '%s\n' "$ALLOWED") || true)"
-if [ -n "$new_seams" ]; then
-  echo "FAIL: gateway DB seam(s) not on the GR-3 allowlist (new seam, or a"
-  echo "      D5-removed seam reappeared). This violates GR-3. Offending files:"
-  printf '  %s\n' $new_seams
-  echo "      Do NOT add to the allowlist — move the store to its owning service."
+non_comment_allowlist=$(rg -v '^[[:space:]]*(#|$)' "$allowlist" || true)
+if [ -n "$non_comment_allowlist" ]; then
+  echo 'FAIL: gateway DB allowlist must be empty'
+  printf '%s\n' "$non_comment_allowlist"
   fail=1
 fi
 
-# (1b) allowlist entries no longer detected => the ratchet should have shrunk.
-# Soft NOTE (not a fail) so a D5 removal PR that deletes the store before pruning
-# its line still goes green; the follow-up prune keeps the list honest.
-stale="$(comm -13 <(printf '%s\n' "$DETECTED") <(printf '%s\n' "$ALLOWED") || true)"
-if [ -n "$stale" ]; then
-  echo "NOTE: allowlist entries no longer present as DB seams — prune these lines"
-  echo "      from $ALLOWLIST (the ratchet only shrinks):"
-  printf '  %s\n' $stale
+report_matches 'database provider code remains in the gateway source' \
+  rg -n -g '*.cs' '^[[:space:]]*using[[:space:]]+Npgsql|UseNpgsql|UseSqlServer|UseSqlite|DbContextOptions|:[[:space:]]*DbContext' "$source_root"
+
+report_matches 'gateway project references a database provider' \
+  rg -n 'PackageReference[^>]+(Npgsql|EntityFrameworkCore)|Testcontainers\.PostgreSql' "$project"
+
+report_matches 'retired gateway Postgres provider file remains' \
+  bash -c "rg --files '$source_root' | rg '/(Postgres|Npgsql)[^/]*\\.cs$'"
+
+active_local=$(rg -n '^[[:space:]]*builder\.Services\.Add(Singleton|Scoped|Transient).*?(InMemory|Postgres|DurableRequestsStore|InProcessCod|NewRequestFanoutQueue|CourierPositionQueue)' "$program" \
+  | rg -v 'InMemorySynonymRegistry|InMemoryGeoIndex' || true)
+if [ -n "$active_local" ]; then
+  echo 'FAIL: production DI registers a local owner/state implementation'
+  printf '%s\n' "$active_local"
+  fail=1
 fi
 
-allowed_n="$(printf '%s\n' "$ALLOWED" | grep -cE '.' || true)"
-detected_n="$(printf '%s\n' "$DETECTED" | grep -cE '.' || true)"
-if [ "$fail" -eq 0 ]; then
-  if [ "$allowed_n" -eq 0 ]; then
-    echo "OK: allowlist empty — GR-3 absolute-zero enforced and $detected_n seams present."
-  else
-    echo "OK: $detected_n DB seam(s), all within the $allowed_n-entry D1 allowlist (ratchet holds)."
-  fi
+hosted=$(rg -n 'AddHostedService' "$source_root" -g '*.cs' \
+  | rg -v '^[^:]+:[0-9]+:[[:space:]]*//' || true)
+hosted_count=$(printf '%s\n' "$hosted" | rg -c '.' || true)
+if [ "$hosted_count" -ne 2 ]; then
+  echo "FAIL: expected only the BFF startup validator and capability-coverage guard; found $hosted_count hosted registrations"
+  printf '%s\n' "$hosted"
+  fail=1
 fi
 
-# ---- Invariant (2): no durable-domain InMemory* registered in DI ------------
-# These are the 10 durable domains rewired to jeeb-state-service (R1–R8).
-echo "-- (2) no durable-domain InMemory* registration in Program.cs DI"
-FORBIDDEN_REGS=(
-  "IRefreshTokenStore, *InMemoryRefreshTokenStore"   # R2
-  "IKycStore, *InMemoryKycStore"                     # R3
-  "IRatingStore, *InMemoryRatingStore"               # R4
-  "IDisputeCaseStore, *InMemoryDisputeCaseStore"     # R5
-  "IDisputeStore, *InMemoryDisputeStore"             # R5
-  "IJeeberRestrictionStore, *InMemoryJeeberRestrictionStore" # R6
-  "IAdminEscalationStore, *InMemoryAdminEscalationStore"     # R7
-)
-inmemory_found=0
-for pat in "${FORBIDDEN_REGS[@]}"; do
-  if grep -nE "AddSingleton<[^>]*$pat" "$PROGRAM" | grep -vE '^\s*//' >/dev/null 2>&1; then
-    inmemory_found=1
-    if [ "$ENFORCE_NO_INMEMORY" = "1" ]; then
-      echo "FAIL: forbidden durable-domain registration still active: $pat"
-      grep -nE "AddSingleton<[^>]*$pat" "$PROGRAM" | grep -vE '^\s*//'
-      fail=1
-    else
-      echo "DEBT: durable-domain InMemory still registered (rewire in progress): $pat"
-    fi
+hosted_whitelist=$(printf '%s\n' "$hosted" \
+  | rg -v 'Program\.cs:.*AddHostedService|BffServiceCollectionExtensions\.cs:.*AddHostedService' || true)
+if [ -n "$hosted_whitelist" ]; then
+  echo 'FAIL: hosted registration is not an approved startup/coverage validator'
+  printf '%s\n' "$hosted_whitelist"
+  fail=1
+fi
+
+report_matches 'background-service implementation remains in the gateway artifact source' \
+  rg -n -g '*.cs' ':[[:space:]]*BackgroundService\b' "$source_root"
+
+unexpected_hosted_type=$(rg -n -g '*.cs' 'class[[:space:]]+[^:]+:[[:space:]]*IHostedService\b' "$source_root" \
+  | rg -v 'BffStartupValidator|CapabilityCoverageGuard' || true)
+if [ -n "$unexpected_hosted_type" ]; then
+  echo 'FAIL: non-validator IHostedService implementation remains in gateway source'
+  printf '%s\n' "$unexpected_hosted_type"
+  fail=1
+fi
+
+report_matches 'gateway-owned state worker or queue is registered' \
+  rg -n 'Add(HostedService|Singleton|Scoped|Transient).*?(SettlementLedgerReconciler|WeeklySettlementBatch|RequestExpiry|RequestNudge|ScheduledDeliveryActivator|PushRetryQueueProcessor|NewRequestFanout|CourierPosition|DataExportProcessor|DataExportWorker|AccountDeletionPurgeWorker|AcceptChatSettleReconciler|RatingRevealJob|LowRatingAutoFlag|AutoOfflineSweeper|OtpHandoverSweeper)' \
+    "$program" "$source_root/Extensions"
+
+report_matches 'retired local owner/worker implementation remains in gateway source' \
+  rg -n -g '*.cs' 'class[[:space:]]+(InProcessCodSettlementLedger|DurableRequestsStore|SettlementLedgerReconciler|WeeklySettlementBatch|RequestExpirySweeper|RequestNudgeSweeper|RequestExpiryObserver|ScheduledDeliveryActivator|PushRetryQueueProcessor|NewRequestFanoutProcessor|CourierPositionPublisher|DataExportProcessor|DataExportWorker|AccountDeletionPurgeWorker|AcceptChatSettleReconciler|RatingRevealJob|LowRatingAutoFlag|AutoOfflineSweeper|OtpHandoverSweeper|JeebNotificationCatalogSeeder|NotificationDurableWriteStartupAlarm|DefaultLexiconSeeder)\b' \
+    "$source_root"
+
+report_matches 'retired database/UPG selector remains in committed gateway configuration' \
+  rg -n '"(GatewayPostgres|WalletPostgres|UnifiedPaymentGateway|UPG|DATABASE_URL|JEEB_DATABASE_URL)"[[:space:]]*:' "$source_root"/appsettings*.json
+
+report_matches 'production deploy still migrates or configures a gateway database/UPG' \
+  rg -n 'GatewayPostgres|WalletPostgres|JEEB_DATABASE_URL|DATABASE_URL|db/apply\.sh|psql|UnifiedPaymentGateway|UPG' .github/workflows/deploy-to-jeeb.yml
+
+gateway_staging_case=$(awk '
+  /^[[:space:]]*jeeb-gateway\)/ { capture=1 }
+  capture { print }
+  capture && /^[[:space:]]*;;[[:space:]]*$/ { exit }
+' .github/workflows/jeeb-staging-deploy.yml)
+if printf '%s\n' "$gateway_staging_case" \
+    | rg -n 'GatewayPostgres|WalletPostgres|JEEB_DATABASE_URL|DATABASE_URL|UnifiedPaymentGateway|UPG' >/dev/null; then
+  echo 'FAIL: staging jeeb-gateway service case carries a database/UPG setting'
+  printf '%s\n' "$gateway_staging_case" \
+    | rg -n 'GatewayPostgres|WalletPostgres|JEEB_DATABASE_URL|DATABASE_URL|UnifiedPaymentGateway|UPG'
+  fail=1
+fi
+
+for required in \
+  JeebStateService__ServiceTokenFile \
+  DELIVERY_SERVICE_TOKEN_FILE \
+  ServiceNotificationClient__ServiceTokenFile; do
+  if ! rg -q "$required" .github/workflows/deploy-to-jeeb.yml .github/workflows/jeeb-staging-deploy.yml; then
+    echo "FAIL: deployment does not mount/configure $required"
+    fail=1
   fi
 done
-if [ "$inmemory_found" -eq 0 ]; then
-  echo "OK: no durable-domain InMemory registration remains."
-elif [ "$ENFORCE_NO_INMEMORY" != "1" ]; then
-  echo "NOTE: set R9_ENFORCE_NO_INMEMORY=1 to hard-fail once jeeb-state-service"
-  echo "      exposes read-by-domain-key endpoints and the fallbacks are removed."
+
+if ! rg -q 'GatewayDirectPushDispatchGuardHandler' "$program"; then
+  echo 'FAIL: generated push client is missing the fail-closed direct-dispatch guard'
+  fail=1
 fi
 
+report_matches 'retired/vulnerable package version remains in gateway/test projects or locks' \
+  rg -n 'OpenTelemetry[^"\n]*Version="1\.9\.0|"Npgsql"|Testcontainers\.PostgreSql' \
+    "$project" tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj \
+    "$source_root/packages.lock.json" tests/JeebGateway.IntegrationTests/packages.lock.json
+
 if [ "$fail" -ne 0 ]; then
-  echo ""
-  echo "R9 gate FAILED — gateway is not stateless. See ADR-001-rev2."
+  echo 'stateless gateway hard gate FAILED'
   exit 1
 fi
-echo ""
-echo "R9 gate PASSED — gateway holds no DB and no forbidden volatile store."
+
+echo 'stateless gateway hard gate PASSED'

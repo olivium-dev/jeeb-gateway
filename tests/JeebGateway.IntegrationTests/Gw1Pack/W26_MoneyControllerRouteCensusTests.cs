@@ -331,28 +331,16 @@ public class W26_MoneyControllerRouteCensusTests
         store.ListedStatuses.Should().Equal("not-a-real-status", "open");
     }
 
-    // ── C5 — the NEGATIVE DISCRIMINATOR (explicitly NOT a GW1 defect) ──────
+    // ── C5 — COD composition is wallet-owned ───────────────────────────────
 
     [Fact]
-    public void C5_The_Other_MarkPaid_Is_Still_In_Process_And_Is_Not_GW1s_To_Fix()
+    public void C5_CodLedger_Is_Explicitly_Inside_The_Stateless_Composition_Guard()
     {
-        using var factory = new WebApplicationFactory<Program>();
-
-        factory.Services.GetRequiredService<ICodSettlementLedger>()
-            .Should().BeOfType<InProcessCodSettlementLedger>(
-                "documented, not repaired: POST /admin/v1/settlements/{batchId}/mark-paid on " +
-                "CodSettlementComposeController is backed by ConcurrentDictionaries and loses its " +
-                "row across a restart for a PRE-EXISTING reason. If a restart round shows that row " +
-                "gone, it is NOT a GW1 regression — GW1 owns the ISettlementBatchStore route");
-
         StoreDurabilityGuard.Critical.Select(c => c.Iface)
-            .Should().NotContain(typeof(ICodSettlementLedger),
-                "and the durability guard is structurally blind to it — escalated separately, " +
-                "out of GW1's scope by the batch document");
-
-        // POSITIVE CONTROL — the same guard DOES see the ledger GW1 promoted, so the
-        // NotContain above is a real distinction rather than an empty set.
-        StoreDurabilityGuard.Critical.Select(c => c.Iface)
-            .Should().Contain(typeof(ISettlementLedgerClient));
+            .Should().Contain(typeof(ICodSettlementLedger),
+                "a process-local COD ledger would lose money state across a restart");
+        StoreDurabilityGuard.Critical
+            .Single(entry => entry.Iface == typeof(ICodSettlementLedger))
+            .DurableImpls.Should().Equal(typeof(WalletCodSettlementLedger));
     }
 }

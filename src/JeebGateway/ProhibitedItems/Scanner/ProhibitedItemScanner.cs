@@ -47,18 +47,26 @@ public class ProhibitedItemScanner : IProhibitedItemScanner
 
     public async Task<ProhibitedItemScanResult> ScanAsync(string? description, CancellationToken ct)
     {
+        var items = await _store.ListActiveAsync(ct);
+        return await ScanAsync(description, items, ct);
+    }
+
+    public Task<ProhibitedItemScanResult> ScanAsync(
+        string? description,
+        IReadOnlyList<ProhibitedItem> items,
+        CancellationToken ct)
+    {
         var normalized = TextNormalizer.Normalize(description);
         if (normalized.Length == 0)
         {
-            return new ProhibitedItemScanResult
+            return Task.FromResult(new ProhibitedItemScanResult
             {
                 Matches = Array.Empty<ProhibitedItemMatch>(),
                 RequiresReview = false
-            };
+            });
         }
 
         var tokens = TextNormalizer.Tokenize(normalized);
-        var items = await _store.ListActiveAsync(ct);
 
         // Dedupe by (itemId, matchType) keeping the highest confidence so the
         // queue isn't spammed with five "knife"-shaped hits from one sentence.
@@ -80,11 +88,11 @@ public class ProhibitedItemScanner : IProhibitedItemScanner
             .ThenBy(m => m.ItemName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        return new ProhibitedItemScanResult
+        return Task.FromResult(new ProhibitedItemScanResult
         {
             Matches = matches,
             RequiresReview = matches.Any(m => m.Confidence >= ReviewThreshold)
-        };
+        });
     }
 
     private static void EvaluateTerm(

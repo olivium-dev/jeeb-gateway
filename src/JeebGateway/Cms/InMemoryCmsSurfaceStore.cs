@@ -12,7 +12,7 @@ namespace JeebGateway.Cms;
 /// the gateway process. This seed is a byte-for-byte mirror of the Postgres
 /// seed in migrations 0032 (four W2 surfaces) + 0042 (config surface).
 /// </summary>
-public sealed class InMemoryCmsSurfaceStore : ICmsSurfaceStore
+public sealed class InMemoryCmsSurfaceStore
 {
     private readonly ConcurrentDictionary<string, CmsSurface> _bySurfaceId =
         new(StringComparer.Ordinal);

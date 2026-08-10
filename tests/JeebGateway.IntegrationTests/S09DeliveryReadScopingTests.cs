@@ -216,6 +216,8 @@ public class S09DeliveryReadScopingTests
             builder.UseSetting("FeatureFlags:UseUpstream:Delivery", deliveryUpstream ? "true" : "false");
             builder.ConfigureServices(services =>
             {
+                Fakes.OwnerServiceFakes.UseInMemoryUsers(services);
+                Fakes.OwnerServiceFakes.AllowAllAccounts(services);
                 services.RemoveAll<IDeliveryServiceClient>();
                 services.AddSingleton(deliveryClient);
 
@@ -223,10 +225,14 @@ public class S09DeliveryReadScopingTests
                 // (sub == userId), which the [Authorize] GET /deliveries route requires.
                 services.RemoveAll<IServiceOTPClient>();
                 services.AddSingleton<IServiceOTPClient>(new StubOtpClient());
+                services.RemoveAll<IUserManagementDualRoleClient>();
+                services.AddSingleton<IUserManagementDualRoleClient,
+                    Fakes.TestUserManagementDualRoleClient>();
 
                 services.Configure<UpstreamFeatureFlags>(f =>
                 {
                     f.Otp = true;
+                    f.UserManagement = true;
                     f.Delivery = deliveryUpstream;
                 });
                 services.Configure<JeebGateway.Auth.OtpSignIn.OtpSignInOptions>(o =>

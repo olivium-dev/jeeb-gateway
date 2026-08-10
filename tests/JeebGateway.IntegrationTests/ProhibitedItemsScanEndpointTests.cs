@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
+using JeebGateway.IntegrationTests.Fakes;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
@@ -25,18 +26,22 @@ public class ProhibitedItemsScanEndpointTests
     /// <summary>
     /// These advisory-scan tests own a CONTROLLED lexicon (each test seeds its
     /// own uniquely-named item and asserts exact match counts / empty results).
-    /// The create-moderation gate is now ON by default, which auto-seeds a small
-    /// real lexicon ("knife", "arak", "alcohol", "kitchen knife") at startup —
-    /// that would collide with these tests' exact-count assertions. Disabling the
-    /// create-moderation flag here skips the default seeder so the scan tests keep
-    /// their empty baseline. (The default-ON behaviour is covered by
-    /// CreateModerationGateTests and CreateGatesEndpointTests.)
+    /// Runtime reads the ban-service owner. These tests install an explicit empty
+    /// owner double so each case controls its own catalog without live service
+    /// state. The create-moderation flag is disabled because this suite exercises
+    /// the advisory scan surface, not create-time gating.
     /// </summary>
     public sealed class NoDefaultLexiconFactory : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:CreateModeration:Enabled", "false");
+            builder.ConfigureServices(services =>
+            {
+                OwnerServiceFakes.AllowAllAccounts(services);
+                OwnerServiceFakes.UseEmptyModerationCatalog(services);
+            });
         }
     }
 

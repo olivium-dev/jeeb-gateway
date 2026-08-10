@@ -33,6 +33,8 @@ public class DualRoleIdentityTests : IClassFixture<WebApplicationFactory<Program
         {
             builder.ConfigureServices(services =>
             {
+                Fakes.OwnerServiceFakes.UseInMemoryUsers(services);
+                Fakes.OwnerServiceFakes.AllowAllAccounts(services);
                 services.RemoveAll<IDeliveryServiceClient>();
                 services.AddSingleton<IDeliveryServiceClient>(new FakeDeliveryPresenceClient());
             });

@@ -28,9 +28,8 @@ namespace JeebGateway.IntegrationTests;
 public class DeliverySmParityTests
 {
     /// <summary>
-    /// The frozen 14-row table from ADR-002 §2.3 (13 canonical edges + the
-    /// AtDoor escalate_either alias of edge 11). The entry edge [*]→Ordered is
-    /// NOT included — it lives in the offer/auction context outside the table.
+    /// The frozen owner table, including the later additive generic-cancel and
+    /// tier-TTL transitions. The entry edge [*]→Ordered remains outside it.
     /// </summary>
     private static readonly HashSet<string> FrozenEdgeSet = new(StringComparer.Ordinal)
     {
@@ -38,16 +37,22 @@ public class DeliverySmParityTests
         Edge("Ordered", "client_cancel_no_fee", "Cancelled"),
         Edge("Ordered", "jeeber_cancel_strike", "Cancelled"),
         Edge("Ordered", "escalate_either", "FailedNeedsEscalation"),
+        Edge("Ordered", "cancel_requested", "Cancelled"),
+        Edge("Ordered", "tier_ttl_elapsed", "Cancelled"),
         Edge("Picked", "jeeber_tap", "InTransit"),
         Edge("Picked", "jeeber_cancel_high_strike", "Cancelled"),
         Edge("Picked", "escalate_either", "FailedNeedsEscalation"),
+        Edge("Picked", "cancel_requested", "Cancelled"),
         Edge("InTransit", "jeeber_tap", "AtDoor"),
         Edge("InTransit", "escalate_either", "FailedNeedsEscalation"),
+        Edge("InTransit", "cancel_requested", "Cancelled"),
         Edge("AtDoor", "otp_verified", "Done"),
         Edge("AtDoor", "otp_fail_or_jeeber_escalate", "FailedNeedsEscalation"),
         Edge("AtDoor", "escalate_either", "FailedNeedsEscalation"),
+        Edge("AtDoor", "cancel_requested", "Cancelled"),
         Edge("FailedNeedsEscalation", "admin_resolve", "Done"),
         Edge("FailedNeedsEscalation", "admin_cancel", "Cancelled"),
+        Edge("FailedNeedsEscalation", "cancel_requested", "Cancelled"),
     };
 
     private static string Edge(string from, string trigger, string to) => $"{from}|{trigger}|{to}";
@@ -64,7 +69,7 @@ public class DeliverySmParityTests
             "the gateway table must not contain an edge the frozen ADR-002 §2.3 table lacks");
         FrozenEdgeSet.Except(gatewayEdges).Should().BeEmpty(
             "the gateway table must contain every edge in the frozen ADR-002 §2.3 table");
-        gatewayEdges.Should().HaveCount(14);
+        gatewayEdges.Should().HaveCount(20);
     }
 
     [Fact]

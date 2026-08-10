@@ -115,6 +115,9 @@ public class RequestNotOpen409FidelityTests
                 {
                     services.RemoveAll<IOfferServiceClient>();
                     services.AddSingleton<IOfferServiceClient>(fake);
+                    services.RemoveAll<IPendingOffersStore>();
+                    services.AddSingleton<IPendingOffersStore,
+                        UpstreamPendingOffersStore>();
                 });
             });
 
@@ -166,6 +169,9 @@ public class RequestNotOpen409FidelityTests
                 {
                     services.RemoveAll<IOfferServiceClient>();
                     services.AddSingleton<IOfferServiceClient>(fake);
+                    services.RemoveAll<IPendingOffersStore>();
+                    services.AddSingleton<IPendingOffersStore,
+                        UpstreamPendingOffersStore>();
                 });
             });
 
@@ -217,6 +223,9 @@ public class RequestNotOpen409FidelityTests
                 {
                     services.RemoveAll<IOfferServiceClient>();
                     services.AddSingleton<IOfferServiceClient>(fake);
+                    services.RemoveAll<IPendingOffersStore>();
+                    services.AddSingleton<IPendingOffersStore,
+                        UpstreamPendingOffersStore>();
                 });
             });
 

@@ -57,7 +57,6 @@ public sealed class AuthOtpController : ControllerBase
     private readonly IServiceOTPClient _otpClient;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IOptions<OtpSignInOptions> _options;
-    private readonly IUsersStore _users;
     private readonly ITokenService _tokens;
     private readonly IPhonePolicy _phonePolicy;
     private readonly IOtpRequestRateLimiter _rateLimiter;
@@ -68,7 +67,6 @@ public sealed class AuthOtpController : ControllerBase
         IServiceOTPClient otpClient,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         IOptions<OtpSignInOptions> options,
-        IUsersStore users,
         ITokenService tokens,
         IPhonePolicy phonePolicy,
         IOtpRequestRateLimiter rateLimiter,
@@ -78,7 +76,6 @@ public sealed class AuthOtpController : ControllerBase
         _otpClient = otpClient;
         _flags = flags;
         _options = options;
-        _users = users;
         _tokens = tokens;
         _phonePolicy = phonePolicy;
         _rateLimiter = rateLimiter;
@@ -187,6 +184,11 @@ public sealed class AuthOtpController : ControllerBase
     {
         if (!_flags.CurrentValue.Otp)
             return UpstreamDisabled();
+        if (!_flags.CurrentValue.UserManagement)
+            return OtpSignInProblems.Problem(
+                this, StatusCodes.Status503ServiceUnavailable, "user_management_unavailable",
+                "User-management not enabled",
+                "OTP verification cannot resolve an authoritative identity while user-management is disabled.");
 
         if (body is null || string.IsNullOrWhiteSpace(body.Phone) || string.IsNullOrWhiteSpace(body.Code))
         {
@@ -243,23 +245,26 @@ public sealed class AuthOtpController : ControllerBase
         // mint is orchestration and stays in the gateway — N11 split-signer: only the
         // role-switch path is UM-signed).
         var key = (body.Phone ?? string.Empty).Trim();
-        var (userId, opaqueRoles, opaqueActiveRole) = await ResolveIdentityAsync(key, ct);
-
-        // Project the UM-resolved identity locally so the gateway-minted JWT embeds the
-        // SAME active_role/roles claims UM persisted (TokenService reads active_role from
-        // the store). New identities default to the opaque 'customer' single role.
-        await _users.UpsertProjectionAsync(new UserProfile
+        string userId;
+        IReadOnlyList<string> opaqueRoles;
+        string opaqueActiveRole;
+        try
         {
-            Id = userId,
-            Phone = key,
-            Name = string.Empty,
-            Roles = opaqueRoles.ToList(),
-            ActiveRole = opaqueActiveRole,
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow,
-        }, ct);
+            (userId, opaqueRoles, opaqueActiveRole) = await ResolveIdentityAsync(key, ct);
+        }
+        catch (UserManagementCallException ex)
+        {
+            _log.LogWarning(
+                "auth.otp.verify UM identity resolution failed (status {Status}); failing closed",
+                ex.StatusCode);
+            return OtpSignInProblems.Problem(
+                this, StatusCodes.Status502BadGateway, "user_management_unavailable",
+                "Identity service unavailable",
+                "The verified phone could not be resolved by user-management.");
+        }
 
-        var pair = await _tokens.IssueAsync(userId, opaqueRoles, ct);
+        var pair = await _tokens.IssueAsync(
+            userId, opaqueRoles, opaqueActiveRole, authentication: null, ct);
 
         // Never log the raw phone or code — only the minted user id.
         _log.LogInformation("auth.otp.verify ok userId={UserId}", userId);
@@ -288,61 +293,38 @@ public sealed class AuthOtpController : ControllerBase
     /// <summary>
     /// F-C identity resolution. When the UM kill switch is ON, orchestrates the shared
     /// user-management phone find-or-create (the identity authority) and returns the
-    /// canonical id + OPAQUE roles. Degrades SAFELY: a transient UM fault falls back to
-    /// the legacy in-memory find-or-create so a live OTP login is never hard-broken by a
-    /// UM blip (the session is gateway-minted in both branches). When the switch is OFF,
-    /// uses the in-memory path directly (unchanged legacy behavior for existing fixtures).
+    /// canonical id + OPAQUE roles. A UM fault is propagated to the caller and mapped
+    /// to a fail-closed 502; the gateway never invents a phone-keyed identity.
     /// </summary>
     private async Task<(string userId, IReadOnlyList<string> opaqueRoles, string opaqueActiveRole)>
         ResolveIdentityAsync(string phone, CancellationToken ct)
     {
-        if (_flags.CurrentValue.UserManagement)
+        var um = await _userManagement.PhoneFindOrCreateAsync(phone, ct);
+
+        // JEEBER-SPINE Defect 1 — the phone find-or-create surface is IDENTITY-ONLY
+        // (JEB-1480), so it returns only the canonical id + the gateway's default
+        // 'customer' decoration. Hydrate the user's REAL persisted role set
+        // (available_roles + active_role, e.g. a granted/active driver) from UM's
+        // role-read so the gateway-minted JWT reflects the owner state.
+        IReadOnlyList<string> roles = um.AvailableRoles is { Count: > 0 }
+            ? um.AvailableRoles
+            : new[] { Roles.Client };
+        var active = string.IsNullOrWhiteSpace(um.ActiveRole) ? Roles.Client : um.ActiveRole;
+
+        var persisted = await SafeGetUserRolesAsync(um.UserId, ct);
+        if (persisted is not null)
         {
-            try
-            {
-                var um = await _userManagement.PhoneFindOrCreateAsync(phone, ct);
-
-                // JEEBER-SPINE Defect 1 — the phone find-or-create surface is IDENTITY-ONLY
-                // (JEB-1480), so it returns only the canonical id + the gateway's default
-                // 'customer' decoration. Hydrate the user's REAL persisted role set
-                // (available_roles + active_role, e.g. a granted/active driver) from UM's
-                // role-read so the gateway-minted JWT (roles + active_role claims) reflects
-                // the driver capability instead of always projecting customer. Best-effort:
-                // a 404/blip leaves the safe default and never blocks the login.
-                IReadOnlyList<string> roles = um.AvailableRoles is { Count: > 0 }
-                    ? um.AvailableRoles
-                    : new[] { Roles.Client };
-                var active = string.IsNullOrWhiteSpace(um.ActiveRole) ? Roles.Client : um.ActiveRole;
-
-                var persisted = await SafeGetUserRolesAsync(um.UserId, ct);
-                if (persisted is not null)
-                {
-                    if (persisted.AvailableRoles is { Count: > 0 })
-                        roles = persisted.AvailableRoles;
-                    if (!string.IsNullOrWhiteSpace(persisted.ActiveRole))
-                        active = persisted.ActiveRole!;
-                }
-
-                // Never emit an active_role the user does not hold (token integrity / BR-1).
-                if (!roles.Contains(active, StringComparer.OrdinalIgnoreCase))
-                {
-                    active = roles.Count > 0 ? roles[0] : Roles.Client;
-                }
-
-                return (um.UserId, roles, active);
-            }
-            catch (UserManagementCallException ex)
-            {
-                // Fail-safe: never block a successful OTP validate on a UM blip.
-                _log.LogWarning(
-                    "auth.otp.verify UM find-or-create failed (status {Status}); falling back to in-memory identity",
-                    ex.StatusCode);
-            }
+            if (persisted.AvailableRoles is { Count: > 0 })
+                roles = persisted.AvailableRoles;
+            if (!string.IsNullOrWhiteSpace(persisted.ActiveRole))
+                active = persisted.ActiveRole!;
         }
 
-        var profile = await _users.GetOrCreateAsync(phone, ct);
-        var fallbackActive = string.IsNullOrWhiteSpace(profile.ActiveRole) ? Roles.Client : profile.ActiveRole;
-        return (profile.Id, profile.Roles.ToList(), fallbackActive);
+        // Never emit an active_role the user does not hold (token integrity / BR-1).
+        if (!roles.Contains(active, StringComparer.OrdinalIgnoreCase))
+            active = roles.Count > 0 ? roles[0] : Roles.Client;
+
+        return (um.UserId, roles, active);
     }
 
     /// <summary>

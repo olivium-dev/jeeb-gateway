@@ -3,15 +3,8 @@ namespace JeebGateway.Services.Dispatch;
 /// <summary>
 /// Gateway notification render→dispatch primitive (JEB-1494).
 ///
-/// <para>Encapsulates the full outbound notification pipeline:
-///   1. Idempotency check against the outbox.
-///   2. Persist job to the outbox (durable in Postgres, in-memory for MVP).
-///   3. Render the template via <see cref="INotificationTemplateRenderer"/>.
-///   4. Dispatch through <see cref="JeebGateway.Push.IPushNotificationService"/>
-///      (preference filtering, device resolution, transport fan-out, retry).
-///   5. On success mark the outbox entry Delivered; on failure schedule a
-///      retry up to <c>MaxAttempts</c> then move to DLQ.
-/// </para>
+/// Renders the legacy template envelope and submits one stable command to the
+/// notification-service owner. No delivery state is retained in the gateway.
 /// </summary>
 public interface IJeebNotificationDispatcher
 {

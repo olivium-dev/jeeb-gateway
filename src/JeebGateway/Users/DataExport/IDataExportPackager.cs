@@ -13,7 +13,11 @@ namespace JeebGateway.Users.DataExport;
 /// </summary>
 public interface IDataExportPackager
 {
-    Task<DataExportPayload> BuildAsync(string userId, string format, CancellationToken ct);
+    Task<DataExportPayload> BuildAsync(
+        string userId,
+        string format,
+        DateTimeOffset generatedAt,
+        CancellationToken ct);
 }
 
 public class DataExportPayload
@@ -21,6 +25,22 @@ public class DataExportPayload
     public required byte[] Bytes { get; init; }
     public required string ContentType { get; init; }
     public required string FileName { get; init; }
+}
+
+public sealed record DataExportPackageMetadata(string ContentType, string FileName)
+{
+    public static DataExportPackageMetadata For(
+        string userId,
+        string format,
+        DateTimeOffset generatedAt)
+    {
+        // PDF is still an accepted compatibility request but is packaged as
+        // honest JSON until a PDF renderer owner exists.
+        _ = format;
+        return new DataExportPackageMetadata(
+            "application/json",
+            $"jeeb-data-export-{userId}-{generatedAt.ToUniversalTime():yyyyMMdd-HHmmss}.json");
+    }
 }
 
 public class DataExportPackager : IDataExportPackager
@@ -36,23 +56,23 @@ public class DataExportPackager : IDataExportPackager
     private readonly IRequestsStore _requests;
     private readonly IDataExportRatingsProvider _ratings;
     private readonly IDataExportChatHistoryProvider _chats;
-    private readonly TimeProvider _clock;
-
     public DataExportPackager(
         IUsersStore users,
         IRequestsStore requests,
         IDataExportRatingsProvider ratings,
-        IDataExportChatHistoryProvider chats,
-        TimeProvider clock)
+        IDataExportChatHistoryProvider chats)
     {
         _users = users;
         _requests = requests;
         _ratings = ratings;
         _chats = chats;
-        _clock = clock;
     }
 
-    public async Task<DataExportPayload> BuildAsync(string userId, string format, CancellationToken ct)
+    public async Task<DataExportPayload> BuildAsync(
+        string userId,
+        string format,
+        DateTimeOffset generatedAt,
+        CancellationToken ct)
     {
         var profile = await _users.GetByIdAsync(userId, ct);
         var addresses = await _users.ListAddressesAsync(userId, ct);
@@ -63,7 +83,7 @@ public class DataExportPackager : IDataExportPackager
         var document = new
         {
             schemaVersion = 1,
-            generatedAt = _clock.GetUtcNow(),
+            generatedAt = generatedAt.ToUniversalTime(),
             userId,
             profile = profile is null ? null : new
             {
@@ -130,34 +150,31 @@ public class DataExportPackager : IDataExportPackager
         // still JSON until the renderer service is wired up. The bytes
         // are still valid (a PDF reader will reject them), but the
         // ContentType is honest so clients don't mis-render.
-        var contentType = "application/json";
-        var fileName = $"jeeb-data-export-{userId}-{_clock.GetUtcNow():yyyyMMdd-HHmmss}.json";
+        var metadata = DataExportPackageMetadata.For(userId, format, generatedAt);
 
         return new DataExportPayload
         {
             Bytes = json,
-            ContentType = contentType,
-            FileName = fileName
+            ContentType = metadata.ContentType,
+            FileName = metadata.FileName
         };
     }
 
     private async Task<IReadOnlyList<DeliveryRequest>> GatherOrdersAsync(string userId, CancellationToken ct)
     {
-        // The IRequestsStore contract only exposes scans by status; we
-        // need every order ever created for the user. The in-memory MVP
-        // store keeps everything in a dictionary, so we read it through
-        // the reflection-free escape hatch the production Postgres store
-        // will replace with a "WHERE client_id = ?" query.
-        if (_requests is InMemoryRequestsStore mem)
-        {
-            return mem.ListForClient(userId);
-        }
-        // Until the production seam is wired, fall back to a stale-but-correct
-        // listing via the pending-pre-acceptance window. Production swap
-        // will provide a typed ListForUser method on the NSwag client.
-        var listed = await _requests.ListPendingCreatedAtOrBeforeAsync(
-            DateTimeOffset.MaxValue,
-            ct);
-        return listed.Where(r => string.Equals(r.ClientId, userId, StringComparison.Ordinal)).ToArray();
+        // A right-of-access package requires every historical delivery in both
+        // roles. Expiry/pending scans are not substitutes: filtering them would
+        // silently omit completed and cancelled orders. DeliveryOwnerRequestsStore
+        // therefore raises OwnerCapabilityUnavailableException until delivery-
+        // service exposes complete client- and jeeber-scoped list operations;
+        // DataExportWorkHandler converts that gap into a durable defer.
+        var asClient = await _requests.ListForClientAsync(userId, ct);
+        var asJeeber = await _requests.ListForJeeberAsync(userId, ct);
+        return asClient.Concat(asJeeber)
+            .GroupBy(request => request.Id, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .OrderBy(request => request.CreatedAt)
+            .ThenBy(request => request.Id, StringComparer.Ordinal)
+            .ToArray();
     }
 }

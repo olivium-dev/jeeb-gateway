@@ -75,6 +75,19 @@ public interface IJeebConversationClient
             "This test double does not implement the canonical paged export route.");
 
     /// <summary>
+    /// Bounded, viewer-filtered conversation discovery for a complete data
+    /// export. The first response pins <c>as_of</c>; callers reuse it across
+    /// every subsequent index and per-conversation export page.
+    /// </summary>
+    Task<JeebConversationExportIndexPage> ListConversationExportIndexAsync(
+        string viewerUserId,
+        DateTimeOffset? asOf,
+        string? cursor,
+        int limit,
+        CancellationToken ct) => throw new NotSupportedException(
+            "This test double does not implement the canonical conversation export-index route.");
+
+    /// <summary>
     /// S08 A6 — viewer-filtered DELTA read. Returns ONLY the messages created
     /// AFTER <paramref name="cursor"/> that the viewer may see. The gateway forwards
     /// both the viewer and the cursor verbatim; chat-service applies the SAME

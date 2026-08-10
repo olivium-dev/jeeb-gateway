@@ -22,10 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup .NET 8
+      - name: Setup exact .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: "8.0.404"
       - name: Install NSwag CLI
         run: dotnet tool install -g NSwag.ConsoleCore --version 14.2.0
       - name: Regenerate jeeb-state-service client
@@ -48,10 +48,10 @@ jobs:
       # NSwag.ConsoleCore 14.2.0 is a net8.0 tool whose process runtime is Net80.
       # The nswag-otp.json document therefore declares "runtime": "Net80" (matching
       # the working nswag-state job); setup .NET 8 so the toolchain is consistent.
-      - name: Setup .NET 8
+      - name: Setup exact .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: "8.0.404"
       - name: Install NSwag CLI
         run: dotnet tool install -g NSwag.ConsoleCore --version 14.2.0
       - name: Regenerate OTP service client
@@ -71,22 +71,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup .NET 8
+      - name: Setup exact .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: "8.0.404"
 
-      - name: Restore
-        run: dotnet restore src/JeebGateway/JeebGateway.csproj
+      - name: Restore gateway (locked)
+        run: dotnet restore src/JeebGateway/JeebGateway.csproj --locked-mode
+
+      - name: Audit gateway dependency vulnerabilities
+        run: |
+          set -euo pipefail
+          dotnet list src/JeebGateway/JeebGateway.csproj package \
+            --vulnerable --include-transitive | tee vulnerability-audit.txt
+          if grep -Fq 'has the following vulnerable packages' vulnerability-audit.txt; then
+            echo '::error::The gateway dependency graph contains a known vulnerable package.'
+            exit 1
+          fi
 
       - name: Build
         run: dotnet build src/JeebGateway/JeebGateway.csproj -c Release --no-restore
 
-      - name: Restore test project
-        run: dotnet restore tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj
+      - name: Restore test project (locked)
+        run: dotnet restore tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj --locked-mode
 
       - name: Test
         run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal --logger "trx;LogFileName=tests.trx"
+
+      - name: Assert lock files stayed unchanged
+        run: git diff --exit-code -- src/JeebGateway/packages.lock.json tests/JeebGateway.IntegrationTests/packages.lock.json
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -129,6 +142,8 @@ jobs:
       - name: Verify health check endpoint exists in image
         run: |
           docker run -d --name gw-smoke -p 18080:8080 \
+            -e ASPNETCORE_ENVIRONMENT="Testing" \
+            -e DELIVERY_SERVICE_TOKEN="ci-smoke-delivery-token-not-for-prod-aaaaaaaaaaaa" \
             -e JeebJwt__SigningKey="ci-smoke-signing-key-not-for-prod-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
             -e JeebJwt__PhonePepper="ci-smoke-phone-pepper-not-for-prod-aaaaaaa" \
             -e Services__Auth__BaseUrl="http://auth-service:8080" \

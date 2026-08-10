@@ -130,6 +130,29 @@ public sealed class JeebConversationClient : IJeebConversationClient
         return await SendAsync<JeebConversationExportPage>(msg, ct);
     }
 
+    public async Task<JeebConversationExportIndexPage> ListConversationExportIndexAsync(
+        string viewerUserId,
+        DateTimeOffset? asOf,
+        string? cursor,
+        int limit,
+        CancellationToken ct)
+    {
+        var query = new List<string>
+        {
+            "viewer=" + Uri.EscapeDataString(viewerUserId),
+            "limit=" + Math.Clamp(limit, 1, 100)
+                .ToString(System.Globalization.CultureInfo.InvariantCulture),
+        };
+        if (asOf is not null)
+            query.Add("asOf=" + Uri.EscapeDataString(asOf.Value.ToUniversalTime().ToString("o")));
+        if (!string.IsNullOrWhiteSpace(cursor))
+            query.Add("cursor=" + Uri.EscapeDataString(cursor));
+        using var msg = new HttpRequestMessage(
+            HttpMethod.Get,
+            $"api/conversations/export-index?{string.Join("&", query)}");
+        return await SendAsync<JeebConversationExportIndexPage>(msg, ct);
+    }
+
     public async Task<JeebMessageListResponse> ListMessagesSinceForViewerAsync(
         string conversationId, string viewerUserId, string cursor, CancellationToken ct)
     {

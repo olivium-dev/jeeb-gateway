@@ -17,9 +17,8 @@ namespace JeebGateway.Controllers;
 ///   POST /v1/notifications/dispatch
 ///
 /// The endpoint accepts a typed dispatch request, routes it through the
-/// gateway's existing <see cref="IPushNotificationService"/> pipeline
-/// (preference-filtering, device-token resolution, FCM/APNs transport,
-/// retry queue) and returns 202 Accepted with the delivery outcome so the
+/// stateless <see cref="IPushNotificationService"/> compatibility adapter,
+/// which durably submits to notification-service, and returns 202 once the
 /// weekly batch can log per-notification results without blocking.
 ///
 /// Authorization: service-to-service calls (admin scope or system-internal
@@ -49,14 +48,14 @@ public sealed class NotificationDispatchController : ControllerBase
     ///
     /// Returns 202 Accepted with the <see cref="DispatchOutcomeDto"/> so the
     /// caller can log per-notification results. The underlying push is
-    /// best-effort: a transport failure does NOT 5xx this endpoint — it returns
-    /// 202 with <c>delivered=false</c> + the failure reason so batch callers
-    /// can collect non-delivery telemetry without aborting the batch.
+    /// delivery itself is asynchronous and owner-managed. A failure to obtain
+    /// durable owner acceptance returns 503 and is never fabricated as 202.
     /// </summary>
     [HttpPost("dispatch")]
     [RequireCapability(Capabilities.NotificationDispatch)]
     [ProducesResponseType(typeof(DispatchOutcomeDto), StatusCodes.Status202Accepted)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> Dispatch(
@@ -109,19 +108,15 @@ public sealed class NotificationDispatchController : ControllerBase
         }
         catch (Exception ex)
         {
-            // Transport-level exception: surface as 202 with delivered=false
-            // so the caller (batch job) can log and continue, not abort.
             _log.LogWarning(ex,
                 "notification.dispatch_exception userId={UserId} trigger={Trigger}",
                 body.UserId, trigger);
 
-            return Accepted(new DispatchOutcomeDto
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
             {
-                UserId    = body.UserId,
-                Trigger   = trigger.ToString(),
-                Delivered = false,
-                Outcome   = "transport_exception",
-                Detail    = ex.GetType().Name
+                Title = "Notification owner did not durably accept the command.",
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Type = "https://jeeb.dev/errors/notification-owner-unavailable",
             });
         }
 

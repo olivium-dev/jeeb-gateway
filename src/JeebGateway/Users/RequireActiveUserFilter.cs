@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
+using JeebGateway.Services.Clients;
 
 namespace JeebGateway.Users;
 
@@ -25,20 +26,44 @@ public sealed class RequireActiveUserAttribute : Attribute, IAsyncActionFilter
             return;
         }
 
-        var store = context.HttpContext.RequestServices.GetService(typeof(IUsersStore)) as IUsersStore;
-        if (store is null)
+        var owner = context.HttpContext.RequestServices
+            .GetService(typeof(IBanServiceClient)) as IBanServiceClient;
+        if (owner is null)
         {
-            await next();
+            context.Result = Unavailable();
             return;
         }
 
-        var profile = await store.GetByIdAsync(userId, context.HttpContext.RequestAborted);
-        if (profile is { IsSuspended: true })
+        BanStatusesResult statuses;
+        try
+        {
+            statuses = await owner.GetStatusAsync(
+                userId, context.HttpContext.RequestAborted);
+        }
+        catch (OperationCanceledException) when (context.HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // A ban-owner outage must never be interpreted as "active". That would
+            // silently bypass an administrator suspension after a gateway restart.
+            context.Result = Unavailable();
+            return;
+        }
+
+        var active = statuses.BanStatuses
+            .Where(status => status.IsCurrentlyBanned)
+            .OrderByDescending(status => status.LastUpdated)
+            .FirstOrDefault();
+        if (active is not null)
         {
             context.Result = new ObjectResult(new ProblemDetails
             {
                 Title = "Account is suspended.",
-                Detail = profile.SuspensionReason ?? "Contact support.",
+                Detail = string.IsNullOrWhiteSpace(active.Message)
+                    ? "Contact support."
+                    : active.Message,
                 Status = StatusCodes.Status403Forbidden,
                 Type = "https://jeeb.dev/errors/account-suspended"
             })
@@ -50,4 +75,15 @@ public sealed class RequireActiveUserAttribute : Attribute, IAsyncActionFilter
 
         await next();
     }
+
+    private static ObjectResult Unavailable() => new(new ProblemDetails
+    {
+        Title = "Account status is unavailable.",
+        Detail = "The ban service could not confirm whether this account is active.",
+        Status = StatusCodes.Status503ServiceUnavailable,
+        Type = "https://jeeb.dev/errors/account-status-unavailable",
+    })
+    {
+        StatusCode = StatusCodes.Status503ServiceUnavailable,
+    };
 }

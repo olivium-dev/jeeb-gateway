@@ -101,6 +101,7 @@ public sealed class KycSubmissionWiringEndpointTests
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:UseUpstream:FormBuilder", _formBuilderOn ? "true" : "false");
             builder.ConfigureServices(services =>
             {

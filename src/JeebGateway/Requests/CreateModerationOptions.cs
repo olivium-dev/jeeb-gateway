@@ -16,15 +16,14 @@ namespace JeebGateway.Requests;
 /// Default is now <b>true</b> (S05 round-2): prohibited-items screening is a
 /// safety control, so it is ON by default and — critically — DECOUPLED from
 /// <c>FeatureFlags:DurableRequests</c>. The two flags are independent: the
-/// moderation gate runs (and the lexicon is seeded) regardless of whether the
+/// moderation gate runs regardless of whether the
 /// durable saga create path is active, so "arak"/"knife" are rejected with 409
 /// (N1/A1.1) whether durable_requests is ON or OFF. To disable the gate (e.g. a
 /// staging soak with a not-yet-curated lexicon) set
 /// <c>FeatureFlags__CreateModeration__Enabled=false</c> explicitly; absence of
 /// the key means ON. The gate is purely orchestration: it composes the existing
-/// gateway-owned <c>IProhibitedItemScanner</c> + ack ledger and the lexicon
-/// stays gateway-owned (N11), so no gateway-side domain logic and no
-/// ban-service coupling is introduced.
+/// gateway scanner over a version-pinned ban-service catalog snapshot and its
+/// owner acknowledgement ledger. No gateway-side owner state is introduced.
 /// </summary>
 public sealed class CreateModerationOptions
 {

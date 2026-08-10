@@ -1,5 +1,7 @@
 using System.Net;
 using JeebGateway.Services.Clients;
+using JeebGateway.StateService.Audit;
+using JeebGateway.StateService.Work;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
 using Polly.Timeout;
@@ -17,14 +19,16 @@ public static class StateServiceClientExtensions
     /// Registers <see cref="IJeebStateServiceClient"/> as an
     /// IHttpClientFactory-managed typed client with a standard Polly v8
     /// resilience pipeline (retry + circuit breaker + timeout). A
-    /// state-service outage trips the breaker and the decorators degrade to
-    /// the local fallback instead of cascading fleet-wide 500s.
+    /// state-service outage trips the breaker and surfaces as an owner
+    /// capability failure; the gateway never substitutes process-local state.
     /// </summary>
     public static IServiceCollection AddJeebStateServiceClient(
         this IServiceCollection services,
         StateServiceOptions options)
     {
         var baseUrl = options.BaseUrl.TrimEnd('/') + "/";
+
+        services.AddTransient<StateServiceCredentialHandler>();
 
         services
             .AddHttpClient<IJeebStateServiceClient, JeebStateServiceClient>(http =>
@@ -38,6 +42,7 @@ public static class StateServiceClientExtensions
             // gateway on first request).
             .AddTypedClient<IJeebStateServiceClient>((http, _) =>
                 new JeebStateServiceClient(baseUrl, http))
+            .AddHttpMessageHandler<StateServiceCredentialHandler>()
             .AddResilienceHandler("jeeb-state-service", pipeline =>
             {
                 pipeline.AddRetry(new HttpRetryStrategyOptions
@@ -66,6 +71,34 @@ public static class StateServiceClientExtensions
                     BreakDuration = TimeSpan.FromSeconds(15)
                 });
                 pipeline.AddTimeout(TimeSpan.FromSeconds(options.TimeoutSeconds));
+            });
+
+        // Durable executor mutations deliberately use a separate no-retry client.
+        // A transport failure after state-service accepted /claim, /lease,
+        // /complete, or /fail is ambiguous; replaying it in an HTTP resilience
+        // handler can claim extra work or turn a successful CAS into a misleading
+        // conflict. The external scheduler safely invokes another bounded sweep,
+        // and expired state-service leases provide recovery.
+        services.AddHttpClient<IStateWorkItemClient, StateWorkItemClient>(http =>
+        {
+            http.BaseAddress = new Uri(baseUrl);
+            http.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
+        }).AddHttpMessageHandler<StateServiceCredentialHandler>();
+
+        // Audit appends carry a required owner-side idempotency key, so transport
+        // ambiguity is safe to resolve by replaying the exact request. Keep the
+        // client independent from generated state surfaces and their regeneration.
+        services
+            .AddHttpClient<IStateAuditClient, StateAuditClient>(http =>
+            {
+                http.BaseAddress = new Uri(baseUrl);
+                http.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
+            })
+            .AddHttpMessageHandler<StateServiceCredentialHandler>()
+            .AddStandardResilienceHandler(options =>
+            {
+                options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(
+                    Math.Max(1, options.AttemptTimeout.Timeout.Seconds * 3));
             });
 
         return services;

@@ -6,6 +6,7 @@ using FluentAssertions;
 using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
+using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -22,9 +23,10 @@ namespace JeebGateway.IntegrationTests;
 /// The controller is a THIN BFF: it orchestrates the shared one-time-password
 /// service via the NSwag-generated <see cref="IServiceOTPClient"/> for
 /// send/validate and mints the gateway session ONLY on a successful validate
-/// (<c>IUsersStore.GetOrCreateAsync</c> + <c>ITokenService.IssueAsync</c>, which
-/// are the real in-memory singletons in the test host, so verify mints a genuine
-/// JWT pair). The retired in-gateway OTP mock — which duplicated OTP business
+/// (authoritative user-management identity resolution +
+/// <c>ITokenService.IssueAsync</c>; this fixture supplies an explicit UM owner
+/// double, so verify mints a genuine JWT pair). The retired in-gateway OTP mock —
+/// which duplicated OTP business
 /// logic — is gone; the gateway now contains ZERO OTP send/validate logic.
 ///
 /// Boundaries asserted:
@@ -321,7 +323,14 @@ public class AuthOtpControllerTests
             {
                 services.RemoveAll<IServiceOTPClient>();
                 services.AddSingleton(stub);
-                services.Configure<UpstreamFeatureFlags>(f => f.Otp = otpEnabled);
+                services.RemoveAll<IUserManagementDualRoleClient>();
+                services.AddSingleton<IUserManagementDualRoleClient,
+                    Fakes.TestUserManagementDualRoleClient>();
+                services.Configure<UpstreamFeatureFlags>(f =>
+                {
+                    f.Otp = otpEnabled;
+                    f.UserManagement = true;
+                });
                 services.Configure<OtpSignInOptions>(o =>
                 {
                     o.ApplicationId = AppId;

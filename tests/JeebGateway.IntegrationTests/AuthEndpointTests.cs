@@ -33,7 +33,8 @@ public class AuthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
                     // F3: token-mint gate OFF so the legacy /auth/tokens helper used
                     // by these auth-flow tests keeps working without a privileged key.
                     ["Security:TokenMint:Enabled"] = "false",
-                    ["Security:RateLimit:Enabled"] = "false"
+                    ["Security:RateLimit:Enabled"] = "false",
+                    ["Features:DevEndpoints:Enabled"] = "true"
                 });
             });
         });
@@ -153,7 +154,11 @@ public class AuthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
     private async Task<TokenPairResponse> Issue(string userId)
     {
         var resp = await _factory.CreateClient()
-            .PostAsJsonAsync("/auth/tokens", new { userId });
+            .PostAsJsonAsync("/auth/tokens", new
+            {
+                userId,
+                roles = new[] { "client" },
+            });
         resp.EnsureSuccessStatusCode();
         return (await resp.Content.ReadFromJsonAsync<TokenPairResponse>())!;
     }

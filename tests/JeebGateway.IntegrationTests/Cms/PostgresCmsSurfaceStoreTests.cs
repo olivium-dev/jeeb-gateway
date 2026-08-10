@@ -13,10 +13,8 @@ using Xunit;
 namespace JeebGateway.IntegrationTests.Cms;
 
 /// <summary>
-/// Gateway durability hardening (JEBV4-132, AUDIT-A IN-MEM-LIVE) —
-/// PostgresCmsSurfaceStore replaces InMemoryCmsSurfaceStore behind
-/// GatewayPostgres:ConnectionString. Mirrors PostgresTiersStoreTests, the
-/// established DI-resolution-smoke-test pattern for a flag-gated store swap.
+/// CMS ownership regression: the compatibility routes always resolve the
+/// stateless bundler-service adapter and never a gateway persistence store.
 ///
 /// <para>The DI-resolution tests run for real, no live Postgres required:
 /// PostgresCmsSurfaceStore's constructor only stores its collaborators
@@ -38,7 +36,7 @@ public class PostgresCmsSurfaceStoreTests
     // ── PART A: DI wiring (real, runs without Postgres) ────────────────────────
 
     [Fact]
-    public void CmsSurfaceStore_Resolves_To_Postgres_When_GatewayPostgres_Configured()
+    public void CmsSurfaceStore_Resolves_To_Bundler_When_GatewayPostgres_Configured()
     {
         using var factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(b =>
@@ -56,14 +54,13 @@ public class PostgresCmsSurfaceStoreTests
         using var scope = factory.Services.CreateScope();
         var act = () => scope.ServiceProvider.GetRequiredService<ICmsSurfaceStore>();
 
-        act.Should().NotThrow("PostgresCmsSurfaceStore's constructor stores its collaborators and does no I/O");
+        act.Should().NotThrow("the bundler adapter constructor performs no I/O");
         scope.ServiceProvider.GetRequiredService<ICmsSurfaceStore>()
-            .Should().BeOfType<PostgresCmsSurfaceStore>(
-                "GatewayPostgres:ConnectionString is configured, so the durable store must be selected");
+            .Should().BeOfType<BundlerCmsSurfaceStore>();
     }
 
     [Fact]
-    public void CmsSurfaceStore_Resolves_To_InMemory_When_GatewayPostgres_Absent()
+    public void CmsSurfaceStore_Still_Resolves_To_Bundler_When_GatewayPostgres_Absent()
     {
         // Default test config carries no GatewayPostgres:ConnectionString, so the
         // in-memory fallback must remain the live path (unchanged behaviour for
@@ -72,22 +69,17 @@ public class PostgresCmsSurfaceStoreTests
 
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<ICmsSurfaceStore>()
-            .Should().BeOfType<InMemoryCmsSurfaceStore>(
-                "no connection string is configured, so local/CI runs must keep exercising the in-memory fallback");
+            .Should().BeOfType<BundlerCmsSurfaceStore>(
+                "there is no gateway-local CMS fallback");
     }
 
     // ── PART A: Durability guard promotion (JEBV4-132) ─────────────────────────
 
     [Fact]
-    public void Cms_Is_Now_A_Critical_Durable_Store_Requiring_PostgresCmsSurfaceStore()
+    public void Cms_Is_Not_A_Gateway_Critical_Store()
     {
-        var critical = StoreDurabilityGuard.Critical
-            .FirstOrDefault(c => c.Iface == typeof(ICmsSurfaceStore));
-
-        critical.Iface.Should().Be(typeof(ICmsSurfaceStore),
-            "ICmsSurfaceStore must be promoted to the Critical fail-closed set now that a durable target exists");
-        critical.DurableImpls.Should().Contain(typeof(PostgresCmsSurfaceStore),
-            "the only durable implementation that satisfies the prod-like gate is PostgresCmsSurfaceStore");
+        StoreDurabilityGuard.Critical.Select(entry => entry.Iface)
+            .Should().NotContain(typeof(ICmsSurfaceStore));
     }
 
     [Fact]
@@ -99,7 +91,7 @@ public class PostgresCmsSurfaceStoreTests
     }
 
     [Fact]
-    public void EnsureDurable_ProdLike_With_InMemory_Cms_Fails_Closed()
+    public void Legacy_InMemory_Cms_Type_Does_Not_Affect_Gateway_Durability_Guard()
     {
         // Prove the promotion is live: a prod-like gateway resolving ICmsSurfaceStore
         // to the in-memory store must now refuse to boot, naming the offending store.
@@ -112,8 +104,7 @@ public class PostgresCmsSurfaceStoreTests
         var provider = new MapServiceProvider(map);
         var violations = StoreDurabilityGuard.Evaluate(t => provider.GetService(t)?.GetType());
 
-        violations.Should().ContainSingle()
-            .Which.Should().Contain("ICmsSurfaceStore").And.Contain("InMemoryCmsSurfaceStore");
+        violations.Should().BeEmpty();
     }
 
     // ── PART A: Round-trip semantics (deferred to Testcontainers QV) ───────────

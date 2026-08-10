@@ -90,6 +90,9 @@ public class AdminUserSearchResultItem
     public required IReadOnlyList<string> Roles { get; init; }
     public decimal? Rating { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
+    public required bool IsSuspended { get; init; }
+    public string? SuspensionReason { get; init; }
+    public DateTimeOffset? SuspendedAt { get; init; }
     /// <summary>
     /// True when the user has never been rated. Drives the "New" badge
     /// in admin rosters next to the Jeeber's rating column.

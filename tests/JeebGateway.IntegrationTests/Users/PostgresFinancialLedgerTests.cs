@@ -34,7 +34,7 @@ public class PostgresFinancialLedgerTests
     // ── DI wiring (real, runs without Postgres) ────────────────────────────
 
     [Fact]
-    public void FinancialLedger_Resolves_To_Postgres_When_GatewayPostgres_Configured()
+    public void FinancialLedger_Resolves_To_WalletOwner_When_GatewayPostgres_Configured()
     {
         using var factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(b =>
@@ -53,14 +53,14 @@ public class PostgresFinancialLedgerTests
         using var scope = factory.Services.CreateScope();
         var act = () => scope.ServiceProvider.GetRequiredService<IFinancialLedgerAnonymizer>();
 
-        act.Should().NotThrow("PostgresFinancialLedger's constructor stores its collaborators and does no I/O");
+        act.Should().NotThrow("the wallet owner adapter stores its collaborators and does no I/O");
         scope.ServiceProvider.GetRequiredService<IFinancialLedgerAnonymizer>()
-            .Should().BeOfType<PostgresFinancialLedger>(
-                "GatewayPostgres:ConnectionString is configured, so the durable store must be selected");
+            .Should().BeOfType<WalletServiceFinancialLedgerAnonymizer>(
+                "gateway Postgres must not retake ownership of wallet ledger rows");
     }
 
     [Fact]
-    public void FinancialLedger_Resolves_To_InMemory_When_GatewayPostgres_Absent()
+    public void FinancialLedger_Resolves_To_WalletOwner_When_GatewayPostgres_Absent()
     {
         // Default test config carries no GatewayPostgres:ConnectionString, so the
         // in-memory fallback must remain the live path (unchanged behaviour for every
@@ -70,22 +70,23 @@ public class PostgresFinancialLedgerTests
 
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<IFinancialLedgerAnonymizer>()
-            .Should().BeOfType<InMemoryFinancialLedger>(
-                "no connection string is configured, so local/CI runs must keep exercising the in-memory fallback");
+            .Should().BeOfType<WalletServiceFinancialLedgerAnonymizer>(
+                "the stateless owner boundary has no gateway-local fallback");
     }
 
     // ── Durability guard promotion (JEBV4-154) ─────────────────────────────
 
     [Fact]
-    public void FinancialLedger_Is_Now_A_Critical_Durable_Store_Requiring_PostgresFinancialLedger()
+    public void FinancialLedger_Is_A_Critical_Owner_Boundary_Requiring_WalletService()
     {
         var critical = StoreDurabilityGuard.Critical
             .FirstOrDefault(c => c.Iface == typeof(IFinancialLedgerAnonymizer));
 
         critical.Iface.Should().Be(typeof(IFinancialLedgerAnonymizer),
             "IFinancialLedgerAnonymizer must be promoted to the Critical fail-closed set now that a durable target exists");
-        critical.DurableImpls.Should().Contain(typeof(PostgresFinancialLedger),
-            "the only durable implementation that satisfies the prod-like gate is PostgresFinancialLedger");
+        critical.DurableImpls.Should().ContainSingle()
+            .Which.Should().Be(typeof(WalletServiceFinancialLedgerAnonymizer),
+                "wallet-service owns retained financial rows and its pseudonym");
     }
 
     [Fact]

@@ -91,42 +91,6 @@ jobs:
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
             | ssh jeeb-staging "DOCKER_CONFIG='$REMOTE_DOCKER_CONFIG' docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
 
-      - name: Apply gateway database migrations on staging host
-        env:
-          DATABASE_URL: ${{ secrets.JEEB_DATABASE_URL }}
-        run: |
-          set -euo pipefail
-          : "${DATABASE_URL:?JEEB_DATABASE_URL is required}"
-          case "$DATABASE_URL" in
-            postgres://*|postgresql://*) ;;
-            *) echo 'JEEB_DATABASE_URL must be a PostgreSQL DSN' >&2; exit 1 ;;
-          esac
-          case "$DATABASE_URL" in
-            *@192.168.2.20:*) ;;
-            *) echo 'JEEB_DATABASE_URL must target staging Postgres at 192.168.2.20' >&2; exit 1 ;;
-          esac
-          case "${DATABASE_URL%%\?*}" in
-            */jeeb_gateway) ;;
-            *) echo 'JEEB_DATABASE_URL must target the jeeb_gateway database' >&2; exit 1 ;;
-          esac
-          archive="/tmp/jeeb-gateway-db-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
-          tar -czf gateway-db.tar.gz db
-          scp gateway-db.tar.gz "jeeb-staging:$archive"
-          {
-            printf 'DATABASE_URL=%q\n' "$DATABASE_URL"
-            printf 'ARCHIVE=%q\n' "$archive"
-            cat <<'REMOTE'
-          set -euo pipefail
-          work=$(mktemp -d)
-          trap 'rm -rf "$work" "$ARCHIVE"' EXIT
-          tar -C "$work" -xzf "$ARCHIVE"
-          DATABASE_URL="$DATABASE_URL" bash "$work/db/apply.sh"
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -At \
-            -c "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0044_init_settlement_ledger_entries') AND to_regclass('public.settlement_ledger_entries') IS NOT NULL;" \
-            | grep -Fxq t
-          REMOTE
-          } | ssh jeeb-staging bash -se
-
       - name: Deploy Swarm service
         env:
           REPOSITORY: ${{ github.event.repository.name }}
@@ -148,10 +112,23 @@ jobs:
           HEARTBEAT_JWKS_URL: ${{ secrets.HEARTBEAT_JWKS_URL }}
           JWT_SIGNING_KEY: ${{ secrets.JEEB_JWT_SIGNING_KEY }}
           UMJWT_SIGNING_KEY: ${{ secrets.UMJWT_SIGNING_KEY }}
+          JEEB_STATE_SERVICE_TOKEN: ${{ secrets.JEEB_STATE_SERVICE_TOKEN }}
+          DELIVERY_SERVICE_TOKEN: ${{ secrets.DELIVERY_SERVICE_TOKEN }}
+          NOTIFICATION_SERVICE_TOKEN: ${{ secrets.NOTIFICATION_SERVICE_TOKEN }}
+          BUNDLER_CMS_BEARER_TOKEN: ${{ secrets.BUNDLER_CMS_BEARER_TOKEN }}
+          PRIVATE_ARTIFACT_STORE_BEARER_TOKEN: ${{ secrets.PRIVATE_ARTIFACT_STORE_BEARER_TOKEN }}
+          DATA_EXPORT_TOKEN_SIGNING_KEY: ${{ secrets.DATA_EXPORT_TOKEN_SIGNING_KEY }}
+          JEEB_GATEWAY_JOB_TOKEN: ${{ secrets.JEEB_GATEWAY_JOB_TOKEN }}
         run: |
           set -euo pipefail
           delivery_database_url=''
-          gateway_postgres_cs=''
+          state_secret_name=''
+          delivery_secret_name=''
+          notification_secret_name=''
+          bundler_secret_name=''
+          artifact_secret_name=''
+          export_secret_name=''
+          job_secret_name=''
           if [ "$REPOSITORY" = delivery-service ]; then
             : "${JEEB_DB_USERNAME:?JEEB_DB_USERNAME is required}"
             : "${JEEB_DB_PASSWORD:?JEEB_DB_PASSWORD is required}"
@@ -162,33 +139,34 @@ jobs:
             delivery_database_url="postgresql://${db_user}:${db_password}@${JEEB_DB_HOST}:${JEEB_DB_PORT}/delivery"
           fi
           if [ "$REPOSITORY" = jeeb-gateway ]; then
-            : "${JEEB_DATABASE_URL:?JEEB_DATABASE_URL is required}"
-            gateway_postgres_cs=$(python3 <<'PY'
-          import os
-          from urllib.parse import unquote, urlsplit
-
-          dsn = urlsplit(os.environ["JEEB_DATABASE_URL"])
-          if dsn.scheme not in {"postgres", "postgresql"}:
-              raise SystemExit("JEEB_DATABASE_URL must be a PostgreSQL DSN")
-          if dsn.hostname != "192.168.2.20":
-              raise SystemExit("JEEB_DATABASE_URL must target staging Postgres at 192.168.2.20")
-          if dsn.path != "/jeeb_gateway":
-              raise SystemExit("JEEB_DATABASE_URL must target the jeeb_gateway database")
-          username = unquote(dsn.username or "")
-          password = unquote(dsn.password or "")
-          if not username:
-              raise SystemExit("JEEB_DATABASE_URL must include a username")
-
-          def quote(value: str) -> str:
-              return '"' + value.replace('"', '""') + '"'
-
-          print(
-              f"Host={quote(dsn.hostname)};Port={dsn.port or 5432};"
-              f"Database={quote(dsn.path.removeprefix('/'))};"
-              f"Username={quote(username)};Password={quote(password)};SSL Mode=Disable"
-          )
-          PY
-            )
+            : "${JEEB_STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN is required}"
+            : "${DELIVERY_SERVICE_TOKEN:?DELIVERY_SERVICE_TOKEN is required}"
+            : "${NOTIFICATION_SERVICE_TOKEN:?NOTIFICATION_SERVICE_TOKEN is required}"
+            : "${BUNDLER_CMS_BEARER_TOKEN:?BUNDLER_CMS_BEARER_TOKEN is required}"
+            : "${PRIVATE_ARTIFACT_STORE_BEARER_TOKEN:?PRIVATE_ARTIFACT_STORE_BEARER_TOKEN is required}"
+            : "${DATA_EXPORT_TOKEN_SIGNING_KEY:?DATA_EXPORT_TOKEN_SIGNING_KEY is required}"
+            : "${JEEB_GATEWAY_JOB_TOKEN:?JEEB_GATEWAY_JOB_TOKEN is required}"
+            state_secret_name="jeeb_staging_gateway_state_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            delivery_secret_name="jeeb_staging_gateway_delivery_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            notification_secret_name="jeeb_staging_gateway_notification_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            bundler_secret_name="jeeb_staging_gateway_bundler_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            artifact_secret_name="jeeb_staging_gateway_artifact_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            export_secret_name="jeeb_staging_gateway_export_key_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            job_secret_name="jeeb_staging_gateway_job_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            stream_secret() {
+              printf '%s' "$2" | ssh jeeb-staging "docker secret create '$1' - >/dev/null"
+            }
+            stream_secret "$state_secret_name" "$JEEB_STATE_SERVICE_TOKEN"
+            stream_secret "$delivery_secret_name" "$DELIVERY_SERVICE_TOKEN"
+            stream_secret "$notification_secret_name" "$NOTIFICATION_SERVICE_TOKEN"
+            stream_secret "$bundler_secret_name" "$BUNDLER_CMS_BEARER_TOKEN"
+            stream_secret "$artifact_secret_name" "$PRIVATE_ARTIFACT_STORE_BEARER_TOKEN"
+            stream_secret "$export_secret_name" "$DATA_EXPORT_TOKEN_SIGNING_KEY"
+            stream_secret "$job_secret_name" "$JEEB_GATEWAY_JOB_TOKEN"
+            unset JEEB_STATE_SERVICE_TOKEN DELIVERY_SERVICE_TOKEN NOTIFICATION_SERVICE_TOKEN \
+              BUNDLER_CMS_BEARER_TOKEN \
+              PRIVATE_ARTIFACT_STORE_BEARER_TOKEN DATA_EXPORT_TOKEN_SIGNING_KEY \
+              JEEB_GATEWAY_JOB_TOKEN
           fi
           openai_api_key="${OPENAI_API_KEY_PRIMARY:-$OPENAI_API_KEY_FALLBACK}"
           {
@@ -197,7 +175,9 @@ jobs:
               JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_REDIS_URL openai_api_key \
               JEEB_SECRET_KEY_BASE JEEB_INTERNAL_SERVICE_TOKEN \
               HEARTBEAT_REDIS_URL HEARTBEAT_SERVICE_AUTH_KEY HEARTBEAT_JWKS_URL \
-              delivery_database_url gateway_postgres_cs JWT_SIGNING_KEY UMJWT_SIGNING_KEY; do
+              delivery_database_url state_secret_name delivery_secret_name notification_secret_name \
+              bundler_secret_name \
+              artifact_secret_name export_secret_name job_secret_name JWT_SIGNING_KEY UMJWT_SIGNING_KEY; do
               printf '%s=%q\n' "$variable" "${!variable}"
             done
             cat <<'REMOTE'
@@ -206,6 +186,8 @@ jobs:
           trap 'rm -rf "$DOCKER_CONFIG"' EXIT
           network=jeeb-staging-net
           mount_args=()
+          secret_update_args=()
+          secret_create_args=()
           update_env=()
           create_env=()
           add_env() { update_env+=(--env-add "$1=$2"); create_env+=(--env "$1=$2"); }
@@ -213,7 +195,6 @@ jobs:
             jeeb-gateway)
               service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
               : "${JWT_SIGNING_KEY:?JEEB_JWT_SIGNING_KEY is required}"
-              : "${gateway_postgres_cs:?gateway Postgres connection string is required}"
               add_env ASPNETCORE_ENVIRONMENT Staging
               add_env ASPNETCORE_URLS http://+:8080
               add_env Jwt__SigningKey "$JWT_SIGNING_KEY"
@@ -224,14 +205,41 @@ jobs:
               add_env UmJwt__Audience user-management
               add_env AdminOidc__Enabled false
               add_env Settlements__CodOwnerVerified true
-              # StoreDurabilityGuard selectors. These select durable concrete
-              # implementations; no FailClosedDisabled bypass is permitted.
-              add_env GatewayPostgres__ConnectionString "$gateway_postgres_cs"
               add_env Redis__ConnectionString 192.168.2.20:6379
               add_env GatewayRateLimit__RedisConnectionString 192.168.2.20:6379
               add_env JeebStateService__BaseUrl http://192.168.2.20:10073
               add_env JeebStateService__TimeoutSeconds 5
               add_env JeebStateService__Enabled true
+              add_env JeebStateService__ServiceTokenFile /run/secrets/jeeb_state_service_token
+              add_env DELIVERY_SERVICE_TOKEN_FILE /run/secrets/delivery_service_token
+              add_env ServiceNotificationClient__ServiceTokenFile /run/secrets/notification_service_token
+              add_env BUNDLER_CMS_BASE_URL http://192.168.2.20:10056/
+              add_env BUNDLER_CMS_BEARER_TOKEN_FILE /run/secrets/bundler_cms_bearer_token
+              add_env PRIVATE_ARTIFACT_STORE_BASE_URL http://192.168.2.20:10072/
+              add_env PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE /run/secrets/private_artifact_store_bearer_token
+              add_env DATA_EXPORT_TOKEN_SIGNING_KEY_FILE /run/secrets/data_export_token_signing_key
+              add_env InternalJobAuth__TokenFile /run/secrets/jeeb_gateway_job_token
+              add_rotated_secret() {
+                local source=$1 target_name=$2
+                while IFS= read -r old_secret; do
+                  [ -z "$old_secret" ] || secret_update_args+=(--secret-rm "$old_secret")
+                done < <(
+                  docker service inspect "$service" \
+                    --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{.SecretName}} {{.File.Name}}{{"\n"}}{{end}}' \
+                    2>/dev/null \
+                    | awk -v target="$target_name" '$2 == target { print $1 }' \
+                    || true
+                )
+                secret_update_args+=(--secret-add "source=$source,target=$target_name,mode=0444")
+                secret_create_args+=(--secret "source=$source,target=$target_name,mode=0444")
+              }
+              add_rotated_secret "$state_secret_name" jeeb_state_service_token
+              add_rotated_secret "$delivery_secret_name" delivery_service_token
+              add_rotated_secret "$notification_secret_name" notification_service_token
+              add_rotated_secret "$bundler_secret_name" bundler_cms_bearer_token
+              add_rotated_secret "$artifact_secret_name" private_artifact_store_bearer_token
+              add_rotated_secret "$export_secret_name" data_export_token_signing_key
+              add_rotated_secret "$job_secret_name" jeeb_gateway_job_token
               add_env FeatureFlags__DurableRequests__Enabled true
               add_env FeatureFlags__UseUpstream__RemoteUserPreferences true
               add_env FeatureFlags__UseUpstream__Ratings true
@@ -250,14 +258,13 @@ jobs:
               add_env Services__FormBuilder__BaseUrl http://192.168.2.20:10070
               add_env Services__HeartBeat__BaseUrl http://192.168.2.20:10075
               add_env Services__Ban__BaseUrl http://192.168.2.20:10065
-              add_env UnifiedPaymentGateway__BaseUrl http://192.168.2.20:10066/
               add_env RemoteUserPreferencesServiceApi__BaseUrl http://192.168.2.20:10067/
               add_env FeedbackServiceApi__BaseUrl http://192.168.2.20:10064
               add_env UserManagementServiceApi__BaseUrl http://192.168.2.20:10001/
               add_env WalletServiceApi__BaseUrl http://192.168.2.20:10014
               add_env ServiceOTPApi__BaseUrl http://192.168.2.20:10037
               add_env ChatServiceApi__BaseUrl http://192.168.2.20:10028
-              add_env ServiceNotificationClient__BaseUrl http://192.168.2.20:10026
+              add_env ServiceNotificationClient__BaseUrl http://192.168.2.20:11026
               add_env PushNotificationServiceApi__BaseUrl http://192.168.2.20:10040
               ;;
             delivery-service)
@@ -354,11 +361,11 @@ jobs:
             --rollback-order stop-first --update-monitor 20s)
           if docker service inspect "$service" >/dev/null 2>&1; then
             docker service update --image "$IMAGE" --with-registry-auth \
-              "${update_env[@]}" "${common[@]}" "$service"
+              "${secret_update_args[@]}" "${update_env[@]}" "${common[@]}" "$service"
           else
             docker service create --name "$service" --replicas 1 --network "$network" \
               --publish "published=$published,target=$target,mode=host" \
-              --with-registry-auth "${mount_args[@]}" "${create_env[@]}" \
+              --with-registry-auth "${mount_args[@]}" "${secret_create_args[@]}" "${create_env[@]}" \
               "${common[@]}" "$IMAGE"
           fi
           ports=$(docker service inspect -f '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}' "$service")

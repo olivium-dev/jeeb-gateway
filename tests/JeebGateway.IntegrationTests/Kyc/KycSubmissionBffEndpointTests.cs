@@ -338,6 +338,7 @@ public sealed class KycSubmissionBffEndpointTests : IClassFixture<KycSubmissionB
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:UseUpstream:Kyc", "true");
             builder.ConfigureServices(services =>
             {

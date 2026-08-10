@@ -386,6 +386,8 @@ public class ClientVisibilityAndReceiptTests
                 }));
             builder.ConfigureTestServices(services =>
             {
+                Fakes.OwnerServiceFakes.UseInMemoryUsers(services);
+                Fakes.OwnerServiceFakes.AllowAllAccounts(services);
                 services.RemoveAll<IDeliveryServiceClient>();
                 services.AddSingleton<IDeliveryServiceClient>(delivery);
 
@@ -413,9 +415,13 @@ public class ClientVisibilityAndReceiptTests
                 // Real-session mint for the [Authorize]-gated flat GET /deliveries.
                 services.RemoveAll<IServiceOTPClient>();
                 services.AddSingleton<IServiceOTPClient>(new StubOtpClient());
+                services.RemoveAll<IUserManagementDualRoleClient>();
+                services.AddSingleton<IUserManagementDualRoleClient,
+                    Fakes.TestUserManagementDualRoleClient>();
                 services.Configure<UpstreamFeatureFlags>(f =>
                 {
                     f.Otp = true;
+                    f.UserManagement = true;
                     f.Offer = upstreamOffer;
                     f.Delivery = false;
                 });

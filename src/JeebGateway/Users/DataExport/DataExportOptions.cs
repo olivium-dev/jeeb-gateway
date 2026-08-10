@@ -24,9 +24,9 @@ public class DataExportOptions
     public TimeSpan LinkValidity { get; set; } = TimeSpan.FromDays(7);
 
     /// <summary>
-    /// How often the background processor scans the queue. The SLA is in
-    /// hours, so a fast cadence is unnecessary; we sweep every 30s in
-    /// production so a fresh request is picked up well within a minute.
+    /// Delay before an externally scheduled sweep retries an export whose
+    /// owner contract cannot yet supply a complete section. No gateway
+    /// background processor exists.
     /// </summary>
-    public TimeSpan SweepInterval { get; set; } = TimeSpan.FromSeconds(30);
+    public TimeSpan SourceUnavailableRetryDelay { get; set; } = TimeSpan.FromMinutes(15);
 }

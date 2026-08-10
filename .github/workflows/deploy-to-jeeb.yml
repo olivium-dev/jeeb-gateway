@@ -13,11 +13,9 @@
 #   * registry creds via GitHub secrets, never inlined (no demo-password literals)
 #   * HTTP health gate after deploy, with auto-rollback to the previous image
 #
-# This service is the Jeeb gateway: a JWT BFF that aggregates downstream services
-# via Services__*__BaseUrl config injected on first create. It also owns a Postgres
-# schema (db/migrations/) for KYC, users, disputes, and financial ledger. Migrations
-# are applied via db/apply.sh before the docker service update (JEB-1490); the
-# required DATABASE_URL credential is injected from the JEEB_DATABASE_URL secret.
+# This service is the stateless Jeeb gateway: a JWT BFF that aggregates owner
+# services via configured HTTP boundaries. It receives no database credential
+# and runs no schema migration.
 #
 # Required secrets (set org-selected to the Jeeb repos, or per-repo):
 #   JEEB_SSH_PRIVATE_KEY    -- deploy private key authorized on the Jeeb swarm host
@@ -41,6 +39,15 @@
 #                              This is the leaked shared fleet key (known-debt #6); a
 #                              fleet-wide rotation is tracked separately — do NOT reuse it
 #                              as the gateway's own mint key (JeebJwt__SigningKey).
+#   JEEB_STATE_SERVICE_TOKEN -- dedicated state-owner service credential. The
+#                              workflow streams it into a versioned Swarm secret;
+#                              it is never passed as an env value or command arg.
+#   DELIVERY_SERVICE_TOKEN, NOTIFICATION_SERVICE_TOKEN -- dedicated owner
+#                              credentials, mounted as rotating secret files.
+#   BUNDLER_CMS_BEARER_TOKEN, PRIVATE_ARTIFACT_STORE_BEARER_TOKEN,
+#   DATA_EXPORT_TOKEN_SIGNING_KEY, JEEB_GATEWAY_JOB_TOKEN -- likewise mounted
+#                              as versioned Swarm secrets for stateless CMS and
+#                              durable deletion/export execution.
 
 name: Deploy to Jeeb
 
@@ -70,7 +77,7 @@ on:
       chat_base_url:               { description: 'Chat service base URL',            required: true, default: 'http://192.168.2.50:10028' }
       user_management_base_url:    { description: 'User-management service base URL',  required: true, default: 'http://192.168.2.50:10001' }
       wallet_base_url:             { description: 'Wallet service base URL',          required: true, default: 'http://192.168.2.50:10014' }
-      notification_base_url:       { description: 'Notification service base URL',     required: true, default: 'http://192.168.2.50:10026' }
+      notification_base_url:       { description: 'Notification owner base URL',       required: true, default: 'http://127.0.0.1:11026' }
       push_notification_base_url:  { description: 'Push-notification service base URL',required: true, default: 'http://192.168.2.50:10040' }
       otp_base_url:                { description: 'OTP service base URL',             required: true, default: 'http://192.168.2.50:10037' }
       matching_base_url:           { description: 'Matching service base URL (native host)', required: true, default: 'http://192.168.2.50:10025' }
@@ -286,44 +293,6 @@ jobs:
       - name: Remote GHCR login (token via stdin pipe)
         run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"
 
-      # JEB-1490: run database migrations BEFORE the image update so the new
-      # code never starts against an un-migrated schema.  Fail-fast: if apply.sh
-      # exits non-zero the workflow aborts here and the running service is
-      # untouched (no rollback needed because docker service update was not yet
-      # called).
-      #
-      # db/apply.sh uses psql + $DATABASE_URL; it is idempotent (re-run safe).
-      # Each migration is wrapped in IF NOT EXISTS / CREATE TABLE IF NOT EXISTS
-      # guards so replaying on a fully-migrated DB is a no-op.
-      #
-      # Required secret: JEEB_DATABASE_URL  (postgres://user:pass@host:5432/jeeb)
-      # The URL is NOT a workflow input (it is a credential, never in YAML
-      # literals) — set it once as an org/repo GitHub secret.
-      - name: Install psql client (for migration apply + readiness check)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client
-
-      - name: Apply DB migrations (fail-fast before image update)
-        env:
-          DATABASE_URL: ${{ secrets.JEEB_DATABASE_URL }}
-        run: |
-          set -euo pipefail
-          if [ -z "${DATABASE_URL:-}" ]; then
-            echo "::error::JEEB_DATABASE_URL secret is not set — cannot run migrations. Add it as an org/repo secret."
-            exit 1
-          fi
-          echo "==> Applying migrations via db/apply.sh ..."
-          bash db/apply.sh
-          echo "==> Migrations applied successfully."
-          echo "==> Schema readiness check (querying scheduled_delivery_settings sentinel table) ..."
-          ROW_COUNT=$(psql "$DATABASE_URL" -t -c "SELECT COUNT(*) FROM scheduled_delivery_settings;" 2>/dev/null | tr -d ' \n' || echo "-1")
-          if [ "$ROW_COUNT" = "-1" ]; then
-            echo "::warning::Schema readiness check skipped (table not yet present or DB unreachable)"
-          else
-            echo "Schema readiness check passed: scheduled_delivery_settings has ${ROW_COUNT} row(s)"
-          fi
-
       - name: Capture current image as rollback target
         id: prev
         run: |
@@ -331,8 +300,44 @@ jobs:
           echo "prev=$PREV" >> "$GITHUB_OUTPUT"
 
       - name: Zero-downtime deploy (update if exists, else create)
+        env:
+          STATE_SERVICE_TOKEN: ${{ secrets.JEEB_STATE_SERVICE_TOKEN }}
+          DELIVERY_OWNER_TOKEN: ${{ secrets.DELIVERY_SERVICE_TOKEN }}
+          NOTIFICATION_OWNER_TOKEN: ${{ secrets.NOTIFICATION_SERVICE_TOKEN }}
+          BUNDLER_CMS_TOKEN: ${{ secrets.BUNDLER_CMS_BEARER_TOKEN }}
+          PRIVATE_ARTIFACT_TOKEN: ${{ secrets.PRIVATE_ARTIFACT_STORE_BEARER_TOKEN }}
+          DATA_EXPORT_SIGNING_KEY: ${{ secrets.DATA_EXPORT_TOKEN_SIGNING_KEY }}
+          GATEWAY_JOB_TOKEN: ${{ secrets.JEEB_GATEWAY_JOB_TOKEN }}
         run: |
+          set -euo pipefail
+          : "${STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN secret is required}"
+          : "${DELIVERY_OWNER_TOKEN:?DELIVERY_SERVICE_TOKEN secret is required}"
+          : "${NOTIFICATION_OWNER_TOKEN:?NOTIFICATION_SERVICE_TOKEN secret is required}"
+          : "${BUNDLER_CMS_TOKEN:?BUNDLER_CMS_BEARER_TOKEN secret is required}"
+          : "${PRIVATE_ARTIFACT_TOKEN:?PRIVATE_ARTIFACT_STORE_BEARER_TOKEN secret is required}"
+          : "${DATA_EXPORT_SIGNING_KEY:?DATA_EXPORT_TOKEN_SIGNING_KEY secret is required}"
+          : "${GATEWAY_JOB_TOKEN:?JEEB_GATEWAY_JOB_TOKEN secret is required}"
           TAG="${{ steps.build.outputs.tag }}"
+          STATE_SECRET="jeeb_gateway_state_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          DELIVERY_SECRET="jeeb_gateway_delivery_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          NOTIFICATION_SECRET="jeeb_gateway_notification_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          BUNDLER_SECRET="jeeb_gateway_bundler_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          ARTIFACT_SECRET="jeeb_gateway_artifact_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          EXPORT_SECRET="jeeb_gateway_export_key_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          JOB_SECRET="jeeb_gateway_job_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          stream_secret() {
+            printf '%s' "$2" | ssh jeeb "docker secret create '$1' - >/dev/null"
+          }
+          stream_secret "$STATE_SECRET" "$STATE_SERVICE_TOKEN"
+          stream_secret "$DELIVERY_SECRET" "$DELIVERY_OWNER_TOKEN"
+          stream_secret "$NOTIFICATION_SECRET" "$NOTIFICATION_OWNER_TOKEN"
+          stream_secret "$BUNDLER_SECRET" "$BUNDLER_CMS_TOKEN"
+          stream_secret "$ARTIFACT_SECRET" "$PRIVATE_ARTIFACT_TOKEN"
+          stream_secret "$EXPORT_SECRET" "$DATA_EXPORT_SIGNING_KEY"
+          stream_secret "$JOB_SECRET" "$GATEWAY_JOB_TOKEN"
+          unset STATE_SERVICE_TOKEN DELIVERY_OWNER_TOKEN NOTIFICATION_OWNER_TOKEN \
+            BUNDLER_CMS_TOKEN PRIVATE_ARTIFACT_TOKEN \
+            DATA_EXPORT_SIGNING_KEY GATEWAY_JOB_TOKEN
           # DEV-only /dev/* flag, controlled EXCLUSIVELY by the dev_endpoints input (3-state).
           # preserve (DEFAULT) => emit NO dev-flag arg. `docker service update --image ...`
           #                       preserves every unlisted env var, so the flag's current value
@@ -429,6 +434,31 @@ jobs:
           ssh jeeb bash -se <<EOF
           set -euo pipefail
           SVC='${{ inputs.service_name }}'; INT='${{ inputs.internal_port }}'; EXT='${{ inputs.external_port }}'
+          STATE_SECRET='$STATE_SECRET'
+          DELIVERY_SECRET='$DELIVERY_SECRET'
+          NOTIFICATION_SECRET='$NOTIFICATION_SECRET'
+          BUNDLER_SECRET='$BUNDLER_SECRET'
+          ARTIFACT_SECRET='$ARTIFACT_SECRET'
+          EXPORT_SECRET='$EXPORT_SECRET'
+          JOB_SECRET='$JOB_SECRET'
+          state_secret_args=()
+          if docker service inspect "\$SVC" >/dev/null 2>&1; then
+            add_rotated_secret() {
+              target="\$1"; source="\$2"
+              format="{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name \"\$target\"}}{{.SecretName}}{{\"\\n\"}}{{end}}{{end}}"
+              while IFS= read -r old_secret; do
+                [ -z "\$old_secret" ] || state_secret_args+=(--secret-rm "\$old_secret")
+              done < <(docker service inspect "\$SVC" --format "\$format")
+              state_secret_args+=(--secret-add "source=\$source,target=\$target,mode=0444")
+            }
+            add_rotated_secret jeeb_state_service_token "\$STATE_SECRET"
+            add_rotated_secret delivery_service_token "\$DELIVERY_SECRET"
+            add_rotated_secret notification_service_token "\$NOTIFICATION_SECRET"
+            add_rotated_secret bundler_cms_bearer_token "\$BUNDLER_SECRET"
+            add_rotated_secret private_artifact_store_bearer_token "\$ARTIFACT_SECRET"
+            add_rotated_secret data_export_token_signing_key "\$EXPORT_SECRET"
+            add_rotated_secret jeeb_gateway_job_token "\$JOB_SECRET"
+          fi
           docker pull '$TAG'
           if docker service ls --format '{{.Name}}' | grep -wq "\$SVC"; then
             docker service update --image '$TAG' --with-registry-auth \
@@ -444,6 +474,17 @@ jobs:
               --env-add Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
               --env-add Services__Chat__BaseUrl='${{ inputs.chat_base_url }}' \
               --env-add Services__Delivery__BaseUrl='${{ inputs.delivery_base_url }}' \
+              --env-add ServiceNotificationClient__BaseUrl='${{ inputs.notification_base_url }}' \
+              --env-add JeebStateService__BaseUrl='http://192.168.2.50:10073' \
+              --env-add JeebStateService__ServiceTokenFile='/run/secrets/jeeb_state_service_token' \
+              --env-add DELIVERY_SERVICE_TOKEN_FILE='/run/secrets/delivery_service_token' \
+              --env-add ServiceNotificationClient__ServiceTokenFile='/run/secrets/notification_service_token' \
+              --env-add BUNDLER_CMS_BASE_URL='http://192.168.2.50:10056/' \
+              --env-add BUNDLER_CMS_BEARER_TOKEN_FILE='/run/secrets/bundler_cms_bearer_token' \
+              --env-add PRIVATE_ARTIFACT_STORE_BASE_URL='http://192.168.2.50:10072/' \
+              --env-add PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE='/run/secrets/private_artifact_store_bearer_token' \
+              --env-add DATA_EXPORT_TOKEN_SIGNING_KEY_FILE='/run/secrets/data_export_token_signing_key' \
+              --env-add InternalJobAuth__TokenFile='/run/secrets/jeeb_gateway_job_token' \
               --env-add Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env-add Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               --env-add FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
@@ -454,6 +495,7 @@ jobs:
               $FEATURE_FLAG_ARGS \
               $DEV_FLAG_ARG \
               $SWAGGER_FLAG_ARG \
+              "\${state_secret_args[@]}" \
               "\$SVC"
           else
             docker service create --name "\$SVC" --replicas 1 \
@@ -473,7 +515,17 @@ jobs:
               --env Services__Chat__BaseUrl='${{ inputs.chat_base_url }}' \
               --env Services__UserManagement__BaseUrl='${{ inputs.user_management_base_url }}' \
               --env Services__Wallet__BaseUrl='${{ inputs.wallet_base_url }}' \
-              --env Services__Notification__BaseUrl='${{ inputs.notification_base_url }}' \
+              --env ServiceNotificationClient__BaseUrl='${{ inputs.notification_base_url }}' \
+              --env JeebStateService__BaseUrl='http://192.168.2.50:10073' \
+              --env JeebStateService__ServiceTokenFile='/run/secrets/jeeb_state_service_token' \
+              --env DELIVERY_SERVICE_TOKEN_FILE='/run/secrets/delivery_service_token' \
+              --env ServiceNotificationClient__ServiceTokenFile='/run/secrets/notification_service_token' \
+              --env BUNDLER_CMS_BASE_URL='http://192.168.2.50:10056/' \
+              --env BUNDLER_CMS_BEARER_TOKEN_FILE='/run/secrets/bundler_cms_bearer_token' \
+              --env PRIVATE_ARTIFACT_STORE_BASE_URL='http://192.168.2.50:10072/' \
+              --env PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE='/run/secrets/private_artifact_store_bearer_token' \
+              --env DATA_EXPORT_TOKEN_SIGNING_KEY_FILE='/run/secrets/data_export_token_signing_key' \
+              --env InternalJobAuth__TokenFile='/run/secrets/jeeb_gateway_job_token' \
               --env Services__PushNotification__BaseUrl='${{ inputs.push_notification_base_url }}' \
               --env UserManagementApi__BaseUrl='${{ inputs.user_management_base_url }}' \
               --env Services__Matching__BaseUrl='${{ inputs.matching_base_url }}' \
@@ -489,6 +541,13 @@ jobs:
               --env FeatureFlags__UseUpstream__Offer='true' \
               --env FeatureFlags__UseUpstream__Delivery='true' \
               --env FeatureFlags__UseUpstream__Chat='true' \
+              --secret "source=\$STATE_SECRET,target=jeeb_state_service_token,mode=0444" \
+              --secret "source=\$DELIVERY_SECRET,target=delivery_service_token,mode=0444" \
+              --secret "source=\$NOTIFICATION_SECRET,target=notification_service_token,mode=0444" \
+              --secret "source=\$BUNDLER_SECRET,target=bundler_cms_bearer_token,mode=0444" \
+              --secret "source=\$ARTIFACT_SECRET,target=private_artifact_store_bearer_token,mode=0444" \
+              --secret "source=\$EXPORT_SECRET,target=data_export_token_signing_key,mode=0444" \
+              --secret "source=\$JOB_SECRET,target=jeeb_gateway_job_token,mode=0444" \
               $FEATURE_FLAG_CREATE_ARGS \
               --reserve-memory 256M \
               '$TAG'

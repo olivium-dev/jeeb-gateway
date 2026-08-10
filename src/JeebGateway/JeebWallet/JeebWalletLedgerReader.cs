@@ -5,8 +5,6 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
-using Npgsql;
-using NpgsqlTypes;
 
 namespace JeebGateway.JeebWallet;
 
@@ -31,17 +29,6 @@ public sealed class WalletLedgerUnavailableException : Exception
         : base(message, innerException)
     {
     }
-}
-
-public sealed class WalletLedgerMigrationOptions
-{
-    public const string SectionName = "WalletLedgerMigration";
-
-    /// <summary>
-    /// Temporarily compare wallet API results with the legacy WalletPostgres projection. The
-    /// comparison is observational only and never changes the API response.
-    /// </summary>
-    public bool ShadowCompareEnabled { get; set; }
 }
 
 /// <summary>
@@ -221,127 +208,6 @@ public interface IJeebWalletLedgerShadowReader
         CancellationToken ct);
 
     Task<JeebWalletLedgerEntry?> ReadEntryAsync(Guid holderId, string detailId, CancellationToken ct);
-}
-
-public sealed class PostgresJeebWalletLedgerShadowReader : IJeebWalletLedgerShadowReader
-{
-    private readonly string _connectionString;
-
-    public PostgresJeebWalletLedgerShadowReader(string connectionString)
-    {
-        if (string.IsNullOrWhiteSpace(connectionString))
-            throw new ArgumentException("Wallet shadow Postgres connection string is required.", nameof(connectionString));
-        _connectionString = connectionString;
-    }
-
-    public async Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
-        Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to,
-        CancellationToken ct)
-    {
-        var safePage = Math.Max(page, 1);
-        var safeSize = pageSize is < 1 or > 200 ? 20 : pageSize;
-        var walletIds = await ReadWalletIdsAsync(holderId, ct);
-        if (walletIds.Count == 0) return Array.Empty<JeebWalletLedgerEntry>();
-
-        const string sql = """
-            SELECT
-                d.txid::text,
-                COALESCE(NULLIF(h.tag, ''), 'transaction'),
-                d.amount,
-                CASE WHEN d.destinationwalletid = ANY(@WalletIds) THEN 1 ELSE -1 END,
-                COALESCE(NULLIF(h.summary, ''), NULLIF(h.notes, ''), ''),
-                h.createdat
-            FROM transactiondetails d
-            JOIN transactionheader h ON h.txid = d.txheaderid
-            WHERE (d.sourcewalletid = ANY(@WalletIds) OR d.destinationwalletid = ANY(@WalletIds))
-              AND (@Type IS NULL OR COALESCE(NULLIF(h.tag, ''), 'transaction') = @Type)
-              AND (@FromDate IS NULL OR h.createdat::date >= @FromDate)
-              AND (@ToDate IS NULL OR h.createdat::date <= @ToDate)
-            ORDER BY h.createdat DESC, d.txid DESC
-            LIMIT @Limit OFFSET @Offset
-            """;
-
-        await using var conn = new NpgsqlConnection(_connectionString);
-        await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("WalletIds", walletIds.ToArray());
-        cmd.Parameters.AddWithValue("Limit", safeSize);
-        cmd.Parameters.AddWithValue("Offset", (safePage - 1) * safeSize);
-        cmd.Parameters.Add(new NpgsqlParameter("Type", NpgsqlDbType.Text)
-            { Value = string.IsNullOrWhiteSpace(type) ? DBNull.Value : type.Trim() });
-        cmd.Parameters.Add(new NpgsqlParameter("FromDate", NpgsqlDbType.Date)
-            { Value = (object?)from ?? DBNull.Value });
-        cmd.Parameters.Add(new NpgsqlParameter("ToDate", NpgsqlDbType.Date)
-            { Value = (object?)to ?? DBNull.Value });
-        return await ReadEntriesAsync(cmd, ct);
-    }
-
-    public async Task<JeebWalletLedgerEntry?> ReadEntryAsync(
-        Guid holderId, string detailId, CancellationToken ct)
-    {
-        if (!Guid.TryParse(detailId, out var parsedDetailId)) return null;
-        var walletIds = await ReadWalletIdsAsync(holderId, ct);
-        if (walletIds.Count == 0) return null;
-
-        const string sql = """
-            SELECT
-                d.txid::text,
-                COALESCE(NULLIF(h.tag, ''), 'transaction'),
-                d.amount,
-                CASE WHEN d.destinationwalletid = ANY(@WalletIds) THEN 1 ELSE -1 END,
-                COALESCE(NULLIF(h.summary, ''), NULLIF(h.notes, ''), ''),
-                h.createdat
-            FROM transactiondetails d
-            JOIN transactionheader h ON h.txid = d.txheaderid
-            WHERE d.txid = @DetailId
-              AND (d.sourcewalletid = ANY(@WalletIds) OR d.destinationwalletid = ANY(@WalletIds))
-            LIMIT 1
-            """;
-
-        await using var conn = new NpgsqlConnection(_connectionString);
-        await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("WalletIds", walletIds.ToArray());
-        cmd.Parameters.AddWithValue("DetailId", parsedDetailId);
-        return (await ReadEntriesAsync(cmd, ct)).SingleOrDefault();
-    }
-
-    private async Task<List<Guid>> ReadWalletIdsAsync(Guid holderId, CancellationToken ct)
-    {
-        await using var conn = new NpgsqlConnection(_connectionString);
-        await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand(
-            "SELECT walletid FROM wallets WHERE holderid = @HolderId", conn);
-        cmd.Parameters.AddWithValue("HolderId", holderId);
-        var ids = new List<Guid>();
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct)) ids.Add(reader.GetGuid(0));
-        return ids;
-    }
-
-    private static async Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadEntriesAsync(
-        NpgsqlCommand cmd, CancellationToken ct)
-    {
-        var items = new List<JeebWalletLedgerEntry>();
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
-        {
-            var timestamp = reader.GetFieldValue<DateTime>(5);
-            var utc = timestamp.Kind == DateTimeKind.Unspecified
-                ? DateTime.SpecifyKind(timestamp, DateTimeKind.Utc)
-                : timestamp.ToUniversalTime();
-            items.Add(new JeebWalletLedgerEntry
-            {
-                Id = reader.GetString(0),
-                Type = reader.GetString(1),
-                Amount = reader.GetDecimal(2),
-                Sign = reader.GetInt32(3),
-                Ref = reader.GetString(4),
-                Ts = utc.ToString("O", CultureInfo.InvariantCulture),
-            });
-        }
-        return items;
-    }
 }
 
 /// <summary>

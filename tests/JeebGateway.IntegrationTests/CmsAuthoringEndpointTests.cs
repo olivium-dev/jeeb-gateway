@@ -2,7 +2,11 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using FluentAssertions;
+using JeebGateway.Cms;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -24,6 +28,45 @@ public sealed class CmsAuthoringEndpointTests
     private const string Surface = "ofl-cms-orders-mfe";
     private const string Base = "/gateway/admin/v1/cms";
 
+    private sealed class CmsControllerFactory : WebApplicationFactory<Program>
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            base.ConfigureWebHost(builder);
+            builder.ConfigureServices(services =>
+            {
+                // Controller-contract tests use an explicit test double. Runtime
+                // Program wiring remains exclusively BundlerCmsSurfaceStore.
+                services.RemoveAll<ICmsSurfaceStore>();
+                services.AddSingleton<ICmsSurfaceStore, CmsControllerStore>();
+            });
+        }
+    }
+
+    private sealed class CmsControllerStore : ICmsSurfaceStore
+    {
+        private readonly InMemoryCmsSurfaceStore _inner = new();
+
+        public Task<IReadOnlyList<CmsSurface>> ListSurfacesAsync(CancellationToken ct) =>
+            Task.FromResult(_inner.ListSurfaces());
+
+        public Task<CmsSurface?> GetSurfaceAsync(string surfaceId, CancellationToken ct) =>
+            Task.FromResult(_inner.GetSurface(surfaceId));
+
+        public Task<CmsSurface?> UpsertDraftAsync(
+            string surfaceId,
+            CmsConfig draft,
+            CancellationToken ct) =>
+            Task.FromResult(_inner.UpsertDraft(surfaceId, draft));
+
+        public Task<CmsConfigVersion?> PublishAsync(
+            string surfaceId,
+            string publishedByUserId,
+            DateTimeOffset publishedAt,
+            CancellationToken ct) =>
+            Task.FromResult(_inner.Publish(surfaceId, publishedByUserId, publishedAt));
+    }
+
     private static HttpClient Client(WebApplicationFactory<Program> f)
     {
         var c = f.CreateClient();
@@ -42,7 +85,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task Publish_Without_StepUp_Header_Returns_401_StepUpRequired()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var resp = await Client(f).PostAsync($"{Base}/config/{Surface}/publish", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
@@ -56,7 +99,7 @@ public sealed class CmsAuthoringEndpointTests
     [InlineData("42 4242")] // space
     public async Task Publish_With_Malformed_Totp_Returns_401_StepUpRequired(string totp)
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var http = Client(f);
         http.DefaultRequestHeaders.Add("X-Step-Up-Totp", totp);
 
@@ -69,7 +112,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task Publish_With_Wrong_Totp_Returns_403_StepUpInvalid()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var http = Client(f);
         http.DefaultRequestHeaders.Add("X-Step-Up-Totp", "111111");
 
@@ -82,7 +125,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task Publish_With_Valid_Totp_Returns_200_And_Bumps_Version()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var http = Client(f);
 
         // Seeded surfaces start at published v1.
@@ -104,7 +147,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task Publish_With_CapabilityDeny_Returns_403_Even_With_Valid_Totp()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var http = Client(f);
         http.DefaultRequestHeaders.Add("X-Step-Up-Totp", "424242");
         http.DefaultRequestHeaders.Add("X-Cms-Capability", "deny");
@@ -118,7 +161,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task Publish_Unknown_Surface_Without_Totp_Returns_401_Not_404()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var resp = await Client(f)
             .PostAsync($"{Base}/config/does-not-exist/publish", content: null);
 
@@ -130,7 +173,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task Publish_Unknown_Surface_With_Valid_Totp_Returns_404()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var http = Client(f);
         http.DefaultRequestHeaders.Add("X-Step-Up-Totp", "424242");
 
@@ -145,7 +188,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task ListSurfaces_Returns_Four_Seeded_Surfaces()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var body = await Client(f).GetFromJsonAsync<JsonElement>($"{Base}/surfaces");
 
         var ids = body.GetProperty("surfaces").EnumerateArray()
@@ -162,7 +205,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task Draft_Upsert_Then_Read_Roundtrips_And_Sets_HasDraft()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var http = Client(f);
 
         var put = await http.PutAsJsonAsync(
@@ -177,7 +220,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task Draft_Upsert_With_CapabilityDeny_Returns_403()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var http = Client(f);
         http.DefaultRequestHeaders.Add("X-Cms-Capability", "deny");
 
@@ -192,7 +235,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task Versions_Lists_History_After_Publish()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var http = Client(f);
 
         await http.PutAsJsonAsync(
@@ -210,7 +253,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task Diff_Reports_Changed_And_Added_Keys_Between_Versions()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var http = Client(f);
 
         // v1 (seed): { surfaceId, enabled:true }. Draft adds "banner" and flips enabled.
@@ -230,7 +273,7 @@ public sealed class CmsAuthoringEndpointTests
     [Fact]
     public async Task DevStepUpTotp_Returns_Documented_Code()
     {
-        using var f = new WebApplicationFactory<Program>();
+        using var f = new CmsControllerFactory();
         var body = await Client(f).GetFromJsonAsync<JsonElement>($"{Base}/dev/step-up-totp");
 
         body.GetProperty("code").GetString().Should().Be("424242");

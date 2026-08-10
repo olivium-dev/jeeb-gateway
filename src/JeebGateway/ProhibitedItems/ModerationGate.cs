@@ -28,30 +28,28 @@ public sealed class ModerationGate
     /// </summary>
     public async Task<ModerationGateOutcome> EvaluateAsync(string? text, CancellationToken ct)
     {
-        IReadOnlyList<ProhibitedItem> activeItems;
+        ProhibitedCatalogSnapshot catalog;
         try
         {
-            activeItems = await _store.ListActiveAsync(ct);
+            catalog = await _store.GetActiveCatalogAsync(ct);
         }
         catch (Exception ex)
         {
             throw new LexiconUnavailableException("Prohibited items lexicon could not be loaded.", ex);
         }
 
-        if (activeItems.Count == 0)
+        if (catalog.Items.Count == 0)
         {
             throw new LexiconUnavailableException("Prohibited items lexicon could not be loaded.");
         }
 
-        var version = ComputeLexiconVersion(activeItems);
-        var scan = await _scanner.ScanAsync(text, ct);
-        return new ModerationGateOutcome(scan.GatingSeverity, scan, version);
+        var scan = await _scanner.ScanAsync(text, catalog.Items, ct);
+        return new ModerationGateOutcome(scan.GatingSeverity, scan, catalog.Version);
     }
 
     /// <summary>
-    /// Lexicon version = max UpdatedAt across the active set. MUST match
-    /// <c>ProhibitedItemsController.ComputeVersion</c> so an ack recorded against the
-    /// GET /prohibited-items version clears the warn gate everywhere.
+    /// Legacy local-store version calculation retained for isolated tests.
+    /// Runtime owner reads use ban-service's opaque version tag instead.
     /// </summary>
     public static string ComputeLexiconVersion(IReadOnlyList<ProhibitedItem> items)
     {

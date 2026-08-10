@@ -118,6 +118,10 @@ public class AdminProhibitedItemsController : ControllerBase
                 Status = StatusCodes.Status409Conflict
             });
         }
+        catch (ProhibitedCatalogConflictException)
+        {
+            return OwnerConflict();
+        }
     }
 
     [HttpPatch("{id}")]
@@ -168,6 +172,10 @@ public class AdminProhibitedItemsController : ControllerBase
                 Title = ex.Message,
                 Status = StatusCodes.Status409Conflict
             });
+        }
+        catch (ProhibitedCatalogConflictException)
+        {
+            return OwnerConflict();
         }
     }
 
@@ -247,6 +255,17 @@ public class AdminProhibitedItemsController : ControllerBase
                 {
                     Index = i,
                     Outcome = "duplicate",
+                    Name = row.Name,
+                    Error = ex.Message
+                });
+            }
+            catch (ProhibitedCatalogConflictException ex)
+            {
+                skipped++;
+                results.Add(new ProhibitedItemBulkImportRowResult
+                {
+                    Index = i,
+                    Outcome = "conflict",
                     Name = row.Name,
                     Error = ex.Message
                 });
@@ -354,6 +373,12 @@ public class AdminProhibitedItemsController : ControllerBase
     {
         Title = "Request body is required.",
         Status = StatusCodes.Status400BadRequest
+    });
+
+    private IActionResult OwnerConflict() => Conflict(new ProblemDetails
+    {
+        Title = "The prohibited-items catalog changed; retry the operation.",
+        Status = StatusCodes.Status409Conflict
     });
 
     /// <summary>

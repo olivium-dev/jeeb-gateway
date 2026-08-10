@@ -5,6 +5,7 @@ using JeebGateway.Tokens;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -18,7 +19,15 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public class AdminUsersEndpointTests
 {
-    private static WebApplicationFactory<Program> NewFactory() => new();
+    private static WebApplicationFactory<Program> NewFactory() =>
+        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IAdminUserProjection>();
+                services.AddSingleton<InMemoryUsersStore>();
+                services.AddSingleton<IAdminUserProjection>(sp =>
+                    new TestAdminUserProjection(sp.GetRequiredService<InMemoryUsersStore>()));
+            }));
 
     private static HttpClient AdminClient(WebApplicationFactory<Program> factory)
     {
@@ -232,5 +241,31 @@ public class AdminUsersEndpointTests
         var resp = await admin.PatchAsync("/admin/users/does-not-exist/unsuspend", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    /// <summary>
+    /// Endpoint-only double. Production resolves OwnerComposedAdminUsers; tests
+    /// explicitly inject this local adapter so no owning service is impersonated by
+    /// runtime DI and the HTTP/controller contract remains independently testable.
+    /// </summary>
+    private sealed class TestAdminUserProjection : IAdminUserProjection
+    {
+        private readonly InMemoryUsersStore _users;
+
+        public TestAdminUserProjection(InMemoryUsersStore users) => _users = users;
+
+        public Task<UserSearchResult> SearchAsync(UserSearchQuery query, CancellationToken ct)
+            => _users.SearchAsync(query, ct);
+
+        public Task<UserProfile?> GetByIdAsync(string userId, CancellationToken ct)
+            => _users.GetByIdAsync(userId, ct);
+
+        public Task<UserProfile?> SuspendAsync(
+            string userId, string reason, string adminId, CancellationToken ct)
+            => _users.SuspendAsync(userId, reason, adminId, ct);
+
+        public Task<UserProfile?> UnsuspendAsync(
+            string userId, string adminId, CancellationToken ct)
+            => _users.UnsuspendAsync(userId, adminId, ct);
     }
 }

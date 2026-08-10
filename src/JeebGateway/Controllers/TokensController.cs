@@ -80,11 +80,28 @@ public class TokensController : ControllerBase
             });
         }
 
-        // Make sure a profile shell exists so subsequent /users/me works.
-        var profile = await _users.GetOrCreateAsync(body.UserId, ct);
-        var roles = body.Roles is { Count: > 0 } ? body.Roles : profile.Roles;
+        // Identity state is never created in the gateway. If the privileged caller
+        // supplied no role context, resolve it from user-management through the
+        // stateless compatibility facade; otherwise use the explicitly authorized
+        // role set and avoid manufacturing a local profile shell.
+        var profile = await _users.GetByIdAsync(body.UserId, ct);
+        var roles = body.Roles is { Count: > 0 } ? body.Roles : profile?.Roles;
+        if (roles is not { Count: > 0 })
+        {
+            return NotFound(new ProblemDetails
+            {
+                Title = $"User '{body.UserId}' was not found in user-management.",
+                Status = StatusCodes.Status404NotFound,
+            });
+        }
 
-        var pair = await _tokens.IssueAsync(body.UserId, roles, ct);
+        var activeRole = profile?.ActiveRole;
+        if (string.IsNullOrWhiteSpace(activeRole)
+            || !roles.Contains(activeRole, StringComparer.OrdinalIgnoreCase))
+            activeRole = roles[0];
+
+        var pair = await _tokens.IssueAsync(
+            body.UserId, roles, activeRole, authentication: null, ct);
         return Ok(ToResponse(pair));
     }
 

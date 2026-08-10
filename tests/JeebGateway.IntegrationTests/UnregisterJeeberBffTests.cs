@@ -47,9 +47,8 @@ public sealed class UnregisterJeeberBffTests
         um.RemoveCalls.Should().Be(1);
         um.LastRemovedRole.Should().Be(Roles.Jeeber);
 
-        var users = factory.Services.GetRequiredService<InMemoryUsersStore>();
-        var profile = await users.GetByIdAsync(userId, CancellationToken.None);
-        profile!.Roles.Should().NotContain(Roles.Jeeber);
+        var profile = await um.GetUserRolesAsync(userId, CancellationToken.None);
+        profile!.AvailableRoles.Should().NotContain(Roles.Jeeber);
         profile.ActiveRole.Should().Be(Roles.Client);
     }
 
@@ -92,8 +91,8 @@ public sealed class UnregisterJeeberBffTests
         problem!.Type.Should().EndWith("active_delivery");
         um.RemoveCalls.Should().Be(0, "the guard must short-circuit before any UM call");
 
-        var users = factory.Services.GetRequiredService<InMemoryUsersStore>();
-        (await users.GetByIdAsync(userId, CancellationToken.None))!.Roles.Should().Contain(Roles.Jeeber);
+        (await um.GetUserRolesAsync(userId, CancellationToken.None))!
+            .AvailableRoles.Should().Contain(Roles.Jeeber);
     }
 
     [Fact]
@@ -128,9 +127,9 @@ public sealed class UnregisterJeeberBffTests
         var problem = await resp.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
         problem!.Type.Should().EndWith("upstream_fault");
 
-        var users = factory.Services.GetRequiredService<InMemoryUsersStore>();
-        var profile = await users.GetByIdAsync(userId, CancellationToken.None);
-        profile!.Roles.Should().Contain(Roles.Jeeber, "a failed UM call must not partially apply the revoke");
+        var profile = await um.GetUserRolesAsync(userId, CancellationToken.None);
+        profile!.AvailableRoles.Should().Contain(
+            Roles.Jeeber, "a failed UM call must not partially apply the revoke");
         profile.ActiveRole.Should().Be(Roles.Jeeber);
     }
 
@@ -196,16 +195,12 @@ public sealed class UnregisterJeeberBffTests
 
     private static void SeedUser(WebApplicationFactory<Program> factory, string userId, params string[] roles)
     {
-        factory.Services.GetRequiredService<InMemoryUsersStore>().Seed(new UserProfile
-        {
-            Id = userId,
-            Phone = "+9613009999",
-            Name = "F3 Test",
-            Roles = roles.ToList(),
-            ActiveRole = roles.Contains(Roles.Jeeber) ? Roles.Jeeber : Roles.Client,
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow,
-        });
+        var owner = factory.Services.GetRequiredService<IUserManagementDualRoleClient>()
+            .Should().BeOfType<StubUm>().Subject;
+        owner.Seed(
+            userId,
+            roles,
+            roles.Contains(Roles.Jeeber) ? Roles.Jeeber : Roles.Client);
     }
 
     private static HttpClient AuthenticatedClient(WebApplicationFactory<Program> factory, string userId)
@@ -258,9 +253,19 @@ public sealed class UnregisterJeeberBffTests
 
     private sealed class StubUm : IUserManagementDualRoleClient
     {
+        private readonly Dictionary<string, UserRolesResult> _roles =
+            new(StringComparer.Ordinal);
+
         public int RemoveCalls { get; private set; }
         public string? LastRemovedRole { get; private set; }
         public Exception? RemoveThrows { get; init; }
+
+        public void Seed(
+            string userId,
+            IReadOnlyList<string> roles,
+            string activeRole)
+            => _roles[userId] = new UserRolesResult(
+                userId, roles.ToArray(), activeRole);
 
         public Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct)
             => Task.FromResult(new PhoneFindOrCreateResult(phone, false, new[] { Roles.Client }, Roles.Client));
@@ -276,10 +281,23 @@ public sealed class UnregisterJeeberBffTests
             RemoveCalls++;
             LastRemovedRole = opaqueRole;
             if (RemoveThrows is not null) throw RemoveThrows;
-            return Task.FromResult(new RoleGrantResult(userId, new[] { Roles.Client }, true));
+            var current = _roles[userId];
+            var roles = current.AvailableRoles
+                .Where(role => !string.Equals(
+                    role, opaqueRole, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            _roles[userId] = new UserRolesResult(
+                userId,
+                roles,
+                roles.Contains(current.ActiveRole, StringComparer.OrdinalIgnoreCase)
+                    ? current.ActiveRole
+                    : roles.FirstOrDefault());
+            return Task.FromResult(new RoleGrantResult(userId, roles, true));
         }
 
         public Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct)
-            => Task.FromResult<UserRolesResult?>(null);
+            => Task.FromResult(_roles.TryGetValue(userId, out var roles)
+                ? roles
+                : null);
     }
 }

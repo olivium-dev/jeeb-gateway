@@ -26,11 +26,8 @@ namespace JeebGateway.IntegrationTests;
 /// invalidated that key. Pins that a profile write is immediately visible on the
 /// very next <c>/me</c> read, not stale for up to 30s.
 ///
-/// Also covers F5 validator correction 3 — <c>FirstNonBlank</c> already excludes
-/// empty strings on both the upstream-echoed and submitted <c>ProfilePic</c>, so an
-/// empty-string write can never clobber the local-projection mirror. Regression-only
-/// (no new implementation): pinned on BOTH <c>/profile</c> and <c>/profile/update</c>
-/// per the validator's note that the plan never mentioned the twin route.
+/// Also pins the empty-string clear contract on both routes. Profile state is
+/// read back from user-management; the gateway has no local profile mirror.
 /// </summary>
 public sealed class ProfileUpdateCacheInvalidationTests
 {
@@ -73,7 +70,7 @@ public sealed class ProfileUpdateCacheInvalidationTests
     [Theory]
     [InlineData("/api/User/profile")]
     [InlineData("/api/User/profile/update")]
-    public async Task ProfileUpdate_EmptyStringProfilePic_DoesNotClobberLocalProjectionAvatar(string route)
+    public async Task ProfileUpdate_EmptyStringProfilePic_ClearsOwnerStateWithoutLocalMirror(string route)
     {
         var um = new StatefulUmClient();
         using var factory = MakeFactory(um);
@@ -84,15 +81,14 @@ public sealed class ProfileUpdateCacheInvalidationTests
         (await http.PutAsJsonAsync(route, new { userId, profilePic = "keep-me.png" }))
             .StatusCode.Should().Be(HttpStatusCode.OK);
 
-        // A name-only-shaped save that (per the historical mobile defect) carries a
-        // hardcoded empty-string profilePic must not wipe it.
+        // Empty string is an explicit clear and is owned by user-management.
         var resp = await http.PutAsJsonAsync(route, new { userId, username = "New Name", profilePic = "" });
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
 
-        var store = factory.Services.GetRequiredService<IUsersStore>();
-        var profile = await store.GetByIdAsync(userId, CancellationToken.None);
-        profile!.AvatarUrl.Should().Be("keep-me.png",
-            "FirstNonBlank must exclude an empty-string ProfilePic on both the echoed and submitted sides");
+        um.ProfilePic.Should().BeEmpty(
+            "the gateway must forward the explicit clear to the profile owner");
+        var me = await http.GetFromJsonAsync<System.Text.Json.JsonElement>("/v1/users/me");
+        me.GetProperty("avatarUrl").ValueKind.Should().Be(System.Text.Json.JsonValueKind.Null);
     }
 
     // ----- helpers -----
@@ -105,6 +101,9 @@ public sealed class ProfileUpdateCacheInvalidationTests
             {
                 services.RemoveAll<UmClient>();
                 services.AddSingleton<UmClient>(um);
+                services.RemoveAll<IUserManagementDualRoleClient>();
+                services.AddSingleton<IUserManagementDualRoleClient,
+                    Fakes.TestUserManagementDualRoleClient>();
                 services.Configure<UpstreamFeatureFlags>(f => f.UserManagement = true);
             });
         });

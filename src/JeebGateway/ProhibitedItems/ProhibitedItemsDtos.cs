@@ -51,9 +51,9 @@ public class AdminProhibitedItemsListResponse
 }
 
 /// <summary>
-/// Mobile read-shape. <see cref="Version"/> is the maximum updated_at across the
-/// active set; the client echoes it back to /prohibited-items/acknowledge so we
-/// can tell whether the user acknowledged the *current* list or a stale one.
+/// Mobile read-shape. <see cref="Version"/> is ban-service's exact opaque,
+/// immutable catalog tag; the client echoes it back to
+/// /prohibited-items/acknowledge so the owner can atomically reject a stale tag.
 /// </summary>
 public class ProhibitedItemsListResponse
 {
@@ -117,7 +117,10 @@ public class ProhibitedItemBulkImportRequest
     public List<ProhibitedItemBulkImportRow>? Items { get; set; }
 }
 
-/// <summary>WS-06: per-row outcome of a bulk import. <c>Outcome</c> is <c>created</c> | <c>duplicate</c> | <c>invalid</c>.</summary>
+/// <summary>
+/// WS-06: per-row outcome of a bulk import. <c>Outcome</c> is
+/// <c>created</c> | <c>duplicate</c> | <c>conflict</c> | <c>invalid</c>.
+/// </summary>
 public class ProhibitedItemBulkImportRowResult
 {
     public required int Index { get; init; }

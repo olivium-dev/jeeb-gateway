@@ -40,6 +40,7 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
                     ["Security:TokenMint:Key"] = MintKey
                 });
             });
+            builder.ConfigureServices(Fakes.OwnerServiceFakes.UseInMemoryUsers);
         });
     }
 
@@ -53,6 +54,7 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
     [Fact]
     public async Task Issue_Returns_AccessToken_With_15_Minute_Lifetime()
     {
+        SeedDefault("u-issue-1");
         var client = AuthorizedClient();
 
         var resp = await client.PostAsJsonAsync("/auth/tokens", new { userId = "u-issue-1" });
@@ -221,6 +223,7 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
     [Fact]
     public async Task Mint_With_Valid_Privileged_Key_Returns_200()
     {
+        SeedDefault("authorized-caller");
         var resp = await AuthorizedClient()
             .PostAsJsonAsync("/auth/tokens", new { userId = "authorized-caller" });
 
@@ -231,6 +234,12 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 
     private async Task<TokenPairResponse> Issue(string userId)
     {
+        var store = _factory.Services.GetRequiredService<InMemoryUsersStore>();
+        if (await store.GetByIdAsync(userId, CancellationToken.None) is null)
+        {
+            SeedDefault(userId);
+        }
+
         var resp = await AuthorizedClient()
             .PostAsJsonAsync("/auth/tokens", new { userId });
         resp.EnsureSuccessStatusCode();
@@ -245,4 +254,15 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         var store = _factory.Services.GetRequiredService<InMemoryUsersStore>();
         store.Seed(profile);
     }
+
+    private void SeedDefault(string userId) => Seed(new UserProfile
+    {
+        Id = userId,
+        Phone = string.Empty,
+        Name = userId,
+        Roles = new List<string> { Roles.Client },
+        ActiveRole = Roles.Client,
+        CreatedAt = DateTimeOffset.UtcNow,
+        UpdatedAt = DateTimeOffset.UtcNow,
+    });
 }

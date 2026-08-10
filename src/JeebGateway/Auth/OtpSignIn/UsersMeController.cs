@@ -61,7 +61,6 @@ public sealed class UsersMeController : ControllerBase
     private const int ProfileCacheSeconds = 30;
 
     private readonly UmServiceClient _umProfile;
-    private readonly IUsersStore _users;
     private readonly IMemoryCache _cache;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IUserManagementDualRoleClient _dualRole;
@@ -76,7 +75,6 @@ public sealed class UsersMeController : ControllerBase
 
     public UsersMeController(
         UmServiceClient umProfile,
-        IUsersStore users,
         IMemoryCache cache,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         IUserManagementDualRoleClient dualRole,
@@ -90,7 +88,6 @@ public sealed class UsersMeController : ControllerBase
         ILogger<UsersMeController> log)
     {
         _umProfile = umProfile;
-        _users = users;
         _cache = cache;
         _flags = flags;
         _dualRole = dualRole;
@@ -160,15 +157,6 @@ public sealed class UsersMeController : ControllerBase
                     AvatarUrlResolver.Absolutize(
                         profile?.ProfilePic, userId, _publicOptions.Value.PublicBaseUrl));
 
-                // jeeberName gap fix: user-management's username is the ONLY display
-                // name real (OTP-minted) accounts carry anywhere in the flow, and the
-                // deliveries jeeberName enrichment reads the gateway's LOCAL users
-                // projection — which the OTP mint fills with Name = "". Hydrate the
-                // projection from this successful UM read so a jeeber who has a UM
-                // username gets a resolvable display name after their first /me read
-                // (the app calls this at login), without any extra UM round-trip.
-                // Best-effort: a projection write fault never degrades the read.
-                await HydrateLocalDisplayNameAsync(userId, display, ct);
             }
             catch (UmApiException ex)
             {
@@ -262,11 +250,8 @@ public sealed class UsersMeController : ControllerBase
             // re-login; available_roles/active_role in THIS body are authoritative immediately).
             var result = await _dualRole.RoleSwitchAsync(userId, opaque, ct);
 
-            // Project the switch locally so the next gateway-minted/read path reflects it, and
-            // invalidate the 30s /me profile cache so GET /v1/users/me is not stale (G3).
-            // TokenService.IssueAsync reads active_role from THIS store, so the switch MUST be
-            // persisted locally before the re-mint below for the new JWT to carry the new role.
-            await _users.SwitchRoleAsync(userId, result.ActiveRole, ct);
+            // UM already persisted the switch. Invalidate only the request-shaping
+            // display cache; no gateway identity projection is written.
             _cache.Remove(ProfileCacheKeys.ForUser(userId));
 
             // Resolve the user's FULL available-role set for the response body (the re-issued
@@ -293,7 +278,8 @@ public sealed class UsersMeController : ControllerBase
             var refreshToken = string.Empty;
             try
             {
-                var pair = await _tokens.IssueAsync(userId, opaqueAvailable, ct);
+                var pair = await _tokens.IssueAsync(
+                    userId, opaqueAvailable, result.ActiveRole, authentication: null, ct);
                 accessToken = pair.AccessToken;
                 refreshToken = pair.RefreshToken;
             }
@@ -442,17 +428,17 @@ public sealed class UsersMeController : ControllerBase
             // (correction 9); the catch below turns that into a documented 502, never a fake success.
             var result = await _dualRole.RemoveAvailableRoleAsync(userId, Roles.Jeeber, ct);
 
-            // Local mirror ONLY after UM succeeds (no partial apply). RevokeRoleAsync
-            // durably mirrors into Postgres (correction 2) and flips ActiveRole off Jeeber.
-            await _users.RevokeRoleAsync(userId, Roles.Jeeber, ct);
             _cache.Remove(ProfileCacheKeys.ForUser(userId));
 
             var contractAvailable = JeebRoleTranslator.ToContract(result.AvailableRoles);
             if (contractAvailable.Length == 0)
                 contractAvailable = new[] { JeebRoleTranslator.ContractClient };
 
-            var localProfile = await _users.GetByIdAsync(userId, ct);
-            var contractActive = JeebRoleTranslator.ToContract(localProfile?.ActiveRole);
+            var authoritative = await _dualRole.GetUserRolesAsync(userId, ct);
+            var activeRole = authoritative?.ActiveRole
+                             ?? result.AvailableRoles.FirstOrDefault()
+                             ?? Roles.Client;
+            var contractActive = JeebRoleTranslator.ToContract(activeRole);
             if (string.IsNullOrWhiteSpace(contractActive))
                 contractActive = JeebRoleTranslator.ContractClient;
 
@@ -460,7 +446,8 @@ public sealed class UsersMeController : ControllerBase
             var refreshToken = string.Empty;
             try
             {
-                var pair = await _tokens.IssueAsync(userId, result.AvailableRoles, ct);
+                var pair = await _tokens.IssueAsync(
+                    userId, result.AvailableRoles, activeRole, authentication: null, ct);
                 accessToken = pair.AccessToken;
                 refreshToken = pair.RefreshToken;
             }
@@ -534,31 +521,10 @@ public sealed class UsersMeController : ControllerBase
     /// </summary>
     private async Task<IReadOnlyList<string>> ResolveAvailableRolesAsync(string userId, CancellationToken ct)
     {
-        IReadOnlyList<string> baseRoles = Array.Empty<string>();
-
-        // 1) AUTHORITATIVE — the persisted role set user-management owns.
-        try
-        {
-            var um = await _dualRole.GetUserRolesAsync(userId, ct);
-            if (um is { AvailableRoles.Count: > 0 }) baseRoles = um.AvailableRoles;
-        }
-        catch (Exception ex)
-        {
-            // A UM roles-read blip is non-fatal: fall through to the local projection /
-            // session claims rather than failing the whole /me read.
-            _log.LogWarning(ex, "v1/users/me UM roles read failed; falling back to local projection/claims");
-        }
-
-        // 2) Local UM projection (the source the OTP-mint / role-switch paths upsert).
-        if (baseRoles.Count == 0)
-        {
-            var profile = await _users.GetByIdAsync(userId, ct);
-            if (profile is { Roles.Count: > 0 }) baseRoles = profile.Roles;
-        }
-
-        // 3) Last resort — the roles claim on the validated session token.
-        if (baseRoles.Count == 0)
-            baseRoles = UserIdentity.GetRoles(HttpContext);
+        var owner = await _dualRole.GetUserRolesAsync(userId, ct);
+        if (owner is not { AvailableRoles.Count: > 0 })
+            throw new UserManagementCallException("get roles", StatusCodes.Status502BadGateway);
+        IReadOnlyList<string> baseRoles = owner.AvailableRoles;
 
         // Union the dev-seeded roles so /me matches the login mint (see summary). Dev-only store:
         // null (a strict no-op) for every real user. Resolve by userId — the seed records both the
@@ -568,31 +534,6 @@ public sealed class UsersMeController : ControllerBase
             baseRoles = baseRoles.Union(seeded, StringComparer.OrdinalIgnoreCase).ToList();
 
         return baseRoles;
-    }
-
-    /// <summary>
-    /// jeeberName gap fix — best-effort mirror of the UM display name into the local
-    /// users projection (the store the deliveries jeeberName enrichment reads). Only
-    /// fills a MISSING local name; a name already learned locally (e.g. via the
-    /// profile-update mirror) is never overwritten by this passive read path. Never
-    /// throws into the /me read.
-    /// </summary>
-    private async Task HydrateLocalDisplayNameAsync(string userId, ProfileDisplay display, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(display.Name)) return;
-
-        try
-        {
-            var local = await _users.GetByIdAsync(userId, ct);
-            if (!string.IsNullOrWhiteSpace(local?.Name)) return;
-
-            await _users.UpdateProfileAsync(userId, new ProfilePatch { Name = display.Name.Trim() }, ct);
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex,
-                "v1/users/me local display-name hydration failed for {UserId}; read is unaffected.", userId);
-        }
     }
 
     private ObjectResult UpstreamDisabled() => Problem(

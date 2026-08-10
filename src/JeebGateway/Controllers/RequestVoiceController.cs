@@ -1,12 +1,10 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Requests;
-using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
 using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
 
@@ -48,7 +46,6 @@ public sealed class RequestVoiceController : ControllerBase
     private readonly IRequestsStore _store;
     private readonly ITiersStore _tiers;
     private readonly IVoiceTranscriptionClient _voice;
-    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly Notifications.INewRequestPushNotifier _newRequestPush;
     private readonly ILogger<RequestVoiceController> _logger;
 
@@ -56,14 +53,12 @@ public sealed class RequestVoiceController : ControllerBase
         IRequestsStore store,
         ITiersStore tiers,
         IVoiceTranscriptionClient voice,
-        IOptionsMonitor<UpstreamFeatureFlags> flags,
         Notifications.INewRequestPushNotifier newRequestPush,
         ILogger<RequestVoiceController> logger)
     {
         _store = store;
         _tiers = tiers;
         _voice = voice;
-        _flags = flags;
         _newRequestPush = newRequestPush;
         _logger = logger;
     }
@@ -84,6 +79,7 @@ public sealed class RequestVoiceController : ControllerBase
     [RequireActiveUser]
     [RequestSizeLimit(8 * 1024 * 1024)]
     [ProducesResponseType(typeof(VoiceRequestResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(VoiceTranscriptionQueuedResponse), StatusCodes.Status202Accepted)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
@@ -91,6 +87,7 @@ public sealed class RequestVoiceController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status413PayloadTooLarge)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status415UnsupportedMediaType)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> SubmitVoice(
         [FromForm] VoiceOrderForm form,
@@ -99,18 +96,6 @@ public sealed class RequestVoiceController : ControllerBase
         var audio = form.Audio;
         var requestId = form.RequestId;
         var tier = form.Tier;
-
-        // Net-new path kill switch: when the upstream voice route is not enabled in
-        // this environment, return 503 rather than dialing an unconfigured host.
-        if (!_flags.CurrentValue.Voice)
-        {
-            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
-            {
-                Title = "Voice transcription is not enabled in this environment.",
-                Status = StatusCodes.Status503ServiceUnavailable,
-                Type = "https://jeeb.dev/errors/voice-disabled"
-            });
-        }
 
         if (!UserIdentity.TryGetUserId(HttpContext, out var clientId, out var problem)) return problem;
 
@@ -214,6 +199,18 @@ public sealed class RequestVoiceController : ControllerBase
                 Detail = ex.Message,
                 Status = StatusCodes.Status503ServiceUnavailable,
                 Type = "https://jeeb.dev/errors/voice-unavailable"
+            });
+        }
+
+        if (result.Outcome == TranscriptionOutcome.QueuedForRetry)
+        {
+            return Accepted(new VoiceTranscriptionQueuedResponse
+            {
+                RequestId = requestId,
+                AudioId = result.AudioId,
+                Status = "queued",
+                StatusUrl = $"/transcribe/status/{Uri.EscapeDataString(result.AudioId)}",
+                Reason = result.Reason,
             });
         }
 
@@ -397,4 +394,18 @@ public sealed class VoiceRequestResponse
     /// </summary>
     [System.Text.Json.Serialization.JsonPropertyName("description")]
     public string? Description { get; init; }
+}
+
+/// <summary>
+/// Truthful 202 returned when the owning service has persisted the audio and
+/// its retry job but no transcript exists yet. No gateway request row is
+/// fabricated until a completed transcription is submitted.
+/// </summary>
+public sealed class VoiceTranscriptionQueuedResponse
+{
+    public string? RequestId { get; init; }
+    public required string AudioId { get; init; }
+    public required string Status { get; init; }
+    public required string StatusUrl { get; init; }
+    public string? Reason { get; init; }
 }

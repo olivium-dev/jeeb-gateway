@@ -31,7 +31,7 @@ namespace JeebGateway.IntegrationTests.Gw1Pack;
 ///
 /// <para><b>Correction to the batch document, stated plainly.</b> <c>GW1.md</c>'s V-2
 /// section says the health line <i>"only interpolates <c>Critical.Length</c> into its own
-/// log line, so 'all 33 critical stores durable' reports an array length, not
+/// log line, so 'all 26 critical stores durable' reports an array length, not
 /// durability. It is the cheap half of the gate."</i> That is <b>half wrong, in the
 /// pessimistic direction</b>. Read <c>StoreDurabilityHealthCheck.CheckHealthAsync</c>:
 /// the Healthy branch is reached <i>only after</i>
@@ -42,7 +42,7 @@ namespace JeebGateway.IntegrationTests.Gw1Pack;
 /// emits it is a per-store live type check. Since W1.8 puts
 /// <see cref="ISettlementLedgerClient"/> into <c>Critical</c> bound to
 /// <see cref="PostgresSettlementLedgerClient"/>, a live
-/// <c>store-durability: all 33 critical stores durable</c> IS a live read of that store's
+/// <c>store-durability: all 26 critical stores durable</c> IS a live read of that store's
 /// resolved concrete type. <b>S1/S2/S4 below prove that; S3 proves its one loophole.</b></para>
 ///
 /// <para><b>Note carefully what the health check does NOT have.</b> Unlike the boot gate
@@ -90,7 +90,7 @@ public class W18_LiveProbeInstrumentTests
     }
 
     /// <summary>The exact literal a verifier greps for in MSI's <c>/health/ready</c> payload.</summary>
-    private const string LiveHealthyDescription = "store-durability: all 33 critical stores durable";
+    private const string LiveHealthyDescription = "store-durability: all 26 critical stores durable";
 
     // ── S1 — the live string is REACHABLE, and it is byte-exact ────────────
 
@@ -111,9 +111,9 @@ public class W18_LiveProbeInstrumentTests
             "this is the literal a service-class verifier matches in MSI's /health/ready payload; " +
             "if the format moves, the live probe must move with it");
 
-        // …and the 33 in that literal is the SEALED predicate, not a free number.
-        StoreDurabilityGuard.Critical.Length.Should().Be(33,
-            "SEALED-PREDICATES.md §4 / OWNER-DECISIONS.md 2026-07-31 'PROMOTE': Critical.Length = 33");
+        // …and the 26 in that literal is the owner-cutover predicate, not a free number.
+        StoreDurabilityGuard.Critical.Length.Should().Be(26,
+            "runtime stores and the retired IDataExportStore moved to their owners");
     }
 
     // ── S2 — the string is DISCRIMINATING for this batch's store ───────────

@@ -3,10 +3,9 @@ using System.Collections.Concurrent;
 namespace JeebGateway.Users.DataExport;
 
 /// <summary>
-/// Seam for fetching the user's ratings (both given and received) at
-/// export time. Ratings live in score-taking-service; the packager goes
-/// through this interface so it can pull a coherent snapshot regardless
-/// of the storage. MVP backs it with <see cref="InMemoryDataExportRatingsProvider"/>.
+/// Seam for fetching the user's ratings at export time. Ratings live in
+/// feedback-service; the production provider always reads the owner rather
+/// than retaining a gateway projection.
 /// </summary>
 public interface IDataExportRatingsProvider
 {

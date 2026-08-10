@@ -34,6 +34,22 @@ public interface IBanServiceClient
     /// PARTIAL_BAN) is ban-service-authoritative.
     /// </summary>
     Task<BanStatusItem> ApplyBanAsync(string userId, string banType, CancellationToken ct);
+
+    /// <summary>
+    /// <c>PUT /api/v1/ban/{userId}/{policyKey}/terminal</c> — atomically moves
+    /// the configured policy to its terminal BAN stage. Unlike repeatedly calling
+    /// the progressive endpoint, this is idempotent and cannot stop at WARNING or
+    /// PARTIAL_BAN when an administrator suspends an account.
+    /// </summary>
+    Task<BanStatusItem> ApplyTerminalBanAsync(
+        string userId, string policyKey, CancellationToken ct);
+
+    /// <summary>
+    /// <c>POST /api/v1/ban/{userId}/force-reset</c> — clears every ban status
+    /// owned by ban-service for the user. This is the owner-backed implementation
+    /// of the CMS unsuspend action.
+    /// </summary>
+    Task<BanResetResult> ForceResetAsync(string userId, CancellationToken ct);
 }
 
 /// <summary>
@@ -80,4 +96,12 @@ public sealed class BanStatusItem
     public DateTimeOffset? BannedUntil { get; init; }
     public DateTimeOffset LastUpdated { get; init; }
     public bool IsCurrentlyBanned { get; init; }
+}
+
+/// <summary>Projection of ban-service's <c>BanUpdateResponse</c>.</summary>
+public sealed class BanResetResult
+{
+    public BanStatusItem? OldStatus { get; init; }
+    public BanStatusItem? NewStatus { get; init; }
+    public bool Updated { get; init; }
 }

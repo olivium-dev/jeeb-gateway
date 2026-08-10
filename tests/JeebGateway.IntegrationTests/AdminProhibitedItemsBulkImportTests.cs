@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
+using JeebGateway.IntegrationTests.Fakes;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
@@ -14,13 +15,28 @@ namespace JeebGateway.IntegrationTests;
 /// and the duplicate-name guard mirrors single create's 409 semantics as a
 /// per-row "duplicate" outcome.
 /// </summary>
-public class AdminProhibitedItemsBulkImportTests : IClassFixture<WebApplicationFactory<Program>>
+public class AdminProhibitedItemsBulkImportTests
+    : IClassFixture<AdminProhibitedItemsBulkImportTests.OwnerFixture>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly OwnerFixture _factory;
 
-    public AdminProhibitedItemsBulkImportTests(WebApplicationFactory<Program> factory)
+    public AdminProhibitedItemsBulkImportTests(OwnerFixture factory)
     {
         _factory = factory;
+    }
+
+    public sealed class OwnerFixture : WebApplicationFactory<Program>
+    {
+        protected override void ConfigureWebHost(
+            Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
+        {
+            base.ConfigureWebHost(builder);
+            builder.ConfigureServices(services =>
+            {
+                OwnerServiceFakes.AllowAllAccounts(services);
+                OwnerServiceFakes.UseEmptyModerationCatalog(services);
+            });
+        }
     }
 
     [Fact]

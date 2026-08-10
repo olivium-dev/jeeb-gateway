@@ -1,5 +1,3 @@
-using System.Collections.Concurrent;
-
 namespace JeebGateway.Financials;
 
 /// <summary>
@@ -27,21 +25,4 @@ public interface ISettlementEnqueueStore
     /// <paramref name="deliveryId"/>.
     /// </summary>
     Task<bool> IsEnqueuedAsync(string deliveryId, CancellationToken ct);
-}
-
-/// <summary>
-/// In-memory <see cref="ISettlementEnqueueStore"/> for MVP. A ConcurrentDictionary
-/// keyed on deliveryId is sufficient for single-node deployments; the durable
-/// upgrade path (backed by jeeb-state-service R1 idempotency KV) is wired in a
-/// future PR once the settlement-service Postgres migration is ready.
-/// </summary>
-public sealed class InMemorySettlementEnqueueStore : ISettlementEnqueueStore
-{
-    private readonly ConcurrentDictionary<string, DateTimeOffset> _enqueued = new(StringComparer.Ordinal);
-
-    public Task<bool> TryEnqueueAsync(string deliveryId, DateTimeOffset at, CancellationToken ct)
-        => Task.FromResult(_enqueued.TryAdd(deliveryId, at));
-
-    public Task<bool> IsEnqueuedAsync(string deliveryId, CancellationToken ct)
-        => Task.FromResult(_enqueued.ContainsKey(deliveryId));
 }
