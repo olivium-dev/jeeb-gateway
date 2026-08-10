@@ -79,6 +79,20 @@ public sealed class JeebNotificationRecordClient
         CancellationToken cancellationToken)
         => PostAsync(RatingAutoRevealedNotificationRecord.TemplateKey, record, cancellationToken);
 
+    /// <summary>
+    /// <c>POST notifications/events</c> — the shared service's product-agnostic durable-event
+    /// seam. Unlike the typed routes above it is idempotent on <c>notification_id</c>.
+    /// </summary>
+    public async Task<HttpStatusCode> PostGenericEventAsync(
+        GenericEventNotificationRecord record,
+        CancellationToken cancellationToken)
+    {
+        using var response = await _http
+            .PostAsJsonAsync("notifications/events", record, JsonOptions, cancellationToken)
+            .ConfigureAwait(false);
+        return response.StatusCode;
+    }
+
     public async Task<bool> ContainsCorrelationIdAsync(
         string recipientId,
         string notificationCorrelationId,

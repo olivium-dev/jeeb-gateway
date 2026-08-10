@@ -112,6 +112,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     private readonly INewRequestFanoutQueue _queue;
     private readonly NewRequestFanoutOptions _options;
     private readonly TimeProvider _clock;
+    private readonly IGenericEventDispatcher _events;
 
     public NewRequestPushNotifier(
         ServicePushNotificationClient push,
@@ -122,6 +123,21 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         INewRequestFanoutQueue queue,
         IOptions<NewRequestFanoutOptions> options,
         TimeProvider clock)
+        : this(push, tiers, logger, availability, users, queue, options, clock,
+               NullGenericEventDispatcher.Instance)
+    {
+    }
+
+    public NewRequestPushNotifier(
+        ServicePushNotificationClient push,
+        JeebGateway.Tiers.ITiersStore tiers,
+        ILogger<NewRequestPushNotifier> logger,
+        IAvailabilityStore availability,
+        IUsersStore users,
+        INewRequestFanoutQueue queue,
+        IOptions<NewRequestFanoutOptions> options,
+        TimeProvider clock,
+        IGenericEventDispatcher events)
     {
         _push = push;
         _tiers = tiers;
@@ -131,6 +147,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         _queue = queue;
         _options = options.Value;
         _clock = clock;
+        _events = events;
     }
 
     // ── Hot path ──────────────────────────────────────────────────────────────
@@ -241,28 +258,42 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         IReadOnlyList<JeeberAvailability> candidates = await _availability.ListOnlineAsync(ct)
             ?? Array.Empty<JeeberAvailability>();
 
-        // 2. optional geo narrowing around the pickup point. Ships DISABLED (RadiusKm null).
-        if (_options.RadiusKm is { } radiusKm && radiusKm > 0
-            && n.PickupLat is { } pickupLat && n.PickupLng is { } pickupLng)
+        // 2. D2 fail-CLOSED geo narrowing. The radius comes from the REQUEST'S OWN TIER
+        // (3/10/25 km), matching how delivery-service cuts per delivery; the global
+        // NewRequestFanoutOptions.RadiusKm is only an override for that value.
+        var tierRadiusKm = _options.RadiusKm is { } configured && configured > 0
+            ? configured
+            : (await ResolveTierRadiusKmAsync(n.TierId, ct));
+
+        if (n.PickupLat is { } pickupLat && n.PickupLng is { } pickupLng
+            && tierRadiusKm is { } radiusKm && radiusKm > 0)
         {
             var near = candidates
-                .Where(r => !HasCoordinates(r)
-                            || HaversineKm(r.Latitude!.Value, r.Longitude!.Value, pickupLat, pickupLng) <= radiusKm)
+                .Where(r => HasCoordinates(r)
+                            && HaversineKm(r.Latitude!.Value, r.Longitude!.Value, pickupLat, pickupLng) <= radiusKm)
                 .ToArray();
 
             if (near.Length == 0 && candidates.Count > 0)
             {
-                // A mis-set radius must never kill the reverse auction.
-                _logger.LogWarning(
+                // No keep-unfiltered fallback: an empty in-range set is the correct answer.
+                _logger.LogInformation(
                     "newreq-fanout geo-filter-emptied requestId={RequestId} radiusKm={RadiusKm} "
-                    + "candidates={Candidates}; keeping the UNFILTERED online set",
+                    + "candidates={Candidates}; fail-closed, sending to NOBODY",
                     n.RequestId, radiusKm, candidates.Count);
             }
-            else
-            {
-                candidates = near;
-                source = "online+geo";
-            }
+
+            candidates = near;
+            source = "online+geo";
+        }
+        else
+        {
+            // Unknown pickup or unknown tier radius cannot be proven in range.
+            _logger.LogInformation(
+                "newreq-fanout geo-unresolvable requestId={RequestId} tierId={TierId} "
+                + "hasPickup={HasPickup}; fail-closed, sending to NOBODY",
+                n.RequestId, n.TierId, n.PickupLat is not null && n.PickupLng is not null);
+            candidates = Array.Empty<JeeberAvailability>();
+            source = "online+geo";
         }
 
         // 3. never-starve fallback: the known-jeeber roster (R1).
@@ -275,6 +306,23 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                 ?? Array.Empty<JeeberAvailability>();
             source = "known";
             (candidates, roleFiltered, roleUnknown) = await FilterKnownByActiveRoleAsync(candidates, ct);
+
+            // D2: the roster fallback used to blast with no geo cut at all, which re-opened
+            // the fail-open the stage above just closed. Same rule applies to it.
+            if (n.PickupLat is { } fbLat && n.PickupLng is { } fbLng
+                && tierRadiusKm is { } fbRadius && fbRadius > 0)
+            {
+                candidates = candidates
+                    .Where(r => HasCoordinates(r)
+                                && HaversineKm(r.Latitude!.Value, r.Longitude!.Value, fbLat, fbLng) <= fbRadius)
+                    .ToArray();
+                source = "known+geo";
+            }
+            else
+            {
+                candidates = Array.Empty<JeeberAvailability>();
+                source = "known+geo";
+            }
         }
 
         var candidateCount = candidates.Count;
@@ -412,6 +460,11 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         IReadOnlyList<string> recipients, Dictionary<string, object?> payload, CancellationToken ct)
     {
         var tally = new SendTally();
+        var routing = payload.ToDictionary(
+            kv => kv.Key, kv => kv.Value?.ToString() ?? string.Empty, StringComparer.Ordinal);
+        var requestId = routing.TryGetValue("requestId", out var rid) && !string.IsNullOrWhiteSpace(rid)
+            ? rid
+            : routing.GetValueOrDefault("request_id", string.Empty);
         using var gate = new SemaphoreSlim(Math.Max(1, _options.MaxParallelSends));
 
         var tasks = new List<Task>(recipients.Count);
@@ -438,6 +491,34 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
             try
             {
+                if (!string.IsNullOrWhiteSpace(requestId))
+                {
+                    var handover = await _events.DispatchAsync(
+                        JeebGenericEventTypes.NewRequestEventType,
+                        userId,
+                        requestId,
+                        routing.GetValueOrDefault("title", "New delivery request"),
+                        routing.GetValueOrDefault("body", string.Empty),
+                        routing,
+                        PushSilencePolicy.CategoryNewRequest,
+                        ct);
+
+                    if (handover.Classification
+                        != GenericEventDispatchClassification.SkippedDirectDispatchArmed)
+                    {
+                        if (handover.Classification == GenericEventDispatchClassification.Unproven)
+                        {
+                            Interlocked.Increment(ref tally.Failed);
+                        }
+                        else
+                        {
+                            Interlocked.Increment(ref tally.Sent);
+                        }
+
+                        return;
+                    }
+                }
+
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(_options.PerSendTimeout);
 
@@ -555,6 +636,31 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     /// degrades to "no suffix", never to a failed push (the whole notify path is
     /// degrade-don't-fail).
     /// </summary>
+    /// <summary>
+    /// The request's own tier radius in km. Null when the tier is unknown or unreadable, which
+    /// the fail-closed caller turns into "no recipients".
+    /// </summary>
+    private async Task<double?> ResolveTierRadiusKmAsync(string? tierId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(tierId))
+        {
+            return null;
+        }
+
+        try
+        {
+            var tier = await _tiers.GetAsync(
+                JeebGateway.Tiers.LegacyTierCodes.Canonicalize(tierId), ct);
+            return tier is { RadiusKm: > 0 } ? tier.RadiusKm : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "newreq-fanout tier radius resolve failed for {TierId}; fail-closed.", tierId);
+            return null;
+        }
+    }
+
     private async Task<string?> ResolveTierLabelAsync(string? tierId, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(tierId))

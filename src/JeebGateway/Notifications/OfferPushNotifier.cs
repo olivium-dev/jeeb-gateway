@@ -136,15 +136,17 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
 
     private readonly ServicePushNotificationClient _push;
     private readonly INotificationRecordWriter _recordWriter;
+    private readonly IGenericEventDispatcher _events;
     private readonly Func<string, CancellationToken, Task<DeliveryRequest?>> _getRequest;
     private readonly ILogger<OfferPushNotifier> _logger;
 
     public OfferPushNotifier(
         ServicePushNotificationClient push,
         INotificationRecordWriter recordWriter,
+        IGenericEventDispatcher events,
         IRequestsStore requests,
         ILogger<OfferPushNotifier> logger)
-        : this(push, recordWriter, requests.GetAsync, logger)
+        : this(push, recordWriter, events, requests.GetAsync, logger)
     {
     }
 
@@ -154,6 +156,7 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
         : this(
             push,
             DisabledNotificationRecordWriter.Instance,
+            NullGenericEventDispatcher.Instance,
             (_, _) => Task.FromResult<DeliveryRequest?>(null),
             logger)
     {
@@ -164,9 +167,20 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
         INotificationRecordWriter recordWriter,
         Func<string, CancellationToken, Task<DeliveryRequest?>> getRequest,
         ILogger<OfferPushNotifier> logger)
+        : this(push, recordWriter, NullGenericEventDispatcher.Instance, getRequest, logger)
+    {
+    }
+
+    internal OfferPushNotifier(
+        ServicePushNotificationClient push,
+        INotificationRecordWriter recordWriter,
+        IGenericEventDispatcher events,
+        Func<string, CancellationToken, Task<DeliveryRequest?>> getRequest,
+        ILogger<OfferPushNotifier> logger)
     {
         _push = push;
         _recordWriter = recordWriter;
+        _events = events;
         _getRequest = getRequest;
         _logger = logger;
     }
@@ -431,6 +445,28 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
             {
                 payload["notificationId"] = notificationCorrelationId;
                 payload["notification_id"] = notificationCorrelationId;
+            }
+
+            // offer_lost has no notification-centre route, so the generic seam is the only way
+            // it survives the gateway ceasing to be a push producer.
+            if (string.Equals(templateKey, RetiredOfferLostTemplateKey, StringComparison.Ordinal))
+            {
+                var handover = await _events.DispatchAsync(
+                    JeebGenericEventTypes.OfferLostEventType,
+                    recipientId,
+                    offerId,
+                    template.Title,
+                    template.Body,
+                    payload.ToDictionary(
+                        kv => kv.Key, kv => kv.Value?.ToString() ?? string.Empty, StringComparer.Ordinal),
+                    PushSilencePolicy.CategoryOfferLost,
+                    ct);
+
+                if (handover.Classification
+                    != GenericEventDispatchClassification.SkippedDirectDispatchArmed)
+                {
+                    return;
+                }
             }
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);

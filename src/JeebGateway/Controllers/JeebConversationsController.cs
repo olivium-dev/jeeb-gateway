@@ -405,7 +405,8 @@ public sealed class JeebConversationsController : ControllerBase
             // BUILD-CHAT-PUSH — the only missing link for real A→B chat push: notify the
             // conversation's other party. Best-effort/degrade-don't-fail — the notifier
             // never throws and is bounded by a short timeout, so it never affects this 201.
-            await _chatPush.NotifyNewMessageAsync(conversationId, authorId, body.Body, ct);
+            await _chatPush.NotifyNewMessageAsync(
+                conversationId, authorId, body.Body, ct, result?.MessageId);
 
             return StatusCode(StatusCodes.Status201Created, result);
         }

@@ -1,4 +1,5 @@
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Geo;
 using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
@@ -22,8 +23,12 @@ namespace JeebGateway.Controllers.V1;
 /// <para><b>Visibility projection (contract-freeze §1 / §6).</b> A request is visible to jeeber
 /// <c>J</c> iff: (1) <c>J</c> is currently online in the delivery-service presence store — the same
 /// online-set matching reads; (2) <c>request.status == pending</c>; (3) <c>request.clientId != J</c>
-/// (a jeeber never sees their own client requests). Zone/nearby narrowing is a documented
-/// fast-follow owned by the matching domain, NOT the gateway.</para>
+/// (a jeeber never sees their own client requests); and (4) the jeeber→pickup great-circle
+/// distance is KNOWN and within the request tier's radius (3/10/25 km). Predicate (4) is
+/// FAIL-CLOSED — a missing jeeber fix, a missing pickup point, or an unresolvable tier
+/// EXCLUDES the request. The "zone/nearby narrowing is a fast-follow owned by the matching
+/// domain, NOT the gateway" note that stood here described the state that produced bug D2
+/// (a ~9,000 km request offered to a 25 km jeeber, distanceMeters null).</para>
 ///
 /// <para><b>Thin BFF aggregation.</b> Primary list = the gateway's own request store projected by
 /// status (always available). Each item is then ANNOTATED with this jeeber's existing offer
@@ -57,6 +62,7 @@ public sealed class JeebFeedController : ControllerBase
     // P7 (G-H): the offer-wait countdown projection for feed cards.
     private readonly OfferDeadlineProjector _deadlines;
     private readonly GatewayPublicOptions _publicOptions;
+    private readonly JeebGateway.Tiers.ITiersStore _tiers;
     private readonly ILogger<JeebFeedController> _logger;
 
     public JeebFeedController(
@@ -68,6 +74,7 @@ public sealed class JeebFeedController : ControllerBase
         TimeProvider clock,
         OfferDeadlineProjector deadlines,
         IOptions<GatewayPublicOptions> publicOptions,
+        JeebGateway.Tiers.ITiersStore tiers,
         ILogger<JeebFeedController> logger)
     {
         _publicOptions = publicOptions.Value;
@@ -78,6 +85,7 @@ public sealed class JeebFeedController : ControllerBase
         _flags = flags.Value;
         _clock = clock;
         _deadlines = deadlines;
+        _tiers = tiers;
         _logger = logger;
     }
 
@@ -111,7 +119,8 @@ public sealed class JeebFeedController : ControllerBase
         // authority for "who is online" (written by Contract A / availability toggle). Offline OR
         // never-online (upstream null) → empty feed (200), the Gate B negative case. Degrade-safe:
         // a presence read blip is treated as offline rather than 5xx-ing the feed.
-        if (!await IsOnlineAsync(jeeberId, ct))
+        var presence = await ReadPresenceAsync(jeeberId, ct);
+        if (presence is not { Online: true })
         {
             _logger.LogInformation("jeeber.feed for {JeeberId}: offline → empty feed.", jeeberId);
             return Ok(JeeberFeedResponse.EmptyAt(feedNow));
@@ -133,6 +142,36 @@ public sealed class JeebFeedController : ControllerBase
             // (contract-freeze §3.6 — pinned for deterministic QA/mobile assertions).
             .OrderBy(r => r.CreatedAt)
             .ToList();
+
+        // (2b) D2 fail-CLOSED tier-radius cut. An unknown distance is an EXCLUSION, never a
+        // pass-through: the 9,000 km request that reached a 25 km jeeber got there this way.
+        var tiersById = await LoadTiersAsync(ct);
+        var distancesByRequest = new Dictionary<string, double>(StringComparer.Ordinal);
+        var inRadius = new List<DeliveryRequest>(visible.Count);
+
+        foreach (var request in visible)
+        {
+            var evaluation = TierRadiusPolicy.Evaluate(
+                presence.Lat,
+                presence.Lng,
+                request.PickupLocation,
+                ResolveTier(tiersById, request.TierId));
+
+            if (!evaluation.IsIncluded)
+            {
+                _logger.LogInformation(
+                    "event={event} jeeberId={JeeberId} requestId={RequestId} tierId={TierId} "
+                    + "reason={Reason} distanceMeters={DistanceMeters}",
+                    "jeeber.feed.excluded", jeeberId, request.Id, request.TierId,
+                    evaluation.Decision, evaluation.DistanceMeters);
+                continue;
+            }
+
+            distancesByRequest[request.Id] = evaluation.DistanceMeters!.Value;
+            inRadius.Add(request);
+        }
+
+        visible = inRadius;
 
         if (limit is > 0)
         {
@@ -167,7 +206,8 @@ public sealed class JeebFeedController : ControllerBase
         }
 
         var items = visible
-            .Select(r => ToFeedItem(r, offersByRequest, sendersByClient, project(r)))
+            .Select(r => ToFeedItem(
+                r, offersByRequest, sendersByClient, project(r), distancesByRequest[r.Id]))
             .ToList();
 
         _logger.LogInformation(
@@ -187,12 +227,12 @@ public sealed class JeebFeedController : ControllerBase
     /// or <c>online=false</c> → not online. A read fault degrades to "offline" (privacy-safe,
     /// never 5xx) so a presence blip yields an empty feed instead of an error.
     /// </summary>
-    private async Task<bool> IsOnlineAsync(string jeeberId, CancellationToken ct)
+    private async Task<JeeberAvailabilityUpstream?> ReadPresenceAsync(
+        string jeeberId, CancellationToken ct)
     {
         try
         {
-            var presence = await _delivery.GetAvailabilityAsync(jeeberId, ct);
-            return presence is { Online: true };
+            return await _delivery.GetAvailabilityAsync(jeeberId, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -203,8 +243,53 @@ public sealed class JeebFeedController : ControllerBase
             _logger.LogWarning(ex,
                 "jeeber.feed presence read failed for {JeeberId}; treating as offline (empty feed).",
                 jeeberId);
-            return false;
+            return null;
         }
+    }
+
+    /// <summary>
+    /// Tier catalog for this page. A read fault yields an EMPTY map, which the fail-closed
+    /// evaluator turns into unknown-tier exclusions rather than an unbounded feed.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, JeebGateway.Tiers.DeliveryTier>> LoadTiersAsync(CancellationToken ct)
+    {
+        try
+        {
+            var tiers = await _tiers.ListAsync(ct);
+            var map = new Dictionary<string, JeebGateway.Tiers.DeliveryTier>(StringComparer.OrdinalIgnoreCase);
+            foreach (var tier in tiers)
+            {
+                map[tier.Id] = tier;
+            }
+
+            return map;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "jeeber.feed tier catalog read failed; excluding every request.");
+            return new Dictionary<string, JeebGateway.Tiers.DeliveryTier>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private static JeebGateway.Tiers.DeliveryTier? ResolveTier(
+        IReadOnlyDictionary<string, JeebGateway.Tiers.DeliveryTier> tiersById, string? tierId)
+    {
+        if (string.IsNullOrWhiteSpace(tierId))
+        {
+            return null;
+        }
+
+        if (tiersById.TryGetValue(tierId.Trim(), out var tier))
+        {
+            return tier;
+        }
+
+        var canonical = JeebGateway.Tiers.LegacyTierCodes.Canonicalize(tierId.Trim());
+        return canonical is not null && tiersById.TryGetValue(canonical, out var mapped) ? mapped : null;
     }
 
     /// <summary>
@@ -333,7 +418,8 @@ public sealed class JeebFeedController : ControllerBase
         DeliveryRequest request,
         IReadOnlyDictionary<string, JeeberFeedOffer> offersByRequest,
         IReadOnlyDictionary<string, FeedSenderIdentity> sendersByClient,
-        (DateTimeOffset? At, int? Seconds) offerDeadline)
+        (DateTimeOffset? At, int? Seconds) offerDeadline,
+        double distanceMeters)
     {
         offersByRequest.TryGetValue(request.Id, out var myOffer);
         sendersByClient.TryGetValue(request.ClientId, out var sender);
@@ -346,9 +432,8 @@ public sealed class JeebFeedController : ControllerBase
             Pickup = ToFeedLocation(request.PickupAddress, request.PickupLocation),
             Dropoff = ToFeedLocation(request.DropoffAddress, request.DropoffLocation),
             TierId = request.TierId,
-            // distanceMeters: jeeber→pickup distance is owned by the matching/geo domain
-            // (zone/nearby fast-follow). The gateway does not compute it → null for now.
-            DistanceMeters = null,
+            // D2: a listed item passed the fail-closed radius cut, so this is never null.
+            DistanceMeters = distanceMeters,
             CreatedAt = request.CreatedAt,
             MyOffer = myOffer is null
                 ? null

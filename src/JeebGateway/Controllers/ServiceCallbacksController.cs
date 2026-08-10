@@ -103,17 +103,20 @@ public sealed class ServiceCallbacksController : ControllerBase
     private readonly ServicePushNotificationClient _push;
     private readonly IIdempotencyStore _idempotency;
     private readonly INotificationRecordWriter _records;
+    private readonly IGenericEventDispatcher _events;
     private readonly ILogger<ServiceCallbacksController> _log;
 
     public ServiceCallbacksController(
         ServicePushNotificationClient push,
         IIdempotencyStore idempotency,
         INotificationRecordWriter records,
+        IGenericEventDispatcher events,
         ILogger<ServiceCallbacksController> log)
     {
         _push = push;
         _idempotency = idempotency;
         _records = records;
+        _events = events;
         _log = log;
     }
 
@@ -247,6 +250,22 @@ public sealed class ServiceCallbacksController : ControllerBase
         // so this call site cannot accidentally bypass it.
         await TryWriteCentreRowAsync(
             notificationType, recipientUserId, template, body.Data, entityId, entryId, ct);
+
+        // D1: this controller and the in-gateway notifiers are two producers for one event.
+        // The shared correlation id is what collapses them at notification-service's upsert.
+        var handover = await TryHandOverGenericEventAsync(
+            notificationType, recipientUserId, template, payload, entityId ?? entryId, ct);
+        if (handover != GenericEventDispatchClassification.SkippedDirectDispatchArmed)
+        {
+            return Accepted(new ServiceCallbackNotifyResponse
+            {
+                EntryId = entryId,
+                WasDeduplicated = false,
+                Status = handover == GenericEventDispatchClassification.Unproven
+                    ? DispatchStatus.Failed
+                    : DispatchStatus.Queued,
+            });
+        }
 
         var status = DispatchStatus.Queued;
         try
@@ -406,6 +425,47 @@ public sealed class ServiceCallbacksController : ControllerBase
     /// it in <c>data</c>; we accept the camel and snake spellings the mobile client already reads.
     /// Absent ⇒ the resolver returns the inbox root rather than a malformed link.
     /// </summary>
+    /// <summary>
+    /// Hands the event to notification-service under the SAME correlation id the in-gateway
+    /// notifiers mint, so one logical event yields one stored command and one dispatch.
+    /// </summary>
+    private async Task<GenericEventDispatchClassification> TryHandOverGenericEventAsync(
+        string notificationType,
+        string recipientUserId,
+        NotificationTemplate template,
+        IReadOnlyDictionary<string, object?> payload,
+        string entityId,
+        CancellationToken ct)
+    {
+        try
+        {
+            var routing = payload.ToDictionary(
+                kv => kv.Key,
+                kv => kv.Value?.ToString() ?? string.Empty,
+                StringComparer.Ordinal);
+
+            var outcome = await _events.DispatchAsync(
+                notificationType,
+                recipientUserId,
+                entityId,
+                template.Title,
+                template.Body,
+                routing,
+                PushSilencePolicy.CategoryForTemplateKey(notificationType)
+                    ?? PushSilencePolicy.CategoryDelivery,
+                ct);
+
+            return outcome.Classification;
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex,
+                "event={event} type={type} recipientId={recipientId}",
+                "svc_callback.generic_event_failed", notificationType, recipientUserId);
+            return GenericEventDispatchClassification.Unproven;
+        }
+    }
+
     private static string? ResolveEntityId(IReadOnlyDictionary<string, string>? data)
     {
         if (data is null)

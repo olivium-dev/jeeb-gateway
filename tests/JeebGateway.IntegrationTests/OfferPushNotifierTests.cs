@@ -279,6 +279,13 @@ public class OfferPushNotifierTests
         {
             ClientId = clientId,
             Description = "Pick up a package",
+            // D2: the offer range guard needs a resolvable tier + pickup point.
+            TierId = Fakes.InRangeGeoFixture.TierId,
+            PickupLocation = new GeoPoint
+            {
+                Lat = Fakes.InRangeGeoFixture.Lat,
+                Lng = Fakes.InRangeGeoFixture.Lng,
+            },
         }, default);
         return (clientId, created.Id);
     }

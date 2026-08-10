@@ -115,6 +115,8 @@ public class RequestNotOpen409FidelityTests
                 {
                     services.RemoveAll<IOfferServiceClient>();
                     services.AddSingleton<IOfferServiceClient>(fake);
+                    // D2: presence with coordinates, so the range guard is not the subject here.
+                    Fakes.InRangeGeoFixture.UseInRangePresence(services);
                 });
             });
 
@@ -125,6 +127,13 @@ public class RequestNotOpen409FidelityTests
             var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
             var created = await store.CreateAsync(new CreateRequestInput
             {
+                // D2: the offer/feed range guard needs a resolvable tier + pickup point.
+                TierId = Fakes.InRangeGeoFixture.TierId,
+                PickupLocation = new GeoPoint
+                {
+                    Lat = Fakes.InRangeGeoFixture.Lat,
+                    Lng = Fakes.InRangeGeoFixture.Lng,
+                },
                 ClientId = clientId,
                 Description = $"offer-service generic conflict for {upstreamScenario}",
             }, default);
@@ -166,6 +175,8 @@ public class RequestNotOpen409FidelityTests
                 {
                     services.RemoveAll<IOfferServiceClient>();
                     services.AddSingleton<IOfferServiceClient>(fake);
+                    // D2: presence with coordinates, so the range guard is not the subject here.
+                    Fakes.InRangeGeoFixture.UseInRangePresence(services);
                 });
             });
 
@@ -180,6 +191,13 @@ public class RequestNotOpen409FidelityTests
             var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
             var created = await store.CreateAsync(new CreateRequestInput
             {
+                // D2: the offer/feed range guard needs a resolvable tier + pickup point.
+                TierId = Fakes.InRangeGeoFixture.TierId,
+                PickupLocation = new GeoPoint
+                {
+                    Lat = Fakes.InRangeGeoFixture.Lat,
+                    Lng = Fakes.InRangeGeoFixture.Lng,
+                },
                 ClientId = clientId,
                 Description = "closed upstream, pending locally",
             }, default);
@@ -217,6 +235,8 @@ public class RequestNotOpen409FidelityTests
                 {
                     services.RemoveAll<IOfferServiceClient>();
                     services.AddSingleton<IOfferServiceClient>(fake);
+                    // D2: presence with coordinates, so the range guard is not the subject here.
+                    Fakes.InRangeGeoFixture.UseInRangePresence(services);
                 });
             });
 
@@ -233,6 +253,13 @@ public class RequestNotOpen409FidelityTests
             {
                 var created = await store.CreateAsync(new CreateRequestInput
                 {
+                    // D2: the offer/feed range guard needs a resolvable tier + pickup point.
+                    TierId = Fakes.InRangeGeoFixture.TierId,
+                    PickupLocation = new GeoPoint
+                    {
+                        Lat = Fakes.InRangeGeoFixture.Lat,
+                        Lng = Fakes.InRangeGeoFixture.Lng,
+                    },
                     ClientId = $"client-many-{i}-{Guid.NewGuid()}",
                     Description = $"open request {i}",
                 }, default);

@@ -76,6 +76,8 @@ public class RequestOffersController : ControllerBase
     private readonly IWalletSufficiencyGuard _walletGuard;
     private readonly UpstreamFeatureFlags _flags;
     private readonly TimeProvider _clock;
+    private readonly JeebGateway.Services.Clients.IDeliveryServiceClient _delivery;
+    private readonly JeebGateway.Tiers.ITiersStore _tiers;
     private readonly ILogger<RequestOffersController> _logger;
 
     public RequestOffersController(
@@ -89,8 +91,12 @@ public class RequestOffersController : ControllerBase
         IWalletSufficiencyGuard walletGuard,
         IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
+        JeebGateway.Services.Clients.IDeliveryServiceClient delivery,
+        JeebGateway.Tiers.ITiersStore tiers,
         ILogger<RequestOffersController> logger)
     {
+        _delivery = delivery;
+        _tiers = tiers;
         _offers = offers;
         _requests = requests;
         _dualRole = dualRole;
@@ -232,6 +238,23 @@ public class RequestOffersController : ControllerBase
                     }
                 });
             }
+        }
+
+        // D2: hiding an out-of-radius request from the feed is not enough — the offer route
+        // is directly callable. Same fail-closed evaluation, so the two cannot disagree.
+        var radius = await EvaluateTierRadiusAsync(jeeberId, request, ct);
+        if (!radius.IsIncluded)
+        {
+            _logger.LogInformation(
+                "event={event} jeeberId={JeeberId} requestId={RequestId} tierId={TierId} reason={Reason}",
+                "offer.submit.out_of_range", jeeberId, requestId, request.TierId, radius.Decision);
+            return Conflict(new ProblemDetails
+            {
+                Title = "Request is outside your serviceable range.",
+                Detail = $"reason={radius.Decision}",
+                Status = StatusCodes.Status409Conflict,
+                Type = "https://jeeb.dev/errors/offer-out-of-range",
+            });
         }
 
         PendingOffer created;
@@ -527,4 +550,51 @@ public class RequestOffersController : ControllerBase
         CreatedAt = o.CreatedAt,
         UpdatedAt = o.UpdatedAt
     };
+
+    /// <summary>
+    /// Fail-closed jeeber→pickup range check. A presence, tier, or coordinate gap EXCLUDES;
+    /// it never degrades to "allow", which is the D2 defect.
+    /// </summary>
+    private async Task<JeebGateway.Geo.TierRadiusEvaluation> EvaluateTierRadiusAsync(
+        string jeeberId, DeliveryRequest request, CancellationToken ct)
+    {
+        JeebGateway.Services.Clients.JeeberAvailabilityUpstream? presence = null;
+        try
+        {
+            presence = await _delivery.GetAvailabilityAsync(jeeberId, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "offer.submit presence read failed for {JeeberId}; treating as no-fix.", jeeberId);
+        }
+
+        JeebGateway.Tiers.DeliveryTier? tier = null;
+        if (!string.IsNullOrWhiteSpace(request.TierId))
+        {
+            try
+            {
+                var canonical = JeebGateway.Tiers.LegacyTierCodes.Canonicalize(request.TierId!);
+                tier = await _tiers.GetAsync(canonical, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "offer.submit tier read failed for {TierId}; treating as unknown tier.",
+                    request.TierId);
+            }
+        }
+
+        return JeebGateway.Geo.TierRadiusPolicy.Evaluate(
+            presence?.Lat, presence?.Lng, request.PickupLocation, tier);
+    }
+
 }

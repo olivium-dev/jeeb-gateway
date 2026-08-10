@@ -261,6 +261,8 @@ public sealed class S08GatewayCloseoutTests
             {
                 services.RemoveAll<IJeebConversationClient>();
                 services.AddSingleton(chat);
+                // D2: presence with coordinates, so the range guard is not the subject here.
+                Fakes.InRangeGeoFixture.UseInRangePresence(services);
                 if (fakeOffer is not null)
                 {
                     services.RemoveAll<IOfferServiceClient>();
@@ -277,6 +279,13 @@ public sealed class S08GatewayCloseoutTests
         {
             ClientId = clientId,
             Description = "Pick up the package",
+            // D2: the offer range guard needs a resolvable tier + pickup point.
+            TierId = Fakes.InRangeGeoFixture.TierId,
+            PickupLocation = new GeoPoint
+            {
+                Lat = Fakes.InRangeGeoFixture.Lat,
+                Lng = Fakes.InRangeGeoFixture.Lng,
+            },
         }, default);
         if (!string.IsNullOrWhiteSpace(conversationId))
         {
@@ -301,6 +310,8 @@ public sealed class S08GatewayCloseoutTests
             {
                 services.RemoveAll<IJeebConversationClient>();
                 services.AddSingleton(chat);
+                // D2: presence with coordinates, so the range guard is not the subject here.
+                Fakes.InRangeGeoFixture.UseInRangePresence(services);
 
                 services.RemoveAll<IServiceOTPClient>();
                 services.AddSingleton<IServiceOTPClient>(new StubServiceOtpClient());

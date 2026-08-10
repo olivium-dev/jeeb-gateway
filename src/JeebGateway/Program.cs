@@ -744,6 +744,10 @@ ServiceClientExtensions.AttachBreakerAndTimeoutOnly(
 builder.Services.AddScoped<
     JeebGateway.Notifications.INotificationRecordWriter,
     JeebGateway.Notifications.NotificationRecordWriter>();
+// D1 single-producer: the hand-over seam for push kinds that have no centre route.
+builder.Services.AddScoped<
+    JeebGateway.Notifications.IGenericEventDispatcher,
+    JeebGateway.Notifications.GenericEventDispatcher>();
 builder.Services.AddHostedService<JeebGateway.Notifications.NotificationDurableWriteStartupAlarm>();
 
 // BUILD-CHAT-PUSH — the chat-message → push-notification trigger. Best-effort fan-out
@@ -1578,6 +1582,7 @@ if (durableRequests.Enabled)
             }
             http.Timeout = TimeSpan.FromSeconds(5);
         })
+        .AddStateServiceCredential(builder.Configuration)
         .AddStandardResilienceHandler();
 
     // JEB-50 (S05 H9b): broadcast-event recorder — typed HttpClient over the SAME
@@ -1597,6 +1602,7 @@ if (durableRequests.Enabled)
             }
             http.Timeout = TimeSpan.FromSeconds(5);
         })
+        .AddStateServiceCredential(builder.Configuration)
         .AddStandardResilienceHandler();
 
     builder.Services.AddSingleton<IRequestsStore>(sp => new DurableRequestsStore(

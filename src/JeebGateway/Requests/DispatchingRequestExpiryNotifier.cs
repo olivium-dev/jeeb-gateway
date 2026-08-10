@@ -147,14 +147,41 @@ public sealed class DispatchingRequestExpiryNotifier : IRequestExpiryNotifier
 
             try
             {
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                cts.CancelAfter(PushTimeout);
-
-                var push = scope.ServiceProvider.GetRequiredService<ServicePushNotificationClient>();
-                await push.Send_notification_to_userAsync(
+                // Expiry/nudge has no notification-centre route; the generic seam carries it
+                // once the gateway stops producing pushes directly.
+                var events = scope.ServiceProvider
+                    .GetService<JeebGateway.Notifications.IGenericEventDispatcher>()
+                    ?? JeebGateway.Notifications.NullGenericEventDispatcher.Instance;
+                var handover = await events.DispatchAsync(
+                    JeebGateway.Notifications.JeebGenericEventTypes.RequestExpiringEventType,
                     clientId,
-                    new SentPayloadToUserRequest { Payload = payload },
-                    cts.Token);
+                    $"{notificationType}:{requestId}",
+                    rendered.Title,
+                    rendered.Body,
+                    payload.ToDictionary(
+                        kv => kv.Key, kv => kv.Value?.ToString() ?? string.Empty, StringComparer.Ordinal),
+                    JeebGateway.Notifications.PushSilencePolicy.CategoryRequestExpired,
+                    ct);
+
+                if (handover.Classification
+                    == JeebGateway.Notifications.GenericEventDispatchClassification
+                        .SkippedDirectDispatchArmed)
+                {
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    cts.CancelAfter(PushTimeout);
+
+                    var push = scope.ServiceProvider.GetRequiredService<ServicePushNotificationClient>();
+                    await push.Send_notification_to_userAsync(
+                        clientId,
+                        new SentPayloadToUserRequest { Payload = payload },
+                        cts.Token);
+                }
+                else if (handover.Classification
+                    == JeebGateway.Notifications.GenericEventDispatchClassification.Unproven)
+                {
+                    throw new InvalidOperationException(
+                        "Generic event hand-over for the request expiry notification was unproven.");
+                }
             }
             catch (Exception pushEx)
             {

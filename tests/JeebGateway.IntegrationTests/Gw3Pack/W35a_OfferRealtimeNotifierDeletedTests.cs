@@ -188,6 +188,13 @@ public class W35a_OfferRealtimeNotifierDeletedTests
         {
             ClientId = clientId,
             Description = "GW3 W3.5(a) probe",
+            // D2: the offer range guard needs a resolvable tier + pickup point.
+            TierId = Fakes.InRangeGeoFixture.TierId,
+            PickupLocation = new GeoPoint
+            {
+                Lat = Fakes.InRangeGeoFixture.Lat,
+                Lng = Fakes.InRangeGeoFixture.Lng,
+            },
         }, default);
         return (clientId, created.Id);
     }

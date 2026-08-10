@@ -144,6 +144,13 @@ public sealed class RequestOffersSeatTests
         {
             ClientId = clientId,
             Description = "Pick up a package",
+            // D2: the offer range guard needs a resolvable tier + pickup point.
+            TierId = Fakes.InRangeGeoFixture.TierId,
+            PickupLocation = new GeoPoint
+            {
+                Lat = Fakes.InRangeGeoFixture.Lat,
+                Lng = Fakes.InRangeGeoFixture.Lng,
+            },
         }, default);
         return (clientId, created.Id);
     }
@@ -158,6 +165,13 @@ public sealed class RequestOffersSeatTests
         {
             ClientId = clientId,
             Description = "Pick up a package",
+            // D2: the offer range guard needs a resolvable tier + pickup point.
+            TierId = Fakes.InRangeGeoFixture.TierId,
+            PickupLocation = new GeoPoint
+            {
+                Lat = Fakes.InRangeGeoFixture.Lat,
+                Lng = Fakes.InRangeGeoFixture.Lng,
+            },
         }, default);
         // Stamp a conversation id on the ledger row (order-create auto-create path). The
         // in-memory store returns the live row reference, so mutating ConversationId here

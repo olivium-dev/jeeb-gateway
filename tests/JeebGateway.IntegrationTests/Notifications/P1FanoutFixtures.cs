@@ -23,7 +23,16 @@ namespace JeebGateway.IntegrationTests;
 internal static class P1Fanout
 {
     /// <summary>A jeeber_availability row, optionally with stored coordinates.</summary>
-    public static JeeberAvailability Jeeber(string id, double? lat = null, double? lng = null)
+    /// <summary>
+    /// D2: coordinates now DEFAULT to the fan-out pickup point. A coordinate-less row is no
+    /// longer a recipient at all, so leaving these null would make every unrelated assertion
+    /// in these fixtures vacuous.
+    /// </summary>
+    public const double DefaultLat = 33.88;
+    public const double DefaultLng = 35.50;
+
+    public static JeeberAvailability Jeeber(
+        string id, double? lat = DefaultLat, double? lng = DefaultLng)
     {
         var now = DateTimeOffset.UtcNow;
         return new JeeberAvailability

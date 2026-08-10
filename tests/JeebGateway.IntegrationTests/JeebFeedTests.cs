@@ -48,7 +48,7 @@ public class JeebFeedTests
 
         var goOnline = await jeeber.PutAsJsonAsync(
             "/v1/jeebers/me/availability",
-            new { online = true, vehicleType = "car", zone = "downtown" });
+            new { online = true, vehicleType = "car", zone = "downtown", latitude = HereLat, longitude = HereLng });
         goOnline.StatusCode.Should().Be(HttpStatusCode.OK, "GAP-1 PUT v1 availability must resolve");
 
         var resp = await jeeber.GetAsync(FeedPath);
@@ -378,13 +378,23 @@ public class JeebFeedTests
         return client;
     }
 
+    // D2: the feed now requires a jeeber position fix and an in-range, tier-resolved pickup.
+    // These defaults keep every pre-existing test's own subject intact.
+    private const double HereLat = 33.51;
+    private const double HereLng = 36.27;
+    private const string DefaultTierId = "urgent";
+
     private static async Task SetOnlineAsync(WebApplicationFactory<Program> factory, string jeeberId, bool online)
     {
         // Drive the canonical presence store directly (the same store the toggle writes), so the
         // feed's online gate (delivery GetAvailabilityAsync) flips without going through the toggle.
         var delivery = (FakeDeliveryPresenceClient)factory.Services.GetRequiredService<IDeliveryServiceClient>();
         await delivery.SetAvailabilityAsync(
-            new JeeberAvailabilityUpstreamRequest { Online = online, VehicleType = "car", Zone = "downtown" },
+            new JeeberAvailabilityUpstreamRequest
+            {
+                Online = online, VehicleType = "car", Zone = "downtown",
+                Lat = HereLat, Lng = HereLng,
+            },
             jeeberId,
             default);
     }
@@ -406,9 +416,9 @@ public class JeebFeedTests
                 Id = id,
                 ClientId = clientId,
                 Description = description,
-                TierId = tierId,
+                TierId = tierId ?? DefaultTierId,
                 PickupAddress = pickupAddress,
-                PickupLocation = pickupLat is { } plat && pickupLng is { } plng ? new GeoPoint { Lat = plat, Lng = plng } : null,
+                PickupLocation = new GeoPoint { Lat = pickupLat ?? HereLat, Lng = pickupLng ?? HereLng },
                 DropoffAddress = dropoffAddress,
                 DropoffLocation = dropoffLat is { } dlat && dropoffLng is { } dlng ? new GeoPoint { Lat = dlat, Lng = dlng } : null,
                 RecipientPhone = recipientPhone,

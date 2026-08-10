@@ -1,3 +1,4 @@
+using System.Linq;
 using JeebGateway.Availability;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -45,5 +46,60 @@ public class FakeOfferStoreWebApplicationFactory : WebApplicationFactory<Program
         // trip existing offer tests (the real client's upstream is down in tests).
         services.RemoveAll<SwServiceWalletClient>();
         services.AddScoped<SwServiceWalletClient>(_ => new FakeWalletClient());
+
+        // D2 — same rationale as the wallet double: the new fail-closed range guard on offer
+        // submit must not silently disable every unrelated offer test.
+        InRangeGeoFixture.UseInRangePresence(services);
     }
+}
+
+/// <summary>
+/// D2: the offer route now rejects a request the jeeber cannot be proven to be near, so a
+/// fixture that seeds offers needs a presence row with coordinates. Mirrors the wallet double
+/// above — a guard added for production must not silently disable every unrelated offer test.
+/// </summary>
+public static class InRangeGeoFixture
+{
+    /// <summary>Jeeber position AND the pickup point the seeded requests use: distance 0.</summary>
+    public const double Lat = 33.5138;
+
+    public const double Lng = 36.2765;
+
+    /// <summary>A seeded catalog tier id (3 km radius) so the tier always resolves.</summary>
+    public const string TierId = "urgent";
+
+    public static void UseInRangePresence(IServiceCollection services)
+    {
+        // A default, never an override: a caller that already supplied its own delivery
+        // double keeps it, whatever order it registered in.
+        var existing = services.LastOrDefault(
+            d => d.ServiceType == typeof(JeebGateway.Services.Clients.IDeliveryServiceClient));
+        if (existing?.ImplementationInstance?.GetType().Assembly == typeof(InRangeGeoFixture).Assembly)
+        {
+            return;
+        }
+
+        services.RemoveAll<JeebGateway.Services.Clients.IDeliveryServiceClient>();
+        services.AddSingleton<JeebGateway.Services.Clients.IDeliveryServiceClient>(
+            new AlwaysOnlineNearbyPresenceClient());
+    }
+}
+
+/// <summary>Presence double that reports every jeeber online at <see cref="InRangeGeoFixture"/>.</summary>
+internal sealed class AlwaysOnlineNearbyPresenceClient : FakeDeliveryPresenceClient
+{
+    public override Task<JeebGateway.Services.Clients.JeeberAvailabilityUpstream?> GetAvailabilityAsync(
+        string jeeberId, CancellationToken ct)
+        => Task.FromResult<JeebGateway.Services.Clients.JeeberAvailabilityUpstream?>(
+            new JeebGateway.Services.Clients.JeeberAvailabilityUpstream
+            {
+                JeeberId = jeeberId,
+                Online = true,
+                VehicleType = "car",
+                Zone = "downtown",
+                Lat = InRangeGeoFixture.Lat,
+                Lng = InRangeGeoFixture.Lng,
+                LastSeenAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            });
 }
