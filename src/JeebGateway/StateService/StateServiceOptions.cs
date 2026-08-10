@@ -32,4 +32,13 @@ public sealed class StateServiceOptions
     /// local/CI runs stand up without a live state-service.
     /// </summary>
     public bool Enabled { get; init; } = true;
+
+    /// <summary>
+    /// Absolute path to the mounted shared-secret file for jeeb-state-service ownership auth
+    /// (env key <c>JeebStateService__ServiceTokenFile</c>). Unset leaves every state HttpClient
+    /// unauthenticated, exactly as today — the credential is additive, not a new hard dependency.
+    /// </summary>
+    public string? ServiceTokenFile { get; init; }
+
+    public bool HasServiceCredential => !string.IsNullOrWhiteSpace(ServiceTokenFile);
 }

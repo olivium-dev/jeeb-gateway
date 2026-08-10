@@ -1,4 +1,6 @@
 using System.Net;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
@@ -26,12 +28,21 @@ public static class StateServiceClientExtensions
     {
         var baseUrl = options.BaseUrl.TrimEnd('/') + "/";
 
-        services
+        services.TryAddTransient(_ => new StateServiceCredentialHandler(options));
+
+        var builder = services
             .AddHttpClient<IJeebStateServiceClient, JeebStateServiceClient>(http =>
             {
                 http.BaseAddress = new Uri(baseUrl);
                 http.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
-            })
+            });
+
+        if (options.HasServiceCredential)
+        {
+            builder.AddHttpMessageHandler<StateServiceCredentialHandler>();
+        }
+
+        builder
             // The NSwag client's ctor is (string baseUrl, HttpClient) because the
             // spec carries no `servers` block. Supply the baseUrl explicitly so
             // DI does not try to resolve a bare `string` (which crash-loops the
@@ -69,6 +80,31 @@ public static class StateServiceClientExtensions
             });
 
         return services;
+    }
+
+    /// <summary>
+    /// Attaches the file-backed state credential to a typed HttpClient built outside
+    /// <see cref="AddJeebStateServiceClient"/> (the saga-bundle and broadcast-event recorders).
+    /// No configured token file leaves the client exactly as it is today.
+    /// </summary>
+    public static IHttpClientBuilder AddStateServiceCredential(
+        this IHttpClientBuilder builder,
+        IConfiguration configuration)
+    {
+        var tokenFile = configuration[$"{StateServiceOptions.SectionName}:ServiceTokenFile"];
+        if (string.IsNullOrWhiteSpace(tokenFile))
+        {
+            return builder;
+        }
+
+        builder.Services.TryAddTransient(_ =>
+            new StateServiceCredentialHandler(new StateServiceOptions
+            {
+                BaseUrl = configuration[$"{StateServiceOptions.SectionName}:BaseUrl"] ?? string.Empty,
+                ServiceTokenFile = tokenFile,
+            }));
+
+        return builder.AddHttpMessageHandler<StateServiceCredentialHandler>();
     }
 }
 
