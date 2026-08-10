@@ -24,7 +24,7 @@ namespace JeebGateway.IntegrationTests;
 /// Every other method throws <see cref="NotSupportedException"/> so an
 /// accidental call is loud.
 /// </summary>
-internal sealed class FakeDeliveryPresenceClient : IDeliveryServiceClient
+internal class FakeDeliveryPresenceClient : IDeliveryServiceClient
 {
     private readonly ConcurrentDictionary<string, JeeberAvailabilityUpstream> _store = new();
 
@@ -45,7 +45,7 @@ internal sealed class FakeDeliveryPresenceClient : IDeliveryServiceClient
         return Task.FromResult(row);
     }
 
-    public Task<JeeberAvailabilityUpstream?> GetAvailabilityAsync(string jeeberId, CancellationToken ct)
+    public virtual Task<JeeberAvailabilityUpstream?> GetAvailabilityAsync(string jeeberId, CancellationToken ct)
         => Task.FromResult(_store.TryGetValue(jeeberId, out var row) ? row : null);
 
     public Task<JeeberAvailabilityUpstream> HeartbeatAsync(string jeeberId, double lat, double lng, CancellationToken ct)

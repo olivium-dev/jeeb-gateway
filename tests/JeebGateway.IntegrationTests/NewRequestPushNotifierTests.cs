@@ -80,8 +80,10 @@ public class NewRequestPushNotifierTests
         string? requestId = RequestId,
         string? tierId = TierId,
         string? description = "Pick up a package",
-        double? lat = null,
-        double? lng = null)
+        double? lat = P1Fanout.DefaultLat,
+        double? lng = P1Fanout.DefaultLng)
+        // D2: a pickup point is now a PRECONDITION of any fan-out, so the default job carries
+        // one. A job without it reaches nobody, which is the fail-closed behaviour under test.
         => new(requestId!, tierId, description, initiator, lat, lng);
 
     // =====================================================================
@@ -298,7 +300,7 @@ public class NewRequestPushNotifierTests
             {
                 P1Fanout.Jeeber("near", 33.885, 35.505),
                 P1Fanout.Jeeber("far", 34.5, 36.5),
-                P1Fanout.Jeeber("noCoords"),
+                P1Fanout.Jeeber("noCoords", lat: null, lng: null),
             }
         };
         var log = new CapturingLogger<NewRequestPushNotifier>();
@@ -308,13 +310,14 @@ public class NewRequestPushNotifierTests
         await notifier.FanOutAsync(
             Job(initiator: "customer-1", lat: 33.88, lng: 35.50), CancellationToken.None);
 
-        push.RecipientIds.Should().BeEquivalentTo(new[] { "near", "noCoords" },
-            "a row WITHOUT stored coordinates is never dropped — partial data must not starve the auction");
+        push.RecipientIds.Should().BeEquivalentTo(new[] { "near" },
+            "D2: a row without stored coordinates cannot be proven in range, so it is EXCLUDED. "
+            + "Keeping it was the fail-open that let a ~9,000 km request reach a nearby jeeber");
         log.Has(LogLevel.Information, "source=online+geo").Should().BeTrue();
     }
 
-    [Fact] // G-U10 — a mis-set radius must never kill the auction.
-    public async Task GeoFilter_Emptying_Falls_Back_To_Unfiltered()
+    [Fact] // G-U10 (D2 REVERSAL) — an emptied geo filter must NOT revert to the unfiltered set.
+    public async Task GeoFilter_Emptying_Sends_To_Nobody()
     {
         var push = new RecordingPushClient();
         var store = new FakeAvailabilityStore
@@ -332,8 +335,11 @@ public class NewRequestPushNotifierTests
         await notifier.FanOutAsync(
             Job(initiator: "customer-1", lat: 33.88, lng: 35.50), CancellationToken.None);
 
-        push.RecipientIds.Should().BeEquivalentTo(new[] { "farA", "farB" });
-        log.Has(LogLevel.Warning, "geo-filter-emptied").Should().BeTrue();
+        push.RecipientIds.Should().BeEmpty(
+            "this test used to assert the OPPOSITE — keeping the unfiltered online set when the "
+            + "radius emptied it. That fallback is bug D2: it pushed every out-of-range request "
+            + "to everyone online. An empty in-range set is the correct answer");
+        log.Has(LogLevel.Information, "geo-filter-emptied").Should().BeTrue();
     }
 
     [Fact] // G-U11 — the config-only rollback path is PROVEN, not assumed.

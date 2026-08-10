@@ -386,6 +386,13 @@ public class WalletGuardOfferTests
         var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
         var created = await store.CreateAsync(new CreateRequestInput
         {
+            // D2: the offer/feed range guard needs a resolvable tier + pickup point.
+            TierId = Fakes.InRangeGeoFixture.TierId,
+            PickupLocation = new GeoPoint
+            {
+                Lat = Fakes.InRangeGeoFixture.Lat,
+                Lng = Fakes.InRangeGeoFixture.Lng,
+            },
             ClientId = clientId,
             Description = "Pick up a package",
         }, CancellationToken.None);

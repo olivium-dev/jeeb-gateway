@@ -4,6 +4,7 @@ using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Notifications;
 using JeebGateway.Services.Clients;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -199,6 +200,21 @@ public sealed class GenericEventDispatcherTests
         recorder.Requests.Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task Nothing_is_handed_over_when_the_durable_write_flag_is_off()
+    {
+        // Deploy footgun made explicit: direct dispatch off AND durable write off means the
+        // event has no producer at all. The dispatcher logs that and does not pretend to send.
+        var recorder = new RecordingHandler(HttpStatusCode.Created);
+        var dispatcher = Dispatcher(recorder, directDispatchEnabled: false, durableWriteEnabled: false);
+
+        var outcome = await Dispatch(dispatcher);
+
+        outcome.Classification.Should()
+            .Be(GenericEventDispatchClassification.SkippedDirectDispatchArmed);
+        recorder.Requests.Should().BeEmpty();
+    }
+
     // ── harness ──────────────────────────────────────────────────────────────────────
 
     private static string ExpectedCorrelationId() => NotificationCorrelationId.Create(
@@ -210,12 +226,21 @@ public sealed class GenericEventDispatcherTests
             "New message", "hello", Routing, PushSilencePolicy.CategoryChat, default);
 
     private static GenericEventDispatcher Dispatcher(
-        HttpMessageHandler handler, bool directDispatchEnabled)
+        HttpMessageHandler handler, bool directDispatchEnabled, bool durableWriteEnabled = true)
     {
         var http = new HttpClient(handler) { BaseAddress = new Uri("http://notifications.test/") };
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [NotificationRecordWriter.EnabledConfigurationKey] =
+                    durableWriteEnabled ? "true" : "false",
+            })
+            .Build();
+
         return new GenericEventDispatcher(
             new JeebNotificationRecordClient(http),
             Options.Create(new GatewayDirectPushDispatchOptions { Enabled = directDispatchEnabled }),
+            configuration,
             NullLogger<GenericEventDispatcher>.Instance);
     }
 

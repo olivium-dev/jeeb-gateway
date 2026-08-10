@@ -295,7 +295,11 @@ public class OfferDeadlineContractTests
         var delivery = (FakeDeliveryPresenceClient)
             factory.Services.GetRequiredService<IDeliveryServiceClient>();
         await delivery.SetAvailabilityAsync(
-            new JeeberAvailabilityUpstreamRequest { Online = online, VehicleType = "car", Zone = "downtown" },
+            new JeeberAvailabilityUpstreamRequest
+            {
+                Online = online, VehicleType = "car", Zone = "downtown",
+                Lat = 33.51, Lng = 36.27,
+            },
             jeeberId,
             default);
     }

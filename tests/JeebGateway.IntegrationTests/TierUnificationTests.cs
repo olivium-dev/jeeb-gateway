@@ -115,7 +115,7 @@ public class TierUnificationTests
         var notifier = NewFanoutNotifier(push);
 
         await notifier.FanOutAsync(
-            new NewRequestNotification("req-1", tierId, "Deliver a parcel", "customer-1", null, null),
+            new NewRequestNotification("req-1", tierId, "Deliver a parcel", "customer-1", P1Fanout.DefaultLat, P1Fanout.DefaultLng),
             CancellationToken.None);
 
         var payload = (IDictionary<string, object?>)push.UserSends.Single().Payload;
@@ -136,7 +136,7 @@ public class TierUnificationTests
 
         await notifier.FanOutAsync(
             new NewRequestNotification(
-                "req-1", "definitely-not-a-tier", "Deliver a parcel", "customer-1", null, null),
+                "req-1", "definitely-not-a-tier", "Deliver a parcel", "customer-1", P1Fanout.DefaultLat, P1Fanout.DefaultLng),
             CancellationToken.None);
 
         var payload = (IDictionary<string, object?>)push.UserSends.Single().Payload;
@@ -155,7 +155,9 @@ public class TierUnificationTests
             new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber("jeeberA") } },
             new FakeUsersStore(),
             new RecordingFanoutQueue(),
-            Options.Create(new NewRequestFanoutOptions()),
+            // D2: an explicit radius override so these COPY tests still reach a recipient when
+            // the tier id is deliberately unresolvable (an unknown tier now fails closed).
+            Options.Create(new NewRequestFanoutOptions { RadiusKm = 50 }),
             TimeProvider.System);
 
     // ---------------------------------------------------------------------
