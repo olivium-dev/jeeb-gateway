@@ -1,5 +1,6 @@
 using System.Net;
 using JeebGateway.Services.Clients;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Notifications;
@@ -14,15 +15,18 @@ public sealed class GenericEventDispatcher : IGenericEventDispatcher
 
     private readonly JeebNotificationRecordClient _client;
     private readonly IOptions<GatewayDirectPushDispatchOptions> _directDispatch;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<GenericEventDispatcher> _logger;
 
     public GenericEventDispatcher(
         JeebNotificationRecordClient client,
         IOptions<GatewayDirectPushDispatchOptions> directDispatch,
+        IConfiguration configuration,
         ILogger<GenericEventDispatcher> logger)
     {
         _client = client;
         _directDispatch = directDispatch;
+        _configuration = configuration;
         _logger = logger;
     }
 
@@ -45,6 +49,20 @@ public sealed class GenericEventDispatcher : IGenericEventDispatcher
 
         if (_directDispatch.Value.Enabled)
         {
+            return new(GenericEventDispatchClassification.SkippedDirectDispatchArmed, null);
+        }
+
+        // Same gate as NotificationRecordWriter: the durable-write flag is what says the
+        // gateway may talk to the notification centre at all.
+        if (!_configuration.GetValue<bool>(NotificationRecordWriter.EnabledConfigurationKey))
+        {
+            _logger.LogError(
+                "event={event} eventType={eventType} recipientId={recipientId} entityId={entityId} "
+                + "detail={detail}",
+                "notif.generic_event.no_producer", eventType, receiver, entityId,
+                "direct push dispatch is disabled AND "
+                + NotificationRecordWriter.EnabledConfigurationKey
+                + " is false: this event has NO push producer");
             return new(GenericEventDispatchClassification.SkippedDirectDispatchArmed, null);
         }
 

@@ -196,23 +196,6 @@ public class RequestOffersController : ControllerBase
             });
         }
 
-        // D2: hiding an out-of-radius request from the feed is not enough — the offer route
-        // is directly callable. Same fail-closed evaluation, so the two cannot disagree.
-        var radius = await EvaluateTierRadiusAsync(jeeberId, request, ct);
-        if (!radius.IsIncluded)
-        {
-            _logger.LogInformation(
-                "event={event} jeeberId={JeeberId} requestId={RequestId} tierId={TierId} reason={Reason}",
-                "offer.submit.out_of_range", jeeberId, requestId, request.TierId, radius.Decision);
-            return Conflict(new ProblemDetails
-            {
-                Title = "Request is outside your serviceable range.",
-                Detail = $"reason={radius.Decision}",
-                Status = StatusCodes.Status409Conflict,
-                Type = "https://jeeb.dev/errors/offer-out-of-range",
-            });
-        }
-
         // Offers only make sense while the auction is open — once an offer
         // is accepted (or the request is cancelled / expired) further bids
         // are noise. Mirrors the offer-service's own gating.
@@ -255,6 +238,23 @@ public class RequestOffersController : ControllerBase
                     }
                 });
             }
+        }
+
+        // D2: hiding an out-of-radius request from the feed is not enough — the offer route
+        // is directly callable. Same fail-closed evaluation, so the two cannot disagree.
+        var radius = await EvaluateTierRadiusAsync(jeeberId, request, ct);
+        if (!radius.IsIncluded)
+        {
+            _logger.LogInformation(
+                "event={event} jeeberId={JeeberId} requestId={RequestId} tierId={TierId} reason={Reason}",
+                "offer.submit.out_of_range", jeeberId, requestId, request.TierId, radius.Decision);
+            return Conflict(new ProblemDetails
+            {
+                Title = "Request is outside your serviceable range.",
+                Detail = $"reason={radius.Decision}",
+                Status = StatusCodes.Status409Conflict,
+                Type = "https://jeeb.dev/errors/offer-out-of-range",
+            });
         }
 
         PendingOffer created;
