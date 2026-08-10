@@ -150,7 +150,8 @@ public sealed class DispatchingRequestExpiryNotifier : IRequestExpiryNotifier
                 // Expiry/nudge has no notification-centre route; the generic seam carries it
                 // once the gateway stops producing pushes directly.
                 var events = scope.ServiceProvider
-                    .GetRequiredService<JeebGateway.Notifications.IGenericEventDispatcher>();
+                    .GetService<JeebGateway.Notifications.IGenericEventDispatcher>()
+                    ?? JeebGateway.Notifications.NullGenericEventDispatcher.Instance;
                 var handover = await events.DispatchAsync(
                     JeebGateway.Notifications.JeebGenericEventTypes.RequestExpiringEventType,
                     clientId,
