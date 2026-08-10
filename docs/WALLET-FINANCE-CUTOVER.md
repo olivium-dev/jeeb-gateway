@@ -25,15 +25,24 @@ execution idempotently and stamps the returned wallet transaction-header id.
 
 ## Reconciliation/backfill tool
 
-The tool reads both the gateway financial rows and delivery-service's non-financial completion
-markers. It reports delivery-only rows rather than inventing missing amounts. It also checks every
-Jeeber for exactly one active wallet in every currency returned by `GET Fees/currencies`.
+The shared gateway opaque-role append seam now blocks a `driver` grant unless an idempotent
+`PUT Wallet/holder/ensure` first converges the same UUID holder to exactly one active wallet in
+every currency returned by `GET Fees/currencies`. The call carries no user bearer or service-auth
+header and stays inside the private overlay. Wallet-service does not interpret the role; the Jeeb
+role decision remains entirely in the gateway/User Management boundary.
+
+The one-time tool derives the complete active Jeeber population only from User Management users
+whose `AvailableRoles` contains the opaque `driver` role. It then reads gateway financial rows and
+delivery-service's non-financial completion markers for reconciliation. A settlement whose Jeeber
+is absent from the User Management population is flagged and never creates a holder or posts a
+wallet transaction. Delivery-only rows are reported rather than used to invent missing amounts.
 
 Connection strings must be supplied indirectly through environment-variable names and are never
 printed. Dry-run is the default and performs zero wallet PUT/POST requests:
 
 ```sh
 dotnet run --project tools/WalletFinanceBackfill -- \
+  --user-management-dsn-env JEEB_USER_MANAGEMENT_DSN \
   --gateway-dsn-env JEEB_GATEWAY_DSN \
   --delivery-dsn-env JEEB_DELIVERY_DSN \
   --wallet-base-url http://wallet-service:8080/ \
@@ -44,14 +53,16 @@ After an owner reviews the JSONL artifact, execution requires a second explicit 
 
 ```sh
 dotnet run --project tools/WalletFinanceBackfill -- \
+  --user-management-dsn-env JEEB_USER_MANAGEMENT_DSN \
   --gateway-dsn-env JEEB_GATEWAY_DSN \
   --delivery-dsn-env JEEB_DELIVERY_DSN \
   --wallet-base-url http://wallet-service:8080/ \
   --execute --confirm wallet-authoritative-backfill --require-clean
 ```
 
-The run is restart-safe: holder provisioning is an idempotent `PUT`, transaction initiation reuses
-the same durable key, and execution is idempotent on the returned header id.
+The run is restart-safe: every active User Management Jeeber is inspected before any settlement,
+holder provisioning is an idempotent `PUT`, transaction initiation reuses the same durable key,
+and execution is idempotent on the returned header id.
 
 ## Phase B gate
 
@@ -60,7 +71,7 @@ projection/reconciler registrations only after an MSI observation window establi
 following:
 
 - zero source/identity mismatches (or an owner-approved exception list);
-- every configured-currency wallet is present exactly once per Jeeber;
+- every configured-currency wallet is present exactly once per active User Management Jeeber;
 - every eligible gateway settlement replays to one executed wallet header;
 - gross, commission, insurance, currency, holder and external delivery reference match per row;
 - no unresolved wallet-post failures and no rising reconciliation backlog.

@@ -40,7 +40,8 @@ public static class Program
         var wallet = new WalletSettlementLedgerClient(
             factory, loggerFactory.CreateLogger<WalletSettlementLedgerClient>());
         var provisioner = new WalletProvisioner(walletHttp);
-        var runner = new BackfillRunner(options, wallet, provisioner);
+        var source = new NpgsqlBackfillSource(options);
+        var runner = new BackfillRunner(options, wallet, provisioner, source);
 
         BackfillSummary summary;
         try
@@ -63,15 +64,17 @@ public static class Program
     private static void PrintUsage() => Console.Error.WriteLine(
         """
         Usage: WalletFinanceBackfill
+          --user-management-dsn-env <ENV_VAR_NAME>
           --gateway-dsn-env <ENV_VAR_NAME>
           --delivery-dsn-env <ENV_VAR_NAME>
           --wallet-base-url <PRIVATE_OVERLAY_URL>
           [--require-clean] [--dry-run]
           [--execute --confirm wallet-authoritative-backfill]
 
-        Default mode is dry-run: both databases and wallet inventory are read, but there are zero
-        wallet PUT/POST requests. Execute mode idempotently ensures configured wallets and posts
-        each financial settlement under wallet key settlement:<gateway-settlement-id>.
+        Default mode is dry-run: all three databases and wallet inventory are read, but there are
+        zero wallet PUT/POST requests. Execute mode first idempotently ensures configured wallets
+        for every active user-management driver, then posts each matching financial settlement
+        under wallet key settlement:<gateway-settlement-id>.
         Connection strings are read only from the named environment variables and never logged.
         """);
 }
@@ -80,6 +83,7 @@ public sealed class Options
 {
     private const string Confirmation = "wallet-authoritative-backfill";
 
+    public required string UserManagementDsn { get; init; }
     public required string GatewayDsn { get; init; }
     public required string DeliveryDsn { get; init; }
     public required string WalletBaseUrl { get; init; }
@@ -88,6 +92,7 @@ public sealed class Options
 
     public static Options Parse(string[] args)
     {
+        string? userManagementEnv = null;
         string? gatewayEnv = null;
         string? deliveryEnv = null;
         string? walletBaseUrl = null;
@@ -99,6 +104,7 @@ public sealed class Options
         {
             switch (args[i])
             {
+                case "--user-management-dsn-env": userManagementEnv = Value(args, ++i); break;
                 case "--gateway-dsn-env": gatewayEnv = Value(args, ++i); break;
                 case "--delivery-dsn-env": deliveryEnv = Value(args, ++i); break;
                 case "--wallet-base-url": walletBaseUrl = Value(args, ++i); break;
@@ -110,6 +116,8 @@ public sealed class Options
             }
         }
 
+        if (string.IsNullOrWhiteSpace(userManagementEnv))
+            throw new ArgumentException("--user-management-dsn-env is required");
         if (string.IsNullOrWhiteSpace(gatewayEnv))
             throw new ArgumentException("--gateway-dsn-env is required");
         if (string.IsNullOrWhiteSpace(deliveryEnv))
@@ -128,6 +136,7 @@ public sealed class Options
 
         return new Options
         {
+            UserManagementDsn = ReadSecret(userManagementEnv),
             GatewayDsn = ReadSecret(gatewayEnv),
             DeliveryDsn = ReadSecret(deliveryEnv),
             WalletBaseUrl = walletBaseUrl,
@@ -184,6 +193,15 @@ public sealed record BackfillRow(
     string Outcome,
     string? Error);
 
+public sealed record HolderBackfillRow(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("holder_id")] string HolderId,
+    [property: JsonPropertyName("identity_source")] string IdentitySource,
+    [property: JsonPropertyName("wallet_inventory")] string WalletInventory,
+    string Mode,
+    string Outcome,
+    string? Error);
+
 public sealed class BackfillSummary
 {
     [JsonPropertyName("mode")]
@@ -195,6 +213,12 @@ public sealed class BackfillSummary
     [JsonPropertyName("delivery_markers")]
     public int DeliveryMarkers { get; set; }
 
+    [JsonPropertyName("authoritative_jeeber_holders")]
+    public int AuthoritativeJeeberHolders { get; set; }
+
+    [JsonPropertyName("wallet_holders_ensured")]
+    public int WalletHoldersEnsured { get; set; }
+
     [JsonPropertyName("wallet_posts_succeeded")]
     public int WalletPostsSucceeded { get; set; }
 
@@ -205,27 +229,62 @@ public sealed class BackfillSummary
     public int ReconciliationMismatches { get; set; }
 }
 
+public interface IBackfillSource
+{
+    Task<IReadOnlyList<Guid>> ReadAuthoritativeJeeberIdsAsync(CancellationToken ct);
+    Task<IReadOnlyList<GatewaySettlement>> ReadGatewaySettlementsAsync(CancellationToken ct);
+    Task<IReadOnlyList<DeliveryMarker>> ReadDeliveryMarkersAsync(CancellationToken ct);
+}
+
+public interface IWalletProvisioner
+{
+    Task<IReadOnlyList<WalletCurrency>> ReadCurrenciesAsync(CancellationToken ct);
+
+    Task<WalletInspection> InspectAsync(
+        Guid holderId,
+        IReadOnlyList<WalletCurrency> currencies,
+        CancellationToken ct);
+
+    Task EnsureAsync(
+        Guid holderId,
+        IReadOnlyList<WalletCurrency> currencies,
+        WalletInspection inspection,
+        CancellationToken ct);
+}
+
 public sealed class BackfillRunner
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly Options _options;
-    private readonly WalletSettlementLedgerClient _wallet;
-    private readonly WalletProvisioner _provisioner;
+    private readonly ISettlementLedgerClient _wallet;
+    private readonly IWalletProvisioner _provisioner;
+    private readonly IBackfillSource _source;
+    private readonly Action<object> _write;
 
     public BackfillRunner(
         Options options,
-        WalletSettlementLedgerClient wallet,
-        WalletProvisioner provisioner)
+        ISettlementLedgerClient wallet,
+        IWalletProvisioner provisioner,
+        IBackfillSource source,
+        Action<object>? write = null)
     {
         _options = options;
         _wallet = wallet;
         _provisioner = provisioner;
+        _source = source;
+        _write = write ?? Write;
     }
 
     public async Task<BackfillSummary> RunAsync(CancellationToken ct)
     {
-        var gatewayRows = await ReadGatewaySettlementsAsync(ct);
-        var deliveryRows = await ReadDeliveryMarkersAsync(ct);
+        var authoritativeIds = (await _source.ReadAuthoritativeJeeberIdsAsync(ct))
+            .Where(id => id != Guid.Empty)
+            .Distinct()
+            .OrderBy(id => id)
+            .ToArray();
+        var authoritativeSet = authoritativeIds.ToHashSet();
+        var gatewayRows = await _source.ReadGatewaySettlementsAsync(ct);
+        var deliveryRows = await _source.ReadDeliveryMarkersAsync(ct);
         var deliveryById = deliveryRows
             .GroupBy(row => row.DeliveryId, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(x => x.CreatedAt).First(),
@@ -241,7 +300,57 @@ public sealed class BackfillRunner
             Mode = _options.Execute ? "execute" : "dry-run",
             GatewaySettlements = gatewayRows.Count,
             DeliveryMarkers = deliveryRows.Count,
+            AuthoritativeJeeberHolders = authoritativeIds.Length,
         };
+
+        var holderReadiness = new Dictionary<Guid, HolderReadiness>();
+        foreach (var holderId in authoritativeIds)
+        {
+            ct.ThrowIfCancellationRequested();
+            var inventory = "unchecked";
+            string outcome;
+            string? error = null;
+            try
+            {
+                var inspection = await _provisioner.InspectAsync(holderId, currencies, ct);
+                inventory = inspection.State;
+                if (_options.Execute)
+                {
+                    await _provisioner.EnsureAsync(holderId, currencies, inspection, ct);
+                    inventory = "ready";
+                    outcome = "ensured_or_replayed";
+                    summary.WalletHoldersEnsured++;
+                    holderReadiness[holderId] = new HolderReadiness(true, inventory, null);
+                }
+                else
+                {
+                    outcome = inspection.Ready ? "ready" : "provisioning_required";
+                    if (!inspection.Ready) summary.ReconciliationMismatches++;
+                    holderReadiness[holderId] = new HolderReadiness(
+                        inspection.Ready, inventory, inspection.Ready ? null : outcome);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                summary.Errors++;
+                outcome = "error";
+                error = ex.Message;
+                holderReadiness[holderId] = new HolderReadiness(false, inventory, error);
+            }
+
+            _write(new HolderBackfillRow(
+                "authoritative_jeeber_wallet",
+                holderId.ToString("D"),
+                "user_management_available_roles_driver",
+                inventory,
+                summary.Mode,
+                outcome,
+                error));
+        }
 
         foreach (var row in gatewayRows)
         {
@@ -261,13 +370,25 @@ public sealed class BackfillRunner
             {
                 if (!Guid.TryParse(row.JeeberId, out var holderId) || holderId == Guid.Empty)
                     throw new InvalidOperationException("Jeeber id is not a non-system wallet holder UUID.");
+                if (!authoritativeSet.Contains(holderId))
+                {
+                    summary.ReconciliationMismatches++;
+                    throw new InvalidOperationException(
+                        "Settlement Jeeber is absent from the active user-management driver population; "
+                        + "no holder is inferred and no wallet write is attempted.");
+                }
 
-                var inspection = await _provisioner.InspectAsync(holderId, currencies, ct);
-                inventory = inspection.State;
+                var readiness = holderReadiness[holderId];
+                inventory = readiness.Inventory;
+                if (!readiness.Ready)
+                {
+                    throw new InvalidOperationException(
+                        "Authoritative Jeeber wallet inventory is not ready; settlement was not posted."
+                        + (readiness.Error is null ? string.Empty : $" {readiness.Error}"));
+                }
+
                 if (_options.Execute)
                 {
-                    await _provisioner.EnsureAsync(holderId, currencies, inspection, ct);
-                    inventory = "ready";
                     var posted = await _wallet.PostLedgerEntryAsync(new LedgerEntryRequest
                     {
                         DeliveryId = row.DeliveryId,
@@ -288,9 +409,12 @@ public sealed class BackfillRunner
                 }
                 else
                 {
-                    if (!inspection.Ready) summary.ReconciliationMismatches++;
-                    outcome = inspection.Ready ? "ready_to_backfill" : "provisioning_required";
+                    outcome = "ready_to_backfill";
                 }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -299,7 +423,7 @@ public sealed class BackfillRunner
                 error = ex.Message;
             }
 
-            Write(new BackfillRow(
+            _write(new BackfillRow(
                 "gateway_financial_settlement",
                 row.Id,
                 row.DeliveryId,
@@ -317,7 +441,7 @@ public sealed class BackfillRunner
                      row => !gatewayDeliveryIds.Contains(row.DeliveryId)))
         {
             summary.ReconciliationMismatches++;
-            Write(new BackfillRow(
+            _write(new BackfillRow(
                 "delivery_marker_without_financial_source",
                 null,
                 marker.DeliveryId,
@@ -334,7 +458,45 @@ public sealed class BackfillRunner
         return summary;
     }
 
-    private async Task<List<GatewaySettlement>> ReadGatewaySettlementsAsync(CancellationToken ct)
+    private static void Write(object row) =>
+        Console.WriteLine(JsonSerializer.Serialize(row, row.GetType(), Json));
+
+    private sealed record HolderReadiness(bool Ready, string Inventory, string? Error);
+}
+
+/// <summary>
+/// Read-only source adapter. User Management is the only population authority: settlement rows
+/// are reconciliation inputs, never an implicit instruction to create a holder.
+/// </summary>
+public sealed class NpgsqlBackfillSource : IBackfillSource
+{
+    public const string AuthoritativeJeeberSql = """
+        SELECT "Id"
+        FROM "Users"
+        WHERE "Email" <> 'Removed'
+          AND "Username" <> 'Removed'
+          AND "AvailableRoles" @> ARRAY['driver']::text[]
+          AND "Id" <> '00000000-0000-0000-0000-000000000000'::uuid
+        ORDER BY "Id"
+        """;
+
+    private readonly Options _options;
+
+    public NpgsqlBackfillSource(Options options) => _options = options;
+
+    public async Task<IReadOnlyList<Guid>> ReadAuthoritativeJeeberIdsAsync(CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(_options.UserManagementDsn);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(AuthoritativeJeeberSql, conn);
+        var ids = new List<Guid>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) ids.Add(reader.GetGuid(0));
+        return ids;
+    }
+
+    public async Task<IReadOnlyList<GatewaySettlement>> ReadGatewaySettlementsAsync(
+        CancellationToken ct)
     {
         const string sql = """
             SELECT id::text, delivery_id, jeeber_id, client_id,
@@ -360,7 +522,7 @@ public sealed class BackfillRunner
         return rows;
     }
 
-    private async Task<List<DeliveryMarker>> ReadDeliveryMarkersAsync(CancellationToken ct)
+    public async Task<IReadOnlyList<DeliveryMarker>> ReadDeliveryMarkersAsync(CancellationToken ct)
     {
         await using var conn = new NpgsqlConnection(_options.DeliveryDsn);
         await conn.OpenAsync(ct);
@@ -382,12 +544,9 @@ public sealed class BackfillRunner
         }
         return rows;
     }
-
-    private static void Write(BackfillRow row) =>
-        Console.WriteLine(JsonSerializer.Serialize(row, Json));
 }
 
-public sealed class WalletProvisioner
+public sealed class WalletProvisioner : IWalletProvisioner
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private const string DefaultWalletType = "jeeb";
@@ -400,8 +559,20 @@ public sealed class WalletProvisioner
         using var response = await _http.GetAsync(
             "Fees/currencies", HttpCompletionOption.ResponseHeadersRead, ct);
         await Success(response, "read wallet currencies", ct);
-        return await response.Content.ReadFromJsonAsync<List<WalletCurrency>>(Json, ct)
+        var currencies = await response.Content.ReadFromJsonAsync<List<WalletCurrency>>(Json, ct)
             ?? new List<WalletCurrency>();
+        if (currencies.Count == 0
+            || currencies.Any(currency => currency.Id <= 0)
+            || currencies.Any(currency => string.IsNullOrWhiteSpace(currency.Code))
+            || currencies.GroupBy(currency => currency.Id).Any(group => group.Count() != 1)
+            || currencies.GroupBy(currency => currency.Code, StringComparer.OrdinalIgnoreCase)
+                .Any(group => group.Count() != 1))
+        {
+            throw new InvalidOperationException(
+                "Wallet-service must expose a non-empty, unambiguous configured currency set.");
+        }
+
+        return currencies;
     }
 
     public async Task<WalletInspection> InspectAsync(
@@ -421,13 +592,21 @@ public sealed class WalletProvisioner
             active.Count(wallet => wallet.CurrencyId == currency.Id) > 1);
         if (ambiguous)
             return new WalletInspection(holder, false, "ambiguous_duplicate_active_currency_wallets");
-        var ready = holder.WalletHolder is not null && currencies.All(currency =>
-            active.Count(wallet => wallet.CurrencyId == currency.Id) == 1);
+        var ready = holder.WalletHolder is not null
+            && holder.WalletHolder.HolderId == holderId
+            && holder.WalletHolder.IsActive
+            && currencies.All(currency =>
+            {
+                var matches = active.Where(wallet => wallet.CurrencyId == currency.Id).ToArray();
+                return matches.Length == 1 && matches[0].WalletId != Guid.Empty;
+            });
         return new WalletInspection(
             holder,
             ready,
             holder.WalletHolder is null
                 ? "holder_missing"
+                : holder.WalletHolder.HolderId != holderId || !holder.WalletHolder.IsActive
+                    ? "holder_inactive_or_mismatched"
                 : ready ? "ready" : "configured_wallets_missing");
     }
 
@@ -448,9 +627,15 @@ public sealed class WalletProvisioner
                 wallet.IsActive && wallet.CurrencyId == currency.Id) == 0)
             .Select(currency => new EnsureWallet(currency.Id, DefaultWalletType, "wallet-authority-backfill"))
             .ToArray();
-        if (missing.Length == 0) return;
+        if (missing.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"Holder inventory is not ready and cannot be repaired additively: {inspection.State}.");
+        }
 
         var currentHolder = inspection.Response.WalletHolder;
+        if (currentHolder is not null && currentHolder.HolderId != holderId)
+            throw new InvalidOperationException("Wallet holder id does not match the authoritative Jeeber id.");
         var payload = new EnsureHolderRequest(
             new WalletHolderPayload(
                 holderId,
@@ -499,12 +684,16 @@ public sealed class WalletHolderResponse
 
 public sealed class WalletHolder
 {
+    public Guid HolderId { get; set; }
     public string HolderName { get; set; } = string.Empty;
     public string HolderType { get; set; } = string.Empty;
+    public bool IsActive { get; set; }
 }
 
 public sealed class WalletAccount
 {
+    public Guid WalletId { get; set; }
+
     [JsonPropertyName("currencyID")]
     public int CurrencyId { get; set; }
 
