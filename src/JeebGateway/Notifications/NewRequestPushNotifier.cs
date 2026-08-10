@@ -105,7 +105,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     private const double EarthRadiusKm = 6371.0;
 
     private readonly ServicePushNotificationClient _push;
-    private readonly JeebGateway.Tiers.ITiersStore _tiers;
+    private readonly JeebGateway.Tiers.ITierCatalogResolver _tiers;
     private readonly ILogger<NewRequestPushNotifier> _logger;
     private readonly IAvailabilityStore _availability;
     private readonly IUsersStore _users;
@@ -116,7 +116,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
     public NewRequestPushNotifier(
         ServicePushNotificationClient push,
-        JeebGateway.Tiers.ITiersStore tiers,
+        JeebGateway.Tiers.ITierCatalogResolver tiers,
         ILogger<NewRequestPushNotifier> logger,
         IAvailabilityStore availability,
         IUsersStore users,
@@ -130,7 +130,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
     public NewRequestPushNotifier(
         ServicePushNotificationClient push,
-        JeebGateway.Tiers.ITiersStore tiers,
+        JeebGateway.Tiers.ITierCatalogResolver tiers,
         ILogger<NewRequestPushNotifier> logger,
         IAvailabilityStore availability,
         IUsersStore users,
@@ -193,7 +193,9 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                 return;
             }
 
-            var payload = await BuildPayloadAsync(n, ct);
+            // ONE catalog read per job: the body label and the D2 radius are the same tier.
+            var tier = await ResolveTierAsync(n.TierId, ct);
+            var payload = BuildPayload(n, tier);
 
             if (!_options.Enabled)
             {
@@ -202,7 +204,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                 return;
             }
 
-            var resolved = await ResolveRecipientsAsync(n, ct);
+            var resolved = await ResolveRecipientsAsync(n, tier, ct);
 
             if (resolved.Recipients.Count == 0)
             {
@@ -251,7 +253,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         int RoleUnknown);
 
     private async Task<ResolvedRecipients> ResolveRecipientsAsync(
-        NewRequestNotification n, CancellationToken ct)
+        NewRequestNotification n, JeebGateway.Tiers.DeliveryTier? tier, CancellationToken ct)
     {
         // 1. online jeebers first.
         var source = "online";
@@ -261,9 +263,9 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         // 2. D2 fail-CLOSED geo narrowing. The radius comes from the REQUEST'S OWN TIER
         // (3/10/25 km), matching how delivery-service cuts per delivery; the global
         // NewRequestFanoutOptions.RadiusKm is only an override for that value.
-        var tierRadiusKm = _options.RadiusKm is { } configured && configured > 0
+        double? tierRadiusKm = _options.RadiusKm is { } configured && configured > 0
             ? configured
-            : (await ResolveTierRadiusKmAsync(n.TierId, ct));
+            : tier is { RadiusKm: > 0 } ? tier.RadiusKm : null;
 
         if (n.PickupLat is { } pickupLat && n.PickupLng is { } pickupLng
             && tierRadiusKm is { } radiusKm && radiusKm > 0)
@@ -581,8 +583,8 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
     // ── Payload ───────────────────────────────────────────────────────────────
 
-    private async Task<Dictionary<string, object?>> BuildPayloadAsync(
-        NewRequestNotification n, CancellationToken ct)
+    private static Dictionary<string, object?> BuildPayload(
+        NewRequestNotification n, JeebGateway.Tiers.DeliveryTier? tier)
     {
         // Resolve the human tier LABEL for the body suffix from the gateway's in-process tier
         // catalog (the same store served at GET /v1/tiers). When the id does not resolve to a
@@ -590,7 +592,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         // and the suffix is DROPPED — a raw id/UUID is never shown to the jeeber. The raw
         // tierId still travels as its own flat machine field below for client-side filtering,
         // which is unaffected by display resolution.
-        var tierLabel = await ResolveTierLabelAsync(n.TierId, ct);
+        var tierLabel = string.IsNullOrWhiteSpace(tier?.Name) ? null : tier!.Name.Trim();
 
         return new Dictionary<string, object?>
         {
@@ -626,21 +628,16 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     }
 
     /// <summary>
-    /// Best-effort resolve of a tier id to its human display name via the gateway's
-    /// in-process tier catalog. feat/tier-unify-names: the id is first canonicalized
-    /// through <see cref="JeebGateway.Tiers.LegacyTierCodes"/>, so legacy codes
-    /// (flash/express/standard/on_the_way/eco) resolve to their aliased catalog row's
-    /// display name instead of silently dropping the suffix. Returns null when the id
-    /// is blank or does not match a catalog row — the caller then DROPS the body
-    /// suffix rather than render a raw id/UUID. Never throws: a catalog hiccup
-    /// degrades to "no suffix", never to a failed push (the whole notify path is
-    /// degrade-don't-fail).
+    /// The request's own tier, resolved via <see cref="JeebGateway.Tiers.ITierCatalogResolver"/>
+    /// against the catalog the tier-picker rendered from (delivery-service upstream when that
+    /// flag is on, the gateway-local catalog otherwise), matching on id, name, then the
+    /// <see cref="JeebGateway.Tiers.LegacyTierCodes"/> alias — so a UUID id and a legacy code
+    /// both resolve.
+    /// Null when the tier is unknown or unreadable — the fail-closed caller then sends to
+    /// NOBODY, and the body suffix is dropped rather than rendering a raw id/UUID.
     /// </summary>
-    /// <summary>
-    /// The request's own tier radius in km. Null when the tier is unknown or unreadable, which
-    /// the fail-closed caller turns into "no recipients".
-    /// </summary>
-    private async Task<double?> ResolveTierRadiusKmAsync(string? tierId, CancellationToken ct)
+    private async Task<JeebGateway.Tiers.DeliveryTier?> ResolveTierAsync(
+        string? tierId, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(tierId))
         {
@@ -649,36 +646,12 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
         try
         {
-            var tier = await _tiers.GetAsync(
-                JeebGateway.Tiers.LegacyTierCodes.Canonicalize(tierId), ct);
-            return tier is { RadiusKm: > 0 } ? tier.RadiusKm : null;
+            return await _tiers.ResolveAsync(tierId, ct);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "newreq-fanout tier radius resolve failed for {TierId}; fail-closed.", tierId);
-            return null;
-        }
-    }
-
-    private async Task<string?> ResolveTierLabelAsync(string? tierId, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(tierId))
-        {
-            return null;
-        }
-
-        try
-        {
-            var tier = await _tiers.GetAsync(
-                JeebGateway.Tiers.LegacyTierCodes.Canonicalize(tierId), ct);
-            return string.IsNullOrWhiteSpace(tier?.Name) ? null : tier!.Name.Trim();
-        }
-        catch (Exception ex)
-        {
-            // The catalog lookup must never break the push. Fall back to "no suffix".
-            _logger.LogDebug(ex,
-                "Tier-label resolve failed for tier {TierId}; dropping the body suffix.", tierId);
+                "newreq-fanout tier resolve failed for {TierId}; fail-closed.", tierId);
             return null;
         }
     }
@@ -686,7 +659,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     /// <summary>
     /// Body = the description preview (trimmed to <see cref="BodyPreviewMaxLength"/>
     /// chars) plus a " • {tier}" suffix ONLY when a human tier LABEL was resolved
-    /// (<see cref="ResolveTierLabelAsync"/>). When no label is available the suffix
+    /// (<see cref="ResolveTierAsync"/>). When no label is available the suffix
     /// is dropped — a raw tier id/UUID is never surfaced in the notification body.
     /// </summary>
     private static string BuildBody(string? description, string? tierLabel)
