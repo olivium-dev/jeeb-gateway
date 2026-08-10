@@ -702,9 +702,8 @@ if (notificationUpstreamEnabled && notificationSeederEnabled)
 // 500 on api/v1/sent-payload/user/{id} from breaker accounting, so one poisoned
 // recipient can no longer pin the breaker open and deny pushes to everyone else.
 // Rationale + accepted residual risk: ServiceClientExtensions.ConfigurePushBreakerAndTimeout.
-// SINGLE-PRODUCER CUTOVER — direct send routes are fail-closed by default. Deploy
-// this gateway state before enabling notification-service's durable webhook
-// dispatcher. Registration/deletion and idempotency recovery remain reachable.
+// SINGLE-PRODUCER CUTOVER — direct sends fail closed by default; enable and verify
+// notification-service's durable dispatcher BEFORE deploying this gateway state.
 builder.Services.Configure<GatewayDirectPushDispatchOptions>(
     builder.Configuration.GetSection(GatewayDirectPushDispatchOptions.SectionName));
 builder.Services.AddTransient<GatewayDirectPushDispatchGuardHandler>();
