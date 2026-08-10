@@ -47,11 +47,16 @@ public interface IChatMessagePushNotifier
     /// Best-effort: push a "new message" notification to the conversation's other
     /// delivery principal(s) (excluding the author). Never throws.
     /// </summary>
+    /// <param name="messageId">
+    /// Per-message entity id for the generic-event idempotency key. Omitting it falls back to
+    /// the conversation id, which would collapse every message in a thread onto one key.
+    /// </param>
     Task NotifyNewMessageAsync(
         string conversationId,
         string authorUserId,
         string? messagePreview,
-        CancellationToken ct);
+        CancellationToken ct,
+        string? messageId = null);
 }
 
 /// <inheritdoc />
@@ -89,23 +94,35 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
 
     private readonly IRequestsStore _requests;
     private readonly ServicePushNotificationClient _push;
+    private readonly IGenericEventDispatcher _events;
     private readonly ILogger<ChatMessagePushNotifier> _logger;
 
     public ChatMessagePushNotifier(
         IRequestsStore requests,
         ServicePushNotificationClient push,
+        IGenericEventDispatcher events,
         ILogger<ChatMessagePushNotifier> logger)
     {
         _requests = requests;
         _push = push;
+        _events = events;
         _logger = logger;
+    }
+
+    public ChatMessagePushNotifier(
+        IRequestsStore requests,
+        ServicePushNotificationClient push,
+        ILogger<ChatMessagePushNotifier> logger)
+        : this(requests, push, NullGenericEventDispatcher.Instance, logger)
+    {
     }
 
     public async Task NotifyNewMessageAsync(
         string conversationId,
         string authorUserId,
         string? messagePreview,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? messageId = null)
     {
         try
         {
@@ -195,8 +212,30 @@ public sealed class ChatMessagePushNotifier : IChatMessagePushNotifier
                 ["type"] = "chat",
             };
 
+            // The generic-event seam is the sole producer once direct dispatch is disabled;
+            // the entity id must be the MESSAGE, not the thread, or the thread dedupes to one push.
+            var entityId = string.IsNullOrWhiteSpace(messageId) ? conversationId : messageId!;
+            var routing = payload.ToDictionary(
+                kv => kv.Key, kv => kv.Value?.ToString() ?? string.Empty, StringComparer.Ordinal);
+
             foreach (var recipient in recipients)
             {
+                var handover = await _events.DispatchAsync(
+                    JeebGenericEventTypes.ChatMessageEventType,
+                    recipient,
+                    entityId,
+                    (string)payload["title"]!,
+                    (string)payload["body"]!,
+                    routing,
+                    PushSilencePolicy.CategoryChat,
+                    ct);
+
+                if (handover.Classification
+                    != GenericEventDispatchClassification.SkippedDirectDispatchArmed)
+                {
+                    continue;
+                }
+
                 // JEBV4-345: the budget is PER RECIPIENT. It used to be one CancellationTokenSource
                 // created before the loop, so the whole fan-out shared a single deadline and the
                 // second recipient inherited whatever the first left over — with a real ~3s FCM
