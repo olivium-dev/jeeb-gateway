@@ -77,7 +77,7 @@ public class RequestOffersController : ControllerBase
     private readonly UpstreamFeatureFlags _flags;
     private readonly TimeProvider _clock;
     private readonly JeebGateway.Services.Clients.IDeliveryServiceClient _delivery;
-    private readonly JeebGateway.Tiers.ITiersStore _tiers;
+    private readonly JeebGateway.Tiers.ITierCatalogResolver _tiers;
     private readonly ILogger<RequestOffersController> _logger;
 
     public RequestOffersController(
@@ -92,7 +92,7 @@ public class RequestOffersController : ControllerBase
         IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         JeebGateway.Services.Clients.IDeliveryServiceClient delivery,
-        JeebGateway.Tiers.ITiersStore tiers,
+        JeebGateway.Tiers.ITierCatalogResolver tiers,
         ILogger<RequestOffersController> logger)
     {
         _delivery = delivery;
@@ -578,8 +578,7 @@ public class RequestOffersController : ControllerBase
         {
             try
             {
-                var canonical = JeebGateway.Tiers.LegacyTierCodes.Canonicalize(request.TierId!);
-                tier = await _tiers.GetAsync(canonical, ct);
+                tier = await _tiers.ResolveAsync(request.TierId, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {

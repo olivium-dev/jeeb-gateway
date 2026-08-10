@@ -1649,6 +1649,10 @@ builder.Services.AddScoped<JeebGateway.Matching.IDeliveryRowMirror,
 // LegacyTierCodes alias table.
 builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requests.CatalogBackedTiersStore>();
 
+// D2-b: the POLICY read of the tier catalog (radius, display name) resolves against the SAME
+// source GET /v1/tiers serves, so an upstream UUID tier id is no longer an unknown tier.
+builder.Services.AddSingleton<JeebGateway.Tiers.ITierCatalogResolver, JeebGateway.Tiers.TierCatalogResolver>();
+
 // JEB-1507: CancellationPolicy thresholds (WeeklyThreshold, StrikeThreshold,
 // RestrictionDurationHours) are configurable via appsettings so they can be
 // adjusted per environment without a redeploy.

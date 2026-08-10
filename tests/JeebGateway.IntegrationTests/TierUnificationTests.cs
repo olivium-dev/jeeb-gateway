@@ -150,7 +150,7 @@ public class TierUnificationTests
     private static NewRequestPushNotifier NewFanoutNotifier(RecordingPushClient push)
         => new(
             push,
-            new InMemoryTiersStore(),
+            new TierCatalogResolver(new InMemoryTiersStore()),
             NullLogger<NewRequestPushNotifier>.Instance,
             new FakeAvailabilityStore { Online = new[] { P1Fanout.Jeeber("jeeberA") } },
             new FakeUsersStore(),

@@ -62,7 +62,7 @@ public sealed class JeebFeedController : ControllerBase
     // P7 (G-H): the offer-wait countdown projection for feed cards.
     private readonly OfferDeadlineProjector _deadlines;
     private readonly GatewayPublicOptions _publicOptions;
-    private readonly JeebGateway.Tiers.ITiersStore _tiers;
+    private readonly JeebGateway.Tiers.ITierCatalogResolver _tiers;
     private readonly ILogger<JeebFeedController> _logger;
 
     public JeebFeedController(
@@ -74,7 +74,7 @@ public sealed class JeebFeedController : ControllerBase
         TimeProvider clock,
         OfferDeadlineProjector deadlines,
         IOptions<GatewayPublicOptions> publicOptions,
-        JeebGateway.Tiers.ITiersStore tiers,
+        JeebGateway.Tiers.ITierCatalogResolver tiers,
         ILogger<JeebFeedController> logger)
     {
         _publicOptions = publicOptions.Value;
@@ -145,7 +145,7 @@ public sealed class JeebFeedController : ControllerBase
 
         // (2b) D2 fail-CLOSED tier-radius cut. An unknown distance is an EXCLUSION, never a
         // pass-through: the 9,000 km request that reached a 25 km jeeber got there this way.
-        var tiersById = await LoadTiersAsync(ct);
+        var tierCatalog = await LoadTierCatalogAsync(ct);
         var distancesByRequest = new Dictionary<string, double>(StringComparer.Ordinal);
         var inRadius = new List<DeliveryRequest>(visible.Count);
 
@@ -155,7 +155,7 @@ public sealed class JeebFeedController : ControllerBase
                 presence.Lat,
                 presence.Lng,
                 request.PickupLocation,
-                ResolveTier(tiersById, request.TierId));
+                tierCatalog.Resolve(request.TierId));
 
             if (!evaluation.IsIncluded)
             {
@@ -248,21 +248,15 @@ public sealed class JeebFeedController : ControllerBase
     }
 
     /// <summary>
-    /// Tier catalog for this page. A read fault yields an EMPTY map, which the fail-closed
-    /// evaluator turns into unknown-tier exclusions rather than an unbounded feed.
+    /// Tier catalog for this page, read ONCE from the same source <c>GET /v1/tiers</c> serves.
+    /// A read fault yields an EMPTY snapshot, which the fail-closed evaluator turns into
+    /// unknown-tier exclusions rather than an unbounded feed.
     /// </summary>
-    private async Task<IReadOnlyDictionary<string, JeebGateway.Tiers.DeliveryTier>> LoadTiersAsync(CancellationToken ct)
+    private async Task<JeebGateway.Tiers.TierCatalogSnapshot> LoadTierCatalogAsync(CancellationToken ct)
     {
         try
         {
-            var tiers = await _tiers.ListAsync(ct);
-            var map = new Dictionary<string, JeebGateway.Tiers.DeliveryTier>(StringComparer.OrdinalIgnoreCase);
-            foreach (var tier in tiers)
-            {
-                map[tier.Id] = tier;
-            }
-
-            return map;
+            return await _tiers.SnapshotAsync(ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -271,25 +265,8 @@ public sealed class JeebFeedController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "jeeber.feed tier catalog read failed; excluding every request.");
-            return new Dictionary<string, JeebGateway.Tiers.DeliveryTier>(StringComparer.OrdinalIgnoreCase);
+            return JeebGateway.Tiers.TierCatalogSnapshot.Empty;
         }
-    }
-
-    private static JeebGateway.Tiers.DeliveryTier? ResolveTier(
-        IReadOnlyDictionary<string, JeebGateway.Tiers.DeliveryTier> tiersById, string? tierId)
-    {
-        if (string.IsNullOrWhiteSpace(tierId))
-        {
-            return null;
-        }
-
-        if (tiersById.TryGetValue(tierId.Trim(), out var tier))
-        {
-            return tier;
-        }
-
-        var canonical = JeebGateway.Tiers.LegacyTierCodes.Canonicalize(tierId.Trim());
-        return canonical is not null && tiersById.TryGetValue(canonical, out var mapped) ? mapped : null;
     }
 
     /// <summary>

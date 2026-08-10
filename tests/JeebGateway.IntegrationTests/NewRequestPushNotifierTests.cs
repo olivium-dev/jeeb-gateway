@@ -67,7 +67,7 @@ public class NewRequestPushNotifierTests
         FakeUsersStore? users = null)
         => new(
             push,
-            new JeebGateway.Tiers.InMemoryTiersStore(),
+            new JeebGateway.Tiers.TierCatalogResolver(new JeebGateway.Tiers.InMemoryTiersStore()),
             logger ?? NullLogger<NewRequestPushNotifier>.Instance,
             availability ?? new FakeAvailabilityStore(),
             users ?? new FakeUsersStore(),
