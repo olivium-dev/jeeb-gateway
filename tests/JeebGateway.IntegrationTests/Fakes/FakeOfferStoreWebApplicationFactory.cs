@@ -1,3 +1,4 @@
+using System.Linq;
 using JeebGateway.Availability;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -69,6 +70,15 @@ public static class InRangeGeoFixture
 
     public static void UseInRangePresence(IServiceCollection services)
     {
+        // A default, never an override: a caller that already supplied its own delivery
+        // double keeps it, whatever order it registered in.
+        var existing = services.LastOrDefault(
+            d => d.ServiceType == typeof(JeebGateway.Services.Clients.IDeliveryServiceClient));
+        if (existing?.ImplementationInstance?.GetType().Assembly == typeof(InRangeGeoFixture).Assembly)
+        {
+            return;
+        }
+
         services.RemoveAll<JeebGateway.Services.Clients.IDeliveryServiceClient>();
         services.AddSingleton<JeebGateway.Services.Clients.IDeliveryServiceClient>(
             new AlwaysOnlineNearbyPresenceClient());
