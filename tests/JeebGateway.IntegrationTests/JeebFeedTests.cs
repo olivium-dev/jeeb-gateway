@@ -60,6 +60,9 @@ public class JeebFeedTests
         item.Status.Should().Be(RequestStatus.Pending);
         item.Description.Should().Be("Deliver documents to the bank");
         item.TierId.Should().Be("express");
+        // D-W1: the display projections the chip matches on travel with the item.
+        item.Tier.Should().Be("urgent");
+        item.TierName.Should().Be("Urgent");
         item.Pickup!.Address.Should().Be("Office, downtown");
         item.Pickup.Location!.Lat.Should().Be(33.51);
         item.MyOffer.Should().BeNull("a fresh cross-able request has no offer from this jeeber yet");
@@ -300,6 +303,28 @@ public class JeebFeedTests
     }
 
     [Fact]
+    public async Task Feed_Item_Carries_The_Tier_Slug_When_TierId_Is_An_Upstream_Uuid()
+    {
+        // D-W1 regression: since the delivery-service cut-over tierId is a UUIDv5, which no
+        // client tier lexicon can match — so a feed item that projected ONLY tierId could never
+        // render a tier chip. The slug + display name must travel with the item, byte-compatible
+        // with /v1/requests, while tierId itself is untouched.
+        using var factory = FactoryWithTierCatalog(UpstreamStyleCatalog);
+        var jeeber = JeeberClient(factory, out var jeeberId);
+        await SetOnlineAsync(factory, jeeberId, online: true);
+
+        var seeded = await SeedPendingRequestAsync(
+            factory, clientId: "client-A", description: "Parcel", tierId: StandardTierUuid);
+
+        var feed = await (await jeeber.GetAsync(FeedPath)).Content.ReadFromJsonAsync<FeedResponse>();
+        var item = feed!.Items.Should().ContainSingle(i => i.RequestId == seeded.Id).Subject;
+
+        item.TierId.Should().Be(StandardTierUuid, "the raw id stays exactly as stored");
+        item.Tier.Should().Be("standard", "the chip matches on the slugged catalog name");
+        item.TierName.Should().Be("Standard");
+    }
+
+    [Fact]
     public async Task Client_Without_Jeeber_Capability_Gets_403()
     {
         // Authz negative (contract-freeze §3.5): jeeber.feed.read is jeeber-only; a client → 403.
@@ -354,6 +379,48 @@ public class JeebFeedTests
                 services.RemoveAll<IUsersStore>();
                 services.AddSingleton<IUsersStore>(users);
             }));
+
+    private static WebApplicationFactory<Program> FactoryWithTierCatalog(
+        JeebGateway.Tiers.TierCatalogSnapshot catalog) =>
+        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                UseFakeDeliveryPresence(services);
+                // D-W1: swap in a delivery-service-SHAPED catalog (UUID ids, Flash/Express/
+                // Standard names) — the gateway-local seed only carries slug ids.
+                services.RemoveAll<JeebGateway.Tiers.ITierCatalogResolver>();
+                services.AddSingleton<JeebGateway.Tiers.ITierCatalogResolver>(
+                    new StubTierCatalogResolver(catalog));
+            }));
+
+    /// <summary>The live delivery-service tier taxonomy: UUIDv5 ids, Flash/Express/Standard names.</summary>
+    private const string StandardTierUuid = "5c1b6a1e-2f2b-5d2c-9a0e-2d9b5d3a7f21";
+
+    private static JeebGateway.Tiers.TierCatalogSnapshot UpstreamStyleCatalog =>
+        new(
+            new[]
+            {
+                new JeebGateway.Tiers.DeliveryTier
+                {
+                    Id = StandardTierUuid, Name = "Standard", SlaHours = 24, RadiusKm = 25.0,
+                    RequestTtlSeconds = 3600, CommissionRate = 0.10, PriceHint = "Standard rate",
+                },
+            },
+            "delivery-upstream");
+
+    private sealed class StubTierCatalogResolver : JeebGateway.Tiers.ITierCatalogResolver
+    {
+        private readonly JeebGateway.Tiers.TierCatalogSnapshot _snapshot;
+
+        public StubTierCatalogResolver(JeebGateway.Tiers.TierCatalogSnapshot snapshot)
+            => _snapshot = snapshot;
+
+        public Task<JeebGateway.Tiers.TierCatalogSnapshot> SnapshotAsync(CancellationToken ct)
+            => Task.FromResult(_snapshot);
+
+        public Task<JeebGateway.Tiers.DeliveryTier?> ResolveAsync(string? tierId, CancellationToken ct)
+            => Task.FromResult(_snapshot.Resolve(tierId));
+    }
 
     private static UserProfile Profile(string id, string name, string? avatarUrl = null) =>
         new() { Id = id, Phone = string.Empty, Name = name, AvatarUrl = avatarUrl };
@@ -437,6 +504,8 @@ public class JeebFeedTests
         FeedLoc? Pickup,
         FeedLoc? Dropoff,
         string? TierId,
+        string? Tier,
+        string? TierName,
         double? DistanceMeters,
         DateTimeOffset CreatedAt,
         FeedOffer? MyOffer,

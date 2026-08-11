@@ -212,7 +212,8 @@ public sealed class JeebFeedController : ControllerBase
 
         var items = visible
             .Select(r => ToFeedItem(
-                r, offersByRequest, sendersByClient, project(r), distancesByRequest[r.Id]))
+                r, offersByRequest, sendersByClient, project(r), distancesByRequest[r.Id],
+                tierCatalog.Resolve(r.TierId)))
             .ToList();
 
         _logger.LogInformation(
@@ -401,7 +402,8 @@ public sealed class JeebFeedController : ControllerBase
         IReadOnlyDictionary<string, JeeberFeedOffer> offersByRequest,
         IReadOnlyDictionary<string, FeedSenderIdentity> sendersByClient,
         (DateTimeOffset? At, int? Seconds) offerDeadline,
-        double distanceMeters)
+        double distanceMeters,
+        JeebGateway.Tiers.DeliveryTier? tier)
     {
         offersByRequest.TryGetValue(request.Id, out var myOffer);
         sendersByClient.TryGetValue(request.ClientId, out var sender);
@@ -414,6 +416,10 @@ public sealed class JeebFeedController : ControllerBase
             Pickup = ToFeedLocation(request.PickupAddress, request.PickupLocation),
             Dropoff = ToFeedLocation(request.DropoffAddress, request.DropoffLocation),
             TierId = request.TierId,
+            // D-W1: the display projections the row does not hold — same derivation
+            // /v1/requests uses, so a UUID tierId never reaches the chip lexicon.
+            Tier = JeebGateway.Tiers.TierDisplay.Slug(tier) ?? request.TierId,
+            TierName = tier?.Name,
             // D2: a listed item passed the fail-closed radius cut, so this is never null.
             DistanceMeters = distanceMeters,
             CreatedAt = request.CreatedAt,
@@ -488,6 +494,19 @@ public sealed class JeeberFeedItem
     public FeedLocation? Pickup { get; init; }
     public FeedLocation? Dropoff { get; init; }
     public string? TierId { get; init; }
+
+    /// <summary>
+    /// D-W1 — the stable lowercase tier token (<c>flash</c>/<c>express</c>/<c>standard</c>) the
+    /// client tier chip matches on, falling back to the raw <see cref="TierId"/> when the tier
+    /// did not resolve. Byte-compatible with the <c>tier</c> field on <c>/v1/requests</c>;
+    /// <see cref="TierId"/> is unchanged. Since the delivery-service cut-over the id is a UUIDv5,
+    /// which no client lexicon can match — so without this the chip could never render.
+    /// </summary>
+    public string? Tier { get; init; }
+
+    /// <summary>D-W1 — the tier's catalog display name (e.g. "Standard"), or null when unresolved.</summary>
+    public string? TierName { get; init; }
+
     public double? DistanceMeters { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
 
