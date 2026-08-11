@@ -431,6 +431,31 @@ public class DeliveryRequestDto
         Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? ProofPhotoUrl { get; init; }
     public string? TierId { get; init; }
+
+    /// <summary>
+    /// O11 — the DISPLAY tier token (<c>flash</c>/<c>express</c>/<c>standard</c>), resolved from
+    /// <see cref="TierId"/> through the catalog the tier-picker rendered from. Since the
+    /// delivery-service cut-over <see cref="TierId"/> is a UUIDv5 that matches no client tier
+    /// lexicon, so every order card fell through to "no tier chip". Additive and nullable: null
+    /// when the tier does not resolve, and <see cref="TierId"/> is untouched.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Tier { get; init; }
+
+    /// <summary>O11 — the resolved tier's human catalog name (e.g. <c>Standard</c>).</summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? TierName { get; init; }
+
+    /// <summary>
+    /// O11 — the human order reference (<c>ORD-3F2A1B</c>) the order card renders as its
+    /// header. Derived from <see cref="Id"/>, never stored. Additive and nullable.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? DisplayId { get; init; }
+
     public GeoPoint? PickupLocation { get; init; }
     public GeoPoint? DropoffLocation { get; init; }
     public string? PickupAddress { get; init; }

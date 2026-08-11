@@ -43,6 +43,7 @@ public sealed class JeebOrdersListController : ControllerBase
     // P7 (G-G): the offer-wait countdown projection + the ONE clock this
     // controller stamps every envelope's serverNow from.
     private readonly OfferDeadlineProjector _deadlines;
+    private readonly JeebGateway.Tiers.ITierCatalogResolver _tierCatalog;
     private readonly TimeProvider _clock;
     private readonly ILogger<JeebOrdersListController> _log;
 
@@ -50,12 +51,14 @@ public sealed class JeebOrdersListController : ControllerBase
         IRequestsStore requests,
         IPendingOffersStore offers,
         OfferDeadlineProjector deadlines,
+        JeebGateway.Tiers.ITierCatalogResolver tierCatalog,
         TimeProvider clock,
         ILogger<JeebOrdersListController> log)
     {
         _requests = requests;
         _offers = offers;
         _deadlines = deadlines;
+        _tierCatalog = tierCatalog;
         _clock = clock;
         _log = log;
     }
@@ -165,11 +168,15 @@ public sealed class JeebOrdersListController : ControllerBase
             project = _ => (null, null);
         }
 
+        // O11: ONE catalog read for the whole page (short-TTL cached).
+        var tierCatalog = await ReadTierCatalogAsync(ct);
+
         var items = window
             .Select(r => ToOrderItem(
                 r,
                 offerCounts.TryGetValue(r.Id, out var c) ? c : 0,
-                project(r)))
+                project(r),
+                tierCatalog))
             .ToList();
 
         return Ok(PagedListResponse<OrderListItem>.Of(items, pg, sz, total, now));
@@ -264,13 +271,15 @@ public sealed class JeebOrdersListController : ControllerBase
             .Where(r => OrderDateRangeFilter.Includes(r.CreatedAt, fromDate, toDate))
             .ToList();
 
+        var deliveriesTierCatalog = await ReadTierCatalogAsync(ct);
+
         var (pg, sz) = NormalizePaging(page, pageSize);
         var total = listable.Count;
         var window = listable
             .OrderByDescending(r => r.CreatedAt)
             .Skip((pg - 1) * sz)
             .Take(sz)
-            .Select(r => ToOrderItem(r, 0, (null, null)))
+            .Select(r => ToOrderItem(r, 0, (null, null), deliveriesTierCatalog))
             .ToList();
 
         // P7 (G-G): the deliveries surface is post-acceptance — no countdown applies,
@@ -357,39 +366,69 @@ public sealed class JeebOrdersListController : ControllerBase
         return IsListableActive(r); // unknown token → safe default
     }
 
+    /// <summary>
+    /// O11: the tier catalog for this response. Degrade-don't-fail — an unreadable catalog
+    /// yields an EMPTY snapshot, so `tier` falls back to the raw id and the list still 200s.
+    /// </summary>
+    private async Task<JeebGateway.Tiers.TierCatalogSnapshot> ReadTierCatalogAsync(CancellationToken ct)
+    {
+        try
+        {
+            return await _tierCatalog.SnapshotAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "v1 orders tier decoration failed; serving the raw tier id");
+            return JeebGateway.Tiers.TierCatalogSnapshot.Empty;
+        }
+    }
+
     private static OrderListItem ToOrderItem(
         DeliveryRequest r,
         int offersCount,
-        (DateTimeOffset? At, int? Seconds) offerDeadline) => new()
+        (DateTimeOffset? At, int? Seconds) offerDeadline,
+        JeebGateway.Tiers.TierCatalogSnapshot tierCatalog)
     {
-        // P7 (G-G): derived offer-wait deadline; both null unless the row is
-        // pending/matched (RequestStatus.PreAcceptanceStates).
-        OfferDeadlineAt = offerDeadline.At,
-        OfferDeadlineInSeconds = offerDeadline.Seconds,
-        Id = r.Id,
-        // No DisplayId on the row; mobile tolerates absence. Short, stable handle derived from the id.
-        DisplayId = r.Id.Length > 8 ? r.Id[..8] : r.Id,
-        // PR-G1: surface the CANONICAL SM-1 status token (Ordered/Picked/InTransit/AtDoor/
-        // Done/…). In-flight rows persisted under the legacy vocabulary (picked_up/
-        // heading_off/…) dual-read to canonical so the mobile Orders/Jobs list shows a
-        // 'Picked' row as Picked (never picked_up) and vice-versa, consistently. An
-        // entirely unknown token falls back to the raw value rather than dropping it.
-        Status = DeliveryStatusAlias.ToCanonical(r.Status) ?? r.Status,
-        Title = r.Description,
-        Tier = r.TierId,
-        OffersCount = offersCount,
-        // F4 (JEBV4-301): stateless "there are bids awaiting your decision" signal — true
-        // only while the request has offers AND no jeeber has been accepted yet. Once a
-        // jeeber is bound (JeeberId set) the auction is closed, so it flips false. This lets
-        // the client delete its polling probe and badge the row directly off the list read.
-        HasNewOffers = offersCount > 0 && string.IsNullOrEmpty(r.JeeberId),
-        ConversationId = r.ConversationId,
-        JeeberId = r.JeeberId,
-        Pickup = new AddressBlock { Address = r.PickupAddress },
-        Dropoff = new AddressBlock { Address = r.DropoffAddress },
-        CreatedAt = r.CreatedAt,
-        AcceptedAt = r.AcceptedAt,
-    };
+        var tier = tierCatalog.Resolve(r.TierId);
+        return new OrderListItem
+        {
+            // P7 (G-G): derived offer-wait deadline; both null unless the row is
+            // pending/matched (RequestStatus.PreAcceptanceStates).
+            OfferDeadlineAt = offerDeadline.At,
+            OfferDeadlineInSeconds = offerDeadline.Seconds,
+            Id = r.Id,
+            // No DisplayId on the row; mobile tolerates absence. Short, stable handle derived from the id.
+            DisplayId = r.Id.Length > 8 ? r.Id[..8] : r.Id,
+            // PR-G1: surface the CANONICAL SM-1 status token (Ordered/Picked/InTransit/AtDoor/
+            // Done/…). In-flight rows persisted under the legacy vocabulary (picked_up/
+            // heading_off/…) dual-read to canonical so the mobile Orders/Jobs list shows a
+            // 'Picked' row as Picked (never picked_up) and vice-versa, consistently. An
+            // entirely unknown token falls back to the raw value rather than dropping it.
+            Status = DeliveryStatusAlias.ToCanonical(r.Status) ?? r.Status,
+            Title = r.Description,
+            // O11: `tier` echoed the raw tierId — a UUIDv5 no client lexicon matches, so no card
+            // ever drew a tier chip. Resolved token here; the raw id keeps its own field.
+            Tier = JeebGateway.Tiers.TierDisplay.Slug(tier) ?? r.TierId,
+            TierId = r.TierId,
+            TierName = tier?.Name,
+            OffersCount = offersCount,
+            // F4 (JEBV4-301): stateless "there are bids awaiting your decision" signal — true
+            // only while the request has offers AND no jeeber has been accepted yet. Once a
+            // jeeber is bound (JeeberId set) the auction is closed, so it flips false. This lets
+            // the client delete its polling probe and badge the row directly off the list read.
+            HasNewOffers = offersCount > 0 && string.IsNullOrEmpty(r.JeeberId),
+            ConversationId = r.ConversationId,
+            JeeberId = r.JeeberId,
+            Pickup = new AddressBlock { Address = r.PickupAddress },
+            Dropoff = new AddressBlock { Address = r.DropoffAddress },
+            CreatedAt = r.CreatedAt,
+            AcceptedAt = r.AcceptedAt,
+        };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +496,17 @@ public sealed class OrderListItem
 
     [JsonPropertyName("tier")]
     public string? Tier { get; init; }
+
+    /// <summary>O11: the RAW catalog tier id (a UUIDv5 upstream), kept beside the display
+    /// token so nothing a consumer read before disappears.</summary>
+    [JsonPropertyName("tierId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TierId { get; init; }
+
+    /// <summary>O11: the resolved tier's human catalog name (e.g. <c>Standard</c>).</summary>
+    [JsonPropertyName("tierName")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TierName { get; init; }
 
     [JsonPropertyName("offersCount")]
     public int OffersCount { get; init; }
