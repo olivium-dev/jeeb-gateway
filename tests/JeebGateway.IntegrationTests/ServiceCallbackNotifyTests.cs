@@ -6,8 +6,10 @@ using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
+using JeebGateway.Notifications;
 using JeebGateway.service.ServicePushNotification;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -262,6 +264,160 @@ public sealed class ServiceCallbackNotifyTests
         push.Attempts.Should().Be(0);
     }
 
+    /// <summary>
+    /// D1 SINGLE PRODUCER. <c>jeeb.offer_received</c> and <c>jeeb.offer_accepted</c> are already
+    /// produced inside the gateway by the in-request offer seats (<c>OfferPushNotifier</c>).
+    /// offer-service ALSO enqueues an Oban callback into this endpoint for the same two events;
+    /// live on 2026-08-11 that second dispatch reached notification-service and came back
+    /// <c>409 Deduplicated</c> — exactly-once held only because two independent implementations
+    /// happened to mint the same correlation id.
+    ///
+    /// <para>Both counters are the discriminators: before the fix this callback produced ONE
+    /// generic-event hand-over and (with the hand-over seam skipped) ONE direct push. After it,
+    /// zero of each — the callback is answered 202/Skipped and the gateway stays the sole
+    /// producer.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("jeeb.offer_received")]
+    [InlineData("jeeb.offer_accepted")]
+    public async Task InGateway_Produced_Offer_Types_Are_Skipped_And_Produce_No_Second_Event(
+        string notificationType)
+    {
+        var push = new RecordingPushClient();
+        var events = new RecordingGenericEventDispatcher();
+        await using var factory = CreateFactory(push, events);
+        var client = factory.CreateClient();
+
+        var resp = await client.PostAsync(Endpoint, Json(new
+        {
+            notificationType,
+            recipientUserId = Recipient,
+            locale = "en",
+            silent = false,
+            idempotencyKey = $"offer-event:{Guid.NewGuid()}:recipient:{Recipient}",
+            data = new Dictionary<string, string>
+            {
+                ["offerId"] = "97df0977-aab8-4595-ac6b-e1387f97c31b",
+                ["requestId"] = "da210b2f-cbde-41ba-afe2-fa3c17c9ffd4",
+                ["entityId"] = "97df0977-aab8-4595-ac6b-e1387f97c31b",
+            },
+        }));
+
+        // The producer counters are the defect; the status string is only how it is reported.
+        events.Calls.Should().Be(0,
+            "the in-gateway offer seat is the sole producer — this hand-over is the duplicate");
+        push.Attempts.Should().Be(0, "no push may leave the gateway on this path");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Accepted,
+            "offer-service's Oban worker treats any 2xx as done — a non-2xx would loop it forever");
+
+        var body = await ReadBodyAsync(resp);
+        body.Status.Should().Be("Skipped");
+        body.WasDeduplicated.Should().BeFalse("nothing was deduplicated; the callback was declined");
+        body.EntryId.Should().NotBeNullOrWhiteSpace();
+    }
+
+    /// <summary>
+    /// The skip must not consume an idempotency reservation: a no-op has nothing to dedupe, and a
+    /// retry of the same callback must simply re-skip rather than replay a stored Queued answer.
+    /// </summary>
+    [Fact]
+    public async Task Skipped_Offer_Callback_Burns_No_Idempotency_Reservation()
+    {
+        var push = new RecordingPushClient();
+        var events = new RecordingGenericEventDispatcher();
+        await using var factory = CreateFactory(push, events);
+        var client = factory.CreateClient();
+
+        var key = $"offer-event:{Guid.NewGuid()}:recipient:{Recipient}";
+        object Payload() => new
+        {
+            notificationType = "jeeb.offer_received",
+            recipientUserId = Recipient,
+            silent = false,
+            idempotencyKey = key,
+            data = new Dictionary<string, string> { ["offerId"] = "offer-1" },
+        };
+
+        var first = await ReadBodyAsync(await client.PostAsync(Endpoint, Json(Payload())));
+        var retry = await ReadBodyAsync(await client.PostAsync(Endpoint, Json(Payload())));
+
+        first.Status.Should().Be("Skipped");
+        retry.Status.Should().Be("Skipped");
+        retry.WasDeduplicated.Should().BeFalse();
+        events.Calls.Should().Be(0);
+        push.Attempts.Should().Be(0);
+    }
+
+    /// <summary>
+    /// THE NEGATIVE CONTROL, and the whole reason the skip set is enumerated rather than a
+    /// <c>jeeb.offer_*</c> prefix match. <c>jeeb.offer_updated</c> (edit/withdraw/reject/expire)
+    /// has NO producer other than this callback — over-matching would silently reduce those pushes
+    /// to zero, which is the failure mode this fix exists to avoid, not to repeat.
+    /// </summary>
+    [Fact]
+    public async Task OfferUpdated_Callback_Is_Not_Skipped_And_Still_Produces_Exactly_One_Event()
+    {
+        var push = new RecordingPushClient();
+        var events = new RecordingGenericEventDispatcher();
+        await using var factory = CreateFactory(push, events);
+        var client = factory.CreateClient();
+
+        var resp = await client.PostAsync(Endpoint, Json(new
+        {
+            notificationType = "jeeb.offer_updated",
+            recipientUserId = Recipient,
+            locale = "en",
+            silent = false,
+            idempotencyKey = $"offer-event:{Guid.NewGuid()}:recipient:{Recipient}",
+            data = new Dictionary<string, string>
+            {
+                ["offerId"] = "offer-42",
+                ["status"] = "expired",
+                ["entityId"] = "offer-42",
+            },
+        }));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        (await ReadBodyAsync(resp)).Status.Should().Be("Queued");
+
+        events.Calls.Should().Be(1, "this type's only producer is the callback lane — it must stay live");
+        events.EventTypes.Should().ContainSingle().Which.Should().Be("jeeb.offer_updated");
+    }
+
+    /// <summary>
+    /// The skip runs AFTER validation, so a malformed offer callback still gets the 400 the
+    /// caller's retry logic is written against rather than a misleading 202/Skipped.
+    /// </summary>
+    [Fact]
+    public async Task Skipped_Offer_Type_Still_Validates_Recipient_And_IdempotencyKey()
+    {
+        var push = new RecordingPushClient();
+        var events = new RecordingGenericEventDispatcher();
+        await using var factory = CreateFactory(push, events);
+        var client = factory.CreateClient();
+
+        var noRecipient = await client.PostAsync(Endpoint, Json(new
+        {
+            notificationType = "jeeb.offer_received",
+            recipientUserId = "  ",
+            silent = false,
+            idempotencyKey = "offer-event:" + Guid.NewGuid(),
+        }));
+
+        var noKey = await client.PostAsync(Endpoint, Json(new
+        {
+            notificationType = "jeeb.offer_accepted",
+            recipientUserId = Recipient,
+            silent = false,
+        }));
+
+        noRecipient.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        noKey.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        events.Calls.Should().Be(0);
+        push.Attempts.Should().Be(0);
+    }
+
     private static StringContent Json(object body)
         => new(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
 
@@ -278,7 +434,9 @@ public sealed class ServiceCallbackNotifyTests
 
     private sealed record NotifyBody(string EntryId, bool WasDeduplicated, string Status);
 
-    private static WebApplicationFactory<Program> CreateFactory(RecordingPushClient push)
+    private static WebApplicationFactory<Program> CreateFactory(
+        RecordingPushClient push,
+        RecordingGenericEventDispatcher? events = null)
         => new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
@@ -290,6 +448,47 @@ public sealed class ServiceCallbackNotifyTests
 
                 // Only the push microservice seam is substituted; everything else is the real host.
                 builder.ConfigureTestServices(services =>
-                    services.AddScoped<ServicePushNotificationClient>(_ => push));
+                {
+                    services.AddScoped<ServicePushNotificationClient>(_ => push);
+
+                    if (events is not null)
+                    {
+                        services.AddScoped<IGenericEventDispatcher>(_ => events);
+                    }
+                });
             });
+
+    /// <summary>
+    /// Counts hand-overs to the notification centre's generic-event seam. Answers
+    /// <see cref="GenericEventDispatchClassification.SkippedDirectDispatchArmed"/> so the
+    /// controller still falls through to its direct-push branch — that keeps BOTH producer
+    /// counters (hand-over and push) live in one assertion.
+    /// </summary>
+    private sealed class RecordingGenericEventDispatcher : IGenericEventDispatcher
+    {
+        private readonly List<string> _eventTypes = new();
+
+        public int Calls => _eventTypes.Count;
+
+        public IReadOnlyList<string> EventTypes => _eventTypes;
+
+        public Task<GenericEventDispatchOutcome> DispatchAsync(
+            string eventType,
+            string receiver,
+            string entityId,
+            string title,
+            string body,
+            IReadOnlyDictionary<string, string> data,
+            string refreshCategory,
+            CancellationToken ct)
+        {
+            lock (_eventTypes)
+            {
+                _eventTypes.Add(eventType);
+            }
+
+            return Task.FromResult(new GenericEventDispatchOutcome(
+                GenericEventDispatchClassification.SkippedDirectDispatchArmed, null));
+        }
+    }
 }
