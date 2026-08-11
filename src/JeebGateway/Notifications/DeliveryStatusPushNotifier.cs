@@ -41,6 +41,20 @@ namespace JeebGateway.Notifications;
 /// always goes through the push microservice. This class is the delivery-status
 /// leg of that rule.</para>
 ///
+/// <para><b>⚠️ PRODUCER, since 2026-08-11.</b> The direct client is no longer the primary
+/// producer. PR #374's D1 single-producer cut-over armed
+/// <c>GatewayDirectPushDispatchGuardHandler</c>, which synthesizes a 503
+/// <c>gateway_direct_push_dispatch_disabled</c> for every <c>POST
+/// /api/v1/sent-payload/*</c> while <c>PushNotificationServiceApi:GatewayDirectDispatch:Enabled</c>
+/// is false — and false is the committed and live default. Every other push seat (chat,
+/// offer-lost, new-request, expiry) was migrated to the hand-over path at the same time;
+/// this one was NOT, so the delivery-status category had NO producer at all and all four
+/// transitions of the 2026-08-11 00:32-00:35 proof journey (delivery <c>da210b2f</c>) failed
+/// identically in the live gateway journal. It now dispatches through
+/// <see cref="IGenericEventDispatcher"/> first and falls back to the direct client ONLY when
+/// the dispatcher reports <c>SkippedDirectDispatchArmed</c> — never both, or the gateway is
+/// two producers again and the duplicate-push defect D1 killed comes back.</para>
+///
 /// <para><b>DEGRADE-DON'T-FAIL.</b> Never throws. A status transition has already
 /// committed by the time this runs; a push-service blip must never surface to the
 /// caller or roll anything back. Every failure is logged and swallowed, and each
@@ -111,13 +125,16 @@ public sealed class DeliveryStatusPushNotifier : IDeliveryStatusPushNotifier
     public static readonly TimeSpan PerRecipientTimeout = PushSendBudget.PerRecipient;
 
     private readonly ServicePushNotificationClient _push;
+    private readonly IGenericEventDispatcher _events;
     private readonly ILogger<DeliveryStatusPushNotifier> _logger;
 
     public DeliveryStatusPushNotifier(
         ServicePushNotificationClient push,
+        IGenericEventDispatcher events,
         ILogger<DeliveryStatusPushNotifier> logger)
     {
         _push = push;
+        _events = events;
         _logger = logger;
     }
 
@@ -150,8 +167,36 @@ public sealed class DeliveryStatusPushNotifier : IDeliveryStatusPushNotifier
 
             var payload = BuildPayload(n);
 
+            var routing = payload
+                .Where(kv => kv.Key is not ("title" or "body"))
+                .ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? string.Empty, StringComparer.Ordinal);
+
+            // The entity id MUST encode the TRANSITION, not just the delivery. The correlation
+            // id is a deterministic hash of (eventType, receiver, entityId) and the centre
+            // upserts on it, so keying on DeliveryId alone collapses a whole journey
+            // (Picked/InTransit/AtDoor/Done) into ONE push — the thread-level trap chat hit.
+            var entityId = $"{n.DeliveryId}:{n.PreviousStatus}->{n.Status}";
+
             foreach (var recipient in recipients)
             {
+                // The generic-event hand-over is the SOLE producer while gateway direct
+                // dispatch is disabled; the direct send below is the re-armed fallback.
+                var handover = await _events.DispatchAsync(
+                    DeliveryStatusUpdatedNotificationRecord.TemplateKey,
+                    recipient,
+                    entityId,
+                    n.Title,
+                    n.Body,
+                    routing,
+                    PushSilencePolicy.CategoryDelivery,
+                    ct);
+
+                if (handover.Classification
+                    != GenericEventDispatchClassification.SkippedDirectDispatchArmed)
+                {
+                    continue;
+                }
+
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(PerRecipientTimeout);
 
