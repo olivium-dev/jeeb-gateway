@@ -194,7 +194,8 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
             }
 
             // ONE catalog read per job: the body label and the D2 radius are the same tier.
-            var tier = await ResolveTierAsync(n.TierId, ct);
+            var catalog = await ReadTierCatalogAsync(ct);
+            var tier = catalog.Resolve(n.TierId);
             var payload = BuildPayload(n, tier);
 
             if (!_options.Enabled)
@@ -204,7 +205,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                 return;
             }
 
-            var resolved = await ResolveRecipientsAsync(n, tier, ct);
+            var resolved = await ResolveRecipientsAsync(n, tier, catalog, ct);
 
             if (resolved.Recipients.Count == 0)
             {
@@ -253,7 +254,10 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         int RoleUnknown);
 
     private async Task<ResolvedRecipients> ResolveRecipientsAsync(
-        NewRequestNotification n, JeebGateway.Tiers.DeliveryTier? tier, CancellationToken ct)
+        NewRequestNotification n,
+        JeebGateway.Tiers.DeliveryTier? tier,
+        JeebGateway.Tiers.TierCatalogSnapshot catalog,
+        CancellationToken ct)
     {
         // 1. online jeebers first.
         var source = "online";
@@ -267,21 +271,34 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
             ? configured
             : tier is { RadiusKm: > 0 } ? tier.RadiusKm : null;
 
-        if (n.PickupLat is { } pickupLat && n.PickupLng is { } pickupLng
-            && tierRadiusKm is { } radiusKm && radiusKm > 0)
+        var hasPickup = n.PickupLat is not null && n.PickupLng is not null;
+
+        if (hasPickup && tierRadiusKm is { } radiusKm && radiusKm > 0)
         {
-            var near = candidates
-                .Where(r => HasCoordinates(r)
-                            && HaversineKm(r.Latitude!.Value, r.Longitude!.Value, pickupLat, pickupLng) <= radiusKm)
+            var pickupLat = n.PickupLat!.Value;
+            var pickupLng = n.PickupLng!.Value;
+
+            var distances = candidates
+                .Where(HasCoordinates)
+                .Select(r => (Row: r,
+                    Km: HaversineKm(r.Latitude!.Value, r.Longitude!.Value, pickupLat, pickupLng)))
                 .ToArray();
+
+            var near = distances.Where(d => d.Km <= radiusKm).Select(d => d.Row).ToArray();
 
             if (near.Length == 0 && candidates.Count > 0)
             {
-                // No keep-unfiltered fallback: an empty in-range set is the correct answer.
+                // No keep-unfiltered fallback: an empty in-range set is the correct answer, and
+                // nearestMeters separates "all 41 km out" from "nobody had coordinates".
+                double? nearestMeters = distances.Length == 0
+                    ? null
+                    : Math.Round(distances.Min(d => d.Km) * 1000.0, MidpointRounding.AwayFromZero);
+
                 _logger.LogInformation(
                     "newreq-fanout geo-filter-emptied requestId={RequestId} radiusKm={RadiusKm} "
-                    + "candidates={Candidates}; fail-closed, sending to NOBODY",
-                    n.RequestId, radiusKm, candidates.Count);
+                    + "candidates={Candidates} located={Located} nearestDistanceMeters={DistanceMeters}"
+                    + "; fail-closed, sending to NOBODY",
+                    n.RequestId, radiusKm, candidates.Count, distances.Length, nearestMeters);
             }
 
             candidates = near;
@@ -289,11 +306,21 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         }
         else
         {
-            // Unknown pickup or unknown tier radius cannot be proven in range.
+            // ORDER MATTERS: the missing pickup is reported BEFORE the tier, so an unresolvable
+            // tier cannot mask it — the two used to collapse into one indistinct log line.
+            var reason = !hasPickup
+                ? JeebGateway.Geo.TierRadiusDecision.NoPickupCoords
+                : catalog.IsAvailable
+                    ? JeebGateway.Geo.TierRadiusDecision.UnknownTier
+                    : JeebGateway.Geo.TierRadiusDecision.TierCatalogUnavailable;
+
             _logger.LogInformation(
                 "newreq-fanout geo-unresolvable requestId={RequestId} tierId={TierId} "
-                + "hasPickup={HasPickup}; fail-closed, sending to NOBODY",
-                n.RequestId, n.TierId, n.PickupLat is not null && n.PickupLng is not null);
+                + "reason={Reason} hasPickup={HasPickup} radiusKm={RadiusKm} "
+                + "tierSource={TierSource} catalogRows={CatalogRows}"
+                + "; fail-closed, sending to NOBODY",
+                n.RequestId, n.TierId, reason, hasPickup, tierRadiusKm,
+                catalog.Source, catalog.Rows.Count);
             candidates = Array.Empty<JeeberAvailability>();
             source = "online+geo";
         }
@@ -314,10 +341,27 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
             if (n.PickupLat is { } fbLat && n.PickupLng is { } fbLng
                 && tierRadiusKm is { } fbRadius && fbRadius > 0)
             {
-                candidates = candidates
-                    .Where(r => HasCoordinates(r)
-                                && HaversineKm(r.Latitude!.Value, r.Longitude!.Value, fbLat, fbLng) <= fbRadius)
+                var fbDistances = candidates
+                    .Where(HasCoordinates)
+                    .Select(r => (Row: r,
+                        Km: HaversineKm(r.Latitude!.Value, r.Longitude!.Value, fbLat, fbLng)))
                     .ToArray();
+
+                var fbNear = fbDistances.Where(d => d.Km <= fbRadius).Select(d => d.Row).ToArray();
+
+                if (fbNear.Length == 0 && candidates.Count > 0)
+                {
+                    _logger.LogInformation(
+                        "newreq-fanout roster-geo-filter-emptied requestId={RequestId} radiusKm={RadiusKm} "
+                        + "candidates={Candidates} located={Located} nearestDistanceMeters={DistanceMeters}"
+                        + "; fail-closed, sending to NOBODY",
+                        n.RequestId, fbRadius, candidates.Count, fbDistances.Length,
+                        fbDistances.Length == 0
+                            ? null
+                            : Math.Round(fbDistances.Min(d => d.Km) * 1000.0, MidpointRounding.AwayFromZero));
+                }
+
+                candidates = fbNear;
                 source = "known+geo";
             }
             else
@@ -634,25 +678,20 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     /// <see cref="JeebGateway.Tiers.LegacyTierCodes"/> alias — so a UUID id and a legacy code
     /// both resolve.
     /// Null when the tier is unknown or unreadable — the fail-closed caller then sends to
-    /// NOBODY, and the body suffix is dropped rather than rendering a raw id/UUID.
+    /// NOBODY, and the body suffix is dropped rather than rendering a raw id/UUID. The SNAPSHOT
+    /// travels with it so the log can separate "unknown id" from "unreadable catalog".
     /// </summary>
-    private async Task<JeebGateway.Tiers.DeliveryTier?> ResolveTierAsync(
-        string? tierId, CancellationToken ct)
+    private async Task<JeebGateway.Tiers.TierCatalogSnapshot> ReadTierCatalogAsync(
+        CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(tierId))
-        {
-            return null;
-        }
-
         try
         {
-            return await _tiers.ResolveAsync(tierId, ct);
+            return await _tiers.SnapshotAsync(ct);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex,
-                "newreq-fanout tier resolve failed for {TierId}; fail-closed.", tierId);
-            return null;
+            _logger.LogWarning(ex, "newreq-fanout tier catalog read failed; fail-closed.");
+            return JeebGateway.Tiers.TierCatalogSnapshot.Empty;
         }
     }
 

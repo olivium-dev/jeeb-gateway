@@ -8,8 +8,10 @@ namespace JeebGateway.Controllers;
 
 /// <summary>
 /// WS-01 — CMS authoring plane (W4). Gateway-owned surfaces mounted under
-/// <c>/gateway/admin/v1/cms/*</c> (the mock's <c>cms-admin-service</c>). This
-/// is the surface that drives every MFE config envelope
+/// <c>admin/v1/cms/*</c> — the browser reaches them at <c>/gateway/admin/v1/cms/*</c>
+/// because the back-office vhost strips its public <c>/gateway/</c> prefix before
+/// proxying, exactly like every other <c>admin/v1/*</c> controller. This is the
+/// surface that drives every MFE config envelope
 /// (<c>ofl-cms-orders/users/wallet/kyc-mfe</c>).
 ///
 /// Endpoints:
@@ -31,6 +33,9 @@ namespace JeebGateway.Controllers;
 /// stable <c>type</c> URN.
 /// </summary>
 [ApiController]
+[Route("admin/v1/cms")]
+// Legacy alias: the deployed CMS bundle still emits the browser prefix twice
+// (/gateway/gateway/admin/v1/cms/...). Drop once that bundle is retired.
 [Route("gateway/admin/v1/cms")]
 [PublicEndpoint("CMS authoring plane: access is governed by the X-Cms-Capability header gate and step-up TOTP. ADR-005 L2 is intentionally not used here.")]
 public sealed class CmsAuthoringController : ControllerBase

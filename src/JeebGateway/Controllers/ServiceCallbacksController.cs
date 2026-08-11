@@ -100,6 +100,15 @@ public sealed class ServiceCallbacksController : ControllerBase
             "title", "body", "silent", "type", "category", "deepLink", "notificationId",
         };
 
+    // D1 single-producer: the in-gateway offer seats (OfferPushNotifier) already produce these two;
+    // offer-service's Oban callback for them is the redundant producer and is skipped below.
+    private static readonly HashSet<string> InGatewayPushProducedTypes =
+        new(StringComparer.Ordinal)
+        {
+            OfferReceivedNotificationRecord.TemplateKey,
+            OfferAcceptedNotificationRecord.TemplateKey,
+        };
+
     private readonly ServicePushNotificationClient _push;
     private readonly IIdempotencyStore _idempotency;
     private readonly INotificationRecordWriter _records;
@@ -179,6 +188,22 @@ public sealed class ServiceCallbacksController : ControllerBase
         if (string.IsNullOrEmpty(callerKey))
         {
             return Invalid("idempotencyKey is required — service callbacks retry.");
+        }
+
+        // Deliberately AFTER validation (a malformed callback must still 400) and BEFORE the
+        // reservation, so a no-op burns no idempotency row and a retry simply re-skips.
+        if (InGatewayPushProducedTypes.Contains(notificationType))
+        {
+            _log.LogInformation(
+                "event={event} type={type} recipientId={recipientId} idempotencyKey={key}",
+                "svc_callback.skipped_in_gateway_producer", notificationType, recipientUserId, callerKey);
+
+            return Accepted(new ServiceCallbackNotifyResponse
+            {
+                EntryId = Guid.NewGuid().ToString("D"),
+                WasDeduplicated = false,
+                Status = DispatchStatus.Skipped,
+            });
         }
 
         var entryId = Guid.NewGuid().ToString("D");
@@ -515,6 +540,9 @@ public sealed class ServiceCallbacksController : ControllerBase
     {
         internal const string Queued = "Queued";
         internal const string Failed = "Failed";
+
+        /// <summary>The gateway already produces this event itself; the callback is a no-op.</summary>
+        internal const string Skipped = "Skipped";
     }
 
     /// <summary>What the idempotency row stores, so a replay can answer with the ORIGINAL identity.</summary>
@@ -560,6 +588,7 @@ public sealed class ServiceCallbackNotifyResponse
     /// <summary>True when this key was already seen and NO second push was sent.</summary>
     public required bool WasDeduplicated { get; init; }
 
-    /// <summary><c>Queued</c> when the push was dispatched, <c>Failed</c> when dispatch threw.</summary>
+    /// <summary><c>Queued</c> when dispatched, <c>Failed</c> when dispatch threw, <c>Skipped</c>
+    /// when the gateway itself already produces this event type.</summary>
     public required string Status { get; init; }
 }

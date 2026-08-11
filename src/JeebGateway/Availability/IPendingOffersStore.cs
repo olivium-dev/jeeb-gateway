@@ -225,6 +225,37 @@ public interface IPendingOffersStore
     /// </summary>
     Task<int> ExpireForRequestAsync(string requestId, DateTimeOffset at, CancellationToken ct)
         => Task.FromResult(0);
+
+    /// <summary>
+    /// FR-6.6 nudge guard — does <paramref name="requestId"/> already carry a LIVE bid
+    /// (<see cref="PendingOfferStatus.IsLive"/>: pending/submitted/edited/accepted)? The
+    /// "Still looking — try a faster tier" nudge is defined for a request with ZERO offers,
+    /// so <see cref="JeebGateway.Requests.RequestNudgeSweeper"/> calls this to suppress it
+    /// once a jeeber has bid.
+    ///
+    /// <para><paramref name="ownerClientId"/> is the request creator's id. The upstream
+    /// offer route authorizes on <c>x-user-id == owner</c>, and the sweeper is a BACKGROUND
+    /// service with no HTTP context, so the owner MUST be threaded explicitly — see
+    /// <see cref="UpstreamPendingOffersStore"/>'s override. The default below is correct only
+    /// for context-free implementations (the in-memory test fake).</para>
+    ///
+    /// <para>DEGRADE-DON'T-NUDGE-LESS: any lookup failure returns <c>false</c> (= "no live
+    /// offer"), so a blip sends a possibly-redundant nudge rather than silently swallowing a
+    /// legitimate one.</para>
+    /// </summary>
+    async Task<bool> HasLiveOfferForRequestAsync(
+        string requestId, string? ownerClientId, CancellationToken ct)
+    {
+        try
+        {
+            var offers = await ListForRequestAsync(requestId, ct);
+            return offers.Any(o => PendingOfferStatus.IsLive(o.Status));
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }
 
 /// <summary>

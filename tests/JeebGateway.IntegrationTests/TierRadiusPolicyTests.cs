@@ -107,4 +107,58 @@ public sealed class TierRadiusPolicyTests
         // Amsterdam → Paris is ~430 km; pins the maths so a unit slip (m vs km) is caught.
         => TierRadiusPolicy.HaversineKm(JeeberLat, JeeberLng, 48.8566, 2.3522)
             .Should().BeInRange(420, 440);
+
+    // ── diagnostics: an unknown tier must not MASK the other exclusion facts ──
+
+    [Fact]
+    public void An_unknown_tier_still_reports_the_distance_it_could_compute()
+    {
+        // Pre-fix the tier rung short-circuited before the haversine, so every UnknownTier
+        // exclusion logged distanceMeters=null — fixing the catalog was the only way to find
+        // out the row was ALSO thousands of km out of range.
+        var result = TierRadiusPolicy.Evaluate(JeeberLat, JeeberLng, Point(48.8566, 2.3522), null);
+
+        result.Decision.Should().Be(TierRadiusDecision.UnknownTier);
+        result.DistanceMeters.Should().NotBeNull().And.BeGreaterThan(400_000);
+        result.RadiusKm.Should().BeNull();
+    }
+
+    [Fact]
+    public void An_unreadable_catalog_is_a_distinct_reason_from_an_unknown_tier()
+    {
+        TierRadiusPolicy
+            .Evaluate(JeeberLat, JeeberLng, Point(JeeberLat, JeeberLng), null,
+                tierCatalogAvailable: false)
+            .Decision.Should().Be(TierRadiusDecision.TierCatalogUnavailable);
+
+        TierRadiusPolicy
+            .Evaluate(JeeberLat, JeeberLng, Point(JeeberLat, JeeberLng), null,
+                tierCatalogAvailable: true)
+            .Decision.Should().Be(TierRadiusDecision.UnknownTier);
+    }
+
+    [Fact]
+    public void A_geometry_gap_is_reported_before_the_tier_and_still_carries_the_radius()
+    {
+        // Ordering: a missing fix is the primary reason, but the radius the decision WOULD have
+        // used travels with it so one log line explains the whole decision.
+        var result = TierRadiusPolicy.Evaluate(null, null, Point(JeeberLat, JeeberLng), Tier("t", 25.0));
+
+        result.Decision.Should().Be(TierRadiusDecision.NoJeeberFix);
+        result.RadiusKm.Should().Be(25.0);
+    }
+
+    [Theory]
+    [InlineData(1.0, TierRadiusDecision.OutOfRadius)]
+    [InlineData(500.0, TierRadiusDecision.Included)]
+    public void Every_tier_backed_decision_carries_both_numbers(
+        double radiusKm, TierRadiusDecision expected)
+    {
+        var result = TierRadiusPolicy.Evaluate(
+            JeeberLat, JeeberLng, Point(JeeberLat + 0.05, JeeberLng), Tier("t", radiusKm));
+
+        result.Decision.Should().Be(expected);
+        result.RadiusKm.Should().Be(radiusKm);
+        result.DistanceMeters.Should().NotBeNull();
+    }
 }

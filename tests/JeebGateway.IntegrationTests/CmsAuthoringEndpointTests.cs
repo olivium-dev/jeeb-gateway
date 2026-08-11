@@ -140,6 +140,24 @@ public sealed class CmsAuthoringEndpointTests
         (await ProblemType(resp)).Should().Be("urn:jeeb:error:surface_not_found");
     }
 
+    // ---- route surface ------------------------------------------------------
+
+    // The public /gateway/ prefix is stripped by the back-office vhost, so the
+    // canonical server route is admin/v1/cms; the doubled alias stays for the
+    // deployed bundle.
+    [Theory]
+    [InlineData("/admin/v1/cms")]
+    [InlineData("/gateway/admin/v1/cms")]
+    public async Task Surfaces_Is_Served_On_Canonical_And_Legacy_Routes(string prefix)
+    {
+        using var f = new WebApplicationFactory<Program>();
+        var resp = await Client(f).GetAsync($"{prefix}/surfaces");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("surfaces").GetArrayLength().Should().BeGreaterThan(0);
+    }
+
     // ---- surfaces + draft + versions + diff --------------------------------
 
     [Fact]

@@ -246,8 +246,10 @@ public class RequestOffersController : ControllerBase
         if (!radius.IsIncluded)
         {
             _logger.LogInformation(
-                "event={event} jeeberId={JeeberId} requestId={RequestId} tierId={TierId} reason={Reason}",
-                "offer.submit.out_of_range", jeeberId, requestId, request.TierId, radius.Decision);
+                "event={event} jeeberId={JeeberId} requestId={RequestId} tierId={TierId} "
+                + "reason={Reason} radiusKm={RadiusKm} distanceMeters={DistanceMeters}",
+                "offer.submit.out_of_range", jeeberId, requestId, request.TierId,
+                radius.Decision, radius.RadiusKm, radius.DistanceMeters);
             return Conflict(new ProblemDetails
             {
                 Title = "Request is outside your serviceable range.",
@@ -573,27 +575,27 @@ public class RequestOffersController : ControllerBase
                 "offer.submit presence read failed for {JeeberId}; treating as no-fix.", jeeberId);
         }
 
-        JeebGateway.Tiers.DeliveryTier? tier = null;
-        if (!string.IsNullOrWhiteSpace(request.TierId))
+        // One catalog snapshot, so an unresolvable id and an unreadable CATALOG produce
+        // different exclusion reasons instead of both collapsing to UnknownTier.
+        var catalog = JeebGateway.Tiers.TierCatalogSnapshot.Empty;
+        try
         {
-            try
-            {
-                tier = await _tiers.ResolveAsync(request.TierId, ct);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "offer.submit tier read failed for {TierId}; treating as unknown tier.",
-                    request.TierId);
-            }
+            catalog = await _tiers.SnapshotAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "offer.submit tier catalog read failed for {TierId}; treating as unavailable.",
+                request.TierId);
         }
 
         return JeebGateway.Geo.TierRadiusPolicy.Evaluate(
-            presence?.Lat, presence?.Lng, request.PickupLocation, tier);
+            presence?.Lat, presence?.Lng, request.PickupLocation,
+            catalog.Resolve(request.TierId), catalog.IsAvailable);
     }
 
 }

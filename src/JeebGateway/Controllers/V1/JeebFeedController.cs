@@ -155,15 +155,20 @@ public sealed class JeebFeedController : ControllerBase
                 presence.Lat,
                 presence.Lng,
                 request.PickupLocation,
-                tierCatalog.Resolve(request.TierId));
+                tierCatalog.Resolve(request.TierId),
+                tierCatalog.IsAvailable);
 
             if (!evaluation.IsIncluded)
             {
+                // radiusKm + distanceMeters on EVERY exclusion: "why" is unactionable without
+                // the two numbers the decision was made from.
                 _logger.LogInformation(
                     "event={event} jeeberId={JeeberId} requestId={RequestId} tierId={TierId} "
-                    + "reason={Reason} distanceMeters={DistanceMeters}",
+                    + "tierSource={TierSource} catalogRows={CatalogRows} reason={Reason} "
+                    + "radiusKm={RadiusKm} distanceMeters={DistanceMeters}",
                     "jeeber.feed.excluded", jeeberId, request.Id, request.TierId,
-                    evaluation.Decision, evaluation.DistanceMeters);
+                    tierCatalog.Source, tierCatalog.Rows.Count,
+                    evaluation.Decision, evaluation.RadiusKm, evaluation.DistanceMeters);
                 continue;
             }
 

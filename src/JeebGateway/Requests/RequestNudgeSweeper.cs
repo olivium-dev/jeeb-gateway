@@ -67,6 +67,8 @@ public class RequestNudgeSweeper : BackgroundService
         var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
         var notifier = scope.ServiceProvider.GetRequiredService<IRequestExpiryNotifier>();
         var tiers = scope.ServiceProvider.GetRequiredService<JeebGateway.Tiers.ITiersStore>();
+        var offers = scope.ServiceProvider
+            .GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
 
         var now = _clock.GetUtcNow();
         var tierTtls = await _windows.LoadTierTtlsAsync(tiers, ct);
@@ -83,6 +85,16 @@ public class RequestNudgeSweeper : BackgroundService
             // a simultaneous "try expanding tier" would be confusing. This
             // preserves the exact precedence the old combined sweeper had.
             if (req.CreatedAt <= now - _windows.ResolveExpiryWindow(req, tierTtls)) continue;
+
+            // FR-6.6 defines this nudge for a request with ZERO offers. Once a jeeber has
+            // bid, "Still looking — try a faster tier" is simply wrong on the client's screen.
+            if (await offers.HasLiveOfferForRequestAsync(req.Id, req.ClientId, ct))
+            {
+                _logger.LogInformation(
+                    "Request {RequestId} already has a live offer — try-expanding-tier nudge suppressed",
+                    req.Id);
+                continue;
+            }
 
             await notifier.NotifyTryExpandTierAsync(req.ClientId, req.Id, now, ct);
             _logger.LogInformation(

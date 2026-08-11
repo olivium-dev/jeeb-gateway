@@ -613,7 +613,7 @@ ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient("Ser
         client.BaseAddress = new Uri(apiUrl);
     }
     client.Timeout = TimeSpan.FromSeconds(30);
-}));
+}).AddHttpMessageHandler<JeebGateway.Notifications.NotificationServiceTokenHandler>());
 builder.Services.AddScoped<JeebGateway.service.ServiceNotification.ServiceNotificationClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -668,6 +668,7 @@ if (notificationUpstreamEnabled && notificationSeederEnabled)
     // AddDownstreamClients): forward any caller bearer + sign X-Service-Auth.
     seederClient.AddHttpMessageHandler<JeebGateway.Services.Bff.BearerForwardingHandler>();
     seederClient.AddHttpMessageHandler<JeebGateway.Services.Bff.ServiceAuthSigningHandler>();
+    seederClient.AddHttpMessageHandler<JeebGateway.Notifications.NotificationServiceTokenHandler>();
 
     builder.Services.AddHostedService<JeebGateway.Notifications.JeebNotificationCatalogSeeder>();
 }
@@ -740,7 +741,8 @@ ServiceClientExtensions.AttachBreakerAndTimeoutOnly(
                 client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
             }
             client.Timeout = TimeSpan.FromSeconds(30);
-        }));
+        })
+        .AddHttpMessageHandler<JeebGateway.Notifications.NotificationServiceTokenHandler>());
 builder.Services.AddScoped<
     JeebGateway.Notifications.INotificationRecordWriter,
     JeebGateway.Notifications.NotificationRecordWriter>();
@@ -1337,6 +1339,20 @@ builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient
     return new JeebGateway.service.ServiceWallet.ServiceWalletClient(baseUrl, client);
 });
 
+// Read-only wallet ledger client: GET-only, so retry/breaker/timeout resilience is safe.
+// No service-auth header; wallet-service sits behind the private network boundary.
+ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
+    JeebGateway.JeebWallet.WalletServiceJeebWalletLedgerReader.HttpClientName,
+    client =>
+    {
+        var apiUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
+        if (!string.IsNullOrWhiteSpace(apiUrl))
+        {
+            client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
+        }
+        client.Timeout = TimeSpan.FromSeconds(30);
+    }));
+
 // F1 — offer-submit/accept/edit wallet-sufficiency guard (OQ1 unresolved: see
 // WalletGuardOptions). Reuses the ServiceWalletClient registered immediately above.
 builder.Services.Configure<JeebGateway.Financials.WalletGuardOptions>(
@@ -1350,25 +1366,66 @@ builder.Services.AddScoped<JeebGateway.Financials.IWalletSufficiencyGuard,
 // the same reused wallet-service saga). See Extensions/PartnerWalletExtensions.cs.
 builder.Services.AddPartnerWallet(builder.Configuration);
 
-// REALAPP fix — GET /v1/jeeb/wallet/ledger reads the holder's OWN transactions
-// directly from the wallet DB (transactionheader + transactiondetails, joined via
-// wallets.holderid), because the generic wallet-service exposes no ledger LIST
-// endpoint. When WalletPostgres:ConnectionString is configured, use the Postgres
-// reader; otherwise fall back to the empty-page reader (dev/CI/tests, no regression).
-// Mirrors the GatewayPostgres direct-Postgres seam already used for COD settlements.
+// GET /v1/jeeb/wallet/ledger — migration seam: WalletPostgres stays authoritative
+// (Authority=postgres); the wallet API runs as a compare-only shadow and never serves.
+builder.Services.Configure<JeebGateway.JeebWallet.WalletLedgerMigrationOptions>(
+    builder.Configuration.GetSection(
+        JeebGateway.JeebWallet.WalletLedgerMigrationOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.JeebWallet.WalletServiceJeebWalletLedgerReader>();
 var walletPostgresCs = builder.Configuration["WalletPostgres:ConnectionString"];
-if (!string.IsNullOrWhiteSpace(walletPostgresCs))
+var walletLedgerMigration = builder.Configuration
+    .GetSection(JeebGateway.JeebWallet.WalletLedgerMigrationOptions.SectionName)
+    .Get<JeebGateway.JeebWallet.WalletLedgerMigrationOptions>()
+    ?? new JeebGateway.JeebWallet.WalletLedgerMigrationOptions();
+var walletLedgerApiConfigured = !string.IsNullOrWhiteSpace(
+    builder.Configuration["WalletServiceApi:BaseUrl"]);
+
+builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader>(sp =>
 {
-    builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader>(sp =>
-        new JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader(
-            walletPostgresCs!,
-            sp.GetRequiredService<ILogger<JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader>>()));
-}
-else
-{
-    builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader,
-        JeebGateway.JeebWallet.NullJeebWalletLedgerReader>();
-}
+    var log = sp.GetRequiredService<ILoggerFactory>().CreateLogger("JeebWalletLedgerWiring");
+    var api = sp.GetRequiredService<JeebGateway.JeebWallet.WalletServiceJeebWalletLedgerReader>();
+
+    // dev/CI: no wallet DB. Keep the empty-page fallback (mobile parser tolerates it) rather than
+    // hard-depending on an unreachable wallet API.
+    if (string.IsNullOrWhiteSpace(walletPostgresCs))
+    {
+        if (walletLedgerMigration.WalletApiIsAuthoritative && walletLedgerApiConfigured)
+            return api;
+        return new JeebGateway.JeebWallet.NullJeebWalletLedgerReader();
+    }
+
+    var postgres = new JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader(
+        walletPostgresCs!,
+        sp.GetRequiredService<ILogger<JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader>>());
+
+    if (walletLedgerMigration.WalletApiIsAuthoritative && !walletLedgerApiConfigured)
+    {
+        log.LogWarning(
+            "WalletLedgerMigration:Authority=wallet-api ignored: WalletServiceApi:BaseUrl is not "
+            + "configured. Serving the WalletPostgres ledger projection.");
+    }
+
+    var serveApi = walletLedgerMigration.WalletApiIsAuthoritative && walletLedgerApiConfigured;
+    var primary = serveApi ? (JeebGateway.JeebWallet.IJeebWalletLedgerReader)api : postgres;
+    var shadow = serveApi ? (JeebGateway.JeebWallet.IJeebWalletLedgerReader)postgres : api;
+
+    if (!walletLedgerMigration.ShadowCompareEnabled || !walletLedgerApiConfigured)
+    {
+        if (walletLedgerMigration.ShadowCompareEnabled && !walletLedgerApiConfigured)
+        {
+            log.LogWarning(
+                "WalletLedgerMigration:ShadowCompareEnabled is set but WalletServiceApi:BaseUrl is "
+                + "not configured; wallet ledger shadow comparison is disabled.");
+        }
+        return primary;
+    }
+
+    return new JeebGateway.JeebWallet.ShadowComparingJeebWalletLedgerReader(
+        primary,
+        shadow,
+        sp.GetRequiredService<
+            ILogger<JeebGateway.JeebWallet.ShadowComparingJeebWalletLedgerReader>>());
+});
 
 // GW12-OBS-2 (Leg-12) — readiness depth for the gateway-owned Postgres databases.
 // The durability Leg made 9+ stores depend on GatewayPostgres (and the wallet ledger
@@ -1651,7 +1708,18 @@ builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requ
 
 // D2-b: the POLICY read of the tier catalog (radius, display name) resolves against the SAME
 // source GET /v1/tiers serves, so an upstream UUID tier id is no longer an unknown tier.
-builder.Services.AddSingleton<JeebGateway.Tiers.ITierCatalogResolver, JeebGateway.Tiers.TierCatalogResolver>();
+// Short-TTL cached (TierCatalogCache:Ttl / :StaleGrace): uncached, each D2 evaluator dialled
+// upstream per request and one delivery-service blip silently emptied every feed.
+builder.Services.Configure<JeebGateway.Tiers.TierCatalogCacheOptions>(
+    builder.Configuration.GetSection(JeebGateway.Tiers.TierCatalogCacheOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Tiers.ITierCatalogResolver>(sp =>
+    new JeebGateway.Tiers.TierCatalogResolver(
+        sp.GetRequiredService<JeebGateway.Tiers.ITiersStore>(),
+        sp.GetService<JeebGateway.Services.Clients.IDeliveryServiceClient>(),
+        sp.GetService<Microsoft.Extensions.Options.IOptionsMonitor<UpstreamFeatureFlags>>(),
+        sp.GetService<ILogger<JeebGateway.Tiers.TierCatalogResolver>>(),
+        sp.GetService<Microsoft.Extensions.Options.IOptions<JeebGateway.Tiers.TierCatalogCacheOptions>>()?.Value,
+        sp.GetService<TimeProvider>()));
 
 // JEB-1507: CancellationPolicy thresholds (WeeklyThreshold, StrikeThreshold,
 // RestrictionDurationHours) are configurable via appsettings so they can be
@@ -2135,8 +2203,9 @@ else
 {
     builder.Services.AddSingleton<IDataExportStore, InMemoryDataExportStore>();
 }
-builder.Services.AddSingleton<InMemoryDataExportRatingsProvider>();
-builder.Services.AddSingleton<IDataExportRatingsProvider>(sp => sp.GetRequiredService<InMemoryDataExportRatingsProvider>());
+// Ratings for GDPR export: feedback-service is the record-of-truth, and the in-memory
+// provider nothing seeds outside tests silently exported an empty ratings section.
+builder.Services.AddDataExportRatingsProvider(builder.Configuration);
 // Chat history for GDPR export. The gateway no longer carries a chat BFF client
 // (removed with the salehly mirror), so this provider returns an empty transcript
 // and logs the documented per-user enumeration limitation pending a generic

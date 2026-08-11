@@ -126,7 +126,21 @@ public sealed class PartnerWalletController : PartnerControllerBase
         // Collapse an empty/whitespace type to "no filter" so ?type= is treated as absent (not a miss).
         var typeFilter = string.IsNullOrWhiteSpace(type) ? null : type.Trim();
 
-        var items = await _ledger.ReadLedgerAsync(partnerId, safePage, safeSize, typeFilter, fromDate, toDate, ct);
+        IReadOnlyList<JeebWalletLedgerEntry> items;
+        try
+        {
+            items = await _ledger.ReadLedgerAsync(
+                partnerId, safePage, safeSize, typeFilter, fromDate, toDate, ct);
+        }
+        catch (WalletLedgerUnavailableException ex)
+        {
+            _log.LogWarning(ex,
+                "Partner wallet: authoritative ledger read failed for partner {PartnerId}.",
+                partnerId);
+            return Problem(
+                title: "The wallet ledger is temporarily unavailable.",
+                statusCode: StatusCodes.Status502BadGateway);
+        }
         var totalPages = items.Count >= safeSize ? safePage + 1 : safePage;
 
         return Ok(new JeebWalletLedgerPageResponse

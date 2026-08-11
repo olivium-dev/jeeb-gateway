@@ -40,6 +40,7 @@ public class RequestsController : ControllerBase
 
     private readonly IRequestsStore _store;
     private readonly ITiersStore _tiers;
+    private readonly JeebGateway.Tiers.ITierCatalogResolver _tierCatalog;
     private readonly TimeProvider _clock;
     private readonly ScheduledDeliveryOptions _scheduledOptions;
     private readonly CreateModerationEvaluator _moderationEvaluator;
@@ -48,6 +49,7 @@ public class RequestsController : ControllerBase
     public RequestsController(
         IRequestsStore store,
         ITiersStore tiers,
+        JeebGateway.Tiers.ITierCatalogResolver tierCatalog,
         TimeProvider clock,
         IOptions<ScheduledDeliveryOptions> scheduledOptions,
         CreateModerationEvaluator moderationEvaluator,
@@ -55,6 +57,7 @@ public class RequestsController : ControllerBase
     {
         _store = store;
         _tiers = tiers;
+        _tierCatalog = tierCatalog;
         _clock = clock;
         _scheduledOptions = scheduledOptions.Value;
         _moderationEvaluator = moderationEvaluator;
@@ -253,7 +256,9 @@ public class RequestsController : ControllerBase
             });
         }
 
-        return Created($"/requests/{created.Id}", ToDto(created, _clock.GetUtcNow()));
+        return Created(
+            $"/requests/{created.Id}",
+            ToDto(created, _clock.GetUtcNow(), await ReadTierCatalogAsync(ct)));
     }
 
     /// <summary>
@@ -330,7 +335,10 @@ public class RequestsController : ControllerBase
         // and converting it to an envelope is explicitly out of scope. It still stamps
         // ServerNow per item from ONE clock read for the whole response.
         var serverNow = _clock.GetUtcNow();
-        var dtos = rows.Select(r => ToDto(r, serverNow)).ToArray();
+        // O11: ONE catalog read for the whole page (short-TTL cached), so every row can
+        // carry its display tier without an upstream call per row.
+        var tierCatalog = await ReadTierCatalogAsync(ct);
+        var dtos = rows.Select(r => ToDto(r, serverNow, tierCatalog)).ToArray();
         return Ok(dtos);
     }
 
@@ -369,7 +377,7 @@ public class RequestsController : ControllerBase
             return NotFound();
         }
 
-        return Ok(ToDto(existing, _clock.GetUtcNow()));
+        return Ok(ToDto(existing, _clock.GetUtcNow(), await ReadTierCatalogAsync(ct)));
     }
 
     /// <summary>
@@ -460,33 +468,66 @@ public class RequestsController : ControllerBase
     private Task<IActionResult?> EvaluateModerationAsync(string clientId, string description, CancellationToken ct)
         => _moderationEvaluator.EvaluateAsync(clientId, description, ct);
 
+    /// <summary>
+    /// O11: the tier catalog for this response. Degrade-don't-fail — an unreadable catalog
+    /// yields an EMPTY snapshot, which drops the display tier fields rather than failing a read.
+    /// </summary>
+    private async Task<JeebGateway.Tiers.TierCatalogSnapshot> ReadTierCatalogAsync(CancellationToken ct)
+    {
+        try
+        {
+            return await _tierCatalog.SnapshotAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "requests tier catalog read failed; omitting the display tier.");
+            return JeebGateway.Tiers.TierCatalogSnapshot.Empty;
+        }
+    }
+
     // P7 (G-E): every DeliveryRequestDto carries a ServerNow stamped from ONE
     // clock read per response. This legacy surface leaves the deadline fields
     // null (it is not a pre-acceptance countdown surface); only
     // GET /v1/requests/{id} and the jeeber feed populate them.
-    private static DeliveryRequestDto ToDto(DeliveryRequest r, DateTimeOffset serverNow) => new()
+    private static DeliveryRequestDto ToDto(
+        DeliveryRequest r,
+        DateTimeOffset serverNow,
+        JeebGateway.Tiers.TierCatalogSnapshot tierCatalog)
     {
-        ServerNow = serverNow,
-        ExpiredAt = r.ExpiredAt,
-        Id = r.Id,
-        ClientId = r.ClientId,
-        Status = r.Status,
-        Description = r.Description,
-        Transcription = r.Transcription,
-        AudioUrl = r.AudioUrl,
-        Photos = r.Photos,
-        TierId = r.TierId,
-        PickupLocation = r.PickupLocation,
-        DropoffLocation = r.DropoffLocation,
-        PickupAddress = r.PickupAddress,
-        DropoffAddress = r.DropoffAddress,
-        RecipientPhone = r.RecipientPhone,
-        CreatedAt = r.CreatedAt,
-        ScheduledAt = r.ScheduledAt,
-        JeeberId = r.JeeberId,
-        AcceptedAt = r.AcceptedAt,
-        ConversationId = r.ConversationId
-    };
+        var tier = tierCatalog.Resolve(r.TierId);
+        return new DeliveryRequestDto
+        {
+            ServerNow = serverNow,
+            ExpiredAt = r.ExpiredAt,
+            Id = r.Id,
+            ClientId = r.ClientId,
+            Status = r.Status,
+            Description = r.Description,
+            Transcription = r.Transcription,
+            AudioUrl = r.AudioUrl,
+            Photos = r.Photos,
+            TierId = r.TierId,
+            // O11: the display projections the row does not hold. `tier` falls back to the raw
+            // id so a client that only reads `tier` is never left with nothing.
+            Tier = JeebGateway.Tiers.TierDisplay.Slug(tier) ?? r.TierId,
+            TierName = tier?.Name,
+            DisplayId = JeebGateway.Tiers.TierDisplay.OrderReference(r.Id),
+            PickupLocation = r.PickupLocation,
+            DropoffLocation = r.DropoffLocation,
+            PickupAddress = r.PickupAddress,
+            DropoffAddress = r.DropoffAddress,
+            RecipientPhone = r.RecipientPhone,
+            CreatedAt = r.CreatedAt,
+            ScheduledAt = r.ScheduledAt,
+            JeeberId = r.JeeberId,
+            AcceptedAt = r.AcceptedAt,
+            ConversationId = r.ConversationId
+        };
+    }
 }
 
 /// <summary>

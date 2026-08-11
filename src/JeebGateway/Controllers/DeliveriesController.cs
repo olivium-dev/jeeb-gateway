@@ -97,6 +97,9 @@ public class DeliveriesController : ControllerBase
     private readonly IDistributedCache _cache;
     private readonly IHandoverCodeStore _handoverCodes;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
+    // Counterparty-avatar enrich: AvatarUrlResolver needs the gateway's public base to
+    // turn a stored CDN object ref into a loadable /api/users/{id}/avatar URL.
+    private readonly IOptions<GatewayPublicOptions> _publicOptions;
     private readonly TimeProvider _clock;
     private readonly ILogger<DeliveriesController> _log;
 
@@ -221,6 +224,7 @@ public class DeliveriesController : ControllerBase
         IDistributedCache cache,
         IHandoverCodeStore handoverCodes,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
+        IOptions<GatewayPublicOptions> publicOptions,
         TimeProvider clock,
         ILogger<DeliveriesController> log)
     {
@@ -242,6 +246,7 @@ public class DeliveriesController : ControllerBase
         _cache = cache;
         _handoverCodes = handoverCodes;
         _flags = flags;
+        _publicOptions = publicOptions;
         _clock = clock;
         _log = log;
     }
@@ -636,6 +641,14 @@ public class DeliveriesController : ControllerBase
     /// via the pending-offers store keyed by request id; the jeeber name is resolved via
     /// the gateway's own users projection store (a cheap in-process seam, not an added
     /// upstream user-management round-trip).
+    ///
+    /// <para>It ALSO resolves both parties' display identity for the participant-scoped read:
+    /// <see cref="DeliveryRequestDto.JeeberAvatarUrl"/> plus
+    /// <see cref="DeliveryRequestDto.ClientName"/>/<see cref="DeliveryRequestDto.ClientAvatarUrl"/>.
+    /// This is the ONLY read both chat legs and every mutual-rating entry point can reach, so it
+    /// is where the counterparty photo has to live. Avatars go through
+    /// <see cref="AvatarUrlResolver"/> (same projection the offer card and the jeeber feed use).
+    /// Same degrade-don't-fail contract: a users-store fault serves 200 without the fields.</para>
     /// </summary>
     private async Task EnrichWithOfferAndJeeberAsync(
         DeliveryRequestDto dto, string deliveryId, string? jeeberId, decimal? snapshotFee, CancellationToken ct)
@@ -680,6 +693,8 @@ public class DeliveriesController : ControllerBase
             dto.Amount = snapshotFee;
         }
 
+        var publicBaseUrl = _publicOptions.Value.PublicBaseUrl;
+
         if (!string.IsNullOrWhiteSpace(jeeberId))
         {
             try
@@ -689,13 +704,36 @@ public class DeliveriesController : ControllerBase
                 {
                     dto.JeeberName = profile.Name;
                 }
+                dto.JeeberAvatarUrl = AvatarUrlResolver.Absolutize(profile?.AvatarUrl, jeeberId, publicBaseUrl);
             }
             catch (Exception ex)
             {
                 _log.LogWarning(ex,
                     "Jeeber display-name enrich failed for delivery {DeliveryId} jeeber {JeeberId}; "
-                    + "returning without JeeberName.",
+                    + "returning without JeeberName/JeeberAvatarUrl.",
                     deliveryId, jeeberId);
+            }
+        }
+
+        // Symmetric client identity: the JEEBER leg needs the counterparty's name+photo for
+        // the chat header and the mutual-rating terminal, exactly as the client leg does.
+        if (!string.IsNullOrWhiteSpace(dto.ClientId))
+        {
+            try
+            {
+                var client = await _users.GetByIdAsync(dto.ClientId, ct);
+                if (!string.IsNullOrWhiteSpace(client?.Name))
+                {
+                    dto.ClientName = client.Name;
+                }
+                dto.ClientAvatarUrl = AvatarUrlResolver.Absolutize(client?.AvatarUrl, dto.ClientId, publicBaseUrl);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "Client display enrich failed for delivery {DeliveryId} client {ClientId}; "
+                    + "returning without ClientName/ClientAvatarUrl.",
+                    deliveryId, dto.ClientId);
             }
         }
     }

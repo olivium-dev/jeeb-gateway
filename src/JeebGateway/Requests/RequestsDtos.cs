@@ -431,6 +431,31 @@ public class DeliveryRequestDto
         Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? ProofPhotoUrl { get; init; }
     public string? TierId { get; init; }
+
+    /// <summary>
+    /// O11 — the DISPLAY tier token (<c>flash</c>/<c>express</c>/<c>standard</c>), resolved from
+    /// <see cref="TierId"/> through the catalog the tier-picker rendered from. Since the
+    /// delivery-service cut-over <see cref="TierId"/> is a UUIDv5 that matches no client tier
+    /// lexicon, so every order card fell through to "no tier chip". Additive and nullable: null
+    /// when the tier does not resolve, and <see cref="TierId"/> is untouched.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Tier { get; init; }
+
+    /// <summary>O11 — the resolved tier's human catalog name (e.g. <c>Standard</c>).</summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? TierName { get; init; }
+
+    /// <summary>
+    /// O11 — the human order reference (<c>ORD-3F2A1B</c>) the order card renders as its
+    /// header. Derived from <see cref="Id"/>, never stored. Additive and nullable.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? DisplayId { get; init; }
+
     public GeoPoint? PickupLocation { get; init; }
     public GeoPoint? DropoffLocation { get; init; }
     public string? PickupAddress { get; init; }
@@ -550,6 +575,29 @@ public class DeliveryRequestDto
     [System.Text.Json.Serialization.JsonIgnore(
         Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? JeeberName { get; set; }
+
+    /// <summary>
+    /// Counterparty display identity for the two DELIVERY PARTICIPANTS (chat header +
+    /// mutual rating). Same additive/ignore-when-null contract as <see cref="JeeberName"/>:
+    /// unresolved ⇒ null ⇒ the key is omitted entirely, and a users-store fault degrades
+    /// the read rather than failing it. Avatar values are projected through
+    /// <see cref="Users.AvatarUrlResolver"/>, so they are loadable URLs, never bare object
+    /// refs. Exposure is bounded by the read itself — GET /deliveries/{id} 403s any caller
+    /// who is neither the client nor the assigned jeeber.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? JeeberAvatarUrl { get; set; }
+
+    /// <inheritdoc cref="JeeberAvatarUrl"/>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ClientName { get; set; }
+
+    /// <inheritdoc cref="JeeberAvatarUrl"/>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ClientAvatarUrl { get; set; }
 
     /// <summary>
     /// Gap G4 (run-24 CHECK C): the 4-digit delivery handover code the CUSTOMER
