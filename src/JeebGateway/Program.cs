@@ -1337,9 +1337,8 @@ builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient
     return new JeebGateway.service.ServiceWallet.ServiceWalletClient(baseUrl, client);
 });
 
-// Read-only generic wallet ledger client. Unlike the generated wallet client above, this named
-// client only issues GETs, so retry/breaker/timeout resilience is safe. It carries no service-auth
-// header: wallet-service is protected by the private overlay/network boundary.
+// Read-only wallet ledger client: GET-only, so retry/breaker/timeout resilience is safe.
+// No service-auth header; wallet-service sits behind the private network boundary.
 ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
     JeebGateway.JeebWallet.WalletServiceJeebWalletLedgerReader.HttpClientName,
     client =>
@@ -1365,10 +1364,8 @@ builder.Services.AddScoped<JeebGateway.Financials.IWalletSufficiencyGuard,
 // the same reused wallet-service saga). See Extensions/PartnerWalletExtensions.cs.
 builder.Services.AddPartnerWallet(builder.Configuration);
 
-// GET /v1/jeeb/wallet/ledger — migration seam from the direct WalletPostgres projection to
-// wallet-service's holder-scoped ledger API. Postgres stays AUTHORITATIVE (Authority=postgres);
-// the wallet API runs as a compare-only shadow until a WalletLedgerShadowMismatch-free window
-// justifies flipping WalletLedgerMigration__Authority=wallet-api. The shadow never serves.
+// GET /v1/jeeb/wallet/ledger — migration seam: WalletPostgres stays authoritative
+// (Authority=postgres); the wallet API runs as a compare-only shadow and never serves.
 builder.Services.Configure<JeebGateway.JeebWallet.WalletLedgerMigrationOptions>(
     builder.Configuration.GetSection(
         JeebGateway.JeebWallet.WalletLedgerMigrationOptions.SectionName));

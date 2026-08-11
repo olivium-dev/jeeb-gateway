@@ -34,9 +34,8 @@ namespace JeebGateway.Controllers;
 /// </para>
 ///
 /// <para>
-/// Ledger reads use wallet-service's generic holder-scoped transaction projection through
-/// <see cref="IJeebWalletLedgerReader"/>. The controller owns only the mobile response shape;
-/// wallet-service remains the authoritative, product-neutral ledger owner.
+/// Ledger reads go through <see cref="IJeebWalletLedgerReader"/>; the controller owns only the
+/// mobile response shape, and wallet-service stays the product-neutral ledger owner.
 /// </para>
 /// </summary>
 [ApiController]

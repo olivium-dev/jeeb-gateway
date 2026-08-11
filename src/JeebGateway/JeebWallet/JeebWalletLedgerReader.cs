@@ -363,10 +363,8 @@ public sealed class NullJeebWalletLedgerReader : IJeebWalletLedgerReader
 }
 
 /// <summary>
-/// Serves <paramref name="primary"/> and compares it against a non-serving shadow. Shadow failures
-/// and mismatches are observable but can never replace, suppress or fail the served response.
-/// Role assignment is the caller's: under Authority=postgres the Postgres reader serves and the
-/// wallet API shadows; under Authority=wallet-api the roles swap.
+/// Serves the primary reader and compares it against a non-serving shadow (roles assigned by the
+/// caller from Authority). Shadow failures and mismatches can never alter the served response.
 /// </summary>
 public sealed class ShadowComparingJeebWalletLedgerReader : IJeebWalletLedgerReader
 {

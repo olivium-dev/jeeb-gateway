@@ -11,10 +11,8 @@ using Xunit;
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// P1-12 re-cut guard. The wallet-API ledger read ships as a compare-only SHADOW: WalletPostgres
-/// stays authoritative until WalletLedgerMigration:Authority is deliberately flipped. These tests
-/// pin the serving side, the readiness guard and the production config so the blind cutover the
-/// original 6d46e69 performed cannot silently return.
+/// P1-12 re-cut guard: pins the serving side, the readiness guard and the production config so the
+/// blind wallet-API cutover the original 6d46e69 performed cannot silently return.
 /// </summary>
 public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicationFactory<Program>>
 {
