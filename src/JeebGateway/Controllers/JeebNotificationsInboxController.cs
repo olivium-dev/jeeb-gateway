@@ -306,10 +306,11 @@ public sealed class JeebNotificationsInboxController : ControllerBase
     /// flow and NEVER meant for a customer's inbox. A caller lacking the jeeber
     /// ("driver") role must not see these rows (they carry other customers' order text).
     /// Matched case-insensitively; kept as a set so sibling jeeber-broadcast types can be
-    /// added without touching the filter logic.
+    /// added without touching the filter logic. BOTH spellings are live: the legacy notifier
+    /// writes <c>new_request</c>, the generic events route writes <c>jeeb.new_request</c>.
     /// </summary>
     private static readonly HashSet<string> JeeberBroadcastTypes =
-        new(StringComparer.OrdinalIgnoreCase) { "new_request" };
+        new(StringComparer.OrdinalIgnoreCase) { "new_request", "jeeb.new_request" };
 
     /// <summary>
     /// Drop jeeber-only broadcast rows (see <see cref="JeeberBroadcastTypes"/>) for a

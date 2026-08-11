@@ -29,6 +29,20 @@ public static class PendingOfferStatus
     public const string Superseded = "superseded";
 
     public const string Withdrawn = "withdrawn";
+
+    /// <summary>
+    /// "Live" = the bid can still win, or already won (<see cref="Pending"/> /
+    /// <see cref="Accepted"/>). Also accepts offer-service's raw pre-map synonyms for
+    /// pending (<c>submitted</c> / <c>edited</c>), because
+    /// <see cref="UpstreamPendingOffersStore.ListForRequestAsync"/> deliberately keeps the
+    /// upstream vocabulary verbatim — a check written against the gateway constants alone
+    /// would silently miss every real submitted bid on the live wire.
+    /// </summary>
+    public static bool IsLive(string? status) => status?.Trim().ToLowerInvariant() switch
+    {
+        Pending or Accepted or "submitted" or "edited" => true,
+        _ => false,
+    };
 }
 
 /// <summary>

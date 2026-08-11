@@ -67,6 +67,72 @@ public class RequestExpirySweeperTests
     }
 
     [Fact]
+    public async Task Nudge_Suppressed_When_Request_Has_Live_Offer()
+    {
+        var factory = NewFactory(out var clock);
+        var client = ClientFor(factory, "nudge-has-offer-client");
+
+        var requestId = await CreateRequest(client, "Deliver a parcel");
+
+        var offers = (JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore)
+            factory.Services.GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
+        offers.EnqueueForTest(jeeberId: "nudge-jeeber-1", requestId: requestId);
+
+        // Past the 10-min no-offer mark, but a jeeber has already bid.
+        clock.Advance(TimeSpan.FromMinutes(11));
+        await NudgeOnce(factory);
+
+        var notifier = (InMemoryRequestExpiryNotifier)factory.Services.GetRequiredService<IRequestExpiryNotifier>();
+        notifier.Nudges.Should().BeEmpty(
+            "FR-6.6 defines the try-expanding-tier nudge for a request with ZERO offers");
+    }
+
+    [Fact]
+    public async Task Nudge_Sent_When_Only_Withdrawn_Offers_Remain()
+    {
+        var factory = NewFactory(out var clock);
+        var client = ClientFor(factory, "nudge-withdrawn-offer-client");
+
+        var requestId = await CreateRequest(client, "Deliver a parcel");
+
+        var offers = (JeebGateway.IntegrationTests.Fakes.FakePendingOffersStore)
+            factory.Services.GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
+        var seeded = offers.EnqueueForTest(jeeberId: "nudge-jeeber-2", requestId: requestId);
+        var outcome = await offers.TryWithdrawAsync(
+            seeded.Id, requestId, "nudge-jeeber-2", clock.GetUtcNow(), CancellationToken.None);
+        outcome.Should().Be(JeebGateway.Availability.WithdrawOfferOutcome.Withdrawn);
+
+        clock.Advance(TimeSpan.FromMinutes(11));
+        await NudgeOnce(factory);
+
+        var notifier = (InMemoryRequestExpiryNotifier)factory.Services.GetRequiredService<IRequestExpiryNotifier>();
+        notifier.Nudges.Should().ContainSingle(
+            "a retracted bid leaves the request offerless again, so the nudge is legitimate")
+            .Which.RequestId.Should().Be(requestId);
+    }
+
+    [Fact]
+    public async Task Nudge_Sent_When_Offers_Lookup_Throws()
+    {
+        var factory = NewFactory(out var clock, services =>
+        {
+            services.RemoveAll<JeebGateway.Availability.IPendingOffersStore>();
+            services.AddSingleton<JeebGateway.Availability.IPendingOffersStore, ThrowingOffersStore>();
+        });
+        var client = ClientFor(factory, "nudge-offer-blip-client");
+
+        var requestId = await CreateRequest(client, "Deliver a parcel");
+
+        clock.Advance(TimeSpan.FromMinutes(11));
+        await NudgeOnce(factory);
+
+        var notifier = (InMemoryRequestExpiryNotifier)factory.Services.GetRequiredService<IRequestExpiryNotifier>();
+        notifier.Nudges.Should().ContainSingle(
+            "an offers-lookup blip must degrade to sending the nudge, never to silently swallowing it")
+            .Which.RequestId.Should().Be(requestId);
+    }
+
+    [Fact]
     public async Task Shorter_Other_Tier_Ttl_Does_Not_Nudge_Before_No_Offer_Window()
     {
         var factory = NewFactory(out var clock);
@@ -384,6 +450,11 @@ public class RequestExpirySweeperTests
     // -----------------------------------------------------------------
 
     private static WebApplicationFactory<Program> NewFactory(out FakeClock clock)
+        => NewFactory(out clock, null);
+
+    private static WebApplicationFactory<Program> NewFactory(
+        out FakeClock clock,
+        Action<IServiceCollection>? extraTestServices)
     {
         var theClock = new FakeClock(new DateTimeOffset(2026, 5, 15, 12, 0, 0, TimeSpan.Zero));
         clock = theClock;
@@ -404,6 +475,11 @@ public class RequestExpirySweeperTests
             // Program.cs's own unconditional registration.
             builder.ConfigureTestServices(
                 Fakes.FakeOfferStoreWebApplicationFactory.UseFakeOfferStore);
+
+            if (extraTestServices is not null)
+            {
+                builder.ConfigureTestServices(extraTestServices);
+            }
         });
     }
 
@@ -652,6 +728,43 @@ public class RequestExpirySweeperTests
 
         public Task<DeliveryRequest?> GetAsync(string requestId, CancellationToken ct) =>
             Task.FromResult<DeliveryRequest?>(null);
+    }
+
+    /// <summary>
+    /// Offer ledger that faults on every read — stands in for an offer-service blip so the
+    /// nudge sweeper's degrade direction (still nudge) is asserted, not assumed.
+    /// </summary>
+    private sealed class ThrowingOffersStore : JeebGateway.Availability.IPendingOffersStore
+    {
+        private static InvalidOperationException Blip()
+            => new("offer-service unavailable (test double)");
+
+        public Task<IReadOnlyList<JeebGateway.Availability.PendingOffer>> ListForRequestAsync(
+            string requestId, CancellationToken ct) => throw Blip();
+
+        public Task<int> WithdrawForJeeberAsync(string jeeberId, CancellationToken ct) => throw Blip();
+
+        public Task<JeebGateway.Availability.PendingOffer?> GetAsync(string offerId, CancellationToken ct)
+            => throw Blip();
+
+        public Task<bool> AcceptAsync(string offerId, DateTimeOffset at, CancellationToken ct)
+            => throw Blip();
+
+        public Task<JeebGateway.Availability.AcceptOfferOutcome> AcceptWithSupersedeAsync(
+            string offerId, DateTimeOffset at, CancellationToken ct) => throw Blip();
+
+        public Task<JeebGateway.Availability.EditOfferOutcome> TryEditAsync(
+            string offerId, string requestId, string jeeberId, decimal? fee, int? etaMinutes,
+            string? note, int maxEdits, DateTimeOffset at, CancellationToken ct) => throw Blip();
+
+        public Task<JeebGateway.Availability.PendingOffer> TrySubmitAsync(
+            string requestId, string jeeberId, decimal fee, int etaMinutes, string? note,
+            int maxPerRequest, DateTimeOffset at, CancellationToken ct, string? clientId = null)
+            => throw Blip();
+
+        public Task<JeebGateway.Availability.WithdrawOfferOutcome> TryWithdrawAsync(
+            string offerId, string requestId, string jeeberId, DateTimeOffset at, CancellationToken ct)
+            => throw Blip();
     }
 
     private sealed record RequestDto(

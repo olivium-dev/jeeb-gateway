@@ -373,6 +373,42 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
             .ToList();
     }
 
+    /// <summary>
+    /// FR-6.6 nudge guard on the upstream wire. MUST override the interface default: that
+    /// default routes through <see cref="ListForRequestAsync"/>, which resolves the acting
+    /// identity from <see cref="IHttpContextAccessor"/> and returns an EMPTY list when there
+    /// is no HTTP context — so in a background sweeper the default would always answer "no
+    /// live offer" and the fix would be a live no-op while every in-memory test passed.
+    ///
+    /// <para>Instead this mirrors <see cref="ListForJeeberAsync"/>'s owner-forwarding: the
+    /// caller supplies the request OWNER's id (offer-service authorizes its request-scoped
+    /// list on <c>x-user-id == owner</c>). Statuses are read RAW off the wire and classified
+    /// by <see cref="PendingOfferStatus.IsLive"/>, which understands offer-service's
+    /// <c>submitted</c>/<c>edited</c> vocabulary as well as the gateway's own.</para>
+    ///
+    /// <para>DEGRADE-DON'T-NUDGE-LESS: no owner, an upstream blip, or a throw → <c>false</c>,
+    /// so the nudge still goes out. The client already folds non-2xx to an empty list.</para>
+    /// </summary>
+    public async Task<bool> HasLiveOfferForRequestAsync(
+        string requestId, string? ownerClientId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(requestId) || string.IsNullOrWhiteSpace(ownerClientId))
+        {
+            return false;
+        }
+
+        try
+        {
+            var wires = await _client.ListForRequestAsync(ownerClientId!, requestId, ct);
+            return wires.Any(w =>
+                !string.IsNullOrWhiteSpace(w.Id) && PendingOfferStatus.IsLive(w.Status));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public Task<int> WithdrawForJeeberAsync(string jeeberId, CancellationToken ct)
         => throw new NotSupportedException(
             "offer-service exposes no bulk withdraw-for-jeeber route, so the auto-offline sweeper's bulk " +

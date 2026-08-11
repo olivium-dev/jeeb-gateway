@@ -43,6 +43,21 @@ public enum PushDeliveryMode
 /// hidden flag, not a row pre-marked <c>is_read=true</c>. Any of those still costs a POST,
 /// still occupies the inbox projection, and is still replayable.</para>
 ///
+/// <para><b>⚠️ SCOPE CORRECTION, 2026-08-11 (D4 contradiction ruling).</b> The paragraph above
+/// governs the <b>notification-centre write path</b> (<see cref="NotificationRecordWriter"/>),
+/// which is the only path this policy can refuse. It does <b>NOT</b> govern the generic events
+/// route (<c>POST /notifications/events</c>, <see cref="GenericEventDispatcher"/>): in the live
+/// architecture (gateway direct dispatch OFF, durable write ON) the Mongo row that route
+/// creates IS the at-least-once dispatch vehicle AND the notification_id/fingerprint dedupe
+/// that currently suppresses the known second-producer duplicate pushes. Skipping it there
+/// would break push delivery and re-open duplicates — so for a silent type on that route the
+/// row MAY exist. It is instead made harmless at the far end: the record carries
+/// <c>data.silent="true"</c> (stamped by <see cref="GenericEventDispatcher.BuildRecord"/> from
+/// <see cref="IsSilent"/>, still the single silence authority), notification-service excludes
+/// such rows from every receiver-facing read and unread count, and a generic TTL index reaps
+/// them. "Silent = invisible and mortal" on that route; "silent = no row" everywhere this
+/// policy is actually consulted. Do not reconcile these by deleting either half.</para>
+///
 /// <para><b>THE COROLLARY (the easy mistake).</b> A change that is BOTH worth telling the
 /// user about AND requires a UI refresh is <b>ONE</b> non-silent stored notification whose
 /// <c>data</c> block also carries the refresh category. It is <b>NOT</b> two pushes. Two is
@@ -72,13 +87,14 @@ public enum PushDeliveryMode
 /// <para><b>⚠️ TWO DEFINITIONS OF "SILENT" ARE IN FLIGHT, and nothing reconciles them.</b>
 /// This policy decides silence from the notification <b>type</b> (a static lookup). The
 /// push service decides it from a per-send wire flag (<c>payload.get("silent")</c>, b02
-/// step 2). They can disagree and no code forces agreement — today they never meet, because
-/// nothing in this gateway stamps <c>silent</c> on an outbound payload (verified by
-/// <c>grep -rni silent src --include=*.cs</c>: no hit in any send path). When the gateway
-/// does start stamping it, both desync directions are live: a silent push that still wrote
-/// a row (an inbox entry the user was never told about), or a shade buzz with no row (a
-/// banner the user taps and finds nothing behind). Whoever wires the stamp must source it
-/// from <see cref="IsSilent"/> and from nowhere else.</para>
+/// step 2). They can disagree and no code forces agreement. <b>UPDATED 2026-08-11: the stamp
+/// is now wired</b> — <see cref="GenericEventDispatcher.BuildRecord"/> sets
+/// <c>data["silent"]="true"</c> sourced from <see cref="ModeForCategory"/>, i.e. from this
+/// policy and nowhere else, which is the contract the older wording demanded of whoever wired
+/// it. The desync directions it warned about remain the thing to watch: a silent push that
+/// still surfaces a row (see the scope correction above — such rows are hidden and TTL-reaped
+/// downstream, not absent), or a shade buzz with no row. Any future stamp must likewise
+/// source silence from <see cref="IsSilent"/> / <see cref="ModeForCategory"/>.</para>
 ///
 /// <para><b>⚠️ THE FLAT WIRE <c>category</c> FIELD IS NOT A REFRESH CATEGORY.</b> Today's
 /// payloads stamp <c>["category"] = "delivery"</c> on new-offer
