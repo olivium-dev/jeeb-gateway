@@ -94,9 +94,10 @@ public sealed class FeedbackServiceDataExportRatingsProvider : IDataExportRating
                 userId, _options.PageLimit);
         }
 
-        var snapshots = new List<RatingSnapshot>(page.Ratings.Count);
+        var rows = page.Ratings ?? [];
+        var snapshots = new List<RatingSnapshot>(rows.Count);
         var foreign = 0;
-        foreach (var item in page.Ratings)
+        foreach (var item in rows)
         {
             if (!IsJeebRow(item))
             {
@@ -109,12 +110,12 @@ public sealed class FeedbackServiceDataExportRatingsProvider : IDataExportRating
                 RatingId = item.Id.ToString("D"),
                 RequestId = JeebRatingVocabulary.TryDeliveryForCorrelation(item.CorrelationId, out var deliveryId)
                     ? deliveryId
-                    : string.Empty,
+                    : item.CorrelationId?.Trim() ?? string.Empty,
                 Direction = item.Direction ?? string.Empty,
                 CounterpartyId = item.CounterpartyId.ToString("D"),
                 Stars = item.Score,
                 Comment = item.Comment,
-                CreatedAt = new DateTimeOffset(DateTime.SpecifyKind(item.CreatedAt, DateTimeKind.Utc))
+                CreatedAt = item.CreatedAt.ToUniversalTime()
             });
         }
 
@@ -137,7 +138,7 @@ public sealed class FeedbackServiceDataExportRatingsProvider : IDataExportRating
     internal sealed class RatingExportPage
     {
         public bool HasMore { get; set; }
-        public List<RatingExportItem> Ratings { get; set; } = [];
+        public List<RatingExportItem>? Ratings { get; set; }
     }
 
     internal sealed class RatingExportItem
@@ -149,6 +150,9 @@ public sealed class FeedbackServiceDataExportRatingsProvider : IDataExportRating
         public int Score { get; set; }
         public string? Comment { get; set; }
         public List<string>? Tags { get; set; }
-        public DateTime CreatedAt { get; set; }
+
+        // Upstream normalises to UTC and serialises with 'Z'; DateTimeOffset keeps
+        // an offset form correct too, which a bare DateTime would misread as local.
+        public DateTimeOffset CreatedAt { get; set; }
     }
 }

@@ -134,6 +134,53 @@ public class FeedbackServiceDataExportRatingsProviderTests
         }
     }
 
+    [Fact]
+    public async Task Tolerates_a_null_rows_array_and_an_offset_timestamp()
+    {
+        var provider = NewProvider(
+            _ => Json(new
+            {
+                hasMore = false,
+                ratings = new[]
+                {
+                    new
+                    {
+                        id = Guid.NewGuid(),
+                        correlationId = "jeeb:delivery:DEL-9",
+                        direction = "given",
+                        counterpartyId = Guid.NewGuid(),
+                        score = 3,
+                        comment = (string?)null,
+                        tags = new[] { "jeeb" },
+                        // Non-Z offset: a bare DateTime would have read this as local time.
+                        createdAt = "2026-08-04T11:00:00+02:00"
+                    }
+                }
+            }),
+            out var tokenFile);
+
+        try
+        {
+            var snapshots = await provider.GetForUserAsync(JeebUserId, CancellationToken.None);
+            snapshots.Should().ContainSingle();
+            snapshots[0].CreatedAt.Should().Be(new DateTimeOffset(2026, 8, 4, 9, 0, 0, TimeSpan.Zero));
+        }
+        finally
+        {
+            File.Delete(tokenFile);
+        }
+
+        var nullRows = NewProvider(_ => Json(new { hasMore = false, ratings = (object?)null }), out var second);
+        try
+        {
+            (await nullRows.GetForUserAsync(JeebUserId, CancellationToken.None)).Should().BeEmpty();
+        }
+        finally
+        {
+            File.Delete(second);
+        }
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.Unauthorized)]
     [InlineData(HttpStatusCode.ServiceUnavailable)]
