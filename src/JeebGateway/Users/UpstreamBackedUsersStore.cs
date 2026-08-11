@@ -185,6 +185,10 @@ public sealed class UpstreamBackedUsersStore : IUsersStore
         // Durable admin search — served from Postgres so it survives a restart.
         => _projection.SearchAsync(query, ct);
 
+    public Task<UserRoleCounts> CountByRolesAsync(IReadOnlyCollection<string> opaqueRoles, CancellationToken ct)
+        // Durable admin KPI — counted in Postgres, not over the in-process snapshot.
+        => _projection.CountByRolesAsync(opaqueRoles, ct);
+
     public async Task<UserProfile?> SuspendAsync(string userId, string reason, string adminId, CancellationToken ct)
     {
         var updated = await _inner.SuspendAsync(userId, reason, adminId, ct);

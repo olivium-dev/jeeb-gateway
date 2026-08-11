@@ -308,6 +308,36 @@ public sealed class DurableRequestsStore : IRequestsStore
         => _inner.CountActiveForClientAsync(clientId, ct);
 
     /// <summary>
+    /// CMS dashboard read (D2). Prefers the durable mirror (survives a bounce) and
+    /// degrades to the in-memory snapshot when there is no mirror, or the mirror read
+    /// faults — an admin dashboard widget must never turn a Postgres blip into a 500.
+    /// </summary>
+    public async Task<RequestsAdminSnapshot> GetAdminDashboardSnapshotAsync(int recentLimit, CancellationToken ct)
+    {
+        if (_mirror is not null)
+        {
+            try
+            {
+                var durable = await _mirror.GetAdminDashboardSnapshotAsync(recentLimit, ct);
+                if (durable is not null) return durable;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                BusinessOutcomeTelemetry.DurableReadFailures.Add(1,
+                    new KeyValuePair<string, object?>("store", "postgres-requests-admin-snapshot"));
+                _logger.LogWarning(ex,
+                    "requests-durable: admin dashboard snapshot read failed; serving the in-memory snapshot.");
+            }
+        }
+
+        return await _inner.GetAdminDashboardSnapshotAsync(recentLimit, ct);
+    }
+
+    /// <summary>
     /// F4: status mutation with a durable EFFECT. The in-memory model owns the
     /// authoritative state machine (delegated verbatim); on a committed change the
     /// new status is reflected onto the durable owner-list mirror (best-effort) so a

@@ -172,4 +172,12 @@ public interface IDurableRequestsMirror
     /// no constraint can fire. No-op when the request id is not a UUID.
     /// </summary>
     Task UpdateConversationIdAsync(string requestId, string conversationId, CancellationToken ct);
+
+    /// <summary>
+    /// CMS dashboard read (D2): durable status histogram + newest rows over the mirror.
+    /// Returns <see langword="null"/> when this mirror cannot answer, so
+    /// <see cref="DurableRequestsStore"/> falls back to the in-memory snapshot.
+    /// </summary>
+    Task<RequestsAdminSnapshot?> GetAdminDashboardSnapshotAsync(int recentLimit, CancellationToken ct)
+        => Task.FromResult<RequestsAdminSnapshot?>(null);
 }

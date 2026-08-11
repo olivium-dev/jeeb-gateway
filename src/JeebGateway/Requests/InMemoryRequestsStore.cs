@@ -754,6 +754,37 @@ public class InMemoryRequestsStore : IRequestsStore
         return count;
     }
 
+    /// <summary>
+    /// CMS dashboard snapshot over the in-process model. The in-memory row carries no
+    /// updated-at, so <c>UpdatedAt</c> reports <see cref="DeliveryRequest.CreatedAt"/>.
+    /// </summary>
+    public Task<RequestsAdminSnapshot> GetAdminDashboardSnapshotAsync(int recentLimit, CancellationToken ct)
+    {
+        var rows = _requests.Values.ToList();
+
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            counts[row.Status] = counts.GetValueOrDefault(row.Status) + 1;
+        }
+
+        var recent = rows
+            .OrderByDescending(r => r.CreatedAt)
+            .Take(Math.Max(recentLimit, 0))
+            .Select(r => new RequestsAdminRecentRow
+            {
+                Id = r.Id,
+                Status = r.Status,
+                Title = r.Description,
+                ClientId = r.ClientId,
+                JeeberId = r.JeeberId,
+                UpdatedAt = r.CreatedAt,
+            })
+            .ToList();
+
+        return Task.FromResult(new RequestsAdminSnapshot { CountsByStatus = counts, Recent = recent });
+    }
+
     private DeliveryRequest BuildRequest(CreateRequestInput input) => new()
     {
         Id = string.IsNullOrWhiteSpace(input.Id) ? Guid.NewGuid().ToString() : input.Id,

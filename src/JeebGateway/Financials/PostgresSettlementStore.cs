@@ -142,6 +142,24 @@ public sealed class PostgresSettlementStore : ISettlementStore
         return await ReadListAsync(cmd, ct);
     }
 
+    public async Task<decimal> SumEarningsAsync(IReadOnlyCollection<string>? codStates, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+
+        // Same cod_state predicate as ListByJeeberAsync, minus the per-jeeber/window filters.
+        var sql = codStates is { Count: > 0 }
+            ? "SELECT COALESCE(SUM(goods_cost - commission), 0) FROM settlements WHERE cod_state = ANY(@CodStates)"
+            : "SELECT COALESCE(SUM(goods_cost - commission), 0) FROM settlements";
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        if (codStates is { Count: > 0 })
+        {
+            cmd.Parameters.AddWithValue("CodStates", codStates.ToArray());
+        }
+
+        return Convert.ToDecimal(await cmd.ExecuteScalarAsync(ct));
+    }
+
     public async Task<bool> ReplacePendingAsync(string deliveryId, Settlement settled, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);

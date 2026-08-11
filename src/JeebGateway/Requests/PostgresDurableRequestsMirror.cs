@@ -378,6 +378,70 @@ public sealed class PostgresDurableRequestsMirror : IDurableRequestsMirror
     }
 
     /// <summary>
+    /// CMS dashboard read (D2): status histogram over every mirrored row + the newest
+    /// <paramref name="recentLimit"/> rows. Two read-only aggregate queries over
+    /// <c>delivery_requests</c> — no new table, no write path.
+    ///
+    /// <para>Scope is honest: only rows carrying <c>gw_mirror = TRUE</c> exist here, so a
+    /// request whose id/client id was not a UUID (never mirrorable) is not counted.</para>
+    /// </summary>
+    public async Task<RequestsAdminSnapshot?> GetAdminDashboardSnapshotAsync(int recentLimit, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        const string countSql = """
+            SELECT COALESCE(gw_status, status::text) AS gw, COUNT(*) AS n
+            FROM delivery_requests
+            WHERE gw_mirror = TRUE
+            GROUP BY 1
+            """;
+        await using (var countCmd = new NpgsqlCommand(countSql, conn))
+        await using (var reader = await countCmd.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                counts[reader.GetString(0)] = Convert.ToInt32(reader.GetInt64(1));
+            }
+        }
+
+        var recent = new List<RequestsAdminRecentRow>();
+        if (recentLimit > 0)
+        {
+            const string recentSql = """
+                SELECT
+                    id,
+                    COALESCE(gw_status, status::text) AS gw,
+                    description,
+                    client_id,
+                    gw_jeeber_id,
+                    GREATEST(created_at, gw_updated_at) AS updated_at
+                FROM delivery_requests
+                WHERE gw_mirror = TRUE
+                ORDER BY created_at DESC
+                LIMIT @Limit
+                """;
+            await using var recentCmd = new NpgsqlCommand(recentSql, conn);
+            recentCmd.Parameters.AddWithValue("Limit", recentLimit);
+            await using var reader = await recentCmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                recent.Add(new RequestsAdminRecentRow
+                {
+                    Id = reader.GetGuid(0).ToString(),
+                    Status = reader.GetString(1),
+                    Title = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                    ClientId = reader.IsDBNull(3) ? null : reader.GetGuid(3).ToString(),
+                    JeeberId = reader.IsDBNull(4) ? null : reader.GetString(4),
+                    UpdatedAt = reader.GetFieldValue<DateTimeOffset>(5),
+                });
+            }
+        }
+
+        return new RequestsAdminSnapshot { CountsByStatus = counts, Recent = recent };
+    }
+
+    /// <summary>
     /// JEBV4-248: durable by-id read. Same column projection + <see cref="MapRow"/>
     /// as the owner-list queries, filtered to the single mirror row. The native id
     /// is a UUID column, so a non-UUID id has no mirror row (returns null). Used as

@@ -121,6 +121,18 @@ public interface ISettlementStore
     Task<IReadOnlyList<Settlement>> ListPageForAdminAsync(
         AdminSettlementPortalFilter filter, int limit, CancellationToken ct)
         => Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
+
+    /// <summary>
+    /// CMS dashboard read (D2): platform-wide sum of jeeber NET earnings
+    /// (<c>goods_cost - commission</c> per row, the identical per-settlement arithmetic
+    /// <see cref="EarningsAggregationService.GetProjectionWithStatesAsync"/> does),
+    /// restricted to <paramref name="codStates"/> — callers pass
+    /// <see cref="CodSettlementState.EarningsStates"/> so this and the per-jeeber
+    /// earnings read can never disagree on which rows are earnings.
+    /// Default returns 0 so unrelated test doubles keep compiling.
+    /// </summary>
+    Task<decimal> SumEarningsAsync(IReadOnlyCollection<string>? codStates, CancellationToken ct)
+        => Task.FromResult(0m);
 }
 
 /// <summary>
