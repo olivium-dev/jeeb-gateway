@@ -34,13 +34,8 @@ namespace JeebGateway.Controllers;
 /// </para>
 ///
 /// <para>
-/// Coverage note: the generic <see cref="ServiceWalletClient"/> exposes a
-/// holder-wallets read (the balance source) but NO Jeeb-shaped ledger LIST or
-/// single-ledger-entry read. Until that generic read exists, the ledger routes
-/// return the correctly-shaped EMPTY page / 404 the mobile parsers already
-/// tolerate, rather than fabricating ledger state in the gateway (which ADR-0001
-/// forbids). Re-point these to the generic ledger read the moment wallet-service
-/// ships it — the mobile-facing contract here does not change.
+/// Ledger reads go through <see cref="IJeebWalletLedgerReader"/>; the controller owns only the
+/// mobile response shape, and wallet-service stays the product-neutral ledger owner.
 /// </para>
 /// </summary>
 [ApiController]
@@ -100,6 +95,7 @@ public sealed class JeebWalletController : ControllerBase
     [ProducesResponseType(typeof(JeebWalletLedgerPageResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> GetLedger(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
@@ -110,16 +106,16 @@ public sealed class JeebWalletController : ControllerBase
         var safePage = page < 1 ? 1 : page;
         var safeSize = pageSize is < 1 or > 200 ? 20 : pageSize;
 
-        // REALAPP fix — the wallet-service has no Jeeb-shaped ledger LIST endpoint, so
-        // read the holder's OWN transactions directly from the wallet DB
-        // (transactionheader + transactiondetails, joined via wallets.holderid) and
-        // project them into the mobile-facing ledger page. Read-only, request-scoped,
-        // no money moves (ADR-0001 spirit). A no-data holder / DB blip degrades to the
-        // empty, correctly-shaped page the mobile ledger parser tolerates (see
-        // PostgresJeebWalletLedgerReader) — never a 5xx.
-        // Consumer jeeb wallet ledger: no filters (type/from/to = null) — the PP-8 filter
-        // params are partner-portal-only; passing null keeps this read unchanged.
-        var items = await _ledger.ReadLedgerAsync(holderId, safePage, safeSize, type: null, from: null, to: null, ct);
+        IReadOnlyList<JeebWalletLedgerEntry> items;
+        try
+        {
+            items = await _ledger.ReadLedgerAsync(
+                holderId, safePage, safeSize, type: null, from: null, to: null, ct);
+        }
+        catch (WalletLedgerUnavailableException ex)
+        {
+            return LedgerUnavailable(ex);
+        }
 
         // The page-count is best-effort over the returned page: the mobile parser only
         // needs items + a >=1 totalPages; a full COUNT(*) round-trip is unnecessary
@@ -142,15 +138,20 @@ public sealed class JeebWalletController : ControllerBase
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public Task<IActionResult> GetLedgerEntry(string id, CancellationToken ct)
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
+    public async Task<IActionResult> GetLedgerEntry(string id, CancellationToken ct)
     {
-        if (!TryResolveHolderId(out _, out var failure)) return Task.FromResult(failure);
+        if (!TryResolveHolderId(out var holderId, out var failure)) return failure;
 
-        // No generic single-ledger-entry read exists; 404 is the honest, mobile-mapped
-        // response (DioWalletTransactionRepository maps 404 → notFound) until the
-        // generic read lands. See class remarks.
-        IActionResult notFound = NotFound();
-        return Task.FromResult(notFound);
+        try
+        {
+            var entry = await _ledger.ReadEntryAsync(holderId, id, ct);
+            return entry is null ? NotFound() : Ok(entry);
+        }
+        catch (WalletLedgerUnavailableException ex)
+        {
+            return LedgerUnavailable(ex);
+        }
     }
 
     /// <summary>
@@ -205,5 +206,15 @@ public sealed class JeebWalletController : ControllerBase
         return Problem(
             title: "The wallet request could not be completed.",
             statusCode: status);
+    }
+
+    private IActionResult LedgerUnavailable(WalletLedgerUnavailableException ex)
+    {
+        _log.LogWarning(ex,
+            "Wallet BFF: authoritative ledger read failed on {Method} {Path}.",
+            Request.Method, Request.Path);
+        return Problem(
+            title: "The wallet ledger is temporarily unavailable.",
+            statusCode: StatusCodes.Status502BadGateway);
     }
 }
