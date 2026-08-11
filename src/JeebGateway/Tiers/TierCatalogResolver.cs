@@ -35,23 +35,63 @@ public interface ITierCatalogResolver
 }
 
 /// <summary>
+/// How long a catalog read is reused, and how far past that a LAST-GOOD catalog may still be
+/// served while the authoritative source is unreachable.
+/// </summary>
+public sealed class TierCatalogCacheOptions
+{
+    public const string SectionName = "TierCatalogCache";
+
+    /// <summary>
+    /// Reuse window for a good read. 30 s is the deliberate trade: an admin radius/TTL edit
+    /// takes at most this long to reach the D2 evaluators, and in exchange the feed, the
+    /// fan-out and the offer route stop making one upstream catalog call EACH, per request.
+    /// </summary>
+    public TimeSpan Ttl { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How far beyond <see cref="Ttl"/> the last good catalog is still served when the
+    /// authoritative source cannot be read. Bounded on purpose: past it the catalog is treated
+    /// as unknown again and the D2 cut resumes failing CLOSED rather than routing on a radius
+    /// nobody can vouch for.
+    /// </summary>
+    public TimeSpan StaleGrace { get; set; } = TimeSpan.FromMinutes(5);
+}
+
+/// <summary>
 /// An immutable read of the effective tier catalog plus the id/name/legacy-alias matching
 /// rules. <see cref="Source"/> names which catalog answered, for the exclusion logs.
 /// </summary>
 public sealed class TierCatalogSnapshot
 {
     public static readonly TierCatalogSnapshot Empty =
-        new(Array.Empty<DeliveryTier>(), "none");
+        new(Array.Empty<DeliveryTier>(), "none", authoritative: false);
 
-    public TierCatalogSnapshot(IReadOnlyList<DeliveryTier> rows, string source)
+    public TierCatalogSnapshot(
+        IReadOnlyList<DeliveryTier> rows, string source, bool authoritative = true)
     {
         Rows = rows ?? Array.Empty<DeliveryTier>();
         Source = source;
+        IsAuthoritative = authoritative;
     }
 
     public IReadOnlyList<DeliveryTier> Rows { get; }
 
     public string Source { get; }
+
+    /// <summary>
+    /// False when the source that OWNS the catalog did not answer — including the degrade to the
+    /// gateway-local slug catalog while delivery-service is the authority, which cannot resolve
+    /// an upstream UUID at all and so is not a substitute for it.
+    /// </summary>
+    public bool IsAuthoritative { get; }
+
+    /// <summary>
+    /// True when the authoritative catalog answered with rows. Distinguishes "this tier id is
+    /// garbage" (fail closed on ONE request) from "the catalog itself is unreadable" (fail
+    /// closed on EVERYTHING) — two causes that used to log the identical <c>UnknownTier</c>.
+    /// </summary>
+    public bool IsAvailable => IsAuthoritative && Rows.Count > 0;
 
     /// <summary>
     /// Match order: exact id, then exact name, then the
@@ -102,6 +142,15 @@ public sealed class TierCatalogSnapshot
 /// Standard 25 km). Upstream off — or an upstream read that faults — ⇒ the gateway-local
 /// catalog, which is the pre-existing behaviour. A tier that matches neither still resolves to
 /// null, so genuine garbage remains fail-closed.
+///
+/// <para>The read is CACHED for <see cref="TierCatalogCacheOptions.Ttl"/> behind a single-flight
+/// gate. Uncached, the three D2 evaluators made one upstream catalog call EACH per request, and
+/// any delivery-service blip therefore silently emptied a live feed. A last-good catalog is
+/// served for a bounded <see cref="TierCatalogCacheOptions.StaleGrace"/> past the TTL when the
+/// authoritative source cannot be read; past that the catalog reads unavailable and the D2 cut
+/// fails CLOSED again. Only an AUTHORITATIVE read refreshes the cache — a degraded read (the
+/// local slug catalog while upstream is the authority) is never cached, because it cannot
+/// resolve the UUIDs the app submits and would pin the D2-b failure in place.</para>
 /// </summary>
 public sealed class TierCatalogResolver : ITierCatalogResolver
 {
@@ -109,17 +158,26 @@ public sealed class TierCatalogResolver : ITierCatalogResolver
     private readonly IDeliveryServiceClient? _upstream;
     private readonly IOptionsMonitor<UpstreamFeatureFlags>? _flags;
     private readonly ILogger<TierCatalogResolver>? _logger;
+    private readonly TierCatalogCacheOptions _cache;
+    private readonly TimeProvider _clock;
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
+
+    private volatile CachedCatalog? _cached;
 
     public TierCatalogResolver(
         ITiersStore catalog,
         IDeliveryServiceClient? upstream,
         IOptionsMonitor<UpstreamFeatureFlags>? flags,
-        ILogger<TierCatalogResolver>? logger = null)
+        ILogger<TierCatalogResolver>? logger = null,
+        TierCatalogCacheOptions? cache = null,
+        TimeProvider? clock = null)
     {
         _catalog = catalog;
         _upstream = upstream;
         _flags = flags;
         _logger = logger;
+        _cache = cache ?? new TierCatalogCacheOptions();
+        _clock = clock ?? TimeProvider.System;
     }
 
     /// <summary>Local-catalog-only resolver, for tests and flag-less call sites.</summary>
@@ -130,16 +188,86 @@ public sealed class TierCatalogResolver : ITierCatalogResolver
 
     public async Task<TierCatalogSnapshot> SnapshotAsync(CancellationToken ct)
     {
-        if (_upstream is not null && _flags?.CurrentValue.Delivery == true)
+        var cached = _cached;
+        if (cached is not null && _clock.GetUtcNow() < cached.ServeUntil)
+        {
+            return cached.Snapshot;
+        }
+
+        await _refreshGate.WaitAsync(ct);
+        try
+        {
+            var now = _clock.GetUtcNow();
+            cached = _cached;
+            if (cached is not null && now < cached.ServeUntil)
+            {
+                return cached.Snapshot;
+            }
+
+            var snapshot = await ReadEffectiveAsync(ct);
+            if (snapshot.IsAvailable)
+            {
+                _cached = new CachedCatalog(snapshot, now, now + _cache.Ttl);
+                return snapshot;
+            }
+
+            var graceEnd = cached is null
+                ? now
+                : cached.ReadAt + _cache.Ttl + _cache.StaleGrace;
+
+            if (cached is not null && cached.Snapshot.IsAvailable && now <= graceEnd)
+            {
+                // ReadAt is NOT refreshed, so the grace keeps shrinking and a sustained outage
+                // still reaches fail-closed. ServeUntil is, but CLAMPED to the grace end.
+                var serveUntil = now + _cache.Ttl;
+                _cached = cached with
+                {
+                    ServeUntil = serveUntil < graceEnd ? serveUntil : graceEnd,
+                };
+                _logger?.LogWarning(
+                    "event={Event} source={Source} rows={Rows} ageSeconds={AgeSeconds} "
+                    + "graceSecondsLeft={GraceSecondsLeft}",
+                    "tier-catalog.stale-serve", cached.Snapshot.Source, cached.Snapshot.Rows.Count,
+                    (int)(now - cached.ReadAt).TotalSeconds,
+                    (int)(graceEnd - now).TotalSeconds);
+                return cached.Snapshot;
+            }
+
+            // The grace is spent: drop the entry so the fast path cannot resurrect it.
+            _cached = null;
+            return snapshot;
+        }
+        finally
+        {
+            _refreshGate.Release();
+        }
+    }
+
+    private sealed record CachedCatalog(
+        TierCatalogSnapshot Snapshot, DateTimeOffset ReadAt, DateTimeOffset ServeUntil);
+
+    /// <summary>
+    /// One read of the effective catalog. The flag decides which source is AUTHORITATIVE;
+    /// anything else that answers is a degrade, reported as such so the caller can prefer a
+    /// recent authoritative snapshot over it.
+    /// </summary>
+    private async Task<TierCatalogSnapshot> ReadEffectiveAsync(CancellationToken ct)
+    {
+        var upstreamIsAuthority = _upstream is not null && _flags?.CurrentValue.Delivery == true;
+
+        if (upstreamIsAuthority)
         {
             try
             {
-                var upstreamRows = await _upstream.ListTiersAsync(ct);
+                var upstreamRows = await _upstream!.ListTiersAsync(ct);
                 if (upstreamRows is { Count: > 0 })
                 {
                     return new TierCatalogSnapshot(
                         upstreamRows.Select(FromDto).ToArray(), "delivery-upstream");
                 }
+
+                _logger?.LogWarning(
+                    "tier catalog upstream returned no rows; falling back to the gateway-local catalog.");
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -156,7 +284,12 @@ public sealed class TierCatalogResolver : ITierCatalogResolver
 
         try
         {
-            return new TierCatalogSnapshot(await _catalog.ListAsync(ct), "gateway-local");
+            // While upstream is the authority this is a DEGRADE, not an answer: it carries slug
+            // ids and cannot resolve the UUIDs the app submits.
+            return new TierCatalogSnapshot(
+                await _catalog.ListAsync(ct),
+                upstreamIsAuthority ? "gateway-local-degraded" : "gateway-local",
+                authoritative: !upstreamIsAuthority);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

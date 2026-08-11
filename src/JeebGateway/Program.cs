@@ -1651,7 +1651,18 @@ builder.Services.AddSingleton<JeebGateway.Requests.ITiersStore, JeebGateway.Requ
 
 // D2-b: the POLICY read of the tier catalog (radius, display name) resolves against the SAME
 // source GET /v1/tiers serves, so an upstream UUID tier id is no longer an unknown tier.
-builder.Services.AddSingleton<JeebGateway.Tiers.ITierCatalogResolver, JeebGateway.Tiers.TierCatalogResolver>();
+// Short-TTL cached (TierCatalogCache:Ttl / :StaleGrace): uncached, each D2 evaluator dialled
+// upstream per request and one delivery-service blip silently emptied every feed.
+builder.Services.Configure<JeebGateway.Tiers.TierCatalogCacheOptions>(
+    builder.Configuration.GetSection(JeebGateway.Tiers.TierCatalogCacheOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Tiers.ITierCatalogResolver>(sp =>
+    new JeebGateway.Tiers.TierCatalogResolver(
+        sp.GetRequiredService<JeebGateway.Tiers.ITiersStore>(),
+        sp.GetService<JeebGateway.Services.Clients.IDeliveryServiceClient>(),
+        sp.GetService<Microsoft.Extensions.Options.IOptionsMonitor<UpstreamFeatureFlags>>(),
+        sp.GetService<ILogger<JeebGateway.Tiers.TierCatalogResolver>>(),
+        sp.GetService<Microsoft.Extensions.Options.IOptions<JeebGateway.Tiers.TierCatalogCacheOptions>>()?.Value,
+        sp.GetService<TimeProvider>()));
 
 // JEB-1507: CancellationPolicy thresholds (WeeklyThreshold, StrikeThreshold,
 // RestrictionDurationHours) are configurable via appsettings so they can be

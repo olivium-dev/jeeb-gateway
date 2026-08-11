@@ -11,11 +11,20 @@ public enum TierRadiusDecision
     NoPickupCoords,
     UnknownTier,
     OutOfRadius,
+
+    /// <summary>
+    /// The catalog itself could not be read, so NO tier resolves. Appended (never reordered):
+    /// it used to be indistinguishable from <see cref="UnknownTier"/>, which meant a
+    /// delivery-service outage and one bad tier id produced the same log line — the first
+    /// blanks every feed, the second excludes one row.
+    /// </summary>
+    TierCatalogUnavailable,
 }
 
 public readonly record struct TierRadiusEvaluation(
     TierRadiusDecision Decision,
-    double? DistanceMeters)
+    double? DistanceMeters,
+    double? RadiusKm = null)
 {
     public bool IsIncluded => Decision == TierRadiusDecision.Included;
 }
@@ -23,6 +32,12 @@ public readonly record struct TierRadiusEvaluation(
 /// <summary>
 /// Bug D2 — the fail-CLOSED jeeber/pickup distance cut, modelled on delivery-service
 /// internal/matching/feed.go. Unknown distance excludes; there is no keep-on-empty fallback.
+///
+/// <para>Rung ORDER is diagnostic, not just control flow: the distance is computed as soon as
+/// both fixes exist and is reported with EVERY later decision, so an unresolved tier no longer
+/// masks how far the request actually was. Before this, an unknown tier short-circuited with
+/// <c>distanceMeters=null</c>, so fixing the catalog was the only way to discover the row was
+/// also 9,000 km out of range.</para>
 /// </summary>
 public static class TierRadiusPolicy
 {
@@ -32,31 +47,43 @@ public static class TierRadiusPolicy
         double? jeeberLat,
         double? jeeberLng,
         GeoPoint? pickup,
-        DeliveryTier? tier)
+        DeliveryTier? tier,
+        bool tierCatalogAvailable = true)
     {
+        var radiusKm = tier is { RadiusKm: > 0 } && !double.IsNaN(tier.RadiusKm)
+            ? tier.RadiusKm
+            : (double?)null;
+
         if (jeeberLat is not { } jLat || jeeberLng is not { } jLng
             || double.IsNaN(jLat) || double.IsNaN(jLng)
             || jLat is < -90 or > 90 || jLng is < -180 or > 180)
         {
-            return new(TierRadiusDecision.NoJeeberFix, null);
+            return new(TierRadiusDecision.NoJeeberFix, null, radiusKm);
         }
 
         if (pickup is null || !pickup.IsValid())
         {
-            return new(TierRadiusDecision.NoPickupCoords, null);
+            return new(TierRadiusDecision.NoPickupCoords, null, radiusKm);
         }
 
-        if (tier is null || tier.RadiusKm <= 0 || double.IsNaN(tier.RadiusKm))
-        {
-            return new(TierRadiusDecision.UnknownTier, null);
-        }
-
+        // Both fixes are real, so the distance is knowable REGARDLESS of the tier — compute it
+        // before the tier rung so every remaining decision carries it.
         var km = HaversineKm(jLat, jLng, pickup.Lat, pickup.Lng);
         var metres = Math.Round(km * 1000.0, MidpointRounding.AwayFromZero);
 
-        return km <= tier.RadiusKm
-            ? new(TierRadiusDecision.Included, metres)
-            : new(TierRadiusDecision.OutOfRadius, metres);
+        if (radiusKm is not { } tierRadiusKm)
+        {
+            return new(
+                tierCatalogAvailable
+                    ? TierRadiusDecision.UnknownTier
+                    : TierRadiusDecision.TierCatalogUnavailable,
+                metres,
+                null);
+        }
+
+        return km <= tierRadiusKm
+            ? new(TierRadiusDecision.Included, metres, tierRadiusKm)
+            : new(TierRadiusDecision.OutOfRadius, metres, tierRadiusKm);
     }
 
     public static double HaversineKm(double lat1, double lng1, double lat2, double lng2)
