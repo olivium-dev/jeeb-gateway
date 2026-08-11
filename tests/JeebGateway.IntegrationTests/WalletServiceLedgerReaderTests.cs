@@ -144,7 +144,7 @@ public sealed class WalletServiceLedgerReaderTests
             Task.FromResult(send(request));
     }
 
-    private sealed class ThrowingShadow : IJeebWalletLedgerShadowReader
+    private sealed class ThrowingShadow : IJeebWalletLedgerReader
     {
         public Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
             Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to,

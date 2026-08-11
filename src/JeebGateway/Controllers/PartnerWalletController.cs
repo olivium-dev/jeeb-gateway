@@ -69,7 +69,6 @@ public sealed class PartnerWalletController : PartnerControllerBase
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> GetBalance(CancellationToken ct)
     {
         if (!TryResolveCallerId(out var partnerId, out var failure)) return failure;
