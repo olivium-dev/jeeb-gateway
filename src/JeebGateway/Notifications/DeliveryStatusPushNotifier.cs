@@ -55,6 +55,25 @@ namespace JeebGateway.Notifications;
 /// the dispatcher reports <c>SkippedDirectDispatchArmed</c> — never both, or the gateway is
 /// two producers again and the duplicate-push defect D1 killed comes back.</para>
 ///
+/// <para><b>ENTITY ID — the transition, never the delivery.</b>
+/// <see cref="NotificationCorrelationId.Create"/> is a deterministic hash of
+/// <c>(eventType, receiver, entityId)</c> and notification-service upserts <c>$setOnInsert</c>
+/// on <c>notification_id</c>, so an entity id of <c>DeliveryId</c> alone would collapse an
+/// entire journey — Picked, InTransit, AtDoor, Done — into ONE push. That is the same
+/// dedup trap chat hit at thread level, and it is invisible in every gateway-side
+/// instrument, so it is pinned by a test rather than left to review.</para>
+///
+/// <para><b>⚠️ <c>status</c> DOES NOT SURVIVE THE HAND-OVER — do not read it client-side.</b>
+/// notification-service treats <c>status</c> as a RESERVED envelope field: it strips the
+/// producer's value out of the routing spread and stamps its own delivery-state literal
+/// (<c>"not delivered"</c>) in its place. So on the hand-over path the push arrives carrying
+/// <c>status="not delivered"</c>, not <c>"AtDoor"</c>. This is harmless today and deliberately
+/// not worked around: the mobile handler routes on <c>type=delivery</c> and re-reads the real
+/// status from the API once the <c>delivery_id</c> alias trips its refresh signal — it never
+/// reads this key. <c>previous_status</c>/<c>previousStatus</c> are NOT reserved and do travel
+/// intact. If a client surface ever needs the new status in-band, add a non-colliding alias
+/// (e.g. <c>delivery_status</c>); do not "fix" it by trusting <c>status</c>.</para>
+///
 /// <para><b>DEGRADE-DON'T-FAIL.</b> Never throws. A status transition has already
 /// committed by the time this runs; a push-service blip must never surface to the
 /// caller or roll anything back. Every failure is logged and swallowed, and each
@@ -171,10 +190,7 @@ public sealed class DeliveryStatusPushNotifier : IDeliveryStatusPushNotifier
                 .Where(kv => kv.Key is not ("title" or "body"))
                 .ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? string.Empty, StringComparer.Ordinal);
 
-            // The entity id MUST encode the TRANSITION, not just the delivery. The correlation
-            // id is a deterministic hash of (eventType, receiver, entityId) and the centre
-            // upserts on it, so keying on DeliveryId alone collapses a whole journey
-            // (Picked/InTransit/AtDoor/Done) into ONE push — the thread-level trap chat hit.
+            // Keyed on the TRANSITION, not the delivery: see the ENTITY ID note on this class.
             var entityId = $"{n.DeliveryId}:{n.PreviousStatus}->{n.Status}";
 
             foreach (var recipient in recipients)
