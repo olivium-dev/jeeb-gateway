@@ -552,6 +552,29 @@ public class DeliveryRequestDto
     public string? JeeberName { get; set; }
 
     /// <summary>
+    /// Counterparty display identity for the two DELIVERY PARTICIPANTS (chat header +
+    /// mutual rating). Same additive/ignore-when-null contract as <see cref="JeeberName"/>:
+    /// unresolved ⇒ null ⇒ the key is omitted entirely, and a users-store fault degrades
+    /// the read rather than failing it. Avatar values are projected through
+    /// <see cref="Users.AvatarUrlResolver"/>, so they are loadable URLs, never bare object
+    /// refs. Exposure is bounded by the read itself — GET /deliveries/{id} 403s any caller
+    /// who is neither the client nor the assigned jeeber.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? JeeberAvatarUrl { get; set; }
+
+    /// <inheritdoc cref="JeeberAvatarUrl"/>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ClientName { get; set; }
+
+    /// <inheritdoc cref="JeeberAvatarUrl"/>
+    [System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ClientAvatarUrl { get; set; }
+
+    /// <summary>
     /// Gap G4 (run-24 CHECK C): the 4-digit delivery handover code the CUSTOMER
     /// reads IN-APP. Populated ONLY on the offer-accept response
     /// (<c>POST /v1/offers/{offerId}/accept</c>) and returned ONLY to the accepting
