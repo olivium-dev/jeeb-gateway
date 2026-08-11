@@ -71,6 +71,24 @@ public static class JeebRatingVocabulary
     }
 
     /// <summary>
+    /// Inverse of <see cref="CorrelationForDelivery"/>. The shared service hands back
+    /// opaque correlationIds (its export surface is product-agnostic), so the Jeeb
+    /// linkage is re-read here rather than downstream. False for any correlationId
+    /// that is not a Jeeb delivery — including another product's rows.
+    /// </summary>
+    public static bool TryDeliveryForCorrelation(string? correlationId, out string deliveryId)
+    {
+        deliveryId = string.Empty;
+        if (string.IsNullOrWhiteSpace(correlationId)) return false;
+
+        var trimmed = correlationId.Trim();
+        if (!trimmed.StartsWith(CorrelationPrefix, StringComparison.Ordinal)) return false;
+
+        deliveryId = trimmed[CorrelationPrefix.Length..];
+        return deliveryId.Length > 0;
+    }
+
+    /// <summary>
     /// Map a caller's Jeeb role to the partition-stamped, validated tag set that is
     /// sent as the generic primitive's opaque <c>tags[]</c>. Always includes the
     /// <see cref="PartitionValue"/> partition tag and the role tag; any caller tags
