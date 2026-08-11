@@ -613,7 +613,7 @@ ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient("Ser
         client.BaseAddress = new Uri(apiUrl);
     }
     client.Timeout = TimeSpan.FromSeconds(30);
-}));
+}).AddHttpMessageHandler<JeebGateway.Notifications.NotificationServiceTokenHandler>());
 builder.Services.AddScoped<JeebGateway.service.ServiceNotification.ServiceNotificationClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -668,6 +668,7 @@ if (notificationUpstreamEnabled && notificationSeederEnabled)
     // AddDownstreamClients): forward any caller bearer + sign X-Service-Auth.
     seederClient.AddHttpMessageHandler<JeebGateway.Services.Bff.BearerForwardingHandler>();
     seederClient.AddHttpMessageHandler<JeebGateway.Services.Bff.ServiceAuthSigningHandler>();
+    seederClient.AddHttpMessageHandler<JeebGateway.Notifications.NotificationServiceTokenHandler>();
 
     builder.Services.AddHostedService<JeebGateway.Notifications.JeebNotificationCatalogSeeder>();
 }
@@ -740,7 +741,8 @@ ServiceClientExtensions.AttachBreakerAndTimeoutOnly(
                 client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
             }
             client.Timeout = TimeSpan.FromSeconds(30);
-        }));
+        })
+        .AddHttpMessageHandler<JeebGateway.Notifications.NotificationServiceTokenHandler>());
 builder.Services.AddScoped<
     JeebGateway.Notifications.INotificationRecordWriter,
     JeebGateway.Notifications.NotificationRecordWriter>();

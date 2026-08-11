@@ -52,6 +52,7 @@ public static class ServiceClientExtensions
         services.AddHttpContextAccessor();
         services.AddTransient<BearerForwardingHandler>();
         services.AddTransient<ServiceAuthSigningHandler>();
+        services.AddTransient<JeebGateway.Notifications.NotificationServiceTokenHandler>();
 
         // S06 / ADR-HB-001 AUTH CONTRACT — the heart-beat-only static
         // X-Service-Auth-Key handler (attached to the heart-beat typed client
@@ -560,7 +561,8 @@ public static class ServiceClientExtensions
         // notification-service (Mongo read) — GET /notifications. Reuse the same
         // upstream base the salehly-mirrored ServiceNotificationClient targets
         // (host port 10026) so the probe and the passthrough agree on the host.
-        AddNamedDownstreamClient(services, config, "db-probe-notification", "ServiceNotificationClient:BaseUrl");
+        AddNamedDownstreamClient(services, config, "db-probe-notification", "ServiceNotificationClient:BaseUrl")
+            .AddHttpMessageHandler<JeebGateway.Notifications.NotificationServiceTokenHandler>();
 
         // geolocation-service (PG read) — GET /locations/user/{user_id}.
         AddNamedDownstreamClient(services, config, "db-probe-geolocation", "Services:Geolocation:BaseUrl");
