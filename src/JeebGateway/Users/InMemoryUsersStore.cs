@@ -358,6 +358,18 @@ public class InMemoryUsersStore : IUsersStore
         });
     }
 
+    public Task<UserRoleCounts> CountByRolesAsync(IReadOnlyCollection<string> opaqueRoles, CancellationToken ct)
+    {
+        var rows = _users.Values.ToList();
+        var byRole = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var role in opaqueRoles)
+        {
+            byRole[role] = rows.Count(u => u.Roles.Any(r => string.Equals(r, role, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        return Task.FromResult(new UserRoleCounts { Total = rows.Count, ByRole = byRole });
+    }
+
     private void ClearOtherDefaults(string userId, string keepId)
     {
         foreach (var a in _addresses.Values.Where(a => a.UserId == userId && a.Id != keepId && a.IsDefault))

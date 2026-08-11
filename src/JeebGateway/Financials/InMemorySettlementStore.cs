@@ -64,6 +64,14 @@ public sealed class InMemorySettlementStore : ISettlementStore
         return Task.FromResult<IReadOnlyList<Settlement>>(rows);
     }
 
+    public Task<decimal> SumEarningsAsync(IReadOnlyCollection<string>? codStates, CancellationToken ct)
+    {
+        var sum = _byId.Values
+            .Where(s => codStates is null || codStates.Count == 0 || codStates.Contains(s.CodState))
+            .Sum(s => s.GoodsCost - s.Commission);
+        return Task.FromResult(sum);
+    }
+
     public Task<bool> SetLedgerEntryAsync(string settlementId, string ledgerEntryId, CancellationToken ct)
     {
         lock (_writeLock)

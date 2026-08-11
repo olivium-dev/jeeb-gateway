@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using JeebGateway.Infrastructure;
 using Microsoft.Extensions.Logging;
@@ -60,6 +62,13 @@ public interface IUserProjectionStore
 
     /// <summary>Durable GDPR PII purge — name → '', email → NULL, avatar_url → NULL.</summary>
     Task PurgePiiAsync(string userId, CancellationToken ct);
+
+    /// <summary>
+    /// CMS dashboard read (D2): total rows + a count per OPAQUE role. Default returns
+    /// <see cref="UserRoleCounts.Empty"/> so unrelated test doubles keep compiling.
+    /// </summary>
+    Task<UserRoleCounts> CountByRolesAsync(IReadOnlyCollection<string> opaqueRoles, CancellationToken ct)
+        => Task.FromResult(UserRoleCounts.Empty);
 }
 
 /// <inheritdoc cref="IUserProjectionStore"/>
@@ -125,6 +134,43 @@ public sealed class PostgresUserProjectionStore : IUserProjectionStore
 
         var items = await ReadListAsync(pageCmd, ct);
         return new UserSearchResult { Items = items, Total = total };
+    }
+
+    /// <summary>
+    /// One aggregate pass over <c>users</c>: total rows + a FILTER count per opaque role.
+    /// <c>roles</c> is a jsonb string array (see <see cref="DeserializeRoles"/>), so
+    /// membership is <c>roles @&gt; '["driver"]'</c> — the containment form the jsonb index
+    /// can serve. Role names come from <see cref="Roles"/>/<see cref="JeebRoleTranslator"/>,
+    /// never from user input; only the bound VALUES are parameterised.
+    /// </summary>
+    public async Task<UserRoleCounts> CountByRolesAsync(IReadOnlyCollection<string> opaqueRoles, CancellationToken ct)
+    {
+        var roles = opaqueRoles.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        var sql = new StringBuilder("SELECT COUNT(*) AS total");
+        for (var i = 0; i < roles.Count; i++)
+        {
+            sql.Append(CultureInfo.InvariantCulture, $", COUNT(*) FILTER (WHERE roles @> @R{i}::jsonb) AS r{i}");
+        }
+        sql.Append(" FROM users");
+
+        await using var conn = await _db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
+        for (var i = 0; i < roles.Count; i++)
+        {
+            cmd.Parameters.AddWithValue($"R{i}", JsonSerializer.Serialize(new[] { roles[i] }));
+        }
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return UserRoleCounts.Empty;
+
+        var byRole = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < roles.Count; i++)
+        {
+            byRole[roles[i]] = Convert.ToInt32(reader.GetInt64(i + 1));
+        }
+
+        return new UserRoleCounts { Total = Convert.ToInt32(reader.GetInt64(0)), ByRole = byRole };
     }
 
     public async Task UpsertIdentityAsync(UserProfile profile, CancellationToken ct)

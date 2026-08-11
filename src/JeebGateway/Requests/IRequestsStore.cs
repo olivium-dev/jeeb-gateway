@@ -387,6 +387,52 @@ public interface IRequestsStore
         string requestId,
         string escalationId,
         CancellationToken ct);
+
+    /// <summary>
+    /// CMS dashboard read (D2): a status histogram over every request row this store can
+    /// see, plus the newest <paramref name="recentLimit"/> rows for the activity feed.
+    /// Read-only and unfiltered by owner — the only caller is the admin dashboard.
+    ///
+    /// <para>Default returns <see cref="RequestsAdminSnapshot.Empty"/> so unrelated test
+    /// doubles keep compiling; every store registered in Program.cs overrides it.</para>
+    /// </summary>
+    Task<RequestsAdminSnapshot> GetAdminDashboardSnapshotAsync(int recentLimit, CancellationToken ct)
+        => Task.FromResult(RequestsAdminSnapshot.Empty);
+}
+
+/// <summary>
+/// One recent-activity row for the CMS dashboard. Deliberately NOT a
+/// <see cref="DeliveryRequest"/>: the feed needs only five fields plus an
+/// <see cref="UpdatedAt"/> that <see cref="DeliveryRequest"/> does not carry.
+/// </summary>
+public sealed class RequestsAdminRecentRow
+{
+    public required string Id { get; init; }
+
+    /// <summary>Raw gateway status token; the caller folds it onto the CMS enum.</summary>
+    public required string Status { get; init; }
+
+    public required string Title { get; init; }
+    public string? ClientId { get; init; }
+    public string? JeeberId { get; init; }
+    public required DateTimeOffset UpdatedAt { get; init; }
+}
+
+/// <summary>Status histogram + newest rows behind the CMS dashboard KPIs.</summary>
+public sealed class RequestsAdminSnapshot
+{
+    public static readonly RequestsAdminSnapshot Empty = new()
+    {
+        CountsByStatus = new Dictionary<string, int>(StringComparer.Ordinal),
+        Recent = Array.Empty<RequestsAdminRecentRow>(),
+    };
+
+    /// <summary>Row count per RAW gateway status token (not folded onto the CMS enum).</summary>
+    public required IReadOnlyDictionary<string, int> CountsByStatus { get; init; }
+
+    public required IReadOnlyList<RequestsAdminRecentRow> Recent { get; init; }
+
+    public int Total => CountsByStatus.Values.Sum();
 }
 
 /// <summary>

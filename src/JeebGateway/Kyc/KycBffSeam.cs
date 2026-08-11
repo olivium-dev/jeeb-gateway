@@ -139,6 +139,29 @@ public sealed class KycBffSeam : IKycBffSeam
         };
     }
 
+    public async Task<KycBffSubmissionView?> GetByIdAsync(string submissionId, CancellationToken ct)
+    {
+        // Same fail-closed rule as every other read: the gateway holds no KYC state, so
+        // with the flag OFF there is nothing to answer from (503, never a fabricated row).
+        EnsureUpstream();
+
+        var view = await _upstream.GetByIdAsync(submissionId, ct);
+        if (view is null) return null;
+
+        return new KycBffSubmissionView
+        {
+            SubmissionId = view.SubmissionId,
+            UserId = view.UserId,
+            Status = view.Status,
+            SubmittedAt = view.SubmittedAt,
+            ReviewedAt = view.ReviewedAt,
+            RejectionReason = view.RejectionReason,
+            TosSignedAt = view.TosSignedAt,
+            TosAcceptedVersion = view.TosAcceptedVersion,
+            ResubmitSteps = view.ResubmitSteps,
+        };
+    }
+
     public async Task<KycBffQueuePage> GetPendingQueueAsync(int page, int pageSize, CancellationToken ct)
     {
         EnsureUpstream();

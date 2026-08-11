@@ -2063,6 +2063,11 @@ builder.Services.AddSingleton<JeebGateway.Financials.Cod.ICodSettlementLedger>(s
 // closed (503) when the flag is off.
 builder.Services.AddSingleton<IKycBffSeam, KycBffSeam>();
 
+// The KYC admin queue-search + review composition, shared by the native /admin/kyc routes and
+// the CMS-compat /user-management/admin/kyc facade so the role-grant/audit path cannot fork.
+builder.Services.AddScoped<JeebGateway.Admin.KycQueueSearch>();
+builder.Services.AddScoped<JeebGateway.Admin.KycAdminReviewComposer>();
+
 // Users / profile / saved addresses / admin search (T-backend-029).
 // In-memory store for the MVP; production wiring will proxy to auth-service
 // via an NSwag-generated client, backed by the schema in 0001 + 0006.

@@ -93,6 +93,31 @@ public interface IUsersStore
     /// resolve their foreign key. Returns false when no such user exists.
     /// </summary>
     Task<bool> PurgePiiAsync(string userId, CancellationToken ct);
+
+    /// <summary>
+    /// CMS dashboard read (D2): total user rows plus a per-role count for each OPAQUE role
+    /// in <paramref name="opaqueRoles"/> (translate contract → opaque with
+    /// <see cref="JeebRoleTranslator.ToOpaque"/> before calling). Default returns
+    /// <see cref="UserRoleCounts.Empty"/> so unrelated test doubles keep compiling.
+    /// </summary>
+    Task<UserRoleCounts> CountByRolesAsync(IReadOnlyCollection<string> opaqueRoles, CancellationToken ct)
+        => Task.FromResult(UserRoleCounts.Empty);
+}
+
+/// <summary>Total user rows + how many hold each requested opaque role.</summary>
+public sealed class UserRoleCounts
+{
+    public static readonly UserRoleCounts Empty = new()
+    {
+        Total = 0,
+        ByRole = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase),
+    };
+
+    public required int Total { get; init; }
+
+    public required IReadOnlyDictionary<string, int> ByRole { get; init; }
+
+    public int For(string opaqueRole) => ByRole.TryGetValue(opaqueRole, out var n) ? n : 0;
 }
 
 public class ProfilePatch

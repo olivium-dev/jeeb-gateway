@@ -71,6 +71,16 @@ public class KycQueueItem
     public required string VehicleType { get; init; }
     public required string VehicleRegistration { get; init; }
     public required bool LivenessPassed { get; init; }
+
+    /// <summary>
+    /// Additive: the applicant's display name / phone from the gateway's own user
+    /// projection (kyc-service rows carry a subject id only). Null when the projection
+    /// has no row or the field is blank — these are the fields <c>?q=</c> filters on.
+    /// </summary>
+    public string? UserName { get; init; }
+
+    /// <inheritdoc cref="UserName"/>
+    public string? Phone { get; init; }
 }
 
 /// <summary>

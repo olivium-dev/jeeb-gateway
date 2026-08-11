@@ -204,6 +204,8 @@ public sealed class AdminKycRoleGrantTranslationTests
             => throw new NotImplementedException();
         public Task<KycBffSubmissionView?> GetLatestForUserAsync(string userId, CancellationToken ct)
             => Task.FromResult<KycBffSubmissionView?>(null);
+        public Task<KycBffSubmissionView?> GetByIdAsync(string submissionId, CancellationToken ct)
+            => Task.FromResult<KycBffSubmissionView?>(null);
         public Task<KycBffQueuePage> GetPendingQueueAsync(int page, int pageSize, CancellationToken ct)
             => throw new NotImplementedException();
     }

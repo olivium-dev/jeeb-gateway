@@ -59,6 +59,12 @@ public interface IKycBffSeam
     Task<KycBffSubmissionView?> GetLatestForUserAsync(string userId, CancellationToken ct);
 
     /// <summary>
+    /// Read ONE submission by id for the admin detail surface. Returns <c>null</c> when
+    /// no such submission exists (the controller maps that to 404).
+    /// </summary>
+    Task<KycBffSubmissionView?> GetByIdAsync(string submissionId, CancellationToken ct);
+
+    /// <summary>
     /// Read the pending-review queue oldest-first (H7), paginated. Admin-gated at
     /// the gateway edge.
     /// </summary>

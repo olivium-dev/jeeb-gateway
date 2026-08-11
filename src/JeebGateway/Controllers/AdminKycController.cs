@@ -1,10 +1,8 @@
 using JeebGateway.Admin;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Kyc;
-using JeebGateway.Services;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
 
@@ -20,11 +18,12 @@ namespace JeebGateway.Controllers;
 /// (<see cref="KycBffReviewResult.GrantsRole"/> = the opaque jeeber role); the
 /// GATEWAY then composes the user-management append (jsonb <c>available_roles</c>,
 /// set-semantics) + token re-issue. kyc-service NEVER calls user-management
-/// (ARCH LAW). The approve commits regardless of the notification fan-out
-/// (off-path, N14) — an approve is never rolled back by a push failure.</para>
+/// (ARCH LAW). That composition lives in <see cref="KycAdminReviewComposer"/>, shared
+/// verbatim with the CMS-compat review route so the two can never fork.</para>
 ///
 /// <list type="bullet">
-///   <item>GET <c>/admin/kyc/queue</c> — pending submissions oldest-first (H7/N6).</item>
+///   <item>GET <c>/admin/kyc/queue</c> — pending submissions oldest-first (H7/N6),
+///     optionally filtered by <c>?q=</c> on the applicant's name/phone.</item>
 ///   <item>PATCH <c>/admin/kyc/{id}/review</c> — approve | reject | request_resubmit;
 ///     re-review of a finalised row → 409 (N8); RFC7807 throughout.</item>
 /// </list>
@@ -39,31 +38,14 @@ public class AdminKycController : ControllerBase
 {
     private const int DefaultPageSize = 20;
     private const int MaxPageSize = 100;
-    private const int MaxReasonLength = 500;
 
-    private const string EntityType = "kyc_submission";
-    private const string ActionApprove = "approve_kyc";
-    private const string ActionReject = "reject_kyc";
-    private const string ActionRequestResubmit = "request_resubmit_kyc";
+    private readonly KycQueueSearch _queue;
+    private readonly KycAdminReviewComposer _reviews;
 
-    private readonly IKycBffSeam _kyc;
-    private readonly IUserManagementDualRoleClient _userManagement;
-    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
-    private readonly IAdminAuditLog _auditLog;
-    private readonly ILogger<AdminKycController> _log;
-
-    public AdminKycController(
-        IKycBffSeam kyc,
-        IUserManagementDualRoleClient userManagement,
-        IOptionsMonitor<UpstreamFeatureFlags> flags,
-        IAdminAuditLog auditLog,
-        ILogger<AdminKycController> log)
+    public AdminKycController(KycQueueSearch queue, KycAdminReviewComposer reviews)
     {
-        _kyc = kyc;
-        _userManagement = userManagement;
-        _flags = flags;
-        _auditLog = auditLog;
-        _log = log;
+        _queue = queue;
+        _reviews = reviews;
     }
 
     [HttpGet("queue")]
@@ -75,6 +57,7 @@ public class AdminKycController : ControllerBase
     public async Task<IActionResult> Queue(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = DefaultPageSize,
+        [FromQuery] string? q = null,
         CancellationToken ct = default)
     {
         if (page < 1)
@@ -95,10 +78,10 @@ public class AdminKycController : ControllerBase
             });
         }
 
-        KycBffQueuePage queue;
+        KycQueueSearchPage queue;
         try
         {
-            queue = await _kyc.GetPendingQueueAsync(page, pageSize, ct);
+            queue = await _queue.SearchAsync(page, pageSize, q, ct);
         }
         catch (KycUpstreamDisabledException)
         {
@@ -135,185 +118,63 @@ public class AdminKycController : ControllerBase
             });
         }
 
-        if (!TryParseAction(body.Action, out var action, out var actionError))
-        {
-            return BadRequest(actionError);
-        }
-
-        var reason = body.Reason?.Trim();
-        if (reason is { Length: > MaxReasonLength })
+        if (!KycAdminReviewComposer.TryParseAction(body.Action, out var action, out var actionError))
         {
             return BadRequest(new ProblemDetails
             {
-                Title = $"reason must be {MaxReasonLength} characters or fewer.",
+                Title = actionError,
                 Status = StatusCodes.Status400BadRequest
             });
         }
 
-        KycBffReviewResult outcome;
-        try
-        {
-            outcome = await _kyc.ReviewAsync(id, new KycBffReviewInput
-            {
-                Action = action,
-                ReviewerId = adminId,
-                Reason = reason,
-                ResubmitSteps = body.ResubmitSteps
-            }, ct);
-        }
-        catch (KycUpstreamDisabledException)
-        {
-            return KycUpstreamDisabled();
-        }
-        catch (KycBffNotFoundException)
-        {
-            return NotFound();
-        }
-        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
-        {
-            // JEB-1522 (manual-approval flow): the live kyc-service answers 404 for an
-            // unknown submission id, which the typed client surfaces as an
-            // HttpRequestException(404) rather than KycBffNotFoundException. Without
-            // this mapping the global handler turns it into a misleading 502 — the
-            // admin reviewing a stale/unknown id must see the declared 404.
-            return NotFound();
-        }
-        catch (KycBffReviewConflictException ex)
-        {
-            // N8: re-review of a finalised submission.
-            return StatusCode(StatusCodes.Status409Conflict, new ProblemDetails
-            {
-                Title = ex.Message,
-                Status = StatusCodes.Status409Conflict
-            });
-        }
-        catch (KycBffReviewValidationException ex)
-        {
-            return BadRequest(new ProblemDetails
-            {
-                Title = ex.Message,
-                Status = StatusCodes.Status400BadRequest
-            });
-        }
+        var outcome = await _reviews.ReviewAsync(
+            id, action, adminId, body.Reason, body.ResubmitSteps, HttpContext.TraceIdentifier, ct);
 
-        // CP-C / H8: the ONLY identity-mutating transition. On an approve outcome
-        // the seam returns the role-grant INTENT; the GATEWAY composes the UM
-        // append (kyc-service never calls UM). The approve already committed in the
-        // KYC domain, so a UM blip must not roll it back — we surface roleGranted
-        // = false and log, rather than failing the review.
-        var roleGranted = false;
-        if (!string.IsNullOrWhiteSpace(outcome.GrantsRole))
+        if (outcome.Status != KycAdminReviewStatus.Ok)
         {
-            try
-            {
-                roleGranted = await ComposeRoleGrantAsync(outcome.SubmissionId, outcome.UserId, outcome.GrantsRole!, ct);
-            }
-            catch (InvalidContractRoleException ex)
-            {
-                // JEB-1472 / AC3: the relocated {client,jeeber} whitelist rejects an unknown Jeeb
-                // contract role at the gateway boundary (RFC 7807 invalid_role 400) — the gateway
-                // never persists a non-contract role to the shared, product-agnostic UM service.
-                return BadRequest(new ProblemDetails
-                {
-                    Type = "https://jeeb.dev/errors/invalid-role",
-                    Title = "invalid_role",
-                    Detail = ex.Message,
-                    Status = StatusCodes.Status400BadRequest
-                });
-            }
+            return MapFailure(outcome);
         }
-
-        await _auditLog.AppendAsync(new AdminAuditAppend
-        {
-            AdminUserId = adminId,
-            Action = AuditActionFor(action),
-            EntityType = EntityType,
-            EntityId = id,
-            BeforeState = new Dictionary<string, object?> { ["status"] = "pending_review" },
-            AfterState = Snapshot(outcome, roleGranted),
-            RequestId = HttpContext.TraceIdentifier
-        }, ct);
 
         return Ok(new KycReviewResponse
         {
-            Submission = ToResponse(outcome),
-            RoleGranted = roleGranted,
+            Submission = ToResponse(outcome.Result!),
+            RoleGranted = outcome.RoleGranted,
             // Interim path delivers the status push inline; upstream path composes
             // notification async off the critical path (N14).
-            PushSent = outcome.PushSent
+            PushSent = outcome.Result!.PushSent
         });
     }
 
     /// <summary>
-    /// Composes the user-management role append for an approve outcome. When the
-    /// UserManagement upstream is enabled the gateway calls UM (the durable,
-    /// blast-radius-1 jsonb append + token re-issue authority). When it is off,
-    /// the interim seam has already granted the role on the in-gateway store, so
-    /// the grant is reported as effected. Returns whether the role is now held.
-    ///
-    /// <para><b>N14 translation (the S03 403 root-fix).</b> The kyc grant INTENT is
-    /// the frozen Jeeb CONTRACT role (e.g. <c>jeeber</c>) — that is the only
-    /// vocabulary the KYC domain knows. user-management stores OPAQUE roles
-    /// (<c>{customer,driver}</c>) and a later <c>role/switch</c> translates
-    /// <c>jeeber → driver</c> before checking <c>available_roles</c>. So the append
-    /// MUST also be translated to opaque here, or it would store the literal
-    /// <c>jeeber</c> while the switch looks for <c>driver</c> → 403. The gateway is
-    /// the sole translation seam (UM never names client/jeeber).</para>
-    ///
-    /// <para><b>JEB-1472 (AC3) — whitelist enforcement.</b> The relocated Jeeb contract
-    /// whitelist (<see cref="JeebRoleTranslator.ContractRoles"/>) is enforced HERE, the live
-    /// inbound seam where a Jeeb role reaches the translator. A grant role that is not a
-    /// recognised contract role is REJECTED (<see cref="InvalidContractRoleException"/> →
-    /// <c>invalid_role</c> 400) BEFORE any grant — interim or UM — instead of being forwarded
-    /// verbatim. This is the production caller that makes the relocated whitelist real.</para>
+    /// Shared failure translation for both review routes — same statuses, same RFC 7807
+    /// shapes the native route has always emitted.
     /// </summary>
-    private async Task<bool> ComposeRoleGrantAsync(
-        string submissionId, string? subjectUserId, string contractRole, CancellationToken ct)
+    internal IActionResult MapFailure(KycAdminReviewOutcome outcome) => outcome.Status switch
     {
-        // JEB-1472 / AC3: enforce the gateway-owned Jeeb contract whitelist BEFORE any grant
-        // (interim or UM). An unknown contract role must not be forwarded verbatim — reject it
-        // as invalid_role so the relocated {client,jeeber} whitelist has a real runtime enforcer.
-        // Translating now also yields the OPAQUE role UM persists (jeeber → driver), so the
-        // appended role matches what the role checks look up.
-        var opaqueRole = JeebRoleTranslator.ToOpaque(contractRole);
-        if (opaqueRole is null)
+        KycAdminReviewStatus.UpstreamDisabled => KycUpstreamDisabled(),
+        KycAdminReviewStatus.NotFound => NotFound(),
+        KycAdminReviewStatus.Conflict => StatusCode(StatusCodes.Status409Conflict, new ProblemDetails
         {
-            _log.LogWarning(
-                "kyc approve {SubmissionId}: grant role '{Role}' is not a recognised Jeeb contract role; "
-                + "rejecting as invalid_role", submissionId, contractRole);
-            throw new InvalidContractRoleException(contractRole);
-        }
+            Title = outcome.Error,
+            Status = StatusCodes.Status409Conflict
+        }),
+        KycAdminReviewStatus.InvalidRole => BadRequest(new ProblemDetails
+        {
+            // JEB-1472 / AC3: the {client,jeeber} whitelist rejects an unknown Jeeb contract
+            // role at the gateway boundary; a non-contract role never reaches shared UM.
+            Type = "https://jeeb.dev/errors/invalid-role",
+            Title = "invalid_role",
+            Detail = outcome.Error,
+            Status = StatusCodes.Status400BadRequest
+        }),
+        _ => BadRequest(new ProblemDetails
+        {
+            Title = outcome.Error,
+            Status = StatusCodes.Status400BadRequest
+        })
+    };
 
-        if (!_flags.CurrentValue.UserManagement)
-        {
-            // Interim path: the in-gateway service already appended the role.
-            return true;
-        }
-
-        if (string.IsNullOrWhiteSpace(subjectUserId))
-        {
-            _log.LogWarning(
-                "kyc approve {SubmissionId}: review outcome carried no owner; role grant skipped", submissionId);
-            return false;
-        }
-
-        try
-        {
-            var grant = await _userManagement.AppendAvailableRoleAsync(subjectUserId, opaqueRole, ct);
-            return grant.Added || grant.AvailableRoles.Any(
-                r => string.Equals(r, opaqueRole, StringComparison.OrdinalIgnoreCase));
-        }
-        catch (UserManagementCallException ex)
-        {
-            // Approve never rolls back on a UM blip (N14); surface false + log.
-            _log.LogWarning(ex,
-                "kyc approve {SubmissionId}: user-management role append failed (status {Status}); "
-                + "approve committed, role grant deferred", submissionId, ex.StatusCode);
-            return false;
-        }
-    }
-
-    private IActionResult KycUpstreamDisabled() => StatusCode(
+    internal IActionResult KycUpstreamDisabled() => StatusCode(
         StatusCodes.Status503ServiceUnavailable,
         new ProblemDetails
         {
@@ -323,65 +184,14 @@ public class AdminKycController : ControllerBase
             Status = StatusCodes.Status503ServiceUnavailable
         });
 
-    private static bool TryParseAction(string? raw, out KycReviewAction action, out ProblemDetails error)
+    private static KycQueueItem ToQueueItem(KycQueueSearchRow row) => new()
     {
-        action = default;
-        error = null!;
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            error = new ProblemDetails
-            {
-                Title = "action is required (approve, reject, or request_resubmit).",
-                Status = StatusCodes.Status400BadRequest
-            };
-            return false;
-        }
-
-        switch (raw.Trim().ToLowerInvariant())
-        {
-            case "approve":
-                action = KycReviewAction.Approve;
-                return true;
-            case "reject":
-                action = KycReviewAction.Reject;
-                return true;
-            case "request_resubmit":
-            case "resubmit":
-                action = KycReviewAction.RequestResubmit;
-                return true;
-            default:
-                error = new ProblemDetails
-                {
-                    Title = $"Unknown action '{raw}'. Allowed: approve, reject, request_resubmit.",
-                    Status = StatusCodes.Status400BadRequest
-                };
-                return false;
-        }
-    }
-
-    private static string AuditActionFor(KycReviewAction action) => action switch
-    {
-        KycReviewAction.Approve => ActionApprove,
-        KycReviewAction.Reject => ActionReject,
-        KycReviewAction.RequestResubmit => ActionRequestResubmit,
-        _ => action.ToString()
-    };
-
-    private static IReadOnlyDictionary<string, object?> Snapshot(KycBffReviewResult r, bool roleGranted) =>
-        new Dictionary<string, object?>
-        {
-            ["status"] = r.Status,
-            ["rejection_reason"] = r.RejectionReason,
-            ["resubmit_steps"] = r.ResubmitSteps.ToList(),
-            ["role_granted"] = roleGranted
-        };
-
-    private static KycQueueItem ToQueueItem(KycBffQueueItem s) => new()
-    {
-        Id = s.SubmissionId,
-        UserId = s.UserId,
-        Status = s.Status,
-        SubmittedAt = s.SubmittedAt,
+        Id = row.Item.SubmissionId,
+        UserId = row.Item.UserId,
+        Status = row.Item.Status,
+        SubmittedAt = row.Item.SubmittedAt,
+        UserName = row.UserName,
+        Phone = row.Phone,
         // Vehicle metadata is not carried on the thin queue projection (kyc-service
         // owns the full submission); the admin list shows the lifecycle fields.
         VehicleType = string.Empty,
