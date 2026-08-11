@@ -2135,8 +2135,9 @@ else
 {
     builder.Services.AddSingleton<IDataExportStore, InMemoryDataExportStore>();
 }
-builder.Services.AddSingleton<InMemoryDataExportRatingsProvider>();
-builder.Services.AddSingleton<IDataExportRatingsProvider>(sp => sp.GetRequiredService<InMemoryDataExportRatingsProvider>());
+// Ratings for GDPR export: feedback-service is the record-of-truth, and the in-memory
+// provider nothing seeds outside tests silently exported an empty ratings section.
+builder.Services.AddDataExportRatingsProvider(builder.Configuration);
 // Chat history for GDPR export. The gateway no longer carries a chat BFF client
 // (removed with the salehly mirror), so this provider returns an empty transcript
 // and logs the documented per-user enumeration limitation pending a generic
