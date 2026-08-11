@@ -2715,14 +2715,7 @@ builder.Services.AddHealthChecks()
 // is not configured, case routes return 503 rather than creating local state.
 // Older unrelated state adapters retain their existing local/CI behavior.
 // ---------------------------------------------------------------------------
-var stateOptions = new JeebGateway.StateService.StateServiceOptions
-{
-    BaseUrl = builder.Configuration["JeebStateService:BaseUrl"]
-              ?? builder.Configuration["Services:JeebState:BaseUrl"]
-              ?? string.Empty,
-    TimeoutSeconds = int.TryParse(builder.Configuration["JeebStateService:TimeoutSeconds"], out var ts) ? ts : 5,
-    Enabled = !bool.TryParse(builder.Configuration["JeebStateService:Enabled"], out var en) || en
-};
+var stateOptions = JeebGateway.StateService.StateServiceOptionsFactory.FromConfiguration(builder.Configuration);
 var stateServiceWired = stateOptions.Enabled && !string.IsNullOrWhiteSpace(stateOptions.BaseUrl);
 if (stateServiceWired)
 {
@@ -2809,6 +2802,8 @@ var app = builder.Build();
 // on but incomplete; a disabled AdminOidc section keeps the live BFF untouched.
 JeebGateway.Auth.Oidc.AdminOidcStartupGuard.EnsureConfigured(
     app.Configuration, app.Environment);
+
+JeebGateway.StateService.StateServiceCredentialStartupGuard.Validate(stateOptions, app.Logger);
 
 if (app.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
 {
