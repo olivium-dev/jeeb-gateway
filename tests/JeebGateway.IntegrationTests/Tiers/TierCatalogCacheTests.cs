@@ -132,6 +132,29 @@ public sealed class TierCatalogCacheTests
     }
 
     [Fact]
+    public async Task AStaleServeCannotPushTheCachePastTheGraceEnd()
+    {
+        // The stale serve refreshes ServeUntil so an outage costs one upstream retry per TTL —
+        // clamped to the grace end, or a serve at grace-minus-10s would keep the stale radius
+        // alive for a further TTL through the fast path.
+        var upstream = new CountingCatalogClient();
+        var resolver = Resolver(upstream, out var clock);
+
+        await resolver.SnapshotAsync(CancellationToken.None);
+        upstream.Faulting = true;
+
+        // Inside the grace (0:00 + 30 s TTL + 5 min = 5:30 grace end), but only just.
+        clock.Advance(TimeSpan.FromMinutes(5) + TimeSpan.FromSeconds(20));
+        (await resolver.SnapshotAsync(CancellationToken.None)).IsAvailable.Should().BeTrue();
+
+        // Now past the grace end but still inside the TTL a naive refresh would have granted.
+        clock.Advance(TimeSpan.FromSeconds(20));
+
+        (await resolver.SnapshotAsync(CancellationToken.None)).Resolve(StandardId).Should().BeNull(
+            "the grace end is absolute — a stale serve may not extend it");
+    }
+
+    [Fact]
     public async Task AnOutageWithNoCachedCatalog_FailsClosedImmediately()
     {
         var upstream = new CountingCatalogClient { Faulting = true };

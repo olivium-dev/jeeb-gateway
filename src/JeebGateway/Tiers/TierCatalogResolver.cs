@@ -162,7 +162,7 @@ public sealed class TierCatalogResolver : ITierCatalogResolver
     private readonly TimeProvider _clock;
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
 
-    private CachedCatalog? _cached;
+    private volatile CachedCatalog? _cached;
 
     public TierCatalogResolver(
         ITiersStore catalog,
@@ -211,22 +211,30 @@ public sealed class TierCatalogResolver : ITierCatalogResolver
                 return snapshot;
             }
 
-            if (cached is not null
-                && cached.Snapshot.IsAvailable
-                && now - cached.ReadAt <= _cache.Ttl + _cache.StaleGrace)
+            var graceEnd = cached is null
+                ? now
+                : cached.ReadAt + _cache.Ttl + _cache.StaleGrace;
+
+            if (cached is not null && cached.Snapshot.IsAvailable && now <= graceEnd)
             {
                 // ReadAt is NOT refreshed, so the grace keeps shrinking and a sustained outage
-                // still reaches fail-closed; ServeUntil is, so retries stay one per TTL.
-                _cached = cached with { ServeUntil = now + _cache.Ttl };
+                // still reaches fail-closed. ServeUntil is, but CLAMPED to the grace end.
+                var serveUntil = now + _cache.Ttl;
+                _cached = cached with
+                {
+                    ServeUntil = serveUntil < graceEnd ? serveUntil : graceEnd,
+                };
                 _logger?.LogWarning(
                     "event={Event} source={Source} rows={Rows} ageSeconds={AgeSeconds} "
                     + "graceSecondsLeft={GraceSecondsLeft}",
                     "tier-catalog.stale-serve", cached.Snapshot.Source, cached.Snapshot.Rows.Count,
                     (int)(now - cached.ReadAt).TotalSeconds,
-                    (int)((cached.ReadAt + _cache.Ttl + _cache.StaleGrace) - now).TotalSeconds);
+                    (int)(graceEnd - now).TotalSeconds);
                 return cached.Snapshot;
             }
 
+            // The grace is spent: drop the entry so the fast path cannot resurrect it.
+            _cached = null;
             return snapshot;
         }
         finally
