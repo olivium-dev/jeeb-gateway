@@ -89,6 +89,10 @@ red. Any future merge onto a red `main` needs its own waiver, and must
 demonstrate the same thing #373 demonstrates: an unchanged failing-test set
 plus green tests for the change itself.
 
+Exception: documentation-only diffs (no code, config or test surface) may merge
+onto the standing red without a separate waiver, provided the failing-check set
+is unchanged from the parent — as it is for the PR introducing this document.
+
 ## What still has to happen
 
 The waiver ratifies the merge. It does **not** retire the underlying problems:

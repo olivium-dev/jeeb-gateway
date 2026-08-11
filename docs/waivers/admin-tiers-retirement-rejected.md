@@ -16,9 +16,16 @@ No code was changed. This note records the audit so the proposal is not retried.
 
 ## What actually reads the catalog
 
-`AdminTiersController` writes `JeebGateway.Tiers.ITiersStore`
-(`InMemoryTiersStore`, registered in `Program.cs`). Non-test readers of that
-store on `main` @ `fb52a2d`:
+`AdminTiersController` writes `JeebGateway.Tiers.ITiersStore`. `Program.cs`
+(~1809-1815) binds that interface to `PostgresTiersStore` (durable `tiers`
+table, migrations 0029+0036) whenever `GatewayPostgres:ConnectionString` is set
+— which is the live MSI case, where `gateway-postgres` is Healthy and
+`StoreDurabilityGuard` enforces the Postgres store in prod-like envs.
+`InMemoryTiersStore` is only the dev/CI fallback when that connection string is
+absent. So the catalog is NOT process-memory that resets on restart, and
+freezing the writes is NOT harmless: it would strand a durable, admin-owned
+system of record with no write path. Non-test readers of that store on `main` @
+`fb52a2d`:
 
 | Reader | What it uses the catalog for |
 | --- | --- |
@@ -87,8 +94,9 @@ The correct sequence is migrate-then-retire:
 
 1. Make delivery-service the sole tier authority, including `RequestTtlSeconds`.
 2. Cut the gateway's local readers over to the resolver's upstream arm only.
-3. Delete `InMemoryTiersStore`, `AdminTiersController` and the local fallback
-   together, in one PR.
+3. Delete `PostgresTiersStore`, `InMemoryTiersStore`, `AdminTiersController` and
+   the local fallback together, in one PR, and retire the `tiers` table with a
+   migration once nothing reads it.
 
 A `410` on the writes while the readers still point at the local store would be
 step 3 without steps 1 and 2.
