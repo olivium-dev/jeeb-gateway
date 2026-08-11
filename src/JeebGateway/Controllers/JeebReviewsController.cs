@@ -48,13 +48,11 @@ namespace JeebGateway.Controllers;
 /// Coverage note: the generic <see cref="ServiceFeedbackClient"/> exposes the
 /// two-party blind-rating submit/reveal primitive (and a per-tag AVERAGE read) plus,
 /// as of feedback-service PR #15, a review report/moderation endpoint
-/// (<c>POST /Review/report</c>) — but still NO per-jeeber reviews LIST. The report
-/// route now FORWARDS to that endpoint (the feedback-service owns/processes the
-/// report) while keeping an opaque durable breadcrumb as an idempotent fallback;
-/// until a generic reviews LIST exists, the reviews-list route returns the
-/// correctly-shaped COLD-START EMPTY page the mobile <c>DioReviewsRepository</c>
-/// already tolerates. Re-point the list read to the generic read the moment
-/// feedback-service ships it — the mobile-facing contract is stable.
+/// (<c>POST /Review/report</c>). The report route FORWARDS to that endpoint (the
+/// feedback-service owns/processes the report) while keeping an opaque durable
+/// breadcrumb as an idempotent fallback. D-W2: the reviews-list route now reads the
+/// generic list-by-RATEE aggregate (<c>GET /ratings/ratee/{rateeId}/reviews</c>,
+/// feedback-service PR #12) — the surface the rating write path actually populates.
 /// </para>
 /// </summary>
 [ApiController]
@@ -86,9 +84,8 @@ public sealed class JeebReviewsController : ControllerBase
 
     /// <summary>
     /// GET /v1/ratings/jeeb/reviews?jeeberId=&amp;page=&amp;pageSize= — one page of a
-    /// jeeber's reviews (R1m). See class remarks: the generic feedback-service has no
-    /// per-jeeber reviews LIST, so this returns the mobile-tolerated cold-start empty
-    /// page rather than synthesising review rows (ADR-0001).
+    /// jeeber's reviews (R1m), projected from the generic feedback-service
+    /// list-by-ratee read. A read failure is fail-closed 502, never an empty page.
     /// </summary>
     [HttpGet("reviews")]
     [RequireCapability(Capabilities.DeliveryParticipate)]
@@ -114,22 +111,18 @@ public sealed class JeebReviewsController : ControllerBase
         var safeSize = pageSize < 1 ? 20 : pageSize;
         var offset = (safePage - 1) * safeSize;
 
-        // REALAPP fix — read the jeeber's reviews from the SHARED feedback-service
-        // per-tag REVIEW surface (GET /Review/comment?Tag=<jeeberId>&Length=&Offset=&Filter=).
-        // The jeeberId is the public review TAG the write side stamps on each review
-        // (a parallel agent fixes feedback-service's POST /Review/comment write path),
-        // so the read is keyed on the RAW jeeberId — not an opaque StableGuid (the prior
-        // GET /ratings/ratee/{guid}/reviews endpoint does not exist upstream and always
-        // 404'd → silent cold-start empty). Filter=0 = no rating-bucket filter; the
-        // generic upstream returns {comments[], totalReviewCount, averageRating}. The
-        // Jeeb presentation shaping stays HERE (ADR-0001 thin BFF / GR2); the upstream
-        // is product-agnostic.
-        const int NoRatingFilter = 0;
-
+        // D-W2 — read the jeeber's reviews from the SHARED feedback-service list-by-RATEE
+        // aggregate (GET /ratings/ratee/{rateeId}/reviews?length=&offset=), which is what the
+        // rating WRITE path actually populates. The prior per-tag /Review/comment read is keyed
+        // on a review TAG nothing ever writes for jeebers, so it always returned {0, null} →
+        // "No reviews yet" despite revealed ratings. StableGuid is the same id derivation the
+        // write path stamps (real GUIDs round-trip unchanged). The Jeeb presentation shaping
+        // stays HERE (ADR-0001 thin BFF / GR2); the upstream is product-agnostic.
         try
         {
-            var upstream = await _feedback.CommentGETAsync(id, safeSize, offset, NoRatingFilter, ct);
-            return Ok(JeebReviewsProjection.ProjectCommentsPage(id, upstream, safePage, safeSize));
+            var upstream = await _feedback.RatingsByRateeAsync(
+                JeebGateway.Ratings.FeedbackServiceRatingStore.StableGuid(id), safeSize, offset, ct);
+            return Ok(JeebReviewsProjection.ProjectReviewsPage(id, upstream, safePage, safeSize));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

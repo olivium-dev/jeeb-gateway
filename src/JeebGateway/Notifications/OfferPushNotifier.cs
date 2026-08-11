@@ -277,6 +277,14 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 + "{ClientId}: {Accounting}.",
                 requestId, offerId, clientId, PushAcceptance.Describe(accepted));
         }
+        catch (ApiException ex) when (IsDirectDispatchDisabled(ex))
+        {
+            // Expected steady state: notification-service is the sole push producer, so the
+            // guard's 503 is not a failure worth a WARN + stack on every offer.
+            _logger.LogDebug(
+                "Offer push direct dispatch for request {RequestId} (offer {OfferId}) skipped: "
+                + "guard armed, notification-service is the sole producer.", requestId, offerId);
+        }
         catch (Exception ex)
         {
             // DEGRADE-DON'T-FAIL: the offer was already durable and the 201 is committed.
@@ -285,6 +293,20 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 + "offer submit stays 201.", requestId, offerId, clientId);
         }
     }
+
+    /// <summary>
+    /// GW-OFFER-503 — true for the synthetic 503 <see cref="JeebGateway.Services.Clients.GatewayDirectPushDispatchGuardHandler"/>
+    /// returns while the gateway is deliberately NOT a push producer. That is the expected steady
+    /// state (notification-service owns these pushes off the durable record write), so it is logged
+    /// at Debug instead of WARN+stack per offer. If the emergency
+    /// <c>PushNotificationServiceApi:GatewayDirectDispatch:Enabled</c> rollback is ever flipped,
+    /// direct sends resume and every REAL failure still takes the WARN path unchanged.
+    /// </summary>
+    private static bool IsDirectDispatchDisabled(ApiException ex)
+        => ex.StatusCode == (int)System.Net.HttpStatusCode.ServiceUnavailable
+           && ex.Response?.Contains(
+               JeebGateway.Services.Clients.GatewayDirectPushDispatchGuardHandler.DisabledProblemCode,
+               StringComparison.Ordinal) == true;
 
     private static NotificationTemplate RenderNewOffer(decimal fee) => new(
         "New offer on your request",
@@ -482,6 +504,12 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 "Offer {Type} push accepted for request {RequestId} (offer {OfferId}) to "
                 + "{RecipientId}: {Accounting}.",
                 type, requestId, offerId, recipientId, PushAcceptance.Describe(accepted));
+        }
+        catch (ApiException ex) when (IsDirectDispatchDisabled(ex))
+        {
+            _logger.LogDebug(
+                "Offer {Type} direct dispatch for request {RequestId} (offer {OfferId}) skipped: "
+                + "guard armed, notification-service is the sole producer.", type, requestId, offerId);
         }
         catch (Exception ex)
         {

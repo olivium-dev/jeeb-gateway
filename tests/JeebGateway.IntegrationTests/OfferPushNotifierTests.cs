@@ -81,6 +81,83 @@ public class OfferPushNotifierTests
     }
 
     [Fact]
+    public async Task GuardArmed503_IsLoggedAtDebug_NotWarnWithStack()
+    {
+        // GW-OFFER-503: since the D1 single-producer cut-over the direct-dispatch guard
+        // synthesizes a 503 for EVERY offer push, and the generic catch logged it as
+        // WARN + full stack once per offer. notification-service produces these pushes off
+        // the durable record write, so the 503 is the expected steady state, not a fault.
+        var log = new CapturingLogger<OfferPushNotifier>();
+        var notifier = new OfferPushNotifier(GuardedPushClient(), log);
+
+        await notifier.NotifyNewOfferAsync(Client, RequestId, OfferId, 5m, CancellationToken.None);
+
+        log.Entries.Should().NotContain(e => e.Level == LogLevel.Warning,
+            "the guard's expected 503 must not be journal noise");
+        log.Has(LogLevel.Debug, "guard armed").Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task RealPushFailure_StillWarns_WhenItIsNotTheArmedGuard()
+    {
+        // The downgrade filter is narrow on purpose: a genuine push-service 503 (no guard
+        // problem code) keeps the WARN + stack that operators alert on.
+        var log = new CapturingLogger<OfferPushNotifier>();
+        var push = new ServicePushNotificationClient(
+            "http://push.test/",
+            new HttpClient(new StaticResponseHandler(() => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            {
+                Content = new StringContent("{\"code\":\"upstream_unavailable\"}"),
+            }))
+            {
+                BaseAddress = new Uri("http://push.test/"),
+            });
+
+        await new OfferPushNotifier(push, log)
+            .NotifyNewOfferAsync(Client, RequestId, OfferId, 5m, CancellationToken.None);
+
+        log.Entries.Should().Contain(e => e.Level == LogLevel.Warning,
+            "a real push failure is still a warning");
+    }
+
+    /// <summary>
+    /// A push client behind the REAL <see cref="JeebGateway.Services.Clients.GatewayDirectPushDispatchGuardHandler"/>
+    /// in its committed (disabled) state, so the test sees the exact 503 + problem code the live
+    /// gateway sees rather than a hand-forged exception.
+    /// </summary>
+    private static ServicePushNotificationClient GuardedPushClient()
+    {
+        var guard = new JeebGateway.Services.Clients.GatewayDirectPushDispatchGuardHandler(
+            Microsoft.Extensions.Options.Options.Create(
+                new JeebGateway.Services.Clients.GatewayDirectPushDispatchOptions { Enabled = false }))
+        {
+            InnerHandler = new StaticResponseHandler(
+                () => new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = JsonContent.Create(new { message = "ok" }),
+                }),
+        };
+
+        return new ServicePushNotificationClient(
+            "http://push.test/",
+            new HttpClient(guard) { BaseAddress = new Uri("http://push.test/") });
+    }
+
+    private sealed class StaticResponseHandler : HttpMessageHandler
+    {
+        private readonly Func<HttpResponseMessage> _response;
+
+        public StaticResponseHandler(Func<HttpResponseMessage> response) => _response = response;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var response = _response();
+            response.RequestMessage = request;
+            return Task.FromResult(response);
+        }
+    }
+
+    [Fact]
     public async Task MissingClientId_PushesNothing()
     {
         var push = new RecordingUserPushClient();

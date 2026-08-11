@@ -23,7 +23,6 @@ public sealed class OfferJeeberEnricher : IOfferJeeberEnricher
 {
     private const int AggregateProbeLength = 1;
     private const int AggregateProbeOffset = 0;
-    private const int NoRatingFilter = 0;
 
     private readonly UserManagementClient _profiles;
     private readonly FeedbackClient _reviews;
@@ -115,14 +114,13 @@ public sealed class OfferJeeberEnricher : IOfferJeeberEnricher
     {
         try
         {
-            // The existing Jeeb reviews BFF uses this same generic per-tag read.
-            // Length=1 keeps the aggregate lookup cheap; totalReviewCount and
-            // averageRating describe the full revealed-review set.
-            var aggregate = await _reviews.CommentGETAsync(
-                jeeberId,
+            // D-W2: the list-by-RATEE aggregate is the surface the rating write path
+            // populates; the old per-tag read always returned 0/null. Length=1 keeps the
+            // probe cheap — totalReviewCount/averageRating cover the whole revealed set.
+            var aggregate = await _reviews.RatingsByRateeAsync(
+                JeebGateway.Ratings.FeedbackServiceRatingStore.StableGuid(jeeberId),
                 AggregateProbeLength,
                 AggregateProbeOffset,
-                NoRatingFilter,
                 ct);
 
             return RatingLookup.Available(
