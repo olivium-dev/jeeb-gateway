@@ -1,20 +1,8 @@
 #!/usr/bin/env bash
-# G-08 / R1 — StoreDurabilityGuard roster manifest gate.
-#
-# Failure mode it closes: a store deletion PR removes the implementation but
-# leaves its line on StoreDurabilityGuard.Critical, so the fail-closed boot
-# guard 503s production on the next deploy. Invariants:
-#   (0) SHAPE   — the generated roster is plausible (all four rosters present,
-#       Critical not collapsed), so the gate cannot be neutered into a pass.
-#   (1) DRIFT   — scripts/guard-roster.txt matches the four rosters in
-#       StoreDurabilityGuard.cs (roster edit + manifest ship in the SAME PR).
-#   (2) ORPHAN  — every type on the manifest is still declared under src/.
-#   (3) G-18    — build.yml keeps the migration double-apply/seed gate.
-#
-# The C# roster stays the SOURCE OF TRUTH and the .txt is generated + drift
-# checked: making DI read a text file at runtime would weaken the boot guard.
-#
-# Regenerate the manifest with: scripts/check-guard-roster.sh --write
+# G-08 / R1 — StoreDurabilityGuard roster manifest gate: (0) shape (1) drift (2) orphan (3) G-18.
+# Failure mode + rationale: docs/runbooks/gwdbx-program-rules.md.
+# The C# roster is the source of truth; the .txt is generated + drift-checked.
+# Regenerate with: scripts/check-guard-roster.sh --write
 set -euo pipefail
 
 SRC="src/JeebGateway"
