@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using FluentAssertions;
 using JeebGateway.JeebWallet;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -42,6 +43,18 @@ public sealed class WalletLedgerParityTests
         implementation.Should().NotBeNull(
             "the interface default returns null, which the controller maps to a permanent 404 on "
             + "GET /v1/jeeb/wallet/ledger/{id} for rows the page response already returned");
+    }
+
+    [Fact]
+    public void PostgresPageQuery_TieBreaksEqualTimestamps_TheSameWayAsWalletService()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepoRoot(), "src", "JeebGateway", "JeebWallet", "JeebWalletLedgerReader.cs"));
+
+        source.Should().Contain("ORDER BY h.createdat DESC, d.txid DESC");
+        source.Should().NotContain("ORDER BY h.createdat DESC, d.txid\n",
+            "an ASC tie-break returns rows sharing a timestamp in the opposite order to "
+            + "wallet-service, whose keyset cursor is only correct under DESC/DESC");
     }
 
     [Fact]
@@ -91,6 +104,16 @@ public sealed class WalletLedgerParityTests
     {
         Id = "a", Type = "topup", Amount = 10m, Sign = 1, Ref = "r", Ts = "2026-08-10T10:00:00Z",
     };
+
+    private static string FindRepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = new FileInfo(thisFile).Directory!;
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "JeebGateway")))
+            dir = dir.Parent!;
+
+        (dir is not null).Should().BeTrue("could not locate repo root from test source file path");
+        return dir!.FullName;
+    }
 
     /// <summary>Forces the process-local zone so the assertion never depends on the build host.</summary>
     private sealed class LocalTimeZoneScope : IDisposable
