@@ -201,7 +201,8 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
             Guid.NewGuid(), 1, 20, null, null, null, CancellationToken.None);
 
         result.Should().ContainSingle().Which.Amount.Should().Be(10m);
-        log.Messages.Should().ContainSingle(m => m.Contains("WalletLedgerShadowMismatch"));
+        (await log.WaitForMessagesAsync()).Should()
+            .ContainSingle(m => m.Contains("WalletLedgerShadowMismatch"));
     }
 
     [Fact]
@@ -217,7 +218,8 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
 
         await sut.ReadLedgerAsync(Guid.NewGuid(), 1, 20, null, null, null, CancellationToken.None);
 
-        log.Messages.Should().ContainSingle(m => m.Contains("WalletLedgerShadowMatch"));
+        (await log.WaitForMessagesAsync()).Should()
+            .ContainSingle(m => m.Contains("WalletLedgerShadowMatch"));
     }
 
     [Fact]
@@ -281,7 +283,7 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
 
     private sealed class CapturingLogger<T> : ILogger<T>
     {
-        public List<string> Messages { get; } = new();
+        private readonly List<string> _messages = new();
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -289,7 +291,23 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
 
         public void Log<TState>(
             LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-            Func<TState, Exception?, string> formatter) =>
-            Messages.Add(formatter(state, exception));
+            Func<TState, Exception?, string> formatter)
+        {
+            lock (_messages) _messages.Add(formatter(state, exception));
+        }
+
+        /// <summary>The shadow comparison is deliberately detached from the request, so its
+        /// log line lands after the read returns.</summary>
+        public async Task<IReadOnlyList<string>> WaitForMessagesAsync()
+        {
+            for (var attempt = 0; attempt < 100 && Snapshot().Count == 0; attempt++)
+                await Task.Delay(20);
+            return Snapshot();
+        }
+
+        private IReadOnlyList<string> Snapshot()
+        {
+            lock (_messages) return _messages.ToArray();
+        }
     }
 }
