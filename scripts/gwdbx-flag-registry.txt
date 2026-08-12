@@ -1,43 +1,6 @@
-# Gateway DB-extraction (gwdbx) flag registry — A10 mode registry, checklist PRE-03.
-#
-# This file IS `approved-flags.txt` for guardrail G-22 (one-way containment:
-# repo tokens must be a SUBSET of this registry; registry entries not yet built
-# are fine). It is the MACHINE-READABLE copy of the "Flag registry (A10)" table
-# in PLAYBOOK-gateway-db-extraction-2026-08-12.md — the rows here and the rows
-# there MUST STAY IN SYNC; the playbook table is the normative prose source and
-# any edit to one is an edit to the other in the same PR.
-#
-# Format: one entry per line
-#     <flag-token> <status> <owning-wave> # note
-# Tokens are written BARE — no `FeatureFlags:` prefix — because the inventory
-# emits them bare and the containment check is a plain string `comm`.
-#
-# Status classes:
-#   baseline   Flag that already existed at 66a7b9d and is NOT part of this
-#              program. Listed only so one-way containment stays green. FROZEN:
-#              the program never adds to this class.
-#   program    A mode enum or flag this program creates, with the wave that
-#              creates it and the wave that deletes it (A8 step-6). Per A10 each
-#              unbuilt §3-B domain gets exactly ONE ordered 5-state enum
-#              (local -> dual-write-local-read -> dual-write-upstream-read ->
-#              upstream-authority -> retired), ValidateOnStart-checked. The note
-#              records the superseded design flag name(s) the enum replaces.
-#   forbidden  A name that must NEVER become an active config key. The check
-#              fails if it appears as an active appsettings key or as a property
-#              of UpstreamFeatureFlags; a mention in a comment or a .md file is
-#              explicitly allowed.
-#
-# Owning-wave field: `-` for baseline/forbidden; `create=<wave>;delete=<wave>`
-# for program rows. Exactly one create wave per entry — G-22's "no flag gates
-# two cutovers" half is checked mechanically from this field.
-#
-# `/api/OTP/codes` is also SUPERSEDED (A3, never built) but is a ROUTE, not a
-# config key, so it carries its stamp in the playbook table only.
-#
-# Inventory method (D1 default, owner may override) + namespace filter are
-# recorded in scripts/check-gwdbx-flag-registry.sh.
+# G-22 approved-flags registry (A10). Bare token form; machine-readable copy of the playbook's
+# Flag registry (A10) table — keep in sync. Statuses + rationale: docs/runbooks/gwdbx-program-rules.md.
 
-# ---- program: §3-B mode enums (A10) -----------------------------------------
 CodSettlementMode        program create=W2;delete=W5 # COD settlement -> wallet-service; supersedes UseUpstream:CodSettlements + SettlementLedgerMigration:{DualWrite,Authority}
 PayoutBatchMode          program create=W2;delete=W5 # payout batches -> wallet-service; supersedes UseUpstream:SettlementBatches + PayoutBatchMigration:{DualWrite,Authority} (never approved)
 JeeberEarningsMode       program create=W2;delete=W5 # earnings read flip; supersedes UseUpstream:JeeberEarnings; never overloads prod-ON UseUpstream:Earnings
