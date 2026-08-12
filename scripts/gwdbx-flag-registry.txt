@@ -16,6 +16,7 @@ UserModerationMode       program create=W4;delete=W4 # users projection -> user-
 PushDispatchMode         program create=W3;delete=W5 # push trio -> push-notification; supersedes UseUpstream:PushDispatchDurability
 NotificationOutboxMode   program create=W1;delete=W5 # outbox -> state-service work-items, drain-and-switch; supersedes UseUpstream:NotificationOutbox
 CmsConfigMode            program create=W3;delete=W5 # cms_surfaces pair -> state-service; supersedes UseUpstream:CmsConfig
+RefreshTokenStoreMode    program create=W1;delete=W5 # refresh-token store -> state-service (A7/W1-14), pinned local; upstream-authority fail-closes the boot when state-service is unwired
 
 # ---- program: non-§3-B and grandfathered ------------------------------------
 WalletLedgerMigration:Authority           program create=pre-program;delete=W5 # GRANDFATHERED as built (owner ruling), live at 66a7b9d via gateway PR #385; step-6 date recorded in the W5-10 ledger entry

@@ -2243,7 +2243,12 @@ builder.Services.AddSingleton<JeebGateway.TestControlPlane.FakeTimeProvider>(
     _ => new JeebGateway.TestControlPlane.FakeTimeProvider(TimeProvider.System));
 builder.Services.AddSingleton<TimeProvider>(
     sp => sp.GetRequiredService<JeebGateway.TestControlPlane.FakeTimeProvider>());
-builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
+// A10 ladder: the in-memory store is the LOCAL rung only (default), still overridden below by
+// StateServiceRefreshTokenStore when state-service is wired; from upstream-authority it is gone.
+if (!RefreshTokenStoreModes.RequiresStateService(RefreshTokenStoreModes.Resolve(builder.Configuration)))
+{
+    builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
+}
 builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 builder.Services.AddSingleton<IUmAuthenticationContextValidator, UmAuthenticationContextValidator>();
@@ -2717,6 +2722,22 @@ builder.Services.AddHealthChecks()
 // ---------------------------------------------------------------------------
 var stateOptions = JeebGateway.StateService.StateServiceOptionsFactory.FromConfiguration(builder.Configuration);
 var stateServiceWired = stateOptions.Enabled && !string.IsNullOrWhiteSpace(stateOptions.BaseUrl);
+
+// A10 fail-closed boot guard (W1-14): at upstream-authority/retired the state-service store is the
+// ONLY authority, so an unwired dependency must refuse the boot, never fork sessions in-memory.
+builder.Services
+    .AddOptions<RefreshTokenStoreOptions>()
+    .Bind(builder.Configuration.GetSection(RefreshTokenStoreOptions.SectionName))
+    .Validate(
+        o => RefreshTokenStoreModes.TryParse(o.RefreshTokenStoreMode, out _),
+        $"{RefreshTokenStoreOptions.ModeKey} must be one of: {RefreshTokenStoreOptions.ModeNames}.")
+    .Validate(
+        o => !RefreshTokenStoreModes.TryParse(o.RefreshTokenStoreMode, out var mode)
+             || !RefreshTokenStoreModes.RequiresStateService(mode)
+             || stateServiceWired,
+        $"{RefreshTokenStoreOptions.ModeKey}=upstream-authority (or retired) makes jeeb-state-service the sole refresh-token authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}). Refusing to start rather than falling back to the in-memory store, which forks refresh-token families across replicas and restarts.")
+    .ValidateOnStart();
+
 if (stateServiceWired)
 {
     builder.Services.AddSingleton(stateOptions);
@@ -2762,7 +2783,7 @@ if (stateServiceWired)
     // in-memory MVP store (rows lost on every gateway bounce → refresh-reuse detection and
     // active-token revocation evaporate) to the state-service-backed store, which persists
     // the token row + status chain + hash/user index in the R1 idempotency KV (registered
-    // above). Overrides the InMemoryRefreshTokenStore registered earlier (last-wins DI).
+    // above). Overrides the in-memory store when the A10 ladder registers one (last-wins DI).
     builder.Services.AddSingleton<IRefreshTokenStore,
         JeebGateway.Tokens.StateServiceRefreshTokenStore>();
 

@@ -46,6 +46,8 @@ internal static class StoreDurabilityGuard
         (typeof(JeebGateway.Financials.ISettlementStore),                   new[] { typeof(JeebGateway.Financials.PostgresSettlementStore) }),
         (typeof(JeebGateway.Financials.ISettlementBatchStore),              new[] { typeof(JeebGateway.Financials.PostgresSettlementBatchStore) }),
         (typeof(JeebGateway.Users.IUsersStore),                             new[] { typeof(JeebGateway.Users.UpstreamBackedUsersStore) }),
+        // W1-14 (A7/A10): selection moved to FeatureFlags:RefreshTokenStoreMode, but the ONLY durable
+        // resolution is unchanged — in-memory (below upstream-authority) or unregistered both fail closed.
         (typeof(JeebGateway.Tokens.IRefreshTokenStore),                     new[] { typeof(JeebGateway.Tokens.StateServiceRefreshTokenStore) }),
         (typeof(JeebGateway.StateService.Idempotency.IIdempotencyStore),    new[] { typeof(JeebGateway.StateService.Idempotency.StateServiceIdempotencyStore) }),
         // Disputes and support share the canonical generic case authority. The retired
