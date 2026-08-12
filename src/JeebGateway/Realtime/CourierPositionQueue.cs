@@ -40,6 +40,8 @@ public interface ICourierPositionQueue
 }
 
 /// <inheritdoc />
+// gwdbx PLAN §3-C: retained transient buffer, no authoritative state, restart-drop benign —
+// NOT a durable store, never on the StoreDurabilityGuard roster. docs/runbooks/gwdbx-program-rules.md
 public sealed class CourierPositionQueue : ICourierPositionQueue
 {
     public CourierPositionQueue(IOptions<CourierPositionPublishOptions> options)
