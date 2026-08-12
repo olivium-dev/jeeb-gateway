@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using FluentAssertions;
 using JeebGateway.JeebWallet;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -33,29 +33,112 @@ public sealed class WalletLedgerParityTests
             "wallet-service reads the same column as `h.CreatedAt AT TIME ZONE 'UTC'`");
     }
 
+    /// <summary>
+    /// The detail route reaches real SQL rather than the null-returning interface default: an
+    /// unparseable id short-circuits to null, a well-formed one is taken to the database.
+    /// </summary>
     [Fact]
-    public void PostgresReader_ServesTheDetailRoute_NotTheNullReturningInterfaceDefault()
+    public async Task PostgresReader_ServesTheDetailRoute_NotTheNullReturningInterfaceDefault()
     {
-        var implementation = typeof(PostgresJeebWalletLedgerReader).GetMethod(
-            nameof(IJeebWalletLedgerReader.ReadEntryAsync),
-            new[] { typeof(Guid), typeof(string), typeof(CancellationToken) });
+        var sut = UnreachableReader();
 
-        implementation.Should().NotBeNull(
-            "the interface default returns null, which the controller maps to a permanent 404 on "
-            + "GET /v1/jeeb/wallet/ledger/{id} for rows the page response already returned");
+        (await sut.ReadEntryAsync(Guid.NewGuid(), "not-a-guid", CancellationToken.None))
+            .Should().BeNull("an unparseable id can never name a row — no query is issued");
+        var act = () => sut.ReadEntryAsync(
+            Guid.NewGuid(), Guid.NewGuid().ToString("D"), CancellationToken.None);
+        await act.Should().ThrowAsync<WalletLedgerUnavailableException>(
+            "a well-formed id must be resolved against the wallet DB, not answered from memory");
     }
 
+    /// <summary>Asserted on the SQL the reader executes, whitespace-normalised, so neither a
+    /// reformat nor a semantically different ORDER BY can slip past this regression.</summary>
     [Fact]
     public void PostgresPageQuery_TieBreaksEqualTimestamps_TheSameWayAsWalletService()
     {
-        var source = File.ReadAllText(Path.Combine(
-            FindRepoRoot(), "src", "JeebGateway", "JeebWallet", "JeebWalletLedgerReader.cs"));
+        var clause = Regex.Match(
+            PostgresJeebWalletLedgerReader.PageSql, @"ORDER\s+BY\s+(?<clause>.+?)\s+LIMIT",
+            RegexOptions.Singleline | RegexOptions.IgnoreCase);
 
-        source.Should().Contain("ORDER BY h.createdat DESC, d.txid DESC");
-        source.Should().NotContain("ORDER BY h.createdat DESC, d.txid\n",
+        clause.Success.Should().BeTrue("the paged read must order deterministically");
+        Regex.Replace(clause.Groups["clause"].Value, @"\s+", " ").Should().Be(
+            "h.createdat DESC, d.txid DESC",
             "an ASC tie-break returns rows sharing a timestamp in the opposite order to "
             + "wallet-service, whose keyset cursor is only correct under DESC/DESC");
     }
+
+    /// <summary>Both reads must surface the same row identically, so the detail route cannot drift
+    /// from the page the client already rendered.</summary>
+    [Fact]
+    public void PostgresDetailQuery_ProjectsAndScopesOwnership_ExactlyLikeThePageQuery()
+    {
+        Projection(PostgresJeebWalletLedgerReader.EntrySql).Should().Be(
+            Projection(PostgresJeebWalletLedgerReader.PageSql));
+        PostgresJeebWalletLedgerReader.EntrySql.Should().Contain(
+            "d.sourcewalletid = ANY(@WalletIds)").And.Contain(
+            "d.destinationwalletid = ANY(@WalletIds))",
+            "another holder's row must not be readable by id");
+    }
+
+    /// <summary>
+    /// A wallet-DB outage is not the verdict "no such transaction": 404 on a money route is a
+    /// claim about the ledger's contents. The page read keeps its long-standing empty degrade.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseFailure_OnTheDetailRoute_IsNeverServedAsNotFound()
+    {
+        var sut = UnreachableReader();
+
+        var detail = () => sut.ReadEntryAsync(
+            Guid.NewGuid(), Guid.NewGuid().ToString("D"), CancellationToken.None);
+        await detail.Should().ThrowAsync<WalletLedgerUnavailableException>();
+        (await sut.ReadLedgerAsync(Guid.NewGuid(), 1, 20, null, null, null, CancellationToken.None))
+            .Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Once postgres is the shadow, a read cancelled by the 5s budget must be logged as a shadow
+    /// FAILURE; degrading it to [] would post a fake mismatch against the flip's clean window.
+    /// </summary>
+    [Fact]
+    public async Task CancelledRead_SurfacesAsCancellation_NotAsAnEmptyLedger()
+    {
+        var sut = UnreachableReader();
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        var page = () => sut.ReadLedgerAsync(
+            Guid.NewGuid(), 1, 20, null, null, null, cancelled.Token);
+
+        await page.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    /// <summary>
+    /// Detached comparisons are no longer bounded by the request, so they are bounded here: a
+    /// stalled shadow must not accumulate one in-flight call per request against it.
+    /// </summary>
+    [Fact]
+    public async Task DetachedShadowReads_AreCapped_SoAStalledShadowIsNotAmplified()
+    {
+        var shadow = new HangingLedgerReader(TimeSpan.FromSeconds(8));
+        var sut = new ShadowComparingJeebWalletLedgerReader(
+            new SingleEntryLedgerReader(), shadow,
+            NullLogger<ShadowComparingJeebWalletLedgerReader>.Instance);
+        var cap = ShadowComparingJeebWalletLedgerReader.MaxConcurrentShadowReads;
+
+        for (var request = 0; request < cap * 3; request++)
+            await sut.ReadLedgerAsync(Guid.NewGuid(), 1, 20, null, null, null, CancellationToken.None);
+
+        (await shadow.WaitForStartsAsync(cap)).Should().Be(
+            cap, "requests beyond the cap skip their comparison instead of piling onto the shadow");
+    }
+
+    private static PostgresJeebWalletLedgerReader UnreachableReader() => new(
+        "Host=127.0.0.1;Port=1;Username=none;Password=none;Database=none;Timeout=2;Command Timeout=2",
+        NullLogger<PostgresJeebWalletLedgerReader>.Instance);
+
+    private static string Projection(string sql) => Regex.Replace(
+        Regex.Match(sql, @"SELECT(?<body>.+?)FROM", RegexOptions.Singleline).Groups["body"].Value,
+        @"\s+", " ").Trim();
 
     [Fact]
     public async Task SlowShadow_NeverDelaysThePrimaryResponse()
@@ -104,16 +187,6 @@ public sealed class WalletLedgerParityTests
     {
         Id = "a", Type = "topup", Amount = 10m, Sign = 1, Ref = "r", Ts = "2026-08-10T10:00:00Z",
     };
-
-    private static string FindRepoRoot([CallerFilePath] string thisFile = "")
-    {
-        var dir = new FileInfo(thisFile).Directory!;
-        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "JeebGateway")))
-            dir = dir.Parent!;
-
-        (dir is not null).Should().BeTrue("could not locate repo root from test source file path");
-        return dir!.FullName;
-    }
 
     /// <summary>Forces the process-local zone so the assertion never depends on the build host.</summary>
     private sealed class LocalTimeZoneScope : IDisposable

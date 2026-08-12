@@ -49,7 +49,7 @@ public sealed class WalletServiceLedgerReaderTests
         result.Should().ContainSingle();
         result[0].Amount.Should().Be(9007199254740993.25m);
         result[0].Id.Should().Be(detailId.ToString("D"));
-        result[0].Ts.Should().Be("2026-08-10T11:12:13.0000000+00:00");
+        result[0].Ts.Should().Be("2026-08-10T11:12:13.0000000Z");
         var decoded = Uri.UnescapeDataString(requested!.Query);
         decoded.Should().Contain("page=2").And.Contain("pageSize=50");
         decoded.Should().Contain("type=partner-topup");
@@ -99,6 +99,53 @@ public sealed class WalletServiceLedgerReaderTests
         found.Should().NotBeNull();
         found!.Ref.Should().Be("delivery-1");
         missing.Should().BeNull();
+    }
+
+    /// <summary>
+    /// The Authority flip must be invisible on the wire: both readers project the same instant
+    /// into the SAME string, or every mobile client sees the format change the day it flips.
+    /// </summary>
+    [Fact]
+    public async Task BothAuthorities_ProjectTheSameInstant_IntoTheSameWireFormat()
+    {
+        var sut = NewReader(new DelegateHandler(_ => Json(HttpStatusCode.OK, $$"""
+            {
+              "items": [{
+                "id": "{{Guid.NewGuid():D}}", "type": "topup", "amount": 1,
+                "sign": 1, "reference": "r", "createdAt": "2026-08-08T21:02:43.9544940Z"
+              }],
+              "nextCursor": null
+            }
+            """)));
+
+        var viaWalletApi = await sut.ReadLedgerAsync(
+            Guid.NewGuid(), 1, 20, null, null, null, CancellationToken.None);
+
+        var viaPostgres = PostgresJeebWalletLedgerReader.FormatUtcTimestamp(
+            new DateTime(2026, 8, 8, 21, 2, 43, DateTimeKind.Unspecified).AddTicks(9_544_940));
+        viaWalletApi[0].Ts.Should().Be(viaPostgres);
+    }
+
+    /// <summary>
+    /// The shadow digest is the only evidence the flip is judged on, so it must hash the served
+    /// bytes: an offset-form vs Z-form drift on the same instant has to read as a MISMATCH.
+    /// </summary>
+    [Fact]
+    public void ShadowDigest_SeesAWireFormatDrift_OnTheSameInstant()
+    {
+        var zForm = new JeebWalletLedgerEntry
+        {
+            Id = "a", Type = "topup", Amount = 1m, Sign = 1, Ref = "r",
+            Ts = "2026-08-08T21:02:43.9544940Z",
+        };
+        var offsetForm = new JeebWalletLedgerEntry
+        {
+            Id = "a", Type = "topup", Amount = 1m, Sign = 1, Ref = "r",
+            Ts = "2026-08-08T21:02:43.9544940+00:00",
+        };
+
+        ShadowComparingJeebWalletLedgerReader.Digest(new[] { zForm })
+            .Should().NotBe(ShadowComparingJeebWalletLedgerReader.Digest(new[] { offsetForm }));
     }
 
     [Fact]
