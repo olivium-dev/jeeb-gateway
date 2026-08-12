@@ -25,6 +25,15 @@ jobs:
       - name: G-22 gwdbx flag-registry gate
         run: bash scripts/check-gwdbx-flag-registry.sh
 
+  guard-roster-gate:
+    # G-08 — StoreDurabilityGuard roster manifest stays in sync with the C#
+    # rosters (R1 same-PR rule) and names no deleted type; keeps the G-18 gate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: G-08 guard-roster gate
+        run: bash scripts/check-guard-roster.sh
+
   nswag-freshness:
     # Regenerate the jeeb-state-service NSwag client from the committed spec and
     # fail if it drifts from the committed client (F5-style freshness gate).
