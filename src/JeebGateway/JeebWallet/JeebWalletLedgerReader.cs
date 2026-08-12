@@ -280,7 +280,9 @@ public sealed class PostgresJeebWalletLedgerReader : IJeebWalletLedgerReader
               AND (@Type IS NULL OR COALESCE(NULLIF(h.tag, ''), 'transaction') = @Type)
               AND (@FromDate IS NULL OR h.createdat::date >= @FromDate)
               AND (@ToDate   IS NULL OR h.createdat::date <= @ToDate)
-            ORDER BY h.createdat DESC, d.txid
+            -- DESC/DESC tie-break matches wallet-service, whose keyset cursor
+            -- (CreatedAt, TxId) < (…) is only correct in that order.
+            ORDER BY h.createdat DESC, d.txid DESC
             LIMIT @Limit OFFSET @Offset
             """;
 
@@ -318,7 +320,7 @@ public sealed class PostgresJeebWalletLedgerReader : IJeebWalletLedgerReader
                     Amount = reader.GetDecimal(2),
                     Sign = reader.GetInt32(3),
                     Ref = reader.GetString(4),
-                    Ts = reader.GetFieldValue<DateTime>(5).ToUniversalTime().ToString("o"),
+                    Ts = FormatUtcTimestamp(reader.GetFieldValue<DateTime>(5)),
                 });
             }
             return items;
@@ -331,6 +333,72 @@ public sealed class PostgresJeebWalletLedgerReader : IJeebWalletLedgerReader
             return Array.Empty<JeebWalletLedgerEntry>();
         }
     }
+
+    /// <summary>
+    /// Single ledger row, mirroring wallet-service <c>GetHolderLedgerEntry</c>: same projection,
+    /// holder-ownership on EITHER side of the transfer, same +1-on-destination sign.
+    /// </summary>
+    public async Task<JeebWalletLedgerEntry?> ReadEntryAsync(
+        Guid holderId, string detailId, CancellationToken ct)
+    {
+        if (!Guid.TryParse(detailId, out var parsedDetailId)) return null;
+
+        const string sql = """
+            SELECT
+                d.txid::text                                         AS id,
+                COALESCE(NULLIF(h.tag, ''), 'transaction')           AS type,
+                d.amount                                             AS amount,
+                CASE WHEN d.destinationwalletid = ANY(@WalletIds) THEN 1 ELSE -1 END AS sign,
+                COALESCE(NULLIF(h.summary, ''), NULLIF(h.notes, ''), '') AS ref,
+                h.createdat                                          AS ts
+            FROM transactiondetails d
+            JOIN transactionheader  h ON h.txid = d.txheaderid
+            WHERE d.txid = @DetailId
+              AND (d.sourcewalletid = ANY(@WalletIds)
+                OR d.destinationwalletid = ANY(@WalletIds))
+            LIMIT 1
+            """;
+
+        try
+        {
+            await using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync(ct);
+
+            var walletIds = await ReadWalletIdsAsync(conn, holderId, ct);
+            if (walletIds.Count == 0) return null;
+
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("WalletIds", walletIds.ToArray());
+            cmd.Parameters.AddWithValue("DetailId", parsedDetailId);
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct)) return null;
+
+            return new JeebWalletLedgerEntry
+            {
+                Id = reader.GetString(0),
+                Type = reader.GetString(1),
+                Amount = reader.GetDecimal(2),
+                Sign = reader.GetInt32(3),
+                Ref = reader.GetString(4),
+                Ts = FormatUtcTimestamp(reader.GetFieldValue<DateTime>(5)),
+            };
+        }
+        catch (Exception ex)
+        {
+            // Same graceful degrade as the page read (ADR-0001): a DB blip is the
+            // existing 404, not a new 5xx surface on the detail route.
+            _log.LogWarning(ex, "wallet ledger detail read for holder {HolderId} degraded to null", holderId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// <c>h.createdat</c> is <c>timestamp</c> WITHOUT time zone storing UTC, so Npgsql yields
+    /// Kind=Unspecified: label it UTC, never ToUniversalTime() (that subtracts the host offset).
+    /// </summary>
+    internal static string FormatUtcTimestamp(DateTime value) =>
+        DateTime.SpecifyKind(value, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
 
     private static async Task<List<Guid>> ReadWalletIdsAsync(NpgsqlConnection conn, Guid holderId, CancellationToken ct)
     {
@@ -368,6 +436,9 @@ public sealed class NullJeebWalletLedgerReader : IJeebWalletLedgerReader
 /// </summary>
 public sealed class ShadowComparingJeebWalletLedgerReader : IJeebWalletLedgerReader
 {
+    /// <summary>Budget for the detached shadow read; deliberately a const, not a config key (G-22).</summary>
+    private static readonly TimeSpan ShadowReadBudget = TimeSpan.FromSeconds(5);
+
     private readonly IJeebWalletLedgerReader _primary;
     private readonly IJeebWalletLedgerReader _shadow;
     private readonly ILogger<ShadowComparingJeebWalletLedgerReader> _log;
@@ -387,15 +458,8 @@ public sealed class ShadowComparingJeebWalletLedgerReader : IJeebWalletLedgerRea
         CancellationToken ct)
     {
         var primary = await _primary.ReadLedgerAsync(holderId, page, pageSize, type, from, to, ct);
-        try
-        {
-            var shadow = await _shadow.ReadLedgerAsync(holderId, page, pageSize, type, from, to, ct);
-            LogComparison(holderId, "page", primary, shadow);
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "Wallet ledger shadow read failed for holder {HolderId}.", holderId);
-        }
+        CompareDetached(holderId, "page", primary, shadowCt =>
+            _shadow.ReadLedgerAsync(holderId, page, pageSize, type, from, to, shadowCt));
         return primary;
     }
 
@@ -403,21 +467,38 @@ public sealed class ShadowComparingJeebWalletLedgerReader : IJeebWalletLedgerRea
         Guid holderId, string detailId, CancellationToken ct)
     {
         var primary = await _primary.ReadEntryAsync(holderId, detailId, ct);
-        try
-        {
-            var shadow = await _shadow.ReadEntryAsync(holderId, detailId, ct);
-            LogComparison(
-                holderId,
-                "detail",
-                primary is null ? Array.Empty<JeebWalletLedgerEntry>() : new[] { primary },
-                shadow is null ? Array.Empty<JeebWalletLedgerEntry>() : new[] { shadow });
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "Wallet ledger shadow detail read failed for holder {HolderId}.", holderId);
-        }
+        CompareDetached(holderId, "detail", AsList(primary), async shadowCt =>
+            AsList(await _shadow.ReadEntryAsync(holderId, detailId, shadowCt)));
         return primary;
     }
+
+    /// <summary>
+    /// Observational by construction: the shadow runs off the request (its own token and budget,
+    /// never the caller's) so it cannot delay, alter or fault the already-computed response.
+    /// </summary>
+    private void CompareDetached(
+        Guid holderId,
+        string scope,
+        IReadOnlyList<JeebWalletLedgerEntry> primary,
+        Func<CancellationToken, Task<IReadOnlyList<JeebWalletLedgerEntry>>> readShadow)
+    {
+        _ = Task.Run(async () =>
+        {
+            using var cts = new CancellationTokenSource(ShadowReadBudget);
+            try
+            {
+                LogComparison(holderId, scope, primary, await readShadow(cts.Token));
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(
+                    ex, "Wallet ledger shadow {Scope} read failed for holder {HolderId}.", scope, holderId);
+            }
+        }, CancellationToken.None);
+    }
+
+    private static IReadOnlyList<JeebWalletLedgerEntry> AsList(JeebWalletLedgerEntry? entry) =>
+        entry is null ? Array.Empty<JeebWalletLedgerEntry>() : new[] { entry };
 
     private void LogComparison(
         Guid holderId,
