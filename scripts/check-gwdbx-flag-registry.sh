@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # G-22 gate (PRE-03 + PRE-06): registry shape, one-way repo-subset-of-registry containment,
-# forbidden names inactive. Rationale + inventory method (D1): docs/runbooks/gwdbx-program-rules.md.
+# forbidden names inactive. Rationale + inventory method (D1/D2): docs/runbooks/gwdbx-program-rules.md.
 set -euo pipefail
 
 SRC="src/JeebGateway"
@@ -68,17 +68,21 @@ APPROVED="$(printf '%s\n' "$ROWS" \
   | awk '$2 == "baseline" || $2 == "program" || $2 == "setting" {print $1}' | sort -u)"
 FORBIDDEN="$(printf '%s\n' "$ROWS" | awk '$2 == "forbidden" {print $1}' | sort -u)"
 
-# Inventory: jq-flattened appsettings keys (authoritative) + D1 code arm + *Mode arm.
+# Inventory: jq-flattened appsettings keys + code (bound-options) arm + literal-read arm + *Mode arm.
 # `paths(scalars)` is WRONG here — it drops `false` values, hiding default-OFF flags.
+# Array indices collapse to the element property (Boundaries:0:Key -> Boundaries:Key).
 RAW_CONFIG_KEYS="$(for f in "$SRC"/appsettings*.json; do
     jq -r 'paths as $p | select(getpath($p) | type | . != "object" and . != "array") | $p | join(":")' "$f"
-  done | grep -vE '(^|:)_comment' | sort -u)"
+  done | grep -vE '(^|:)_comment' | sed -E -e ':a' -e 's/:[0-9]+(:|$)/\1/' -e ta | sort -u)"
 ALL_CONFIG_KEYS="$(printf '%s\n' "$RAW_CONFIG_KEYS" | sed 's/^FeatureFlags://' | sort -u)"
-CONFIG_FLAGS="$(printf '%s\n' "$RAW_CONFIG_KEYS" | grep -E '^FeatureFlags:|Migration:|Mode$' \
-  | sed 's/^FeatureFlags://' | sort -u || true)"
-# D1 code arm: every options class bound via Configure<T>(...GetSection(...)) in Program.cs,
-# so an env-only switch (no appsettings key) can never hide from the registry again.
-CLASS_INDEX="$(git grep -E '^[[:space:]]*(public|internal)[^=(]*[[:space:]]class[[:space:]]+[A-Za-z0-9_]+' \
+# D2: EVERY committed key, not the `FeatureFlags:|Migration:|...Mode` name-spelling guess —
+# that heuristic let a committed `OpsBypass:SkipAuthentication` through untouched.
+CONFIG_FLAGS="$ALL_CONFIG_KEYS"
+# Code arm (D1 + D2): every options class bound ANYWHERE under $SRC — Configure<T>(…GetSection(…)),
+# AddOptions<T>()…Bind(…) and GetSection(…).Get<T>() are all binding sites, in Program.cs or not.
+# --untracked everywhere: a brand-new options file is exactly how a flag arrives, and
+# plain `git grep` cannot see it until it is added.
+CLASS_INDEX="$(git grep --untracked -E '^[[:space:]]*(public|internal)[^=(]*[[:space:]]class[[:space:]]+[A-Za-z0-9_]+' \
   -- "$SRC" | sed -E 's/^([^:]+):.*[[:space:]]class[[:space:]]+([A-Za-z0-9_]+).*$/\2 \1/' | sort -u)"
 
 # "SECTION <name>" + "PROP <name> <type>" for what class $2 of file $1 declares directly;
@@ -99,12 +103,13 @@ class_members() {
     }' "$1"
 }
 
-# File declaring class $1, empty when $1 is not a class here (string/int/TimeSpan/...);
+# EVERY file declaring class $1, empty when $1 is not a class here (string/int/TimeSpan/...);
 # the in-shell name test keeps the scalar property types from spawning a lookup each.
+# D2: first-hit-only dropped a same-named class in another namespace, or a partial-class half.
 CLASS_NAMES=" $(printf '%s\n' "$CLASS_INDEX" | awk '{print $1}' | sort -u | tr '\n' ' ')"
-class_file() {
+class_files() {
   case "$CLASS_NAMES" in *" $1 "*) ;; *) return 0 ;; esac
-  awk -v c="$1" '$1 == c { print $2; exit }' <<<"$CLASS_INDEX"
+  awk -v c="$1" '$1 == c { print $2 }' <<<"$CLASS_INDEX"
 }
 
 # emit_flags <file> <class> <key-prefix> <depth>: one token per bindable property,
@@ -117,48 +122,72 @@ emit_flags() {
     type="${type%\?}"; type="${type##*.}"
     case "$type" in
       *[!A-Za-z0-9_]*) ;;
-      *) nested="$(class_file "$type")"
-         if [ -n "$nested" ]; then emit_flags "$nested" "$type" "$3:$name" $(($4 + 1)); fi ;;
+      *) for nested in $(class_files "$type"); do
+           emit_flags "$nested" "$type" "$3:$name" $(($4 + 1))
+         done ;;
     esac
   done
 }
 
+# emit_type <type>: the type's own properties, from every file that declares it.
+# The section const may live in one half of a partial class and the properties in the other.
+emit_type() {
+  local f sec fallback
+  fallback="$(for f in $(class_files "$1"); do
+      class_members "$f" "$1" | awk '$1 == "SECTION" { print $2; exit }'
+    done | awk 'NR == 1')"
+  for f in $(class_files "$1"); do
+    sec="$(class_members "$f" "$1" | awk '$1 == "SECTION" { print $2; exit }')"
+    emit_flags "$f" "$1" "${sec:-${fallback:-$1}}" 1
+  done
+}
+
+# Statement-joined scan of every .cs file, not Program.cs only: 6 of the repo's options
+# classes bind through AddOptions<T>().Bind(...), four of them from Extensions/*.cs.
+CS_FILES="$(git ls-files -co --exclude-standard "$SRC" | grep -E '\.cs$' | sort -u)"
 BOUND_TYPES="$(awk '
+  FNR == 1 { stmt = "" }
   { stmt = stmt " " $0 }
   /;[[:space:]]*$/ {
-    if (stmt ~ /GetSection\(/) {
+    if (stmt ~ /GetSection\(|\.Bind\(/) {
       s = stmt
-      while (match(s, /Configure<[^>]+>/)) {
-        t = substr(s, RSTART + 10, RLENGTH - 11); s = substr(s, RSTART + RLENGTH)
-        sub(/.*\./, "", t); print t
+      while (match(s, /(Configure|AddOptions|Get)<[^<>]+>/)) {
+        t = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+        sub(/^[A-Za-z]+</, "", t); sub(/>$/, "", t); sub(/.*\./, "", t)
+        # Get<string[]>/Get<int> read a key, not an options class; the read arm owns those.
+        if (t ~ /^[A-Za-z_][A-Za-z0-9_]*$/) print t
       }
     }
     stmt = ""
-  }' "$PROGRAM_CS" | sort -u)"
+  }' $CS_FILES | sort -u)"
 if [ -z "$BOUND_TYPES" ]; then
-  echo "FAIL: no Configure<T>(...GetSection(...)) binding parsed from $PROGRAM_CS —"
-  echo "      the D1 code arm would silently inventory nothing. Fix the parser."
+  echo "FAIL: no options binding parsed from $CS_FILES —"
+  echo "      the code arm would silently inventory nothing. Fix the parser."
   exit 1
 fi
-UNRESOLVED="$(for t in $BOUND_TYPES; do if [ -z "$(class_file "$t")" ]; then echo "$t"; fi; done)"
+UNRESOLVED="$(for t in $BOUND_TYPES; do if [ -z "$(class_files "$t")" ]; then echo "$t"; fi; done)"
 if [ -n "$UNRESOLVED" ]; then
-  echo "FAIL: bound options class(es) not declared under $SRC, so the D1 code arm"
+  echo "FAIL: bound options class(es) not declared under $SRC, so the code arm"
   echo "      cannot inventory them: $(printf '%s ' $UNRESOLVED)"
   exit 1
 fi
-CODE_FLAGS="$(for t in $BOUND_TYPES; do
-    f="$(class_file "$t")"
-    sec="$(class_members "$f" "$t" | awk '$1 == "SECTION" { print $2; exit }')"
-    emit_flags "$f" "$t" "${sec:-$t}" 1
-  done | sed 's/^FeatureFlags://' | sort -u)"
+CODE_FLAGS="$(for t in $BOUND_TYPES; do emit_type "$t"; done \
+  | sed 's/^FeatureFlags://' | sort -u)"
 if [ -z "$CODE_FLAGS" ]; then
-  echo "FAIL: the D1 code arm produced 0 tokens from $(printf '%s\n' "$BOUND_TYPES" | grep -c .)"
+  echo "FAIL: the code arm produced 0 tokens from $(printf '%s\n' "$BOUND_TYPES" | grep -c .)"
   echo "      bound options class(es) — the property parser is broken, not the repo."
   exit 1
 fi
-MODE_TOKENS="$(git grep -howE '[A-Za-z]+Mode' -- "$SRC" | sort -u \
+# D2 read arm: keys read straight off IConfiguration with no options class in between —
+# GetValue<T>("k") / GetSection("k") / config["k"] / a `…Key` const holding the literal.
+READ_FLAGS="$({
+    git grep --untracked -hoE '(GetValue<[^<>]*>|GetSection|GetConnectionString)\("[^"]+"' -- "$SRC"
+    git grep --untracked -hoE '([A-Za-z0-9_.]*[Cc]onfig(uration)?|cfg)\[[[:space:]]*"[^"]+"' -- "$SRC"
+    git grep --untracked -hoE 'const string [A-Za-z0-9_]*Key = "[^"]+:[^"]+"' -- "$SRC"
+  } | sed -E 's/^[^"]*"//; s/"$//; s/^FeatureFlags://' | grep -vE '^[[:space:]]*$' | sort -u)"
+MODE_TOKENS="$(git grep --untracked -howE '[A-Za-z]+Mode' -- "$SRC" | sort -u \
   | grep -vxF "$FRAMEWORK_MODE_TYPES" || true)"
-INVENTORY="$(printf '%s\n%s\n%s\n' "$CONFIG_FLAGS" "$CODE_FLAGS" "$MODE_TOKENS" \
+INVENTORY="$(printf '%s\n%s\n%s\n%s\n' "$CONFIG_FLAGS" "$CODE_FLAGS" "$READ_FLAGS" "$MODE_TOKENS" \
   | grep -vE '^[[:space:]]*$' | sort -u)"
 
 # ---- Invariant (2): one-way containment (repo subset of registry) -----------
@@ -177,13 +206,16 @@ else
 fi
 echo "   arms: config=$(printf '%s\n' "$CONFIG_FLAGS" | grep -cE '.')" \
      "code=$(printf '%s\n' "$CODE_FLAGS" | grep -cE '.')" \
+     "read=$(printf '%s\n' "$READ_FLAGS" | grep -cE '.')" \
      "mode=$(printf '%s\n' "$MODE_TOKENS" | grep -cE '.')" \
      "(code arm: $(printf '%s\n' "$BOUND_TYPES" | grep -cE '.') bound options classes)"
 
 # ---- Invariant (3): forbidden names are never active config keys ------------
-echo "-- (3) forbidden names absent from active config keys and UpstreamFeatureFlags"
+echo "-- (3) forbidden names absent from active config keys, bound options and code reads"
+# D2: the read arm belongs here too — a retired name revives just as well through
+# GetValue<bool>("FeatureFlags:UseUpstream:Payments") as through an options property.
 active_forbidden="$(comm -12 <(printf '%s\n' "$FORBIDDEN") \
-  <(printf '%s\n%s\n' "$ALL_CONFIG_KEYS" "$CODE_FLAGS" | sort -u) || true)"
+  <(printf '%s\n%s\n%s\n' "$ALL_CONFIG_KEYS" "$CODE_FLAGS" "$READ_FLAGS" | sort -u) || true)"
 if [ -n "$active_forbidden" ]; then
   echo "FAIL: SUPERSEDED/retired name(s) active as a config key or a bound flag property:"
   printf '  %s\n' $active_forbidden

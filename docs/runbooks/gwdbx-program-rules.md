@@ -68,16 +68,22 @@ Reviewer checklist: smallest diff that satisfies the item; no runtime-behaviour 
 StoreDurabilityGuard roster edited in the **same PR** as any store deletion; no flag key outside the registry; and none of
 §1 violated.
 
-### 4.1 G-22 inventory scope (owner decision D1 — ruled, option A)
+### 4.1 G-22 inventory scope (owner decision D1 — ruled, option A; scope bugs closed by D2)
 
-`scripts/check-gwdbx-flag-registry.sh` inventories the repo through three arms, and every token it produces must appear
+`scripts/check-gwdbx-flag-registry.sh` inventories the repo through four arms, and every token it produces must appear
 in `scripts/gwdbx-flag-registry.txt`:
 
-1. **`CONFIG_FLAGS`** — jq-flattened `appsettings*.json` keys matching `FeatureFlags:` / `Migration:` / `…Mode`.
-2. **`CODE_FLAGS`** — **every** options class bound via `Configure<T>(…GetSection(…))` in `Program.cs`, contributing its
-   bindable public properties as `<SectionName>:<PropertyName>` (section taken from the class's `SectionName` const,
-   recursing into nested option types). Before D1 this arm read `Services/UpstreamFeatureFlags.cs` only.
-3. **`MODE_TOKENS`** — `*Mode` identifiers under `src/`, minus `FRAMEWORK_MODE_TYPES`.
+1. **`CONFIG_FLAGS`** — **every** jq-flattened `appsettings*.json` key (array indices collapse to the element
+   property, `FeatureFlags:` prefix stripped). It does **not** filter on how the key is spelled.
+2. **`CODE_FLAGS`** — **every** options class bound anywhere under `src/JeebGateway` via `Configure<T>(…GetSection(…))`,
+   `AddOptions<T>()…Bind(…)` or `GetSection(…).Get<T>()`, contributing its bindable public properties as
+   `<SectionName>:<PropertyName>` (section from the class's `SectionName` const, recursing into nested option types,
+   reading **every** file that declares the class). Before D1 this arm read `Services/UpstreamFeatureFlags.cs` only.
+3. **`READ_FLAGS`** — literal keys read straight off `IConfiguration` with no options class in between:
+   `GetValue<T>("k")`, `GetSection("k")`, `config["k"]`, and `const string …Key = "k"`.
+4. **`MODE_TOKENS`** — `*Mode` identifiers under `src/`, minus `FRAMEWORK_MODE_TYPES`.
+
+All four arms read untracked files too, because a brand-new options file is exactly how a flag arrives.
 
 **What D1 fixed.** `FRAMEWORK_MODE_TYPES` is for framework *type* names, but it also held two real configuration
 switches, so the registry was blind to both:
@@ -97,4 +103,25 @@ bare `*Mode`-arm token and once as the full key, because those are the two forms
 `FRAMEWORK_MODE_TYPES` is now only `BoundedChannelFullMode`, `FullMode` (both `System.Threading.Channels`),
 `SameSiteMode` (ASP.NET cookie enum) and `PushDeliveryMode` (a local enum in `Notifications/PushSilencePolicy.cs`, never
 bound to configuration). **Re-verify against the binding sites before adding a fifth** — an entry here is a hole in the
-registry, and widening `CODE_FLAGS` is what keeps an environment-only switch from hiding a second time.
+registry.
+
+**What D2 fixed.** D1 claimed the widened `CODE_FLAGS` meant an environment-only switch could never hide again. That was
+false: the arm parsed `Configure<T>(…GetSection(…))` in `Program.cs` only, so the six classes bound through
+`AddOptions<T>().Bind(…)` — `ServiceAuthOptions`, `DownstreamServicesOptions`, `PartnerWalletOptions`,
+`PartnerAuthOptions` (in `Extensions/*.cs`), `NewRequestFanoutOptions` and `TrackingOptions` (in `Program.cs`) — were
+inventoried by no arm at all, and neither was anything bound from an extension method. `ServiceAuth:Enabled`,
+`PartnerWallet:MaxTransferAmount` and `StoreDurability:FailClosedDisabled` were live, switchable and unregistered. Four
+scope bugs are closed, each with a probe that now fails the gate:
+
+- the code arm scans **every** `.cs` file and all three binding idioms, not `Configure<T>` in `Program.cs`;
+- bound types resolve to **every** file declaring that simple name, so a same-named class in a second namespace (or the
+  other half of a `partial`) is no longer silently replaced by the alphabetically-first file;
+- the config arm keeps **every** committed key — the old `FeatureFlags:|Migration:|…Mode` filter was a name-spelling
+  guess that a `OpsBypass:SkipAuthentication` key walks straight past, and it is only luck that `SuperLogin:OpenMode`
+  was spelled with a capital `M`;
+- invariant (3) tests the forbidden names against the read arm as well, since `GetValue<bool>("FeatureFlags:UseUpstream:Payments")`
+  revives a retired flag just as effectively as an options property does.
+
+**Known limit.** A key assembled at runtime (`config[$"{Section}:Enabled"]`, `config[someVariable]`) is not a literal and
+no static arm can see it. Write configuration keys as literals or as a `const string …Key`; a computed key is a review
+finding, not a gate finding.

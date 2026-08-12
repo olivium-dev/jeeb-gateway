@@ -259,3 +259,104 @@ Whisper:MaxAttempts                                  setting -
 Whisper:MaxBackoff                                   setting -
 Whisper:Model                                        setting -
 Whisper:Timeout                                      setting -
+
+# ---- setting: bound options knobs the pre-D2 code arm could not reach (D2) --
+# AddOptions<T>().Bind(...) sites — 4 in Extensions/*.cs, 2 in Program.cs — plus GetSection().Get<T>().
+BffServices:Keys                                     setting -
+BffServices:Required                                 setting -
+BffServices:RequiredInProduction                     setting - # false skips the BFF downstream-URL boot validator
+Notifications:NewRequestFanout:FallbackToKnownJeebers setting -
+Notifications:NewRequestFanout:KnownJeeberWindow     setting -
+Notifications:NewRequestFanout:MaxParallelSends      setting -
+Notifications:NewRequestFanout:MaxRecipients         setting -
+Notifications:NewRequestFanout:PerSendTimeout        setting -
+Notifications:NewRequestFanout:QueueCapacity         setting -
+Notifications:NewRequestFanout:RadiusKm              setting -
+Notifications:NewRequestFanout:TopicFallbackWhenEmpty setting - # topic-blast hatch when the per-user set is empty
+Notifications:NewRequestFanout:TotalBudget           setting -
+PartnerAuth:Credentials                              setting - # SECRET: partner API credentials
+PartnerWallet:CreditTag                              setting -
+PartnerWallet:CurrencyId                             setting -
+PartnerWallet:EnforceHolderType                      setting - # false drops the holder-type check on partner transfers
+PartnerWallet:JeeberHolderTypes                      setting -
+PartnerWallet:MaxTransferAmount                      setting - # MONEY: per-transfer cap
+PartnerWallet:OtpStepUpThreshold                     setting - # MONEY: amount above which OTP step-up is demanded
+PartnerWallet:PartnerHolderTypes                     setting -
+PartnerWallet:ServiceName                            setting -
+PartnerWallet:TopupTag                               setting -
+ServiceAuth:Caller                                   setting -
+ServiceAuth:ClockSkewSeconds                         setting -
+ServiceAuth:Enabled                                  setting - # SECURITY: false stops signing service-to-service calls
+ServiceAuth:SigningKey                               setting - # SECRET: service-to-service signing key
+Tracking:MaxPointsPerBatch                           setting -
+Tracking:PositionRetention                           setting -
+Tracking:PositionTtl                                 setting -
+Tracking:StaleThreshold                              setting -
+Users:DataExport:FeedbackRatings:Enabled             setting -
+Users:DataExport:FeedbackRatings:PageLimit           setting -
+Users:DataExport:FeedbackRatings:ServiceTokenFile    setting -
+Users:DataExport:FeedbackRatings:TimeoutSeconds      setting -
+
+# ---- setting: committed appsettings keys, no longer filtered by name (D2) ---
+# The config arm inventories every flattened key; array indices collapse to the element property.
+Admin:Zones:Boundaries:Key                           setting -
+Admin:Zones:Boundaries:MaxLatitude                   setting -
+Admin:Zones:Boundaries:MaxLongitude                  setting -
+Admin:Zones:Boundaries:MinLatitude                   setting -
+Admin:Zones:Boundaries:MinLongitude                  setting -
+Admin:Zones:Boundaries:Name                          setting -
+AllowedHosts                                         setting -
+CatalogServiceApi:BaseUrl                            setting -
+ChatServiceApi:BaseUrl                               setting -
+FeedbackServiceApi:BaseUrl                           setting -
+ForwardedHeaders:KnownProxies                        setting -
+GatewayRateLimit:PerIpPerMin                         setting -
+GatewayRateLimit:PerPhonePerMin                      setting -
+JeebStateService:BaseUrl                             setting -
+JeebStateService:Enabled                             setting -
+JeebStateService:TimeoutSeconds                      setting -
+Logging:LogLevel:Default                             setting -
+Logging:LogLevel:Microsoft.AspNetCore                setting -
+Otel:Endpoint                                        setting -
+PushNotificationServiceApi:BaseUrl                   setting -
+Redis:ConnectionString                               setting -
+RemoteUserPreferencesServiceApi:BaseUrl              setting -
+ServiceContractSigningApi:BaseUrl                    setting -
+ServiceNotificationClient:BaseUrl                    setting -
+ServiceOTPApi:BaseUrl                                setting -
+Services:Auth                                        setting -
+Services:Ban:BaseUrl                                 setting -
+Services:Cdn:BaseUrl                                 setting -
+Services:Compliment:BaseUrl                          setting -
+Services:ContractSigning:BaseUrl                     setting -
+Services:Delivery:BaseUrl                            setting -
+Services:FormBuilder:BaseUrl                         setting -
+Services:Geolocation                                 setting -
+Services:Geolocation:BaseUrl                         setting -
+Services:HeartBeat:BaseUrl                           setting -
+Services:Kyc:BaseUrl                                 setting -
+Services:Offer:BaseUrl                               setting -
+Services:Realtime:BaseUrl                            setting -
+Services:VoiceTranscription:BaseUrl                  setting -
+UserManagementServiceApi:BaseUrl                     setting -
+WalletServiceApi:BaseUrl                             setting -
+
+# ---- setting: keys read straight off IConfiguration, no options class (D2) --
+AdminEvidence:TokenKey                               setting - # SECRET: signs admin evidence links
+AdminPortal:AllowedOrigins                           setting -
+ComplimentServiceApi                                 setting -
+ComplimentServiceApi:BaseUrl                         setting -
+DevEndpoints                                         setting - # parent section of Features:DevEndpoints:Enabled
+Features                                             setting - # parent section of Features:{DevEndpoints,Swagger}
+ForwardedHeaders:KnownNetworks                       setting -
+GatewayPostgres:ConnectionString                     setting - # DSN, deleted with the gateway DB at W5-10
+GatewayRateLimit:RedisConnectionString               setting - # DSN
+NotificationCatalogSeeder:Enabled                    setting - # env-only seeder switch, in no appsettings file
+PushNotificationServiceApi:InternalApiKey            setting - # SECRET: push-service internal key
+ServiceNotificationClient:ApiToken                   setting - # SECRET: notification-service token, read via a const key
+Services:JeebState:BaseUrl                           setting - # legacy alias of JeebStateService:BaseUrl
+Services:ServiceOTP                                  setting -
+Services:ServiceOTP:BaseUrl                          setting -
+StoreDurability:FailClosedDisabled                   setting - # SECURITY: disables the fail-closed durability guard (test harness only)
+Swagger                                              setting - # parent section of Features:Swagger
+WalletPostgres:ConnectionString                      setting - # DSN, deleted with the wallet read path at W5-10
