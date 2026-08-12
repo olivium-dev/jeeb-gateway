@@ -51,6 +51,9 @@ internal static class StoreDurabilityGuard
         // Disputes and support share the canonical generic case authority. The retired
         // opaque dispute stores must not remain production boot requirements.
         (typeof(JeebGateway.Services.Clients.IGenericCaseStateClient),      new[] { typeof(JeebGateway.Services.Clients.JeebStateServiceClient) }),
+        // W1-02 (G-08): audit-events + work-items are the durable home of the admin trail and the
+        // GDPR export queue; the Unavailable fallback must never satisfy a prod-like boot.
+        (typeof(JeebGateway.Services.Clients.IStateOwnershipClient),        new[] { typeof(JeebGateway.Services.Clients.JeebStateServiceClient) }),
         // Ambiguous at-most-once push claims require the durable push-service operator
         // ledger; the gateway client is stateless, but this recovery boundary must resolve.
         (typeof(JeebGateway.Services.Clients.IPushDispatchRecoveryClient), new[] { typeof(JeebGateway.Services.Clients.PushDispatchRecoveryClient) }),
