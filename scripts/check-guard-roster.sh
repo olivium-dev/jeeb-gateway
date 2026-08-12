@@ -4,6 +4,8 @@
 # Failure mode it closes: a store deletion PR removes the implementation but
 # leaves its line on StoreDurabilityGuard.Critical, so the fail-closed boot
 # guard 503s production on the next deploy. Invariants:
+#   (0) SHAPE   — the generated roster is plausible (all four rosters present,
+#       Critical not collapsed), so the gate cannot be neutered into a pass.
 #   (1) DRIFT   — scripts/guard-roster.txt matches the four rosters in
 #       StoreDurabilityGuard.cs (roster edit + manifest ship in the SAME PR).
 #   (2) ORPHAN  — every type on the manifest is still declared under src/.
@@ -20,6 +22,10 @@ GUARD="$SRC/Infrastructure/StoreDurabilityGuard.cs"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="$SCRIPT_DIR/guard-roster.txt"
 BUILD_WORKFLOW=".github/workflows/build.yml"
+ROSTERS="Critical KnownInMemoryBacklog UpstreamContractIncomplete IntentionalInMemory"
+# Critical held 33 entries at 66a7b9d; a parser regression collapses it to 0, while
+# the planned W1–W5 store extractions remove far fewer than the 8 slack entries here.
+CRITICAL_MIN=25
 fail=0
 
 # Emits "<Roster> <Iface>[ -> <Impl>[, <Impl>]]" per roster entry, in source
@@ -40,13 +46,15 @@ generate_roster() {
       for (i = 2; i <= n; i++) out = out (i == 2 ? " -> " : ", ") a[i]
       print out
     }
-    /^[[:space:]]*internal static readonly .*\[\][[:space:]]+[A-Za-z]+[[:space:]]*=[[:space:]]*$/ {
+    # Every brace style: opener at EOL, on the declaration line, or a C# 12
+    # collection expression, so a harmless restyle cannot silently empty a roster.
+    /^[[:space:]]*internal static readonly .*\[\][[:space:]]+[A-Za-z]+[[:space:]]*=[[:space:]]*[{[]?[[:space:]]*$/ {
       name = $0
-      sub(/[[:space:]]*=[[:space:]]*$/, "", name)
+      sub(/[[:space:]]*=[[:space:]]*[{[]?[[:space:]]*$/, "", name)
       sub(/.*[[:space:]]/, "", name)
       roster = name; buf = ""; next
     }
-    roster != "" && /^[[:space:]]*\};[[:space:]]*$/ {
+    roster != "" && /^[[:space:]]*[}\]];[[:space:]]*$/ {
       # A last entry may omit its trailing comma; flush it so it is not dropped.
       o = gsub(/\(/, "(", buf); c = gsub(/\)/, ")", buf)
       if (o == c) flush(buf)
@@ -66,18 +74,53 @@ generate_roster() {
   ' "$GUARD"
 }
 
+# Invariant (0). A parser regression (e.g. a restyled declaration) empties a roster
+# silently; without this, --write would bake the collapse in and the gate would pass.
+assert_roster_shape() {
+  file="$1"
+  shape_bad=0
+  for name in $ROSTERS; do
+    n="$(grep -cE "^${name}[[:space:]]" "$file" || true)"
+    if [ "$n" -eq 0 ]; then
+      echo "FAIL: generator emitted 0 entries for roster '$name' — it no longer parses"
+      echo "      its declaration in $GUARD. Fix the generator; do NOT"
+      echo "      regenerate the manifest, that neuters the G-08 gate. (invariant 0)"
+      shape_bad=1
+    fi
+  done
+  n="$(grep -cE '^Critical[[:space:]]' "$file" || true)"
+  if [ "$n" -gt 0 ] && [ "$n" -lt "$CRITICAL_MIN" ]; then
+    echo "FAIL: Critical roster collapsed to $n entries (floor $CRITICAL_MIN) — a real"
+    echo "      shrink that large needs this floor lowered in the SAME PR. (invariant 0)"
+    shape_bad=1
+  fi
+  [ "$shape_bad" -eq 0 ] || exit 1
+}
+
 if [ ! -f "$GUARD" ]; then
   echo "FAIL: $GUARD not found (run from the repo root)"
   exit 1
 fi
 
 if [ "${1:-}" = "--write" ]; then
-  generate_roster > "$MANIFEST"
+  STAGED="$(mktemp)"
+  trap 'rm -f "$STAGED"' EXIT
+  generate_roster > "$STAGED"
+  assert_roster_shape "$STAGED"
+  cat "$STAGED" > "$MANIFEST"
   echo "wrote $MANIFEST ($(grep -cE '.' "$MANIFEST") entries)"
   exit 0
 fi
 
 echo "== G-08 gate: StoreDurabilityGuard roster manifest =="
+
+# ---- Invariant (0): the generated roster is plausible ----------------------
+echo "-- (0) SHAPE: generator still sees all four rosters"
+GENERATED="$(mktemp)"
+trap 'rm -f "$GENERATED"' EXIT
+generate_roster > "$GENERATED"
+assert_roster_shape "$GENERATED"
+echo "OK: four rosters non-empty, Critical=$(grep -cE '^Critical[[:space:]]' "$GENERATED") (floor $CRITICAL_MIN)."
 
 # ---- Invariant (1): manifest matches the C# rosters (R1 same-PR rule) -------
 echo "-- (1) DRIFT: scripts/guard-roster.txt vs StoreDurabilityGuard.cs"
@@ -85,10 +128,6 @@ if [ ! -f "$MANIFEST" ]; then
   echo "FAIL: manifest not found at $MANIFEST"
   exit 1
 fi
-
-GENERATED="$(mktemp)"
-trap 'rm -f "$GENERATED"' EXIT
-generate_roster > "$GENERATED"
 
 if ! diff -u "$MANIFEST" "$GENERATED" > /dev/null; then
   echo "FAIL: guard-roster.txt has drifted from StoreDurabilityGuard.cs."
