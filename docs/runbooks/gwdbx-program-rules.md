@@ -67,3 +67,34 @@ A `gwdbx(...)` PR is read against the plan clause and guardrail IDs named in its
 Reviewer checklist: smallest diff that satisfies the item; no runtime-behaviour change unless the item says so; the
 StoreDurabilityGuard roster edited in the **same PR** as any store deletion; no flag key outside the registry; and none of
 §1 violated.
+
+### 4.1 G-22 inventory scope (owner decision D1 — ruled, option A)
+
+`scripts/check-gwdbx-flag-registry.sh` inventories the repo through three arms, and every token it produces must appear
+in `scripts/gwdbx-flag-registry.txt`:
+
+1. **`CONFIG_FLAGS`** — jq-flattened `appsettings*.json` keys matching `FeatureFlags:` / `Migration:` / `…Mode`.
+2. **`CODE_FLAGS`** — **every** options class bound via `Configure<T>(…GetSection(…))` in `Program.cs`, contributing its
+   bindable public properties as `<SectionName>:<PropertyName>` (section taken from the class's `SectionName` const,
+   recursing into nested option types). Before D1 this arm read `Services/UpstreamFeatureFlags.cs` only.
+3. **`MODE_TOKENS`** — `*Mode` identifiers under `src/`, minus `FRAMEWORK_MODE_TYPES`.
+
+**What D1 fixed.** `FRAMEWORK_MODE_TYPES` is for framework *type* names, but it also held two real configuration
+switches, so the registry was blind to both:
+
+- **`SuperLogin:OpenMode`** (bound at the `SuperLoginOptions` site in `Program.cs`) — security-critical: when true the
+  gateway mints a session token for an arbitrary `userId` with no service key and serves the demo-user roster
+  anonymously. It appears in **no** `appsettings*.json` file; it is set only as the environment variable
+  `SuperLogin__OpenMode` on the live server, so `CONFIG_FLAGS` could never see it and the `*Mode` arm was the only arm
+  that could.
+- **`WalletGuard:FailMode`** (bound at the `WalletGuardOptions` site) — selects fail-open vs fail-closed when
+  wallet-service is down.
+
+Both are now **registered rather than ignored**, under a fourth status **`setting`**: bound configuration that is not a
+cutover flag, so it always carries owning-wave `-` and never a `create=`/`delete=` pair. Each appears twice, once as the
+bare `*Mode`-arm token and once as the full key, because those are the two forms the arms actually emit.
+
+`FRAMEWORK_MODE_TYPES` is now only `BoundedChannelFullMode`, `FullMode` (both `System.Threading.Channels`),
+`SameSiteMode` (ASP.NET cookie enum) and `PushDeliveryMode` (a local enum in `Notifications/PushSilencePolicy.cs`, never
+bound to configuration). **Re-verify against the binding sites before adding a fifth** — an entry here is a hole in the
+registry, and widening `CODE_FLAGS` is what keeps an environment-only switch from hiding a second time.

@@ -62,9 +62,200 @@ DurableRequests:TenantId          baseline - # pre-existing non-UseUpstream key
 Kyc:AutoApprove                   baseline - # pre-existing non-UseUpstream key
 Heartbeat:RoleKey                 baseline - # pre-existing non-UseUpstream key
 Heartbeat:ServiceAuthKey          baseline - # pre-existing non-UseUpstream key
-WalletGuard:FailMode              baseline - # pre-existing; also picked up by the *Mode arm
 
 # ---- baseline: retained knobs, never deleted by this program ----------------
 Notifications:NewRequestFanout:Enabled baseline - # byte-identical topic-blast kill switch
 Heartbeat:Enabled                      baseline - # orthogonal, default OFF
 UseUpstream:EvidencePresign            baseline - # optional rider, NOT scheduled
+
+# ---- setting: the two real switches the *Mode ignore list used to hide (D1) -
+OpenMode                                             setting - # bare *Mode-arm form of SuperLogin:OpenMode; env-only (SuperLogin__OpenMode), in no appsettings file
+SuperLogin:OpenMode                                  setting - # SECURITY: true mints a session token for any userId with no service key and serves the demo roster anonymously
+FailMode                                             setting - # bare *Mode-arm form of WalletGuard:FailMode; the key itself lives in appsettings.json + appsettings.Production.json
+WalletGuard:FailMode                                 setting - # fail-open vs fail-closed when wallet-service is down (was baseline; D1 restates it as a reviewed setting)
+
+# ---- setting: bound options knobs inventoried by the D1 Configure<T> arm -----
+Admin:Zones:Boundaries                               setting -
+Admin:Zones:RefreshInterval                          setting -
+AdminOidc:AllowedSigningAlgorithms                   setting -
+AdminOidc:AuthorizationEndpoint                      setting -
+AdminOidc:ClientId                                   setting -
+AdminOidc:ClientSecret                               setting -
+AdminOidc:CorrelationLifetimeMinutes                 setting -
+AdminOidc:Enabled                                    setting -
+AdminOidc:GroupClaim                                 setting -
+AdminOidc:Issuer                                     setting -
+AdminOidc:JwksUri                                    setting -
+AdminOidc:MaxAuthenticationAgeMinutes                setting -
+AdminOidc:OperatorSessionHours                       setting -
+AdminOidc:RedirectUri                                setting -
+AdminOidc:RequiredAcrValues                          setting -
+AdminOidc:RoleMappings                               setting -
+AdminOidc:Scopes                                     setting -
+AdminOidc:StateProtectionKey                         setting -
+AdminOidc:TokenEndpoint                              setting -
+Auth:Otp:ApplicationId                               setting -
+Auth:Otp:Phone:AllowedRegion                         setting -
+Auth:Otp:Phone:EnforceRegion                         setting -
+Auth:Otp:RateLimit:Enabled                           setting -
+Auth:Otp:RateLimit:MaxPerIpPerWindow                 setting -
+Auth:Otp:RateLimit:MaxPerPhonePerWindow              setting -
+Auth:Otp:RateLimit:WindowSeconds                     setting -
+Auth:Otp:TtlSeconds                                  setting -
+Availability:AutoOffline:InactivityWindow            setting -
+Availability:AutoOffline:SweepInterval               setting -
+CancellationPolicy:RestrictionDurationHours          setting -
+CancellationPolicy:StrikeThreshold                   setting -
+CancellationPolicy:WeeklyThreshold                   setting -
+CancellationPolicy:WeeklyWindowDays                  setting -
+CapabilityGuard:Enforce                              setting -
+Cases:Evidence:MaxChatMessages                       setting -
+Cases:Evidence:MaxGpsPoints                          setting -
+Cases:Evidence:MaxPagesPerSource                     setting -
+Cases:Evidence:SourceTimeout                         setting -
+ConversationAutoCreate:AcceptedTag                   setting -
+ConversationAutoCreate:BroadcastingTag               setting -
+ConversationAutoCreate:ClosedPhase                   setting -
+ConversationAutoCreate:Enabled                       setting -
+Conversations:AcceptSettleReconciler:Enabled         setting -
+Conversations:AcceptSettleReconciler:LookBack        setting -
+Conversations:AcceptSettleReconciler:PageSize        setting -
+Conversations:AcceptSettleReconciler:SweepInterval   setting -
+CreateModeration:Enabled                             setting -
+DemoUsers:Enabled                                    setting - # prod-off demo seam, paired with SuperLogin:OpenMode on the roster endpoint
+DemoUsers:Users                                      setting -
+Disputes:Evidence:ChatFetchTimeout                   setting -
+Disputes:Evidence:GeoFetchTimeout                    setting -
+Disputes:Evidence:MaxTranscriptMessages              setting -
+DurableRequests:BroadcastingPhase                    setting -
+EarningsStatement:SignedUrlHmacKey                   setting -
+EarningsStatement:SignedUrlTtlHours                  setting -
+Features:DevEndpoints:Enabled                        setting - # prod-off dev-endpoint seam
+Features:Swagger:Enabled                             setting -
+Financials:SettlementLedgerReconciler:PageSize       setting -
+Financials:SettlementLedgerReconciler:SweepInterval  setting -
+Firebase:Chat:ProjectId                              setting -
+Firebase:Chat:ServiceAccountKeyPath                  setting -
+Firebase:Chat:TokenLifetimeSeconds                   setting -
+Gateway:PublicBaseUrl                                setting -
+Jwt:AccessTokenMinutes                               setting -
+Jwt:Audience                                         setting -
+Jwt:Issuer                                           setting -
+Jwt:RefreshRotationGraceSeconds                      setting -
+Jwt:RefreshTokenDays                                 setting -
+Jwt:SigningKey                                       setting -
+LowRatingFlag:MinRatingsRequired                     setting -
+LowRatingFlag:SweepInterval                          setting -
+LowRatingFlag:ThresholdScore                         setting -
+MaskedCalls:Enabled                                  setting -
+MaskedCalls:SessionDuration                          setting -
+MaskedCalls:TwilioAccountSid                         setting -
+MaskedCalls:TwilioAuthToken                          setting -
+MaskedCalls:TwilioProxyServiceSid                    setting -
+MatchingMirror:Enabled                               setting -
+OtpHandover:ClientUnreachableWindow                  setting -
+OtpHandover:MaxAttempts                              setting -
+OtpHandover:SweepInterval                            setting -
+Push:DeliverySla                                     setting -
+Push:RetryDelay                                      setting -
+Push:RetryQueueScanInterval                          setting -
+Push:TransportTimeout                                setting -
+PushNotificationServiceApi:GatewayDirectDispatch:Enabled setting -
+RatingReveal:RatingWindow                            setting -
+RatingReveal:SweepInterval                           setting -
+RatingReveal:WindowName                              setting -
+Ratings:RatingWindow                                 setting -
+Requests:Expiry:NoOfferNudgeWindow                   setting -
+Requests:Expiry:ObserverBatchLimit                   setting -
+Requests:Expiry:ObserverInterval                     setting -
+Requests:Expiry:ObserverLookback                     setting -
+Requests:Expiry:SuppressNotifyBefore                 setting -
+Requests:Expiry:SweepInterval                        setting -
+Requests:Scheduled:MatchingBuffer                    setting -
+Requests:Scheduled:SweepInterval                     setting -
+Security:ApiKey                                      setting -
+Security:ApiKey:Enabled                              setting -
+Security:ApiKey:HeaderName                           setting -
+Security:ApiKey:ServiceKeys                          setting -
+Security:Cors                                        setting -
+Security:Cors:AllowCredentials                       setting -
+Security:Cors:AllowedHeaders                         setting -
+Security:Cors:AllowedMethods                         setting -
+Security:Cors:AllowedOrigins                         setting -
+Security:Cors:ExposedHeaders                         setting -
+Security:Cors:PolicyName                             setting -
+Security:Cors:PreflightMaxAgeSeconds                 setting -
+Security:EdgeIdentity                                setting -
+Security:EdgeIdentity:SharedSecret                   setting -
+Security:EdgeIdentity:SharedSecretHeader             setting -
+Security:Headers                                     setting -
+Security:Headers:ContentSecurityPolicy               setting -
+Security:Headers:Enabled                             setting -
+Security:Headers:HstsIncludeSubdomains               setting -
+Security:Headers:HstsMaxAgeSeconds                   setting -
+Security:Headers:HstsPreload                         setting -
+Security:RateLimit                                   setting -
+Security:RateLimit:AuthReplenishmentSeconds          setting -
+Security:RateLimit:AuthTokenBucketLimit              setting -
+Security:RateLimit:AuthTokensPerPeriod               setting -
+Security:RateLimit:CdnUploadPermitsPerWindow         setting -
+Security:RateLimit:CdnUploadWindowSeconds            setting -
+Security:RateLimit:Enabled                           setting -
+Security:RateLimit:IpPermitsPerMinute                setting -
+Security:RateLimit:SensitiveEndpointPermitsPerWindow setting -
+Security:RateLimit:SensitiveEndpointWindowSeconds    setting -
+Security:RateLimit:UserPermitsPerMinute              setting -
+Security:RateLimit:WindowSegments                    setting -
+Security:RequestValidation                           setting -
+Security:RequestValidation:AllowedContentTypes       setting -
+Security:RequestValidation:Enabled                   setting -
+Security:RequestValidation:MaxBodySizeBytes          setting -
+Security:RequestValidation:MaxHeaderValueLength      setting -
+Security:RequestValidation:MaxUrlLength              setting -
+Security:TokenMint                                   setting -
+Security:TokenMint:Enabled                           setting -
+Security:TokenMint:HeaderName                        setting -
+Security:TokenMint:Key                               setting -
+Services:Delivery:ActiveDeliveriesLimit              setting -
+Services:Delivery:TenantId                           setting -
+Services:Realtime:GuardianIssuer                     setting -
+Services:Realtime:GuardianSecret                     setting -
+Services:Realtime:PublicSocketUrl                    setting -
+Services:Realtime:TokenTtlSeconds                    setting -
+Services:RoleService:ApiKey                          setting -
+Services:RoleService:BaseUrl                         setting -
+TestControlPlane:Enabled                             setting - # prod-off test control plane, shares TestControlPlane:SharedSecret
+TestControlPlane:SharedSecret                        setting -
+TierCatalogCache:StaleGrace                          setting -
+TierCatalogCache:Ttl                                 setting -
+Tracking:GeoHistoryWrite:MaxThrottleDelayMs          setting -
+Tracking:GeoHistoryWrite:MaxThrottleRetries          setting -
+Tracking:GeoHistoryWrite:ThrottleFallbackDelayMs     setting -
+Tracking:RealtimePublish:Enabled                     setting -
+Tracking:RealtimePublish:MaxParallelPublishes        setting -
+Tracking:RealtimePublish:MaxThrottleDelayMs          setting -
+Tracking:RealtimePublish:MaxThrottleRetries          setting -
+Tracking:RealtimePublish:PublishTimeoutMs            setting -
+Tracking:RealtimePublish:QueueCapacity               setting -
+Tracking:RealtimePublish:ThrottleFallbackDelayMs     setting -
+UmJwt:Audience                                       setting -
+UmJwt:Issuer                                         setting -
+UmJwt:SigningKey                                     setting -
+Users:DataExport:LinkValidity                        setting -
+Users:DataExport:Sla                                 setting -
+Users:DataExport:SweepInterval                       setting -
+WeeklySettlement:Interval                            setting -
+WeeklySettlement:MaxBatchSize                        setting -
+WeeklySettlement:SettlementDay                       setting -
+WeeklySettlement:TimeZoneId                          setting -
+Whisper:ApiKey                                       setting -
+Whisper:BaseUrl                                      setting -
+Whisper:CircuitBreakerFailureThreshold               setting -
+Whisper:CircuitBreakerOpenDuration                   setting -
+Whisper:FakeTranscribe                               setting -
+Whisper:InitialBackoff                               setting -
+Whisper:Language                                     setting -
+Whisper:MaxAttempts                                  setting -
+Whisper:MaxBackoff                                   setting -
+Whisper:Model                                        setting -
+Whisper:Timeout                                      setting -
