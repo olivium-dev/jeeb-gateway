@@ -1,0 +1,107 @@
+# Gateway DB-extraction (gwdbx) flag registry — A10 mode registry, checklist PRE-03.
+#
+# This file IS `approved-flags.txt` for guardrail G-22 (one-way containment:
+# repo tokens must be a SUBSET of this registry; registry entries not yet built
+# are fine). It is the MACHINE-READABLE copy of the "Flag registry (A10)" table
+# in PLAYBOOK-gateway-db-extraction-2026-08-12.md — the rows here and the rows
+# there MUST STAY IN SYNC; the playbook table is the normative prose source and
+# any edit to one is an edit to the other in the same PR.
+#
+# Format: one entry per line
+#     <flag-token> <status> <owning-wave> # note
+# Tokens are written BARE — no `FeatureFlags:` prefix — because the inventory
+# emits them bare and the containment check is a plain string `comm`.
+#
+# Status classes:
+#   baseline   Flag that already existed at 66a7b9d and is NOT part of this
+#              program. Listed only so one-way containment stays green. FROZEN:
+#              the program never adds to this class.
+#   program    A mode enum or flag this program creates, with the wave that
+#              creates it and the wave that deletes it (A8 step-6). Per A10 each
+#              unbuilt §3-B domain gets exactly ONE ordered 5-state enum
+#              (local -> dual-write-local-read -> dual-write-upstream-read ->
+#              upstream-authority -> retired), ValidateOnStart-checked. The note
+#              records the superseded design flag name(s) the enum replaces.
+#   forbidden  A name that must NEVER become an active config key. The check
+#              fails if it appears as an active appsettings key or as a property
+#              of UpstreamFeatureFlags; a mention in a comment or a .md file is
+#              explicitly allowed.
+#
+# Owning-wave field: `-` for baseline/forbidden; `create=<wave>;delete=<wave>`
+# for program rows. Exactly one create wave per entry — G-22's "no flag gates
+# two cutovers" half is checked mechanically from this field.
+#
+# `/api/OTP/codes` is also SUPERSEDED (A3, never built) but is a ROUTE, not a
+# config key, so it carries its stamp in the playbook table only.
+#
+# Inventory method (D1 default, owner may override) + namespace filter are
+# recorded in scripts/check-gwdbx-flag-registry.sh.
+
+# ---- program: §3-B mode enums (A10) -----------------------------------------
+CodSettlementMode        program create=W2;delete=W5 # COD settlement -> wallet-service; supersedes UseUpstream:CodSettlements + SettlementLedgerMigration:{DualWrite,Authority}
+PayoutBatchMode          program create=W2;delete=W5 # payout batches -> wallet-service; supersedes UseUpstream:SettlementBatches + PayoutBatchMigration:{DualWrite,Authority} (never approved)
+JeeberEarningsMode       program create=W2;delete=W5 # earnings read flip; supersedes UseUpstream:JeeberEarnings; never overloads prod-ON UseUpstream:Earnings
+AdminAuditMode           program create=W1;delete=W5 # admin_actions -> state-service; supersedes UseUpstream:AdminAudit + AdminAuditMirror:Enabled
+DataExportMode           program create=W1;delete=W5 # GDPR export -> state-service work-items + cdn; supersedes UseUpstream:DataExport
+AccountDeletionMode      program create=W3;delete=W5 # GDPR deletion -> state-service work-items; supersedes UseUpstream:AccountDeletion
+ProhibitedItemsMode      program create=W3;delete=W5 # prohibited-items trio -> state-service; supersedes UseUpstream:ProhibitedItems
+OtpEscalationsMode       program create=W3;delete=W5 # admin_escalations -> delivery-service; supersedes UseUpstream:OtpHandoverEscalations; the ONLY door-OTP flag (A3)
+RequestsOwnerListMode    program create=W5;delete=W5 # delivery_requests mirror -> delivery-service; supersedes UseUpstream:RequestsOwnerList
+AvailabilityMode         program create=W3;delete=W5 # jeeber_availability -> delivery-service; supersedes UseUpstream:Availability
+TiersMode                program create=W4;delete=W4 # tiers catalog -> delivery-service; supersedes UseUpstream:Tiers; delete one release after the W4-14 drop
+UserModerationMode       program create=W4;delete=W4 # users projection -> user-management; supersedes UseUpstream:UserModeration; delete one release after the W4-13 drop
+PushDispatchMode         program create=W3;delete=W5 # push trio -> push-notification; supersedes UseUpstream:PushDispatchDurability
+NotificationOutboxMode   program create=W1;delete=W5 # outbox -> state-service work-items, drain-and-switch; supersedes UseUpstream:NotificationOutbox
+CmsConfigMode            program create=W3;delete=W5 # cms_surfaces pair -> state-service; supersedes UseUpstream:CmsConfig
+
+# ---- program: non-§3-B and grandfathered ------------------------------------
+WalletLedgerMigration:Authority           program create=pre-program;delete=W5 # GRANDFATHERED as built (owner ruling), live at 66a7b9d via gateway PR #385; step-6 date recorded in the W5-10 ledger entry
+WalletLedgerMigration:ShadowCompareEnabled program create=pre-program;delete=W5 # GRANDFATHERED as built; deleted with the WalletPostgres CS removal at W5-10 step-6
+UseUpstream:Geolocation                   program create=pre-program;delete=W5 # §3-C plan-named, pre-existing default false; flipped at W3-17 (O8), deleted after the geo-slot exit
+UseUpstream:FanoutWorkQueue               program create=W1;delete=W5 # §3-C NewRequestFanoutQueue -> state-service work-items (W1-12); no table
+RequestExpiry:Source                      program create=pre-program;delete=W5 # paired W5-04 knob, deleted with RequestsOwnerListMode at step-6
+
+# ---- forbidden: SUPERSEDED / retired names, never active config keys --------
+UseUpstream:OtpChallenges       forbidden - # SUPERSEDED (A3): door-OTP codes extraction CUT, Redis TTL keys retained behind the fail-closed boot guard
+UseUpstream:OtpHandover         forbidden - # SUPERSEDED (§4.2 superseded by A3)
+UseUpstream:OfferById           forbidden - # STRUCK (A2): re-admission needs a plan amendment with generic participant paths + a registry entry
+UseUpstream:NotificationDispatch forbidden - # never created (F1 / §4.1: the outbox re-homes to work-items only)
+UseUpstream:DeliveryStatusEvents forbidden - # removed from the registry (A13: webhook refactor deferred post-program)
+UseUpstream:Payments            forbidden - # UPG retired, key deleted 2026-07-27, never re-add (G-05)
+
+# ---- baseline: pre-existing @66a7b9d, out of program scope ------------------
+UseUpstream:Auth                  baseline - # pre-existing prod flag
+UseUpstream:Ban                   baseline - # pre-existing prod flag
+UseUpstream:CanonicalTransition422 baseline - # measured property name; the playbook baseline line records the colon-grep-truncated form UseUpstream:CanonicalTransition
+UseUpstream:Cdn                   baseline - # pre-existing prod flag
+UseUpstream:Chat                  baseline - # pre-existing prod flag
+UseUpstream:Compliment            baseline - # code-only (no appsettings key)
+UseUpstream:ContractSigning       baseline - # pre-existing prod flag
+UseUpstream:Delivery              baseline - # pre-existing prod flag
+UseUpstream:Earnings              baseline - # prod-ON; deleted at the earnings step-5 cleanup, never overloaded by JeeberEarningsMode
+UseUpstream:Feedback              baseline - # inert residue; binds to nothing after the exact-salehly feedback migration
+UseUpstream:FormBuilder           baseline - # pre-existing prod flag
+UseUpstream:Kyc                   baseline - # pre-existing prod flag
+UseUpstream:Matching              baseline - # code-only (no appsettings key)
+UseUpstream:Notification          baseline - # pre-existing prod flag
+UseUpstream:Offer                 baseline - # pre-existing prod flag
+UseUpstream:Otp                   baseline - # pre-existing prod flag
+UseUpstream:Push                  baseline - # appsettings-only (property removed from UpstreamFeatureFlags)
+UseUpstream:Ratings               baseline - # pre-existing prod flag
+UseUpstream:Realtime              baseline - # pre-existing prod flag
+UseUpstream:RemoteUserPreferences baseline - # pre-existing prod flag, inert
+UseUpstream:RoleService           baseline - # code-only (no appsettings key)
+UseUpstream:UserManagement        baseline - # pre-existing prod flag
+UseUpstream:Voice                 baseline - # pre-existing prod flag
+DurableRequests:Enabled           baseline - # pre-existing non-UseUpstream key
+DurableRequests:SagaTag           baseline - # pre-existing non-UseUpstream key
+DurableRequests:TenantId          baseline - # pre-existing non-UseUpstream key
+Kyc:AutoApprove                   baseline - # pre-existing non-UseUpstream key
+Heartbeat:RoleKey                 baseline - # pre-existing non-UseUpstream key
+Heartbeat:ServiceAuthKey          baseline - # pre-existing non-UseUpstream key
+WalletGuard:FailMode              baseline - # pre-existing; also picked up by the *Mode arm
+
+# ---- baseline: retained knobs, never deleted by this program ----------------
+Notifications:NewRequestFanout:Enabled baseline - # byte-identical topic-blast kill switch
+Heartbeat:Enabled                      baseline - # orthogonal, default OFF
+UseUpstream:EvidencePresign            baseline - # optional rider, NOT scheduled
