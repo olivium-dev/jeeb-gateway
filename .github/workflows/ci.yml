@@ -16,6 +16,15 @@ jobs:
       - name: R9 stateless-gateway gate
         run: bash scripts/check-stateless-gateway.sh
 
+  gwdbx-flag-registry-gate:
+    # G-22 — one flag per cutover: repo flag tokens must be contained by the
+    # gwdbx A10 mode registry, and SUPERSEDED/retired names stay inactive.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: G-22 gwdbx flag-registry gate
+        run: bash scripts/check-gwdbx-flag-registry.sh
+
   guard-roster-gate:
     # G-08 — StoreDurabilityGuard roster manifest stays in sync with the C#
     # rosters (R1 same-PR rule) and names no deleted type; keeps the G-18 gate.
