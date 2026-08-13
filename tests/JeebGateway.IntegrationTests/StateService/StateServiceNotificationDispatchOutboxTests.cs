@@ -326,6 +326,11 @@ public class StateServiceNotificationDispatchOutboxTests
             return Task.FromResult(new WorkItemRecordV1 { WorkItemId = workItemId, Status = "queued" });
         }
 
+        // W1-06 consume rail — notification dispatch produces no consumable artifact.
+        public Task<WorkItemRecordV1> ConsumeWorkItemAsync(
+            Guid workItemId, WorkConsumeRequestV1 body, CancellationToken ct) =>
+            throw new NotSupportedException();
+
         public Task<AuditEventRecordV1> AppendAuditEventAsync(
             AuditEventAppendRequestV1 body, string idempotencyKey, CancellationToken ct) =>
             throw new NotSupportedException();
