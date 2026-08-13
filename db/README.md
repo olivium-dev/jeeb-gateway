@@ -62,7 +62,7 @@ points at a host whose name contains `prod`, `production`, or `live`. Set
   prescription medication, hazardous materials), plus a small `other`
   bucket for live animals, cash, and human remains. `alcohol` rows are
   inserted with `active = FALSE` and admins enable per-market.
-* **Personas** (`users` + `saved_addresses`) — five
+* **Personas** (`users`) — five
   fixed-UUID accounts so tests can reference them by literal value:
   P1 Layla, P2 Hajj Antoine (Arabic), P3 Rami (dual-role), P4 Khaled
   (Jeeber power user), P5 Ops Admin. Phone numbers use the
@@ -83,7 +83,7 @@ points at a host whose name contains `prod`, `production`, or `live`. Set
 | `settlement_batches`        | Weekly Jeeber payout batches — totals, method, status         |
 | `schema_migrations`         | Applied-migration ledger                                      |
 
-### Dropped in gwdbx W0-08 (migrations 0045–0048)
+### Dropped in gwdbx W0-06/W0-08 (migrations 0045–0049)
 
 `kyc_submissions`, `chat_messages`, `offers`, `delivery_financials`, `ratings`,
 `disputes`, `jeeb_cancellation_strikes`, `partner_wallet_operations` and
@@ -92,6 +92,10 @@ before the drop and each authority now lives upstream: user-management (KYC),
 Firebase `jeeb-5a293` (chat), offer-service (offers), wallet-service (money),
 feedback-service (ratings), the generic case authority (disputes) and
 jeeb-state-service (the partner idempotency KV).
+
+`saved_addresses` is gone too (W0-06, migration 0049). Address authority is
+user-management. O3 had gated this on the rows never having been migrated, but
+live held zero rows by the time it ran, so the drop abandoned nothing.
 
 ### Admin moderation & audit
 
