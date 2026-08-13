@@ -2025,10 +2025,8 @@ else
     builder.Services.AddSingleton<InMemoryAdminAuditLog>();
 }
 
-// gwdbx W1-03 — MirroringAdminAuditLog DECORATES the authoritative local log and dual-writes
-// each row to state-service /v1/audit-events (Idempotency-Key = admin_actions.id, G-15) once
-// FeatureFlags:AdminAuditMode reaches dual-write-local-read. At "local" (the code default) the
-// decorator is a pass-through, so wiring it unconditionally changes no behaviour by itself.
+// gwdbx W1-03 — MirroringAdminAuditLog DECORATES the authoritative local log, dual-writing each row
+// to /v1/audit-events once AdminAuditMode reaches dual-write-local-read; at "local" it is pass-through.
 builder.Services.AddSingleton<IAdminAuditLog>(sp =>
 {
     IAdminAuditLog inner = !string.IsNullOrWhiteSpace(gatewayPostgresCs)

@@ -20,16 +20,8 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests.Admin;
 
-/// <summary>
-/// gwdbx W1-03 — <see cref="MirroringAdminAuditLog"/> dual-write behind
-/// <c>FeatureFlags:AdminAuditMode</c>.
-/// </summary>
-/// <remarks>
-/// The two load-bearing charter cases are covered at BOTH levels: the decorator directly, and
-/// end-to-end through PATCH /admin/users/{id}/suspend — (a) upstream throws ⇒ the local row is
-/// still committed and the admin mutation still succeeds, (b) the Idempotency-Key IS
-/// admin_actions.id (the local row's Id), which is the key the W1-04 backfill replays (G-15).
-/// </remarks>
+// gwdbx W1-03 — MirroringAdminAuditLog dual-write behind FeatureFlags:AdminAuditMode.
+// Both charter cases covered at the decorator seam AND end-to-end via PATCH /admin/users/{id}/suspend.
 public class MirroringAdminAuditLogTests
 {
     private static AdminAuditAppend Append(string? entityId = "e-1") => new()

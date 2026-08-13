@@ -8,21 +8,11 @@ using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Admin;
 
-/// <summary>
-/// gwdbx W1-03 — dual-write mirror of the admin trail into state-service /v1/audit-events,
-/// gated by the A10 ladder key FeatureFlags:AdminAuditMode.
-/// </summary>
-/// <remarks>
-/// Local stays authoritative: the inner store (PostgresAdminAuditLog → admin_actions) is written
-/// first and its row is returned; the upstream POST is best-effort, so an admin mutation can never
-/// fail because the mirror failed. Reads stay local until W1-05.
-/// G-15: the mirror POSTs Idempotency-Key = admin_actions.id, the same key the W1-04 backfill
-/// replays — bounded retry may give up, the backfill closes the gap, uq(application, key)
-/// prevents a double-write (gap-free mirroring, A11).
-/// </remarks>
+// gwdbx W1-03 — dual-writes the admin trail to state-service /v1/audit-events behind FeatureFlags:AdminAuditMode.
+// Local admin_actions stays authoritative; Idempotency-Key = admin_actions.id (G-15); mirror failure logs, never throws (A11).
 public sealed class MirroringAdminAuditLog : IAdminAuditLog
 {
-    /// <summary>Application scope the state-service credential grants this gateway.</summary>
+    // Application scope the state-service credential grants this gateway.
     public const string Application = "jeeb-gateway";
 
     // admin_actions only ever records admins; upstream actorRole is required.
@@ -75,7 +65,7 @@ public sealed class MirroringAdminAuditLog : IAdminAuditLog
         string entityType, string entityId, CancellationToken ct) =>
         _inner.ListForEntityAsync(entityType, entityId, ct);
 
-    /// <summary>Best-effort upstream POST; never throws for a mirror failure.</summary>
+    // Best-effort upstream POST; never throws for a mirror failure.
     private async Task MirrorAsync(AdminAuditAppend entry, AdminAuditEntry row, CancellationToken ct)
     {
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
