@@ -26,4 +26,7 @@ public interface INotificationDispatchOutbox
 
     /// <summary>Total count of pending entries (for diagnostics).</summary>
     int PendingCount { get; }
+
+    /// <summary>True when a claim worker owns dispatch — producers enqueue and stop (W1-10).</summary>
+    bool IsClaimDriven => false;
 }

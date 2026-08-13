@@ -37,6 +37,10 @@ public sealed class StateServiceNotificationDispatchOutbox : INotificationDispat
         _log = log;
     }
 
+    // W1-10: WorkItemClaimWorker renders and pushes under a real lease, so every producer on
+    // this outbox enqueues only.
+    public bool IsClaimDriven => true;
+
     /// <summary>The state-service subjectRef for an entry: its idempotency key, entry id when null.</summary>
     public static string SubjectRefFor(NotificationDispatchEntry entry) =>
         string.IsNullOrWhiteSpace(entry.IdempotencyKey)
@@ -147,21 +151,25 @@ public sealed class StateServiceNotificationDispatchOutbox : INotificationDispat
     // Diagnostics-only on the interface; there is no synchronous upstream count to serve it.
     public int PendingCount => 0;
 
-    // W1-10 BLOCKER: complete/fail need a claim lease, but the in-process dispatchers enqueue and
-    // push inline without ever claiming, so this branch is the ONLY one they reach.
+    /// <summary>Rehydrates the entry a claimer holds a lease for; throws on an unreadable payload.</summary>
+    public static NotificationDispatchEntry ReadEntry(WorkItemRecordV1 record) =>
+        record.Payload.Deserialize<OutboxPayloadV1>(PayloadJson)?.ToEntry(record)
+        ?? throw new JsonException(
+            $"Empty notification-dispatch work-item payload on {record.WorkItemId:D}.");
+
+    // Defensive only since W1-10: producers on this outbox enqueue and stop, so nothing but a
+    // stale caller can reach a terminal call without a lease.
     private void LogNoLease(Guid entryId, string operation) =>
         _log.LogWarning(
             "No state-service lease held for notification entry {EntryId}; skipping {Operation}. "
-            + "The work item stays queued and claimable — a claimer would re-send it. "
-            + "W1-10 must not flip NotificationOutboxMode until the claim side owns dispatch.",
+            + "The work item stays queued and claimable — WorkItemClaimWorker owns its dispatch.",
             entryId, operation);
 
     private NotificationDispatchEntry? ToEntry(WorkItemRecordV1 record)
     {
         try
         {
-            var payload = record.Payload.Deserialize<OutboxPayloadV1>(PayloadJson);
-            return payload?.ToEntry(record);
+            return ReadEntry(record);
         }
         catch (JsonException ex)
         {

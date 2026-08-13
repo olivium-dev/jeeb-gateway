@@ -191,7 +191,7 @@ public class StateServiceNotificationDispatchOutboxTests
     }
 
     [Fact]
-    public async Task The_Dispatcher_Hands_The_Same_Idempotency_Key_To_The_Push_Request()
+    public async Task The_Dispatcher_Enqueues_Only_When_The_Outbox_Is_Claim_Driven()
     {
         var state = new FakeStateOwnershipClient();
         var push = new CapturingPushNotificationService();
@@ -208,11 +208,10 @@ public class StateServiceNotificationDispatchOutboxTests
 
         state.Created.Should().ContainSingle().Which.IdempotencyKey
             .Should().Be("notification-dispatch:notif:delivery-completed:req-77");
-        push.Sent.Should().ContainSingle().Which.IdempotencyKey
-            .Should().Be("notif:delivery-completed:req-77");
 
-        // W1-10 BLOCKER, pinned: the dispatcher never claims, so the item stays queued+claimable —
-        // flipping before the claim side owns dispatch backs up the queue and re-pushes delivered work.
+        // W1-10: the claim worker owns dispatch, so the inline path neither pushes nor settles.
+        // WorkItemClaimWorkerTests proves the key still reaches the push request via the claimer.
+        push.Sent.Should().BeEmpty("the inline dispatcher holds no lease and must not double-send");
         state.Completed.Should().BeEmpty(
             "the inline dispatcher cannot complete its own work item without a claim lease");
         state.Failed.Should().BeEmpty();

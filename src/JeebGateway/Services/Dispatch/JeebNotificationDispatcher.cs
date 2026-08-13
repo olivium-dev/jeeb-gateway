@@ -87,6 +87,19 @@ public sealed class JeebNotificationDispatcher : IJeebNotificationDispatcher
             "Notification dispatch enqueued. EntryId={EntryId} TemplateKey={Template} Locale={Locale} Recipient={UserId}",
             entry.Id, templateKey, locale, recipientUserId);
 
+        // W1-10: a claim-driven outbox is dispatched by WorkItemClaimWorker under a real lease.
+        // Pushing here too would double-send, and complete/fail without a lease is a no-op.
+        if (_outbox.IsClaimDriven)
+        {
+            // An unknown template stays a caller-visible 400 instead of a silent 202.
+            return _renderer.Render(templateKey, locale, parameters) is null
+                ? new NotificationDispatchResult(
+                    entry.Id, WasDeduplicated: false, NotificationDispatchStatus.DLQ,
+                    $"Unknown template key '{templateKey}'.")
+                : new NotificationDispatchResult(
+                    entry.Id, WasDeduplicated: false, NotificationDispatchStatus.Pending);
+        }
+
         // 3. Render template
         var rendered = _renderer.Render(templateKey, locale, parameters);
         if (rendered is null)

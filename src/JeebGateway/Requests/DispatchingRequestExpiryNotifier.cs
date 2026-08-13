@@ -145,6 +145,13 @@ public sealed class DispatchingRequestExpiryNotifier : IRequestExpiryNotifier
                 IdempotencyKey = idempotencyKey,
             }, ct);
 
+            // W1-10: a claim-driven outbox is dispatched by WorkItemClaimWorker under a lease;
+            // this path enqueues only rather than pushing twice and no-op'ing complete/fail.
+            if (outbox.IsClaimDriven)
+            {
+                return;
+            }
+
             try
             {
                 // Expiry/nudge has no notification-centre route; the generic seam carries it
