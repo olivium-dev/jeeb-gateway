@@ -108,6 +108,8 @@ public class W35a_OfferRealtimeNotifierDeletedTests
     {
         var push = new RecordingUserPushClient();
         using var factory = NewFactory(push);
+        var detached = factory.Services
+            .GetRequiredService<Fakes.AwaitableDetachedPushDispatcher>();
 
         var (clientId, requestId) = await SeedRequestAsync(factory);
         var jeeber = factory.CreateClient();
@@ -120,6 +122,10 @@ public class W35a_OfferRealtimeNotifierDeletedTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created,
             "deleting the dead realtime seam must not change the submit contract");
+
+        // The seat runs BEHIND the response by design, so wait on the fan-out itself.
+        // Reading Sends straight after the 201 raced Task.Run and went red on CI (empty).
+        await detached.DispatchedWork;
 
         push.Sends.Should().ContainSingle(
             "the customer's ONE real notification per accepted submission is the push dispatch; "
@@ -173,6 +179,8 @@ public class W35a_OfferRealtimeNotifierDeletedTests
             {
                 services.RemoveAll<ServicePushNotificationClient>();
                 services.AddSingleton<ServicePushNotificationClient>(push);
+                // A7 asserts on a seat the gateway deliberately does not await; see the double.
+                Fakes.AwaitableDetachedPushDispatcher.Use(services);
                 // GW3 / W3.5(c): the gateway ships no in-memory offer store, so a test
                 // that submits an offer supplies the ledger itself.
                 Fakes.FakeOfferStoreWebApplicationFactory.UseFakeOfferStore(services);
