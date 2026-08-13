@@ -6,8 +6,8 @@ namespace JeebGateway.Tokens;
 /// <see cref="Local"/> — today's wiring — until the owner flips it wave by wave.</summary>
 public enum RefreshTokenStoreMode
 {
-    // The two dual-write rungs share Local's wiring: the local store here is process memory,
-    // not a table, so there is nothing to dual-write — state-service owns the write once wired.
+    // dual-write-local-read shares Local's wiring: the local store is process memory, not a
+    // table, so there is nothing to dual-write — state-service owns the write once wired.
     Local = 0,
     DualWriteLocalRead = 1,
     DualWriteUpstreamRead = 2,
@@ -60,8 +60,8 @@ public static class RefreshTokenStoreModes
             ? mode
             : RefreshTokenStoreMode.Local;
 
-    /// <summary>From this rung up jeeb-state-service is the sole authority: no in-memory
-    /// fallback is registered, so the dependency must be wired or the boot fails.</summary>
+    /// <summary>From the READ FLIP up, upstream serves reads: no in-memory fallback is
+    /// registered, so the dependency must be wired or the boot fails.</summary>
     public static bool RequiresStateService(RefreshTokenStoreMode mode)
-        => mode >= RefreshTokenStoreMode.UpstreamAuthority;
+        => mode >= RefreshTokenStoreMode.DualWriteUpstreamRead;
 }

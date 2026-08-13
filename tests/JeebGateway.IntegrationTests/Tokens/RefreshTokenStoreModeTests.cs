@@ -41,7 +41,8 @@ public class RefreshTokenStoreModeTests
 
         RefreshTokenStoreModes.RequiresStateService(local).Should().BeFalse();
         RefreshTokenStoreModes.RequiresStateService(dualLocal).Should().BeFalse();
-        RefreshTokenStoreModes.RequiresStateService(dualUpstream).Should().BeFalse();
+        RefreshTokenStoreModes.RequiresStateService(dualUpstream).Should()
+            .BeTrue("the read flip makes upstream the READ authority — reads must never fall back to memory");
         RefreshTokenStoreModes.RequiresStateService(authority).Should().BeTrue();
         RefreshTokenStoreModes.RequiresStateService(retired).Should().BeTrue();
     }
@@ -83,6 +84,21 @@ public class RefreshTokenStoreModeTests
         boot.Should().Throw<OptionsValidationException>()
             .WithMessage("*RefreshTokenStoreMode*",
                 "the failure must name the flag an operator has to fix");
+    }
+
+    /// <summary>REGRESSION (review of #395): dual-write-upstream-read is the READ FLIP, so an
+    /// unwired state-service must refuse the boot, not silently serve reads from process memory.</summary>
+    [Fact]
+    public void DualWriteUpstreamRead_Without_StateService_Refuses_To_Boot()
+    {
+        using var factory = FactoryWith(("FeatureFlags:RefreshTokenStoreMode", "dual-write-upstream-read"))
+            .WithWebHostBuilder(b => b.UseDefaultServiceProvider(o => o.ValidateOnBuild = false));
+
+        var boot = () => factory.CreateClient();
+
+        boot.Should().Throw<OptionsValidationException>()
+            .WithMessage("*dual-write-upstream-read*",
+                "the read flip must name the rung that requires the dependency");
     }
 
     /// <summary>An unknown rung is a typo, not a rollout state: ValidateOnStart rejects it.</summary>
