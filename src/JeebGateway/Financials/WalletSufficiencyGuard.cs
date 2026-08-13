@@ -4,6 +4,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using JeebGateway.JeebWallet;
 using JeebGateway.service.ServiceWallet;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -113,7 +114,11 @@ public sealed class WalletSufficiencyGuard : IWalletSufficiencyGuard
     /// </summary>
     private static (decimal Available, string? Currency) ProjectSingleCurrencyBalance(GetHolderWallets? holder)
     {
-        var active = (holder?.Wallets ?? new List<Wallet>()).Where(w => w.IsActive).ToList();
+        // R-M1 (G-01): drop non-spendable cod_* legs BEFORE the currency grouping, or COD
+        // float could both inflate the balance and flip which currency group is dominant.
+        var active = (holder?.Wallets ?? new List<Wallet>())
+            .Where(w => w.IsActive && SpendableWalletTypes.IsSpendable(w.Type))
+            .ToList();
         if (active.Count == 0) return (0m, null);
 
         var dominant = active

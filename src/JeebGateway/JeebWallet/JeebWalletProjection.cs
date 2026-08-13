@@ -40,14 +40,18 @@ public static class JeebWalletProjection
 
     /// <summary>
     /// Project the generic holder-wallets read into the Jeeb wallet balance the
-    /// mobile <c>DioWalletRepository</c> parses. Only ACTIVE wallets contribute to
-    /// the available balance; an absent/empty holder projects to a zeroed,
+    /// mobile <c>DioWalletRepository</c> parses. Only ACTIVE, SPENDABLE wallets
+    /// (<see cref="SpendableWalletTypes"/>) contribute to the available balance;
+    /// an absent/empty holder projects to a zeroed,
     /// "empty"-affordability balance (mobile parses defensively either way).
     /// </summary>
     public static JeebWalletBalanceResponse ProjectBalance(GetHolderWallets? holder)
     {
         var wallets = holder?.Wallets ?? new List<service.ServiceWallet.Wallet>();
-        var active = wallets.Where(w => w is { IsActive: true }).ToList();
+        // R-M1 (G-01): cod_* legs are COD float, never user-spendable balance.
+        var active = wallets
+            .Where(w => w is { IsActive: true } && SpendableWalletTypes.IsSpendable(w.Type))
+            .ToList();
 
         // JEBV4-49 (M4): the generic wallet-service primitive exposes Amount as a
         // double (NSwag-generated client — a reusable-service boundary the gateway

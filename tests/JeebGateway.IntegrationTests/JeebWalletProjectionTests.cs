@@ -74,6 +74,49 @@ public class JeebWalletProjectionTests
         view.Currency.Should().BeNull();
     }
 
+    // ----- R-M1 (G-01): cod_* float is never user-spendable balance -----
+
+    private static Wallet TypedWallet(string? type, double amount) =>
+        new() { IsActive = true, Amount = amount, CurrencyID = 1, Type = type };
+
+    [Theory]
+    [InlineData("cod_earnings")]
+    [InlineData("cod_commission")]
+    [InlineData("cod_insurance")]
+    [InlineData("COD_Earnings")]
+    [InlineData(" cod_earnings")]
+    public void ProjectBalance_Excludes_Cod_Float_From_AvailableBalance(string codType)
+    {
+        var view = JeebWalletProjection.ProjectBalance(
+            Holder(ActiveWallet(30), TypedWallet(codType, 5_000)));
+
+        view.AvailableBalance.Should().Be(30);
+        view.AffordabilityState.Should().Be(JeebWalletProjection.Affordability.Enough);
+    }
+
+    [Fact]
+    public void ProjectBalance_Cod_Float_Alone_Projects_As_An_Empty_Wallet()
+    {
+        var view = JeebWalletProjection.ProjectBalance(Holder(TypedWallet("cod_earnings", 5_000)));
+
+        view.AvailableBalance.Should().Be(0);
+        view.AffordabilityState.Should().Be(JeebWalletProjection.Affordability.Empty);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("codex")]
+    [InlineData("topup")]
+    public void ProjectBalance_Still_Counts_Every_Non_Cod_Type(string? spendableType)
+    {
+        // Control case: the filter must not be a blanket exclusion. Untyped wallets are
+        // what every already-provisioned holder has today and must keep counting.
+        var view = JeebWalletProjection.ProjectBalance(Holder(TypedWallet(spendableType, 42)));
+
+        view.AvailableBalance.Should().Be(42);
+    }
+
     // ----- JEBV4-49 (M4): money is decimal end-to-end in the wallet read projection -----
 
     [Fact]
