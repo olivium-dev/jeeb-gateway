@@ -1655,6 +1655,13 @@ builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationDispatc
         : ActivatorUtilities.CreateInstance<
             JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox>(sp);
 });
+// W1-10/W1-12: the claimer the work-item rail was missing — complete/fail need a lease and only
+// the batch claim mints one. Both executors are mode-gated OFF, so the worker ships inert.
+builder.Services.AddScoped<JeebGateway.StateService.Work.IWorkItemExecutor,
+    JeebGateway.Services.Dispatch.NotificationDispatchWorkItemExecutor>();
+builder.Services.AddScoped<JeebGateway.StateService.Work.IWorkItemExecutor,
+    JeebGateway.Notifications.NewRequestFanoutWorkItemExecutor>();
+builder.Services.AddHostedService<JeebGateway.StateService.Work.WorkItemClaimWorker>();
 builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationTemplateRenderer,
                                JeebGateway.Services.Dispatch.StaticNotificationTemplateRenderer>();
 builder.Services.AddScoped<JeebGateway.Services.Dispatch.IJeebNotificationDispatcher,

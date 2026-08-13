@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Notifications;
 
@@ -78,7 +79,16 @@ public sealed class NewRequestFanoutProcessor : BackgroundService
         // W1-11: PERSIST FIRST. The durable work item must exist before any push leaves, so a
         // crash between the two lines loses at most a duplicate-suppressed send, never the job.
         var workItems = scope.ServiceProvider.GetRequiredService<INewRequestFanoutWorkItems>();
-        await workItems.PersistAsync(job, ct);
+        var persisted = await workItems.PersistAsync(job, ct);
+
+        // W1-12: once the flag is on, a PERSISTED job is fanned out by WorkItemClaimWorker under
+        // a lease. An unpersisted one still fans out here — degrade-don't-fail.
+        var flags = scope.ServiceProvider
+            .GetService<IOptions<JeebGateway.Services.UpstreamFeatureFlags>>()?.Value;
+        if (persisted && flags?.FanoutWorkQueue == true)
+        {
+            return;
+        }
 
         var notifier = scope.ServiceProvider.GetRequiredService<INewRequestPushNotifier>();
         await notifier.FanOutAsync(job, ct);
