@@ -1,9 +1,8 @@
-using System.Collections.Generic;
 using FluentAssertions;
+using JeebGateway.Migration;
 using JeebGateway.Tokens;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -11,7 +10,7 @@ using Xunit;
 namespace JeebGateway.IntegrationTests.Tokens;
 
 /// <summary>gwdbx W1-14 (A7/A10) — the refresh-token store is selected by the ONE ordered
-/// <c>FeatureFlags:RefreshTokenStoreMode</c> enum, and the selection FAILS CLOSED.</summary>
+/// <c>FeatureFlags:RefreshTokenStoreMode</c> rung on the shared gwdbx ladder, and FAILS CLOSED.</summary>
 public class RefreshTokenStoreModeTests
 {
     // UseSetting (not ConfigureAppConfiguration): the store is selected while Program.cs runs,
@@ -25,35 +24,45 @@ public class RefreshTokenStoreModeTests
             }
         });
 
+    private static GwdbxMigrationPhase Rung(string wire) =>
+        new GwdbxMigrationOptions { RefreshTokenStoreMode = wire }.RefreshTokenStore;
+
+    /// <summary>REVIEW OF #395: the refresh domain rides the SHARED A10 ladder
+    /// (<see cref="GwdbxMigrationPhase"/>), not a second parallel enum that can drift from it.</summary>
     [Fact]
     public void Ladder_Is_The_Five_Ordered_A10_Rungs()
     {
-        RefreshTokenStoreModes.TryParse("local", out var local).Should().BeTrue();
-        RefreshTokenStoreModes.TryParse("dual-write-local-read", out var dualLocal).Should().BeTrue();
-        RefreshTokenStoreModes.TryParse("dual-write-upstream-read", out var dualUpstream).Should().BeTrue();
-        RefreshTokenStoreModes.TryParse("upstream-authority", out var authority).Should().BeTrue();
-        RefreshTokenStoreModes.TryParse("retired", out var retired).Should().BeTrue();
-        RefreshTokenStoreModes.TryParse("upstream", out _).Should().BeFalse("unknown rungs are rejected, never guessed");
+        Rung("local").Should().Be(GwdbxMigrationPhase.Local);
+        Rung("dual-write-local-read").Should().Be(GwdbxMigrationPhase.DualWriteLocalRead);
+        Rung("dual-write-upstream-read").Should().Be(GwdbxMigrationPhase.DualWriteUpstreamRead);
+        Rung("upstream-authority").Should().Be(GwdbxMigrationPhase.UpstreamAuthority);
+        Rung("retired").Should().Be(GwdbxMigrationPhase.Retired);
 
-        new[] { local, dualLocal, dualUpstream, authority, retired }
-            .Should().BeInAscendingOrder("the ladder is ordered local -> ... -> retired")
-            .And.OnlyHaveUniqueItems();
+        GwdbxMigrationOptions.IsKnown("upstream").Should()
+            .BeFalse("unknown rungs are rejected, never guessed");
 
-        RefreshTokenStoreModes.RequiresStateService(local).Should().BeFalse();
-        RefreshTokenStoreModes.RequiresStateService(dualLocal).Should().BeFalse();
-        RefreshTokenStoreModes.RequiresStateService(dualUpstream).Should()
+        new[]
+        {
+            GwdbxMigrationPhase.Local, GwdbxMigrationPhase.DualWriteLocalRead,
+            GwdbxMigrationPhase.DualWriteUpstreamRead, GwdbxMigrationPhase.UpstreamAuthority,
+            GwdbxMigrationPhase.Retired,
+        }.Should().BeInAscendingOrder("the ladder is ordered local -> ... -> retired")
+         .And.OnlyHaveUniqueItems();
+
+        GwdbxMigrationOptions.RequiresUpstream(GwdbxMigrationPhase.Local).Should().BeFalse();
+        GwdbxMigrationOptions.RequiresUpstream(GwdbxMigrationPhase.DualWriteLocalRead).Should().BeFalse();
+        GwdbxMigrationOptions.RequiresUpstream(GwdbxMigrationPhase.DualWriteUpstreamRead).Should()
             .BeTrue("the read flip makes upstream the READ authority — reads must never fall back to memory");
-        RefreshTokenStoreModes.RequiresStateService(authority).Should().BeTrue();
-        RefreshTokenStoreModes.RequiresStateService(retired).Should().BeTrue();
+        GwdbxMigrationOptions.RequiresUpstream(GwdbxMigrationPhase.UpstreamAuthority).Should().BeTrue();
+        GwdbxMigrationOptions.RequiresUpstream(GwdbxMigrationPhase.Retired).Should().BeTrue();
     }
 
     /// <summary>Unset config is the pinned default: the ladder reads <c>local</c>.</summary>
     [Fact]
     public void Unset_Mode_Resolves_To_Local()
     {
-        var empty = new ConfigurationBuilder().Build();
-
-        RefreshTokenStoreModes.Resolve(empty).Should().Be(RefreshTokenStoreMode.Local);
+        new GwdbxMigrationOptions().RefreshTokenStore.Should().Be(GwdbxMigrationPhase.Local);
+        GwdbxMigrationOptions.PhaseOf(null).Should().Be(GwdbxMigrationPhase.Local);
     }
 
     /// <summary>DEFAULT PATH, unchanged by this PR: no mode set and no state-service wired

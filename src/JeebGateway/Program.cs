@@ -935,6 +935,10 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.DataExportMode),
         "FeatureFlags:DataExportMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.RefreshTokenStoreMode),
+        "FeatureFlags:RefreshTokenStoreMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
     .ValidateOnStart();
 
 // Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
@@ -2260,7 +2264,9 @@ builder.Services.AddSingleton<TimeProvider>(
     sp => sp.GetRequiredService<JeebGateway.TestControlPlane.FakeTimeProvider>());
 // A10 ladder: the in-memory store is the LOCAL rung only (default), still overridden below by
 // StateServiceRefreshTokenStore when state-service is wired; from the read flip it is gone.
-if (!RefreshTokenStoreModes.RequiresStateService(RefreshTokenStoreModes.Resolve(builder.Configuration)))
+if (!JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(
+        JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(
+            builder.Configuration["FeatureFlags:RefreshTokenStoreMode"])))
 {
     builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
 }
@@ -2741,16 +2747,11 @@ var stateServiceWired = stateOptions.Enabled && !string.IsNullOrWhiteSpace(state
 // A10 fail-closed boot guard (W1-14): from dual-write-upstream-read up, upstream SERVES READS, so an
 // unwired dependency must refuse the boot rather than silently read sessions out of process memory.
 builder.Services
-    .AddOptions<RefreshTokenStoreOptions>()
-    .Bind(builder.Configuration.GetSection(RefreshTokenStoreOptions.SectionName))
+    .AddOptions<JeebGateway.Migration.GwdbxMigrationOptions>()
     .Validate(
-        o => RefreshTokenStoreModes.TryParse(o.RefreshTokenStoreMode, out _),
-        $"{RefreshTokenStoreOptions.ModeKey} must be one of: {RefreshTokenStoreOptions.ModeNames}.")
-    .Validate(
-        o => !RefreshTokenStoreModes.TryParse(o.RefreshTokenStoreMode, out var mode)
-             || !RefreshTokenStoreModes.RequiresStateService(mode)
+        o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.RefreshTokenStore)
              || stateServiceWired,
-        $"{RefreshTokenStoreOptions.ModeKey} is at or above dual-write-upstream-read, which makes jeeb-state-service the refresh-token READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}). Refusing to start rather than falling back to the in-memory store, which forks refresh-token families across replicas and restarts.")
+        $"FeatureFlags:RefreshTokenStoreMode is at or above dual-write-upstream-read, which makes jeeb-state-service the refresh-token READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}). Refusing to start rather than falling back to the in-memory store, which forks refresh-token families across replicas and restarts.")
     .ValidateOnStart();
 
 if (stateServiceWired)
