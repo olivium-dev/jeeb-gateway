@@ -61,7 +61,9 @@ internal static class StoreDurabilityGuard
         (typeof(JeebGateway.Services.Clients.IPushDispatchRecoveryClient), new[] { typeof(JeebGateway.Services.Clients.PushDispatchRecoveryClient) }),
         (typeof(JeebGateway.Availability.IOfferRequestIndex),               new[] { typeof(JeebGateway.StateService.Durable.StateServiceOfferRequestIndex) }),
         (typeof(JeebGateway.Requests.IRequestsStore),                       new[] { typeof(JeebGateway.Requests.DurableRequestsStore) }),
-        (typeof(JeebGateway.Admin.IAdminAuditLog),                          new[] { typeof(JeebGateway.Admin.PostgresAdminAuditLog) }),
+        // gwdbx W1-03 (G-08): MirroringAdminAuditLog DECORATES the durable local log to dual-write
+        // /v1/audit-events — in a prod-like env the inner is Postgres, so both resolutions are durable.
+        (typeof(JeebGateway.Admin.IAdminAuditLog),                          new[] { typeof(JeebGateway.Admin.PostgresAdminAuditLog), typeof(JeebGateway.Admin.MirroringAdminAuditLog) }),
         // JEBV4-215 (E20): the account-deletion flip now routes through remote-user-preferences
         // (RemoteUserPreferencesAccountDeletionStore) which DECORATES the durable
         // PostgresAccountDeletionStore — in a prod-like env GatewayPostgres is set, so the inner

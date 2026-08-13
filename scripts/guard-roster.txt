@@ -8,7 +8,7 @@ Critical JeebGateway.Services.Clients.IStateOwnershipClient -> JeebGateway.Servi
 Critical JeebGateway.Services.Clients.IPushDispatchRecoveryClient -> JeebGateway.Services.Clients.PushDispatchRecoveryClient
 Critical JeebGateway.Availability.IOfferRequestIndex -> JeebGateway.StateService.Durable.StateServiceOfferRequestIndex
 Critical JeebGateway.Requests.IRequestsStore -> JeebGateway.Requests.DurableRequestsStore
-Critical JeebGateway.Admin.IAdminAuditLog -> JeebGateway.Admin.PostgresAdminAuditLog
+Critical JeebGateway.Admin.IAdminAuditLog -> JeebGateway.Admin.PostgresAdminAuditLog, JeebGateway.Admin.MirroringAdminAuditLog
 Critical JeebGateway.Users.IAccountDeletionStore -> JeebGateway.Users.PostgresAccountDeletionStore, JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore
 Critical JeebGateway.Users.DataExport.IDataExportStore -> JeebGateway.Users.DataExport.PostgresDataExportStore
 Critical JeebGateway.Requests.OtpHandover.IAdminEscalationStore -> JeebGateway.Requests.OtpHandover.PostgresAdminEscalationStore

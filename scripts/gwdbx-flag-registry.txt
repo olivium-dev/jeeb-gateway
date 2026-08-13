@@ -4,7 +4,7 @@
 CodSettlementMode        program create=W2;delete=W5 # COD settlement -> wallet-service; supersedes UseUpstream:CodSettlements + SettlementLedgerMigration:{DualWrite,Authority}
 PayoutBatchMode          program create=W2;delete=W5 # payout batches -> wallet-service; supersedes UseUpstream:SettlementBatches + PayoutBatchMigration:{DualWrite,Authority} (never approved)
 JeeberEarningsMode       program create=W2;delete=W5 # earnings read flip; supersedes UseUpstream:JeeberEarnings; never overloads prod-ON UseUpstream:Earnings
-AdminAuditMode           program create=W1;delete=W5 # admin_actions -> state-service; supersedes UseUpstream:AdminAudit + AdminAuditMirror:Enabled; key CREATED at W1-02 as FeatureFlags:AdminAuditMode (GwdbxMigrationOptions), default "local"
+AdminAuditMode           program create=W1;delete=W5 # admin_actions -> state-service; supersedes UseUpstream:AdminAudit + AdminAuditMirror:Enabled; key CREATED at W1-02 as FeatureFlags:AdminAuditMode (GwdbxMigrationOptions), code default "local"; W1-03 set it to "dual-write-local-read" in appsettings.Production.json (MirroringAdminAuditLog); W1-05 flips it to "dual-write-upstream-read"
 DataExportMode           program create=W1;delete=W5 # GDPR export -> state-service work-items + cdn; supersedes UseUpstream:DataExport; key CREATED at W1-02 as FeatureFlags:DataExportMode (GwdbxMigrationOptions), default "local"
 AccountDeletionMode      program create=W3;delete=W5 # GDPR deletion -> state-service work-items; supersedes UseUpstream:AccountDeletion
 ProhibitedItemsMode      program create=W3;delete=W5 # prohibited-items trio -> state-service; supersedes UseUpstream:ProhibitedItems
