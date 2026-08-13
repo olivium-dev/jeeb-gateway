@@ -28,7 +28,7 @@ public class EscalationMirrorGuardBindingTests
             .Where(t => t != typeof(FailOpenEscalationMirror))
             .SelectMany(t => t.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
                 .SelectMany(c => c.GetParameters())
-                .Where(p => p.ParameterType == typeof(IEscalationMirror))
+                .Where(p => InjectsRawSeam(p.ParameterType))
                 .Select(p => $"{t.FullName}.ctor({p.Name})"))
             .OrderBy(x => x, StringComparer.Ordinal)
             .ToList();
@@ -39,4 +39,9 @@ public class EscalationMirrorGuardBindingTests
             "the OTP-lockout 423 into a 500 (CS-20260813-01, fixed in b74a8f1). Offenders: {0}",
             string.Join(", ", offenders));
     }
+
+    // Direct injection plus the wrappers DI resolves on its own (IEnumerable<>, Lazy<>, ...).
+    private static bool InjectsRawSeam(Type t) =>
+        t == typeof(IEscalationMirror)
+        || (t.IsGenericType && t.GetGenericArguments().Contains(typeof(IEscalationMirror)));
 }
