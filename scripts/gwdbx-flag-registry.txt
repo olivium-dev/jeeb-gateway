@@ -76,6 +76,9 @@ FailMode                                             setting - # bare *Mode-arm 
 WalletGuard:FailMode                                 setting - # fail-open vs fail-closed when wallet-service is down (was baseline; D1 restates it as a reviewed setting)
 
 # ---- setting: bound options knobs inventoried by the D1 Configure<T> arm -----
+AdminAuditBackfill:BatchSize                         setting - # W1-04 keyset page size for the admin_actions scan
+AdminAuditBackfill:DryRun                            setting - # W1-04 rehearsal: enumerate + log the plan, POST nothing (default true)
+AdminAuditBackfill:Enabled                           setting - # W1-04 one-shot admin_actions -> /v1/audit-events relay; NOT a cutover flag (AdminAuditMode owns the ladder); ships OFF, armed only for the run and disarmed after
 Admin:Zones:Boundaries                               setting -
 Admin:Zones:RefreshInterval                          setting -
 AdminOidc:AllowedSigningAlgorithms                   setting -

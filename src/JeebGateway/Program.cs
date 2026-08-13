@@ -2183,6 +2183,17 @@ builder.Services.AddSingleton<IAdminAuditLog>(sp =>
         sp.GetRequiredService<ILogger<JeebGateway.Admin.MirroringAdminAuditLog>>());
 });
 
+// gwdbx W1-04 — one-shot admin_actions -> /v1/audit-events relay. Ships INERT (Enabled=false,
+// and armed it dry-runs); registered only when GatewayPostgres backs the table it reads.
+builder.Services.Configure<JeebGateway.Admin.AdminAuditBackfillOptions>(
+    builder.Configuration.GetSection(JeebGateway.Admin.AdminAuditBackfillOptions.SectionName));
+if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+{
+    builder.Services.AddSingleton<JeebGateway.Admin.IAdminAuditBackfillSource,
+        JeebGateway.Admin.PostgresAdminAuditBackfillSource>();
+    builder.Services.AddHostedService<JeebGateway.Admin.AdminAuditBackfillWorker>();
+}
+
 // Disputes and support are stateless gateway projections over the generic
 // jeeb-state-service /v1/cases engine. Evidence is gathered synchronously with
 // independent source budgets and explicit partial markers. The gateway owns no

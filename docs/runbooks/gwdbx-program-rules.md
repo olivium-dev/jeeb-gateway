@@ -32,7 +32,28 @@ Every backfill in this program has the same shape. No exceptions, no "just this 
 2. **No cross-service DSN reads — ever.** A backfill must not add a `ConnectionString`/DSN pointing at another service's
    database: that recreates exactly the coupling this program deletes.
 3. It is **dryRun-capable and re-runnable** end to end — a double run is a no-op.
-4. The **owner runs it**. Agents never run backfills, never deploy, and never touch `192.168.2.20`. — PLAN §6 (O2), §8
+4. ~~The **owner runs it**.~~ **SUPERSEDED by owner grant A19 (2026-08-13, EXEC-LEDGER S3.41):** backfills and deploys
+   are authorised without a per-run approval. Shape rules 1–3 are unchanged, the A18 deploy mechanics still apply, and
+   `192.168.2.20` is out of scope for control operations by the owner's later instruction (S3.54).
+
+### 2.1 W1-04 — the admin-audit relay
+
+`AdminAuditBackfillWorker` replays every `admin_actions` row to state-service `POST /v1/audit-events` under
+`Idempotency-Key = admin_actions.id` (G-15), the same key `MirroringAdminAuditLog` uses, so a row the live mirror
+already wrote replays instead of duplicating. Both bodies come from `AdminAuditEventMapping`, because the upstream
+unique key is `(application, idempotency_key)` and a drifting body would be rejected with 409 rather than reconciled.
+
+Arm it per run, never by deploying it — `AdminAuditBackfill:Enabled` is `false` by default and `:DryRun` is `true`:
+
+```
+AdminAuditBackfill__Enabled=true  AdminAuditBackfill__DryRun=true   # rehearse: read + log, POST nothing
+AdminAuditBackfill__Enabled=true  AdminAuditBackfill__DryRun=false  # relay
+AdminAuditBackfill__Enabled=false                                   # DISARM once parity is proven
+```
+
+Exit criterion is parity, not a green log: local `SELECT count(*) FROM admin_actions` must equal the row count of
+`GET /v1/audit-events?application=jeeb-gateway`. Read an empty upstream page as evidence of nothing only after a
+known-positive control shows that query returning rows.
 
 **Superseded by this rule (G-21):** the design-flow DSN backfill variants — `delivery-service cmd/backfill-requests`
 (reading gateway `delivery_requests` over an owner-supplied DSN) and `cmd/backfill-availability` (reading

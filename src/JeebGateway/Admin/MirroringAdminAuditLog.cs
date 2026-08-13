@@ -1,4 +1,3 @@
-using System.Text.Json;
 using JeebGateway.Migration;
 using JeebGateway.Services.Clients;
 using JeebGateway.StateService.Ownership;
@@ -13,20 +12,12 @@ namespace JeebGateway.Admin;
 public sealed class MirroringAdminAuditLog : IAdminAuditLog
 {
     // Application scope the state-service credential grants this gateway.
-    public const string Application = "jeeb-gateway";
-
-    // admin_actions only ever records admins; upstream actorRole is required.
-    private const string ActorRole = "admin";
-
-    // resourceRef is a required 1..500-char token upstream, but entity_id is nullable locally.
-    private const string UnknownResourceRef = "-";
+    public const string Application = AdminAuditEventMapping.Application;
 
     // Bounded retry on top of the client's own Polly pipeline, then give up to the W1-04 backfill.
     private const int MirrorAttempts = 2;
     private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan MirrorBudget = TimeSpan.FromMilliseconds(3000);
-
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     private readonly IAdminAuditLog _inner;
     private readonly IServiceScopeFactory _scopeFactory;
@@ -85,21 +76,9 @@ public sealed class MirroringAdminAuditLog : IAdminAuditLog
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         budget.CancelAfter(MirrorBudget);
 
-        var body = new AuditEventAppendRequestV1
-        {
-            Application = Application,
-            ActorRef = row.AdminUserId,
-            ActorRole = ActorRole,
-            Action = row.Action,
-            ResourceType = row.EntityType,
-            // Prefer the raw append id: admin_actions.entity_id degrades to NULL for
-            // non-GUID ids (dsp_*/case_*), and the mirror must not lose them.
-            ResourceRef = Coalesce(entry.EntityId, row.EntityId) ?? UnknownResourceRef,
-            RequestId = row.RequestId,
-            Before = ToJson(row.BeforeState),
-            After = ToJson(row.AfterState),
-            OccurredAt = row.CreatedAt,
-        };
+        // Prefer the raw append id: admin_actions.entity_id degrades to NULL for
+        // non-GUID ids (dsp_*/case_*), and the mirror must not lose them.
+        var body = AdminAuditEventMapping.ToAppendRequest(row, entry.EntityId);
 
         // G-15 — the idempotency key IS admin_actions.id.
         var idempotencyKey = row.Id;
@@ -147,9 +126,4 @@ public sealed class MirroringAdminAuditLog : IAdminAuditLog
         }
     }
 
-    private static string? Coalesce(string? first, string? second) =>
-        string.IsNullOrWhiteSpace(first) ? (string.IsNullOrWhiteSpace(second) ? null : second) : first;
-
-    private static JsonElement? ToJson(IReadOnlyDictionary<string, object?>? state) =>
-        state is null ? null : JsonSerializer.SerializeToElement(state, Json);
 }
