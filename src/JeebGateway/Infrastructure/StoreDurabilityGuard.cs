@@ -103,7 +103,9 @@ internal static class StoreDurabilityGuard
         // 0031). In a prod-like env each MUST resolve to its Postgres impl, never the
         // in-memory store: a fallback means pending/retrying pushes and delivery-log
         // records evaporate on restart (silently dropped notifications).
-        (typeof(JeebGateway.Services.Dispatch.INotificationDispatchOutbox), new[] { typeof(JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox) }),
+        // W1-09 (G-08): the state-service work-item adapter joins the approved durable set so a
+        // NotificationOutboxMode=upstream-authority boot is not fail-closed. In-memory still is.
+        (typeof(JeebGateway.Services.Dispatch.INotificationDispatchOutbox), new[] { typeof(JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox), typeof(JeebGateway.Services.Dispatch.StateServiceNotificationDispatchOutbox) }),
         (typeof(JeebGateway.Push.IPushRetryQueue),                          new[] { typeof(JeebGateway.Push.PostgresPushRetryQueue) }),
         (typeof(JeebGateway.Push.IPushDeliveryTracker),                     new[] { typeof(JeebGateway.Push.PostgresPushDeliveryTracker) }),
         // JEBV4-126 (IN-MEM-LIVE): the voice-note transcription FALLBACK queue —

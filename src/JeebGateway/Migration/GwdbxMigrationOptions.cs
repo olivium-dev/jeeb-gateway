@@ -32,12 +32,18 @@ public sealed class GwdbxMigrationOptions
     // GDPR export -> state-service /v1/work-items (registry token: DataExportMode).
     public string DataExportMode { get; init; } = "local";
 
+    // notification_dispatch_outbox -> state-service /v1/work-items (registry token:
+    // NotificationOutboxMode). Drain-and-switch: only "local" and "upstream-authority" are used.
+    public string NotificationOutboxMode { get; init; } = "local";
+
     // refresh-token store -> state-service KV, W1-14 (registry token: RefreshTokenStoreMode).
     public string RefreshTokenStoreMode { get; init; } = "local";
 
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
+
+    public GwdbxMigrationPhase NotificationOutbox => Read(NotificationOutboxMode);
 
     public GwdbxMigrationPhase RefreshTokenStore => Read(RefreshTokenStoreMode);
 

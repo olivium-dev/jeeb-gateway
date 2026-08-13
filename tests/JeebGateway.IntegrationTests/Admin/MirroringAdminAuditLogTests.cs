@@ -293,6 +293,18 @@ public class MirroringAdminAuditLogTests
         public Task<WorkItemRecordV1?> GetLatestWorkItemAsync(
             string application, string kind, string subjectRef, CancellationToken ct) =>
             throw new NotSupportedException();
+
+        public Task<IReadOnlyList<WorkItemRecordV1>> ClaimWorkItemsAsync(
+            WorkClaimRequestV1 body, CancellationToken ct) =>
+            throw new NotSupportedException();
+
+        public Task<WorkItemRecordV1> CompleteWorkItemAsync(
+            Guid workItemId, WorkCompleteRequestV1 body, CancellationToken ct) =>
+            throw new NotSupportedException();
+
+        public Task<WorkItemRecordV1> FailWorkItemAsync(
+            Guid workItemId, WorkFailRequestV1 body, CancellationToken ct) =>
+            throw new NotSupportedException();
     }
 
     private sealed class ThrowingOwnershipClient : IStateOwnershipClient
@@ -318,6 +330,18 @@ public class MirroringAdminAuditLogTests
 
         public Task<WorkItemRecordV1?> GetLatestWorkItemAsync(
             string application, string kind, string subjectRef, CancellationToken ct) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<WorkItemRecordV1>> ClaimWorkItemsAsync(
+            WorkClaimRequestV1 body, CancellationToken ct) =>
+            throw new NotSupportedException();
+
+        public Task<WorkItemRecordV1> CompleteWorkItemAsync(
+            Guid workItemId, WorkCompleteRequestV1 body, CancellationToken ct) =>
+            throw new NotSupportedException();
+
+        public Task<WorkItemRecordV1> FailWorkItemAsync(
+            Guid workItemId, WorkFailRequestV1 body, CancellationToken ct) =>
             throw new NotSupportedException();
     }
 }
