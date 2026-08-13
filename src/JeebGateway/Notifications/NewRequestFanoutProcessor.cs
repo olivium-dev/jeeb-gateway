@@ -74,6 +74,12 @@ public sealed class NewRequestFanoutProcessor : BackgroundService
         // are BOTH Scoped, so resolving them from the root provider would be a
         // captive-dependency bug.
         using var scope = _services.CreateScope();
+
+        // W1-11: PERSIST FIRST. The durable work item must exist before any push leaves, so a
+        // crash between the two lines loses at most a duplicate-suppressed send, never the job.
+        var workItems = scope.ServiceProvider.GetRequiredService<INewRequestFanoutWorkItems>();
+        await workItems.PersistAsync(job, ct);
+
         var notifier = scope.ServiceProvider.GetRequiredService<INewRequestPushNotifier>();
         await notifier.FanOutAsync(job, ct);
     }
