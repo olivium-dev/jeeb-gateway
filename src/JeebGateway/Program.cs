@@ -2262,11 +2262,12 @@ builder.Services.AddSingleton<JeebGateway.TestControlPlane.FakeTimeProvider>(
     _ => new JeebGateway.TestControlPlane.FakeTimeProvider(TimeProvider.System));
 builder.Services.AddSingleton<TimeProvider>(
     sp => sp.GetRequiredService<JeebGateway.TestControlPlane.FakeTimeProvider>());
-// A10 ladder: the in-memory store is the LOCAL rung only (default), still overridden below by
-// StateServiceRefreshTokenStore when state-service is wired; from the read flip it is gone.
+// W1-14 (A7/A10): the in-memory refresh store is a Development/Testing fallback ONLY — never
+// registered in a prod-like env, and gone entirely from the read flip up.
 if (!JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(
         JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(
-            builder.Configuration["FeatureFlags:RefreshTokenStoreMode"])))
+            builder.Configuration["FeatureFlags:RefreshTokenStoreMode"]))
+    && JeebGateway.Infrastructure.StoreDurabilityGuard.IsExempt(builder.Environment))
 {
     builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
 }
@@ -2804,7 +2805,8 @@ if (stateServiceWired)
     // in-memory MVP store (rows lost on every gateway bounce → refresh-reuse detection and
     // active-token revocation evaporate) to the state-service-backed store, which persists
     // the token row + status chain + hash/user index in the R1 idempotency KV (registered
-    // above). Overrides the in-memory store when the A10 ladder registers one (last-wins DI).
+    // above). W1-14: the SOLE IRefreshTokenStore registration in any prod-like env — the
+    // in-memory store is Development/Testing-only, so there is nothing left to lose a race to.
     builder.Services.AddSingleton<IRefreshTokenStore,
         JeebGateway.Tokens.StateServiceRefreshTokenStore>();
 

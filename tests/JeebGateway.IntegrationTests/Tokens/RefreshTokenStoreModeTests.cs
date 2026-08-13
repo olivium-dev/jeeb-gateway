@@ -1,9 +1,16 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
 using FluentAssertions;
 using JeebGateway.Migration;
+using JeebGateway.StateService;
 using JeebGateway.Tokens;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Xunit;
 
@@ -135,5 +142,90 @@ public class RefreshTokenStoreModeTests
         var store = factory.Services.GetRequiredService<IRefreshTokenStore>();
 
         store.Should().BeOfType<StateServiceRefreshTokenStore>();
+    }
+
+    // Non-placeholder, >=32 bytes: gets a Production boot past JwtSigningKeyGuard so the
+    // refresh-store guard is what aborts it, not the signing key.
+    private const string ProductionSigningKey = "w1-14-refresh-store-boot-gate-0123456789abcdef";
+
+    /// <summary>THE W1-14 CHARTER TEST — at the PINNED DEFAULT rung, a Production boot whose
+    /// state-service BaseUrl was dropped ABORTS, and aborts because nothing is registered to fall
+    /// back to. Byte-exact on the guard's wording, so re-adding an unconditional in-memory
+    /// registration (which reports "resolved to 'InMemoryRefreshTokenStore'") fails this test.</summary>
+    [Fact]
+    public void Production_Boot_Without_StateService_Aborts_With_No_InMemory_Fallback_Registered()
+    {
+        // appsettings.Production.json COMMITS a state-service BaseUrl, so "unwired in Production"
+        // has to be reproduced by blanking it — the dropped-env-var deploy this guard exists for.
+        using var factory = ProductionFactory((StateServiceOptionsFactory.BaseUrlKey, ""));
+
+        var boot = Record.Exception(() => factory.CreateClient());
+
+        boot.Should().NotBeNull("a Production gateway must refuse to serve refresh tokens from memory");
+        var detail = Flatten(boot!);
+        detail.Should().Contain("IRefreshTokenStore", "the abort must name the store it could not resolve");
+        detail.Should().NotContain(
+            nameof(InMemoryRefreshTokenStore),
+            "no in-memory refresh store may exist in a prod-like container — re-adding the "
+            + "unconditional registration makes the boot survive to serve tokens from memory");
+    }
+
+    /// <summary>The other half of the charter: WITH state-service wired (the live shape), the
+    /// state-service store is the resolution — so the abort above is the missing dependency only.</summary>
+    [Fact]
+    public void Production_Boot_With_StateService_Wired_Resolves_The_StateService_Store()
+    {
+        using var factory = ProductionFactory();
+
+        var boot = Record.Exception(() => factory.CreateClient());
+
+        Flatten(boot ?? new Exception(string.Empty)).Should().NotContain(
+            "IRefreshTokenStore",
+            "the committed Production BaseUrl wires the durable store; only other stores may fail here");
+    }
+
+    // UseSetting, not ConfigureAppConfiguration: only host settings outrank appsettings.Production.json
+    // for the reads Program.cs makes while it is still composing the container.
+    private static WebApplicationFactory<Program> ProductionFactory(
+        params (string Key, string Value)[] overrides) =>
+        new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.UseEnvironment("Production");
+            b.UseDefaultServiceProvider(o => o.ValidateOnBuild = false);
+            b.UseSetting("Jwt:SigningKey", ProductionSigningKey);
+            b.UseSetting("UmJwt:SigningKey", ProductionSigningKey);
+            foreach (var (key, value) in overrides)
+            {
+                b.UseSetting(key, value);
+            }
+        });
+
+    /// <summary>The Development/Testing fallback is deliberate and must survive: the same unwired
+    /// boot outside a prod-like environment still resolves the in-memory store.</summary>
+    [Fact]
+    public void Testing_Boot_Without_StateService_Keeps_The_InMemory_Store()
+    {
+        using var factory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(b => b.UseEnvironment("Testing"));
+
+        factory.Services.GetRequiredService<IRefreshTokenStore>()
+            .Should().BeOfType<InMemoryRefreshTokenStore>();
+    }
+
+    private static string Flatten(Exception exception)
+    {
+        var text = new StringBuilder();
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            text.Append(e.Message).Append(" | ");
+            if (e is AggregateException aggregate)
+            {
+                foreach (var inner in aggregate.InnerExceptions)
+                {
+                    text.Append(Flatten(inner)).Append(" | ");
+                }
+            }
+        }
+        return text.ToString();
     }
 }
