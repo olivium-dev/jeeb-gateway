@@ -17,6 +17,9 @@ not only to program PRs. Nothing here is new policy: each clause is traceable to
   (`WalletServiceJeebWalletLedgerReader` + `WalletLedgerMigration` options); the W0 ledger flip is built on it. — G-05
 - **UPG is retired — never re-add `UseUpstream:Payments`** (or a `"Payments"` upstream key). The key was deleted
   2026-07-27; the surviving mentions are tombstone comments/docs. Dispute-refund keeps returning 400/no-op. — G-05, PLAN §8
+  The env spelling `FeatureFlags__UseUpstream__Payments` outlived the repo deletion in the live `gateway.env`
+  (value `false`, zero read sites, so inert) until 2026-08-14; deleted there, and the flag-registry gate's D3
+  deploy-env arm now fails CI on the env spelling too. — G-05-PAYMENTS-KEY-RESIDUE
 - **notification-service is never a target of this program (R7).** No PRs, no jeeb vocabulary there. The gateway calls only
   its existing generic surfaces (`ServiceNotificationClient`, `JeebNotificationRecordClient`); the outbox goes to
   state-service work-items + push-notification instead. — G-25
@@ -121,6 +124,16 @@ scope bugs are closed, each with a probe that now fails the gate:
   was spelled with a capital `M`;
 - invariant (3) tests the forbidden names against the read arm as well, since `GetValue<bool>("FeatureFlags:UseUpstream:Payments")`
   revives a retired flag just as effectively as an options property does.
+
+**What D3 fixed (G-05-PAYMENTS-KEY-RESIDUE).** All four arms above read the **repo's** spelling (`A:B`). The deploy
+workflows set configuration in the **env** spelling (`--env-add FeatureFlags__UseUpstream__Payments='true'`,
+`add_env FeatureFlags__UseUpstream__Ratings true`), and no arm saw a single one of them — `deploy-to-jeeb.yml` alone
+carries 32 such literals. A contributor could therefore re-arm retired UPG routing by editing a workflow and every
+gate would stay green. The **deploy-env arm** now scans the non-comment lines of `.github/workflows/*.yml`, normalises
+`FeatureFlags__A__B` → `A:B`, and feeds invariants (2) and (3). Measured at 12 tokens on introduction, all 12 already
+registered, 0 forbidden. Full-line `#` comments are dropped, so the workflows' own tombstone and how-to blocks stay
+allowed mentions. Three probes: an active `--env-add …__Payments='true'` fails (3); the same name in a `#` comment
+passes; an unregistered `FeatureFlags__OpsBypass__SkipEverything` fails (2).
 
 **Known limit.** A key assembled at runtime (`config[$"{Section}:Enabled"]`, `config[someVariable]`) is not a literal and
 no static arm can see it. Write configuration keys as literals or as a `const string …Key`; a computed key is a review
