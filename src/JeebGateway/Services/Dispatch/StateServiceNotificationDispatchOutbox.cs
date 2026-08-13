@@ -128,7 +128,9 @@ public sealed class StateServiceNotificationDispatchOutbox : INotificationDispat
                 LeaseToken = lease.LeaseToken,
                 ExpectedVersion = lease.Version,
                 Error = error,
-                RetryAt = DateTimeOffset.UtcNow.Add(retryDelay),
+                // A non-future retryAt is a 400; null tells state-service to fail the item now,
+                // which is what a zero retry delay (fire-once nudge) means.
+                RetryAt = retryDelay > TimeSpan.Zero ? DateTimeOffset.UtcNow.Add(retryDelay) : null,
             },
             ct);
     }
@@ -145,10 +147,13 @@ public sealed class StateServiceNotificationDispatchOutbox : INotificationDispat
     // Diagnostics-only on the interface; there is no synchronous upstream count to serve it.
     public int PendingCount => 0;
 
+    // W1-10 BLOCKER: complete/fail need a claim lease, but the in-process dispatchers enqueue and
+    // push inline without ever claiming, so this branch is the ONLY one they reach.
     private void LogNoLease(Guid entryId, string operation) =>
         _log.LogWarning(
             "No state-service lease held for notification entry {EntryId}; skipping {Operation}. "
-            + "The work item stays due and is redelivered when its lease expires (at-least-once).",
+            + "The work item stays queued and claimable — a claimer would re-send it. "
+            + "W1-10 must not flip NotificationOutboxMode until the claim side owns dispatch.",
             entryId, operation);
 
     private NotificationDispatchEntry? ToEntry(WorkItemRecordV1 record)

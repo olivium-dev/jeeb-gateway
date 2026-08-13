@@ -161,6 +161,22 @@ public class StateServiceNotificationDispatchOutboxTests
     }
 
     [Fact]
+    public async Task A_Zero_Retry_Delay_Sends_A_Null_RetryAt_Instead_Of_A_Past_One()
+    {
+        var source = NewEntry("notif:chat:45");
+        var state = new FakeStateOwnershipClient();
+        state.Claimable.Add(Record(Guid.NewGuid(), source, Guid.NewGuid(), version: 1));
+        var outbox = Outbox(state);
+
+        await outbox.GetDueAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+        await outbox.RecordFailureAsync(
+            source.Id, "expired", maxAttempts: 1, TimeSpan.Zero, CancellationToken.None);
+
+        // A non-future retryAt is rejected 400 (work.retry_at.invalid); null fails the item now.
+        state.Failed.Should().ContainSingle().Which.Body.RetryAt.Should().BeNull();
+    }
+
+    [Fact]
     public async Task An_Unclaimed_Entry_Is_Left_Due_Instead_Of_Being_Cas_Guessed()
     {
         var state = new FakeStateOwnershipClient();
@@ -194,6 +210,12 @@ public class StateServiceNotificationDispatchOutboxTests
             .Should().Be("notification-dispatch:notif:delivery-completed:req-77");
         push.Sent.Should().ContainSingle().Which.IdempotencyKey
             .Should().Be("notif:delivery-completed:req-77");
+
+        // W1-10 BLOCKER, pinned: the dispatcher never claims, so the item stays queued+claimable —
+        // flipping before the claim side owns dispatch backs up the queue and re-pushes delivered work.
+        state.Completed.Should().BeEmpty(
+            "the inline dispatcher cannot complete its own work item without a claim lease");
+        state.Failed.Should().BeEmpty();
     }
 
     [Fact]
