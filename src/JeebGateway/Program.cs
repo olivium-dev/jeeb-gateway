@@ -1880,6 +1880,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper
 // gateway restart and cannot be circumvented across replicas. Absent the key (dev / CI /
 // test), the in-process AddDistributedMemoryCache() is kept — same IDistributedCache
 // abstraction, identical behaviour.
+// A3 / W3-01 fail-closed boot guard: in a prod-like env refuse HERE, naming the key, rather than
+// silently registering the in-process fallback that would strand door-OTP state per replica.
+JeebGateway.Infrastructure.RedisDurabilityGuard.EnsureWired(builder.Configuration, builder.Environment);
 var redisCacheCs = builder.Configuration["Redis:ConnectionString"];
 if (!string.IsNullOrWhiteSpace(redisCacheCs))
 {
