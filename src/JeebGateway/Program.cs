@@ -942,6 +942,10 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.DataExportMode),
         "FeatureFlags:DataExportMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.RefreshTokenStoreMode),
+        "FeatureFlags:RefreshTokenStoreMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
     .ValidateOnStart();
 
 // Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
@@ -2279,7 +2283,15 @@ builder.Services.AddSingleton<JeebGateway.TestControlPlane.FakeTimeProvider>(
     _ => new JeebGateway.TestControlPlane.FakeTimeProvider(TimeProvider.System));
 builder.Services.AddSingleton<TimeProvider>(
     sp => sp.GetRequiredService<JeebGateway.TestControlPlane.FakeTimeProvider>());
-builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
+// W1-14 (A7/A10): the in-memory refresh store is a Development/Testing fallback ONLY — never
+// registered in a prod-like env, and gone entirely from the read flip up.
+if (!JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(
+        JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(
+            builder.Configuration["FeatureFlags:RefreshTokenStoreMode"]))
+    && JeebGateway.Infrastructure.StoreDurabilityGuard.IsExempt(builder.Environment))
+{
+    builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
+}
 builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 builder.Services.AddSingleton<IUmAuthenticationContextValidator, UmAuthenticationContextValidator>();
@@ -2753,6 +2765,17 @@ builder.Services.AddHealthChecks()
 // ---------------------------------------------------------------------------
 var stateOptions = JeebGateway.StateService.StateServiceOptionsFactory.FromConfiguration(builder.Configuration);
 var stateServiceWired = stateOptions.Enabled && !string.IsNullOrWhiteSpace(stateOptions.BaseUrl);
+
+// A10 fail-closed boot guard (W1-14): from dual-write-upstream-read up, upstream SERVES READS, so an
+// unwired dependency must refuse the boot rather than silently read sessions out of process memory.
+builder.Services
+    .AddOptions<JeebGateway.Migration.GwdbxMigrationOptions>()
+    .Validate(
+        o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.RefreshTokenStore)
+             || stateServiceWired,
+        $"FeatureFlags:RefreshTokenStoreMode is at or above dual-write-upstream-read, which makes jeeb-state-service the refresh-token READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}). Refusing to start rather than falling back to the in-memory store, which forks refresh-token families across replicas and restarts.")
+    .ValidateOnStart();
+
 if (stateServiceWired)
 {
     builder.Services.AddSingleton(stateOptions);
@@ -2803,7 +2826,8 @@ if (stateServiceWired)
     // in-memory MVP store (rows lost on every gateway bounce → refresh-reuse detection and
     // active-token revocation evaporate) to the state-service-backed store, which persists
     // the token row + status chain + hash/user index in the R1 idempotency KV (registered
-    // above). Overrides the InMemoryRefreshTokenStore registered earlier (last-wins DI).
+    // above). W1-14: the SOLE IRefreshTokenStore registration in any prod-like env — the
+    // in-memory store is Development/Testing-only, so there is nothing left to lose a race to.
     builder.Services.AddSingleton<IRefreshTokenStore,
         JeebGateway.Tokens.StateServiceRefreshTokenStore>();
 
