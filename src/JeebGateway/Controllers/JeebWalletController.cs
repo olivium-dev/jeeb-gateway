@@ -120,7 +120,9 @@ public sealed class JeebWalletController : ControllerBase
         // The page-count is best-effort over the returned page: the mobile parser only
         // needs items + a >=1 totalPages; a full COUNT(*) round-trip is unnecessary
         // chatter for a non-critical surface. A full page implies more may follow.
-        var totalPages = items.Count >= safeSize ? safePage + 1 : safePage;
+        // Saturate: at int.MaxValue the +1 wraps negative and the clamp below would
+        // report totalPages=1 for a page far past the end.
+        var totalPages = items.Count >= safeSize && safePage < int.MaxValue ? safePage + 1 : safePage;
 
         return Ok(new JeebWalletLedgerPageResponse
         {

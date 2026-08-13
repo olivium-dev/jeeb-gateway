@@ -132,6 +132,30 @@ public sealed class WalletLedgerParityTests
             cap, "requests beyond the cap skip their comparison instead of piling onto the shadow");
     }
 
+    // Defect F: the offset was int arithmetic, so a large page wrapped negative and Postgres
+    // rejected it (22023) — which the reader's graceful degrade served as an empty ledger.
+    [Theory]
+    [InlineData(1, 20, 0L)]
+    [InlineData(3, 50, 100L)]
+    [InlineData(int.MaxValue, 200, 429496729200L)]
+    [InlineData(int.MaxValue, 20, 42949672920L)]
+    public void PageOffset_StaysPositive_AtTheIntegerCeiling(int page, int size, long expected)
+    {
+        PostgresJeebWalletLedgerReader.PageOffset(page, size).Should().Be(expected);
+        PostgresJeebWalletLedgerReader.PageOffset(page, size).Should().BeGreaterThanOrEqualTo(
+            0, "a negative OFFSET is rejected by Postgres and degrades to an empty ledger");
+    }
+
+    [Fact]
+    public void PageOffset_InIntArithmetic_WouldHaveWrapped()
+    {
+        unchecked
+        {
+            ((int.MaxValue - 1) * 200).Should().BeNegative(
+                "this is the pre-fix expression — the regression it proves is real, not theoretical");
+        }
+    }
+
     private static PostgresJeebWalletLedgerReader UnreachableReader() => new(
         "Host=127.0.0.1;Port=1;Username=none;Password=none;Database=none;Timeout=2;Command Timeout=2",
         NullLogger<PostgresJeebWalletLedgerReader>.Instance);

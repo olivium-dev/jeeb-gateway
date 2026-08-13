@@ -299,7 +299,7 @@ public sealed class PostgresJeebWalletLedgerReader : IJeebWalletLedgerReader
     {
         var safePage = page < 1 ? 1 : page;
         var safeSize = pageSize is < 1 or > 200 ? 20 : pageSize;
-        var offset = (safePage - 1) * safeSize;
+        var offset = PageOffset(safePage, safeSize);
 
         // Normalize an empty/whitespace type to "no filter" (defensive — the controller
         // already collapses it) so ?type= behaves identically to an absent param.
@@ -407,6 +407,12 @@ public sealed class PostgresJeebWalletLedgerReader : IJeebWalletLedgerReader
     /// </summary>
     internal static string FormatUtcTimestamp(DateTime value) =>
         DateTime.SpecifyKind(value, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// 64-bit: int.MaxValue * 200 wraps to a negative OFFSET, which Postgres rejects (22023)
+    /// and the caller's graceful degrade would then serve as an empty financial ledger.
+    /// </summary>
+    internal static long PageOffset(int safePage, int safeSize) => (long)(safePage - 1) * safeSize;
 
     private static async Task<List<Guid>> ReadWalletIdsAsync(NpgsqlConnection conn, Guid holderId, CancellationToken ct)
     {
