@@ -97,7 +97,21 @@ public sealed class PushNotificationService : IPushNotificationService
 
     private async Task<PushDeliveryResult> SendInternalAsync(PushNotificationRequest request, int attempt, CancellationToken ct)
     {
-        var prefs = await _prefs.GetAsync(request.UserId, ct);
+        UserNotificationPreferences prefs;
+        try
+        {
+            prefs = await _prefs.GetAsync(request.UserId, ct);
+        }
+        catch (UserPreferencesUnavailableException ex)
+        {
+            // Push stays best-effort: an unreachable preferences store must not suppress
+            // delivery. The fail-open now lives HERE, at the caller that wants it.
+            _log.LogWarning(ex,
+                "push preferences unavailable for user {UserId}; proceeding on defaults for trigger {Trigger}",
+                request.UserId, request.Trigger);
+            prefs = NotificationPreferencesDefaults.NewDefault(request.UserId);
+        }
+
         if (!PushTriggerCategoryMap.IsAllowed(request.Trigger, prefs))
         {
             _log.LogInformation(

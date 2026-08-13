@@ -27,11 +27,25 @@ public class NotificationPreferencesController : ControllerBase
     [HttpGet]
     [ProducesResponseType(typeof(NotificationPreferencesResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> Get(CancellationToken ct)
     {
         if (!TryGetUserId(out var userId, out var problem)) return problem;
-        var prefs = await _store.GetAsync(userId, ct);
-        return Ok(ToResponse(prefs));
+        try
+        {
+            var prefs = await _store.GetAsync(userId, ct);
+            return Ok(ToResponse(prefs));
+        }
+        catch (UserPreferencesUnavailableException)
+        {
+            // O10 precedent (wallet ledger): a read the store could NOT answer is a
+            // retryable 502 — never a 200 of defaults the user never chose.
+            return Problem(
+                title: "Notification preferences are temporarily unavailable.",
+                detail: "The preferences service did not answer. Please try again.",
+                statusCode: StatusCodes.Status502BadGateway,
+                type: "https://jeeb.dev/errors/dependency-unavailable");
+        }
     }
 
     [HttpPatch]
