@@ -246,7 +246,7 @@ public sealed class PostgresAvailabilityStore : IAvailabilityStore
         // offline first, THEN the geo index drops the member and any
         // in-flight offers are withdrawn.
         await _geo.RemoveAsync(userId, ct);
-        var withdrawn = await _offers.WithdrawForJeeberAsync(userId, ct);
+        var withdrawn = await WithdrawBestEffortAsync(userId, ct);
 
         _log.LogInformation(
             "Jeeber {UserId} availability upserted offline (reason={Reason}, wasOnline={WasOnline}, withdrawnOffers={Withdrawn})",
@@ -258,6 +258,29 @@ public sealed class PostgresAvailabilityStore : IAvailabilityStore
             WithdrawnOffers = withdrawn,
             WasOnline = wasOnline
         };
+    }
+
+    /// <summary>
+    /// The durable offline row is already committed by the time this runs, so a
+    /// withdraw that has no upstream implementation must not swallow the caller's
+    /// follow-up work (the sweeper's upstream mirror and auto-offline push).
+    /// </summary>
+    private async Task<int> WithdrawBestEffortAsync(string userId, CancellationToken ct)
+    {
+        try
+        {
+            return await _offers.WithdrawForJeeberAsync(userId, ct);
+        }
+        catch (NotSupportedException ex)
+        {
+            // Only the permanent "route does not exist" case is absorbed; transient
+            // upstream faults still propagate so they stay visible.
+            _log.LogWarning(
+                ex,
+                "Offer withdraw unavailable for jeeber {UserId}; offline row is already durable, reporting 0 withdrawn.",
+                userId);
+            return 0;
+        }
     }
 
     public async Task RecordInteractionAsync(string userId, DateTimeOffset at, CancellationToken ct)
