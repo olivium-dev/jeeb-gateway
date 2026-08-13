@@ -55,6 +55,10 @@ public sealed class GwdbxMigrationOptions
     // Freeze-import-flip; the W3-11 flip moves it off "local".
     public string CmsConfigMode { get; init; } = "local";
 
+    // jeeber_availability -> delivery-service /api/v1/providers/*, W3-04 (registry token:
+    // AvailabilityMode). The gateway stays the single presence authority until W3-13 flips it.
+    public string AvailabilityMode { get; init; } = "local";
+
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
@@ -70,6 +74,8 @@ public sealed class GwdbxMigrationOptions
     public GwdbxMigrationPhase ProhibitedItems => Read(ProhibitedItemsMode);
 
     public GwdbxMigrationPhase CmsConfig => Read(CmsConfigMode);
+
+    public GwdbxMigrationPhase Availability => Read(AvailabilityMode);
 
     public static string LadderValues => string.Join(", ", Ladder.Select(entry => entry.Wire));
 

@@ -966,6 +966,10 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.CmsConfigMode),
         "FeatureFlags:CmsConfigMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.AvailabilityMode),
+        "FeatureFlags:AvailabilityMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
     // G-20 — from dual-write-local-read up the mirror uploads export artifacts, so boot
     // fails closed rather than reaching cdn without an encryption key.
     .Validate(
@@ -1910,6 +1914,33 @@ else
 // The mirror seam is fail-open BY CONSTRUCTION: consumers resolve this guard, never the raw
 // IEscalationMirror, so a synchronous throw can never reach the 423 path or the sweeper.
 builder.Services.AddSingleton<FailOpenEscalationMirror>();
+
+// gwdbx W3-04 — fire-and-forget availability write-through to delivery-service, behind
+// FeatureFlags:AvailabilityMode. Carries ONLY the two signals the controllers do not already
+// forward (activity watermark + the sweeper's idle flip). NOT a durable store: the gateway
+// availability row stays authoritative and remains the single presence authority (G-10), so it
+// is deliberately absent from the StoreDurabilityGuard Critical roster. Unwired base URL => no-op.
+if (Uri.TryCreate(builder.Configuration["Services:Delivery:BaseUrl"], UriKind.Absolute, out var availabilityMirrorUri))
+{
+    ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
+        JeebGateway.Availability.AvailabilityMirrorDrainer.HttpClientName, client =>
+        {
+            client.BaseAddress = new Uri(availabilityMirrorUri.ToString().TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(8);
+        }));
+    builder.Services.AddSingleton<JeebGateway.Availability.DeliveryServiceAvailabilityMirror>();
+    builder.Services.AddSingleton<JeebGateway.Availability.IAvailabilityMirror>(sp =>
+        sp.GetRequiredService<JeebGateway.Availability.DeliveryServiceAvailabilityMirror>());
+    builder.Services.AddHostedService<JeebGateway.Availability.AvailabilityMirrorDrainer>();
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.Availability.IAvailabilityMirror,
+        JeebGateway.Availability.NoOpAvailabilityMirror>();
+}
+
+// Fail-open BY CONSTRUCTION: call sites resolve this guard, never the raw IAvailabilityMirror.
+builder.Services.AddSingleton<JeebGateway.Availability.FailOpenAvailabilityMirror>();
 
 // T-BE-019 (JEB-55): shared cache for the external-OTP attempt counter
 // and lockout flag. MVP wires AddDistributedMemoryCache() (single-process);

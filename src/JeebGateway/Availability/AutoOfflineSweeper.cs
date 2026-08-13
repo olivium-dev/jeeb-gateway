@@ -63,6 +63,10 @@ public class AutoOfflineSweeper : BackgroundService
         using var scope = _services.CreateScope();
         var store = scope.ServiceProvider.GetRequiredService<IAvailabilityStore>();
         var notifier = scope.ServiceProvider.GetRequiredService<IAutoOfflineNotifier>();
+        // W3-04: report — never delegate — the flip. This sweeper stays the only
+        // thing that decides a jeeber is idle (G-10).
+        var mirror = (IAvailabilityMirror?)scope.ServiceProvider.GetService<FailOpenAvailabilityMirror>()
+            ?? new NoOpAvailabilityMirror();
 
         var window = _options.Value.InactivityWindow;
         var now = _clock.GetUtcNow();
@@ -81,6 +85,7 @@ public class AutoOfflineSweeper : BackgroundService
                 var result = await store.GoOfflineAsync(record.UserId, GoOfflineReason.AutoOfflineInactive, ct);
                 if (result.WasOnline)
                 {
+                    await mirror.MirrorIdleOfflineAsync(record.UserId, ct);
                     await notifier.NotifyAutoOfflineAsync(record.UserId, now, ct);
                     _logger.LogInformation(
                         "Jeeber {UserId} auto-offlined after {WindowMinutes}m of inactivity ({Withdrawn} offers withdrawn)",
