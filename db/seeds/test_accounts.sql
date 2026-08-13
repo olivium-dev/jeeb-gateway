@@ -101,30 +101,8 @@ ON CONFLICT (phone) DO NOTHING;
 -- KYC seeding removed with the kyc_submissions DROP (gwdbx W0-08, migration 0045).
 -- Verification authority is user-management; nothing in the gateway reads it.
 
--- ---------------------------------------------------------------------
--- A saved address per client persona so the mobile e2e suite has a
--- "Home" pin to drop the dropoff on without going through the map flow.
--- ---------------------------------------------------------------------
-INSERT INTO saved_addresses (id, user_id, label, line1, city, country, latitude, longitude, is_default)
-VALUES
-    (
-        '11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-        '11111111-1111-4111-8111-111111111111',
-        'Home',
-        'Ashrafieh, Sassine Square',
-        'Beirut', 'LB',
-        33.886917, 35.516667,
-        TRUE
-    ),
-    (
-        '22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-        '22222222-2222-4222-8222-222222222222',
-        'Home',
-        'Achrafieh, Rue Furn el Hayek',
-        'Beirut', 'LB',
-        33.886117, 35.518917,
-        TRUE
-    )
-ON CONFLICT (id) DO NOTHING;
+-- Saved-address seeding removed with the saved_addresses DROP (gwdbx W0-06,
+-- migration 0049). Address authority is user-management; nothing in the gateway
+-- reads this table.
 
 COMMIT;
