@@ -44,9 +44,6 @@ public sealed class StateServiceProhibitedItemsStore : IProhibitedItemsStore
         _log = log;
     }
 
-    /// <summary>The authoritative local chain this seam wraps; asserted by the resolution tests.</summary>
-    internal IProhibitedItemsStore Inner => _inner;
-
     private bool UpstreamReads =>
         GwdbxMigrationOptions.RequiresUpstream(_mode.CurrentValue.ProhibitedItems);
 
