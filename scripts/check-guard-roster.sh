@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# G-08 / R1 — StoreDurabilityGuard roster manifest gate: (0) shape (1) drift (2) orphan (3) G-18.
+# G-08 / R1 — StoreDurabilityGuard roster manifest gate: (0) shape (1) drift (2) orphan (3) G-18 (4) seal.
 # Failure mode + rationale: docs/runbooks/gwdbx-program-rules.md.
 # The C# roster is the source of truth; the .txt is generated + drift-checked.
 # Regenerate with: scripts/check-guard-roster.sh --write
@@ -149,6 +149,38 @@ if [ "$orphans" -eq 0 ]; then
   echo "OK: all manifest types are still declared."
 else
   fail=1
+fi
+
+# ---- Invariant (4): the sealed count in the tests tracks the roster --------
+# Invariant (1) only proves .txt matches .cs, so a roster change whose pinned test
+# literals were never re-sealed passes it. This is the only CI check of the seal.
+echo "-- (4) SEAL: sealed test literals match the Critical roster count"
+CRITICAL_N="$(grep -cE '^Critical[[:space:]]' "$GENERATED" || true)"
+SEAL_MIN=3
+# Whole-line comments only: stripping every // would corrupt URLs inside literals.
+seals="$(grep -rhE 'StoreDurabilityGuard\.Critical\.Should\(\)\.HaveCount\([0-9]+|StoreDurabilityGuard\.Critical\.Length\.Should\(\)\.Be\([0-9]+|all [0-9]+ critical stores durable' \
+  tests/ --include='*.cs' 2>/dev/null \
+  | grep -vE '^[[:space:]]*(//|\*)' \
+  | grep -oE 'HaveCount\([0-9]+|Be\([0-9]+|all [0-9]+ critical' \
+  | grep -oE '[0-9]+' || true)"
+seal_count="$(printf '%s\n' "$seals" | grep -cE '[0-9]' || true)"
+if [ "${seal_count:-0}" -lt "$SEAL_MIN" ]; then
+  echo "FAIL: found only ${seal_count:-0} sealed count literals in tests/ (floor $SEAL_MIN)."
+  echo "      The seal is enforced ONLY by these assertions — deleting them to make a"
+  echo "      roster change pass is the failure this invariant exists to stop. G-08."
+  fail=1
+else
+  bad="$(printf '%s\n' "$seals" | grep -vE "^${CRITICAL_N}$" | sort -u | tr '\n' ' ' || true)"
+  if [ -n "$(printf '%s' "$bad" | tr -d '[:space:]')" ]; then
+    echo "FAIL: Critical roster holds $CRITICAL_N stores but tests/ still seal: $bad"
+    echo "      Re-seal every pinned literal in the SAME PR as the roster change —"
+    echo "      update the number deliberately, do NOT delete the assertion. G-08."
+    grep -rnE 'StoreDurabilityGuard\.Critical\.Should\(\)\.HaveCount\([0-9]+|StoreDurabilityGuard\.Critical\.Length\.Should\(\)\.Be\([0-9]+|all [0-9]+ critical stores durable' \
+      tests/ --include='*.cs' 2>/dev/null | grep -vE ':[0-9]+:[[:space:]]*(//|\*)' | sed 's/^/  /' || true
+    fail=1
+  else
+    echo "OK: $seal_count sealed literals all agree with Critical=$CRITICAL_N."
+  fi
 fi
 
 # ---- Invariant (3): G-18 double-apply migration gate still present --------
