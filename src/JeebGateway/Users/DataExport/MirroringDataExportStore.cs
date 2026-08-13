@@ -277,7 +277,12 @@ public sealed class MirroringDataExportStore : IDataExportStore
         {
             return;
         }
-        _subjects[exportId] = subject;
+        // A later leg without the token (e.g. a retried POST returning the open row) must not
+        // erase a token an earlier download lookup resolved.
+        _subjects.AddOrUpdate(
+            exportId,
+            subject,
+            (_, existing) => subject with { Token = subject.Token ?? existing.Token });
     }
 
     private ExportSubject? Forget(string exportId) =>
