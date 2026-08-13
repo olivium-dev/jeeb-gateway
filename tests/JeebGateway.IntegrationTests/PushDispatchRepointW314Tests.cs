@@ -5,6 +5,7 @@ using JeebGateway.Migration;
 using JeebGateway.Push;
 using JeebGateway.service.ServicePushNotification;
 using JeebGateway.Services.Dispatch;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -111,10 +112,72 @@ public class PushDispatchRepointW314Tests
         await dispatcher.DispatchAsync(Template, "en", parameters, Recipient, null, default);
 
         wire.Requests.Select(r => r.IdempotencyKey).Should().Equal("notif:first", null);
-        ServicePushNotificationClient.CurrentIdempotencyKey.Should().BeNull("the scope must unwind");
+    }
+
+    /// <summary>The unwind itself, pinned where it is OBSERVABLE: AsyncLocal writes made inside
+    /// DispatchAsync never flow back to its caller, so asserting there proves nothing.</summary>
+    [Fact]
+    public void Disposing_The_Scope_Restores_The_Previous_Key()
+    {
+        ServicePushNotificationClient.CurrentIdempotencyKey.Should().BeNull();
+
+        using (ServicePushNotificationClient.UseIdempotencyKey("outer"))
+        {
+            using (ServicePushNotificationClient.UseIdempotencyKey("inner"))
+            {
+                ServicePushNotificationClient.CurrentIdempotencyKey.Should().Be("inner");
+            }
+
+            ServicePushNotificationClient.CurrentIdempotencyKey.Should().Be(
+                "outer", "Dispose must restore the previous key, not clear it");
+        }
+
+        ServicePushNotificationClient.CurrentIdempotencyKey.Should().BeNull();
+    }
+
+    // -------- the flip's fail-closed precondition -----------------------------------
+
+    /// <summary>FAIL CLOSED — GatewayDirectPushDispatchGuardHandler 503s every
+    /// POST /api/v1/sent-payload/* while direct dispatch is off, so the flip would send nothing.</summary>
+    [Fact]
+    public void UpstreamAuthority_Without_DirectDispatch_Refuses_To_Boot()
+    {
+        using var factory = FactoryWith(("FeatureFlags:PushDispatchMode", "upstream-authority"));
+
+        var boot = () => factory.CreateClient();
+
+        boot.Should().Throw<OptionsValidationException>()
+            .WithMessage("*GatewayDirectDispatch:Enabled must be true*",
+                "the failure must name the setting an operator has to fix");
+    }
+
+    /// <summary>The other direction — with the precondition met the boot is allowed, so the
+    /// validate gates the flip rather than blocking it outright.</summary>
+    [Fact]
+    public void UpstreamAuthority_With_DirectDispatch_Enabled_Boots()
+    {
+        using var factory = FactoryWith(
+            ("FeatureFlags:PushDispatchMode", "upstream-authority"),
+            ("PushNotificationServiceApi:GatewayDirectDispatch:Enabled", "true"));
+
+        var boot = () => factory.CreateClient();
+
+        boot.Should().NotThrow();
     }
 
     // -------- helpers ---------------------------------------------------------------
+
+    // UseSetting (not ConfigureAppConfiguration): the validate reads builder.Configuration
+    // while Program.cs runs, and only host settings are visible to those reads.
+    private static WebApplicationFactory<Program> FactoryWith(
+        params (string Key, string Value)[] settings) =>
+        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            foreach (var (key, value) in settings)
+            {
+                builder.UseSetting(key, value);
+            }
+        });
 
     private static JeebNotificationDispatcher NewDispatcher(
         GwdbxMigrationOptions options, CapturingPushNotificationService push, CapturingHandler wire) =>
