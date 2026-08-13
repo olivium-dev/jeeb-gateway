@@ -17,4 +17,8 @@ public class AdminAuditEntry
     public IReadOnlyDictionary<string, object?>? AfterState { get; init; }
     public string? RequestId { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
+
+    // F7 — false only for a synthesized entry whose Id has NO local admin_actions row.
+    // Mirrors must skip those: an unreconcilable phantom is worse than a reconcilable gap.
+    public bool Durable { get; init; } = true;
 }

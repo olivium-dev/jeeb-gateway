@@ -83,6 +83,8 @@ public sealed class PostgresAdminAuditLog : IAdminAuditLog
                 entry.AdminUserId, entry.Action, entry.EntityType);
             return new AdminAuditEntry
             {
+                // Durable=false: this Id names no admin_actions row, so it must never be mirrored.
+                Durable = false,
                 Id = Guid.NewGuid().ToString(),
                 AdminUserId = entry.AdminUserId,
                 Action = entry.Action,
