@@ -287,4 +287,14 @@ public sealed class UpstreamFeatureFlags
     /// dedicated role-service instead of user-management. Default false everywhere.
     /// </summary>
     public bool RoleService { get; set; }
+
+    /// <summary>
+    /// gwdbx W1-11 — created here, DEFAULT OFF, and deliberately with NO read site yet
+    /// (same shape as the W1-02 mode keys): W1-12 owns the flip that makes claim-based
+    /// execution of the persisted <c>new-request-fanout</c> work items the only path.
+    ///
+    /// <para>This flag is NOT the fan-out kill switch. <c>Notifications:NewRequestFanout:Enabled</c>
+    /// keeps that job unchanged — false still restores the byte-identical legacy topic blast.</para>
+    /// </summary>
+    public bool FanoutWorkQueue { get; set; }
 }

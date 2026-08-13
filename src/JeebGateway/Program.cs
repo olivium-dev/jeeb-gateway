@@ -819,6 +819,13 @@ builder.Services.AddSingleton<JeebGateway.Notifications.NewRequestFanoutProcesso
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<JeebGateway.Notifications.NewRequestFanoutProcessor>());
 
+// W1-11 — fan-out durability: the drain persists a work item BEFORE fanning out, and the
+// notifier probes the request status before sending. Both degrade-don't-fail (never throw).
+builder.Services.AddScoped<JeebGateway.Notifications.INewRequestFanoutWorkItems,
+    JeebGateway.Notifications.StateServiceNewRequestFanoutWorkItems>();
+builder.Services.AddScoped<JeebGateway.Notifications.INewRequestFanoutStatusProbe,
+    JeebGateway.Notifications.RequestsStoreFanoutStatusProbe>();
+
 // Feedback (ServiceFeedbackClient) — salehly sibling mirror.
 // The NSwag-generated ServiceFeedbackClient
 // (Services/Clients/ServiceFeedbackClient.cs, namespace

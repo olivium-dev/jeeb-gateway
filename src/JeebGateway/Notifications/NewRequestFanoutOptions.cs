@@ -75,4 +75,14 @@ public class NewRequestFanoutOptions
 
     /// <summary>Bounded-channel capacity for the off-hot-path dispatch buffer.</summary>
     public int QueueCapacity { get; set; } = 256;
+
+    /// <summary>
+    /// W1-11 — how long a persisted fan-out work item keeps its payload
+    /// (<c>RetainPayloadUntil</c>). Defaults to the longest tier auction window
+    /// (<see cref="JeebGateway.Requests.TierExpiryWindowResolver.SafeExpiryWindow"/>), which is
+    /// the coarse backstop; the EXACT per-request bound on a late fan-out is the pre-send
+    /// status probe, which drops a job whose request already left the offer-wait window.
+    /// </summary>
+    public TimeSpan RetainPayloadTtl { get; set; } =
+        JeebGateway.Requests.TierExpiryWindowResolver.SafeExpiryWindow;
 }
