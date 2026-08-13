@@ -950,6 +950,10 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.RefreshTokenStoreMode),
         "FeatureFlags:RefreshTokenStoreMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.AccountDeletionMode),
+        "FeatureFlags:AccountDeletionMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
     // G-20 — from dual-write-local-read up the mirror uploads export artifacts, so boot
     // fails closed rather than reaching cdn without an encryption key.
     .Validate(
@@ -2212,28 +2216,26 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 // 192.168.2.50:10067; owner declined the env flip), so the mirror fails open there and the
 // gateway-local persistence path is the real durable fallback — exactly the fail-open-then-local
 // shape notification-prefs took post-#274. When the flag is off, the local store is used directly.
-if (builder.Configuration.GetValue("FeatureFlags:UseUpstream:RemoteUserPreferences", true))
+// gwdbx W3-05 — StateServiceAccountDeletionStore then DECORATES whichever local chain is wired,
+// dual-writing the deletion to /v1/work-items once AccountDeletionMode reaches dual-write-local-read.
+builder.Services.AddSingleton<IAccountDeletionStore>(sp =>
 {
-    builder.Services.AddSingleton<IAccountDeletionStore>(sp =>
+    IAccountDeletionStore local = !string.IsNullOrWhiteSpace(gatewayPostgresCs)
+        ? sp.GetRequiredService<JeebGateway.Users.PostgresAccountDeletionStore>()
+        : sp.GetRequiredService<InMemoryAccountDeletionStore>();
+    if (builder.Configuration.GetValue("FeatureFlags:UseUpstream:RemoteUserPreferences", true))
     {
-        IAccountDeletionStore inner = !string.IsNullOrWhiteSpace(gatewayPostgresCs)
-            ? sp.GetRequiredService<JeebGateway.Users.PostgresAccountDeletionStore>()
-            : sp.GetRequiredService<InMemoryAccountDeletionStore>();
-        return new JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore(
-            inner,
+        local = new JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore(
+            local,
             sp.GetRequiredService<IServiceScopeFactory>(),
             sp.GetRequiredService<ILogger<JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore>>());
-    });
-}
-else if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
-{
-    builder.Services.AddSingleton<IAccountDeletionStore>(sp =>
-        sp.GetRequiredService<JeebGateway.Users.PostgresAccountDeletionStore>());
-}
-else
-{
-    builder.Services.AddSingleton<IAccountDeletionStore>(sp => sp.GetRequiredService<InMemoryAccountDeletionStore>());
-}
+    }
+    return new JeebGateway.Users.StateServiceAccountDeletionStore(
+        local,
+        sp.GetRequiredService<IServiceScopeFactory>(),
+        sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<JeebGateway.Migration.GwdbxMigrationOptions>>(),
+        sp.GetRequiredService<ILogger<JeebGateway.Users.StateServiceAccountDeletionStore>>());
+});
 
 // The scheduled purge worker sweeps every open deletion (pending_active_delivery → scheduled →
 // completed hard-delete once the 30-day SLA is due). It is now ALWAYS scheduled — the soft-delete

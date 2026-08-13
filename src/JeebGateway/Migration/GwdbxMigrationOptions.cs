@@ -39,6 +39,10 @@ public sealed class GwdbxMigrationOptions
     // refresh-token store -> state-service KV, W1-14 (registry token: RefreshTokenStoreMode).
     public string RefreshTokenStoreMode { get; init; } = "local";
 
+    // GDPR account-deletion -> state-service /v1/work-items, W3-05 (registry token:
+    // AccountDeletionMode). The W3-11 flip moves it off "local".
+    public string AccountDeletionMode { get; init; } = "local";
+
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
@@ -46,6 +50,8 @@ public sealed class GwdbxMigrationOptions
     public GwdbxMigrationPhase NotificationOutbox => Read(NotificationOutboxMode);
 
     public GwdbxMigrationPhase RefreshTokenStore => Read(RefreshTokenStoreMode);
+
+    public GwdbxMigrationPhase AccountDeletion => Read(AccountDeletionMode);
 
     public static string LadderValues => string.Join(", ", Ladder.Select(entry => entry.Wire));
 

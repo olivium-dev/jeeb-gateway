@@ -9,7 +9,7 @@ Critical JeebGateway.Services.Clients.IPushDispatchRecoveryClient -> JeebGateway
 Critical JeebGateway.Availability.IOfferRequestIndex -> JeebGateway.StateService.Durable.StateServiceOfferRequestIndex
 Critical JeebGateway.Requests.IRequestsStore -> JeebGateway.Requests.DurableRequestsStore
 Critical JeebGateway.Admin.IAdminAuditLog -> JeebGateway.Admin.PostgresAdminAuditLog, JeebGateway.Admin.MirroringAdminAuditLog
-Critical JeebGateway.Users.IAccountDeletionStore -> JeebGateway.Users.PostgresAccountDeletionStore, JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore
+Critical JeebGateway.Users.IAccountDeletionStore -> JeebGateway.Users.PostgresAccountDeletionStore, JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore, JeebGateway.Users.StateServiceAccountDeletionStore
 Critical JeebGateway.Users.DataExport.IDataExportStore -> JeebGateway.Users.DataExport.PostgresDataExportStore, JeebGateway.Users.DataExport.MirroringDataExportStore
 Critical JeebGateway.Requests.OtpHandover.IAdminEscalationStore -> JeebGateway.Requests.OtpHandover.PostgresAdminEscalationStore
 Critical JeebGateway.ProhibitedItems.FlaggedRequests.IFlaggedRequestStore -> JeebGateway.ProhibitedItems.FlaggedRequests.PostgresFlaggedRequestStore
