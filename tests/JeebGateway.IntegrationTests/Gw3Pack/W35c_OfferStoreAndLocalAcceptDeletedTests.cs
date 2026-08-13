@@ -162,8 +162,9 @@ public class W35c_OfferStoreAndLocalAcceptDeletedTests
     [Fact]
     public void C13_StoreDurabilityGuard_IsUnchangedByGw3()
     {
-        StoreDurabilityGuard.Critical.Should().HaveCount(33,
-            "GW1's sealed predicate (SEALED-PREDICATES.md, owner ruling 2026-07-31)");
+        // RE-SEALED 33 -> 34 at W1-02 (G-08): IStateOwnershipClient joined Critical, not GW3.
+        StoreDurabilityGuard.Critical.Should().HaveCount(34,
+            "GW1's sealed predicate (SEALED-PREDICATES.md, owner ruling 2026-07-31), re-sealed at W1-02");
 
         StoreDurabilityGuard.UpstreamContractIncomplete.Should().Contain(typeof(IPendingOffersStore),
             "GW3 changed the shape of the offer gap (no more restart-drops-bids) but did not close "

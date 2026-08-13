@@ -4,6 +4,7 @@ Critical JeebGateway.Users.IUsersStore -> JeebGateway.Users.UpstreamBackedUsersS
 Critical JeebGateway.Tokens.IRefreshTokenStore -> JeebGateway.Tokens.StateServiceRefreshTokenStore
 Critical JeebGateway.StateService.Idempotency.IIdempotencyStore -> JeebGateway.StateService.Idempotency.StateServiceIdempotencyStore
 Critical JeebGateway.Services.Clients.IGenericCaseStateClient -> JeebGateway.Services.Clients.JeebStateServiceClient
+Critical JeebGateway.Services.Clients.IStateOwnershipClient -> JeebGateway.Services.Clients.JeebStateServiceClient
 Critical JeebGateway.Services.Clients.IPushDispatchRecoveryClient -> JeebGateway.Services.Clients.PushDispatchRecoveryClient
 Critical JeebGateway.Availability.IOfferRequestIndex -> JeebGateway.StateService.Durable.StateServiceOfferRequestIndex
 Critical JeebGateway.Requests.IRequestsStore -> JeebGateway.Requests.DurableRequestsStore
