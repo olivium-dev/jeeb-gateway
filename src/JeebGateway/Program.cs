@@ -996,6 +996,14 @@ builder.Services
                     JeebGateway.Users.DataExport.DataExportArtifactOptions.SectionName + ":ArtifactKey"]),
         "DataExport:ArtifactKey (base64, 16/24/32 bytes) is required once "
             + "FeatureFlags:DataExportMode leaves \"local\".")
+    // W1-05 — MirroringAdminAuditLog still serves ListForEntityAsync from admin_actions, so the
+    // read rungs would flip nothing. Fail closed rather than report a cutover that did not happen.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.AdminAuditMode)
+            < JeebGateway.Migration.GwdbxMigrationPhase.DualWriteUpstreamRead,
+        "FeatureFlags:AdminAuditMode cannot reach \"dual-write-upstream-read\" yet: the upstream "
+            + "read cutover (W1-05) is not implemented, so the flip would be a silent no-op. "
+            + "Highest supported rung: \"dual-write-local-read\".")
     .ValidateOnStart();
 
 // Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop

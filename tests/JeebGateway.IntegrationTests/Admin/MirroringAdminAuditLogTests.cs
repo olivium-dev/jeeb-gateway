@@ -124,6 +124,46 @@ public class MirroringAdminAuditLogTests
         upstream.Queries.Should().Be(0, "the upstream read cutover is W1-05, not this step");
     }
 
+    // ----- W1-05: the read rungs are refused until the cutover exists ---------
+
+    /// <summary>FAIL CLOSED — ListForEntityAsync still reads admin_actions, so accepting the
+    /// read rung would report a cutover that never happened.</summary>
+    [Theory]
+    [InlineData("dual-write-upstream-read")]
+    [InlineData("upstream-authority")]
+    [InlineData("retired")]
+    public void Read_Rungs_Refuse_To_Boot_While_The_Cutover_Is_Unimplemented(string mode)
+    {
+        using var factory = FactoryWith(("FeatureFlags:AdminAuditMode", mode));
+
+        var boot = () => factory.CreateClient();
+
+        boot.Should().Throw<OptionsValidationException>()
+            .WithMessage("*AdminAuditMode cannot reach*",
+                "the failure must name the flag an operator would have flipped");
+    }
+
+    /// <summary>The other direction — the shipped rung still boots, so the guard gates the
+    /// flip rather than breaking the deployed dual-write.</summary>
+    [Fact]
+    public void DualWriteLocalRead_Still_Boots()
+    {
+        using var factory = FactoryWith(("FeatureFlags:AdminAuditMode", "dual-write-local-read"));
+
+        var boot = () => factory.CreateClient();
+
+        boot.Should().NotThrow();
+    }
+
+    /// <summary>Upstream cannot return admin_actions.id: AuditEventRecordV1 carries eventId and
+    /// no idempotencyKey, so a read flip would silently change row identity.</summary>
+    [Fact]
+    public void Upstream_Audit_Record_Cannot_Round_Trip_The_Local_Row_Id()
+    {
+        typeof(AuditEventRecordV1).GetProperty("IdempotencyKey").Should().BeNull(
+            "the mirror's only carrier of admin_actions.id is the Idempotency-Key header");
+    }
+
     [Fact]
     public async Task Non_Guid_Entity_Ids_Are_Preserved_Upstream()
     {
@@ -287,6 +327,18 @@ public class MirroringAdminAuditLogTests
     }
 
     // ----- helpers -----------------------------------------------------------
+
+    // UseSetting (not ConfigureAppConfiguration): the validate reads builder.Configuration
+    // while Program.cs runs, and only host settings are visible to those reads.
+    private static WebApplicationFactory<Program> FactoryWith(
+        params (string Key, string Value)[] settings) =>
+        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            foreach (var (key, value) in settings)
+            {
+                builder.UseSetting(key, value);
+            }
+        });
 
     private static MirroringAdminAuditLog NewLog(
         IStateOwnershipClient upstream, string mode, out IAdminAuditLog inner)

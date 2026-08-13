@@ -74,7 +74,8 @@ public sealed class MirroringAdminAuditLog : IAdminAuditLog
         return row;
     }
 
-    // Local read at dual-write-local-read; the upstream read cutover is W1-05.
+    // Always local — the W1-05 upstream read cutover is NOT implemented, which is why
+    // Program.cs refuses to boot at dual-write-upstream-read or above.
     public Task<IReadOnlyList<AdminAuditEntry>> ListForEntityAsync(
         string entityType, string entityId, CancellationToken ct) =>
         _inner.ListForEntityAsync(entityType, entityId, ct);
