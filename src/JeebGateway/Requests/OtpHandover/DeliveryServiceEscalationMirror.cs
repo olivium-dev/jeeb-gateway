@@ -18,7 +18,8 @@ namespace JeebGateway.Requests.OtpHandover;
 /// <see cref="Channel"/> write and returns an already-completed task; the HTTP call
 /// happens on <see cref="EscalationMirrorDrainer"/>. A dead or slow delivery-service
 /// therefore cannot add a microsecond to the 423 path. The queue is BOUNDED and
-/// drops the oldest entry when full — a mirror gap beats back-pressure on a lockout.</para>
+/// drops the oldest entry when full — a mirror gap beats back-pressure on a lockout,
+/// and every eviction is logged so the gap is never silent.</para>
 ///
 /// <para><b>G-15.</b> The idempotency key is <c>AdminEscalation.Id</c>, sent as the
 /// upstream <c>escalation_id</c>: a replay returns the stored row, never a duplicate.</para>
@@ -28,12 +29,7 @@ public sealed class DeliveryServiceEscalationMirror : IEscalationMirror
     // Bounded so a long upstream outage cannot grow the gateway's heap.
     public const int QueueCapacity = 512;
 
-    private readonly Channel<AdminEscalation> _queue = Channel.CreateBounded<AdminEscalation>(
-        new BoundedChannelOptions(QueueCapacity)
-        {
-            FullMode = BoundedChannelFullMode.DropOldest,
-            SingleReader = true,
-        });
+    private readonly Channel<AdminEscalation> _queue;
 
     private readonly IOptionsMonitor<GwdbxMigrationOptions> _mode;
     private readonly ILogger<DeliveryServiceEscalationMirror> _log;
@@ -44,7 +40,22 @@ public sealed class DeliveryServiceEscalationMirror : IEscalationMirror
     {
         _mode = mode;
         _log = log;
+        _queue = Channel.CreateBounded<AdminEscalation>(
+            new BoundedChannelOptions(QueueCapacity)
+            {
+                FullMode = BoundedChannelFullMode.DropOldest,
+                SingleReader = true,
+            },
+            OnEvicted);
     }
+
+    // DropOldest returns TryWrite==true while discarding a row, so without this callback
+    // the bounded loss is invisible: the warning below is the only trace of a mirror gap.
+    private void OnEvicted(AdminEscalation row) =>
+        _log.LogWarning(
+            "escalation mirror EVICTED escalationId={EscalationId} deliveryId={DeliveryId}: " +
+            "queue full at {Capacity}; the local row stays authoritative and W3-07 replays this id.",
+            row.Id, row.DeliveryId, QueueCapacity);
 
     /// <summary>Rows waiting to be mirrored; the drainer is the only reader.</summary>
     public ChannelReader<AdminEscalation> Reader => _queue.Reader;

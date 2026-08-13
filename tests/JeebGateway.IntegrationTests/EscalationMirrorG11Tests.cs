@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -285,6 +286,32 @@ public class EscalationMirrorG11Tests
     }
 
     [Fact]
+    public void Queue_Overflow_Logs_The_Evicted_Row()
+    {
+        var log = new CapturingLogger<DeliveryServiceEscalationMirror>();
+        var mirror = new DeliveryServiceEscalationMirror(
+            StaticMonitor.For(new GwdbxMigrationOptions { OtpEscalationsMode = "dual-write-local-read" }),
+            log);
+
+        var evicted = NewRow();
+        mirror.MirrorAsync(evicted, CancellationToken.None);
+        for (var i = 0; i < DeliveryServiceEscalationMirror.QueueCapacity; i++)
+        {
+            mirror.MirrorAsync(NewRow(), CancellationToken.None);
+        }
+
+        // DropOldest keeps TryWrite == true, so only the itemDropped callback can surface
+        // the loss; the "queue closed" warning never fires here.
+        log.Warnings.Should().ContainSingle(
+            "exactly one row was pushed out of the bounded queue")
+            .Which.Should().Contain(evicted.Id, "the evicted row must be named in the log");
+
+        // The probe had data: the eviction really happened (oldest row is gone).
+        mirror.Reader.TryRead(out var head).Should().BeTrue();
+        head!.Id.Should().NotBe(evicted.Id);
+    }
+
+    [Fact]
     public async Task Drainer_Hanging_On_Http_Does_Not_Block_The_Producer()
     {
         var mode = StaticMonitor.For(new GwdbxMigrationOptions { OtpEscalationsMode = "dual-write-local-read" });
@@ -411,6 +438,33 @@ public class EscalationMirrorG11Tests
             Requests++;
             FirstRequest.TrySetResult();
             return _never.Task;
+        }
+    }
+
+    /// <summary>Keeps warning-level messages so a silent drop is a failing assertion.</summary>
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        private readonly List<string> _warnings = new();
+
+        public IReadOnlyList<string> Warnings
+        {
+            get { lock (_warnings) { return _warnings.ToArray(); } }
+        }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel < LogLevel.Warning)
+            {
+                return;
+            }
+
+            lock (_warnings) { _warnings.Add(formatter(state, exception)); }
         }
     }
 
