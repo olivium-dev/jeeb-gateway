@@ -224,6 +224,40 @@ public class MirroringDataExportStoreTests
         upstream.TokenHash(UserId).Should().BeNull("consume clears the capability");
     }
 
+    // Deterministic sibling of the race above: the LOSER used to clear the subject entry before
+    // the winner read it, silently dropping the winner's upstream consume.
+    [Fact]
+    public async Task Losing_Download_Does_Not_Strip_The_Winners_Upstream_Consume()
+    {
+        var upstream = new CasOwnershipClient();
+        WinnerParkingStore? gate = null;
+        var store = NewStore(upstream, "dual-write-local-read", out _, out _, out _,
+            inner => gate = new WinnerParkingStore(inner));
+        var row = await store.RequestAsync(UserId, DataExportFormat.Json, default);
+        await store.ClaimNextAsync(DateTimeOffset.UtcNow, default);
+        upstream.Lease(UserId);
+        var token = await store.MarkReadyAsync(
+            row.Id, Plaintext, "application/json", DateTimeOffset.UtcNow, LinkValidity, default);
+        upstream.Latest(UserId)!.Status.Should().Be("completed", "setup: the artifact is staged upstream");
+
+        // Both racers resolve the token before either delivers.
+        var first = await store.GetByDownloadTokenAsync(token, DateTimeOffset.UtcNow, default);
+        var second = await store.GetByDownloadTokenAsync(token, DateTimeOffset.UtcNow, default);
+        first.Should().NotBeNull();
+        second.Should().NotBeNull();
+
+        var winner = Task.Run(() => store.MarkDeliveredAsync(first!.Id, DateTimeOffset.UtcNow, default));
+        await gate!.WinnerParked.WaitAsync(TimeSpan.FromSeconds(5));
+        var loserWon = await store.MarkDeliveredAsync(second!.Id, DateTimeOffset.UtcNow, default);
+        gate.ReleaseWinner();
+
+        (await winner).Should().BeTrue("setup: the parked racer really is the local winner");
+        loserWon.Should().BeFalse("the local single-use CAS admits exactly one downloader");
+        upstream.ConsumeAttempts.Should().Be(1, "the loser must not erase the winner's consume");
+        upstream.Latest(UserId)!.Status.Should().Be("consumed");
+        upstream.TokenHash(UserId).Should().BeNull("a spent token leaves no live upstream capability");
+    }
+
     [Fact]
     public async Task Consume_Cas_Rejects_A_Second_Consumer_At_The_Same_Version()
     {
@@ -284,10 +318,12 @@ public class MirroringDataExportStoreTests
         string mode,
         out IDataExportStore inner,
         out RecordingCdnClient cdn,
-        out ConcurrentDictionary<string, byte[]> objects)
+        out ConcurrentDictionary<string, byte[]> objects,
+        Func<IDataExportStore, IDataExportStore>? wrapInner = null)
     {
         var exportOptions = Options.Create(new DataExportOptions { Sla = Sla, LinkValidity = LinkValidity });
         inner = new InMemoryDataExportStore(TimeProvider.System, exportOptions);
+        inner = wrapInner?.Invoke(inner) ?? inner;
 
         var store = new ObjectStore();
         objects = store.Objects;
@@ -329,6 +365,53 @@ public class MirroringDataExportStoreTests
         public T Get(string? name) => CurrentValue;
 
         public IDisposable? OnChange(Action<T, string?> listener) => null;
+    }
+
+    // Parks the local winner between the inner single-use CAS and the decorator's bookkeeping,
+    // so the loser's whole leg provably runs first — no sleeps, no timing luck.
+    private sealed class WinnerParkingStore : IDataExportStore
+    {
+        private readonly IDataExportStore _inner;
+        private readonly TaskCompletionSource _parked = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public WinnerParkingStore(IDataExportStore inner) => _inner = inner;
+
+        public Task WinnerParked => _parked.Task;
+
+        public void ReleaseWinner() => _release.TrySetResult();
+
+        public async Task<bool> MarkDeliveredAsync(string exportId, DateTimeOffset now, CancellationToken ct)
+        {
+            var delivered = await _inner.MarkDeliveredAsync(exportId, now, ct);
+            if (delivered)
+            {
+                _parked.TrySetResult();
+                await _release.Task;
+            }
+            return delivered;
+        }
+
+        public Task<DataExportRequest> RequestAsync(string userId, string format, CancellationToken ct) =>
+            _inner.RequestAsync(userId, format, ct);
+
+        public Task<DataExportRequest?> GetLatestForUserAsync(string userId, CancellationToken ct) =>
+            _inner.GetLatestForUserAsync(userId, ct);
+
+        public Task<DataExportRequest?> GetByDownloadTokenAsync(
+            string token, DateTimeOffset now, CancellationToken ct) =>
+            _inner.GetByDownloadTokenAsync(token, now, ct);
+
+        public Task<DataExportRequest?> ClaimNextAsync(DateTimeOffset now, CancellationToken ct) =>
+            _inner.ClaimNextAsync(now, ct);
+
+        public Task<string> MarkReadyAsync(
+            string exportId, byte[] payload, string contentType, DateTimeOffset now,
+            TimeSpan linkValidity, CancellationToken ct) =>
+            _inner.MarkReadyAsync(exportId, payload, contentType, now, linkValidity, ct);
+
+        public Task MarkFailedAsync(string exportId, string reason, DateTimeOffset now, CancellationToken ct) =>
+            _inner.MarkFailedAsync(exportId, reason, now, ct);
     }
 
     // The bytes cdn ends up holding, keyed by objectRef — the spot-fetch surface.

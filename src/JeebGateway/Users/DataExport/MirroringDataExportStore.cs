@@ -123,7 +123,9 @@ public sealed class MirroringDataExportStore : IDataExportStore
     public async Task<bool> MarkDeliveredAsync(string exportId, DateTimeOffset now, CancellationToken ct)
     {
         var delivered = await _inner.MarkDeliveredAsync(exportId, now, ct);
-        var subject = Forget(exportId);
+        // Only the winner clears the entry: a loser that forgot it first would strip the
+        // winner's token and silently drop the upstream consume.
+        var subject = delivered ? Forget(exportId) : null;
 
         // Only the winner of the local single-use race consumes upstream; the upstream CAS
         // is the second, independent guard (two racing downloads -> exactly one 200).
