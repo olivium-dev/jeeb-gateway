@@ -79,7 +79,17 @@ public class InMemoryAvailabilityStore : IAvailabilityStore
             });
 
         await _geo.RemoveAsync(userId, ct);
-        var withdrawn = await _offers.WithdrawForJeeberAsync(userId, ct);
+        // Best-effort in lockstep with PostgresAvailabilityStore: the offline flip is
+        // already applied, so a withdraw with no upstream route must not abort the caller.
+        int withdrawn;
+        try
+        {
+            withdrawn = await _offers.WithdrawForJeeberAsync(userId, ct);
+        }
+        catch (NotSupportedException)
+        {
+            withdrawn = 0;
+        }
 
         return new GoOfflineResult
         {
