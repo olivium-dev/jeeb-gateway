@@ -278,6 +278,35 @@ public sealed class PostgresProhibitedItemsStore : IProhibitedItemsStore
         return ack;
     }
 
+    // gwdbx W3-03 — newest ack per user, the same "last ack wins" row GetAcknowledgmentAsync
+    // resolves, enumerated so the freeze-import can replay the ledger upstream.
+    public async Task<UserAcknowledgmentPage> ListAcknowledgmentsAsync(int page, int pageSize, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+
+        const string countSql = "SELECT COUNT(DISTINCT user_id) FROM prohibited_item_acks";
+        await using var countCmd = new NpgsqlCommand(countSql, conn);
+        var total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(ct));
+
+        const string pageSql = """
+            SELECT DISTINCT ON (user_id) user_id, lexicon_version, acknowledged_at
+            FROM prohibited_item_acks
+            ORDER BY user_id ASC, acknowledged_at DESC
+            OFFSET @Skip LIMIT @PageSize
+            """;
+        await using var cmd = new NpgsqlCommand(pageSql, conn);
+        cmd.Parameters.AddWithValue("Skip", Math.Max(0, (page - 1) * pageSize));
+        cmd.Parameters.AddWithValue("PageSize", pageSize);
+
+        var items = new List<UserAcknowledgment>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            items.Add(MapAck(reader));
+        }
+        return new UserAcknowledgmentPage { Items = items, Total = total };
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private static bool IsNameUniqueViolation(PostgresException ex) =>

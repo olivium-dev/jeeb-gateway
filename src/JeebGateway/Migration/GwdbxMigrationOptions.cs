@@ -47,6 +47,14 @@ public sealed class GwdbxMigrationOptions
     // OtpEscalationsMode). The mirror is fire-and-forget; the 423 path never waits (G-11).
     public string OtpEscalationsMode { get; init; } = "local";
 
+    // prohibited_items + _acks + flagged_requests -> state-service config-surfaces/acks/work-items,
+    // W3-03 (registry token: ProhibitedItemsMode). Freeze-import-flip: no dual-write rung is used.
+    public string ProhibitedItemsMode { get; init; } = "local";
+
+    // cms_surfaces pair -> state-service /v1/config-surfaces, W3-03 (registry token: CmsConfigMode).
+    // Freeze-import-flip; the W3-11 flip moves it off "local".
+    public string CmsConfigMode { get; init; } = "local";
+
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
@@ -58,6 +66,10 @@ public sealed class GwdbxMigrationOptions
     public GwdbxMigrationPhase AccountDeletion => Read(AccountDeletionMode);
 
     public GwdbxMigrationPhase OtpEscalations => Read(OtpEscalationsMode);
+
+    public GwdbxMigrationPhase ProhibitedItems => Read(ProhibitedItemsMode);
+
+    public GwdbxMigrationPhase CmsConfig => Read(CmsConfigMode);
 
     public static string LadderValues => string.Join(", ", Ladder.Select(entry => entry.Wire));
 

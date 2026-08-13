@@ -22,6 +22,18 @@ public interface IProhibitedItemsStore
     Task<UserAcknowledgment?> GetAcknowledgmentAsync(string userId, CancellationToken ct);
 
     Task<UserAcknowledgment> AcknowledgeAsync(string userId, string version, CancellationToken ct);
+
+    /// <summary>
+    /// gwdbx W3-03 — enumerates the ack ledger (newest ack per user) so the freeze-import
+    /// can replay it upstream. Read-only; no live caller outside the importer.
+    /// </summary>
+    Task<UserAcknowledgmentPage> ListAcknowledgmentsAsync(int page, int pageSize, CancellationToken ct);
+}
+
+public class UserAcknowledgmentPage
+{
+    public required IReadOnlyList<UserAcknowledgment> Items { get; init; }
+    public required int Total { get; init; }
 }
 
 public class ProhibitedItemCreate

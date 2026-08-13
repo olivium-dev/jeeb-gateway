@@ -146,4 +146,7 @@ file sealed class EmptyProhibitedItemsStore : IProhibitedItemsStore
             Version        = version,
             AcknowledgedAt = DateTimeOffset.UtcNow,
         });
+
+    public Task<UserAcknowledgmentPage> ListAcknowledgmentsAsync(int page, int pageSize, CancellationToken ct) =>
+        Task.FromResult(new UserAcknowledgmentPage { Items = Array.Empty<UserAcknowledgment>(), Total = 0 });
 }
