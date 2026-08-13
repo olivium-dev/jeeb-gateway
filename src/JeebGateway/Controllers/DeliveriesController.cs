@@ -229,7 +229,7 @@ public class DeliveriesController : ControllerBase
         IOptions<GatewayPublicOptions> publicOptions,
         TimeProvider clock,
         ILogger<DeliveriesController> log,
-        IEscalationMirror? escalationMirror = null)
+        FailOpenEscalationMirror? escalationMirror = null)
     {
         _store = store;
         _offers = offers;
@@ -252,7 +252,7 @@ public class DeliveriesController : ControllerBase
         _publicOptions = publicOptions;
         _clock = clock;
         _log = log;
-        _escalationMirror = escalationMirror ?? new NoOpEscalationMirror();
+        _escalationMirror = escalationMirror ?? (IEscalationMirror)new NoOpEscalationMirror();
     }
 
     /// <summary>

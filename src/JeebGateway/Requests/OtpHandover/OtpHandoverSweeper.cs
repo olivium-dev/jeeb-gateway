@@ -82,7 +82,9 @@ public class OtpHandoverSweeper : BackgroundService
         using var scope = _services.CreateScope();
         var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
         var escalations = scope.ServiceProvider.GetRequiredService<IAdminEscalationStore>();
-        var mirror = scope.ServiceProvider.GetService<IEscalationMirror>() ?? new NoOpEscalationMirror();
+        // The guard, never the raw seam: a throwing mirror must not strand the stamp below.
+        var mirror = (IEscalationMirror?)scope.ServiceProvider.GetService<FailOpenEscalationMirror>()
+            ?? new NoOpEscalationMirror();
         var opts = _options.Value;
 
         var now = _clock.GetUtcNow();

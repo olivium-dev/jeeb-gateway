@@ -148,6 +148,109 @@ public class EscalationMirrorG11Tests
         mirror.Seen.Single().Id.Should().Be(row.OtpEscalationId);
     }
 
+    // -------- Proof 1b: a SYNCHRONOUS throw never reaches the caller -------------
+    //
+    // A fake returning a FAULTED task proves nothing here: `_ = MirrorAsync(...)`
+    // already discards that. These fakes throw BEFORE any Task exists, so the
+    // discard cannot help and only a guarded resolution keeps the caller intact.
+
+    [Fact]
+    public async Task Lockout_Returns_423_When_The_Mirror_Throws_Synchronously()
+    {
+        var mirror = new SynchronouslyThrowingEscalationMirror();
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureServices(s =>
+            {
+                s.RemoveAll<IEscalationMirror>();
+                s.AddSingleton<IEscalationMirror>(mirror);
+            }));
+
+        var seed = await SeedAsync(factory);
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Add("X-User-Id", seed.JeeberId);
+        http.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        (await VerifyOtp(http, seed.Id, "111111")).StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await VerifyOtp(http, seed.Id, "222222")).StatusCode.Should().Be(HttpStatusCode.BadRequest);
+
+        var third = await VerifyOtp(http, seed.Id, "333333");
+        third.StatusCode.Should().Be(HttpStatusCode.Locked,
+            "a throwing mirror is a best-effort dual-write, not a reason to lose the 423");
+
+        var locked = await third.Content.ReadFromJsonAsync<OtpLockedResponse>();
+        locked!.EscalationId.Should().NotBeNullOrEmpty();
+        mirror.Calls.Should().Be(1, "the probe must have thrown once on the lockout path");
+    }
+
+    [Fact]
+    public async Task External_Otp_Lockout_Returns_423_When_The_Mirror_Throws_Synchronously()
+    {
+        var mirror = new SynchronouslyThrowingEscalationMirror();
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.UseSetting("FeatureFlags:UseUpstream:Delivery", "false");
+            b.UseSetting("Auth:Otp:ApplicationId", TenantApplicationId);
+            b.ConfigureServices(s =>
+            {
+                s.RemoveAll<IServiceOTPClient>();
+                s.AddSingleton<IServiceOTPClient>(new AlwaysWrongOtpClient());
+                s.RemoveAll<IEscalationMirror>();
+                s.AddSingleton<IEscalationMirror>(mirror);
+            });
+        });
+
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613999000");
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Add("X-User-Id", seed.JeeberId);
+        http.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        for (var i = 0; i < 2; i++)
+        {
+            (await ExternalVerify(http, seed.Id)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        }
+
+        var locked = await ExternalVerify(http, seed.Id);
+        locked.StatusCode.Should().Be(HttpStatusCode.Locked);
+
+        var body = await locked.Content.ReadFromJsonAsync<OtpLockedResponse>();
+        body!.EscalationId.Should().NotBeNullOrEmpty();
+        mirror.Calls.Should().Be(1, "the probe must have thrown once on the external-OTP lockout path");
+    }
+
+    [Fact]
+    public async Task Sweeper_Still_Stamps_The_Escalation_Id_When_The_Mirror_Throws_Synchronously()
+    {
+        // The sweeper mirrors BEFORE TrySetEscalationIdAsync: an escaping throw
+        // here is state divergence (escalation row created, delivery unstamped).
+        var mirror = new SynchronouslyThrowingEscalationMirror();
+        var clock = new FakeClock(new DateTimeOffset(2026, 5, 16, 12, 0, 0, TimeSpan.Zero));
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureServices(s =>
+            {
+                s.RemoveAll<TimeProvider>();
+                s.AddSingleton<TimeProvider>(clock);
+                s.RemoveAll<IEscalationMirror>();
+                s.AddSingleton<IEscalationMirror>(mirror);
+            }));
+
+        var seed = await SeedAsync(factory);
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Add("X-User-Id", seed.JeeberId);
+        http.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        (await http.PostAsync($"/deliveries/{seed.Id}/client-unreachable", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        clock.Advance(TimeSpan.FromMinutes(16));
+
+        var sweeper = factory.Services.GetServices<IHostedService>().OfType<OtpHandoverSweeper>().Single();
+        await sweeper.SweepOnceAsync(default);
+
+        var row = await factory.Services.GetRequiredService<IRequestsStore>().GetAsync(seed.Id, default);
+        row!.OtpEscalationId.Should().NotBeNullOrEmpty(
+            "the stamp runs AFTER the mirror call, so a throw there would strand the row");
+        mirror.Calls.Should().Be(1, "the probe must have thrown once on the sweeper path");
+    }
+
     // -------- Proof 2: the real mirror never touches HTTP inline ----------------
 
     [Fact]
@@ -244,6 +347,20 @@ public class EscalationMirrorG11Tests
             }
 
             return _never.Task;
+        }
+    }
+
+    /// <summary>Throws BEFORE returning a Task — discarding the task cannot catch this.</summary>
+    private sealed class SynchronouslyThrowingEscalationMirror : IEscalationMirror
+    {
+        private int _calls;
+
+        public int Calls => Volatile.Read(ref _calls);
+
+        public Task MirrorAsync(AdminEscalation row, CancellationToken ct)
+        {
+            Interlocked.Increment(ref _calls);
+            throw new InvalidOperationException("mirror threw synchronously");
         }
     }
 

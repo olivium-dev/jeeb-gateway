@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace JeebGateway.Requests.OtpHandover;
 
 /// <summary>
@@ -24,4 +26,38 @@ public interface IEscalationMirror
 public sealed class NoOpEscalationMirror : IEscalationMirror
 {
     public Task MirrorAsync(AdminEscalation row, CancellationToken ct) => Task.CompletedTask;
+}
+
+/// <summary>
+/// Enforces the "never throws" clause above. <see cref="MirrorAsync"/> is NOT async, so a
+/// throw happens synchronously, before any Task exists: <c>_ = MirrorAsync(...)</c> cannot
+/// contain it. Consumers depend on THIS type, so every resolution — including a swapped-in
+/// test double — is fail-open by construction rather than by every call site remembering.
+/// </summary>
+public sealed class FailOpenEscalationMirror : IEscalationMirror
+{
+    private readonly IEscalationMirror _inner;
+    private readonly ILogger<FailOpenEscalationMirror> _log;
+
+    public FailOpenEscalationMirror(IEscalationMirror inner, ILogger<FailOpenEscalationMirror> log)
+    {
+        _inner = inner;
+        _log = log;
+    }
+
+    public Task MirrorAsync(AdminEscalation row, CancellationToken ct)
+    {
+        try
+        {
+            return _inner.MirrorAsync(row, ct);
+        }
+        catch (Exception ex)
+        {
+            // The local admin_escalations row is authoritative; the W3-07 backfill replays this id.
+            _log.LogWarning(ex,
+                "escalation mirror threw for escalationId={EscalationId} deliveryId={DeliveryId}; swallowed (G-11).",
+                row?.Id, row?.DeliveryId);
+            return Task.CompletedTask;
+        }
+    }
 }
