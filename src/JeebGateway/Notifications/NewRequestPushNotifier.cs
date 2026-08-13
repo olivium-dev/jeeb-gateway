@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using JeebGateway.Availability;
 using JeebGateway.Push;
+using JeebGateway.Requests;
 using JeebGateway.Users;
 using JeebGateway.service.ServicePushNotification;
 using Microsoft.Extensions.Logging;
@@ -113,6 +114,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     private readonly NewRequestFanoutOptions _options;
     private readonly TimeProvider _clock;
     private readonly IGenericEventDispatcher _events;
+    private readonly INewRequestFanoutStatusProbe _probe;
 
     public NewRequestPushNotifier(
         ServicePushNotificationClient push,
@@ -124,7 +126,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         IOptions<NewRequestFanoutOptions> options,
         TimeProvider clock)
         : this(push, tiers, logger, availability, users, queue, options, clock,
-               NullGenericEventDispatcher.Instance)
+               NullGenericEventDispatcher.Instance, AlwaysOpenFanoutStatusProbe.Instance)
     {
     }
 
@@ -137,7 +139,8 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         INewRequestFanoutQueue queue,
         IOptions<NewRequestFanoutOptions> options,
         TimeProvider clock,
-        IGenericEventDispatcher events)
+        IGenericEventDispatcher events,
+        INewRequestFanoutStatusProbe probe)
     {
         _push = push;
         _tiers = tiers;
@@ -148,6 +151,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         _options = options.Value;
         _clock = clock;
         _events = events;
+        _probe = probe;
     }
 
     // ── Hot path ──────────────────────────────────────────────────────────────
@@ -202,6 +206,19 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
             {
                 // Config-only rollback: byte-identical to the pre-P1 topic blast.
                 await SendTopicBlastAsync(payload, ct);
+                return;
+            }
+
+            // W1-11 pre-send status probe, placed AFTER the kill-switch branch so the legacy
+            // topic blast stays byte-identical. Unresolvable status = fail open, still send.
+            var status = await _probe.ReadStatusAsync(n.RequestId, ct);
+            if (status is not null
+                && (RequestStatus.IsTerminal(status) || RequestStatus.IsJeeberActive(status)))
+            {
+                _logger.LogInformation(
+                    "newreq-fanout stale-drop requestId={RequestId} status={Status} — NO PUSH SENT "
+                    + "(the request already left the offer-wait window)",
+                    n.RequestId, status);
                 return;
             }
 

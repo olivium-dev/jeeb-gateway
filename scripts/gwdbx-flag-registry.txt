@@ -21,7 +21,7 @@ CmsConfigMode            program create=W3;delete=W5 # cms_surfaces pair -> stat
 WalletLedgerMigration:Authority           program create=pre-program;delete=W5 # GRANDFATHERED as built (owner ruling), live at 66a7b9d via gateway PR #385; step-6 date recorded in the W5-10 ledger entry
 WalletLedgerMigration:ShadowCompareEnabled program create=pre-program;delete=W5 # GRANDFATHERED as built; deleted with the WalletPostgres CS removal at W5-10 step-6
 UseUpstream:Geolocation                   program create=pre-program;delete=W5 # §3-C plan-named, pre-existing default false; flipped at W3-17 (O8), deleted after the geo-slot exit
-UseUpstream:FanoutWorkQueue               program create=W1;delete=W5 # §3-C NewRequestFanoutQueue -> state-service work-items (W1-12); no table
+UseUpstream:FanoutWorkQueue               program create=W1;delete=W5 # §3-C NewRequestFanoutQueue -> state-service work-items (W1-12); no table; key CREATED at W1-11 as FeatureFlags:UseUpstream:FanoutWorkQueue (UpstreamFeatureFlags), default false, flipped at W1-12
 RequestExpiry:Source                      program create=pre-program;delete=W5 # paired W5-04 knob, deleted with RequestsOwnerListMode at step-6
 
 # ---- forbidden: SUPERSEDED / retired names, never active config keys --------
@@ -271,6 +271,7 @@ Notifications:NewRequestFanout:MaxParallelSends      setting -
 Notifications:NewRequestFanout:MaxRecipients         setting -
 Notifications:NewRequestFanout:PerSendTimeout        setting -
 Notifications:NewRequestFanout:QueueCapacity         setting -
+Notifications:NewRequestFanout:RetainPayloadTtl      setting - # W1-11 RetainPayloadUntil horizon on the persisted fan-out work item
 Notifications:NewRequestFanout:RadiusKm              setting -
 Notifications:NewRequestFanout:TopicFallbackWhenEmpty setting - # topic-blast hatch when the per-user set is empty
 Notifications:NewRequestFanout:TotalBudget           setting -
