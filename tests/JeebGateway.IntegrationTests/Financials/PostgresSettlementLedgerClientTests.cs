@@ -129,16 +129,17 @@ public class PostgresSettlementLedgerClientTests
     }
 
     [Fact]
-    public void Critical_Holds_Exactly_33_Stores_After_The_Promotion()
+    public void Critical_Holds_Exactly_34_Stores_After_The_Promotion()
     {
         // Sealed gate value (SEALED-PREDICATES.md §4, row GW1-1): 32 at origin/main 24b3dd6,
         // 33 after this promotion. This is a TRIPWIRE, not the claim — Critical.Length is only
-        // interpolated into a health-check log line, so "33 critical stores durable" reports an
+        // interpolated into a health-check log line, so "34 critical stores durable" reports an
         // ARRAY LENGTH, not durability. The load-bearing assertions are the two above (the
         // interface is present and bound to the durable type) and the fail-closed test below.
-        // If a later batch legitimately adds a 34th store, update this number deliberately and
+        // If a later batch legitimately adds a 35th store, update this number deliberately and
         // re-seal — do not delete the assertion.
-        StoreDurabilityGuard.Critical.Should().HaveCount(33);
+        // RE-SEALED 33 -> 34 at W1-02 (G-08): IStateOwnershipClient joined Critical in this PR.
+        StoreDurabilityGuard.Critical.Should().HaveCount(34);
     }
 
     // ── The promotion is LIVE, not decorative ──────────────────────────────
@@ -197,6 +198,6 @@ public class PostgresSettlementLedgerClientTests
         var result = await check.CheckHealthAsync(new HealthCheckContext());
 
         result.Status.Should().Be(HealthStatus.Healthy);
-        result.Description.Should().Be("store-durability: all 33 critical stores durable");
+        result.Description.Should().Be("store-durability: all 34 critical stores durable");
     }
 }

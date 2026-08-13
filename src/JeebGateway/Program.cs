@@ -922,6 +922,21 @@ builder.Services.Configure<JeebGateway.Users.GatewayPublicOptions>(
 builder.Services.Configure<UpstreamFeatureFlags>(
     builder.Configuration.GetSection(UpstreamFeatureFlags.SectionName));
 
+// A10 — the gateway-DB-extraction mode ladder. Every domain key defaults to "local", so an
+// unset/default deploy behaves exactly as before; ValidateOnStart refuses unknown ladder values.
+builder.Services
+    .AddOptions<JeebGateway.Migration.GwdbxMigrationOptions>()
+    .Bind(builder.Configuration.GetSection(JeebGateway.Migration.GwdbxMigrationOptions.SectionName))
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.AdminAuditMode),
+        "FeatureFlags:AdminAuditMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.DataExportMode),
+        "FeatureFlags:DataExportMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .ValidateOnStart();
+
 // Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
 // that lets the client read its own thread straight from Firestore instead of
 // re-fetching it over REST. The signing key is referenced by absolute HOST path in
@@ -2745,6 +2760,11 @@ if (stateServiceWired)
     builder.Services.AddTransient<IGenericCaseStateClient>(services =>
         (IGenericCaseStateClient)services.GetRequiredService<IJeebStateServiceClient>());
 
+    // W1-02 — /v1/audit-events + /v1/work-items. No caller yet: every consumer arrives with its
+    // domain's A10 mode key, which stays at "local" in this PR.
+    builder.Services.AddTransient<IStateOwnershipClient>(services =>
+        (IStateOwnershipClient)services.GetRequiredService<IJeebStateServiceClient>());
+
     // R1 — idempotency (full 1:1; GET-by-key ⇒ bounce-survivable).
     builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,
         JeebGateway.StateService.Idempotency.StateServiceIdempotencyStore>();
@@ -2798,6 +2818,7 @@ if (stateServiceWired)
 else
 {
     builder.Services.AddSingleton<IGenericCaseStateClient, UnavailableGenericCaseStateClient>();
+    builder.Services.AddSingleton<IStateOwnershipClient, UnavailableStateOwnershipClient>();
     // Unrelated legacy durability adapters still use this existing local/CI fallback.
     // Cases never use it; UnavailableGenericCaseStateClient fails them explicitly.
     builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,
