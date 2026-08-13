@@ -289,16 +289,30 @@ public class W18_SettlementLedgerDurableTests
     }
 
     [Fact]
-    public void B6b_Migration_0044_Is_The_Head_And_Registers_Itself()
+    public void B6b_Migration_0044_Is_Uniquely_Numbered_And_Registers_Itself()
     {
         var dir = Path.Combine(RepoRoot(), "db", "migrations");
         var files = Directory.GetFiles(dir, "*.sql").Select(Path.GetFileName).OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
         files.Should().NotBeEmpty();
-        files.Last().Should().Be("0044_init_settlement_ledger_entries.sql",
-            "0043 was the head at origin/main; W1.8's durable backing is the next number");
+        files.Should().Contain("0044_init_settlement_ledger_entries.sql",
+            "W1.8's durable backing must not be renamed or renumbered out from under the ledger client");
         files.Count(n => n!.StartsWith("0044", StringComparison.Ordinal)).Should().Be(1,
             "two migrations sharing a number is a deploy hazard");
+
+        // Head-position is not asserted: 0044 was the head when this landed, but any later
+        // wave legitimately appends (W0-08 added 0045-0048). Prefix uniqueness is the invariant.
+        var prefixes = files.Select(n => n!.Split('_')[0]).ToArray();
+        prefixes.Should().OnlyHaveUniqueItems("two migrations sharing a number is a deploy hazard");
+
+        // G-18: everything landing after 0044 must write its own schema_migrations row,
+        // or db/apply.sh re-runs stop being idempotent.
+        foreach (var later in files.Where(n => string.CompareOrdinal(n!.Split('_')[0], "0044") > 0))
+        {
+            var laterSql = StripSqlComments(File.ReadAllText(Path.Combine(dir, later!)));
+            laterSql.Should().Contain("INSERT INTO schema_migrations",
+                $"{later} must register itself (G-18) or apply.sh re-runs it every deploy");
+        }
 
         var raw = File.ReadAllText(Path.Combine(dir, "0044_init_settlement_ledger_entries.sql"));
         var sql = StripSqlComments(raw);
