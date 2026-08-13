@@ -182,7 +182,8 @@ public sealed class PostgresAdminAuditLog : IAdminAuditLog
         return results;
     }
 
-    private static AdminAuditEntry MapRow(NpgsqlDataReader r)
+    // internal: the W1-04 backfill source reads the same table and must map it identically.
+    internal static AdminAuditEntry MapRow(NpgsqlDataReader r)
     {
         return new AdminAuditEntry
         {
