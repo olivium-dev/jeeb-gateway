@@ -80,6 +80,8 @@ public class DeliveriesController : ControllerBase
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ICancellationService _cancellations;
     private readonly IAdminEscalationStore _escalations;
+    // gwdbx W3-02 — best-effort upstream mirror; NEVER awaited on the 423 path (G-11).
+    private readonly IEscalationMirror _escalationMirror;
     private readonly IOptions<OtpHandoverOptions> _otpOptions;
     private readonly IOptions<JeebGateway.Auth.OtpSignIn.OtpSignInOptions> _otpSignInOptions;
     private readonly IServiceOTPClient _otpClient;
@@ -226,7 +228,8 @@ public class DeliveriesController : ControllerBase
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         IOptions<GatewayPublicOptions> publicOptions,
         TimeProvider clock,
-        ILogger<DeliveriesController> log)
+        ILogger<DeliveriesController> log,
+        IEscalationMirror? escalationMirror = null)
     {
         _store = store;
         _offers = offers;
@@ -249,6 +252,7 @@ public class DeliveriesController : ControllerBase
         _publicOptions = publicOptions;
         _clock = clock;
         _log = log;
+        _escalationMirror = escalationMirror ?? new NoOpEscalationMirror();
     }
 
     /// <summary>
@@ -1630,6 +1634,10 @@ public class DeliveriesController : ControllerBase
                     }, ct);
 
                     await _store.TrySetEscalationIdAsync(req.Id, escalation.Id, ct);
+
+                    // G-11 — fire-and-forget: the task is DISCARDED, never awaited, so a dead or
+                    // slow delivery-service cannot delay or change this 423. G-15 key = escalation.Id.
+                    _ = _escalationMirror.MirrorAsync(escalation, CancellationToken.None);
                     _log.LogWarning(
                         "OTP lockout for delivery {DeliveryId} after {Attempts} attempts — escalation {EscalationId} opened",
                         req.Id, req.OtpAttemptCount, escalation.Id);
@@ -2234,6 +2242,10 @@ public class DeliveriesController : ControllerBase
                 new KeyValuePair<string, object?>("outcome", "handover_lockout"));
             BusinessOutcomeTelemetry.HandoverEscalations.Add(1,
                 new KeyValuePair<string, object?>("outcome", "otp_locked"));
+
+            // G-11 — fire-and-forget: the task is DISCARDED, never awaited, so a dead or
+            // slow delivery-service cannot delay or change this 423. G-15 key = escalation.Id.
+            _ = _escalationMirror.MirrorAsync(escalation, CancellationToken.None);
 
             _log.LogWarning(
                 "handover.lockout deliveryId={DeliveryId} correlationId={CorrelationId} attempts={Attempts} escalationId={EscalationId}",

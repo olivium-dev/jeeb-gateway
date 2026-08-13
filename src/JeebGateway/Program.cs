@@ -954,6 +954,10 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.AccountDeletionMode),
         "FeatureFlags:AccountDeletionMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.OtpEscalationsMode),
+        "FeatureFlags:OtpEscalationsMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
     // G-20 — from dual-write-local-read up the mirror uploads export artifacts, so boot
     // fails closed rather than reaching cdn without an encryption key.
     .Validate(
@@ -1872,6 +1876,28 @@ else
 }
 builder.Services.AddSingleton<OtpHandoverSweeper>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper>());
+
+// gwdbx W3-02 — fire-and-forget escalation dual-write to delivery-service, behind
+// FeatureFlags:OtpEscalationsMode. NOT a durable store: the local admin_escalations row
+// stays authoritative and the 423 path never waits on this (G-11), so it is deliberately
+// absent from the StoreDurabilityGuard Critical roster. Unwired base URL => no-op mirror.
+if (Uri.TryCreate(builder.Configuration["Services:Delivery:BaseUrl"], UriKind.Absolute, out var escalationMirrorUri))
+{
+    ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
+        JeebGateway.Requests.OtpHandover.EscalationMirrorDrainer.HttpClientName, client =>
+        {
+            client.BaseAddress = new Uri(escalationMirrorUri.ToString().TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(8);
+        }));
+    builder.Services.AddSingleton<JeebGateway.Requests.OtpHandover.DeliveryServiceEscalationMirror>();
+    builder.Services.AddSingleton<IEscalationMirror>(sp =>
+        sp.GetRequiredService<JeebGateway.Requests.OtpHandover.DeliveryServiceEscalationMirror>());
+    builder.Services.AddHostedService<JeebGateway.Requests.OtpHandover.EscalationMirrorDrainer>();
+}
+else
+{
+    builder.Services.AddSingleton<IEscalationMirror, NoOpEscalationMirror>();
+}
 
 // T-BE-019 (JEB-55): shared cache for the external-OTP attempt counter
 // and lockout flag. MVP wires AddDistributedMemoryCache() (single-process);
