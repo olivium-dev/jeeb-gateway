@@ -138,6 +138,14 @@ public class WorkItemClaimWorkerTests
     }
 
     [Fact]
+    public void The_Claimer_Scopes_Itself_To_The_Same_Application_As_Both_Producers()
+    {
+        // A drifted application string would silently claim nothing — the exact bug this closes.
+        WorkItemClaimWorker.Application.Should().Be(StateServiceNotificationDispatchOutbox.Application);
+        WorkItemClaimWorker.Application.Should().Be(StateServiceNewRequestFanoutWorkItems.Application);
+    }
+
+    [Fact]
     public async Task A_Gated_Off_Kind_Does_Not_Drag_Its_Client_Graph_Into_The_Boot_Path()
     {
         var services = new ServiceCollection();
