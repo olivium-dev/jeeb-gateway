@@ -201,5 +201,8 @@ public class ModerationCheckFailClosedTests
 
         public Task<UserAcknowledgment> AcknowledgeAsync(string userId, string version, CancellationToken ct) =>
             throw new NotSupportedException();
+
+        public Task<UserAcknowledgmentPage> ListAcknowledgmentsAsync(int page, int pageSize, CancellationToken ct) =>
+            Task.FromResult(new UserAcknowledgmentPage { Items = Array.Empty<UserAcknowledgment>(), Total = 0 });
     }
 }

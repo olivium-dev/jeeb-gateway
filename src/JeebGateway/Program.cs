@@ -958,6 +958,14 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.OtpEscalationsMode),
         "FeatureFlags:OtpEscalationsMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.ProhibitedItemsMode),
+        "FeatureFlags:ProhibitedItemsMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.CmsConfigMode),
+        "FeatureFlags:CmsConfigMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
     // G-20 — from dual-write-local-read up the mirror uploads export artifacts, so boot
     // fails closed rather than reaching cdn without an encryption key.
     .Validate(
@@ -2014,13 +2022,27 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ScheduledDeliveryA
 // admin edits and per-user acknowledgements survive a restart; in-memory fallback otherwise.
 if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 {
-    builder.Services.AddSingleton<IProhibitedItemsStore,
-        JeebGateway.ProhibitedItems.PostgresProhibitedItemsStore>();
+    builder.Services.AddSingleton<JeebGateway.ProhibitedItems.PostgresProhibitedItemsStore>();
 }
 else
 {
-    builder.Services.AddSingleton<IProhibitedItemsStore, InMemoryProhibitedItemsStore>();
+    builder.Services.AddSingleton<InMemoryProhibitedItemsStore>();
 }
+
+// gwdbx W3-03 — StateServiceProhibitedItemsStore DECORATES the authoritative local catalog. At
+// "local" it is pass-through; from the W3-11 read flip up the published config surface serves
+// ListActiveAsync and fails OPEN back to the local lexicon. No dual-write: catalog leg (A11).
+builder.Services.AddSingleton<IProhibitedItemsStore>(sp =>
+{
+    IProhibitedItemsStore inner = !string.IsNullOrWhiteSpace(gatewayPostgresCs)
+        ? sp.GetRequiredService<JeebGateway.ProhibitedItems.PostgresProhibitedItemsStore>()
+        : sp.GetRequiredService<InMemoryProhibitedItemsStore>();
+    return new JeebGateway.ProhibitedItems.StateServiceProhibitedItemsStore(
+        inner,
+        sp.GetRequiredService<IServiceScopeFactory>(),
+        sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<JeebGateway.Migration.GwdbxMigrationOptions>>(),
+        sp.GetRequiredService<ILogger<JeebGateway.ProhibitedItems.StateServiceProhibitedItemsStore>>());
+});
 
 // Prohibited-item NLP scanner + admin review queue (T-backend-048).
 // The scanner runs Damerau-Levenshtein fuzzy matching with a synonym
@@ -2850,6 +2872,16 @@ builder.Services
         o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.RefreshTokenStore)
              || stateServiceWired,
         $"FeatureFlags:RefreshTokenStoreMode is at or above dual-write-upstream-read, which makes jeeb-state-service the refresh-token READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}). Refusing to start rather than falling back to the in-memory store, which forks refresh-token families across replicas and restarts.")
+    // W3-03 (A10): from the read flip up the config surfaces serve the lexicon and the CMS
+    // envelopes, so an unwired state-service must refuse the boot rather than degrade silently.
+    .Validate(
+        o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.ProhibitedItems)
+             || stateServiceWired,
+        $"FeatureFlags:ProhibitedItemsMode is at or above dual-write-upstream-read, which makes jeeb-state-service the lexicon READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}).")
+    .Validate(
+        o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.CmsConfig)
+             || stateServiceWired,
+        $"FeatureFlags:CmsConfigMode is at or above dual-write-upstream-read, which makes jeeb-state-service the CMS config READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}).")
     .ValidateOnStart();
 
 if (stateServiceWired)
@@ -2863,6 +2895,12 @@ if (stateServiceWired)
     // domain's A10 mode key, which stays at "local" in this PR.
     builder.Services.AddTransient<IStateOwnershipClient>(services =>
         (IStateOwnershipClient)services.GetRequiredService<IJeebStateServiceClient>());
+
+    // W3-03 (G-27) — the ONE versioned-config primitive. Consumers arrive with ProhibitedItemsMode
+    // / CmsConfigMode, both "local" in this PR; the freeze-import is the only upstream writer.
+    builder.Services.AddTransient<IStateConfigClient>(services =>
+        (IStateConfigClient)services.GetRequiredService<IJeebStateServiceClient>());
+    builder.Services.AddTransient<JeebGateway.StateService.Config.StateServiceConfigImporter>();
 
     // R1 — idempotency (full 1:1; GET-by-key ⇒ bounce-survivable).
     builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,
@@ -2919,6 +2957,7 @@ else
 {
     builder.Services.AddSingleton<IGenericCaseStateClient, UnavailableGenericCaseStateClient>();
     builder.Services.AddSingleton<IStateOwnershipClient, UnavailableStateOwnershipClient>();
+    builder.Services.AddSingleton<IStateConfigClient, UnavailableStateConfigClient>();
     // Unrelated legacy durability adapters still use this existing local/CI fallback.
     // Cases never use it; UnavailableGenericCaseStateClient fails them explicitly.
     builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,

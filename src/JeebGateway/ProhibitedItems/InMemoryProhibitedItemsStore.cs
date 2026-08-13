@@ -137,6 +137,14 @@ public class InMemoryProhibitedItemsStore : IProhibitedItemsStore
         return Task.FromResult(ack);
     }
 
+    public Task<UserAcknowledgmentPage> ListAcknowledgmentsAsync(int page, int pageSize, CancellationToken ct)
+    {
+        var ordered = _acks.Values.OrderBy(a => a.UserId, StringComparer.Ordinal).ToList();
+        var items = ordered.Skip(Math.Max(0, (page - 1) * pageSize)).Take(pageSize).ToList();
+
+        return Task.FromResult(new UserAcknowledgmentPage { Items = items, Total = ordered.Count });
+    }
+
     private bool HasActiveNameConflict(string name, string? excludingId)
     {
         foreach (var i in _items.Values)

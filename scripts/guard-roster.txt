@@ -13,7 +13,7 @@ Critical JeebGateway.Users.IAccountDeletionStore -> JeebGateway.Users.PostgresAc
 Critical JeebGateway.Users.DataExport.IDataExportStore -> JeebGateway.Users.DataExport.PostgresDataExportStore, JeebGateway.Users.DataExport.MirroringDataExportStore
 Critical JeebGateway.Requests.OtpHandover.IAdminEscalationStore -> JeebGateway.Requests.OtpHandover.PostgresAdminEscalationStore
 Critical JeebGateway.ProhibitedItems.FlaggedRequests.IFlaggedRequestStore -> JeebGateway.ProhibitedItems.FlaggedRequests.PostgresFlaggedRequestStore
-Critical JeebGateway.ProhibitedItems.IProhibitedItemsStore -> JeebGateway.ProhibitedItems.PostgresProhibitedItemsStore
+Critical JeebGateway.ProhibitedItems.IProhibitedItemsStore -> JeebGateway.ProhibitedItems.PostgresProhibitedItemsStore, JeebGateway.ProhibitedItems.StateServiceProhibitedItemsStore
 Critical JeebGateway.Availability.IAvailabilityStore -> JeebGateway.Availability.PostgresAvailabilityStore
 Critical JeebGateway.Push.IDeviceTokenStore -> JeebGateway.Push.PostgresDeviceTokenStore
 Critical JeebGateway.Users.SavedLocations.ISavedLocationStore -> JeebGateway.Users.SavedLocations.RemoteUserPreferencesSavedLocationStore

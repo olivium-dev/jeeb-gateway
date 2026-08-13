@@ -78,7 +78,9 @@ internal static class StoreDurabilityGuard
         (typeof(JeebGateway.Users.DataExport.IDataExportStore),             new[] { typeof(JeebGateway.Users.DataExport.PostgresDataExportStore), typeof(JeebGateway.Users.DataExport.MirroringDataExportStore) }),
         (typeof(JeebGateway.Requests.OtpHandover.IAdminEscalationStore),    new[] { typeof(JeebGateway.Requests.OtpHandover.PostgresAdminEscalationStore) }),
         (typeof(JeebGateway.ProhibitedItems.FlaggedRequests.IFlaggedRequestStore), new[] { typeof(JeebGateway.ProhibitedItems.FlaggedRequests.PostgresFlaggedRequestStore) }),
-        (typeof(JeebGateway.ProhibitedItems.IProhibitedItemsStore),         new[] { typeof(JeebGateway.ProhibitedItems.PostgresProhibitedItemsStore) }),
+        // gwdbx W3-03 (G-08): StateServiceProhibitedItemsStore DECORATES the durable local catalog to
+        // serve the flipped read — in a prod-like env the inner is Postgres, so both are durable.
+        (typeof(JeebGateway.ProhibitedItems.IProhibitedItemsStore),         new[] { typeof(JeebGateway.ProhibitedItems.PostgresProhibitedItemsStore), typeof(JeebGateway.ProhibitedItems.StateServiceProhibitedItemsStore) }),
         (typeof(JeebGateway.Availability.IAvailabilityStore),               new[] { typeof(JeebGateway.Availability.PostgresAvailabilityStore) }),
         (typeof(JeebGateway.Push.IDeviceTokenStore),                        new[] { typeof(JeebGateway.Push.PostgresDeviceTokenStore) }),
         // JEBV4-165 / JEBV4-194 D5 (D1 matrix row 5): saved locations migrated off the gateway's
