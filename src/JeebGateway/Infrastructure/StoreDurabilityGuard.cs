@@ -70,7 +70,9 @@ internal static class StoreDurabilityGuard
         // is Postgres and the decorated store is durable. Both the bare Postgres store (flag off)
         // and the decorator (flag on, default) are approved durable resolutions. Mirrors the
         // INotificationPreferencesStore → RemoteUserPreferences* treatment below.
-        (typeof(JeebGateway.Users.IAccountDeletionStore),                   new[] { typeof(JeebGateway.Users.PostgresAccountDeletionStore), typeof(JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore) }),
+        // gwdbx W3-05 (G-08): StateServiceAccountDeletionStore is the outermost decorator over that
+        // same durable chain, so it joins the approved set; the inner resolution is unchanged.
+        (typeof(JeebGateway.Users.IAccountDeletionStore),                   new[] { typeof(JeebGateway.Users.PostgresAccountDeletionStore), typeof(JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore), typeof(JeebGateway.Users.StateServiceAccountDeletionStore) }),
         // gwdbx W1-06 (G-08): MirroringDataExportStore DECORATES the durable local store to dual-write
         // /v1/work-items — in a prod-like env the inner is Postgres, so both resolutions are durable.
         (typeof(JeebGateway.Users.DataExport.IDataExportStore),             new[] { typeof(JeebGateway.Users.DataExport.PostgresDataExportStore), typeof(JeebGateway.Users.DataExport.MirroringDataExportStore) }),

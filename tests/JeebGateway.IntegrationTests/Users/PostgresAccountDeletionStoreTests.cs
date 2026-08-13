@@ -63,7 +63,10 @@ public class PostgresAccountDeletionStoreTests
         var act = () => scope.ServiceProvider.GetRequiredService<IAccountDeletionStore>();
 
         act.Should().NotThrow("PostgresAccountDeletionStore's constructor stores its collaborators and does no I/O");
+        // gwdbx W3-05: StateServiceAccountDeletionStore now decorates the chain; the INNER
+        // resolution is what this test pins, and it must still be the durable Postgres store.
         scope.ServiceProvider.GetRequiredService<IAccountDeletionStore>()
+            .Should().BeOfType<StateServiceAccountDeletionStore>().Which.Inner
             .Should().BeOfType<PostgresAccountDeletionStore>(
                 "GatewayPostgres:ConnectionString is configured, so the durable store must be selected");
 
@@ -83,6 +86,7 @@ public class PostgresAccountDeletionStoreTests
 
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<IAccountDeletionStore>()
+            .Should().BeOfType<StateServiceAccountDeletionStore>().Which.Inner
             .Should().BeOfType<InMemoryAccountDeletionStore>(
                 "no connection string is configured, so local/CI runs must keep exercising the in-memory fallback");
 
