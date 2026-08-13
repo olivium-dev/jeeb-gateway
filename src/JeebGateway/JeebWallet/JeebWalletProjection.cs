@@ -41,9 +41,8 @@ public static class JeebWalletProjection
     /// <summary>
     /// Project the generic holder-wallets read into the Jeeb wallet balance the
     /// mobile <c>DioWalletRepository</c> parses. Only ACTIVE, SPENDABLE wallets
-    /// (<see cref="SpendableWalletTypes"/>) contribute to the available balance;
-    /// an absent/empty holder projects to a zeroed,
-    /// "empty"-affordability balance (mobile parses defensively either way).
+    /// (<see cref="SpendableWalletTypes"/>) contribute; an absent/empty holder
+    /// projects to a zeroed, "empty"-affordability balance (mobile is defensive).
     /// </summary>
     public static JeebWalletBalanceResponse ProjectBalance(GetHolderWallets? holder)
     {
