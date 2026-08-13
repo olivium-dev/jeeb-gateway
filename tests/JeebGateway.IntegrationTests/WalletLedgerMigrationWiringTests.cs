@@ -3,6 +3,7 @@ using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.JeebWallet;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -153,11 +154,9 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
     }
 
     [Fact]
-    public void Production_config_targets_the_native_wallet_and_keeps_postgres_authoritative()
+    public void Production_config_targets_the_native_wallet_and_serves_the_wallet_api()
     {
-        using var doc = JsonDocument.Parse(
-            File.ReadAllText(Path.Combine(
-                FindRepoRoot(), "src", "JeebGateway", "appsettings.Production.json")));
+        using var doc = JsonDocument.Parse(File.ReadAllText(ProductionSettingsPath()));
         var root = doc.RootElement;
 
         root.GetProperty("WalletServiceApi").GetProperty("BaseUrl").GetString()
@@ -167,8 +166,44 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
 
         var migration = root.GetProperty("WalletLedgerMigration");
         migration.GetProperty("ShadowCompareEnabled").GetBoolean().Should().BeTrue();
-        migration.GetProperty("Authority").GetString().Should().Be("postgres");
+        migration.GetProperty("Authority").GetString().Should().Be("wallet-api",
+            "the completed flip lived only in gateway.env; a rebuilt env file or a fresh host "
+            + "must not silently revert the money read to the Postgres projection (W0-05)");
     }
+
+    // W0-05: drive the composition root off the SHIPPED Production values, not off literals, so
+    // an edit to appsettings.Production.json alone cannot demote the wallet API out of the serving slot.
+    [Fact]
+    public void Production_config_resolves_the_wallet_api_reader_as_primary()
+    {
+        var production = new ConfigurationBuilder()
+            .AddJsonFile(ProductionSettingsPath(), optional: false)
+            .Build();
+
+        var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("WalletPostgres:ConnectionString", FakeWalletCs);
+            builder.UseSetting(
+                "WalletServiceApi:BaseUrl", production["WalletServiceApi:BaseUrl"]);
+            builder.UseSetting(
+                "WalletLedgerMigration:ShadowCompareEnabled",
+                production["WalletLedgerMigration:ShadowCompareEnabled"]);
+            builder.UseSetting(
+                "WalletLedgerMigration:Authority", production["WalletLedgerMigration:Authority"]);
+        });
+
+        using var scope = factory.Services.CreateScope();
+        var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
+
+        reader.Should().BeOfType<ShadowComparingJeebWalletLedgerReader>();
+        Primary(reader).Should().BeOfType<WalletServiceJeebWalletLedgerReader>(
+            "Production must serve wallet-service; the Postgres projection fail-opens to an "
+            + "empty 200 when WalletPostgres is missing, which reads as a zeroed ledger");
+        Shadow(reader).Should().BeOfType<PostgresJeebWalletLedgerReader>();
+    }
+
+    private static string ProductionSettingsPath() =>
+        Path.Combine(FindRepoRoot(), "src", "JeebGateway", "appsettings.Production.json");
 
     [Fact]
     public void No_appsettings_file_reintroduces_the_swarm_wallet_hostname()

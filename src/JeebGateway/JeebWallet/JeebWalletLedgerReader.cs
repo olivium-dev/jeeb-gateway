@@ -12,7 +12,7 @@ namespace JeebGateway.JeebWallet;
 
 /// <summary>
 /// Holder-scoped ledger boundary. Which implementation serves is chosen at composition time by
-/// WalletLedgerMigration:Authority — "postgres" (default, today's live read) or "wallet-api".
+/// WalletLedgerMigration:Authority — "postgres" (dev/CI default) or "wallet-api" (Production).
 /// </summary>
 public interface IJeebWalletLedgerReader
 {
