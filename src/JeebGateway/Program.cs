@@ -2018,12 +2018,28 @@ if (createModerationEnabled)
 // a restart; in-memory fallback for dev/CI/test.
 if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 {
-    builder.Services.AddSingleton<IAdminAuditLog, JeebGateway.Admin.PostgresAdminAuditLog>();
+    builder.Services.AddSingleton<JeebGateway.Admin.PostgresAdminAuditLog>();
 }
 else
 {
-    builder.Services.AddSingleton<IAdminAuditLog, InMemoryAdminAuditLog>();
+    builder.Services.AddSingleton<InMemoryAdminAuditLog>();
 }
+
+// gwdbx W1-03 — MirroringAdminAuditLog DECORATES the authoritative local log and dual-writes
+// each row to state-service /v1/audit-events (Idempotency-Key = admin_actions.id, G-15) once
+// FeatureFlags:AdminAuditMode reaches dual-write-local-read. At "local" (the code default) the
+// decorator is a pass-through, so wiring it unconditionally changes no behaviour by itself.
+builder.Services.AddSingleton<IAdminAuditLog>(sp =>
+{
+    IAdminAuditLog inner = !string.IsNullOrWhiteSpace(gatewayPostgresCs)
+        ? sp.GetRequiredService<JeebGateway.Admin.PostgresAdminAuditLog>()
+        : sp.GetRequiredService<InMemoryAdminAuditLog>();
+    return new JeebGateway.Admin.MirroringAdminAuditLog(
+        inner,
+        sp.GetRequiredService<IServiceScopeFactory>(),
+        sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<JeebGateway.Migration.GwdbxMigrationOptions>>(),
+        sp.GetRequiredService<ILogger<JeebGateway.Admin.MirroringAdminAuditLog>>());
+});
 
 // Disputes and support are stateless gateway projections over the generic
 // jeeb-state-service /v1/cases engine. Evidence is gathered synchronously with
