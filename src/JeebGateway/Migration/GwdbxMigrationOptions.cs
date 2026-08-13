@@ -36,15 +36,29 @@ public sealed class GwdbxMigrationOptions
     // NotificationOutboxMode). Drain-and-switch: only "local" and "upstream-authority" are used.
     public string NotificationOutboxMode { get; init; } = "local";
 
+    // refresh-token store -> state-service KV, W1-14 (registry token: RefreshTokenStoreMode).
+    public string RefreshTokenStoreMode { get; init; } = "local";
+
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
 
     public GwdbxMigrationPhase NotificationOutbox => Read(NotificationOutboxMode);
 
+    public GwdbxMigrationPhase RefreshTokenStore => Read(RefreshTokenStoreMode);
+
     public static string LadderValues => string.Join(", ", Ladder.Select(entry => entry.Wire));
 
     public static bool IsKnown(string? value) => TryRead(value, out _);
+
+    // A10: from the read flip up, upstream SERVES READS — the domain's dependency must be
+    // wired, because no local fallback is left to answer a read silently.
+    public static bool RequiresUpstream(GwdbxMigrationPhase phase)
+        => phase >= GwdbxMigrationPhase.DualWriteUpstreamRead;
+
+    // Registration-time read: DI is wired before options bind. An unknown value lands on the
+    // pinned default here and ValidateOnStart then refuses the boot, so nothing is picked off it.
+    public static GwdbxMigrationPhase PhaseOf(string? value) => Read(value);
 
     private static GwdbxMigrationPhase Read(string? value) =>
         TryRead(value, out var phase) ? phase : GwdbxMigrationPhase.Local;
