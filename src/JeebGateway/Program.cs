@@ -1899,6 +1899,10 @@ else
     builder.Services.AddSingleton<IEscalationMirror, NoOpEscalationMirror>();
 }
 
+// The mirror seam is fail-open BY CONSTRUCTION: consumers resolve this guard, never the raw
+// IEscalationMirror, so a synchronous throw can never reach the 423 path or the sweeper.
+builder.Services.AddSingleton<FailOpenEscalationMirror>();
+
 // T-BE-019 (JEB-55): shared cache for the external-OTP attempt counter
 // and lockout flag. MVP wires AddDistributedMemoryCache() (single-process);
 // production swaps to AddStackExchangeRedisCache() against the cluster's
