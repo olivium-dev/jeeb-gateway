@@ -5,9 +5,12 @@ using FluentAssertions;
 using JeebGateway.Migration;
 using JeebGateway.Requests;
 using JeebGateway.Requests.OtpHandover;
+using JeebGateway.Services.Clients;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -25,6 +28,8 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public class EscalationMirrorG11Tests
 {
+    private const string TenantApplicationId = "17f6f47f-4047-4f1e-bac2-632a5eaa9a46";
+
     // -------- Proof 1: the 423 response does not await the mirror ---------------
 
     [Fact]
@@ -65,6 +70,82 @@ public class EscalationMirrorG11Tests
         var stored = await factory.Services.GetRequiredService<IAdminEscalationStore>()
             .GetForDeliveryAsync(seed.Id, EscalationReason.OtpLocked, default);
         stored!.Id.Should().Be(locked.EscalationId);
+    }
+
+    [Fact]
+    public async Task External_Otp_Lockout_Returns_423_Even_When_The_Mirror_Never_Completes()
+    {
+        // Second of the three mirror call sites: the durable external-OTP lockout.
+        var mirror = new NeverCompletingEscalationMirror();
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.UseSetting("FeatureFlags:UseUpstream:Delivery", "false");
+            b.UseSetting("Auth:Otp:ApplicationId", TenantApplicationId);
+            b.ConfigureServices(s =>
+            {
+                s.RemoveAll<IServiceOTPClient>();
+                s.AddSingleton<IServiceOTPClient>(new AlwaysWrongOtpClient());
+                s.RemoveAll<IEscalationMirror>();
+                s.AddSingleton<IEscalationMirror>(mirror);
+            });
+        });
+
+        var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613999000");
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Add("X-User-Id", seed.JeeberId);
+        http.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        for (var i = 0; i < 2; i++)
+        {
+            (await ExternalVerify(http, seed.Id)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        }
+
+        // If MirrorAsync were awaited this call never returns and the suite times out.
+        var locked = await ExternalVerify(http, seed.Id);
+        locked.StatusCode.Should().Be(HttpStatusCode.Locked);
+
+        var body = await locked.Content.ReadFromJsonAsync<OtpLockedResponse>();
+        body!.EscalationId.Should().NotBeNullOrEmpty();
+
+        // The probe had data: an unwired seam at this site cannot pass.
+        mirror.Calls.Should().Be(1, "the external-OTP lockout must hand exactly one row to the mirror");
+        mirror.Seen.Single().Id.Should().Be(body.EscalationId,
+            "the mirrored row is the same local row the 423 body names (G-15 key)");
+    }
+
+    [Fact]
+    public async Task Sweeper_Completes_Even_When_The_Mirror_Never_Completes()
+    {
+        // Third mirror call site: the client-unreachable sweeper.
+        var mirror = new NeverCompletingEscalationMirror();
+        var clock = new FakeClock(new DateTimeOffset(2026, 5, 16, 12, 0, 0, TimeSpan.Zero));
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureServices(s =>
+            {
+                s.RemoveAll<TimeProvider>();
+                s.AddSingleton<TimeProvider>(clock);
+                s.RemoveAll<IEscalationMirror>();
+                s.AddSingleton<IEscalationMirror>(mirror);
+            }));
+
+        var seed = await SeedAsync(factory);
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Add("X-User-Id", seed.JeeberId);
+        http.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        (await http.PostAsync($"/deliveries/{seed.Id}/client-unreachable", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        clock.Advance(TimeSpan.FromMinutes(16));
+
+        // If the sweeper awaited MirrorAsync this never returns and the suite times out.
+        var sweeper = factory.Services.GetServices<IHostedService>().OfType<OtpHandoverSweeper>().Single();
+        await sweeper.SweepOnceAsync(default);
+
+        // The probe had data: the sweep really did escalate this row.
+        var row = await factory.Services.GetRequiredService<IRequestsStore>().GetAsync(seed.Id, default);
+        row!.OtpEscalationId.Should().NotBeNullOrEmpty("the sweep must have escalated the due row");
+        mirror.Calls.Should().Be(1, "the sweeper must hand exactly one row to the mirror");
+        mirror.Seen.Single().Id.Should().Be(row.OtpEscalationId);
     }
 
     // -------- Proof 2: the real mirror never touches HTTP inline ----------------
@@ -166,6 +247,40 @@ public class EscalationMirrorG11Tests
         }
     }
 
+    /// <summary>Every code is wrong, so MaxAttempts drives the durable lockout to 423.</summary>
+    private sealed class AlwaysWrongOtpClient : IServiceOTPClient
+    {
+        public Task SendOTPAsync(SendOTPRequestUserID? body) => Task.CompletedTask;
+
+        public Task SendOTPAsync(SendOTPRequestUserID? body, CancellationToken ct) => Task.CompletedTask;
+
+        public Task ValidateOTPAsync(ValidateOTPRequestModel? body)
+            => ValidateOTPAsync(body, CancellationToken.None);
+
+        public Task ValidateOTPAsync(ValidateOTPRequestModel? body, CancellationToken ct)
+            => throw new ApiException(
+                message: "Invalid OTP",
+                statusCode: 400,
+                response: "{\"error\":\"invalid_otp\"}",
+                headers: new Dictionary<string, IEnumerable<string>>(),
+                innerException: null);
+
+        public Task UserAsync() => Task.CompletedTask;
+
+        public Task UserAsync(CancellationToken ct) => Task.CompletedTask;
+    }
+
+    private sealed class FakeClock : TimeProvider
+    {
+        private DateTimeOffset _now;
+
+        public FakeClock(DateTimeOffset start) => _now = start;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        public void Advance(TimeSpan delta) => _now = _now.Add(delta);
+    }
+
     private sealed class NeverRespondingHandler : HttpMessageHandler
     {
         private readonly TaskCompletionSource<HttpResponseMessage> _never = new();
@@ -213,13 +328,17 @@ public class EscalationMirrorG11Tests
 
     private sealed record Seed(string Id, string ClientId, string JeeberId, string? Otp);
 
-    private static async Task<Seed> SeedAsync(WebApplicationFactory<Program> factory)
+    private static async Task<Seed> SeedAsync(
+        WebApplicationFactory<Program> factory,
+        string landingStatus = RequestStatus.HeadingOff,
+        string? recipientPhone = null)
     {
         var store = factory.Services.GetRequiredService<IRequestsStore>();
         var created = await store.CreateAsync(new CreateRequestInput
         {
             ClientId = $"client-{Guid.NewGuid()}",
-            Description = "Pick up the package"
+            Description = "Pick up the package",
+            RecipientPhone = recipientPhone
         }, default);
 
         var jeeberId = $"jeeber-{Guid.NewGuid()}";
@@ -227,10 +346,13 @@ public class EscalationMirrorG11Tests
             created.Id, jeeberId, limit: int.MaxValue, at: DateTimeOffset.UtcNow, ct: default);
         accepted.Should().NotBeNull();
 
-        (await store.SetStatusAsync(created.Id, RequestStatus.HeadingOff, default)).Should().BeTrue();
+        (await store.SetStatusAsync(created.Id, landingStatus, default)).Should().BeTrue();
         return new Seed(created.Id, created.ClientId, jeeberId, accepted!.DeliveryOtp);
     }
 
     private static Task<HttpResponseMessage> VerifyOtp(HttpClient http, string deliveryId, string code) =>
         http.PostAsJsonAsync($"/deliveries/{deliveryId}/verify-otp", new { otpCode = code });
+
+    private static Task<HttpResponseMessage> ExternalVerify(HttpClient http, string deliveryId) =>
+        http.PostAsJsonAsync($"/deliveries/{deliveryId}/otp/verify", new { code = "1111" });
 }
