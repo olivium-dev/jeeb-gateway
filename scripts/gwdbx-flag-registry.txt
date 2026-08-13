@@ -14,7 +14,7 @@ AvailabilityMode         program create=W3;delete=W5 # jeeber_availability -> de
 TiersMode                program create=W4;delete=W4 # tiers catalog -> delivery-service; supersedes UseUpstream:Tiers; delete one release after the W4-14 drop
 UserModerationMode       program create=W4;delete=W4 # users projection -> user-management; supersedes UseUpstream:UserModeration; delete one release after the W4-13 drop
 PushDispatchMode         program create=W3;delete=W5 # push trio -> push-notification; supersedes UseUpstream:PushDispatchDurability
-NotificationOutboxMode   program create=W1;delete=W5 # outbox -> state-service work-items, drain-and-switch; supersedes UseUpstream:NotificationOutbox
+NotificationOutboxMode   program create=W1;delete=W5 # outbox -> state-service work-items, drain-and-switch; supersedes UseUpstream:NotificationOutbox; key CREATED at W1-09 as FeatureFlags:NotificationOutboxMode (GwdbxMigrationOptions), default "local"
 CmsConfigMode            program create=W3;delete=W5 # cms_surfaces pair -> state-service; supersedes UseUpstream:CmsConfig
 
 # ---- program: non-§3-B and grandfathered ------------------------------------

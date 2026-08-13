@@ -65,6 +65,32 @@ public sealed class WorkItemCreateRequestV1
     public DateTimeOffset? RetainPayloadUntil { get; init; }
 }
 
+// W1-09 — claim/complete/fail bodies for the durable due-work rail. Artifact fields of
+// WorkCompleteRequest stay unmodelled: notification dispatch produces no artifact.
+public sealed class WorkClaimRequestV1
+{
+    public required string Application { get; init; }
+    public required string WorkerId { get; init; }
+    public IReadOnlyList<string>? Kinds { get; init; }
+    public int? LeaseSeconds { get; init; }
+    public int? Limit { get; init; }
+}
+
+public sealed class WorkCompleteRequestV1
+{
+    public required Guid LeaseToken { get; init; }
+    public required int ExpectedVersion { get; init; }
+    public JsonElement? Result { get; init; }
+}
+
+public sealed class WorkFailRequestV1
+{
+    public required Guid LeaseToken { get; init; }
+    public required int ExpectedVersion { get; init; }
+    public required string Error { get; init; }
+    public DateTimeOffset? RetryAt { get; init; }
+}
+
 // DownloadTokenHash is [JsonIgnore] server-side and is deliberately not modelled here.
 public sealed class WorkItemRecordV1
 {

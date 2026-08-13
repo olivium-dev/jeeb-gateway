@@ -23,7 +23,7 @@ Critical JeebGateway.Requests.Cancellation.IJeeberRestrictionStore -> JeebGatewa
 Critical JeebGateway.Auth.OtpSignIn.IOtpRequestRateLimiter -> JeebGateway.Auth.OtpSignIn.RedisOtpRequestRateLimiter
 Critical JeebGateway.Tiers.ITiersStore -> JeebGateway.Tiers.PostgresTiersStore
 Critical JeebGateway.Users.IFinancialLedgerAnonymizer -> JeebGateway.Users.PostgresFinancialLedger
-Critical JeebGateway.Services.Dispatch.INotificationDispatchOutbox -> JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox
+Critical JeebGateway.Services.Dispatch.INotificationDispatchOutbox -> JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox, JeebGateway.Services.Dispatch.StateServiceNotificationDispatchOutbox
 Critical JeebGateway.Push.IPushRetryQueue -> JeebGateway.Push.PostgresPushRetryQueue
 Critical JeebGateway.Push.IPushDeliveryTracker -> JeebGateway.Push.PostgresPushDeliveryTracker
 Critical JeebGateway.Whisper.ITranscriptionFallbackQueue -> JeebGateway.Whisper.PostgresTranscriptionFallbackQueue

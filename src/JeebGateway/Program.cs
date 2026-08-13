@@ -935,6 +935,10 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.DataExportMode),
         "FeatureFlags:DataExportMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.NotificationOutboxMode),
+        "FeatureFlags:NotificationOutboxMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
     .ValidateOnStart();
 
 // Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
@@ -1578,16 +1582,22 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProc
 // in-memory store stays the dev/CI/test fallback.
 // INotificationTemplateRenderer: static catalog; replace with an HTTP call to
 // notification-service GET /render/{key} when that endpoint is live.
-if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+// W1-09: NotificationOutboxMode=upstream-authority enqueues + claims on state-service
+// work items instead (drain-and-switch — the legacy rail keeps draining its own rows).
+builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationDispatchOutbox>(sp =>
 {
-    builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationDispatchOutbox,
-                                   JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox>();
-}
-else
-{
-    builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationDispatchOutbox,
-                                   JeebGateway.Services.Dispatch.InMemoryNotificationDispatchOutbox>();
-}
+    var phase = sp.GetRequiredService<
+        Microsoft.Extensions.Options.IOptions<JeebGateway.Migration.GwdbxMigrationOptions>>()
+        .Value.NotificationOutbox;
+    if (phase >= JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority)
+        return ActivatorUtilities.CreateInstance<
+            JeebGateway.Services.Dispatch.StateServiceNotificationDispatchOutbox>(sp);
+    return string.IsNullOrWhiteSpace(gatewayPostgresCs)
+        ? ActivatorUtilities.CreateInstance<
+            JeebGateway.Services.Dispatch.InMemoryNotificationDispatchOutbox>(sp)
+        : ActivatorUtilities.CreateInstance<
+            JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox>(sp);
+});
 builder.Services.AddSingleton<JeebGateway.Services.Dispatch.INotificationTemplateRenderer,
                                JeebGateway.Services.Dispatch.StaticNotificationTemplateRenderer>();
 builder.Services.AddScoped<JeebGateway.Services.Dispatch.IJeebNotificationDispatcher,
