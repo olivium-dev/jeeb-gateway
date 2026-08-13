@@ -65,8 +65,8 @@ public sealed class WorkItemCreateRequestV1
     public DateTimeOffset? RetainPayloadUntil { get; init; }
 }
 
-// W1-09 — claim/complete/fail bodies for the durable due-work rail. Artifact fields of
-// WorkCompleteRequest stay unmodelled: notification dispatch produces no artifact.
+// W1-09 — claim/fail bodies for the durable due-work rail. W1-06 adds complete/consume:
+// these routes take no Idempotency-Key — lease token (or token hash) plus version CAS is the control.
 public sealed class WorkClaimRequestV1
 {
     public required string Application { get; init; }
@@ -81,6 +81,11 @@ public sealed class WorkCompleteRequestV1
     public required Guid LeaseToken { get; init; }
     public required int ExpectedVersion { get; init; }
     public JsonElement? Result { get; init; }
+    public string? ArtifactRef { get; init; }
+    public DateTimeOffset? ArtifactExpiresAt { get; init; }
+
+    // G-20 — only the DERIVED hash travels; the raw download token never leaves the gateway.
+    public string? DownloadTokenHash { get; init; }
 }
 
 public sealed class WorkFailRequestV1
@@ -89,6 +94,13 @@ public sealed class WorkFailRequestV1
     public required int ExpectedVersion { get; init; }
     public required string Error { get; init; }
     public DateTimeOffset? RetryAt { get; init; }
+}
+
+public sealed class WorkConsumeRequestV1
+{
+    public required string Application { get; init; }
+    public required string DownloadTokenHash { get; init; }
+    public required int ExpectedVersion { get; init; }
 }
 
 // DownloadTokenHash is [JsonIgnore] server-side and is deliberately not modelled here.

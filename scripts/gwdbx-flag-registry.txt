@@ -245,6 +245,9 @@ UmJwt:SigningKey                                     setting -
 Users:DataExport:LinkValidity                        setting -
 Users:DataExport:Sla                                 setting -
 Users:DataExport:SweepInterval                       setting -
+DataExport:ArtifactKey                               setting - # SECRET (W1-06/G-20): AES-GCM key for GDPR export artifacts; never leaves the gateway
+DataExport:CdnSlot                                   setting - # W1-06: owner-decided cdn object-key prefix for export artifacts
+DataExport:UploadTtlSeconds                          setting - # W1-06: requested signed-PUT TTL (cdn clamps to <= 300s)
 WeeklySettlement:Interval                            setting -
 WeeklySettlement:MaxBatchSize                        setting -
 WeeklySettlement:SettlementDay                       setting -

@@ -174,6 +174,10 @@ public sealed class CdnUploadUrlRequest
 
     /// <summary>Retention window in days for the eventual asset (default 90).</summary>
     public int RetentionDays { get; init; } = 90;
+
+    // Optional file extension for the minted objectRef ({slot}/{guid:N}{extension}); omitted
+    // when null, so cdn keeps deriving it from the content type as before.
+    public string? Extension { get; init; }
 }
 
 /// <summary>
