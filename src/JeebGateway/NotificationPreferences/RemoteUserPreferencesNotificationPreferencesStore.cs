@@ -1,5 +1,6 @@
 using System.Text.Json;
 using JeebGateway.Services.Generated.ServiceRemoteUserPreferences;
+using JeebGateway.Users;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -10,7 +11,8 @@ namespace JeebGateway.NotificationPreferences;
 /// remote-user-preferences service (Rust, :10067). Preferences are stored as an
 /// opaque JSON blob under the namespaced key <c>jeeb.notification_prefs</c> so the
 /// shared service remains Jeeb-agnostic (GR2 / JEB-1498).
-/// Fail-open: any upstream error on GET falls back to defaults.
+/// A GET the upstream cannot answer throws <see cref="UserPreferencesUnavailableException"/>
+/// (the read path maps it to 502) — defaults are never served as the user's own toggles.
 /// </summary>
 /// <remarks>
 /// This store is registered as a singleton (it is consumed transitively by other
@@ -54,10 +56,12 @@ public sealed class RemoteUserPreferencesNotificationPreferencesStore : INotific
 
     public async Task<UserNotificationPreferences> GetAsync(string userId, CancellationToken ct)
     {
-        // Fail-open READ: on any upstream error OR our budget expiring, return
-        // defaults FAST (<=UpstreamReadBudget) rather than spinning the retry
-        // pipeline for up to ~30s.
-        var (_, prefs) = await ReadInternalAsync(userId, ct);
+        // An unanswered read yields DEFAULTS, not the user's toggles. Serving those as a
+        // 200 silently un-mutes muted categories on screen, so throw instead (O10: 502).
+        var (answered, prefs) = await ReadInternalAsync(userId, ct);
+        if (!answered)
+            throw new UserPreferencesUnavailableException(
+                "remote-user-preferences did not answer the notification-preferences read within the read budget.");
         return prefs;
     }
 

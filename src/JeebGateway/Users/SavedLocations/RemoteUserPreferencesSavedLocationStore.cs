@@ -23,8 +23,8 @@ namespace JeebGateway.Users.SavedLocations;
 /// (create/update/delete) is a read-modify-write of the full collection. The
 /// REQ-02 "exactly one default per user" invariant is applied in-memory on the
 /// read-modify-write path, identical to <see cref="InMemorySavedLocationStore"/>.
-/// Reads degrade to an empty list on an upstream fault (the list surface tolerates
-/// empty and recovers on the next refresh); writes ABORT on an unanswered pre-read
+/// Reads THROW <see cref="JeebGateway.Users.UserPreferencesUnavailableException"/> when the
+/// upstream cannot answer (a 502 for the caller, never a fake empty list); writes ABORT on an unanswered pre-read
 /// so a transient upstream blip can never clobber the user's stored collection with
 /// a defaults-only overwrite.</para>
 /// </summary>
@@ -63,7 +63,8 @@ public sealed class RemoteUserPreferencesSavedLocationStore : ISavedLocationStor
 
     public async Task<IReadOnlyList<SavedLocation>> ListAsync(string userId, CancellationToken ct)
     {
-        var (_, items) = await ReadInternalAsync(userId, ct);
+        var (answered, items) = await ReadInternalAsync(userId, ct);
+        if (!answered) throw Unanswered("list");
         // Same ordering as InMemorySavedLocationStore: default first, then oldest-first.
         return items
             .OrderByDescending(l => l.IsDefault)
@@ -74,10 +75,16 @@ public sealed class RemoteUserPreferencesSavedLocationStore : ISavedLocationStor
 
     public async Task<SavedLocation?> GetAsync(string userId, string id, CancellationToken ct)
     {
-        var (_, items) = await ReadInternalAsync(userId, ct);
+        var (answered, items) = await ReadInternalAsync(userId, ct);
+        if (!answered) throw Unanswered("get");
         var found = items.FirstOrDefault(e => e.Id == id);
         return found is null ? null : ToModel(userId, found);
     }
+
+    // An unanswered read is NOT "nothing stored yet": serving its empty placeholder as a
+    // 200 hides the user's real saved locations. Callers map this to a retryable 502 (O10).
+    private static UserPreferencesUnavailableException Unanswered(string op) =>
+        new($"remote-user-preferences did not answer the saved-location {op} within the read budget.");
 
     public async Task<SavedLocation> CreateAsync(string userId, CreateSavedLocationRequest request, CancellationToken ct)
     {
@@ -217,7 +224,7 @@ public sealed class RemoteUserPreferencesSavedLocationStore : ISavedLocationStor
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "saved-locations read for {UserId} failed or exceeded {BudgetMs}ms; degrading to empty",
+                "saved-locations read for {UserId} failed or exceeded {BudgetMs}ms; answered=false (non-authoritative empty)",
                 userId, UpstreamReadBudget.TotalMilliseconds);
             return (false, new List<SavedLocationEntry>());
         }

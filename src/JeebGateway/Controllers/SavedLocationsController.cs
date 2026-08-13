@@ -27,11 +27,20 @@ public class SavedLocationsController : ControllerBase
     [RequireCapability(Capabilities.ProfileReadSelf)]
     [ProducesResponseType(typeof(SavedLocationsListResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> List(CancellationToken ct)
     {
         if (!TryGetUserId(out var userId, out var problem)) return problem;
-        var items = await _store.ListAsync(userId, ct);
-        return Ok(ToListResponse(userId, items));
+        try
+        {
+            // An EMPTY answered list stays a 200: a user with nothing saved yet is not an error.
+            var items = await _store.ListAsync(userId, ct);
+            return Ok(ToListResponse(userId, items));
+        }
+        catch (UserPreferencesUnavailableException)
+        {
+            return UpstreamUnavailableProblem();
+        }
     }
 
     [HttpGet("{id}")]
@@ -39,11 +48,20 @@ public class SavedLocationsController : ControllerBase
     [ProducesResponseType(typeof(SavedLocationResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> Get(string id, CancellationToken ct)
     {
         if (!TryGetUserId(out var userId, out var problem)) return problem;
-        var found = await _store.GetAsync(userId, id, ct);
-        return found is null ? NotFoundProblem(id) : Ok(ToResponse(found));
+        try
+        {
+            var found = await _store.GetAsync(userId, id, ct);
+            return found is null ? NotFoundProblem(id) : Ok(ToResponse(found));
+        }
+        catch (UserPreferencesUnavailableException)
+        {
+            // Without an answer we cannot know the id is absent; a 404 would be a guess.
+            return UpstreamUnavailableProblem();
+        }
     }
 
     [HttpPost]
@@ -57,8 +75,15 @@ public class SavedLocationsController : ControllerBase
         if (body is null)
             return BadRequest(new ProblemDetails { Title = "Request body is required.", Status = StatusCodes.Status400BadRequest });
 
-        var created = await _store.CreateAsync(userId, body, ct);
-        return CreatedAtAction(nameof(Get), new { id = created.Id }, ToResponse(created));
+        try
+        {
+            var created = await _store.CreateAsync(userId, body, ct);
+            return CreatedAtAction(nameof(Get), new { id = created.Id }, ToResponse(created));
+        }
+        catch (TimeoutException)
+        {
+            return UpstreamTimeoutProblem();
+        }
     }
 
     [HttpPut("{id}")]
@@ -74,8 +99,15 @@ public class SavedLocationsController : ControllerBase
         if (body is null)
             return BadRequest(new ProblemDetails { Title = "Request body is required.", Status = StatusCodes.Status400BadRequest });
 
-        var updated = await _store.UpdateAsync(userId, id, body, ct);
-        return updated is null ? NotFoundProblem(id) : Ok(ToResponse(updated));
+        try
+        {
+            var updated = await _store.UpdateAsync(userId, id, body, ct);
+            return updated is null ? NotFoundProblem(id) : Ok(ToResponse(updated));
+        }
+        catch (TimeoutException)
+        {
+            return UpstreamTimeoutProblem();
+        }
     }
 
     [HttpDelete("{id}")]
@@ -88,9 +120,32 @@ public class SavedLocationsController : ControllerBase
         if (!TryGetUserId(out var userId, out var problem)) return problem;
         if (!Guid.TryParseExact(id, "N", out _)) return NotFoundProblem(id);
 
-        var removed = await _store.DeleteAsync(userId, id, ct);
-        return removed ? NoContent() : NotFoundProblem(id);
+        try
+        {
+            var removed = await _store.DeleteAsync(userId, id, ct);
+            return removed ? NoContent() : NotFoundProblem(id);
+        }
+        catch (TimeoutException)
+        {
+            return UpstreamTimeoutProblem();
+        }
     }
+
+    // O10 precedent (wallet ledger): a read the store could NOT answer is a retryable
+    // 502 — never an authoritative empty 200 that reads as "you saved nothing".
+    private ObjectResult UpstreamUnavailableProblem() => Problem(
+        title: "Saved locations are temporarily unavailable.",
+        detail: "The preferences service did not answer. Please try again.",
+        statusCode: StatusCodes.Status502BadGateway,
+        type: "https://jeeb.dev/errors/dependency-unavailable");
+
+    // Mirrors NotificationPreferencesController.Patch (JEBV4-30): an aborted write
+    // pre-read is a fast 504, not the opaque 500 the unhandled TimeoutException produced.
+    private ObjectResult UpstreamTimeoutProblem() => Problem(
+        title: "Saved locations service timed out.",
+        detail: "The preferences service did not respond in time. Please try again.",
+        statusCode: StatusCodes.Status504GatewayTimeout,
+        type: "https://jeeb.dev/errors/upstream-timeout");
 
     // SEC-C1 (Leg-11): identity derives from the validated JWT principal; the raw
     // X-User-Id header is honoured ONLY when EdgeIdentityTrust permits it (Dev/Testing or
