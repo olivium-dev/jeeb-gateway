@@ -59,6 +59,10 @@ public sealed class GwdbxMigrationOptions
     // AvailabilityMode). The gateway stays the single presence authority until W3-13 flips it.
     public string AvailabilityMode { get; init; } = "local";
 
+    // push trio -> push-notification, W3-14 (registry token: PushDispatchMode). Only "local" and
+    // "upstream-authority" are used: a dual-write rung would make the gateway a 2nd producer (D1).
+    public string PushDispatchMode { get; init; } = "local";
+
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
@@ -76,6 +80,8 @@ public sealed class GwdbxMigrationOptions
     public GwdbxMigrationPhase CmsConfig => Read(CmsConfigMode);
 
     public GwdbxMigrationPhase Availability => Read(AvailabilityMode);
+
+    public GwdbxMigrationPhase PushDispatch => Read(PushDispatchMode);
 
     public static string LadderValues => string.Join(", ", Ladder.Select(entry => entry.Wire));
 

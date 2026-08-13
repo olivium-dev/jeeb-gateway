@@ -1,5 +1,8 @@
+using JeebGateway.Migration;
 using JeebGateway.Push;
+using JeebGateway.service.ServicePushNotification;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Services.Dispatch;
 
@@ -24,18 +27,29 @@ public sealed class JeebNotificationDispatcher : IJeebNotificationDispatcher
     private readonly IPushNotificationService _push;
     private readonly INotificationDispatchOutbox _outbox;
     private readonly ILogger<JeebNotificationDispatcher> _logger;
+    private readonly ServicePushNotificationClient? _servicePush;
+    private readonly GwdbxMigrationPhase _phase;
 
     public JeebNotificationDispatcher(
         INotificationTemplateRenderer renderer,
         IPushNotificationService push,
         INotificationDispatchOutbox outbox,
-        ILogger<JeebNotificationDispatcher> logger)
+        ILogger<JeebNotificationDispatcher> logger,
+        IOptions<GwdbxMigrationOptions>? migration = null,
+        ServicePushNotificationClient? servicePush = null)
     {
         _renderer = renderer;
         _push = push;
         _outbox = outbox;
         _logger = logger;
+        _servicePush = servicePush;
+        _phase = migration?.Value.PushDispatch ?? GwdbxMigrationPhase.Local;
     }
+
+    // W3-14: "local" keeps the in-gateway stack; only "upstream-authority" re-points, because a
+    // dual-write rung would send each notification twice (the D1 duplicate-producer defect).
+    private bool DispatchesUpstream =>
+        _phase >= GwdbxMigrationPhase.UpstreamAuthority && _servicePush is not null;
 
     public async Task<NotificationDispatchResult> DispatchAsync(
         string templateKey,
@@ -86,6 +100,14 @@ public sealed class JeebNotificationDispatcher : IJeebNotificationDispatcher
         // 4. Push dispatch
         try
         {
+            if (DispatchesUpstream)
+            {
+                await SendUpstreamAsync(
+                    entry.Id, templateKey, locale, rendered, parameters, recipientUserId, idempotencyKey, ct);
+                await _outbox.MarkDeliveredAsync(entry.Id, ct);
+                return new NotificationDispatchResult(entry.Id, WasDeduplicated: false, NotificationDispatchStatus.Delivered);
+            }
+
             var pushRequest = new PushNotificationRequest(
                 UserId: recipientUserId.ToString(),
                 Trigger: NotificationTrigger.StatusChange,
@@ -113,5 +135,42 @@ public sealed class JeebNotificationDispatcher : IJeebNotificationDispatcher
             await _outbox.RecordFailureAsync(entry.Id, ex.Message, MaxAttempts, RetryDelay, ct);
             return new NotificationDispatchResult(entry.Id, WasDeduplicated: false, NotificationDispatchStatus.Pending, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// W3-14 — the re-pointed leg: POST api/v1/sent-payload/user/{id} on push-notification.
+    /// The caller's Idempotency-Key rides the request header VERBATIM (§4.1 rider) so the
+    /// push service's own dispatch registry dedups on the same string the gateway used.
+    /// </summary>
+    private async Task SendUpstreamAsync(
+        Guid entryId,
+        string templateKey,
+        string locale,
+        RenderedNotification rendered,
+        Dictionary<string, string> parameters,
+        Guid recipientUserId,
+        string? idempotencyKey,
+        CancellationToken ct)
+    {
+        // Flat map: the relay copies every key but title/body into the FCM data map.
+        var payload = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var kv in parameters) payload[kv.Key] = kv.Value;
+        payload["title"] = rendered.Title;
+        payload["body"] = rendered.Body;
+        payload["type"] = templateKey;
+        payload["language"] = locale;
+
+        using (ServicePushNotificationClient.UseIdempotencyKey(idempotencyKey))
+        {
+            await _servicePush!.Send_notification_to_userAsync(
+                recipientUserId.ToString(),
+                new SentPayloadToUserRequest { Payload = payload },
+                ct);
+        }
+
+        _logger.LogInformation(
+            "Notification push dispatched to push-notification. EntryId={EntryId} TemplateKey={Template} "
+            + "Recipient={UserId} IdempotencyKey={Key}",
+            entryId, templateKey, recipientUserId, idempotencyKey);
     }
 }

@@ -970,6 +970,22 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.AvailabilityMode),
         "FeatureFlags:AvailabilityMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.PushDispatchMode),
+        "FeatureFlags:PushDispatchMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    // W3-14 — GatewayDirectPushDispatchGuardHandler 503s every POST /api/v1/sent-payload/*
+    // while direct dispatch is off, so a flip without it would dispatch nothing at all.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.PushDispatchMode)
+                < JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority
+            || string.Equals(
+                builder.Configuration[
+                    JeebGateway.Services.Clients.GatewayDirectPushDispatchOptions.SectionName
+                        + ":Enabled"],
+                "true", StringComparison.OrdinalIgnoreCase),
+        "PushNotificationServiceApi:GatewayDirectDispatch:Enabled must be true once "
+            + "FeatureFlags:PushDispatchMode reaches \"upstream-authority\".")
     // G-20 — from dual-write-local-read up the mirror uploads export artifacts, so boot
     // fails closed rather than reaching cdn without an encryption key.
     .Validate(
