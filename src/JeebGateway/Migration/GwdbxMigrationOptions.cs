@@ -43,6 +43,10 @@ public sealed class GwdbxMigrationOptions
     // AccountDeletionMode). The W3-11 flip moves it off "local".
     public string AccountDeletionMode { get; init; } = "local";
 
+    // admin_escalations -> delivery-service /api/v1/escalations (registry token:
+    // OtpEscalationsMode). The mirror is fire-and-forget; the 423 path never waits (G-11).
+    public string OtpEscalationsMode { get; init; } = "local";
+
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
@@ -52,6 +56,8 @@ public sealed class GwdbxMigrationOptions
     public GwdbxMigrationPhase RefreshTokenStore => Read(RefreshTokenStoreMode);
 
     public GwdbxMigrationPhase AccountDeletion => Read(AccountDeletionMode);
+
+    public GwdbxMigrationPhase OtpEscalations => Read(OtpEscalationsMode);
 
     public static string LadderValues => string.Join(", ", Ladder.Select(entry => entry.Wire));
 

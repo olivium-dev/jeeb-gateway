@@ -82,6 +82,7 @@ public class OtpHandoverSweeper : BackgroundService
         using var scope = _services.CreateScope();
         var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
         var escalations = scope.ServiceProvider.GetRequiredService<IAdminEscalationStore>();
+        var mirror = scope.ServiceProvider.GetService<IEscalationMirror>() ?? new NoOpEscalationMirror();
         var opts = _options.Value;
 
         var now = _clock.GetUtcNow();
@@ -108,6 +109,9 @@ public class OtpHandoverSweeper : BackgroundService
                 CreatedAt = now,
                 OtpAttemptCount = req.OtpAttemptCount
             }, ct);
+
+            // gwdbx W3-02 — fire-and-forget mirror; the sweep never waits on delivery-service.
+            _ = mirror.MirrorAsync(escalation, CancellationToken.None);
 
             var stamped = await store.TrySetEscalationIdAsync(req.Id, escalation.Id, ct);
             if (stamped)
