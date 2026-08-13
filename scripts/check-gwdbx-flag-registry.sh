@@ -187,8 +187,26 @@ READ_FLAGS="$({
   } | sed -E 's/^[^"]*"//; s/"$//; s/^FeatureFlags://' | grep -vE '^[[:space:]]*$' | sort -u)"
 MODE_TOKENS="$(git grep --untracked -howE '[A-Za-z]+Mode' -- "$SRC" | sort -u \
   | grep -vxF "$FRAMEWORK_MODE_TYPES" || true)"
-INVENTORY="$(printf '%s\n%s\n%s\n%s\n' "$CONFIG_FLAGS" "$CODE_FLAGS" "$READ_FLAGS" "$MODE_TOKENS" \
-  | grep -vE '^[[:space:]]*$' | sort -u)"
+
+# D3 deploy-env arm (G-05): workflows inject env-spelled keys the four arms above cannot see.
+# `__`->`:` normalises to registry spelling; `#` lines drop so tombstone blocks stay mentions.
+WORKFLOW_FILES="$(git ls-files -co --exclude-standard '.github/workflows' \
+  | grep -E '\.ya?ml$' | sort -u || true)"
+DEPLOY_ENV_FLAGS=""
+if [ -n "$WORKFLOW_FILES" ]; then
+  DEPLOY_ENV_FLAGS="$(grep -hvE '^[[:space:]]*#' $WORKFLOW_FILES \
+    | grep -oE 'FeatureFlags__[A-Za-z0-9_]+' \
+    | sed -E 's/^FeatureFlags__//; s/__/:/g' | grep -vE '^[[:space:]]*$' | sort -u || true)"
+  # Parser-broken detector: a literal exists somewhere in the tree but the arm found none.
+  if [ -z "$DEPLOY_ENV_FLAGS" ] && grep -qE 'FeatureFlags__' $WORKFLOW_FILES 2>/dev/null; then
+    echo "FAIL: the deploy-env arm extracted 0 tokens although FeatureFlags__ literals"
+    echo "      exist under .github/workflows — the extractor is broken, not the repo."
+    exit 1
+  fi
+fi
+
+INVENTORY="$(printf '%s\n%s\n%s\n%s\n%s\n' "$CONFIG_FLAGS" "$CODE_FLAGS" "$READ_FLAGS" \
+  "$MODE_TOKENS" "$DEPLOY_ENV_FLAGS" | grep -vE '^[[:space:]]*$' | sort -u)"
 
 # ---- Invariant (2): one-way containment (repo subset of registry) -----------
 echo "-- (2) one-way containment: repo flag tokens subset of the registry"
@@ -208,16 +226,18 @@ echo "   arms: config=$(printf '%s\n' "$CONFIG_FLAGS" | grep -cE '.')" \
      "code=$(printf '%s\n' "$CODE_FLAGS" | grep -cE '.')" \
      "read=$(printf '%s\n' "$READ_FLAGS" | grep -cE '.')" \
      "mode=$(printf '%s\n' "$MODE_TOKENS" | grep -cE '.')" \
+     "deploy-env=$(printf '%s\n' "$DEPLOY_ENV_FLAGS" | grep -cE '.')" \
      "(code arm: $(printf '%s\n' "$BOUND_TYPES" | grep -cE '.') bound options classes)"
 
 # ---- Invariant (3): forbidden names are never active config keys ------------
-echo "-- (3) forbidden names absent from active config keys, bound options and code reads"
-# D2: the read arm belongs here too — a retired name revives just as well through
-# GetValue<bool>("FeatureFlags:UseUpstream:Payments") as through an options property.
+echo "-- (3) forbidden names absent from active config keys, bound options, code reads and deploy env"
+# D2/D3: GetValue<bool>("FeatureFlags:UseUpstream:Payments") and a deploy workflow's
+# `--env-add FeatureFlags__UseUpstream__Payments=true` revive a retired name equally well.
 active_forbidden="$(comm -12 <(printf '%s\n' "$FORBIDDEN") \
-  <(printf '%s\n%s\n%s\n' "$ALL_CONFIG_KEYS" "$CODE_FLAGS" "$READ_FLAGS" | sort -u) || true)"
+  <(printf '%s\n%s\n%s\n%s\n' "$ALL_CONFIG_KEYS" "$CODE_FLAGS" "$READ_FLAGS" \
+      "$DEPLOY_ENV_FLAGS" | sort -u) || true)"
 if [ -n "$active_forbidden" ]; then
-  echo "FAIL: SUPERSEDED/retired name(s) active as a config key or a bound flag property:"
+  echo "FAIL: SUPERSEDED/retired name(s) active as a config key, a bound flag property or a deploy env var:"
   printf '  %s\n' $active_forbidden
   echo "      These carry SUPERSEDED stamps (A2/A3/A13/F1) or are UPG-retired (G-05)"
   echo "      and must never be re-added; comment/doc mentions are allowed."
