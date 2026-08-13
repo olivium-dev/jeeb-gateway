@@ -54,7 +54,21 @@ public sealed class MirroringAdminAuditLog : IAdminAuditLog
 
         if (_mode.CurrentValue.AdminAudit >= GwdbxMigrationPhase.DualWriteLocalRead)
         {
-            await MirrorAsync(entry, row, ct);
+            // F7 — never mirror a row that has no local id. The inner log degrades to a
+            // synthesized entry when admin_user_id is not a GUID (no admin_actions INSERT),
+            // so its Id would key an upstream event the W1-04 backfill can never reconcile.
+            if (row.Durable)
+            {
+                await MirrorAsync(entry, row, ct);
+            }
+            else
+            {
+                _log.LogWarning(
+                    "admin-audit mirror SKIPPED for action={Action} entityType={EntityType} adminUserId={AdminUserId}: " +
+                    "the inner log returned a NON-DURABLE entry (no admin_actions row was inserted — non-GUID admin id), " +
+                    "so mirroring it would create a permanent unreconcilable phantom upstream (A11: a gap beats a phantom).",
+                    row.Action, row.EntityType, row.AdminUserId);
+            }
         }
 
         return row;
