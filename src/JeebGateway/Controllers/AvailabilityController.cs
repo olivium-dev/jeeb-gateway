@@ -61,6 +61,7 @@ public class AvailabilityController : ControllerBase
     private readonly IDeliveryServiceClient _delivery;
     private readonly IHeartBeatServiceClient _heartBeat;
     private readonly HeartbeatFeatureOptions _heartbeatOptions;
+    private readonly FailOpenAvailabilityMirror _mirror;
     private readonly TimeProvider _clock;
     private readonly ILogger<AvailabilityController> _logger;
 
@@ -69,6 +70,7 @@ public class AvailabilityController : ControllerBase
         IDeliveryServiceClient delivery,
         IHeartBeatServiceClient heartBeat,
         IOptions<HeartbeatFeatureOptions> heartbeatOptions,
+        FailOpenAvailabilityMirror mirror,
         TimeProvider clock,
         ILogger<AvailabilityController> logger)
     {
@@ -76,6 +78,7 @@ public class AvailabilityController : ControllerBase
         _delivery = delivery;
         _heartBeat = heartBeat;
         _heartbeatOptions = heartbeatOptions.Value;
+        _mirror = mirror;
         _clock = clock;
         _logger = logger;
     }
@@ -120,14 +123,18 @@ public class AvailabilityController : ControllerBase
             response = OfflineDefault(userId);
         }
 
-        // Mirror the interaction watermark into the in-memory store so the
-        // gateway-local auto-offline sweeper (no upstream equivalent yet) still
-        // sees this read as activity. Best-effort: a store blip must NOT 500 a
-        // successful presence read.
+        // Mirror the interaction watermark into the gateway store, which stays the
+        // presence authority. Best-effort: a store blip must NOT 500 a successful
+        // presence read.
+        var now = _clock.GetUtcNow();
         await TryMirrorAsync(
-            () => _store.RecordInteractionAsync(userId, _clock.GetUtcNow(), ct),
+            () => _store.RecordInteractionAsync(userId, now, ct),
             userId,
             "record-interaction");
+
+        // W3-04 write-through of the same watermark. Non-blocking and inert at the
+        // default "local" rung; never changes presence upstream (G-10).
+        await _mirror.MirrorInteractionAsync(userId, now, ct);
 
         return Ok(response);
     }
