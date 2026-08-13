@@ -109,6 +109,59 @@ public class WalletGuardOfferTests
         result.Allowed.Should().BeFalse();
     }
 
+    // ----- R-M1 (G-01): the guard compares against SPENDABLE balance only -----
+
+    [Theory]
+    [InlineData("cod_earnings")]
+    [InlineData("cod_commission")]
+    [InlineData("COD_Insurance")]
+    public async Task CheckAsync_Ignores_NonSpendable_Cod_Types(string codType)
+    {
+        var holderId = Guid.NewGuid();
+        var guard = NewGuard(new TypedWalletClient(holderId, (codType, 1, 5_000.0)), "fail-closed");
+
+        var result = await guard.CheckAsync(holderId, requiredFee: 5.0m, CancellationToken.None);
+
+        result.Allowed.Should().BeFalse();
+        result.Available.Should().Be(0m);
+        result.DegradedByUpstreamFailure.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("codex")]
+    [InlineData("topup")]
+    public async Task CheckAsync_Still_Counts_Every_Non_Cod_Type(string? spendableType)
+    {
+        // Control case: were the pin a blanket exclusion, this would fail closed and block
+        // every legitimate offer — untyped wallets are what live holders carry today.
+        var holderId = Guid.NewGuid();
+        var guard = NewGuard(new TypedWalletClient(holderId, (spendableType, 1, 5.0)), "fail-closed");
+
+        var result = await guard.CheckAsync(holderId, requiredFee: 5.0m, CancellationToken.None);
+
+        result.Allowed.Should().BeTrue();
+        result.Available.Should().Be(5.0m);
+    }
+
+    [Fact]
+    public async Task CheckAsync_Cod_Types_Cannot_Flip_The_Dominant_Currency_Group()
+    {
+        // Two cod_* legs on currency 2 would out-count the single spendable currency-1
+        // wallet and zero the compare if they were filtered after the grouping.
+        var holderId = Guid.NewGuid();
+        var guard = NewGuard(
+            new TypedWalletClient(holderId,
+                (null, 1, 5.0), ("cod_earnings", 2, 900.0), ("cod_commission", 2, 900.0)),
+            "fail-closed");
+
+        var result = await guard.CheckAsync(holderId, requiredFee: 5.0m, CancellationToken.None);
+
+        result.Allowed.Should().BeTrue();
+        result.Available.Should().Be(5.0m);
+    }
+
     private static WalletSufficiencyGuard NewGuard(SwServiceWalletClient wallet, string failMode)
         => new(wallet, Options.Create(new WalletGuardOptions { FailMode = failMode }),
             NullLogger<WalletSufficiencyGuard>.Instance);
@@ -441,6 +494,34 @@ public class WalletGuardOfferTests
                     new() { WalletId = Guid.NewGuid(), HolderId = _holderId, CurrencyID = 1, Amount = 1.0, IsActive = true },
                     new() { WalletId = Guid.NewGuid(), HolderId = _holderId, CurrencyID = 2, Amount = 100.0, IsActive = true },
                 },
+            });
+
+        public override Task<JeebGateway.service.ServiceWallet.GetHolderWallets> WalletsAsync(Guid holderId)
+            => WalletsAsync(holderId, CancellationToken.None);
+    }
+
+    /// <summary>R-M1: a holder whose wallets carry explicit (type, currency, amount) rows.</summary>
+    private sealed class TypedWalletClient : SwServiceWalletClient
+    {
+        private readonly Guid _holderId;
+        private readonly (string? Type, int Currency, double Amount)[] _rows;
+
+        public TypedWalletClient(Guid holderId, params (string? Type, int Currency, double Amount)[] rows)
+            : base("http://localhost", new HttpClient())
+        {
+            _holderId = holderId;
+            _rows = rows;
+        }
+
+        public override Task<JeebGateway.service.ServiceWallet.GetHolderWallets> WalletsAsync(Guid holderId, CancellationToken ct)
+            => Task.FromResult(new JeebGateway.service.ServiceWallet.GetHolderWallets
+            {
+                WalletHolder = new JeebGateway.service.ServiceWallet.WalletHolder { HolderId = _holderId, IsActive = true },
+                Wallets = _rows.Select(r => new JeebGateway.service.ServiceWallet.Wallet
+                {
+                    WalletId = Guid.NewGuid(), HolderId = _holderId,
+                    CurrencyID = r.Currency, Amount = r.Amount, IsActive = true, Type = r.Type,
+                }).ToList(),
             });
 
         public override Task<JeebGateway.service.ServiceWallet.GetHolderWallets> WalletsAsync(Guid holderId)
