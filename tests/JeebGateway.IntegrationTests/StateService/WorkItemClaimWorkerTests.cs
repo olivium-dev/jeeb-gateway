@@ -213,6 +213,25 @@ public class WorkItemClaimWorkerTests
     }
 
     [Fact]
+    public async Task An_Unknown_Template_Is_Still_A_Caller_Visible_Failure_In_Claim_Driven_Mode()
+    {
+        var outbox = new RecordingOutbox { IsClaimDriven = true };
+        var push = new CapturingPushNotificationService();
+        var dispatcher = new JeebNotificationDispatcher(
+            new StaticNotificationTemplateRenderer(), push, outbox,
+            NullLogger<JeebNotificationDispatcher>.Instance);
+
+        var result = await dispatcher.DispatchAsync(
+            "jeeb.template.does.not.exist", "en", new Dictionary<string, string>(),
+            Recipient, "notif:unknown-template", CancellationToken.None);
+
+        result.Status.Should().Be(NotificationDispatchStatus.DLQ, "the controller still answers 400");
+        outbox.Delivered.Should().Be(0);
+        outbox.Failures.Should().Be(0);
+        push.Sent.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task The_Local_Outbox_Path_Still_Pushes_Inline_And_Marks_Delivered()
     {
         var outbox = new RecordingOutbox { IsClaimDriven = false };

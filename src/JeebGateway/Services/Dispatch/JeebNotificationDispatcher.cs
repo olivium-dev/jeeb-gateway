@@ -91,8 +91,13 @@ public sealed class JeebNotificationDispatcher : IJeebNotificationDispatcher
         // Pushing here too would double-send, and complete/fail without a lease is a no-op.
         if (_outbox.IsClaimDriven)
         {
-            return new NotificationDispatchResult(
-                entry.Id, WasDeduplicated: false, NotificationDispatchStatus.Pending);
+            // An unknown template stays a caller-visible 400 instead of a silent 202.
+            return _renderer.Render(templateKey, locale, parameters) is null
+                ? new NotificationDispatchResult(
+                    entry.Id, WasDeduplicated: false, NotificationDispatchStatus.DLQ,
+                    $"Unknown template key '{templateKey}'.")
+                : new NotificationDispatchResult(
+                    entry.Id, WasDeduplicated: false, NotificationDispatchStatus.Pending);
         }
 
         // 3. Render template
