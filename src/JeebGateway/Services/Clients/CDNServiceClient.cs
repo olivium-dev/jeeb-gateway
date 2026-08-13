@@ -90,6 +90,8 @@ public sealed class CDNServiceClient : ICDNServiceClient
             slot = request.Slot,
             contentType = request.ContentType,
             ttlSeconds = request.TtlSeconds > 0 ? request.TtlSeconds : 300,
+            // Null is dropped by WhenWritingNull, so existing callers keep the old body.
+            extension = string.IsNullOrWhiteSpace(request.Extension) ? null : request.Extension,
         };
 
         using var response = await _http.PostAsJsonAsync("api/ImageUpload/presign-put", body, JsonOptions, ct);

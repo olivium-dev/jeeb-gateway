@@ -22,8 +22,8 @@ public interface IStateOwnershipClient
     Task<WorkItemRecordV1?> GetLatestWorkItemAsync(
         string application, string kind, string subjectRef, CancellationToken ct);
 
-    // W1-09 — the claim/complete/fail rail. These routes take no Idempotency-Key: the
-    // lease token plus version CAS is the concurrency control.
+    // W1-09 claim/complete/fail + W1-06 consume. These routes take no Idempotency-Key: the
+    // lease token (or application + token hash on consume) plus version CAS is the control.
     Task<IReadOnlyList<WorkItemRecordV1>> ClaimWorkItemsAsync(
         WorkClaimRequestV1 body, CancellationToken ct);
 
@@ -32,6 +32,9 @@ public interface IStateOwnershipClient
 
     Task<WorkItemRecordV1> FailWorkItemAsync(
         Guid workItemId, WorkFailRequestV1 body, CancellationToken ct);
+
+    Task<WorkItemRecordV1> ConsumeWorkItemAsync(
+        Guid workItemId, WorkConsumeRequestV1 body, CancellationToken ct);
 }
 
 public partial class JeebStateServiceClient : IStateOwnershipClient
@@ -91,6 +94,10 @@ public partial class JeebStateServiceClient : IStateOwnershipClient
         Guid workItemId, WorkFailRequestV1 body, CancellationToken ct) =>
         PostWorkAsync<WorkItemRecordV1>($"v1/work-items/{workItemId:D}/fail", body, ct);
 
+    public Task<WorkItemRecordV1> ConsumeWorkItemAsync(
+        Guid workItemId, WorkConsumeRequestV1 body, CancellationToken ct) =>
+        PostWorkAsync<WorkItemRecordV1>($"v1/work-items/{workItemId:D}/consume", body, ct);
+
     private Task<T> PostWorkAsync<T>(string path, object body, CancellationToken ct)
         where T : class
     {
@@ -143,5 +150,9 @@ public sealed class UnavailableStateOwnershipClient : IStateOwnershipClient
 
     public Task<WorkItemRecordV1> FailWorkItemAsync(
         Guid workItemId, WorkFailRequestV1 body, CancellationToken ct) =>
+        Fail<WorkItemRecordV1>();
+
+    public Task<WorkItemRecordV1> ConsumeWorkItemAsync(
+        Guid workItemId, WorkConsumeRequestV1 body, CancellationToken ct) =>
         Fail<WorkItemRecordV1>();
 }

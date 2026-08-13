@@ -305,6 +305,10 @@ public class MirroringAdminAuditLogTests
         public Task<WorkItemRecordV1> FailWorkItemAsync(
             Guid workItemId, WorkFailRequestV1 body, CancellationToken ct) =>
             throw new NotSupportedException();
+
+        public Task<WorkItemRecordV1> ConsumeWorkItemAsync(
+            Guid workItemId, WorkConsumeRequestV1 body, CancellationToken ct) =>
+            throw new NotSupportedException();
     }
 
     private sealed class ThrowingOwnershipClient : IStateOwnershipClient
@@ -342,6 +346,10 @@ public class MirroringAdminAuditLogTests
 
         public Task<WorkItemRecordV1> FailWorkItemAsync(
             Guid workItemId, WorkFailRequestV1 body, CancellationToken ct) =>
+            throw new NotSupportedException();
+
+        public Task<WorkItemRecordV1> ConsumeWorkItemAsync(
+            Guid workItemId, WorkConsumeRequestV1 body, CancellationToken ct) =>
             throw new NotSupportedException();
     }
 }

@@ -71,7 +71,9 @@ internal static class StoreDurabilityGuard
         // and the decorator (flag on, default) are approved durable resolutions. Mirrors the
         // INotificationPreferencesStore → RemoteUserPreferences* treatment below.
         (typeof(JeebGateway.Users.IAccountDeletionStore),                   new[] { typeof(JeebGateway.Users.PostgresAccountDeletionStore), typeof(JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore) }),
-        (typeof(JeebGateway.Users.DataExport.IDataExportStore),             new[] { typeof(JeebGateway.Users.DataExport.PostgresDataExportStore) }),
+        // gwdbx W1-06 (G-08): MirroringDataExportStore DECORATES the durable local store to dual-write
+        // /v1/work-items — in a prod-like env the inner is Postgres, so both resolutions are durable.
+        (typeof(JeebGateway.Users.DataExport.IDataExportStore),             new[] { typeof(JeebGateway.Users.DataExport.PostgresDataExportStore), typeof(JeebGateway.Users.DataExport.MirroringDataExportStore) }),
         (typeof(JeebGateway.Requests.OtpHandover.IAdminEscalationStore),    new[] { typeof(JeebGateway.Requests.OtpHandover.PostgresAdminEscalationStore) }),
         (typeof(JeebGateway.ProhibitedItems.FlaggedRequests.IFlaggedRequestStore), new[] { typeof(JeebGateway.ProhibitedItems.FlaggedRequests.PostgresFlaggedRequestStore) }),
         (typeof(JeebGateway.ProhibitedItems.IProhibitedItemsStore),         new[] { typeof(JeebGateway.ProhibitedItems.PostgresProhibitedItemsStore) }),

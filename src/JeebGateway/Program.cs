@@ -950,6 +950,16 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.RefreshTokenStoreMode),
         "FeatureFlags:RefreshTokenStoreMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    // G-20 — from dual-write-local-read up the mirror uploads export artifacts, so boot
+    // fails closed rather than reaching cdn without an encryption key.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.DataExportMode)
+                < JeebGateway.Migration.GwdbxMigrationPhase.DualWriteLocalRead
+            || JeebGateway.Users.DataExport.DataExportArtifactCipher.IsUsableKey(
+                builder.Configuration[
+                    JeebGateway.Users.DataExport.DataExportArtifactOptions.SectionName + ":ArtifactKey"]),
+        "DataExport:ArtifactKey (base64, 16/24/32 bytes) is required once "
+            + "FeatureFlags:DataExportMode leaves \"local\".")
     .ValidateOnStart();
 
 // Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
@@ -2248,16 +2258,37 @@ builder.Services.Configure<DataExportOptions>(builder.Configuration.GetSection(D
 if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 {
     builder.Services.AddSingleton<JeebGateway.Users.DataExport.PostgresDataExportStore>();
-    builder.Services.AddSingleton<IDataExportStore>(sp =>
-        sp.GetRequiredService<JeebGateway.Users.DataExport.PostgresDataExportStore>());
     builder.Services.AddSingleton<JeebGateway.Users.DataExport.DataExportWorker>();
     builder.Services.AddHostedService(sp =>
         sp.GetRequiredService<JeebGateway.Users.DataExport.DataExportWorker>());
 }
 else
 {
-    builder.Services.AddSingleton<IDataExportStore, InMemoryDataExportStore>();
+    builder.Services.AddSingleton<InMemoryDataExportStore>();
 }
+
+// gwdbx W1-06 (G-20) — the encrypt-then-upload artifact pipeline. Dormant while
+// DataExportMode is "local": nothing resolves the uploader until the mirror runs.
+builder.Services.Configure<JeebGateway.Users.DataExport.DataExportArtifactOptions>(
+    builder.Configuration.GetSection(JeebGateway.Users.DataExport.DataExportArtifactOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.Users.DataExport.DataExportArtifactCipher>();
+builder.Services.AddScoped<JeebGateway.Users.DataExport.IDataExportArtifactUploader,
+    JeebGateway.Users.DataExport.CdnDataExportArtifactUploader>();
+
+// gwdbx W1-06 — MirroringDataExportStore DECORATES the authoritative local store, dual-writing the
+// export lifecycle to /v1/work-items once DataExportMode reaches dual-write-local-read.
+builder.Services.AddSingleton<IDataExportStore>(sp =>
+{
+    IDataExportStore inner = !string.IsNullOrWhiteSpace(gatewayPostgresCs)
+        ? sp.GetRequiredService<JeebGateway.Users.DataExport.PostgresDataExportStore>()
+        : sp.GetRequiredService<InMemoryDataExportStore>();
+    return new JeebGateway.Users.DataExport.MirroringDataExportStore(
+        inner,
+        sp.GetRequiredService<IServiceScopeFactory>(),
+        sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<JeebGateway.Migration.GwdbxMigrationOptions>>(),
+        sp.GetRequiredService<ILogger<JeebGateway.Users.DataExport.MirroringDataExportStore>>());
+});
+
 // Ratings for GDPR export: feedback-service is the record-of-truth, and the in-memory
 // provider nothing seeds outside tests silently exported an empty ratings section.
 builder.Services.AddDataExportRatingsProvider(builder.Configuration);
