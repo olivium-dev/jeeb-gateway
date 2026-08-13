@@ -16,8 +16,13 @@ namespace JeebGateway.Whisper;
 /// audio bytes. In-memory this evaporated on every restart / replica move, so the
 /// pending-retry backlog and the <c>PendingQueueDepth</c> that drives the Whisper
 /// health check and the transcription status endpoint silently reset to zero. This
-/// store persists it to the <c>transcription_fallback_queue</c> table (migration
+/// store persisted it to the <c>transcription_fallback_queue</c> table (migration
 /// 0033).</para>
+///
+/// <para>W3-06 (A12): the WRITE to that table is deleted — no new row can be created.
+/// <see cref="Snapshot"/> still READS it so the pre-existing backlog stays visible on
+/// the health check / status probe until the owner-gated table DROP (W5-09), which must
+/// remove this read in the same change.</para>
 ///
 /// <para>This is gateway-OWNED reliability plumbing (the gateway is the transcription
 /// composer for the MVP Whisper seam; there is no upstream queue service that owns it
@@ -26,10 +31,10 @@ namespace JeebGateway.Whisper;
 /// job metadata lives here — the raw audio bytes deliberately do NOT (large blobs do
 /// not belong in the gateway DB; see <see cref="IAudioStore"/>).</para>
 ///
-/// <para>Semantics are preserved exactly:
+/// <para>Semantics:
 /// <list type="bullet">
-/// <item><see cref="EnqueueAsync"/> — a plain append; the row records the audio id,
-/// the fallback reason and the enqueue timestamp.</item>
+/// <item><see cref="EnqueueAsync"/> — W3-06/A12: the durable append is DELETED; the
+/// fallback event is logged instead (see the method).</item>
 /// <item><see cref="Snapshot"/> — reads back every queued row (insertion order), the
 /// durable form of the in-memory <c>ConcurrentQueue.ToArray()</c>. It backs
 /// diagnostics only (queue depth on the health check + status endpoint), so a short
@@ -50,18 +55,17 @@ public sealed class PostgresTranscriptionFallbackQueue : ITranscriptionFallbackQ
         _log = log;
     }
 
-    public async Task EnqueueAsync(QueuedTranscription item, CancellationToken ct)
+    /// <summary>
+    /// W3-06 (A12): the enqueue WRITE is deleted — a queued row could re-drive nothing
+    /// (the audio bytes live only in the in-memory <see cref="IAudioStore"/>). The
+    /// fallback stays observable as a structured log event instead. No I/O, never throws.
+    /// </summary>
+    public Task EnqueueAsync(QueuedTranscription item, CancellationToken ct)
     {
-        await using var conn = await _db.OpenAsync(ct);
-        const string sql = """
-            INSERT INTO transcription_fallback_queue (audio_id, reason, queued_at)
-            VALUES (@AudioId, @Reason, @QueuedAt)
-            """;
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("AudioId", item.AudioId);
-        cmd.Parameters.AddWithValue("Reason", item.Reason ?? string.Empty);
-        cmd.Parameters.AddWithValue("QueuedAt", item.QueuedAt);
-        await cmd.ExecuteNonQueryAsync(ct);
+        _log.LogWarning(
+            "transcription fallback NOT queued (W3-06/A12: enqueue write deleted): AudioId={AudioId} Reason={Reason} QueuedAt={QueuedAt}",
+            item.AudioId, item.Reason ?? string.Empty, item.QueuedAt);
+        return Task.CompletedTask;
     }
 
     /// <summary>

@@ -7,6 +7,9 @@ using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using System.Threading;
+using System.Threading.Tasks;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests.Whisper;
@@ -150,19 +153,40 @@ public class PostgresTranscriptionFallbackQueueTests
             "raw audio blobs do not belong in the gateway DB, so IAudioStore is never a critical durable store");
     }
 
-    // ── Round-trip (deferred to Testcontainers QV) ─────────────────────────────
-    // Enforced by a live Postgres in the QV pass, exactly as PostgresPushReliabilityStoresTests
-    // and PostgresTiersStoreTests defer their round-trip properties.
+    // ── W3-06 (A12): the enqueue WRITE is deleted, the event is logged ─────────
+    // The Snapshot() READ is still deferred to the live-Postgres QV pass; it is removed
+    // by the owner-gated table DROP (W5-09).
 
     [Fact]
-    public void FallbackQueue_Enqueue_Snapshot_RoundTrips_DeferredToPostgresQV()
+    public async Task FallbackQueue_Enqueue_Logs_The_Event_And_Writes_Nothing()
     {
-        // Property: EnqueueAsync appends (audio_id, reason, queued_at) to
-        // transcription_fallback_queue (migration 0033); Snapshot() reads every row back
-        // in insertion order (id) — the same (AudioId, Reason, QueuedAt) tuples the
-        // in-memory ConcurrentQueue.ToArray() returned, now durable so the pending-retry
-        // backlog and the health-check/status PendingQueueDepth survive a restart / replica move.
-        Assert.True(true, "Fallback-queue enqueue/snapshot round-trip verified against a live Postgres in the QV Testcontainers suite.");
+        // FakePostgresCs points at a closed port: any surviving INSERT would throw here.
+        // Passing therefore proves the write is gone, not merely that the method returned.
+        var log = new CapturingLogger<PostgresTranscriptionFallbackQueue>();
+        var queue = new PostgresTranscriptionFallbackQueue(
+            new NpgsqlConnectionFactory(FakePostgresCs), log);
+        var item = new QueuedTranscription("audio-abc", "circuit_open", DateTimeOffset.UnixEpoch);
+
+        var enqueue = async () => await queue.EnqueueAsync(item, CancellationToken.None);
+
+        await enqueue.Should().NotThrowAsync(
+            "W3-06/A12 deleted the transcription_fallback_queue INSERT — the fallback path must not touch Postgres");
+        log.Messages.Should().ContainSingle()
+            .Which.Should().Contain("audio-abc").And.Contain("circuit_open")
+            .And.Contain("NOT queued",
+                "the deleted enqueue must stay observable as a structured log event");
+    }
+
+    /// <summary>Collects formatted log messages so a test can assert on what was logged.</summary>
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<string> Messages { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Messages.Add(formatter(state, exception));
     }
 
     /// <summary>IServiceProvider backed by a fixed interface→instance map; unknown types resolve null.</summary>
