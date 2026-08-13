@@ -335,7 +335,15 @@ public class EscalationMirrorG11Tests
         }
 
         handler.Requests.Should().Be(1, "the drainer is still parked in the first POST");
-        cts.Cancel();
+
+        // Shutdown is the other half of the claim: cancelling must unblock the parked POST.
+        // StopAsync returns when the timeout token fires even if the loop hangs, so assert
+        // on the execute task itself rather than on StopAsync returning.
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await drainer.StopAsync(stop.Token);
+        drainer.ExecuteTask.Should().NotBeNull();
+        drainer.ExecuteTask!.IsCompleted.Should().BeTrue(
+            "the drain loop must observe cancellation, not stay parked in HttpClient");
     }
 
     // ------------------------------- fakes -------------------------------------
@@ -428,6 +436,7 @@ public class EscalationMirrorG11Tests
     private sealed class NeverRespondingHandler : HttpMessageHandler
     {
         private readonly TaskCompletionSource<HttpResponseMessage> _never = new();
+        private CancellationTokenRegistration _registration;
 
         public TaskCompletionSource FirstRequest { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -436,8 +445,17 @@ public class EscalationMirrorG11Tests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             Requests++;
+            // Cancellation-aware: a fake that ignored ct would park forever and hide a
+            // drainer that never shuts down.
+            _registration = ct.Register(() => _never.TrySetCanceled(ct));
             FirstRequest.TrySetResult();
             return _never.Task;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            _registration.Dispose();
+            base.Dispose(disposing);
         }
     }
 
