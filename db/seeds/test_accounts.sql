@@ -98,36 +98,8 @@ VALUES (
 )
 ON CONFLICT (phone) DO NOTHING;
 
--- ---------------------------------------------------------------------
--- KYC: mark P3 + P4 as approved so they can accept offers in tests
--- without going through the manual review path.
--- ---------------------------------------------------------------------
-INSERT INTO kyc_submissions (id, user_id, status, documents, reviewer_id, reviewed_at, submitted_at)
-VALUES
-    (
-        '33333333-0000-4000-8000-000000000001',
-        '33333333-3333-4333-8333-333333333333',
-        'approved',
-        '[{"type":"id_front","url":"s3://jeeb-test/kyc/p3-id-front.png"},
-          {"type":"id_back","url":"s3://jeeb-test/kyc/p3-id-back.png"},
-          {"type":"selfie","url":"s3://jeeb-test/kyc/p3-selfie.png"}]'::jsonb,
-        '55555555-5555-4555-8555-555555555555',
-        NOW() - INTERVAL '14 days',
-        NOW() - INTERVAL '15 days'
-    ),
-    (
-        '44444444-0000-4000-8000-000000000001',
-        '44444444-4444-4444-8444-444444444444',
-        'approved',
-        '[{"type":"id_front","url":"s3://jeeb-test/kyc/p4-id-front.png"},
-          {"type":"id_back","url":"s3://jeeb-test/kyc/p4-id-back.png"},
-          {"type":"selfie","url":"s3://jeeb-test/kyc/p4-selfie.png"},
-          {"type":"vehicle_reg","url":"s3://jeeb-test/kyc/p4-vehicle.png"}]'::jsonb,
-        '55555555-5555-4555-8555-555555555555',
-        NOW() - INTERVAL '90 days',
-        NOW() - INTERVAL '91 days'
-    )
-ON CONFLICT (id) DO NOTHING;
+-- KYC seeding removed with the kyc_submissions DROP (gwdbx W0-08, migration 0045).
+-- Verification authority is user-management; nothing in the gateway reads it.
 
 -- ---------------------------------------------------------------------
 -- A saved address per client persona so the mobile e2e suite has a
