@@ -1450,8 +1450,8 @@ builder.Services.AddScoped<JeebGateway.Financials.IWalletSufficiencyGuard,
 // the same reused wallet-service saga). See Extensions/PartnerWalletExtensions.cs.
 builder.Services.AddPartnerWallet(builder.Configuration);
 
-// GET /v1/jeeb/wallet/ledger — migration seam: WalletPostgres stays authoritative
-// (Authority=postgres); the wallet API runs as a compare-only shadow and never serves.
+// GET /v1/jeeb/wallet/ledger — migration seam. Production serves wallet-service
+// (Authority=wallet-api) with WalletPostgres as the compare-only shadow; dev/CI defaults to postgres.
 builder.Services.Configure<JeebGateway.JeebWallet.WalletLedgerMigrationOptions>(
     builder.Configuration.GetSection(
         JeebGateway.JeebWallet.WalletLedgerMigrationOptions.SectionName));
