@@ -79,6 +79,9 @@ WalletGuard:FailMode                                 setting - # fail-open vs fa
 AdminAuditBackfill:BatchSize                         setting - # W1-04 keyset page size for the admin_actions scan
 AdminAuditBackfill:DryRun                            setting - # W1-04 rehearsal: enumerate + log the plan, POST nothing (default true)
 AdminAuditBackfill:Enabled                           setting - # W1-04 one-shot admin_actions -> /v1/audit-events relay; NOT a cutover flag (AdminAuditMode owns the ladder); ships OFF, armed only for the run and disarmed after
+ConfigImportRun:DryRun                               setting - # W3-07 prep rehearsal: read-only parity check, no upstream write (default true)
+ConfigImportRun:Enabled                              setting - # W3-07 prep one-shot config freeze-import + parity runner; NOT a cutover flag (ProhibitedItemsMode/CmsConfigMode own the ladder); ships OFF, armed only for the run and disarmed after
+ConfigImportRun:Force                                setting - # W3-07 prep: re-import even when a mode already serves upstream reads (importer refuses otherwise)
 Admin:Zones:Boundaries                               setting -
 Admin:Zones:RefreshInterval                          setting -
 AdminOidc:AllowedSigningAlgorithms                   setting -
