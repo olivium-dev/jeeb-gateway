@@ -9,20 +9,8 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests.Realtime;
 
-/// <summary>
-/// RTC-rename G0: every LiveComm topic/channel name derives from
-/// Services:Realtime:TenantPrefix. Three claims are pinned here.
-///
-/// <para><b>1. The default is byte-identical to the live names</b> — this PR is a
-/// zero-behavior-change refactor until an owner-gated config flip.</para>
-///
-/// <para><b>2. A flipped prefix renames every name coherently</b>, and an unsafe
-/// prefix (':' or '*', ACL-namespace escapes) refuses to boot.</para>
-///
-/// <para><b>3. Old route URLs keep working as deprecated aliases</b> after a flip —
-/// live phones hold open sockets and valid tickets — while unknown tenants still
-/// 404 exactly as the pre-rename literal routes did.</para>
-/// </summary>
+/// <summary>RTC-rename G0 pins: default = today's live names byte-identically; a flip
+/// renames coherently; old URLs stay deprecated aliases; unknown tenants still 404.</summary>
 public class RealtimeTenantPrefixTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly WebApplicationFactory<Program> _bare;
@@ -35,9 +23,7 @@ public class RealtimeTenantPrefixTests : IClassFixture<WebApplicationFactory<Pro
     private static RealtimeTopicNames Names(string prefix = "jeeb")
         => new(Options.Create(new RealtimeGuardianOptions { TenantPrefix = prefix }));
 
-    // ---------------------------------------------------------------------
     // 1. Default names are byte-identical to what live phones use today.
-    // ---------------------------------------------------------------------
 
     [Fact]
     public void Default_Prefix_Builds_Todays_Live_Names_Byte_Identically()
@@ -51,9 +37,7 @@ public class RealtimeTenantPrefixTests : IClassFixture<WebApplicationFactory<Pro
         names.ConversationChannelFor("c-1").Should().Be("jeeb_conversation:c-1");
     }
 
-    // ---------------------------------------------------------------------
     // 2. A configured prefix renames coherently; unsafe prefixes fail closed.
-    // ---------------------------------------------------------------------
 
     [Fact]
     public void Configured_Prefix_Renames_Every_Name_Coherently()
@@ -98,10 +82,8 @@ public class RealtimeTenantPrefixTests : IClassFixture<WebApplicationFactory<Pro
         flipped.IsAcceptedTenant(null).Should().BeFalse();
     }
 
-    // ---------------------------------------------------------------------
     // 3. Route matching: old URLs keep working; unknown tenants 404 pre-auth.
     //    401 (bearer challenge) proves the route matched; 404 proves it did not.
-    // ---------------------------------------------------------------------
 
     [Fact]
     public async Task Default_Config_Old_Literal_Routes_Match_And_Unknown_Tenants_404()
