@@ -67,6 +67,10 @@ public sealed class GwdbxMigrationOptions
     // A Program.cs guard pins it <= dual-write-local-read until the read cutover exists (O5).
     public string UserModerationMode { get; init; } = "local";
 
+    // tiers catalog -> delivery-service, W4-09 (registry token: TiersMode). Freeze-import-flip:
+    // only "local" and "upstream-authority" are valid; dual-write rungs are rejected at boot.
+    public string TiersMode { get; init; } = "local";
+
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
@@ -88,6 +92,8 @@ public sealed class GwdbxMigrationOptions
     public GwdbxMigrationPhase PushDispatch => Read(PushDispatchMode);
 
     public GwdbxMigrationPhase UserModeration => Read(UserModerationMode);
+
+    public GwdbxMigrationPhase Tiers => Read(TiersMode);
 
     public static string LadderValues => string.Join(", ", Ladder.Select(entry => entry.Wire));
 
