@@ -1,0 +1,79 @@
+name: zero-dsn-cold-boot
+
+# gwdbx W5-14 harness, NON-gating until W5-11 (zero-dsn leg is continue-on-error; the control leg
+# gates only the harness itself). Contract + arming instructions: docs/runbooks/gwdbx-deletion-ledger.md §7.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  zero-dsn-cold-boot:
+    name: zero-DSN cold boot (non-gating until W5-11)
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      postgres:
+        # Only the CONTROL leg connects; the zero-dsn leg gets no DSN at all.
+        image: postgis/postgis:16-3.4-alpine
+        env:
+          POSTGRES_DB: jeeb
+          POSTGRES_USER: jeeb
+          POSTGRES_PASSWORD: jeeb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jeeb -d jeeb"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore + publish gateway
+        run: |
+          dotnet restore src/JeebGateway/JeebGateway.csproj
+          dotnet publish src/JeebGateway/JeebGateway.csproj -c Release -o /tmp/gwdbx-zero-dsn-publish
+
+      # Control-leg scaffolding only; dies with db/ at W5-11 (delete this step when arming).
+      - name: Prepare control DB (apply migrations)
+        env:
+          DATABASE_URL: postgres://jeeb:jeeb@localhost:5432/jeeb
+          PGPASSWORD: jeeb
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          ./db/apply.sh
+
+      - name: Control leg — boot WITH DSNs (gating; proves the harness)
+        run: bash scripts/gwdbx-zero-dsn-smoke.sh /tmp/gwdbx-zero-dsn-publish --control
+
+      - name: Zero-DSN leg — the W5-14 exit criterion (non-gating until W5-11)
+        id: zerodsn
+        continue-on-error: true
+        run: bash scripts/gwdbx-zero-dsn-smoke.sh /tmp/gwdbx-zero-dsn-publish
+
+      - name: Report
+        run: |
+          if [ "${{ steps.zerodsn.outcome }}" = "success" ]; then
+            echo "## zero-DSN cold boot: PASS — W5-14 exit criterion MET" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## zero-DSN cold boot: criterion unmet (expected until W5-11 lands)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "Contract: docs/runbooks/gwdbx-deletion-ledger.md §7 · roster: scripts/gwdbx-final-health-roster.txt" >> "$GITHUB_STEP_SUMMARY"

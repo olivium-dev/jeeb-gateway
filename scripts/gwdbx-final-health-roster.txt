@@ -1,0 +1,18 @@
+# A9 FINAL /health/ready roster (post W5-11). One name per line, sorted. Count MUST be 16.
+# Contract: docs/runbooks/gwdbx-deletion-ledger.md §7. Consumed by scripts/gwdbx-zero-dsn-smoke.sh.
+admin-oidc-configuration
+ban-service
+cdn-service
+contract-signing-service
+delivery-service
+form-builder-service
+geolocation-service
+jeeb-state-service
+notification-service
+offer-service
+push-notification
+realtime-comunication-service
+user-management
+voice-transcription
+wallet-service
+whisper

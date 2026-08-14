@@ -1028,6 +1028,39 @@ builder.Services
                 }.TryParseReplayFrom(out _),
         "CodWalletMirror:ReplayFromUtc (ISO-8601 UTC instant) is required once "
             + "FeatureFlags:CodSettlementMode leaves \"local\".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.UserModerationMode),
+        "FeatureFlags:UserModerationMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    // W4-04 — user reads (admin search, moderation state) still serve from the gateway
+    // projection, and the O5 phone-privacy ruling is open. Fail closed above the write rung.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.UserModerationMode)
+            < JeebGateway.Migration.GwdbxMigrationPhase.DualWriteUpstreamRead,
+        "FeatureFlags:UserModerationMode cannot reach \"dual-write-upstream-read\" yet: the users "
+            + "read cutover needs O5 resolved and an upstream read surface (W4-06). "
+            + "Highest supported rung: \"dual-write-local-read\".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.TiersMode),
+        "FeatureFlags:TiersMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    // W4-09 — tiers is freeze-import-flip (A11): there is no dual-write decorator by design,
+    // so a dual-write rung would claim a mirroring that does not exist. local or authority only.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.TiersMode)
+                is JeebGateway.Migration.GwdbxMigrationPhase.Local
+                or JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority,
+        "FeatureFlags:TiersMode supports only \"local\" and \"upstream-authority\" "
+            + "(freeze-import-flip has no dual-write rung).")
+    // The flip must not silently fall back to the local store when the upstream
+    // is unwired — that would be a green no-op cutover (the W3-13 void lesson).
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.TiersMode)
+                < JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority
+            || Uri.TryCreate(
+                builder.Configuration["Services:Delivery:BaseUrl"], UriKind.Absolute, out _),
+        "Services:Delivery:BaseUrl must be an absolute URL once FeatureFlags:TiersMode "
+            + "reaches \"upstream-authority\".")
     .ValidateOnStart();
 
 // Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
@@ -2072,7 +2105,27 @@ builder.Services.AddSingleton<JeebGateway.Requests.OtpHandover.IHandoverCodeStor
 // GatewayPostgres:ConnectionString is configured; the in-memory store stays the
 // dev/CI/test fallback when it is absent — the established FAIL-OPEN-then-gate
 // pattern (StoreDurabilityGuard now enforces the Postgres store in prod-like envs).
-if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+// gwdbx W4-09 — at TiersMode=upstream-authority the catalog is served by
+// delivery-service's durable tier catalog (W4-08) through a 60s-cached,
+// fail-open-to-last-known store; below it the local registrations are
+// byte-identical to before (freeze-import-flip: no dual-write rung exists).
+// Registration-time read is safe: an unknown value lands on "local" here and
+// ValidateOnStart then refuses the boot (GwdbxMigrationOptions.PhaseOf doc).
+var tiersModePhase = JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(
+    builder.Configuration["FeatureFlags:TiersMode"]);
+if (tiersModePhase >= JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority
+    && Uri.TryCreate(builder.Configuration["Services:Delivery:BaseUrl"],
+        UriKind.Absolute, out var tiersUpstreamUri))
+{
+    ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
+        JeebGateway.Tiers.DeliveryServiceTiersStore.HttpClientName, client =>
+        {
+            client.BaseAddress = new Uri(tiersUpstreamUri.ToString().TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(8);
+        }));
+    builder.Services.AddSingleton<JeebGateway.Tiers.ITiersStore, JeebGateway.Tiers.DeliveryServiceTiersStore>();
+}
+else if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 {
     builder.Services.AddSingleton<JeebGateway.Tiers.ITiersStore, JeebGateway.Tiers.PostgresTiersStore>();
 }
@@ -2248,6 +2301,13 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
     builder.Services.AddHostedService<JeebGateway.Admin.AdminAuditBackfillWorker>();
 }
 
+// gwdbx W3-07 prep — one-shot config freeze-import + read-only parity check. Ships INERT
+// (Enabled=false; armed it dry-runs = parity only). Unwired state-service fails soft in-worker.
+builder.Services.Configure<JeebGateway.StateService.Config.ConfigImportRunOptions>(
+    builder.Configuration.GetSection(JeebGateway.StateService.Config.ConfigImportRunOptions.SectionName));
+builder.Services.AddTransient<JeebGateway.StateService.Config.ConfigParityChecker>();
+builder.Services.AddHostedService<JeebGateway.StateService.Config.ConfigImportWorker>();
+
 // Disputes and support are stateless gateway projections over the generic
 // jeeb-state-service /v1/cases engine. Evidence is gathered synchronously with
 // independent source budgets and explicit partial markers. The gateway owns no
@@ -2310,6 +2370,33 @@ builder.Services.AddScoped<JeebGateway.Admin.KycAdminReviewComposer>();
 // In-memory store for the MVP; production wiring will proxy to auth-service
 // via an NSwag-generated client, backed by the schema in 0001 + 0006.
 builder.Services.AddSingleton<InMemoryUsersStore>();
+
+// gwdbx W4-04 — best-effort suspension write-through to user-management's W4-03
+// moderation surface, behind FeatureFlags:UserModerationMode (code default "local"
+// = strict no-op; a Validate above pins it <= dual-write-local-read until O5/W4-06).
+// NOT a durable store: the gateway users projection stays authoritative, so this
+// mirror is deliberately absent from the StoreDurabilityGuard roster (G-08 n/a).
+// Unwired base URL => NoOp, matching the escalation-mirror seam shape.
+if (Uri.TryCreate(builder.Configuration["UserManagementServiceApi:BaseUrl"],
+        UriKind.Absolute, out var moderationMirrorUri))
+{
+    ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
+        JeebGateway.Users.Moderation.ModerationMirrorDrainer.HttpClientName, client =>
+        {
+            client.BaseAddress = new Uri(moderationMirrorUri.ToString().TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(8);
+        }));
+    builder.Services.AddSingleton<JeebGateway.Users.Moderation.UserManagementModerationMirror>();
+    builder.Services.AddSingleton<JeebGateway.Users.Moderation.IUserModerationMirror>(sp =>
+        sp.GetRequiredService<JeebGateway.Users.Moderation.UserManagementModerationMirror>());
+    builder.Services.AddHostedService<JeebGateway.Users.Moderation.ModerationMirrorDrainer>();
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.Users.Moderation.IUserModerationMirror,
+        JeebGateway.Users.Moderation.NoOpUserModerationMirror>();
+}
+
 // Durability register #8 — users-durable. When GatewayPostgres is configured, IUsersStore
 // resolves to UpstreamBackedUsersStore: admin user-search + the token-mint active_role read
 // are served from a durable Postgres projection (users table, migration 0025) hydrated from

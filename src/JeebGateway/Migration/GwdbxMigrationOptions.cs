@@ -67,6 +67,14 @@ public sealed class GwdbxMigrationOptions
     // Local rows stay authoritative; CodWalletMirrorReconciler mirrors from dual-write-local-read up.
     public string CodSettlementMode { get; init; } = "local";
 
+    // users projection suspension -> user-management, W4-04 (registry token: UserModerationMode).
+    // A Program.cs guard pins it <= dual-write-local-read until the read cutover exists (O5).
+    public string UserModerationMode { get; init; } = "local";
+
+    // tiers catalog -> delivery-service, W4-09 (registry token: TiersMode). Freeze-import-flip:
+    // only "local" and "upstream-authority" are valid; dual-write rungs are rejected at boot.
+    public string TiersMode { get; init; } = "local";
+
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
@@ -88,6 +96,10 @@ public sealed class GwdbxMigrationOptions
     public GwdbxMigrationPhase PushDispatch => Read(PushDispatchMode);
 
     public GwdbxMigrationPhase CodSettlement => Read(CodSettlementMode);
+
+    public GwdbxMigrationPhase UserModeration => Read(UserModerationMode);
+
+    public GwdbxMigrationPhase Tiers => Read(TiersMode);
 
     public static string LadderValues => string.Join(", ", Ladder.Select(entry => entry.Wire));
 

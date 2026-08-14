@@ -96,7 +96,9 @@ internal static class StoreDurabilityGuard
         // JEBV4-125 (IN-MEM-LIVE): promoted from the in-memory backlog once the durable target
         // landed. The admin delivery-tier catalog is now Postgres-backed (tiers table, migration
         // 0029); in a prod-like env it MUST resolve to PostgresTiersStore, never InMemoryTiersStore.
-        (typeof(JeebGateway.Tiers.ITiersStore),                             new[] { typeof(JeebGateway.Tiers.PostgresTiersStore) }),
+        // gwdbx W4-09: DeliveryServiceTiersStore is the second durable target — delivery-service's
+        // delivery_tiers catalog serves it once FeatureFlags:TiersMode=upstream-authority.
+        (typeof(JeebGateway.Tiers.ITiersStore),                             new[] { typeof(JeebGateway.Tiers.PostgresTiersStore), typeof(JeebGateway.Tiers.DeliveryServiceTiersStore) }),
         // JEBV4-154 (IN-MEM-LIVE): promoted from the in-memory backlog once the durable target
         // landed. The gateway's financial-ledger anonymization bookkeeping (GDPR account-deletion
         // seam — money + GDPR, the highest-risk remaining in-memory store) is now Postgres-backed

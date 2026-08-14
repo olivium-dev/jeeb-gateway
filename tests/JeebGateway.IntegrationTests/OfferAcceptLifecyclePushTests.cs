@@ -274,6 +274,7 @@ public class OfferAcceptLifecyclePushTests
 
         var resp = await ClientActor(factory, "v1-client").PostAsync("/v1/offers/v1-offer-win/accept", null);
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await DrainDetachedPushesAsync(factory);
 
         push.Sends.Should().HaveCount(2);
         var winner = push.Sends.Single(s => TypeOf(s) == "offer_accepted");
@@ -316,6 +317,7 @@ public class OfferAcceptLifecyclePushTests
         var resp = await ClientActor(factory, "v1-client-owner2")
             .PostAsync("/v1/offers/v1-offer-win2/accept", null);
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await DrainDetachedPushesAsync(factory);
 
         // Winner + only the resolvable loser (the unknown bidder is skipped, never guessed).
         push.Sends.Should().HaveCount(2);
@@ -358,6 +360,7 @@ public class OfferAcceptLifecyclePushTests
 
         // Degrade-don't-fail: a throwing push client must never flip the committed 200.
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await DrainDetachedPushesAsync(factory);
         push.Attempts.Should().BeGreaterThanOrEqualTo(1);
     }
 
@@ -419,8 +422,15 @@ public class OfferAcceptLifecyclePushTests
                     services.AddSingleton<IDeliveryServiceClient>(new FakeDeliveryServiceClient());
                     services.RemoveAll<ServicePushNotificationClient>();
                     services.AddSingleton<ServicePushNotificationClient>(push);
+                    // The accept fan-out is detached by design; keep the handle so tests can
+                    // await the sends instead of racing the pool (EXEC-LEDGER S3.56 §2.4).
+                    Fakes.AwaitableDetachedPushDispatcher.Use(services);
                 });
             });
+
+    /// <summary>Completes when every detached push dispatched so far has finished.</summary>
+    private static Task DrainDetachedPushesAsync(WebApplicationFactory<Program> factory)
+        => factory.Services.GetRequiredService<Fakes.AwaitableDetachedPushDispatcher>().DispatchedWork;
 
     private static HttpClient ClientActor(WebApplicationFactory<Program> factory, string clientId)
     {
