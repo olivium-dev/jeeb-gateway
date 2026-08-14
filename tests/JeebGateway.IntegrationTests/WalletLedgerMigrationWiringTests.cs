@@ -205,6 +205,88 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
     private static string ProductionSettingsPath() =>
         Path.Combine(FindRepoRoot(), "src", "JeebGateway", "appsettings.Production.json");
 
+    private static string BaseSettingsPath() =>
+        Path.Combine(FindRepoRoot(), "src", "JeebGateway", "appsettings.json");
+
+    // W0-05 residual: Production.json only wins while the environment resolves to Production.
+    // The BASE file must pin wallet-api so no lost/rewritten env var can demote the money read.
+    [Fact]
+    public void Base_config_pins_wallet_api_and_dev_overlay_records_the_postgres_fallback()
+    {
+        using (var doc = JsonDocument.Parse(File.ReadAllText(BaseSettingsPath())))
+        {
+            doc.RootElement.GetProperty("WalletLedgerMigration").GetProperty("Authority").GetString()
+                .Should().Be("wallet-api",
+                    "the base file is the last layer standing when ASPNETCORE_ENVIRONMENT is lost or "
+                    + "misspelled; it must serve wallet-service, not the Postgres projection (W0-05)");
+        }
+
+        var devPath = Path.Combine(
+            FindRepoRoot(), "src", "JeebGateway", "appsettings.Development.json");
+        using var dev = JsonDocument.Parse(File.ReadAllText(devPath));
+        dev.RootElement.GetProperty("WalletLedgerMigration").GetProperty("Authority").GetString()
+            .Should().Be("postgres",
+                "dev/CI keeps the empty-page fallback (B4) as a RECORDED choice in the Development "
+                + "overlay, never by the base default");
+    }
+
+    // Simulates a gateway.env rebuild that loses ASPNETCORE_ENVIRONMENT and the Authority export:
+    // composition driven by the shipped BASE values alone must still serve the wallet API.
+    [Fact]
+    public void Base_config_alone_resolves_the_wallet_api_reader_as_primary()
+    {
+        var baseConfig = new ConfigurationBuilder()
+            .AddJsonFile(BaseSettingsPath(), optional: false)
+            .Build();
+
+        var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("WalletPostgres:ConnectionString", FakeWalletCs);
+            builder.UseSetting("WalletServiceApi:BaseUrl", baseConfig["WalletServiceApi:BaseUrl"]);
+            builder.UseSetting(
+                "WalletLedgerMigration:ShadowCompareEnabled",
+                baseConfig["WalletLedgerMigration:ShadowCompareEnabled"]);
+            builder.UseSetting(
+                "WalletLedgerMigration:Authority", baseConfig["WalletLedgerMigration:Authority"]);
+        });
+
+        using var scope = factory.Services.CreateScope();
+        var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
+
+        reader.Should().BeOfType<ShadowComparingJeebWalletLedgerReader>();
+        Primary(reader).Should().BeOfType<WalletServiceJeebWalletLedgerReader>(
+            "losing ASPNETCORE_ENVIRONMENT must not silently revert the money read to Postgres "
+            + "(S3.56 §2.5 open residual)");
+        Shadow(reader).Should().BeOfType<PostgresJeebWalletLedgerReader>();
+    }
+
+    // Worst rebuild: BOTH the environment and the WalletPostgres CS are gone. The base values must
+    // pick the wallet API outright — never NullJeebWalletLedgerReader's silent empty ledger.
+    [Fact]
+    public void Base_config_without_wallet_postgres_still_serves_the_wallet_api()
+    {
+        var baseConfig = new ConfigurationBuilder()
+            .AddJsonFile(BaseSettingsPath(), optional: false)
+            .Build();
+
+        var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("WalletServiceApi:BaseUrl", baseConfig["WalletServiceApi:BaseUrl"]);
+            builder.UseSetting(
+                "WalletLedgerMigration:ShadowCompareEnabled",
+                baseConfig["WalletLedgerMigration:ShadowCompareEnabled"]);
+            builder.UseSetting(
+                "WalletLedgerMigration:Authority", baseConfig["WalletLedgerMigration:Authority"]);
+        });
+
+        using var scope = factory.Services.CreateScope();
+        var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
+
+        reader.Should().BeOfType<WalletServiceJeebWalletLedgerReader>(
+            "with no WalletPostgres CS and Authority=wallet-api the API serves directly; the "
+            + "silent-empty-ledger Null reader is only for the recorded Development fallback");
+    }
+
     [Fact]
     public void No_appsettings_file_reintroduces_the_swarm_wallet_hostname()
     {
