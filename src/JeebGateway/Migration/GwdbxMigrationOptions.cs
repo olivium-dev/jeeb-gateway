@@ -63,6 +63,10 @@ public sealed class GwdbxMigrationOptions
     // "upstream-authority" are used: a dual-write rung would make the gateway a 2nd producer (D1).
     public string PushDispatchMode { get; init; } = "local";
 
+    // users projection suspension -> user-management, W4-04 (registry token: UserModerationMode).
+    // A Program.cs guard pins it <= dual-write-local-read until the read cutover exists (O5).
+    public string UserModerationMode { get; init; } = "local";
+
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
@@ -82,6 +86,8 @@ public sealed class GwdbxMigrationOptions
     public GwdbxMigrationPhase Availability => Read(AvailabilityMode);
 
     public GwdbxMigrationPhase PushDispatch => Read(PushDispatchMode);
+
+    public GwdbxMigrationPhase UserModeration => Read(UserModerationMode);
 
     public static string LadderValues => string.Join(", ", Ladder.Select(entry => entry.Wire));
 

@@ -1004,6 +1004,18 @@ builder.Services
         "FeatureFlags:AdminAuditMode cannot reach \"dual-write-upstream-read\" yet: the upstream "
             + "read cutover (W1-05) is not implemented, so the flip would be a silent no-op. "
             + "Highest supported rung: \"dual-write-local-read\".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.UserModerationMode),
+        "FeatureFlags:UserModerationMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    // W4-04 — user reads (admin search, moderation state) still serve from the gateway
+    // projection, and the O5 phone-privacy ruling is open. Fail closed above the write rung.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.UserModerationMode)
+            < JeebGateway.Migration.GwdbxMigrationPhase.DualWriteUpstreamRead,
+        "FeatureFlags:UserModerationMode cannot reach \"dual-write-upstream-read\" yet: the users "
+            + "read cutover needs O5 resolved and an upstream read surface (W4-06). "
+            + "Highest supported rung: \"dual-write-local-read\".")
     .ValidateOnStart();
 
 // Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
@@ -2264,6 +2276,33 @@ builder.Services.AddScoped<JeebGateway.Admin.KycAdminReviewComposer>();
 // In-memory store for the MVP; production wiring will proxy to auth-service
 // via an NSwag-generated client, backed by the schema in 0001 + 0006.
 builder.Services.AddSingleton<InMemoryUsersStore>();
+
+// gwdbx W4-04 — best-effort suspension write-through to user-management's W4-03
+// moderation surface, behind FeatureFlags:UserModerationMode (code default "local"
+// = strict no-op; a Validate above pins it <= dual-write-local-read until O5/W4-06).
+// NOT a durable store: the gateway users projection stays authoritative, so this
+// mirror is deliberately absent from the StoreDurabilityGuard roster (G-08 n/a).
+// Unwired base URL => NoOp, matching the escalation-mirror seam shape.
+if (Uri.TryCreate(builder.Configuration["UserManagementServiceApi:BaseUrl"],
+        UriKind.Absolute, out var moderationMirrorUri))
+{
+    ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
+        JeebGateway.Users.Moderation.ModerationMirrorDrainer.HttpClientName, client =>
+        {
+            client.BaseAddress = new Uri(moderationMirrorUri.ToString().TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(8);
+        }));
+    builder.Services.AddSingleton<JeebGateway.Users.Moderation.UserManagementModerationMirror>();
+    builder.Services.AddSingleton<JeebGateway.Users.Moderation.IUserModerationMirror>(sp =>
+        sp.GetRequiredService<JeebGateway.Users.Moderation.UserManagementModerationMirror>());
+    builder.Services.AddHostedService<JeebGateway.Users.Moderation.ModerationMirrorDrainer>();
+}
+else
+{
+    builder.Services.AddSingleton<JeebGateway.Users.Moderation.IUserModerationMirror,
+        JeebGateway.Users.Moderation.NoOpUserModerationMirror>();
+}
+
 // Durability register #8 — users-durable. When GatewayPostgres is configured, IUsersStore
 // resolves to UpstreamBackedUsersStore: admin user-search + the token-mint active_role read
 // are served from a durable Postgres projection (users table, migration 0025) hydrated from
