@@ -540,8 +540,7 @@ public sealed class JeebConversationsController : ControllerBase
     /// </summary>
     // {tenant} is constrained to the configured prefix + the legacy alias, so the
     // pre-rename literal URL keeps matching byte-for-byte and unknown tenants 404.
-    [HttpGet("v1/realtime/{tenant}:chat:{conversationId}")]
-    [JeebGateway.Realtime.AcceptedRealtimeTenant]
+    [HttpGet("v1/realtime/{tenant:realtimeTenant}:chat:{conversationId}")]
     [Authorize]
     [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; membership = STATE (chat-service)
     [ProducesResponseType(typeof(RealtimeChannelDescriptor), StatusCodes.Status200OK)]

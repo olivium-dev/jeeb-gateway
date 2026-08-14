@@ -565,6 +565,11 @@ builder.Services.AddSingleton<JeebGateway.Realtime.IRealtimeGuardianTokenIssuer,
 // Every LiveComm topic/channel name derives from Services:Realtime:TenantPrefix
 // here; the default keeps live names byte-identical (RTC rename phase G0).
 builder.Services.AddSingleton<JeebGateway.Realtime.RealtimeTopicNames>();
+// Rejects unknown {tenant} segments at URL matching, so those requests 404
+// pre-auth exactly as they did when the two realtime routes were literals.
+builder.Services.Configure<Microsoft.AspNetCore.Routing.RouteOptions>(options =>
+    options.ConstraintMap[JeebGateway.Realtime.RealtimeTenantRouteConstraint.Name] =
+        typeof(JeebGateway.Realtime.RealtimeTenantRouteConstraint));
 
 // The GPS-ingest → realtime fan-out. Queue + drainer, mirroring the
 // NewRequestFanoutQueue / NewRequestFanoutProcessor pair: POST /location/update only
