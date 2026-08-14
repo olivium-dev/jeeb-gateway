@@ -627,8 +627,14 @@ public sealed class PartnerWalletEndpointsTests
         problem.GetProperty("status").GetInt32().Should().Be(502);
         problem.GetProperty("title").GetString().Should().Be("The jeeber search could not be completed.");
 
+        // traceId is random hex that can itself contain "503" (phantom CI red, EXEC-LEDGER S3.56);
+        // leak-check the body with that single random field removed.
         var raw = await resp.Content.ReadAsStringAsync();
-        raw.Should().NotContain("503", "the upstream status must not leak to the caller");
+        var sanitized = JsonSerializer.Serialize(
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(raw)!
+                .Where(kv => kv.Key != "traceId")
+                .ToDictionary(kv => kv.Key, kv => kv.Value));
+        sanitized.Should().NotContain("503", "the upstream status must not leak to the caller");
     }
 
     // ── PP-7: OTP step-up on high-value top-ups ───────────────────────────────────────

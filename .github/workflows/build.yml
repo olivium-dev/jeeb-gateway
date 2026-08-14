@@ -32,7 +32,13 @@ jobs:
         run: dotnet restore tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj
 
       - name: Test
-        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal
+        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal --filter "Quarantine!=timeout-flake"
+
+      # Quarantined repeat timeout-flake victims still run, but cannot poison the merge baseline.
+      - name: Quarantined timeout flakes (non-gating)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal --filter "Quarantine=timeout-flake"
 
       - name: Publish
         run: dotnet publish src/JeebGateway/JeebGateway.csproj -c Release -o publish --no-build

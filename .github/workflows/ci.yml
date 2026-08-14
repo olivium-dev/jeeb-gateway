@@ -104,7 +104,13 @@ jobs:
         run: dotnet restore tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj
 
       - name: Test
-        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal --logger "trx;LogFileName=tests.trx"
+        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal --logger "trx;LogFileName=tests.trx" --filter "Quarantine!=timeout-flake"
+
+      # Quarantined repeat timeout-flake victims still run, but cannot poison the merge baseline.
+      - name: Quarantined timeout flakes (non-gating)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal --logger "trx;LogFileName=quarantine.trx" --filter "Quarantine=timeout-flake"
 
       - name: Upload test results
         uses: actions/upload-artifact@v4

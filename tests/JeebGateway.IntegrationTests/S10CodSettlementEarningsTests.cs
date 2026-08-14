@@ -125,7 +125,10 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         doc.RootElement.TryGetProperty("jeeberId", out _).Should().BeTrue();
     }
 
+    // Quarantined: repeat TestHost-timeout victim under CI runner contention (EXEC-LEDGER S3.51/S3.56).
+    // Runs in the non-gating "Quarantined timeout flakes" CI step; passes in ~60ms when run directly.
     [Fact] // A4.2: lifetime read carries the same nested envelope
+    [Trait("Quarantine", "timeout-flake")]
     public async Task EarningsLifetime_Returns_Nested_Totals()
     {
         var seed = await SeedAsync(CanonicalDeliveryStatus.Done, acceptedFee: 1000000m);
