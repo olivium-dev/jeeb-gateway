@@ -232,6 +232,7 @@ Services:Delivery:TenantId                           setting -
 Services:Realtime:GuardianIssuer                     setting -
 Services:Realtime:GuardianSecret                     setting -
 Services:Realtime:PublicSocketUrl                    setting -
+Services:Realtime:TenantPrefix                       setting - # RTC-rename G0: LiveComm name prefix (RealtimeTopicNames), default "jeeb" = zero behavior change; flip owner-gated
 Services:Realtime:TokenTtlSeconds                    setting -
 Services:RoleService:ApiKey                          setting -
 Services:RoleService:BaseUrl                         setting -

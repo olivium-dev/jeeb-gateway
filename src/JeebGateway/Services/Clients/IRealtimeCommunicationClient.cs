@@ -10,7 +10,7 @@ namespace JeebGateway.Services.Clients;
 ///
 /// <para>
 /// WHAT THE GATEWAY CALLS. Mobile clients connect the WebSocket directly
-/// (Phoenix channel <c>topic:jeeb:chat</c>, join validated against the token's
+/// (Phoenix channel <c>topic:{tenant}:chat</c>, join validated against the token's
 /// <c>topics</c>/<c>scopes</c> claims — the "membership-validated join" the
 /// tickets require). The gateway's role is the SERVER-SIDE FAN-OUT path: when a
 /// chat message is accepted (REST <see cref="JeebGateway.Controllers.ChatController"/>
@@ -33,7 +33,7 @@ namespace JeebGateway.Services.Clients;
 /// <para>
 /// PER-RECIPIENT FAN-OUT FILTER (JEB-50/51/52). The gateway addresses one
 /// recipient per publish by encoding the recipient into the <c>stream</c>
-/// (<c>user:{recipientId}</c>) under a fixed product <c>topic</c> (<c>jeeb:chat</c>).
+/// (<c>user:{recipientId}</c>) under one product <c>topic</c> (<c>{tenant}:chat</c>).
 /// Subscribers filter on stream so a message only reaches the intended recipient;
 /// the gateway never broadcasts a 1:1 message to the whole topic.
 /// </para>
@@ -68,8 +68,8 @@ public interface IRealtimeCommunicationClient
     /// (<c>data</c> + <c>meta</c>).
     /// </summary>
     /// <param name="topic">
-    /// The product topic — Jeeb chat uses <c>jeeb:chat</c>. Authorized upstream
-    /// against the caller's <c>topics</c>/<c>scopes</c> claims.
+    /// The product topic — chat uses <see cref="JeebGateway.Realtime.RealtimeTopicNames"/>'
+    /// ChatTopic. Authorized upstream against the caller's <c>topics</c>/<c>scopes</c> claims.
     /// </param>
     /// <param name="stream">
     /// The per-recipient stream — Jeeb encodes the recipient as
@@ -89,8 +89,8 @@ public interface IRealtimeCommunicationClient
         CancellationToken ct);
 
     /// <summary>
-    /// Convenience fan-out for a Jeeb 1:1 chat message: publishes under the fixed
-    /// <c>jeeb:chat</c> topic to the recipient's <c>user:{recipientId}</c> stream.
+    /// Convenience fan-out for a Jeeb 1:1 chat message: publishes under the configured
+    /// <c>{tenant}:chat</c> topic to the recipient's <c>user:{recipientId}</c> stream.
     /// This is the seam <see cref="JeebGateway.Controllers.RealtimeController"/>
     /// and the chat dispatcher call.
     /// </summary>

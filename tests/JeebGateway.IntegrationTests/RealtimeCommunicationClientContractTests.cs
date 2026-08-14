@@ -130,10 +130,30 @@ public class RealtimeCommunicationClientContractTests
     }
 
     [Fact]
-    public void Publish_Uses_Fixed_Jeeb_Chat_Topic_Constant()
+    public void Chat_Topic_Defaults_To_The_Live_Literal_And_Follows_The_Configured_Prefix()
     {
-        // Lock the product topic so a rename is a deliberate, test-breaking change.
-        RealtimeCommunicationClient.ChatTopic.Should().Be("jeeb:chat");
+        // Lock the default so behavior is byte-identical until the config flips.
+        Names().ChatTopic.Should().Be("jeeb:chat");
+        Names("acme").ChatTopic.Should().Be("acme:chat");
+    }
+
+    [Fact]
+    public async Task FanOut_Ingest_Path_Follows_The_Configured_Tenant_Prefix()
+    {
+        HttpRequestMessage? captured = null;
+        var client = ClientCapturing(
+            HttpStatusCode.Accepted,
+            """{"ok":true,"id":"env-1","seq":7}""",
+            (req, _) => captured = req,
+            topics: Names("acme"));
+
+        await client.FanOutChatMessageAsync(
+            RecipientId,
+            new Dictionary<string, object?> { ["type"] = "text" },
+            CancellationToken.None);
+
+        captured!.RequestUri!.AbsolutePath
+            .Should().Be($"/api/ingest/acme%3Achat/user%3A{RecipientId}");
     }
 
     // -----------------------------------------------------------------------
@@ -173,17 +193,25 @@ public class RealtimeCommunicationClientContractTests
             {
                 BaseAddress = new Uri("http://realtime-service.test/")
             },
-            Issuer(secret: null));
+            Issuer(secret: null),
+            Names());
 
     private static RealtimeCommunicationClient ClientCapturing(
         HttpStatusCode status, string json, Action<HttpRequestMessage, string?> capture,
-        string? guardianSecret = null)
+        string? guardianSecret = null,
+        JeebGateway.Realtime.RealtimeTopicNames? topics = null)
         => new(
             new HttpClient(new StubHandler(status, json, capture))
             {
                 BaseAddress = new Uri("http://realtime-service.test/")
             },
-            Issuer(guardianSecret));
+            Issuer(guardianSecret),
+            topics ?? Names());
+
+    /// <summary>Topic names for a prefix; the default pins today's live literals.</summary>
+    private static JeebGateway.Realtime.RealtimeTopicNames Names(string prefix = "jeeb")
+        => new(Microsoft.Extensions.Options.Options.Create(
+            new JeebGateway.Realtime.RealtimeGuardianOptions { TenantPrefix = prefix }));
 
     /// <summary>
     /// A <c>null</c> secret yields an issuer that mints nothing, so these wire-shape tests

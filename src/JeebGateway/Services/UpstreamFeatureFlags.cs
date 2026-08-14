@@ -20,7 +20,7 @@ public sealed class UpstreamFeatureFlags
     /// S08 (JEB-50/51/52/53) — when true, the Jeeb <b>conversation</b> BFF
     /// (<see cref="JeebGateway.Controllers.JeebConversationsController"/>: create,
     /// append/list structured messages, membership-by-correlation, and the
-    /// <c>/v1/realtime/jeeb:chat:{id}</c> REST visibility gate) routes through the
+    /// <c>/v1/realtime/{tenant}:chat:{id}</c> REST visibility gate) routes through the
     /// real chat-service conversation aggregate via
     /// <see cref="JeebGateway.Conversations.Client.IJeebConversationClient"/>.
     ///
@@ -140,7 +140,7 @@ public sealed class UpstreamFeatureFlags
     /// <see cref="JeebGateway.Services.Clients.IRealtimeCommunicationClient"/>
     /// instead of (or in addition to) the gateway-local SignalR
     /// <see cref="JeebGateway.Chat.ChatHub"/> fan-out. Serves JEB-1453, JEB-1449,
-    /// JEB-1432, JEB-626, JEB-444, JEB-50/51/52 (jeeb:chat Phoenix channel,
+    /// JEB-1432, JEB-626, JEB-444, JEB-50/51/52 ({tenant}:chat Phoenix channel,
     /// membership-validated join, per-recipient fan-out filter).
     ///
     /// Default false in every environment: the realtime-comunication-service is

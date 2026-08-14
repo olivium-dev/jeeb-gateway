@@ -11,15 +11,15 @@ namespace JeebGateway.Controllers;
 /// <summary>
 /// Thin BFF seam over the shared <c>realtime-comunication-service</c>
 /// (Elixir/Phoenix "LiveComm"). Exposes the SERVER-SIDE FAN-OUT path the Jeeb
-/// chat flow needs: a per-recipient publish to the <c>jeeb:chat</c> Phoenix
+/// chat flow needs: a per-recipient publish to the <c>{tenant}:chat</c> Phoenix
 /// topic so a backgrounded recipient receives a 1:1 message even when their
 /// WebSocket is not connected. Mobile clients connect the realtime WebSocket
-/// directly (Phoenix channel <c>topic:jeeb:chat</c>, membership-validated join);
-/// the gateway does NOT proxy the WebSocket.
+/// directly (Phoenix channel <c>topic:{tenant}:chat</c>, membership-validated
+/// join); the gateway does NOT proxy the WebSocket.
 ///
 /// Serves JEB-1453, JEB-1449, JEB-1432, JEB-626, JEB-444, JEB-50, JEB-51,
-/// JEB-52 (jeeb:chat Phoenix channel, membership-validated join, per-recipient
-/// fan-out filter).
+/// JEB-52 ({tenant}:chat Phoenix channel, membership-validated join,
+/// per-recipient fan-out filter).
 ///
 /// <para>
 /// FLAG-GATED. The realtime-comunication-service is NOT yet on the Jeeb swarm
@@ -54,7 +54,7 @@ public sealed class RealtimeController : ControllerBase
     /// <summary>
     /// Fan a 1:1 chat message out to a single recipient over the realtime
     /// transport (per-recipient fan-out filter — published to the recipient's
-    /// <c>user:{recipientId}</c> stream under the <c>jeeb:chat</c> topic). The
+    /// <c>user:{recipientId}</c> stream under the <c>{tenant}:chat</c> topic). The
     /// sender identity is taken from the bearer token; the gateway never lets a
     /// caller publish as another user.
     /// </summary>

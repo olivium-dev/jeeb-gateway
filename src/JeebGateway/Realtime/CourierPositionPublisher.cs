@@ -44,17 +44,20 @@ public sealed class CourierPositionPublisher : BackgroundService
     private readonly IServiceProvider _services;
     private readonly ICourierPositionQueue _queue;
     private readonly CourierPositionPublishOptions _options;
+    private readonly RealtimeTopicNames _topics;
     private readonly ILogger<CourierPositionPublisher> _log;
 
     public CourierPositionPublisher(
         IServiceProvider services,
         ICourierPositionQueue queue,
         IOptions<CourierPositionPublishOptions> options,
+        RealtimeTopicNames topics,
         ILogger<CourierPositionPublisher> log)
     {
         _services = services;
         _queue = queue;
         _options = options.Value;
+        _topics = topics;
         _log = log;
     }
 
@@ -151,7 +154,7 @@ public sealed class CourierPositionPublisher : BackgroundService
 
     private async Task PublishOneAsync(CourierPosition position, CancellationToken ct)
     {
-        var topic = CourierPositionTopic.For(position.DeliveryId);
+        var topic = _topics.DeliveryTopicFor(position.DeliveryId);
         if (topic is null)
         {
             // Unreachable via the controller (it sanitizes first) but a queue is a public

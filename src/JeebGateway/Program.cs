@@ -562,6 +562,9 @@ builder.Services.Configure<JeebGateway.Realtime.RealtimeGuardianOptions>(
     builder.Configuration.GetSection(JeebGateway.Realtime.RealtimeGuardianOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Realtime.IRealtimeGuardianTokenIssuer,
                               JeebGateway.Realtime.RealtimeGuardianTokenIssuer>();
+// Every LiveComm topic/channel name derives from Services:Realtime:TenantPrefix
+// here; the default keeps live names byte-identical (RTC rename phase G0).
+builder.Services.AddSingleton<JeebGateway.Realtime.RealtimeTopicNames>();
 
 // The GPS-ingest → realtime fan-out. Queue + drainer, mirroring the
 // NewRequestFanoutQueue / NewRequestFanoutProcessor pair: POST /location/update only

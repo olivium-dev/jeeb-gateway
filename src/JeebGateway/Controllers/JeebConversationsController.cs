@@ -21,7 +21,7 @@ namespace JeebGateway.Controllers;
 /// <summary>
 /// S08 (JEB-50/51/52/53) — the thin BFF surface for the Jeeb <b>conversation</b>
 /// domain. Exposes the <c>/v1/chat/jeeb/conversations</c>,
-/// <c>/v1/conversations/*</c> and <c>/v1/realtime/jeeb:chat:*</c> seams the mobile
+/// <c>/v1/conversations/*</c> and <c>/v1/realtime/{tenant}:chat:*</c> seams the mobile
 /// client and the S08 suite drive, composing them over the SINGLE typed
 /// <see cref="IJeebConversationClient"/>. The gateway is the SOLE chat caller
 /// (org no-coupling law) and holds NO conversation state: chat-service owns the
@@ -55,6 +55,7 @@ public sealed class JeebConversationsController : ControllerBase
     private readonly IJeebConversationClient _client;
     private readonly IRealtimeTicketIssuer _ticketIssuer;
     private readonly IChatMessagePushNotifier _chatPush;
+    private readonly JeebGateway.Realtime.RealtimeTopicNames _topics;
     private readonly UpstreamFeatureFlags _flags;
     private readonly ILogger<JeebConversationsController> _logger;
 
@@ -62,12 +63,14 @@ public sealed class JeebConversationsController : ControllerBase
         IJeebConversationClient client,
         IRealtimeTicketIssuer ticketIssuer,
         IChatMessagePushNotifier chatPush,
+        JeebGateway.Realtime.RealtimeTopicNames topics,
         IOptions<UpstreamFeatureFlags> flags,
         ILogger<JeebConversationsController> logger)
     {
         _client = client;
         _ticketIssuer = ticketIssuer;
         _chatPush = chatPush;
+        _topics = topics;
         _flags = flags.Value;
         _logger = logger;
     }
@@ -535,7 +538,10 @@ public sealed class JeebConversationsController : ControllerBase
     /// socket — the actual WS join (H6/CP-D) is owned by
     /// realtime-comunication-service.
     /// </summary>
-    [HttpGet("v1/realtime/jeeb:chat:{conversationId}")]
+    // {tenant} is constrained to the configured prefix + the legacy alias, so the
+    // pre-rename literal URL keeps matching byte-for-byte and unknown tenants 404.
+    [HttpGet("v1/realtime/{tenant}:chat:{conversationId}")]
+    [JeebGateway.Realtime.AcceptedRealtimeTenant]
     [Authorize]
     [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; membership = STATE (chat-service)
     [ProducesResponseType(typeof(RealtimeChannelDescriptor), StatusCodes.Status200OK)]
@@ -543,6 +549,7 @@ public sealed class JeebConversationsController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> RealtimeVisibilityGate(
+        string tenant,
         string conversationId,
         CancellationToken ct)
     {
@@ -623,9 +630,9 @@ public sealed class JeebConversationsController : ControllerBase
         }
 
         // Member: hand back the channel descriptor the client upgrades to. The
-        // suite topic is jeeb:chat:{id}; the realtime channel is
-        // jeeb_conversation:{id} — this descriptor maps the two so the client knows
-        // which Phoenix topic to join. The gateway does not open the socket.
+        // suite topic is {tenant}:chat:{id}; the realtime channel is
+        // {tenant}_conversation:{id} — this descriptor maps the two so the client
+        // knows which Phoenix topic to join. The gateway does not open the socket.
         //
         // S08 (D / H6): mint a short-lived signed membership ticket scoped to
         // (conversation, viewer, role) so realtime can authorize the WS join WITHOUT
@@ -648,7 +655,7 @@ public sealed class JeebConversationsController : ControllerBase
         return Ok(new RealtimeChannelDescriptor
         {
             ConversationId = conversationId,
-            Topic = $"jeeb_conversation:{conversationId}",
+            Topic = _topics.ConversationChannelFor(conversationId),
             RoleInConvo = activeRole,
             Ticket = ticket,
         });
