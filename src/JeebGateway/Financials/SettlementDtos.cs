@@ -45,6 +45,10 @@ public sealed class Settlement
     public DateTimeOffset? ReceiptGeneratedAt { get; set; }
     public string? LedgerEntryId { get; set; }
 
+    // gwdbx W2-05: wallet-service earning id once mirrored; NULL = not yet mirrored. The Postgres
+    // store filters/stamps the column in SQL and does not hydrate it here.
+    public string? WalletTxId { get; set; }
+
     // JEB-56/57: COD platform batch lifecycle (additive fields — null until batched).
     public Guid? BatchId { get; set; }
     public DateTimeOffset? BatchedAt { get; set; }

@@ -1005,6 +1005,30 @@ builder.Services
             + "read cutover (W1-05) is not implemented, so the flip would be a silent no-op. "
             + "Highest supported rung: \"dual-write-local-read\".")
     .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.CodSettlementMode),
+        "FeatureFlags:CodSettlementMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    // W2-05 — the earnings read flip (W2-08 JeeberEarningsMode) and authority cutover (W2-14)
+    // are unbuilt; fail closed rather than report a rung this binary cannot serve.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.CodSettlementMode)
+            < JeebGateway.Migration.GwdbxMigrationPhase.DualWriteUpstreamRead,
+        "FeatureFlags:CodSettlementMode cannot pass \"dual-write-local-read\" yet: the upstream "
+            + "read cutover (W2-08) and authority flip (W2-14) are not implemented.")
+    // W2-05 — a dual-write without a replay watermark would leave crash-window rows unmirrored
+    // forever (or silently invite an unauthorised full backfill). Bounded and deliberate, always.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.CodSettlementMode)
+                < JeebGateway.Migration.GwdbxMigrationPhase.DualWriteLocalRead
+            || new JeebGateway.Financials.Cod.CodWalletMirrorOptions
+                {
+                    ReplayFromUtc = builder.Configuration[
+                        JeebGateway.Financials.Cod.CodWalletMirrorOptions.SectionName
+                            + ":ReplayFromUtc"],
+                }.TryParseReplayFrom(out _),
+        "CodWalletMirror:ReplayFromUtc (ISO-8601 UTC instant) is required once "
+            + "FeatureFlags:CodSettlementMode leaves \"local\".")
+    .Validate(
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.UserModerationMode),
         "FeatureFlags:UserModerationMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
@@ -1378,6 +1402,28 @@ builder.Services.Configure<JeebGateway.Financials.SettlementLedgerReconcilerOpti
 builder.Services.AddSingleton<JeebGateway.Financials.SettlementLedgerReconciler>();
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<JeebGateway.Financials.SettlementLedgerReconciler>());
+
+// gwdbx W2-05 — COD→wallet-service settlement mirror. INERT at the shipped CodSettlementMode
+// "local": the sweep no-ops and this named client is never used. Local rows stay authoritative.
+builder.Services.Configure<JeebGateway.Financials.Cod.CodWalletMirrorOptions>(
+    builder.Configuration.GetSection(JeebGateway.Financials.Cod.CodWalletMirrorOptions.SectionName));
+// Money-mutating POST: breaker+timeout only, NO transport retry (ServiceWalletClient precedent);
+// the reconciler sweep is the retry, idempotent on transactionId = settlement id.
+ServiceClientExtensions.AttachBreakerAndTimeoutOnly(builder.Services.AddHttpClient(
+    JeebGateway.Financials.Cod.WalletApiSettlementLedgerClient.HttpClientName,
+    client =>
+    {
+        var apiUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
+        if (!string.IsNullOrWhiteSpace(apiUrl))
+        {
+            client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
+        }
+        client.Timeout = TimeSpan.FromSeconds(30);
+    }));
+builder.Services.AddSingleton<JeebGateway.Financials.Cod.WalletApiSettlementLedgerClient>();
+builder.Services.AddSingleton<JeebGateway.Financials.Cod.CodWalletMirrorReconciler>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<JeebGateway.Financials.Cod.CodWalletMirrorReconciler>());
 
 // ===========================================================================
 // Wallet integration — EXACT mirror of the salehly-gateway sibling.

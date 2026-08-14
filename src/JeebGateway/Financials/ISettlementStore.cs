@@ -133,6 +133,17 @@ public interface ISettlementStore
     /// </summary>
     Task<decimal> SumEarningsAsync(IReadOnlyCollection<string>? codStates, CancellationToken ct)
         => Task.FromResult(0m);
+
+    // gwdbx W2-05: completed settlements not yet mirrored to wallet-service (wallet_tx_id IS NULL,
+    // settled_at >= from), oldest first, bounded. Default empty keeps unrelated fakes compiling.
+    Task<IReadOnlyList<Settlement>> ListWalletUnmirroredAsync(
+        DateTimeOffset from, int limit, CancellationToken ct)
+        => Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
+
+    // gwdbx W2-05: stamps settlements.wallet_tx_id after wallet-service accepted the mirror post.
+    // First stamp wins (idempotent). Default false keeps unrelated fakes compiling.
+    Task<bool> SetWalletTxIdAsync(string settlementId, string walletTxId, CancellationToken ct)
+        => Task.FromResult(false);
 }
 
 /// <summary>

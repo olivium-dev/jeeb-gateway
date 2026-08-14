@@ -19,3 +19,4 @@ Thumbs.db
 
 ## Generated audit/build output
 dist/
+.claude/
