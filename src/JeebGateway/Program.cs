@@ -1016,6 +1016,27 @@ builder.Services
         "FeatureFlags:UserModerationMode cannot reach \"dual-write-upstream-read\" yet: the users "
             + "read cutover needs O5 resolved and an upstream read surface (W4-06). "
             + "Highest supported rung: \"dual-write-local-read\".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.TiersMode),
+        "FeatureFlags:TiersMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    // W4-09 — tiers is freeze-import-flip (A11): there is no dual-write decorator by design,
+    // so a dual-write rung would claim a mirroring that does not exist. local or authority only.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.TiersMode)
+                is JeebGateway.Migration.GwdbxMigrationPhase.Local
+                or JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority,
+        "FeatureFlags:TiersMode supports only \"local\" and \"upstream-authority\" "
+            + "(freeze-import-flip has no dual-write rung).")
+    // The flip must not silently fall back to the local store when the upstream
+    // is unwired — that would be a green no-op cutover (the W3-13 void lesson).
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.TiersMode)
+                < JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority
+            || Uri.TryCreate(
+                builder.Configuration["Services:Delivery:BaseUrl"], UriKind.Absolute, out _),
+        "Services:Delivery:BaseUrl must be an absolute URL once FeatureFlags:TiersMode "
+            + "reaches \"upstream-authority\".")
     .ValidateOnStart();
 
 // Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
@@ -2038,7 +2059,27 @@ builder.Services.AddSingleton<JeebGateway.Requests.OtpHandover.IHandoverCodeStor
 // GatewayPostgres:ConnectionString is configured; the in-memory store stays the
 // dev/CI/test fallback when it is absent — the established FAIL-OPEN-then-gate
 // pattern (StoreDurabilityGuard now enforces the Postgres store in prod-like envs).
-if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+// gwdbx W4-09 — at TiersMode=upstream-authority the catalog is served by
+// delivery-service's durable tier catalog (W4-08) through a 60s-cached,
+// fail-open-to-last-known store; below it the local registrations are
+// byte-identical to before (freeze-import-flip: no dual-write rung exists).
+// Registration-time read is safe: an unknown value lands on "local" here and
+// ValidateOnStart then refuses the boot (GwdbxMigrationOptions.PhaseOf doc).
+var tiersModePhase = JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(
+    builder.Configuration["FeatureFlags:TiersMode"]);
+if (tiersModePhase >= JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority
+    && Uri.TryCreate(builder.Configuration["Services:Delivery:BaseUrl"],
+        UriKind.Absolute, out var tiersUpstreamUri))
+{
+    ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
+        JeebGateway.Tiers.DeliveryServiceTiersStore.HttpClientName, client =>
+        {
+            client.BaseAddress = new Uri(tiersUpstreamUri.ToString().TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(8);
+        }));
+    builder.Services.AddSingleton<JeebGateway.Tiers.ITiersStore, JeebGateway.Tiers.DeliveryServiceTiersStore>();
+}
+else if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 {
     builder.Services.AddSingleton<JeebGateway.Tiers.ITiersStore, JeebGateway.Tiers.PostgresTiersStore>();
 }
