@@ -32,6 +32,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
     private readonly ILogger<PartnerWalletService> _log;
     private readonly IReadOnlyCollection<string> _jeeberHolderTypes;
     private readonly IReadOnlyCollection<string> _partnerHolderTypes;
+    private readonly IReadOnlyCollection<string> _systemWalletTypes;
 
     public PartnerWalletService(
         ServiceWalletClient wallet,
@@ -47,12 +48,13 @@ public sealed class PartnerWalletService : IPartnerWalletService
         _log = log;
         _jeeberHolderTypes = SplitTokens(_options.JeeberHolderTypes);
         _partnerHolderTypes = SplitTokens(_options.PartnerHolderTypes);
+        _systemWalletTypes = SplitTokens(_options.SystemWalletTypes);
     }
 
     public async Task<PartnerWalletBalanceResponse> GetPartnerBalanceAsync(Guid partnerId, CancellationToken ct)
     {
         var holder = await _wallet.WalletsAsync(partnerId);
-        var wallet = PickWallet(holder?.Wallets);
+        var wallet = PickSpendableWallet(holder?.Wallets, "holder");
         return new PartnerWalletBalanceResponse
         {
             PartnerId = partnerId,
@@ -68,7 +70,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
         try
         {
             var holder = await _wallet.WalletsAsync(jeeberId);
-            var wallet = PickWallet(holder?.Wallets);
+            var wallet = PickSpendableWallet(holder?.Wallets, "holder");
             return new PartnerJeeberTargetResponse
             {
                 JeeberId = jeeberId,
@@ -371,7 +373,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
         Guid holderId, string label, IReadOnlyCollection<string> expectedTypes, CancellationToken ct)
     {
         var holder = await _wallet.WalletsAsync(holderId);
-        var wallet = PickWallet(holder?.Wallets);
+        var wallet = PickSpendableWallet(holder?.Wallets, label);
         if (wallet is null || wallet.WalletId == Guid.Empty)
         {
             throw new PartnerWalletException(
@@ -405,7 +407,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
     private async Task<Guid> RequireSystemWalletIdAsync(CancellationToken ct)
     {
         var system = await _wallet.SystemWalletAsync();
-        var wallet = PickWallet(system?.Wallets);
+        var wallet = PickSystemWallet(system?.Wallets);
         if (wallet is null || wallet.WalletId == Guid.Empty)
         {
             throw new PartnerWalletException("The system wallet is not provisioned for the configured currency.");
@@ -413,13 +415,71 @@ public sealed class PartnerWalletService : IPartnerWalletService
         return wallet.WalletId;
     }
 
-    /// <summary>Pick the holder's wallet for the configured currency; fall back to the first wallet.</summary>
-    private SwWallet? PickWallet(IEnumerable<SwWallet>? wallets)
+    /// <summary>Select a HOLDER's spendable wallet: the one ratified predicate
+    /// (<see cref="JeebGateway.JeebWallet.SpendableWalletTypes"/>, R-M1/G-01) minus reserved SYSTEM types.</summary>
+    private SwWallet? PickSpendableWallet(IEnumerable<SwWallet>? wallets, string label)
+        => PickWallet(wallets, label, w =>
+            JeebGateway.JeebWallet.SpendableWalletTypes.IsSpendable(w.Type) && !IsSystemType(w.Type));
+
+    /// <summary>Select the SYSTEM wallet by TYPE, not by list position, so a holder-typed or escrow
+    /// wallet sharing the system holder's list can never source a credit.</summary>
+    private SwWallet? PickSystemWallet(IEnumerable<SwWallet>? wallets)
+        => PickWallet(wallets, "system", w =>
+        {
+            if (_systemWalletTypes.Count == 0) return true;
+
+            // Type is an optional free-form string with no enum in the contract (same reason R-M1 is
+            // a deny-list), so an unclassified wallet degrades OPEN rather than halting cash credits.
+            if (string.IsNullOrWhiteSpace(w.Type))
+            {
+                _log.LogWarning(
+                    "Wallet selection: system wallet {WalletId} has no Type; degrading OPEN (expected "
+                    + "one of: {Expected}).", w.WalletId, string.Join(",", _systemWalletTypes));
+                return true;
+            }
+
+            return IsSystemType(w.Type);
+        });
+
+    /// <summary>Shared selection: configured currency AND active AND the caller's type predicate.
+    /// Deliberately NO fallback — a no-match returns null and the caller raises its own guard.</summary>
+    private SwWallet? PickWallet(
+        IEnumerable<SwWallet>? wallets, string label, Func<SwWallet, bool> typeAllowed)
     {
         if (wallets is null) return null;
-        var list = wallets as IReadOnlyList<SwWallet> ?? wallets.ToList();
-        return list.FirstOrDefault(w => w.CurrencyID == _options.CurrencyId) ?? list.FirstOrDefault();
+
+        foreach (var w in wallets)
+        {
+            if (w is null) continue;
+            if (w.CurrencyID != _options.CurrencyId) continue;
+
+            // A deactivated wallet is not provisioned capacity — never treat it as usable.
+            if (!w.IsActive)
+            {
+                _log.LogWarning(
+                    "Wallet selection SKIP: {Label} wallet {WalletId} matches currency {CurrencyId} but "
+                    + "IsActive=false.", label, w.WalletId, _options.CurrencyId);
+                continue;
+            }
+
+            if (!typeAllowed(w))
+            {
+                _log.LogWarning(
+                    "Wallet selection SKIP: {Label} wallet {WalletId} Type='{Actual}' is not selectable "
+                    + "for this caller.", label, w.WalletId, w.Type);
+                continue;
+            }
+
+            return w;
+        }
+
+        return null;
     }
+
+    /// <summary>True when the wallet type is one of the reserved SYSTEM tokens (case-insensitive).</summary>
+    private bool IsSystemType(string? walletType)
+        => !string.IsNullOrWhiteSpace(walletType)
+            && _systemWalletTypes.Contains(walletType, StringComparer.OrdinalIgnoreCase);
 
     private static IReadOnlyCollection<string> SplitTokens(string? csv)
         => string.IsNullOrWhiteSpace(csv)

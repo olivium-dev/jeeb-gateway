@@ -298,6 +298,7 @@ PartnerWallet:MaxTransferAmount                      setting - # MONEY: per-tran
 PartnerWallet:OtpStepUpThreshold                     setting - # MONEY: amount above which OTP step-up is demanded
 PartnerWallet:PartnerHolderTypes                     setting -
 PartnerWallet:ServiceName                            setting -
+PartnerWallet:SystemWalletTypes                      setting - # MONEY/SECURITY: Wallet.Type tokens identifying the SYSTEM wallet; also reserved from holders. Default = wallet-service DataFeed's seeded "__SYSTEM__,__SYSTEM__PRIMARY__" (W2-R03). Empty de-arms BOTH the system allow-list and the holder reservation
 PartnerWallet:TopupTag                               setting -
 ServiceAuth:Caller                                   setting -
 ServiceAuth:ClockSkewSeconds                         setting -

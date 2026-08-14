@@ -1152,7 +1152,11 @@ public sealed class PartnerWalletEndpointsTests
             WalletHolder = new WalletHolder { HolderId = holderId, HolderName = "fake", IsActive = true },
             Wallets = new List<Wallet>
             {
-                new() { WalletId = Guid.NewGuid(), HolderId = holderId, CurrencyID = 1, Amount = Balance, Type = "main" },
+                new()
+                {
+                    WalletId = Guid.NewGuid(), HolderId = holderId, CurrencyID = 1, Amount = Balance,
+                    Type = "main", IsActive = true,
+                },
             },
         };
 
@@ -1167,7 +1171,11 @@ public sealed class PartnerWalletEndpointsTests
             {
                 Wallets = new List<Wallet>
                 {
-                    new() { WalletId = Guid.NewGuid(), CurrencyID = 1, Amount = 1_000_000, Type = "system" },
+                    new()
+                    {
+                        WalletId = Guid.NewGuid(), CurrencyID = 1, Amount = 1_000_000, Type = "__SYSTEM__",
+                        IsActive = true,
+                    },
                 },
             });
 
