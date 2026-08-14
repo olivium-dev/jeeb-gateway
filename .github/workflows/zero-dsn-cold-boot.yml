@@ -55,6 +55,15 @@ jobs:
           dotnet restore src/JeebGateway/JeebGateway.csproj
           dotnet publish src/JeebGateway/JeebGateway.csproj -c Release -o /tmp/gwdbx-zero-dsn-publish
 
+      # Control-leg scaffolding only; dies with db/ at W5-11 (delete this step when arming).
+      - name: Prepare control DB (apply migrations)
+        env:
+          DATABASE_URL: postgres://jeeb:jeeb@localhost:5432/jeeb
+          PGPASSWORD: jeeb
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          ./db/apply.sh
+
       - name: Control leg — boot WITH DSNs (gating; proves the harness)
         run: bash scripts/gwdbx-zero-dsn-smoke.sh /tmp/gwdbx-zero-dsn-publish --control
 
