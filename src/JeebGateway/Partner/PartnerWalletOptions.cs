@@ -86,4 +86,11 @@ public sealed class PartnerWalletOptions
     /// <summary>Comma-separated wallet-service <c>HolderType</c> tokens that count as a partner (admin-credit target).</summary>
     [Required, MinLength(1), MaxLength(128)]
     public string PartnerHolderTypes { get; init; } = "partner";
+
+    // Holder spendability is NOT configured here: it stays with the one ratified predicate,
+    // JeebWallet.SpendableWalletTypes (R-M1/G-01). Only SYSTEM identity needs a positive allow-list.
+
+    /// <summary>Comma-separated <c>Wallet.Type</c> tokens identifying the SYSTEM wallet (case-insensitive).</summary>
+    /// <remarks>Defaults are wallet-service <c>DataFeed</c>'s seeded types; also reserved — no holder may spend one.</remarks>
+    public string SystemWalletTypes { get; init; } = "__SYSTEM__,__SYSTEM__PRIMARY__";
 }
