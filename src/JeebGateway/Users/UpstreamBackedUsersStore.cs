@@ -104,17 +104,22 @@ public sealed class UpstreamBackedUsersStore : IUsersStore
     private readonly InMemoryUsersStore _inner;
     private readonly IUpstreamUserProfileClient _upstream;
     private readonly ILogger<UpstreamBackedUsersStore> _log;
+    private readonly Moderation.IUserModerationMirror _moderationMirror;
 
+    // moderationMirror is optional so existing test fixtures keep compiling;
+    // DI always supplies it (gwdbx W4-04).
     public UpstreamBackedUsersStore(
         IUserProjectionStore projection,
         InMemoryUsersStore inner,
         IUpstreamUserProfileClient upstream,
-        ILogger<UpstreamBackedUsersStore> log)
+        ILogger<UpstreamBackedUsersStore> log,
+        Moderation.IUserModerationMirror? moderationMirror = null)
     {
         _projection = projection;
         _inner = inner;
         _upstream = upstream;
         _log = log;
+        _moderationMirror = moderationMirror ?? new Moderation.NoOpUserModerationMirror();
     }
 
     public async Task<UserProfile?> GetByIdAsync(string userId, CancellationToken ct)
@@ -192,14 +197,35 @@ public sealed class UpstreamBackedUsersStore : IUsersStore
     public async Task<UserProfile?> SuspendAsync(string userId, string reason, string adminId, CancellationToken ct)
     {
         var updated = await _inner.SuspendAsync(userId, reason, adminId, ct);
-        if (updated is not null) await SafeSuspensionAsync(updated, ct);
+        if (updated is not null)
+        {
+            await SafeSuspensionAsync(updated, ct);
+            // gwdbx W4-04: non-blocking enqueue; no-op below dual-write-local-read.
+            await _moderationMirror.MirrorAsync(new Moderation.UserModerationChange
+            {
+                UserId = userId,
+                IsSuspended = true,
+                Reason = updated.SuspensionReason,
+                ActorRef = adminId,
+                At = updated.SuspendedAt ?? DateTimeOffset.UtcNow,
+            }, ct);
+        }
         return updated;
     }
 
     public async Task<UserProfile?> UnsuspendAsync(string userId, string adminId, CancellationToken ct)
     {
         var updated = await _inner.UnsuspendAsync(userId, adminId, ct);
-        if (updated is not null) await SafeSuspensionAsync(updated, ct);
+        if (updated is not null)
+        {
+            await SafeSuspensionAsync(updated, ct);
+            await _moderationMirror.MirrorAsync(new Moderation.UserModerationChange
+            {
+                UserId = userId,
+                IsSuspended = false,
+                ActorRef = adminId,
+            }, ct);
+        }
         return updated;
     }
 
