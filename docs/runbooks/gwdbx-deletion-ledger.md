@@ -164,6 +164,11 @@ Note: the `gateway-postgres`/`wallet-postgres` checks and the durable-store wiri
 DSN being present, so the W5-10/W5-11 code deletions and the env-file DSN removals must land in the same
 deploy window or the roster assert fails — that is the assert doing its job, not a flake.
 
+CI harness: `scripts/gwdbx-zero-dsn-smoke.sh` (workflow `zero-dsn-cold-boot.yml`) proves this contract on
+every build — control leg (with dummy DSNs, gating for the harness) must see the 3 DB-era checks; the
+zero-DSN leg passes only when /health/ready serves exactly the final 16 names. **Arming at W5-11:** delete
+the workflow's `continue-on-error` line and its control-DB migrations step (db/ is gone by then).
+
 ## 8. Docs
 
 | doc | fate |

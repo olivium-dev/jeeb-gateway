@@ -1,10 +1,7 @@
 name: zero-dsn-cold-boot
 
-# gwdbx W5-14 exit-criterion harness. NON-GATING until W5-11: the zero-dsn leg is EXPECTED to
-# report "criterion unmet" while any Postgres store remains, so its step never fails this job.
-# The control leg IS gating — if boot-with-DSNs breaks, the harness itself is broken and must go red.
-# NOT part of the gwdbx merge rule's required-gate set. To arm at W5-11: delete continue-on-error
-# and require the smoke step's exit 0.
+# gwdbx W5-14 harness, NON-gating until W5-11 (zero-dsn leg is continue-on-error; the control leg
+# gates only the harness itself). Contract + arming instructions: docs/runbooks/gwdbx-deletion-ledger.md §7.
 
 on:
   push:

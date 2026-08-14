@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
-# gwdbx W5-14 exit-criterion harness: cold-boot the PUBLISHED gateway in a prod-like environment with
-# ZERO Postgres DSNs and assert /health/ready serves the A9 FINAL 16-name roster. Non-gating until W5-11.
-#
-# Usage: gwdbx-zero-dsn-smoke.sh <publish-dir> [--control]
-#   <publish-dir>  output of `dotnet publish src/JeebGateway/JeebGateway.csproj`
-#   --control      anti-vacuity leg: boot WITH dummy DSNs instead; PASS = the process boots and the
-#                  roster CONTAINS gateway-postgres + wallet-postgres + store-durability. Proves the
-#                  boot recipe and the roster probe both work, so a zero-DSN FAIL means something.
-#
-# Exit codes: 0 = PASS · 1 = criterion unmet (EXPECTED until W5-11 lands) · 2 = harness broken.
-# Statuses are deliberately ignored: in CI no fleet is listening, so only roster NAMES are the contract.
+# gwdbx W5-14 harness: prod-env cold boot with ZERO Postgres DSNs must serve the A9 final 16-name
+# roster on /health/ready. Full contract + usage: docs/runbooks/gwdbx-deletion-ledger.md §7.
+
+# Usage: gwdbx-zero-dsn-smoke.sh <publish-dir> [--control]. The --control leg boots WITH dummy DSNs
+# and must see the 3 DB-era checks (anti-vacuity). Exit: 0 pass · 1 criterion unmet · 2 harness broken.
 set -uo pipefail
 
 PUBLISH_DIR="${1:?usage: gwdbx-zero-dsn-smoke.sh <publish-dir> [--control]}"
