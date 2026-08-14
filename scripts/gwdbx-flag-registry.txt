@@ -357,7 +357,7 @@ ComplimentServiceApi:BaseUrl                         setting -
 DevEndpoints                                         setting - # parent section of Features:DevEndpoints:Enabled
 Features                                             setting - # parent section of Features:{DevEndpoints,Swagger}
 ForwardedHeaders:KnownNetworks                       setting -
-GatewayPostgres:ConnectionString                     setting - # DSN, deleted with the gateway DB at W5-10
+GatewayPostgres:ConnectionString                     setting - # DSN, deleted in the W5-11 A8 same-PR set (was mislabelled W5-10; PLAN-COMPLETION W5-11 is normative)
 GatewayRateLimit:RedisConnectionString               setting - # DSN
 NotificationCatalogSeeder:Enabled                    setting - # env-only seeder switch, in no appsettings file
 PushNotificationServiceApi:InternalApiKey            setting - # SECRET: push-service internal key
