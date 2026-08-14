@@ -2255,6 +2255,13 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
     builder.Services.AddHostedService<JeebGateway.Admin.AdminAuditBackfillWorker>();
 }
 
+// gwdbx W3-07 prep — one-shot config freeze-import + read-only parity check. Ships INERT
+// (Enabled=false; armed it dry-runs = parity only). Unwired state-service fails soft in-worker.
+builder.Services.Configure<JeebGateway.StateService.Config.ConfigImportRunOptions>(
+    builder.Configuration.GetSection(JeebGateway.StateService.Config.ConfigImportRunOptions.SectionName));
+builder.Services.AddTransient<JeebGateway.StateService.Config.ConfigParityChecker>();
+builder.Services.AddHostedService<JeebGateway.StateService.Config.ConfigImportWorker>();
+
 // Disputes and support are stateless gateway projections over the generic
 // jeeb-state-service /v1/cases engine. Evidence is gathered synchronously with
 // independent source budgets and explicit partial markers. The gateway owns no
