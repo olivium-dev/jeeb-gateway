@@ -108,6 +108,7 @@ jobs:
 
       # Quarantined repeat timeout-flake victims still run, but cannot poison the merge baseline.
       - name: Quarantined timeout flakes (non-gating)
+        if: ${{ !cancelled() }}
         continue-on-error: true
         run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal --logger "trx;LogFileName=quarantine.trx" --filter "Quarantine=timeout-flake"
 
