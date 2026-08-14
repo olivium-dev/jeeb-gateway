@@ -80,7 +80,10 @@ public class JeeberOfferTerminalVisibilityTests
             .Which.Status.Should().Be(PendingOfferStatus.Accepted);
     }
 
+    // Quarantined: repeat TestHost-timeout victim under CI runner contention (EXEC-LEDGER S3.52/S3.56).
+    // Runs in the non-gating "Quarantined timeout flakes" CI step; passes in ~60ms when run directly.
     [Fact]
+    [Trait("Quarantine", "timeout-flake")]
     public async Task InMemory_StatusFilter_NarrowsButDefaultIncludesTerminal()
     {
         using var factory = InMemoryFactory();
