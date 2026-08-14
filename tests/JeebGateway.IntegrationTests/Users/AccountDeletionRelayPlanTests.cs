@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using FluentAssertions;
 using JeebGateway.Migration;
+using JeebGateway.Services.Clients;
 using JeebGateway.StateService.Ownership;
 using JeebGateway.Users;
 using Microsoft.Extensions.DependencyInjection;
