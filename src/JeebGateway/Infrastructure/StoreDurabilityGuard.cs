@@ -43,8 +43,8 @@ internal static class StoreDurabilityGuard
     /// </summary>
     internal static readonly (Type Iface, Type[] DurableImpls)[] Critical =
     {
-        (typeof(JeebGateway.Financials.ISettlementStore),                   new[] { typeof(JeebGateway.Financials.PostgresSettlementStore) }),
-        (typeof(JeebGateway.Financials.ISettlementBatchStore),              new[] { typeof(JeebGateway.Financials.PostgresSettlementBatchStore) }),
+        // gwdbx W2-R02: ISettlementStore + ISettlementBatchStore removed — migration 0052 dropped
+        // their tables, so demanding the Postgres impl here would refuse every prod-like boot.
         (typeof(JeebGateway.Users.IUsersStore),                             new[] { typeof(JeebGateway.Users.UpstreamBackedUsersStore) }),
         // W1-14 (A7/A10): the in-memory store is now Development/Testing-only, so a prod-like boot
         // with state-service unwired resolves NOTHING here and this entry aborts it.
@@ -134,30 +134,8 @@ internal static class StoreDurabilityGuard
         // a fallback means every admin draft edit and published config version evaporates on
         // restart, flapping the MFEs back to the seeded v1 defaults.
         (typeof(JeebGateway.Cms.ICmsSurfaceStore),                          new[] { typeof(JeebGateway.Cms.PostgresCmsSurfaceStore) }),
-        // JEBV4-124 (AUDIT-A guard-gap): the pending-COD-settlement ENQUEUE intent
-        // (Financials/ISettlementEnqueueStore) — MONEY-ADJACENT. Its whole contract is
-        // idempotency ("no double-enqueue"), yet InMemorySettlementEnqueueStore held that
-        // intent in a process ConcurrentDictionary that evaporates on restart, so a bounce
-        // could drop the "already enqueued" record and let a delivery be enqueued for
-        // settlement twice. Now Postgres-backed (settlement_enqueue table, migration 0034,
-        // delivery_id PK + INSERT ON CONFLICT DO NOTHING); in a prod-like env it MUST resolve
-        // to PostgresSettlementEnqueueStore, never InMemorySettlementEnqueueStore.
-        (typeof(JeebGateway.Financials.ISettlementEnqueueStore),            new[] { typeof(JeebGateway.Financials.PostgresSettlementEnqueueStore) }),
-        // b05/GW1 W1.8 + W3.5(b) — OWNER RULING 2026-07-31 "PROMOTE": the cash-settlement
-        // LEDGER itself. MONEY, not money-adjacent. The old rationale for leaving it in
-        // memory ("the settlements row is the system of record, the post is best-effort")
-        // was true about the ROW and silent about the IDEMPOTENCY MEMO: the whole safety of
-        // a best-effort, replayable post was InMemorySettlementLedgerClient's
-        // GetOrAdd(IdempotencyKey), held in a process ConcurrentDictionary. A restart
-        // emptied it, and the 60 s SettlementLedgerReconciler then replays every settlement
-        // row with a NULL ledger_entry_id under the same key — minting a SECOND ledger entry
-        // id for one hand-to-hand cash collection and overwriting the first stamp, silently.
-        // Now Postgres-backed (settlement_ledger_entries, migration 0044, idempotency_key PK
-        // + INSERT ON CONFLICT DO NOTHING RETURNING, same shape as PostgresSettlementStore);
-        // in a prod-like env it MUST resolve to PostgresSettlementLedgerClient, never
-        // InMemorySettlementLedgerClient. It is deliberately NOT on IntentionalInMemory —
-        // that would be an automatic FAIL under the owner's ruling.
-        (typeof(JeebGateway.Financials.ISettlementLedgerClient),            new[] { typeof(JeebGateway.Financials.PostgresSettlementLedgerClient) }),
+        // gwdbx W2-R02: ISettlementEnqueueStore (settlement_enqueue, 0034) + ISettlementLedgerClient
+        // (settlement_ledger_entries, 0044) removed — migration 0052 dropped both tables.
         // partner-wallet-bff money-safety state is owned by jeeb-state-service. The gateway adapter
         // uses the shared atomic idempotency KV and holds no DB row or volatile partner-domain store.
         (typeof(JeebGateway.Partner.IPartnerWalletOperationStore),          new[] { typeof(JeebGateway.Partner.StateServicePartnerWalletOperationStore) }),

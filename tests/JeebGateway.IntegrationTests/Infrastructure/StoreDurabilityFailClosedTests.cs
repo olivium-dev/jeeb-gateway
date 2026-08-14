@@ -84,13 +84,13 @@ public class StoreDurabilityFailClosedTests
     public void Evaluate_InMemory_Critical_Store_Is_A_Violation_Naming_The_Store()
     {
         var provider = ProviderWith(
-            typeof(JeebGateway.Financials.ISettlementStore),
-            typeof(JeebGateway.Financials.InMemorySettlementStore));
+            typeof(JeebGateway.Tokens.IRefreshTokenStore),
+            typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore));
 
         var violations = StoreDurabilityGuard.Evaluate(t => provider.GetService(t)?.GetType());
 
         violations.Should().ContainSingle();
-        violations[0].Should().Contain("ISettlementStore").And.Contain("InMemorySettlementStore");
+        violations[0].Should().Contain("IRefreshTokenStore").And.Contain("InMemoryRefreshTokenStore");
     }
 
     [Fact]
@@ -108,15 +108,15 @@ public class StoreDurabilityFailClosedTests
     public void EnsureDurable_ProdLike_With_InMemory_Critical_Store_Fails_Closed()
     {
         var provider = ProviderWith(
-            typeof(JeebGateway.Financials.ISettlementStore),
-            typeof(JeebGateway.Financials.InMemorySettlementStore));
+            typeof(JeebGateway.Tokens.IRefreshTokenStore),
+            typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore));
 
         var act = () => StoreDurabilityGuard.EnsureDurable(
             provider, new FakeEnv { EnvironmentName = "Production" }, NullLogger.Instance);
 
         act.Should().Throw<InvalidOperationException>("a prod-like gateway must refuse to serve in-memory money state")
             .WithMessage("*FAIL-CLOSED*")
-            .WithMessage("*ISettlementStore*", "the failure must name the offending store");
+            .WithMessage("*IRefreshTokenStore*", "the failure must name the offending store");
     }
 
     [Fact]
@@ -135,7 +135,7 @@ public class StoreDurabilityFailClosedTests
     {
         var provider = ProviderWith(
             typeof(JeebGateway.Admin.IAdminAuditLog),
-            typeof(JeebGateway.Financials.InMemorySettlementStore)); // any non-durable type
+            typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore)); // any non-durable type
 
         var act = () => StoreDurabilityGuard.EnsureDurable(
             provider, new FakeEnv { EnvironmentName = env }, NullLogger.Instance);
@@ -148,8 +148,8 @@ public class StoreDurabilityFailClosedTests
     {
         // Local dev legitimately runs every store in-memory.
         var provider = ProviderWith(
-            typeof(JeebGateway.Financials.ISettlementStore),
-            typeof(JeebGateway.Financials.InMemorySettlementStore));
+            typeof(JeebGateway.Tokens.IRefreshTokenStore),
+            typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore));
 
         var act = () => StoreDurabilityGuard.EnsureDurable(
             provider, new FakeEnv { EnvironmentName = Environments.Development }, NullLogger.Instance);
@@ -162,8 +162,8 @@ public class StoreDurabilityFailClosedTests
     {
         // The integration-test harness legitimately runs in-memory.
         var provider = ProviderWith(
-            typeof(JeebGateway.Financials.ISettlementStore),
-            typeof(JeebGateway.Financials.InMemorySettlementStore));
+            typeof(JeebGateway.Tokens.IRefreshTokenStore),
+            typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore));
 
         var act = () => StoreDurabilityGuard.EnsureDurable(
             provider, new FakeEnv { EnvironmentName = "Testing" }, NullLogger.Instance);
@@ -191,8 +191,8 @@ public class StoreDurabilityFailClosedTests
         // is disarmed EVEN in a prod-like env with an in-memory critical store (this is exactly what
         // the ProdFactory does so its Production WebApplicationFactory can boot without real Postgres).
         var storeMap = AllDurableMap();
-        storeMap[typeof(JeebGateway.Financials.ISettlementStore)] =
-            RuntimeHelpers.GetUninitializedObject(typeof(JeebGateway.Financials.InMemorySettlementStore));
+        storeMap[typeof(JeebGateway.Tokens.IRefreshTokenStore)] =
+            RuntimeHelpers.GetUninitializedObject(typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore));
         var provider = ProviderWithConfig(storeMap,
             new Dictionary<string, string?> { ["StoreDurability:FailClosedDisabled"] = "true" });
 
@@ -209,8 +209,8 @@ public class StoreDurabilityFailClosedTests
     {
         // Real Production NEVER sets the flag (or sets it false) → the gate stays ARMED and fail-closes.
         var storeMap = AllDurableMap();
-        storeMap[typeof(JeebGateway.Financials.ISettlementStore)] =
-            RuntimeHelpers.GetUninitializedObject(typeof(JeebGateway.Financials.InMemorySettlementStore));
+        storeMap[typeof(JeebGateway.Tokens.IRefreshTokenStore)] =
+            RuntimeHelpers.GetUninitializedObject(typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore));
         var config = new Dictionary<string, string?>();
         if (flag is not null) config["StoreDurability:FailClosedDisabled"] = flag;
         var provider = ProviderWithConfig(storeMap, config);
@@ -243,14 +243,14 @@ public class StoreDurabilityFailClosedTests
     public async System.Threading.Tasks.Task HealthCheck_ProdLike_InMemory_Reports_Unhealthy()
     {
         var provider = ProviderWith(
-            typeof(JeebGateway.Financials.ISettlementStore),
-            typeof(JeebGateway.Financials.InMemorySettlementStore));
+            typeof(JeebGateway.Tokens.IRefreshTokenStore),
+            typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore));
         var check = new StoreDurabilityHealthCheck(provider, new FakeEnv { EnvironmentName = "Production" });
 
         var result = await check.CheckHealthAsync(new HealthCheckContext());
 
         result.Status.Should().Be(HealthStatus.Unhealthy);
-        result.Description.Should().Contain("ISettlementStore");
+        result.Description.Should().Contain("IRefreshTokenStore");
     }
 
     [Fact]
@@ -265,8 +265,8 @@ public class StoreDurabilityFailClosedTests
     public async System.Threading.Tasks.Task HealthCheck_Development_Reports_Healthy_Even_With_InMemory()
     {
         var provider = ProviderWith(
-            typeof(JeebGateway.Financials.ISettlementStore),
-            typeof(JeebGateway.Financials.InMemorySettlementStore));
+            typeof(JeebGateway.Tokens.IRefreshTokenStore),
+            typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore));
         var check = new StoreDurabilityHealthCheck(provider, new FakeEnv { EnvironmentName = Environments.Development });
 
         var result = await check.CheckHealthAsync(new HealthCheckContext());

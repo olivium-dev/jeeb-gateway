@@ -1,5 +1,3 @@
-Critical JeebGateway.Financials.ISettlementStore -> JeebGateway.Financials.PostgresSettlementStore
-Critical JeebGateway.Financials.ISettlementBatchStore -> JeebGateway.Financials.PostgresSettlementBatchStore
 Critical JeebGateway.Users.IUsersStore -> JeebGateway.Users.UpstreamBackedUsersStore
 Critical JeebGateway.Tokens.IRefreshTokenStore -> JeebGateway.Tokens.StateServiceRefreshTokenStore
 Critical JeebGateway.StateService.Idempotency.IIdempotencyStore -> JeebGateway.StateService.Idempotency.StateServiceIdempotencyStore
@@ -28,8 +26,6 @@ Critical JeebGateway.Push.IPushRetryQueue -> JeebGateway.Push.PostgresPushRetryQ
 Critical JeebGateway.Push.IPushDeliveryTracker -> JeebGateway.Push.PostgresPushDeliveryTracker
 Critical JeebGateway.Whisper.ITranscriptionFallbackQueue -> JeebGateway.Whisper.PostgresTranscriptionFallbackQueue
 Critical JeebGateway.Cms.ICmsSurfaceStore -> JeebGateway.Cms.PostgresCmsSurfaceStore
-Critical JeebGateway.Financials.ISettlementEnqueueStore -> JeebGateway.Financials.PostgresSettlementEnqueueStore
-Critical JeebGateway.Financials.ISettlementLedgerClient -> JeebGateway.Financials.PostgresSettlementLedgerClient
 Critical JeebGateway.Partner.IPartnerWalletOperationStore -> JeebGateway.Partner.StateServicePartnerWalletOperationStore
 Critical JeebGateway.Partner.IPartnerOtpChallengeStore -> JeebGateway.Partner.StateServicePartnerOtpChallengeStore
 KnownInMemoryBacklog JeebGateway.Whisper.IAudioStore

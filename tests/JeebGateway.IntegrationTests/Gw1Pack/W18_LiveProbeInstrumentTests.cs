@@ -90,7 +90,7 @@ public class W18_LiveProbeInstrumentTests
     }
 
     /// <summary>The exact literal a verifier greps for in MSI's <c>/health/ready</c> payload.</summary>
-    private const string LiveHealthyDescription = "store-durability: all 34 critical stores durable";
+    private const string LiveHealthyDescription = "store-durability: all 30 critical stores durable";
 
     // ── S1 — the live string is REACHABLE, and it is byte-exact ────────────
 
@@ -111,22 +111,25 @@ public class W18_LiveProbeInstrumentTests
             "this is the literal a service-class verifier matches in MSI's /health/ready payload; " +
             "if the format moves, the live probe must move with it");
 
-        // …and the 34 in that literal is the SEALED predicate, not a free number.
-        // RE-SEALED 33 -> 34 at W1-02 (G-08): IStateOwnershipClient joined Critical in this PR.
-        StoreDurabilityGuard.Critical.Length.Should().Be(34,
-            "SEALED-PREDICATES.md §4 / OWNER-DECISIONS.md 2026-07-31 'PROMOTE', re-sealed at W1-02");
+        // …and the 30 in that literal is the SEALED predicate, not a free number.
+        // RE-SEALED 33 -> 34 at W1-02, 34 -> 30 at W2-R02 (G-08): the four settlement entries left.
+        StoreDurabilityGuard.Critical.Length.Should().Be(30,
+            "SEALED-PREDICATES.md §4 / OWNER-DECISIONS.md 2026-07-31 'PROMOTE', re-sealed at W2-R02");
     }
 
     // ── S2 — the string is DISCRIMINATING for this batch's store ───────────
 
+    // RE-TARGETED at gwdbx W2-R02: ISettlementLedgerClient left the Critical roster with its table
+    // (0052), so the probe can no longer see it. The claim — "the probe names the ONE store that
+    // degraded" — is re-proven on a store that is still rostered.
     [Fact]
-    public async Task S2_Swapping_Only_The_Settlement_Ledger_To_InMemory_Destroys_That_String()
+    public async Task S2_Swapping_Only_The_Refresh_Token_Store_To_InMemory_Destroys_That_String()
     {
-        // The whole question V-2's row asks: does the live probe actually see THIS store?
-        // Everything else stays durable, so a red here is attributable to the ledger alone.
+        // The whole question V-2's row asks: does the live probe actually see a degraded store?
+        // Everything else stays durable, so a red here is attributable to that store alone.
         var map = AllDurableMap();
-        map[typeof(ISettlementLedgerClient)] =
-            RuntimeHelpers.GetUninitializedObject(typeof(InMemorySettlementLedgerClient));
+        map[typeof(JeebGateway.Tokens.IRefreshTokenStore)] =
+            RuntimeHelpers.GetUninitializedObject(typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore));
 
         var check = new StoreDurabilityHealthCheck(
             new MapServiceProvider(map), new FakeEnv { EnvironmentName = "Production" });
@@ -134,11 +137,11 @@ public class W18_LiveProbeInstrumentTests
         var result = await check.CheckHealthAsync(new HealthCheckContext());
 
         result.Status.Should().Be(HealthStatus.Unhealthy,
-            "a prod-like gateway serving its cash ledger from process memory must not report ready");
+            "a prod-like gateway serving a critical store from process memory must not report ready");
         result.Description.Should().NotBe(LiveHealthyDescription);
-        result.Description.Should().Contain("ISettlementLedgerClient",
-            "an unnamed red is not attributable to W1.8");
-        result.Description.Should().Contain("InMemorySettlementLedgerClient",
+        result.Description.Should().Contain("IRefreshTokenStore",
+            "an unnamed red is not attributable to a store");
+        result.Description.Should().Contain("InMemoryRefreshTokenStore",
             "and it must say what it resolved to instead");
     }
 
@@ -152,8 +155,8 @@ public class W18_LiveProbeInstrumentTests
         // memory, whenever the process is in Development or Testing. The pre-existing
         // suite asserts only the status here and would not notice.
         var map = AllDurableMap();
-        map[typeof(ISettlementLedgerClient)] =
-            RuntimeHelpers.GetUninitializedObject(typeof(InMemorySettlementLedgerClient));
+        map[typeof(JeebGateway.Tokens.IRefreshTokenStore)] =
+            RuntimeHelpers.GetUninitializedObject(typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore));
 
         var check = new StoreDurabilityHealthCheck(
             new MapServiceProvider(map), new FakeEnv { EnvironmentName = Environments.Development });
@@ -181,7 +184,8 @@ public class W18_LiveProbeInstrumentTests
         var result = await check.CheckHealthAsync(new HealthCheckContext());
 
         result.Status.Should().Be(HealthStatus.Unhealthy);
-        result.Description.Should().Contain("ISettlementLedgerClient");
+        // RE-TARGETED at W2-R02: the settlement ledger left the roster, so name a store still on it.
+        result.Description.Should().Contain("IRefreshTokenStore");
     }
 
     // ── S5 — the one SANCTIONED signal that a row really was written ───────
@@ -237,8 +241,8 @@ public class W18_LiveProbeInstrumentTests
         // check never reads IConfiguration. Proven by giving it a provider that WOULD
         // return `true` for the flag and watching it red anyway.
         var map = AllDurableMap();
-        map[typeof(ISettlementLedgerClient)] =
-            RuntimeHelpers.GetUninitializedObject(typeof(InMemorySettlementLedgerClient));
+        map[typeof(JeebGateway.Tokens.IRefreshTokenStore)] =
+            RuntimeHelpers.GetUninitializedObject(typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore));
         map[typeof(Microsoft.Extensions.Configuration.IConfiguration)] =
             new Microsoft.Extensions.Configuration.ConfigurationBuilder()
                 .AddInMemoryCollection(new Dictionary<string, string?>
@@ -257,7 +261,7 @@ public class W18_LiveProbeInstrumentTests
 
         result.Status.Should().Be(HealthStatus.Unhealthy,
             "the readiness probe has no escape hatch — that is what makes it a usable live instrument");
-        result.Description.Should().Contain("ISettlementLedgerClient");
+        result.Description.Should().Contain("IRefreshTokenStore");
     }
 
     private static string RepoRoot()

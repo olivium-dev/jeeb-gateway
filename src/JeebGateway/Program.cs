@@ -1310,17 +1310,8 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 {
     builder.Services.AddSingleton<JeebGateway.Infrastructure.INpgsqlConnectionFactory>(
         _ => new JeebGateway.Infrastructure.NpgsqlConnectionFactory(gatewayPostgresCs));
-    builder.Services.AddSingleton<ISettlementStore, PostgresSettlementStore>();
-
-    // Durability register (JEBV4-124, AUDIT-A guard-gap) — pending-COD-settlement ENQUEUE
-    // intent. MONEY-ADJACENT: the store's whole contract is idempotency ("no double-enqueue"),
-    // so its in-memory ConcurrentDictionary (InMemorySettlementEnqueueStore) is a data-loss
-    // hole — a restart drops the record of which deliveries were already enqueued and risks a
-    // duplicate settlement enqueue. Postgres-backed (settlement_enqueue, migration 0034) with
-    // DB-level idempotency (delivery_id PK + INSERT ON CONFLICT DO NOTHING, same as
-    // PostgresSettlementStore) whenever GatewayPostgres is configured; guarded fail-closed in
-    // prod-like envs (StoreDurabilityGuard.Critical). In-memory fallback for dev/CI/test only.
-    builder.Services.AddSingleton<ISettlementEnqueueStore, PostgresSettlementEnqueueStore>();
+    // gwdbx W2-R02: ISettlementStore / ISettlementEnqueueStore are no longer chosen here —
+    // migration 0052 dropped their tables. See the settlementStoreRetired block below.
 
     // Durability register: requests-durable [A] — the optional gateway-Postgres owner-list
     // mirror (delivery_requests, migration 0024). Registered ONLY here so DurableRequestsStore
@@ -1333,11 +1324,22 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
     // (D1 matrix row 5) and is now registered flag-gated next to AddSavedLocations()
     // below, independent of GatewayPostgres. The gateway-Postgres seam is deleted.
 }
+
+// gwdbx W2-R02 — migration 0052 dropped settlements / settlement_batches / settlement_enqueue /
+// settlement_ledger_entries. No DSN can serve them, and a prod-like zero-DSN boot must not fake
+// money from process memory, so the Null stores are the ONLY prod-like resolution. The in-memory
+// stores survive for Development/Testing exactly as InMemoryRefreshTokenStore does (W1-14 shape),
+// keeping the settlement behaviour specified until the W2-R11 replacement lands.
+var settlementStoreRetired = !string.IsNullOrWhiteSpace(gatewayPostgresCs)
+    || !JeebGateway.Infrastructure.StoreDurabilityGuard.IsExempt(builder.Environment);
+if (settlementStoreRetired)
+{
+    builder.Services.AddSingleton<ISettlementStore, NullSettlementStore>();
+    builder.Services.AddSingleton<ISettlementEnqueueStore, NullSettlementEnqueueStore>();
+}
 else
 {
     builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
-    // JEBV4-124: in-memory settlement-enqueue fallback for dev/CI/test only. In a prod-like
-    // env the fail-closed guard refuses this fallback (see StoreDurabilityGuard.Critical).
     builder.Services.AddSingleton<ISettlementEnqueueStore, InMemorySettlementEnqueueStore>();
 }
 
@@ -1371,14 +1373,14 @@ else
 // that same key, minting a SECOND entry id for one cash collection and overwriting the first
 // stamp. Nothing throws; the books just disagree with themselves. The PK on idempotency_key
 // moves that memo into the database, where a restart cannot reach it.
-if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+// gwdbx W2-R02: settlement_ledger_entries is dropped, so the durable memo above no longer exists
+// and the Null client faults rather than mint an id without one. Dev/CI keeps the in-memory client.
+if (settlementStoreRetired)
 {
-    builder.Services.AddSingleton<ISettlementLedgerClient, PostgresSettlementLedgerClient>();
+    builder.Services.AddSingleton<ISettlementLedgerClient, NullSettlementLedgerClient>();
 }
 else
 {
-    // Dev/CI/test only. In a prod-like env the fail-closed guard refuses this fallback by name
-    // (StoreDurabilityGuard.Critical) — it does not merely warn.
     builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
 }
 
@@ -2874,14 +2876,16 @@ builder.Services.AddSingleton<IDeliveryParticipantResolver, DeliveryParticipantR
 
 // Wave 2-3 backend services.
 // T-backend-017 / JEB-57: Weekly settlement batch processing.
-// InMemorySettlementBatchStore DELETED (G2 gate). Replaced by PostgresSettlementBatchStore
-// (when GatewayPostgres:ConnectionString is set) or InMemoryFallbackSettlementBatchStore (dev/CI).
+// InMemorySettlementBatchStore DELETED (G2 gate). W2-R02: PostgresSettlementBatchStore is no
+// longer selectable — settlement_batches is dropped; see the settlementStoreRetired branch below.
 builder.Services.Configure<JeebGateway.Financials.WeeklySettlementOptions>(
     builder.Configuration.GetSection(JeebGateway.Financials.WeeklySettlementOptions.SectionName));
-if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
+// gwdbx W2-R02: settlement_batches is dropped, so the Postgres batch store can no longer be
+// selected in any prod-like env. Dev/CI keeps the in-memory fallback over the in-memory store.
+if (settlementStoreRetired)
 {
     builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore,
-        JeebGateway.Financials.PostgresSettlementBatchStore>();
+        JeebGateway.Financials.NullSettlementBatchStore>();
 }
 else
 {
