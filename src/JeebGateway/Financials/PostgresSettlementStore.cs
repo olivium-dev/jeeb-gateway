@@ -212,6 +212,41 @@ public sealed class PostgresSettlementStore : ISettlementStore
         return await cmd.ExecuteNonQueryAsync(ct) > 0;
     }
 
+    public async Task<IReadOnlyList<Settlement>> ListWalletUnmirroredAsync(
+        DateTimeOffset from, int limit, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // W2-05: same completed-state set as ListUnpostedLedgerAsync; the settled_at watermark
+        // keeps the crash-window replay bounded and makes W2-06's backfill an explicit act.
+        const string sql = """
+            SELECT * FROM settlements
+            WHERE wallet_tx_id IS NULL
+              AND state IN ('settled', 'receipt_generated')
+              AND settled_at >= @From
+            ORDER BY settled_at ASC, id ASC
+            LIMIT @Limit
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("From", from);
+        cmd.Parameters.AddWithValue("Limit", limit);
+        return await ReadListAsync(cmd, ct);
+    }
+
+    public async Task<bool> SetWalletTxIdAsync(string settlementId, string walletTxId, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // First stamp wins: a lost-response replay re-posts idempotently upstream, never re-stamps.
+        const string sql = """
+            UPDATE settlements
+            SET wallet_tx_id = @WalletTxId, updated_at = now()
+            WHERE id = @Id AND wallet_tx_id IS NULL
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("Id", Guid.Parse(settlementId));
+        cmd.Parameters.AddWithValue("WalletTxId", walletTxId);
+        return await cmd.ExecuteNonQueryAsync(ct) > 0;
+    }
+
     public async Task<IReadOnlyList<Settlement>> ListUnpostedLedgerAsync(int limit, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);

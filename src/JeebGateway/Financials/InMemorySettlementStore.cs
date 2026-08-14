@@ -100,6 +100,35 @@ public sealed class InMemorySettlementStore : ISettlementStore
         return Task.FromResult<IReadOnlyList<Settlement>>(rows);
     }
 
+    public Task<IReadOnlyList<Settlement>> ListWalletUnmirroredAsync(
+        DateTimeOffset from, int limit, CancellationToken ct)
+    {
+        // W2-05: mirrors the Postgres query — completed states, NULL wallet stamp, watermark, stable order.
+        var rows = _byId.Values
+            .Where(s => string.IsNullOrEmpty(s.WalletTxId)
+                     && (s.State == SettlementState.Settled || s.State == SettlementState.ReceiptGenerated)
+                     && s.SettledAt >= from)
+            .OrderBy(s => s.SettledAt)
+            .ThenBy(s => s.Id, StringComparer.Ordinal)
+            .Take(limit)
+            .Select(Clone)
+            .ToList();
+        return Task.FromResult<IReadOnlyList<Settlement>>(rows);
+    }
+
+    public Task<bool> SetWalletTxIdAsync(string settlementId, string walletTxId, CancellationToken ct)
+    {
+        lock (_writeLock)
+        {
+            if (!_byId.TryGetValue(settlementId, out var row) || !string.IsNullOrEmpty(row.WalletTxId))
+            {
+                return Task.FromResult(false);
+            }
+            row.WalletTxId = walletTxId;
+            return Task.FromResult(true);
+        }
+    }
+
     public Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, DateTimeOffset at, CancellationToken ct)
     {
         lock (_writeLock)
@@ -249,6 +278,7 @@ public sealed class InMemorySettlementStore : ISettlementStore
         SettledAt = s.SettledAt,
         ReceiptGeneratedAt = s.ReceiptGeneratedAt,
         LedgerEntryId = s.LedgerEntryId,
+        WalletTxId = s.WalletTxId,
         BatchId = s.BatchId,
         BatchedAt = s.BatchedAt,
         PaidAt = s.PaidAt,

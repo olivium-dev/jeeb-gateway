@@ -1,7 +1,7 @@
 # G-22 approved-flags registry (A10). Bare token form; machine-readable copy of the playbook's
 # Flag registry (A10) table — keep in sync. Statuses + rationale: docs/runbooks/gwdbx-program-rules.md.
 
-CodSettlementMode        program create=W2;delete=W5 # COD settlement -> wallet-service; supersedes UseUpstream:CodSettlements + SettlementLedgerMigration:{DualWrite,Authority}
+CodSettlementMode        program create=W2;delete=W5 # COD settlement -> wallet-service; supersedes UseUpstream:CodSettlements + SettlementLedgerMigration:{DualWrite,Authority}; key CREATED at W2-05 as FeatureFlags:CodSettlementMode (GwdbxMigrationOptions), code default "local"; write seam CodWalletMirrorReconciler (durable sweep on settlements.wallet_tx_id, POST /v1/holders/{id}/earnings, idempotent on settlement id); rungs past dual-write-local-read fail the boot until W2-08/W2-14 build them; leaving "local" also requires CodWalletMirror:ReplayFromUtc
 PayoutBatchMode          program create=W2;delete=W5 # payout batches -> wallet-service; supersedes UseUpstream:SettlementBatches + PayoutBatchMigration:{DualWrite,Authority} (never approved)
 JeeberEarningsMode       program create=W2;delete=W5 # earnings read flip; supersedes UseUpstream:JeeberEarnings; never overloads prod-ON UseUpstream:Earnings
 AdminAuditMode           program create=W1;delete=W5 # admin_actions -> state-service; supersedes UseUpstream:AdminAudit + AdminAuditMirror:Enabled; key CREATED at W1-02 as FeatureFlags:AdminAuditMode (GwdbxMigrationOptions), code default "local"; W1-03 set it to "dual-write-local-read" in appsettings.Production.json (MirroringAdminAuditLog); W1-05 flips it to "dual-write-upstream-read"
@@ -79,6 +79,10 @@ WalletGuard:FailMode                                 setting - # fail-open vs fa
 AdminAuditBackfill:BatchSize                         setting - # W1-04 keyset page size for the admin_actions scan
 AdminAuditBackfill:DryRun                            setting - # W1-04 rehearsal: enumerate + log the plan, POST nothing (default true)
 AdminAuditBackfill:Enabled                           setting - # W1-04 one-shot admin_actions -> /v1/audit-events relay; NOT a cutover flag (AdminAuditMode owns the ladder); ships OFF, armed only for the run and disarmed after
+CodWalletMirror:DryRun                               setting - # W2-06 rehearsal: log every would-be wallet post, POST nothing, stamp nothing
+CodWalletMirror:PageSize                             setting - # W2-05 bounded sweep page over unmirrored settlements
+CodWalletMirror:ReplayFromUtc                        setting - # W2-05 sweep watermark on settled_at; REQUIRED once CodSettlementMode leaves local; an early instant IS the owner-run W2-06 backfill
+CodWalletMirror:SweepIntervalSeconds                 setting - # W2-05 reconciler tick interval
 Admin:Zones:Boundaries                               setting -
 Admin:Zones:RefreshInterval                          setting -
 AdminOidc:AllowedSigningAlgorithms                   setting -

@@ -63,6 +63,10 @@ public sealed class GwdbxMigrationOptions
     // "upstream-authority" are used: a dual-write rung would make the gateway a 2nd producer (D1).
     public string PushDispatchMode { get; init; } = "local";
 
+    // COD settlements -> wallet-service holder earnings, W2-05 (registry token: CodSettlementMode).
+    // Local rows stay authoritative; CodWalletMirrorReconciler mirrors from dual-write-local-read up.
+    public string CodSettlementMode { get; init; } = "local";
+
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
@@ -82,6 +86,8 @@ public sealed class GwdbxMigrationOptions
     public GwdbxMigrationPhase Availability => Read(AvailabilityMode);
 
     public GwdbxMigrationPhase PushDispatch => Read(PushDispatchMode);
+
+    public GwdbxMigrationPhase CodSettlement => Read(CodSettlementMode);
 
     public static string LadderValues => string.Join(", ", Ladder.Select(entry => entry.Wire));
 
