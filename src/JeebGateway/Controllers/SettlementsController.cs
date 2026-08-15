@@ -30,20 +30,17 @@ namespace JeebGateway.Controllers;
 public class SettlementsController : ControllerBase
 {
     private readonly ISettlementService _settlements;
-    private readonly ISettlementStore _store;
+    private readonly ISettlementServiceClient _client;
     private readonly IDeliveryParticipantResolver _participants;
-    private readonly TimeProvider _clock;
 
     public SettlementsController(
         ISettlementService settlements,
-        ISettlementStore store,
-        IDeliveryParticipantResolver participants,
-        TimeProvider clock)
+        ISettlementServiceClient client,
+        IDeliveryParticipantResolver participants)
     {
         _settlements = settlements;
-        _store = store;
+        _client = client;
         _participants = participants;
-        _clock = clock;
     }
 
     [HttpPost("{deliveryId}/settle")]
@@ -186,7 +183,7 @@ public class SettlementsController : ControllerBase
         // settled but no one looked at it" from "client picked up their
         // receipt". The store method is idempotent — repeat reads keep the
         // original timestamp.
-        var stamped = await _store.MarkReceiptGeneratedAsync(settlement.Id, _clock.GetUtcNow(), ct) ?? settlement;
+        var stamped = await _client.MarkReceiptGeneratedAsync(settlement.Id, ct) ?? settlement;
 
         var receipt = ReceiptGenerator.Generate(stamped);
         return Ok(receipt);

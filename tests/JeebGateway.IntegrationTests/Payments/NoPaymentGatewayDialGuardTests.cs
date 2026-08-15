@@ -105,7 +105,7 @@ public class NoPaymentGatewayDialGuardTests
 
     private static bool AssemblyContains(string needle, Encoding encoding)
     {
-        var path = typeof(JeebGateway.Financials.Cod.ICodSettlementLedger).Assembly.Location;
+        var path = typeof(JeebGateway.Financials.ISettlementServiceClient).Assembly.Location;
         File.Exists(path).Should().BeTrue(
             "the built gateway assembly must be resolvable for this scan to mean anything");
 

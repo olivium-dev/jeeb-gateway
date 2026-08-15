@@ -28,15 +28,15 @@ namespace JeebGateway.IntegrationTests.Financials;
 ///   <item>the delivered-decision derives from the CANONICAL delivery-service state
 ///         (<see cref="IDeliveryServiceClient.GetCanonicalDeliveryAsync"/>) when the
 ///         in-memory row cannot answer;</item>
-///   <item>the amount derives from the DURABLE pending-settlement snapshot stamped at the
-///         AtDoor checkpoint (<see cref="ISettlementService.TrySnapshotPendingCodAsync"/>),
-///         which survives the restart;</item>
 ///   <item>exactly-once + flat-10% are preserved.</item>
 /// </list>
 ///
-/// These are in-memory tests: real settlement store + ledger + request store, with the
-/// Go delivery-service represented by an in-process double (the same harness convention as
-/// <c>JeeberEarningsOnCompleteTests</c>) — no live upstream / no Postgres required.
+/// <para><b>gwdbx W2-R11 — a REAL narrowing, pinned below, not papered over.</b> The durable
+/// AMOUNT half of the original fix is gone: settlement-service stores money as NULL on a pending
+/// intent (there is no "pending with amount" upstream), so an intent can no longer carry the COD
+/// figure across a bounce. The outcome is money-SAFE — a bounced delivery with no live row is
+/// left UNSETTLED with "no server-authoritative amount yet", never credited $0 — and
+/// <see cref="Bounce_Without_Live_Row_Leaves_It_Unsettled_Never_Credits_Zero"/> is the seal.</para>
 /// </summary>
 public class SettlementDurabilityOnCompleteTests
 {
@@ -44,114 +44,116 @@ public class SettlementDurabilityOnCompleteTests
     private const decimal ExpectedCommission = 10m; // 100 * 0.10 (flat, no insurance/floor)
 
     /// <summary>
-    /// KEYSTONE: with the request-store row GONE (a restart wiped the in-memory projection),
-    /// a delivery-service <c>Done</c> STILL settles the jeeber COD × 10% — the amount is
-    /// recovered from the durable pending-settlement snapshot and the delivered-decision from
-    /// the canonical state. Before the fix this returned NotDelivered/$0.
+    /// KEYSTONE: a delivery-service <c>Done</c> settles the jeeber COD × 10% even though the
+    /// in-memory request row cannot answer the delivered question — the decision comes from the
+    /// canonical state. Before the fix this returned NotDelivered/$0.
     /// </summary>
     [Fact]
-    public async Task Done_After_RequestRow_Gone_Still_Settles_Cod_Times_Ten_Percent()
+    public async Task Canonical_Done_Settles_Cod_Times_Ten_Percent()
     {
         const string deliveryId = "11111111-1111-4111-8111-111111111111";
-        const string clientId = "durable-client";
-        const string jeeberId = "durable-jeeber";
+        const string clientId = "44444444-4444-4444-8444-444444444444";
+        const string jeeberId = "55555555-5555-4555-8555-555555555555";
 
-        // Shared durable stores that OUTLIVE the process bounce.
-        var settlementStore = new InMemorySettlementStore();
-        var ledger = new InMemorySettlementLedgerClient(TimeProvider.System);
-        var canonical = new StubDeliveryClient
-        {
-            Canonical = new DeliveryReadUpstream
-            {
-                DeliveryId = deliveryId,
-                ClientId = clientId,
-                JeeberId = jeeberId,
-                Status = CanonicalDeliveryStatus.Done,
-                TierId = "standard",
-                CreatedAt = DateTimeOffset.UtcNow
-            }
-        };
+        var settlements = new FakeSettlementServiceClient();
+        var canonical = Canonical(deliveryId, clientId, jeeberId);
 
-        // ---- BEFORE the bounce: the live in-memory row exists (AtDoor + fee), and the
-        //      AtDoor checkpoint durably snapshots the COD amount. ----
-        var liveRequests = new InMemoryRequestsStore(TimeProvider.System);
-        var created = await liveRequests.CreateAsync(
+        // The live row is present but STALE at AtDoor: only the canonical read says Done.
+        var requests = new InMemoryRequestsStore(TimeProvider.System);
+        var created = await requests.CreateAsync(
             new CreateRequestInput { Id = deliveryId, ClientId = clientId, Description = "parcel" }, default);
-        (await liveRequests.TryAcceptByJeeberAsync(created.Id, jeeberId, int.MaxValue, DateTimeOffset.UtcNow, default))
+        (await requests.TryAcceptByJeeberAsync(created.Id, jeeberId, int.MaxValue, DateTimeOffset.UtcNow, default))
             .Should().NotBeNull();
-        (await liveRequests.TrySetAcceptedFeeAsync(created.Id, Cod, default)).Should().BeTrue();
-        (await liveRequests.SetStatusAsync(created.Id, RequestStatus.AtDoor, default)).Should().BeTrue();
+        (await requests.TrySetAcceptedFeeAsync(created.Id, Cod, default)).Should().BeTrue();
+        (await requests.SetStatusAsync(created.Id, RequestStatus.AtDoor, default)).Should().BeTrue();
 
-        var preBounce = NewService(settlementStore, liveRequests, ledger, canonical);
-        (await preBounce.TrySnapshotPendingCodAsync(deliveryId, default))
-            .Should().BeTrue("the AtDoor checkpoint records the durable COD snapshot");
+        var service = NewService(settlements, requests, canonical);
+        (await service.TrySnapshotPendingCodAsync(deliveryId, default))
+            .Should().BeTrue("the AtDoor checkpoint opens the commission window");
 
-        var snapshot = await settlementStore.GetByDeliveryAsync(deliveryId, default);
-        snapshot!.State.Should().Be(SettlementState.PendingSettlement, "the snapshot is a pending placeholder — no credit yet");
-        snapshot.LedgerEntryId.Should().BeNullOrEmpty("a pending snapshot never posts a ledger entry");
+        var snapshot = await settlements.GetByDeliveryAsync(deliveryId, default);
+        snapshot!.State.Should().Be(SettlementState.PendingSettlement, "an intent is not a credit");
+        snapshot.GoodsCost.Should().Be(0m, "W2-R11: an upstream pending intent carries no money");
 
-        // ---- THE BOUNCE: a fresh, EMPTY request store (the in-memory row is gone) sharing
-        //      the same durable settlement store + canonical delivery-service. ----
-        var afterBounce = NewService(settlementStore, new InMemoryRequestsStore(TimeProvider.System), ledger, canonical);
-        (await afterBounce.SettleOnCompletionAsync(deliveryId, default) is var r0 && r0.Outcome == SettlementOutcome.Settled)
-            .Should().BeTrue();
-        var result = await afterBounce.SettleOnCompletionAsync(deliveryId, default);
+        (await service.SettleOnCompletionAsync(deliveryId, default)).Outcome
+            .Should().Be(SettlementOutcome.Settled);
 
-        // Idempotent: the second call short-circuits on the now-settled row.
-        result.Outcome.Should().Be(SettlementOutcome.AlreadySettled);
-
-        var settled = await settlementStore.GetByDeliveryAsync(deliveryId, default);
-        settled!.State.Should().Be(SettlementState.Settled, "the Done completion settles despite the wiped request row");
+        var settled = await settlements.GetByDeliveryAsync(deliveryId, default);
+        settled!.State.Should().Be(SettlementState.Settled,
+            "the canonical Done settles despite the stale in-memory status");
         settled.JeeberId.Should().Be(jeeberId);
-        settled.GoodsCost.Should().Be(Cod, "the COD amount is recovered from the durable snapshot, not the wiped row");
+        settled.GoodsCost.Should().Be(Cod);
         settled.Commission.Should().Be(ExpectedCommission, "flat 10% preserved: 100 * 0.10");
         settled.Total.Should().Be(ExpectedCommission);
         settled.Insurance.Should().Be(0m);
-        settled.LedgerEntryId.Should().NotBeNullOrEmpty("the jeeber is credited exactly once via the wallet ledger");
     }
 
     /// <summary>
-    /// Exactly-once across the bounce: firing completion TWICE (OTP verify then customer
-    /// PATCH → Done) after the restart credits the jeeber ONCE — a single settled row, a
-    /// single ledger entry.
+    /// gwdbx W2-R11 NARROWING, sealed: after a bounce that wiped the live row, an amount-less
+    /// intent cannot resurrect the COD figure. The delivery is left UNSETTLED with a stated
+    /// reason — the one thing that must never happen is a settled row crediting $0.
     /// </summary>
     [Fact]
-    public async Task SettleOnCompletion_After_Bounce_Is_Idempotent_No_Double_Credit()
+    public async Task Bounce_Without_Live_Row_Leaves_It_Unsettled_Never_Credits_Zero()
+    {
+        const string deliveryId = "66666666-6666-4666-8666-666666666666";
+        const string clientId = "77777777-7777-4777-8777-777777777777";
+        const string jeeberId = "88888888-8888-4888-8888-888888888888";
+
+        var settlements = new FakeSettlementServiceClient();
+        var canonical = Canonical(deliveryId, clientId, jeeberId);
+
+        var live = new InMemoryRequestsStore(TimeProvider.System);
+        var created = await live.CreateAsync(
+            new CreateRequestInput { Id = deliveryId, ClientId = clientId, Description = "parcel" }, default);
+        await live.TryAcceptByJeeberAsync(created.Id, jeeberId, int.MaxValue, DateTimeOffset.UtcNow, default);
+        await live.TrySetAcceptedFeeAsync(created.Id, Cod, default);
+        await live.SetStatusAsync(created.Id, RequestStatus.AtDoor, default);
+        await NewService(settlements, live, canonical).TrySnapshotPendingCodAsync(deliveryId, default);
+
+        // THE BOUNCE: a fresh, EMPTY request store; only the amount-less intent survives.
+        var afterBounce = NewService(settlements, new InMemoryRequestsStore(TimeProvider.System), canonical);
+        var result = await afterBounce.SettleOnCompletionAsync(deliveryId, default);
+
+        result.Outcome.Should().Be(SettlementOutcome.AlreadySettled);
+        result.Reason.Should().Contain("no server-authoritative amount");
+
+        var row = await settlements.GetByDeliveryAsync(deliveryId, default);
+        row!.State.Should().Be(SettlementState.PendingSettlement,
+            "money-safe: an unrecoverable amount leaves the window open, it does not credit zero");
+        row.GoodsCost.Should().Be(0m);
+        row.Commission.Should().Be(0m);
+    }
+
+    /// <summary>
+    /// Exactly-once: firing completion TWICE (OTP verify then customer PATCH → Done) credits
+    /// the jeeber ONCE — a single settled row with a single id.
+    /// </summary>
+    [Fact]
+    public async Task SettleOnCompletion_Is_Idempotent_No_Double_Credit()
     {
         const string deliveryId = "22222222-2222-4222-8222-222222222222";
-        var settlementStore = new InMemorySettlementStore();
-        var ledger = new InMemorySettlementLedgerClient(TimeProvider.System);
-        var canonical = new StubDeliveryClient
-        {
-            Canonical = new DeliveryReadUpstream
-            {
-                DeliveryId = deliveryId,
-                ClientId = "c",
-                JeeberId = "j",
-                Status = CanonicalDeliveryStatus.Done,
-                TierId = "standard",
-                CreatedAt = DateTimeOffset.UtcNow
-            }
-        };
+        const string clientId = "99999999-9999-4999-8999-999999999999";
+        const string jeeberId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
-        var liveRequests = new InMemoryRequestsStore(TimeProvider.System);
-        var created = await liveRequests.CreateAsync(
-            new CreateRequestInput { Id = deliveryId, ClientId = "c", Description = "parcel" }, default);
-        await liveRequests.TryAcceptByJeeberAsync(created.Id, "j", int.MaxValue, DateTimeOffset.UtcNow, default);
-        await liveRequests.TrySetAcceptedFeeAsync(created.Id, Cod, default);
-        await liveRequests.SetStatusAsync(created.Id, RequestStatus.AtDoor, default);
-        await NewService(settlementStore, liveRequests, ledger, canonical).TrySnapshotPendingCodAsync(deliveryId, default);
+        var settlements = new FakeSettlementServiceClient();
+        var canonical = Canonical(deliveryId, clientId, jeeberId);
 
-        var afterBounce = NewService(settlementStore, new InMemoryRequestsStore(TimeProvider.System), ledger, canonical);
+        var requests = new InMemoryRequestsStore(TimeProvider.System);
+        var created = await requests.CreateAsync(
+            new CreateRequestInput { Id = deliveryId, ClientId = clientId, Description = "parcel" }, default);
+        await requests.TryAcceptByJeeberAsync(created.Id, jeeberId, int.MaxValue, DateTimeOffset.UtcNow, default);
+        await requests.TrySetAcceptedFeeAsync(created.Id, Cod, default);
+        await requests.SetStatusAsync(created.Id, RequestStatus.AtDoor, default);
 
-        var first = await afterBounce.SettleOnCompletionAsync(deliveryId, default);
+        var service = NewService(settlements, requests, canonical);
+        var first = await service.SettleOnCompletionAsync(deliveryId, default);
         first.Outcome.Should().Be(SettlementOutcome.Settled);
-        first.Settlement!.LedgerEntryId.Should().NotBeNullOrEmpty();
 
-        var second = await afterBounce.SettleOnCompletionAsync(deliveryId, default);
+        var second = await service.SettleOnCompletionAsync(deliveryId, default);
         second.Outcome.Should().Be(SettlementOutcome.AlreadySettled);
-        second.Settlement!.Id.Should().Be(first.Settlement.Id, "no second settlement row");
-        second.Settlement.LedgerEntryId.Should().Be(first.Settlement.LedgerEntryId, "the ledger credit is posted exactly once");
+        second.Settlement!.Id.Should().Be(first.Settlement!.Id, "no second settlement row");
+        settlements.Rows.Should().ContainSingle();
     }
 
     /// <summary>
@@ -202,8 +204,23 @@ public class SettlementDurabilityOnCompleteTests
     // ----------------------------------------------------------------------
 
     private static SettlementService NewService(
-        ISettlementStore store, IRequestsStore requests, ISettlementLedgerClient wallet, IDeliveryServiceClient delivery)
-        => new(store, requests, wallet, delivery, new EarningsCacheInvalidator(), TimeProvider.System, NullLogger<SettlementService>.Instance);
+        ISettlementServiceClient settlements, IRequestsStore requests, IDeliveryServiceClient delivery)
+        => new(settlements, requests, delivery, new EarningsCacheInvalidator(),
+            NullLogger<SettlementService>.Instance);
+
+    private static StubDeliveryClient Canonical(string deliveryId, string clientId, string jeeberId)
+        => new()
+        {
+            Canonical = new DeliveryReadUpstream
+            {
+                DeliveryId = deliveryId,
+                ClientId = clientId,
+                JeeberId = jeeberId,
+                Status = CanonicalDeliveryStatus.Done,
+                TierId = "standard",
+                CreatedAt = DateTimeOffset.UtcNow
+            }
+        };
 
     /// <summary>Delivery-service double: only the canonical single-read is used here; every
     /// other hop is loud so an unexpected call fails the test rather than silently passing.</summary>

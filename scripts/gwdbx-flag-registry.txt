@@ -235,6 +235,8 @@ Services:Realtime:PublicSocketUrl                    setting -
 Services:Realtime:TokenTtlSeconds                    setting -
 Services:RoleService:ApiKey                          setting -
 Services:RoleService:BaseUrl                         setting -
+Services:Settlement:ApiToken                         setting - # W2-R11 settlement-service SERVICE scope (>=32 chars), committed blank; the ADMIN scope is NEVER bound in the gateway
+Services:Settlement:BaseUrl                          setting - # W2-R11 settlement-service; unset SKIPS the readiness probe and lands the A9 roster at 19 instead of 20
 TestControlPlane:Enabled                             setting - # prod-off test control plane, shares TestControlPlane:SharedSecret
 TestControlPlane:SharedSecret                        setting -
 TierCatalogCache:StaleGrace                          setting -

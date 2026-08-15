@@ -1,6 +1,6 @@
 using JeebGateway.Auth.Capabilities;
+using System.Globalization;
 using JeebGateway.Financials;
-using JeebGateway.Financials.Cod;
 using JeebGateway.Tracking;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
@@ -11,18 +11,16 @@ namespace JeebGateway.Controllers;
 /// COD-compose BFF surface (S10 H3.3/H4/N10-N12, JEB-56/57/62).
 ///
 /// The gateway authorizes the USER (jeeber / admin) JWT at its OWN boundary, then
-/// serves the corresponding route from <see cref="ICodSettlementLedger"/>:
+/// serves the corresponding route from the settlement row:
 ///
 ///   * POST /api/v1/payments/cod/record               — record COD intent (party).
 ///   * GET  /api/v1/payments/cod_jeeb/by-delivery/{id} — read COD record (party/admin).
 ///   * POST /admin/v1/settlements/{batchId}/mark-paid  — bank-confirmation (admin).
 ///
-/// OWNER RULING 2026-07-27 — "jeeb is only cash on delivery": these three routes
-/// were previously a thin composition over unified_payment_gateway. UPG is gone;
-/// the ledger is now in-process (InProcessCodSettlementLedger). The ROUTES,
-/// status codes and body shapes are unchanged — this is a change of WHERE the
-/// COD record lives, never of WHETHER it is written. Authorization is unchanged
-/// too: a non-party still never reaches the ledger.
+/// gwdbx W2-R11: the settlement row IS the COD record — the in-process ledger was a shadow copy
+/// of it and is deleted. The ROUTES, status codes and body shapes are unchanged. mark-paid needs
+/// the settlement-service ADMIN scope the gateway does not hold, so it now fails closed.
+/// Authorization is unchanged: a non-party still never reaches the record.
 ///
 /// LAWS honored:
 ///   * The gateway NEVER touches a payment provider — under cash-on-delivery
@@ -33,16 +31,13 @@ namespace JeebGateway.Controllers;
 [Produces("application/json", "application/problem+json")]
 public sealed class CodSettlementComposeController : ControllerBase
 {
-    private readonly ICodSettlementLedger _ledger;
     private readonly ISettlementService _settlements;
     private readonly IDeliveryParticipantResolver _participants;
 
     public CodSettlementComposeController(
-        ICodSettlementLedger ledger,
         ISettlementService settlements,
         IDeliveryParticipantResolver participants)
     {
-        _ledger = ledger;
         _settlements = settlements;
         _participants = participants;
     }
@@ -81,16 +76,9 @@ public sealed class CodSettlementComposeController : ControllerBase
         if (!isParty && !UserIdentity.IsAdmin(HttpContext))
             return Forbidden();
 
-        var result = await _ledger.RecordCodAsync(new CodRecordRequest(
-            DeliveryId: settlement.DeliveryId,
-            JeeberId: settlement.JeeberId,
-            GrossAmount: settlement.GoodsCost,
-            CommissionRate: settlement.CommissionRate,
-            CommissionAmount: settlement.Commission,
-            Currency: settlement.Currency,
-            Metadata: new Dictionary<string, string> { ["source"] = "jeeb.cod" }), ct);
-
-        return Passthrough(result);
+        // The settlement row already carries the verbatim commission (BR-16); recording the COD
+        // is reading it back, not writing a second copy.
+        return StatusCode(StatusCodes.Status201Created, new { data = CodRecord(settlement) });
     }
 
     /// <summary>
@@ -127,8 +115,7 @@ public sealed class CodSettlementComposeController : ControllerBase
                 return Forbidden();
         }
 
-        var result = await _ledger.GetCodByDeliveryAsync(deliveryId, ct);
-        return Passthrough(result);
+        return settlement is null ? NotFound(new { error = "not_found" }) : Ok(CodRecord(settlement));
     }
 
     /// <summary>
@@ -146,33 +133,38 @@ public sealed class CodSettlementComposeController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
-    public async Task<IActionResult> MarkPaid(
-        string batchId, [FromBody] object? _, CancellationToken ct)
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public IActionResult MarkPaid(string batchId, [FromBody] object? _)
     {
-        if (!UserIdentity.TryGetUserId(HttpContext, out var adminId, out var unauthorized)) return unauthorized;
+        if (!UserIdentity.TryGetUserId(HttpContext, out var _unused, out var unauthorized)) return unauthorized;
         if (!UserIdentity.IsAdmin(HttpContext))
             return Forbidden();
 
-        var result = await _ledger.MarkBatchPaidAsync(batchId, adminId, ct);
-        return Passthrough(result);
-    }
-
-    private IActionResult Passthrough(CodLedgerResult result)
-    {
-        // Defensive only — the in-process ledger is always available. Retained so
-        // the mapping stays total if the ledger is ever backed by a durable store.
-        if (!result.Available)
-            return StatusCode(StatusCodes.Status502BadGateway,
-                Problem("cod-ledger-unavailable", "The COD settlement ledger could not be reached."));
-
-        return new ContentResult
+        // gwdbx W2-R11: paying a batch is an ADMIN-scope settlement-service operation. The gateway
+        // holds the SERVICE scope only, so a leaked gateway token cannot pay anyone.
+        return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
         {
-            StatusCode = result.StatusCode,
-            ContentType = result.ContentType,
-            Content = result.Body,
-        };
+            Title = "Settlement payout is served by settlement-service.",
+            Detail = "The gateway holds the settlement-service SERVICE scope only; mark-paid "
+                     + "requires the ADMIN scope and is not proxied.",
+            Status = StatusCodes.Status503ServiceUnavailable,
+            Type = SettlementAdminScopeException.ProblemType,
+        });
     }
+
+    /// <summary>The COD record wire shape, projected from the settlement row (keys unchanged).</summary>
+    private static object CodRecord(Settlement row) => new
+    {
+        delivery_id = row.DeliveryId,
+        provider_id = row.JeeberId,
+        jeeber_id = row.JeeberId,
+        gross_amount = row.GoodsCost.ToString(CultureInfo.InvariantCulture),
+        commission_amount = row.Commission.ToString(CultureInfo.InvariantCulture),
+        currency = row.Currency,
+        payment_method = row.PaymentMethod,
+        status = row.CodState,
+        batchId = row.BatchId?.ToString("D"),
+    };
 
     private IActionResult Forbidden() => StatusCode(StatusCodes.Status403Forbidden,
         Problem("settlement-not-a-party", "You are not authorized for this settlement action."));

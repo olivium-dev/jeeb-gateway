@@ -69,12 +69,18 @@ public sealed class UpstreamExceptionHandler : IExceptionHandler
                 StatusCodes.Status502BadGateway,
                 "An upstream service returned an unexpected response.",
                 "https://jeeb.dev/errors/upstream-unavailable"),
-            // gwdbx W2-R02: the settlement tables are dropped and no replacement exists. Answer
-            // "gone", never a confident empty — the O10 ledger drill's whole lesson.
-            JeebGateway.Financials.SettlementStoreRetiredException => (
+            // gwdbx W2-R11: settlement-service owns the money rows. An unreachable/refusing
+            // upstream answers "unavailable", never a confident empty — the O10 lesson.
+            JeebGateway.Financials.SettlementServiceUnavailableException => (
                 StatusCodes.Status503ServiceUnavailable,
-                "Settlement records are unavailable: the gateway settlement store has been retired.",
-                JeebGateway.Financials.SettlementStoreRetiredException.ProblemType),
+                "Settlement records are unavailable: settlement-service could not be reached.",
+                JeebGateway.Financials.SettlementServiceUnavailableException.ProblemType),
+            // The gateway holds the SERVICE scope only; ADMIN-scope batch/payout operations are
+            // served by settlement-service directly and are deliberately not proxied.
+            JeebGateway.Financials.SettlementAdminScopeException => (
+                StatusCodes.Status503ServiceUnavailable,
+                "Settlement payout batches are served by settlement-service.",
+                JeebGateway.Financials.SettlementAdminScopeException.ProblemType),
             OperationCanceledException when cancellationToken.IsCancellationRequested => (
                 499, // nginx "client closed request" — request aborted, nothing to serve
                 "The request was cancelled by the client.",

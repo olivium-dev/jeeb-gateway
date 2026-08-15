@@ -521,8 +521,8 @@ builder.Services.AddHttpClient<JeebGateway.Conversations.Client.IJeebConversatio
 // SCOPED, matching IJeebConversationClient's typed-client lifetime: the settler holds a
 // chat client and an IRequestsStore and must never outlive the former.
 //
-// The reconciler is a singleton BackgroundService that opens its OWN scope per sweep
-// (the SettlementLedgerReconciler precedent). It exists because the seat-and-settle call
+// The reconciler is a singleton BackgroundService that opens its OWN scope per sweep.
+// It exists because the seat-and-settle call
 // runs POST-COMMIT: folding two chat writes into one removes the window BETWEEN them,
 // but not the window between the accept saga's commit and the settle request. Anything
 // from a chat blip to the process being killed loses that attempt, and before GW5 the
@@ -1005,30 +1005,6 @@ builder.Services
             + "read cutover (W1-05) is not implemented, so the flip would be a silent no-op. "
             + "Highest supported rung: \"dual-write-local-read\".")
     .Validate(
-        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.CodSettlementMode),
-        "FeatureFlags:CodSettlementMode must be one of: "
-            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
-    // W2-05 — the earnings read flip (W2-08 JeeberEarningsMode) and authority cutover (W2-14)
-    // are unbuilt; fail closed rather than report a rung this binary cannot serve.
-    .Validate(
-        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.CodSettlementMode)
-            < JeebGateway.Migration.GwdbxMigrationPhase.DualWriteUpstreamRead,
-        "FeatureFlags:CodSettlementMode cannot pass \"dual-write-local-read\" yet: the upstream "
-            + "read cutover (W2-08) and authority flip (W2-14) are not implemented.")
-    // W2-05 — a dual-write without a replay watermark would leave crash-window rows unmirrored
-    // forever (or silently invite an unauthorised full backfill). Bounded and deliberate, always.
-    .Validate(
-        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.CodSettlementMode)
-                < JeebGateway.Migration.GwdbxMigrationPhase.DualWriteLocalRead
-            || new JeebGateway.Financials.Cod.CodWalletMirrorOptions
-                {
-                    ReplayFromUtc = builder.Configuration[
-                        JeebGateway.Financials.Cod.CodWalletMirrorOptions.SectionName
-                            + ":ReplayFromUtc"],
-                }.TryParseReplayFrom(out _),
-        "CodWalletMirror:ReplayFromUtc (ISO-8601 UTC instant) is required once "
-            + "FeatureFlags:CodSettlementMode leaves \"local\".")
-    .Validate(
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.UserModerationMode),
         "FeatureFlags:UserModerationMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
@@ -1310,9 +1286,6 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 {
     builder.Services.AddSingleton<JeebGateway.Infrastructure.INpgsqlConnectionFactory>(
         _ => new JeebGateway.Infrastructure.NpgsqlConnectionFactory(gatewayPostgresCs));
-    // gwdbx W2-R02: ISettlementStore / ISettlementEnqueueStore are no longer chosen here —
-    // migration 0052 dropped their tables. See the settlementStoreRetired block below.
-
     // Durability register: requests-durable [A] — the optional gateway-Postgres owner-list
     // mirror (delivery_requests, migration 0024). Registered ONLY here so DurableRequestsStore
     // resolves a non-null IDurableRequestsMirror in prod (see the [B] ctor arg below); absent
@@ -1325,64 +1298,8 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
     // below, independent of GatewayPostgres. The gateway-Postgres seam is deleted.
 }
 
-// gwdbx W2-R02 — migration 0052 dropped settlements / settlement_batches / settlement_enqueue /
-// settlement_ledger_entries. No DSN can serve them, and a prod-like zero-DSN boot must not fake
-// money from process memory, so the Null stores are the ONLY prod-like resolution. The in-memory
-// stores survive for Development/Testing exactly as InMemoryRefreshTokenStore does (W1-14 shape),
-// keeping the settlement behaviour specified until the W2-R11 replacement lands.
-var settlementStoreRetired = !string.IsNullOrWhiteSpace(gatewayPostgresCs)
-    || !JeebGateway.Infrastructure.StoreDurabilityGuard.IsExempt(builder.Environment);
-if (settlementStoreRetired)
-{
-    builder.Services.AddSingleton<ISettlementStore, NullSettlementStore>();
-    builder.Services.AddSingleton<ISettlementEnqueueStore, NullSettlementEnqueueStore>();
-}
-else
-{
-    builder.Services.AddSingleton<ISettlementStore, InMemorySettlementStore>();
-    builder.Services.AddSingleton<ISettlementEnqueueStore, InMemorySettlementEnqueueStore>();
-}
-
-// Cash-settlement ledger — OWNER RULING 2026-07-27: "jeeb is only cash on delivery", no UPG.
-//
-// This was a FeatureFlags:UseUpstream:Payments swap between UpgSettlementLedgerClient (which
-// posted the settlement THROUGH unified_payment_gateway's generic external-settlement endpoint)
-// and the in-process ledger. The flag defaulted OFF and the UPG BaseUrl is gone from committed
-// config, so registering the in-process ledger UNCONDITIONALLY is behaviour-preserving — it is
-// exactly what production has been running. The flag branch, the UPG ledger client and its typed
-// transport are deleted, so no configuration value can resurrect the dial.
-//
-// COD settlement remains independent of disputes: cases never issue a refund or wallet action.
-// TELLS THE TRUTH. Cash was already collected hand-to-hand by the Jeeber; recording it in the
-// gateway's own ledger is the complete operation, not a stand-in for a remote write that did not
-// happen. That is why this one is safe to keep as the permanent implementation while the refund
-// client had to be made to fail loudly. SettlementService still treats the post as best-effort and
-// idempotent on the settlement id.
-//
-// b05/GW1 W1.8 + W3.5(b) — OWNER RULING 2026-07-31 "PROMOTE": local no longer means volatile.
-// The ledger is now Postgres-backed (settlement_ledger_entries, migration 0044) whenever
-// GatewayPostgres is configured, and ISettlementLedgerClient is a Critical store under
-// StoreDurabilityGuard, so a prod-like boot REFUSES the in-memory fallback rather than serving
-// money bookkeeping out of process memory.
-//
-// The specific hole this closes is NOT "the settlement row was lost" — that row is in Postgres
-// already. It is the IDEMPOTENCY MEMO. InMemorySettlementLedgerClient's whole correctness
-// argument was GetOrAdd(IdempotencyKey): replay the same settlement id, get the ORIGINAL entry
-// back. That memo was a ConcurrentDictionary, so a restart emptied it — and the 60 s
-// SettlementLedgerReconciler then replays every settlement row with a NULL ledger_entry_id using
-// that same key, minting a SECOND entry id for one cash collection and overwriting the first
-// stamp. Nothing throws; the books just disagree with themselves. The PK on idempotency_key
-// moves that memo into the database, where a restart cannot reach it.
-// gwdbx W2-R02: settlement_ledger_entries is dropped, so the durable memo above no longer exists
-// and the Null client faults rather than mint an id without one. Dev/CI keeps the in-memory client.
-if (settlementStoreRetired)
-{
-    builder.Services.AddSingleton<ISettlementLedgerClient, NullSettlementLedgerClient>();
-}
-else
-{
-    builder.Services.AddSingleton<ISettlementLedgerClient, InMemorySettlementLedgerClient>();
-}
+// gwdbx W2-R11 — settlement-service owns the rows, the commission arithmetic and the ledger. The
+// gateway's only seam is ISettlementServiceClient; there is nothing left here to select between.
 
 // JEBV4-302: shared per-jeeber earnings-cache invalidation registry. Singleton so the
 // read side (JeebEarningsController links each cache entry to the jeeber's change token)
@@ -1392,40 +1309,6 @@ builder.Services.AddSingleton<JeebGateway.Financials.IEarningsCacheInvalidator,
     JeebGateway.Financials.EarningsCacheInvalidator>();
 
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
-
-// JEBV4-47 (M3/R7): the settlement -> UPG generic-settlement ledger post is
-// best-effort; when UPG is down at settle time the row persists with
-// ledger_entry_id NULL. This hosted reconciler periodically replays those unposted
-// rows (idempotent on the settlement id) so the gateway settlement rows and the UPG
-// ledger reconverge instead of diverging silently forever. Safe defaults; a no-op
-// when there are no unposted rows.
-builder.Services.Configure<JeebGateway.Financials.SettlementLedgerReconcilerOptions>(
-    builder.Configuration.GetSection(JeebGateway.Financials.SettlementLedgerReconcilerOptions.SectionName));
-builder.Services.AddSingleton<JeebGateway.Financials.SettlementLedgerReconciler>();
-builder.Services.AddHostedService(sp =>
-    sp.GetRequiredService<JeebGateway.Financials.SettlementLedgerReconciler>());
-
-// gwdbx W2-05 — COD→wallet-service settlement mirror. INERT at the shipped CodSettlementMode
-// "local": the sweep no-ops and this named client is never used. Local rows stay authoritative.
-builder.Services.Configure<JeebGateway.Financials.Cod.CodWalletMirrorOptions>(
-    builder.Configuration.GetSection(JeebGateway.Financials.Cod.CodWalletMirrorOptions.SectionName));
-// Money-mutating POST: breaker+timeout only, NO transport retry (ServiceWalletClient precedent);
-// the reconciler sweep is the retry, idempotent on transactionId = settlement id.
-ServiceClientExtensions.AttachBreakerAndTimeoutOnly(builder.Services.AddHttpClient(
-    JeebGateway.Financials.Cod.WalletApiSettlementLedgerClient.HttpClientName,
-    client =>
-    {
-        var apiUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
-        if (!string.IsNullOrWhiteSpace(apiUrl))
-        {
-            client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
-        }
-        client.Timeout = TimeSpan.FromSeconds(30);
-    }));
-builder.Services.AddSingleton<JeebGateway.Financials.Cod.WalletApiSettlementLedgerClient>();
-builder.Services.AddSingleton<JeebGateway.Financials.Cod.CodWalletMirrorReconciler>();
-builder.Services.AddHostedService(sp =>
-    sp.GetRequiredService<JeebGateway.Financials.Cod.CodWalletMirrorReconciler>());
 
 // ===========================================================================
 // Wallet integration — EXACT mirror of the salehly-gateway sibling.
@@ -2345,9 +2228,6 @@ if (builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Te
 // what production has been running.
 //
 // This ledger records cash already collected in person. The case engine does not call it.
-builder.Services.AddSingleton<JeebGateway.Financials.Cod.InProcessCodSettlementLedger>();
-builder.Services.AddSingleton<JeebGateway.Financials.Cod.ICodSettlementLedger>(sp =>
-    sp.GetRequiredService<JeebGateway.Financials.Cod.InProcessCodSettlementLedger>());
 
 // Jeeber KYC submission pipeline (T-backend-004 / JEEB-22).
 //
@@ -2875,39 +2755,18 @@ builder.Services.AddSingleton<IDeliveryParticipantResolver, DeliveryParticipantR
 // gateway one.
 
 // Wave 2-3 backend services.
-// T-backend-017 / JEB-57: Weekly settlement batch processing.
-// InMemorySettlementBatchStore DELETED (G2 gate). W2-R02: PostgresSettlementBatchStore is no
-// longer selectable — settlement_batches is dropped; see the settlementStoreRetired branch below.
-builder.Services.Configure<JeebGateway.Financials.WeeklySettlementOptions>(
-    builder.Configuration.GetSection(JeebGateway.Financials.WeeklySettlementOptions.SectionName));
-// gwdbx W2-R02: settlement_batches is dropped, so the Postgres batch store can no longer be
-// selected in any prod-like env. Dev/CI keeps the in-memory fallback over the in-memory store.
-if (settlementStoreRetired)
-{
-    builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore,
-        JeebGateway.Financials.NullSettlementBatchStore>();
-}
-else
-{
-    builder.Services.AddSingleton<JeebGateway.Financials.ISettlementBatchStore>(sp =>
-        new JeebGateway.Financials.InMemoryFallbackSettlementBatchStore(
-            sp.GetRequiredService<JeebGateway.Financials.ISettlementStore>()));
-}
-// Register WeeklySettlementBatch as a singleton so the WS-D job registry can resolve it
-// by concrete type. AddHostedService uses the same singleton instance.
-builder.Services.AddSingleton<JeebGateway.Financials.WeeklySettlementBatch>();
-builder.Services.AddHostedService(sp =>
-    sp.GetRequiredService<JeebGateway.Financials.WeeklySettlementBatch>());
+// gwdbx W2-R11: weekly payout batching moved to settlement-service (its own batch job behind the
+// ADMIN-scope /batches surface). The gateway no longer runs a settlement cron.
 
 // T-backend-018 / JEB-1434 / JEB-1465: Earnings aggregation API.
 // When FeatureFlags:UseUpstream:Earnings=true the scoped
 // WalletEarningsAggregationService reads live gross revenue from the shared
 // wallet-service (Transaction/holder/{holderId}/credit-revenue) instead of
-// summing the in-memory settlement rows (which are always zero on a cold start).
+// summing the settlement-service rows.
 // Default-OFF: flip to true in Production once wallet-service is confirmed healthy.
 // JEBV4-283: ALWAYS register the gateway's OWN settlement aggregation as a concrete service so
 // the jeeber COD-earnings READ (the app's /v1/jeeb/earnings via JeebEarningsBffController) reads
-// gateway-owned settlement rows DIRECTLY, independent of the UseUpstream:Earnings flag below. That
+// settlement-service rows DIRECTLY, independent of the UseUpstream:Earnings flag below. That
 // flag only selects which IEarningsAggregationService the legacy/admin earnings surfaces bind; when
 // it is ON it routes the interface to WalletEarningsAggregationService (wallet gross credit-revenue),
 // which does NOT include COD settlement commission — so the app must not depend on the interface for
@@ -3221,7 +3080,6 @@ var ratingRevealJob = app.Services.GetRequiredService<JeebGateway.Ratings.Rating
 var requestExpirySweeper = app.Services.GetRequiredService<RequestExpirySweeper>();
 var requestNudgeSweeper = app.Services.GetRequiredService<RequestNudgeSweeper>();
 var requestExpiryObserver = app.Services.GetRequiredService<RequestExpiryObserver>();
-var weeklyBatch = app.Services.GetRequiredService<JeebGateway.Financials.WeeklySettlementBatch>();
 
 testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
 {
@@ -3247,14 +3105,6 @@ testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
     Description = "Project upstream-authored request expiries (RequestExpiryObserver.ObserveOnceAsync).",
     RunAsync = ct => requestExpiryObserver.ObserveOnceAsync(ct)
 });
-// settlement-batch: placeholder; WS-A registers the real delegate during Wave 2.
-testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
-{
-    Name = "settlement-batch",
-    Description = "Weekly settlement batch (WeeklySettlementBatch.RunBatchAsync). Placeholder — WS-A wires durable impl.",
-    RunAsync = ct => weeklyBatch.RunBatchAsync(ct)
-});
-
 // Must be registered early in the pipeline so it wraps the whole request.
 app.UseExceptionHandler();
 app.UseStatusCodePages(async statusCodeContext =>
@@ -3478,21 +3328,6 @@ app.MapHealthChecks("/health/aggregate", new HealthCheckOptions
     Predicate = _ => true,
     ResponseWriter = AggregateHealthResponseWriter.WriteAsync,
 }).AllowAnonymous();
-
-// JEB-57: TODO — register WeeklySettlementBatch in WS-D test-control-plane job registry
-// (JEB-1502, fix/JEB-1502).  When that branch is merged, add:
-//
-//   var registry = app.Services.GetService<JeebGateway.TestControlPlane.ITestJobRegistry>();
-//   if (registry is not null)
-//   {
-//       var batch = app.Services.GetRequiredService<JeebGateway.Financials.WeeklySettlementBatch>();
-//       registry.Register(new JeebGateway.TestControlPlane.RegisteredJob
-//       {
-//           Name        = "settlement-batch",
-//           Description = "Weekly COD settlement batch (durable Postgres, JEB-57 Wave-2 impl).",
-//           RunAsync    = ct => batch.RunBatchAsync(ct),
-//       });
-//   }
 
 app.Run();
 

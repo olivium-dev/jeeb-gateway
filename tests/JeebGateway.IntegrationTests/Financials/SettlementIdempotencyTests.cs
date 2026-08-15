@@ -5,46 +5,16 @@ using Xunit;
 namespace JeebGateway.IntegrationTests.Financials;
 
 /// <summary>
-/// QA-PRE-JEB-488: COD Settlement idempotency, commission math, and state
-/// machine tests (JEB-56). These tests exercise the in-memory store (fast,
-/// no external Postgres required); PostgresSettlementStore integration tests
-/// require Testcontainers and run in the CI integration suite.
+/// QA-PRE-JEB-488: the COMMISSION POLICY the gateway still owns (JEB-56).
+///
+/// <para>gwdbx W2-R11: settlement idempotency and the recorded → batched → paid state machine
+/// moved to settlement-service and are its tests now; the end-to-end idempotency claim is pinned
+/// by SettlementServiceCutoverW2R11Tests.A2. What stays here is CommissionCalculator, which the
+/// gateway keeps for the offers path (WalletSufficiencyGuard) and which must agree, to the cent,
+/// with the commission settlement-service computes.</para>
 /// </summary>
 public class SettlementIdempotencyTests
 {
-    private readonly InMemorySettlementStore _store = new();
-    private readonly TimeProvider _clock = TimeProvider.System;
-
-    // ── P1: Idempotency — repeat insert for same deliveryId → one row ─────────
-
-    [Fact]
-    public async Task TryInsertAsync_SameDeliveryId_ReturnsExistingRow_OnSecondCall()
-    {
-        var settlement = MakeSettlement("del-001", "jeeber-001");
-
-        var (row1, inserted1) = await _store.TryInsertAsync(settlement, CancellationToken.None);
-        var (row2, inserted2) = await _store.TryInsertAsync(
-            MakeSettlement("del-001", "jeeber-001"), CancellationToken.None);
-
-        inserted1.Should().BeTrue("first insert should succeed");
-        inserted2.Should().BeFalse("second insert for same deliveryId must be deduplicated");
-        row1.Id.Should().Be(row2.Id, "both calls must return the same settlement row");
-    }
-
-    [Fact]
-    public async Task TryInsertAsync_SameDeliveryId_NumbersUnchangedOnSecondCall()
-    {
-        var settlement = MakeSettlement("del-002", "jeeber-001", goodsCost: 150_000m);
-        await _store.TryInsertAsync(settlement, CancellationToken.None);
-
-        // Second call has different goodsCost — should be ignored.
-        var differentAmountSettlement = MakeSettlement("del-002", "jeeber-001", goodsCost: 200_000m);
-        var (row2, inserted2) = await _store.TryInsertAsync(differentAmountSettlement, CancellationToken.None);
-
-        inserted2.Should().BeFalse();
-        row2.GoodsCost.Should().Be(150_000m, "original goodsCost must not be overwritten on retry");
-    }
-
     // ── P2: Commission math ───────────────────────────────────────────────────
 
     [Theory]
@@ -81,78 +51,6 @@ public class SettlementIdempotencyTests
         result.Total.Should().Be(result.Commission);
     }
 
-    // ── P3: State machine — cod_state transitions ─────────────────────────────
-
-    [Fact]
-    public async Task CodState_StartsAtRecorded_AfterInsert()
-    {
-        var settlement = MakeSettlement("del-003", "jeeber-002", codState: CodSettlementState.Recorded);
-        var (row, _) = await _store.TryInsertAsync(settlement, CancellationToken.None);
-
-        row.CodState.Should().Be(CodSettlementState.Recorded);
-    }
-
-    [Fact]
-    public async Task MarkBatchedAsync_TransitionsRecordedToBatched()
-    {
-        var settlement = MakeSettlement("del-004", "jeeber-003");
-        var (row, _) = await _store.TryInsertAsync(settlement, CancellationToken.None);
-
-        var batchId = Guid.NewGuid();
-        await _store.MarkBatchedAsync(new[] { row.Id }, batchId, DateTimeOffset.UtcNow, CancellationToken.None);
-
-        var updated = await _store.GetByDeliveryAsync("del-004", CancellationToken.None);
-        updated!.CodState.Should().Be(CodSettlementState.Batched, "cron transitions to batched");
-        updated.BatchId.Should().Be(batchId);
-    }
-
-    [Fact]
-    public async Task MarkBatchedAsync_DoesNotTransition_AlreadyBatched()
-    {
-        var settlement = MakeSettlement("del-005", "jeeber-004");
-        var (row, _) = await _store.TryInsertAsync(settlement, CancellationToken.None);
-
-        var batchId1 = Guid.NewGuid();
-        var batchId2 = Guid.NewGuid();
-        var at = DateTimeOffset.UtcNow;
-
-        await _store.MarkBatchedAsync(new[] { row.Id }, batchId1, at, CancellationToken.None);
-        await _store.MarkBatchedAsync(new[] { row.Id }, batchId2, at, CancellationToken.None); // second batch run
-
-        var updated = await _store.GetByDeliveryAsync("del-005", CancellationToken.None);
-        updated!.BatchId.Should().Be(batchId1, "batched→batched transition is a no-op; original batch preserved");
-    }
-
-    [Fact]
-    public async Task MarkPaidByBatchAsync_TransitionsBatchedToPaid()
-    {
-        var settlement = MakeSettlement("del-006", "jeeber-005");
-        var (row, _) = await _store.TryInsertAsync(settlement, CancellationToken.None);
-
-        var batchId = Guid.NewGuid();
-        var at = DateTimeOffset.UtcNow;
-        await _store.MarkBatchedAsync(new[] { row.Id }, batchId, at, CancellationToken.None);
-        await _store.MarkPaidByBatchAsync(batchId, at.AddDays(7), CancellationToken.None);
-
-        var updated = await _store.GetByDeliveryAsync("del-006", CancellationToken.None);
-        updated!.CodState.Should().Be(CodSettlementState.Paid, "admin mark-paid transitions to paid");
-        updated.PaidAt.Should().NotBeNull();
-    }
-
-    [Fact]
-    public async Task RecordedCannotTransitionDirectlyToPaid_WithoutBatch()
-    {
-        var settlement = MakeSettlement("del-007", "jeeber-006");
-        var (row, _) = await _store.TryInsertAsync(settlement, CancellationToken.None);
-
-        // Trying to mark paid by a batch that this row has no link to.
-        await _store.MarkPaidByBatchAsync(Guid.NewGuid(), DateTimeOffset.UtcNow, CancellationToken.None);
-
-        var updated = await _store.GetByDeliveryAsync("del-007", CancellationToken.None);
-        updated!.CodState.Should().Be(CodSettlementState.Recorded,
-            "recorded→paid without batching is forbidden; state must remain recorded");
-    }
-
     // ── P5: No float arithmetic — decimal types only ─────────────────────────
 
     [Theory]
@@ -175,39 +73,5 @@ public class SettlementIdempotencyTests
         // New money model (Q-001): flat 10% commission, no insurance, no floor — Total == Commission only.
         result.Insurance.Should().Be(0m, "insurance surcharge is retired under Q-001");
         result.Total.Should().Be(result.Commission, "total equals commission only — goods cost and insurance never accumulate into it");
-    }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private static Settlement MakeSettlement(
-        string deliveryId,
-        string jeeberId,
-        decimal goodsCost = 100_000m,
-        string? codState = null,
-        string? state = null,
-        DateTimeOffset? settledAt = null)
-    {
-        var tier = CommissionTier.Standard;
-        var breakdown = CommissionCalculator.Calculate(goodsCost, tier);
-        return new Settlement
-        {
-            Id              = Guid.NewGuid().ToString(),
-            DeliveryId      = deliveryId,
-            JeeberId        = jeeberId,
-            ClientId        = "client-001",
-            TierId          = "same-day",
-            GoodsCost       = breakdown.GoodsCost,
-            CommissionTier  = tier,
-            CommissionRate  = breakdown.CommissionRate,
-            Commission      = breakdown.Commission,
-            Insurance       = breakdown.Insurance,
-            Total           = breakdown.Total,
-            MinimumFeeApplied = breakdown.MinimumFeeApplied,
-            Currency        = "USD",
-            PaymentMethod   = "cash",
-            State           = state ?? SettlementState.Settled,
-            CodState        = codState ?? CodSettlementState.Recorded,
-            SettledAt       = settledAt ?? DateTimeOffset.UtcNow,
-        };
     }
 }

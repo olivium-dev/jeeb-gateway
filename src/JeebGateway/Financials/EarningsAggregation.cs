@@ -111,10 +111,9 @@ public interface IEarningsAggregationService
 }
 
 /// <summary>
-/// Sums the gateway-owned settlement rows into the canonical earnings
-/// projection (T-backend-018). This is the in-memory aggregation; the swap to
-/// the wallet-service earnings projection (UseUpstreamWalletEarnings) lands
-/// behind the same interface without changing the controller.
+/// Sums the settlement-service rows into the canonical earnings projection (T-backend-018).
+/// gwdbx W2-R11: the rows are read over HTTP; the wallet-service projection
+/// (UseUpstream:Earnings) still lands behind the same interface without changing the controller.
 ///
 /// <para>net = gross(goodsCost) - commission, per settled delivery; the period
 /// totals are the sums. Currency is always USD (the gateway's single
@@ -122,9 +121,17 @@ public interface IEarningsAggregationService
 /// </summary>
 public sealed class EarningsAggregationService : IEarningsAggregationService
 {
-    private readonly ISettlementStore _store;
+    private readonly ISettlementServiceClient _client;
 
-    public EarningsAggregationService(ISettlementStore store) => _store = store;
+    public EarningsAggregationService(ISettlementServiceClient client) => _client = client;
+
+    private Task<IReadOnlyList<Settlement>> ListAsync(
+        string jeeberId,
+        DateTimeOffset? from,
+        DateTimeOffset? to,
+        IReadOnlyCollection<string>? codStates,
+        CancellationToken ct)
+        => _client.ListAsync(new SettlementListQuery(jeeberId, codStates, from, to), ct);
 
     public async Task<EarningsProjection> GetProjectionAsync(
         string jeeberId,
@@ -132,7 +139,7 @@ public sealed class EarningsAggregationService : IEarningsAggregationService
         DateTimeOffset? to,
         CancellationToken ct)
     {
-        var rows = await _store.ListByJeeberAsync(jeeberId, from, to, ct);
+        var rows = await ListAsync(jeeberId, from, to, null, ct);
 
         var entries = new List<EarningsEntry>(rows.Count);
         decimal gross = 0m, commission = 0m, net = 0m;
@@ -189,7 +196,7 @@ public sealed class EarningsAggregationService : IEarningsAggregationService
         DateTimeOffset to,
         CancellationToken ct)
     {
-        var rows = await _store.ListByJeeberAsync(jeeberId, from, to, ct);
+        var rows = await ListAsync(jeeberId, from, to, null, ct);
         return rows
             .GroupBy(s => DateOnly.FromDateTime(s.SettledAt.UtcDateTime))
             .Select(g => new DailyEarnings(
@@ -217,7 +224,7 @@ public sealed class EarningsAggregationService : IEarningsAggregationService
         IReadOnlyCollection<string> codStates,
         CancellationToken ct)
     {
-        var rows = await _store.ListByJeeberAsync(jeeberId, from, to, ct, codStates);
+        var rows = await ListAsync(jeeberId, from, to, codStates, ct);
 
         var entries = new List<EarningsEntry>(rows.Count);
         decimal gross = 0m, commission = 0m, net = 0m;

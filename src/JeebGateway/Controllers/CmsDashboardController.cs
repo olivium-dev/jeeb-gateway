@@ -40,14 +40,14 @@ public sealed class CmsDashboardController : ControllerBase
 
     private readonly IRequestsStore _requests;
     private readonly IUsersStore _users;
-    private readonly ISettlementStore _settlements;
+    private readonly ISettlementServiceClient _settlements;
     private readonly IKycBffSeam _kyc;
     private readonly ILogger<CmsDashboardController> _log;
 
     public CmsDashboardController(
         IRequestsStore requests,
         IUsersStore users,
-        ISettlementStore settlements,
+        ISettlementServiceClient settlements,
         IKycBffSeam kyc,
         ILogger<CmsDashboardController> log)
     {
@@ -158,7 +158,8 @@ public sealed class CmsDashboardController : ControllerBase
     {
         try
         {
-            return await _settlements.SumEarningsAsync(CodSettlementState.EarningsStates, ct);
+            return await _settlements.SumNetEarningsAsync(
+                holderId: null, CodSettlementState.EarningsStates, from: null, to: null, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

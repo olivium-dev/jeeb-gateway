@@ -5,12 +5,9 @@ using JeebGateway.Admin;
 namespace JeebGateway.Financials;
 
 /// <summary>
-/// In-gateway COD implementation of the admin settlement portal read/reconcile
-/// surface (extracted from PR #364, re-homed off the retired UPG proxy). Serves
-/// the exact wire shapes in <see cref="AdminSettlementResource"/> and friends
-/// from the gateway's own settlement owner (<see cref="ISettlementStore"/> +
-/// <see cref="ISettlementBatchStore"/>). Jeeb is cash on delivery: automated
-/// dispute/resolve mutations have no local owner columns yet and fail closed.
+/// Admin settlement portal read surface (extracted from PR #364). gwdbx W2-R11: the rows come
+/// from settlement-service over the SERVICE scope. Batch reads and mark-paid need the ADMIN
+/// scope the gateway deliberately does not hold, so they fail closed — as do dispute/resolve.
 /// </summary>
 public interface IAdminSettlementPortalService
 {
@@ -62,21 +59,11 @@ public sealed class AdminSettlementPortalService : IAdminSettlementPortalService
         public const string Resolved = "resolved";
     }
 
-    private readonly ISettlementStore _settlements;
-    private readonly ISettlementBatchStore _batches;
-    private readonly TimeProvider _clock;
-    private readonly ILogger<AdminSettlementPortalService> _log;
+    private readonly ISettlementServiceClient _settlements;
 
-    public AdminSettlementPortalService(
-        ISettlementStore settlements,
-        ISettlementBatchStore batches,
-        TimeProvider clock,
-        ILogger<AdminSettlementPortalService> log)
+    public AdminSettlementPortalService(ISettlementServiceClient settlements)
     {
         _settlements = settlements;
-        _batches = batches;
-        _clock = clock;
-        _log = log;
     }
 
     public async Task<AdminSettlementPageResponse> ListAsync(
@@ -84,152 +71,86 @@ public sealed class AdminSettlementPortalService : IAdminSettlementPortalService
     {
         var limit = Math.Clamp(request.Limit, 1, 200);
         var status = string.IsNullOrWhiteSpace(request.Status) ? null : request.Status.Trim();
-        // No local dispute owner exists: disputed/resolved views are always empty.
+        // No dispute owner exists anywhere: disputed/resolved views are always empty.
         if (status is PortalStatus.Disputed or PortalStatus.Resolved)
-            return new AdminSettlementPageResponse(
-                Array.Empty<AdminSettlementResource>(), new AdminSettlementPageCursor(null));
+            return Empty();
 
-        string? state = null;
-        string? codState = null;
-        var excludeIntent = false;
-        switch (status)
-        {
-            case null:
-                break;
-            case PortalStatus.Intent:
-                state = SettlementState.PendingSettlement;
-                break;
-            case PortalStatus.Pending:
-                codState = CodSettlementState.Recorded;
-                excludeIntent = true;
-                break;
-            case PortalStatus.Batched:
-                codState = CodSettlementState.Batched;
-                break;
-            case PortalStatus.Paid:
-                codState = CodSettlementState.Paid;
-                break;
-            default:
-                return new AdminSettlementPageResponse(
-                    Array.Empty<AdminSettlementResource>(), new AdminSettlementPageCursor(null));
-        }
+        if (status is not null
+            and not (PortalStatus.Intent or PortalStatus.Pending or PortalStatus.Batched or PortalStatus.Paid))
+            return Empty();
 
-        var ascending = string.Equals(request.Sort?.Trim(), "asc", StringComparison.OrdinalIgnoreCase);
+        // Upstream pages by (created_at, id); the portal's cursor is a gateway-side keyset over
+        // settled_at. A cursor from a prior page is honoured by filtering, not by re-paging.
         DateTimeOffset? cursorSettledAt = null;
         string? cursorId = null;
         if (!string.IsNullOrWhiteSpace(request.Cursor)
             && !TryDecodeCursor(request.Cursor, out cursorSettledAt, out cursorId))
-            return new AdminSettlementPageResponse(
-                Array.Empty<AdminSettlementResource>(), new AdminSettlementPageCursor(null));
+            return Empty();
 
-        var rows = await _settlements.ListPageForAdminAsync(
-            new AdminSettlementPortalFilter(
-                Query: string.IsNullOrWhiteSpace(request.Query) ? null : request.Query.Trim(),
-                JeeberId: string.IsNullOrWhiteSpace(request.ProviderId) ? null : request.ProviderId.Trim(),
-                DeliveryId: string.IsNullOrWhiteSpace(request.DeliveryId) ? null : request.DeliveryId.Trim(),
-                State: state,
-                CodState: codState,
-                ExcludeIntent: excludeIntent,
+        var rows = await _settlements.ListAsync(
+            new SettlementListQuery(
+                HolderId: string.IsNullOrWhiteSpace(request.ProviderId) ? null : request.ProviderId.Trim(),
+                States: null,
                 From: request.From,
                 To: request.To,
-                Ascending: ascending,
-                CursorSettledAt: cursorSettledAt,
-                CursorId: cursorId),
-            limit,
+                Limit: 200),
             ct);
 
-        var data = rows.Select(row => MapSettlement(row, reconciliation: null)).ToArray();
-        var nextCursor = rows.Count == limit
-            ? EncodeCursor(rows[^1].SettledAt, rows[^1].Id)
+        var ascending = string.Equals(request.Sort?.Trim(), "asc", StringComparison.OrdinalIgnoreCase);
+        var matched = rows
+            .Where(row => status is null || string.Equals(StatusOf(row), status, StringComparison.Ordinal))
+            .Where(row => MatchesQuery(row, request));
+        var filtered = (ascending
+                ? matched.OrderBy(row => row.SettledAt).ThenBy(row => row.Id, StringComparer.Ordinal)
+                : matched.OrderByDescending(row => row.SettledAt).ThenByDescending(row => row.Id, StringComparer.Ordinal))
+            .ToList();
+
+        if (cursorSettledAt is { } after)
+            filtered = filtered
+                .Where(row => ascending
+                    ? row.SettledAt > after || (row.SettledAt == after && string.CompareOrdinal(row.Id, cursorId) > 0)
+                    : row.SettledAt < after || (row.SettledAt == after && string.CompareOrdinal(row.Id, cursorId) < 0))
+                .ToList();
+
+        var page = filtered.Take(limit).ToArray();
+        var data = page.Select(row => MapSettlement(row, reconciliation: null)).ToArray();
+        var nextCursor = page.Length == limit && page.Length > 0
+            ? EncodeCursor(page[^1].SettledAt, page[^1].Id)
             : null;
         return new AdminSettlementPageResponse(data, new AdminSettlementPageCursor(nextCursor));
+    }
+
+    private static AdminSettlementPageResponse Empty() => new(
+        Array.Empty<AdminSettlementResource>(), new AdminSettlementPageCursor(null));
+
+    private static bool MatchesQuery(Settlement row, AdminSettlementPortalListRequest request)
+    {
+        if (!string.IsNullOrWhiteSpace(request.DeliveryId)
+            && !string.Equals(row.DeliveryId, request.DeliveryId.Trim(), StringComparison.Ordinal))
+            return false;
+        if (string.IsNullOrWhiteSpace(request.Query)) return true;
+        var q = request.Query.Trim();
+        return row.Id.Contains(q, StringComparison.OrdinalIgnoreCase)
+            || row.DeliveryId.Contains(q, StringComparison.OrdinalIgnoreCase)
+            || row.JeeberId.Contains(q, StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<AdminSettlementDetailResponse?> GetAsync(string settlementId, CancellationToken ct)
     {
         if (!Guid.TryParse(settlementId, out _)) return null;
         var row = await _settlements.GetByIdAsync(settlementId, ct);
-        if (row is null) return null;
-
-        AdminSettlementReconciliation? reconciliation = null;
-        if (row.BatchId is Guid batchId)
-        {
-            var batch = await _batches.GetByIdAsync(batchId, ct);
-            if (batch is not null)
-                reconciliation = new AdminSettlementReconciliation(
-                    BatchId: batch.Id.ToString("D"),
-                    BatchStatus: batch.Status,
-                    Version: BatchVersion(batch),
-                    PaymentReference: null,
-                    Note: null,
-                    PaidBy: batch.PaidBy,
-                    AllowedActions: string.Equals(batch.Status, "paid", StringComparison.Ordinal)
-                        ? Array.Empty<string>()
-                        : new[] { "mark-paid" });
-        }
-
-        return new AdminSettlementDetailResponse(MapSettlement(row, reconciliation));
+        return row is null ? null : new AdminSettlementDetailResponse(MapSettlement(row, reconciliation: null));
     }
 
-    public async Task<AdminSettlementBatchResponse?> GetBatchAsync(string batchId, CancellationToken ct)
-    {
-        if (!Guid.TryParse(batchId, out var id)) return null;
-        var batch = await _batches.GetByIdAsync(id, ct);
-        if (batch is null) return null;
-        var settlements = await ListBatchSettlementsAsync(batch, ct);
-        return new AdminSettlementBatchResponse(MapBatch(batch, settlements));
-    }
+    // gwdbx W2-R11: /batches/* is ADMIN scope upstream. The gateway holds the SERVICE token only,
+    // by design — a leaked gateway token must not be able to read or pay a payout batch.
+    public Task<AdminSettlementBatchResponse?> GetBatchAsync(string batchId, CancellationToken ct)
+        => throw new SettlementAdminScopeException(nameof(GetBatchAsync));
 
-    public async Task<AdminSettlementMarkPaidResult> MarkBatchPaidAsync(
+    public Task<AdminSettlementMarkPaidResult> MarkBatchPaidAsync(
         string batchId, int expectedVersion, string paymentReference, string reason,
         string adminId, CancellationToken ct)
-    {
-        if (!Guid.TryParse(batchId, out var id))
-            return new AdminSettlementMarkPaidResult(AdminSettlementMarkPaidOutcome.NotFound, null);
-        var batch = await _batches.GetByIdAsync(id, ct);
-        if (batch is null)
-            return new AdminSettlementMarkPaidResult(AdminSettlementMarkPaidOutcome.NotFound, null);
-
-        if (string.Equals(batch.Status, "paid", StringComparison.Ordinal))
-        {
-            var replayedSettlements = await ListBatchSettlementsAsync(batch, ct);
-            return new AdminSettlementMarkPaidResult(
-                AdminSettlementMarkPaidOutcome.Replayed,
-                new AdminSettlementReconcileResponse(
-                    MapBatch(batch, replayedSettlements),
-                    SettlementsUpdated: 0,
-                    NotificationId: "not-dispatched"));
-        }
-
-        if (expectedVersion != BatchVersion(batch))
-            return new AdminSettlementMarkPaidResult(AdminSettlementMarkPaidOutcome.VersionConflict, null);
-
-        var paidAt = _clock.GetUtcNow();
-        var paid = await _batches.MarkPaidAsync(id, adminId, paidAt, ct);
-        // Audit trail: the local owner has no payment_reference column yet; the
-        // structured log is the authoritative record of the operator's evidence.
-        _log.LogInformation(
-            "Admin settlement batch {BatchId} marked paid by {AdminId}; paymentReference={PaymentReference} reason={Reason}",
-            id, adminId, paymentReference, reason);
-        var settlements = await ListBatchSettlementsAsync(paid, ct);
-        return new AdminSettlementMarkPaidResult(
-            AdminSettlementMarkPaidOutcome.Ok,
-            new AdminSettlementReconcileResponse(
-                MapBatch(paid, settlements),
-                SettlementsUpdated: paid.SettlementCount,
-                NotificationId: "not-dispatched"));
-    }
-
-    private async Task<IReadOnlyList<Settlement>> ListBatchSettlementsAsync(
-        SettlementBatch batch, CancellationToken ct)
-    {
-        var from = new DateTimeOffset(
-            batch.PeriodStart.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero).AddDays(-1);
-        var to = new DateTimeOffset(
-            batch.PeriodEnd.ToDateTime(TimeOnly.MaxValue), TimeSpan.Zero).AddDays(1);
-        var window = await _settlements.ListByJeeberAsync(batch.JeeberId, from, to, ct);
-        return window.Where(row => row.BatchId == batch.Id).ToArray();
-    }
+        => throw new SettlementAdminScopeException(nameof(MarkBatchPaidAsync));
 
     private static AdminSettlementResource MapSettlement(
         Settlement row, AdminSettlementReconciliation? reconciliation) => new(
@@ -259,28 +180,6 @@ public sealed class AdminSettlementPortalService : IAdminSettlementPortalService
         Reconciliation: reconciliation,
         History: null);
 
-    private AdminSettlementBatchResource MapBatch(
-        SettlementBatch batch, IReadOnlyList<Settlement> settlements) => new(
-        Id: batch.Id.ToString("D"),
-        ProviderId: batch.JeeberId,
-        TotalNetUsd: Money(batch.TotalNetUsd),
-        Currency: batch.Currency,
-        Status: batch.Status,
-        PeriodStart: batch.PeriodStart,
-        PeriodEnd: batch.PeriodEnd,
-        SettlementCount: batch.SettlementCount,
-        PaidAt: batch.PaidAt,
-        PaidBy: batch.PaidBy,
-        Version: BatchVersion(batch),
-        PaymentReference: null,
-        ReconciliationNote: null,
-        Metadata: null,
-        CreatedAt: batch.CreatedAt,
-        UpdatedAt: batch.UpdatedAt,
-        Settlements: settlements
-            .Select(row => MapSettlement(row, reconciliation: null))
-            .ToArray());
-
     private static string StatusOf(Settlement row) =>
         row.State == SettlementState.PendingSettlement
             ? PortalStatus.Intent
@@ -298,9 +197,6 @@ public sealed class AdminSettlementPortalService : IAdminSettlementPortalService
         PortalStatus.Paid => 3,
         _ => 1,
     };
-
-    internal static int BatchVersion(SettlementBatch batch) =>
-        string.Equals(batch.Status, "paid", StringComparison.Ordinal) ? 2 : 1;
 
     private static string Money(decimal value) =>
         value.ToString("F2", CultureInfo.InvariantCulture);
@@ -334,4 +230,18 @@ public sealed class AdminSettlementPortalService : IAdminSettlementPortalService
             return false;
         }
     }
+}
+
+/// <summary>gwdbx W2-R11: the caller asked for a settlement-service ADMIN-scope operation
+/// (payout batches, mark-paid). The gateway holds the SERVICE scope only, on purpose.</summary>
+public sealed class SettlementAdminScopeException : InvalidOperationException
+{
+    public const string ProblemType = "https://jeeb.dev/errors/settlement-admin-scope-not-held";
+
+    public SettlementAdminScopeException(string member)
+        : base($"'{member}' needs the settlement-service ADMIN scope. The gateway holds the SERVICE "
+               + "scope only — payout batches and mark-paid are served by settlement-service directly.")
+        => Member = member;
+
+    public string Member { get; }
 }
