@@ -43,8 +43,8 @@ internal static class StoreDurabilityGuard
     /// </summary>
     internal static readonly (Type Iface, Type[] DurableImpls)[] Critical =
     {
-        // gwdbx W2-R02: ISettlementStore + ISettlementBatchStore removed — migration 0052 dropped
-        // their tables, so demanding the Postgres impl here would refuse every prod-like boot.
+        // gwdbx W2-R11: the settlement entries are gone for good — settlement-service owns the
+        // rows. ISettlementServiceClient is a stateless HTTP seam, so it is not a durable store.
         (typeof(JeebGateway.Users.IUsersStore),                             new[] { typeof(JeebGateway.Users.UpstreamBackedUsersStore) }),
         // W1-14 (A7/A10): the in-memory store is now Development/Testing-only, so a prod-like boot
         // with state-service unwired resolves NOTHING here and this entry aborts it.
@@ -134,8 +134,6 @@ internal static class StoreDurabilityGuard
         // a fallback means every admin draft edit and published config version evaporates on
         // restart, flapping the MFEs back to the seeded v1 defaults.
         (typeof(JeebGateway.Cms.ICmsSurfaceStore),                          new[] { typeof(JeebGateway.Cms.PostgresCmsSurfaceStore) }),
-        // gwdbx W2-R02: ISettlementEnqueueStore (settlement_enqueue, 0034) + ISettlementLedgerClient
-        // (settlement_ledger_entries, 0044) removed — migration 0052 dropped both tables.
         // partner-wallet-bff money-safety state is owned by jeeb-state-service. The gateway adapter
         // uses the shared atomic idempotency KV and holds no DB row or volatile partner-domain store.
         (typeof(JeebGateway.Partner.IPartnerWalletOperationStore),          new[] { typeof(JeebGateway.Partner.StateServicePartnerWalletOperationStore) }),

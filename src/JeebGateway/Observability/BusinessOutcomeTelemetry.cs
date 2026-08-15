@@ -64,15 +64,9 @@ public static class BusinessOutcomeTelemetry
         Meter.CreateCounter<long>("case.recovery.operations",
             description: "Admin case-callback and push-dispatch recovery operation outcomes.");
 
-    // JEBV4-47 (M3/R7): the settlement -> UPG generic-settlement ledger post is
-    // best-effort. When it fails at settle time the row persists but the ledger
-    // diverges until the SettlementLedgerReconciler replays it. These counters make
-    // that divergence observable (ties into JEBV4-59 business counters).
+    // gwdbx W2-R11: the ledger belongs to settlement-service, and the reconciler is deleted.
+    // This counter is the observable trace of a settle the completion legs swallowed.
     public static readonly Counter<long> SettlementLedgerPostFailures =
         Meter.CreateCounter<long>("settlement.ledger.post_failures",
-            description: "Number of settlement ledger posts that failed at settle time and were left for the reconciler.");
-
-    public static readonly Counter<long> SettlementLedgerReconciled =
-        Meter.CreateCounter<long>("settlement.ledger.reconciled",
-            description: "Number of previously-unposted settlement ledger entries the reconciler successfully replayed.");
+            description: "Number of settle calls (completion credit + AtDoor pending intent) that did not reach settlement-service and were swallowed so the delivery flow could continue. Recovery is the other completion leg, the receipt-read self-heal, or a manual settle — nothing replays them automatically.");
 }

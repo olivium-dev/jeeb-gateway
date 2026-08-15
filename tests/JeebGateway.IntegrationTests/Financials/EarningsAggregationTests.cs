@@ -8,12 +8,12 @@ namespace JeebGateway.IntegrationTests.Financials;
 
 /// <summary>
 /// JEB-58 — Earnings Ledger + Period Aggregation tests.
-/// Uses InMemorySettlementStore. No DB required.
+/// Uses the settlement-service test double. No DB required.
 /// Covers QA-PRE-JEB-512: AC1–AC6 (EXPLAIN AC4 is deferred to Testcontainers QV).
 /// </summary>
 public class EarningsAggregationTests
 {
-    private readonly InMemorySettlementStore _store;
+    private readonly FakeSettlementServiceClient _store;
     private readonly EarningsAggregationService _service;
     private readonly IMemoryCache _cache;
     private readonly FakeTimeProvider _clock;
@@ -24,7 +24,7 @@ public class EarningsAggregationTests
     public EarningsAggregationTests()
     {
         _clock   = new FakeTimeProvider(new DateTimeOffset(2026, 6, 10, 12, 0, 0, TimeSpan.Zero));
-        _store   = new InMemorySettlementStore();
+        _store   = new FakeSettlementServiceClient();
         _service = new EarningsAggregationService(_store);
         _cache   = new MemoryCache(new MemoryCacheOptions { SizeLimit = 100 });
     }
@@ -59,7 +59,7 @@ public class EarningsAggregationTests
             CodState          = codState,
             SettledAt         = at,
         };
-        await _store.TryInsertAsync(s, CancellationToken.None);
+        _store.Rows[s.DeliveryId] = s;
         return s;
     }
 

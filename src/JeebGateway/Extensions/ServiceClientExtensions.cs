@@ -65,6 +65,9 @@ public static class ServiceClientExtensions
         // role-service (net-new grant/revoke seam) — static X-Api-Key auth.
         services.AddTransient<Services.Clients.RoleServiceApiKeyHandler>();
 
+        // settlement-service — static SERVICE-scope bearer. The ADMIN scope is never wired here.
+        services.AddTransient<Financials.SettlementServiceTokenHandler>();
+
         // TODO(T-backend-bff-auth): auth-service — wire NSwag-generated AuthServiceClient
         //   contract: src/JeebGateway/contracts/auth-service.openapi.json
         //   migrates: AuthController, TokensController (currently in-memory)
@@ -520,6 +523,19 @@ public static class ServiceClientExtensions
         roleServiceBuilder.AddHttpMessageHandler<Services.Clients.RoleServiceApiKeyHandler>();
         roleServiceBuilder.AddResilienceHandler("standard", ConfigureStandardResilience);
 
+        // settlement-service — gwdbx W2-R11. Unversioned routes (A21 §4). Breaker + timeout, NO
+        // transport retry on a money POST (ServiceWalletClient precedent); completion legs re-drive.
+        services.Configure<Financials.SettlementServiceOptions>(
+            config.GetSection(Financials.SettlementServiceOptions.SectionName));
+        var settlementBuilder = services.AddHttpClient<
+            Financials.ISettlementServiceClient, Financials.SettlementServiceClient>(http =>
+        {
+            BindBaseAddress(http, config, Financials.SettlementServiceOptions.SectionName);
+            http.Timeout = TimeSpan.FromSeconds(30);
+        });
+        settlementBuilder.AddHttpMessageHandler<Financials.SettlementServiceTokenHandler>();
+        AttachBreakerAndTimeoutOnly(settlementBuilder);
+
         // REMOVED 2026-07-27 (owner ruling — "jeeb is only cash on delivery", no
         // unified_payment_gateway): the typed IUpgSettlementClient /
         // UpgSettlementClient pair that dialed UPG's generic external-settlement
@@ -530,9 +546,9 @@ public static class ServiceClientExtensions
         // (UpgSettlementLedgerClient) was behind FeatureFlags:UseUpstream:Payments,
         // so "Services:UnifiedPayment:BaseUrl" stayed a live configuration string
         // compiled into the shipped assembly. Both the clients and this binding are
-        // deleted — the cash-settlement ledger is now in-process unconditionally
-        // (see Program.cs / InProcessCodSettlementLedger). Do NOT re-add a payments
-        // HttpClient here; see docs/batches/b02-20260726/UPG-REMOVAL.md.
+        // deleted. gwdbx W2-R11: the cash-settlement ledger is not in-process either —
+        // settlement-service owns it (see the settlement-service registration above). Do NOT
+        // re-add a payments HttpClient here; see docs/batches/b02-20260726/UPG-REMOVAL.md.
 
         AddDbProbeClients(services, config);
 

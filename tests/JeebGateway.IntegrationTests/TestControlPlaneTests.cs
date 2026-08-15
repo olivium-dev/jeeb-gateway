@@ -283,7 +283,9 @@ public sealed class TestControlPlaneTests : IClassFixture<WebApplicationFactory<
         var names = body.Jobs.Select(j => j.Name).ToHashSet();
         Assert.Contains("rating-reveal", names);
         Assert.Contains("request-expiry-sweep", names);
-        Assert.Contains("settlement-batch", names);
+        // gwdbx W2-R11: "settlement-batch" is gone — the weekly payout cron moved to
+        // settlement-service. Assert it is ABSENT so the removal cannot silently regress.
+        Assert.DoesNotContain("settlement-batch", names);
     }
 
     // -------------------------------------------------------------------------

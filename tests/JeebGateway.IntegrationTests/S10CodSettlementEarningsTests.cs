@@ -4,6 +4,9 @@ using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Financials;
+using JeebGateway.IntegrationTests.Financials;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using JeebGateway.Requests;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -20,21 +23,32 @@ namespace JeebGateway.IntegrationTests;
 ///   * H5/A4    — earnings summary nested totals envelope {net,gross,commission,currency:USD}.
 ///   * A5       — ETag header + If-None-Match → 304.
 ///   * N15      — from>to → 400.
-///   * H3.3/H4/N10/N11 — COD-compose: record → by-delivery read → mark-paid
-///                (idempotent re-paid → 409; cancelled batch → 422) via the
-///                in-memory UPG COD client (live path swaps to the HTTP client).
+///   * H3.3/N11 — COD-compose: record → by-delivery read, now projected from the
+///                settlement-service row. gwdbx W2-R11: mark-paid needs the ADMIN scope the
+///                gateway must not hold, so H4/N10 became the typed 503 refusal.
 ///   * H6       — statement is application/pdf with the %PDF magic-byte header.
 ///
 /// All run on the local-mirror path (FeatureFlags:UseUpstream:Delivery OFF) so the
 /// IRequestsStore seed is authoritative and no live Go/Elixir upstream is needed.
 /// </summary>
-public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory<Program>>
+public class S10CodSettlementEarningsTests : IClassFixture<S10CodSettlementEarningsTests.Host>
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     private readonly WebApplicationFactory<Program> _factory;
 
-    public S10CodSettlementEarningsTests(WebApplicationFactory<Program> factory) => _factory = factory;
+    public S10CodSettlementEarningsTests(Host host) => _factory = host;
+
+    /// <summary>Host with settlement-service represented by the in-process double.</summary>
+    public sealed class Host : WebApplicationFactory<Program>
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder) =>
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<ISettlementServiceClient>();
+                services.AddSingleton<ISettlementServiceClient>(new FakeSettlementServiceClient());
+            });
+    }
 
     // ── H1: settle a REAL Done delivery (keystone) ─────────────────────────────
 
@@ -58,7 +72,6 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         body.Total.Should().Be(200000m);
         body.Currency.Should().Be("USD");
         body.MinimumFeeApplied.Should().BeFalse();
-        body.LedgerEntryId.Should().NotBeNullOrEmpty();
     }
 
     [Fact] // keystone: legacy 'delivered' alias also settles (dual-read)
@@ -170,7 +183,7 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
     [Fact] // N15
     public async Task EarningsSummary_From_Greater_Than_To_Returns_400()
     {
-        var jeeber = AuthClient($"jeeber-{Guid.NewGuid()}", "driver");
+        var jeeber = AuthClient(Guid.NewGuid().ToString(), "driver");
         var resp = await jeeber.GetAsync("/api/earnings/summary?from=2026-06-30&to=2026-06-01");
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
@@ -192,8 +205,11 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         var read = await jeeber.GetAsync($"/api/v1/payments/cod_jeeb/by-delivery/{seed.Id}");
         read.StatusCode.Should().Be(HttpStatusCode.OK);
         using var doc = JsonDocument.Parse(await read.Content.ReadAsStringAsync());
-        doc.RootElement.GetProperty("status").GetString().Should().Be("batched");
-        doc.RootElement.GetProperty("batchId").GetString().Should().NotBeNullOrEmpty();
+        // W2-R11: the record IS the settlement row, so it reports the row's real COD state.
+        // The old "batched" was hard-coded by the deleted in-process ledger.
+        doc.RootElement.GetProperty("status").GetString().Should().Be(CodSettlementState.Recorded);
+        doc.RootElement.GetProperty("delivery_id").GetString().Should().Be(seed.Id);
+        doc.RootElement.GetProperty("gross_amount").GetString().Should().Be("2000000");
     }
 
     [Fact] // COD by-delivery read by a non-party → 403
@@ -206,41 +222,28 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
         (await jeeber.PostAsJsonAsync("/api/v1/payments/cod/record",
             new { deliveryId = seed.Id }, Json)).EnsureSuccessStatusCode();
 
-        var stranger = AuthClient($"stranger-{Guid.NewGuid()}", "driver,customer");
+        var stranger = AuthClient(Guid.NewGuid().ToString(), "driver,customer");
         var read = await stranger.GetAsync($"/api/v1/payments/cod_jeeb/by-delivery/{seed.Id}");
         read.StatusCode.Should().Be(HttpStatusCode.Forbidden);
     }
 
-    [Fact] // H4: admin marks the batch paid → 200; N10: re-paid → 409
-    public async Task MarkPaid_By_Admin_Returns_200_Then_409_On_Repaid()
+    [Fact] // W2-R11: mark-paid needs the ADMIN scope the gateway must not hold → typed 503
+    public async Task MarkPaid_By_Admin_Is_A_Typed_503_Naming_The_Admin_Scope()
     {
-        var seed = await SeedAsync(CanonicalDeliveryStatus.Done);
-        var jeeber = AuthClient(seed.JeeberId, "driver");
-        (await jeeber.PostAsJsonAsync($"/deliveries/{seed.Id}/settle",
-            new { goodsCost = 2000000m }, Json)).EnsureSuccessStatusCode();
+        var admin = AuthClient(Guid.NewGuid().ToString(), "admin");
 
-        var record = await jeeber.PostAsJsonAsync(
-            "/api/v1/payments/cod/record", new { deliveryId = seed.Id }, Json);
-        using var rdoc = JsonDocument.Parse(await record.Content.ReadAsStringAsync());
-        var batchId = rdoc.RootElement.GetProperty("data").GetProperty("batchId").GetString();
-        batchId.Should().NotBeNullOrEmpty();
-
-        var admin = AuthClient($"admin-{Guid.NewGuid()}", "admin");
         var paid = await admin.PostAsJsonAsync(
-            $"/admin/v1/settlements/{batchId}/mark-paid", new { eventType = "settlement.paid" }, Json);
-        paid.StatusCode.Should().Be(HttpStatusCode.OK);
-        using var pdoc = JsonDocument.Parse(await paid.Content.ReadAsStringAsync());
-        pdoc.RootElement.GetProperty("status").GetString().Should().Be("paid");
+            $"/admin/v1/settlements/{Guid.NewGuid()}/mark-paid", new { eventType = "settlement.paid" }, Json);
 
-        var repaid = await admin.PostAsJsonAsync(
-            $"/admin/v1/settlements/{batchId}/mark-paid", new { eventType = "settlement.paid" }, Json);
-        repaid.StatusCode.Should().Be(HttpStatusCode.Conflict); // N10
+        paid.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        (await paid.Content.ReadAsStringAsync())
+            .Should().Contain(SettlementAdminScopeException.ProblemType);
     }
 
     [Fact] // N12: a non-admin cannot mark a batch paid → 403
     public async Task MarkPaid_By_NonAdmin_Returns_403()
     {
-        var jeeber = AuthClient($"jeeber-{Guid.NewGuid()}", "driver");
+        var jeeber = AuthClient(Guid.NewGuid().ToString(), "driver");
         var resp = await jeeber.PostAsJsonAsync(
             "/admin/v1/settlements/batch-x/mark-paid", new { eventType = "settlement.paid" }, Json);
         resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
@@ -305,8 +308,9 @@ public class S10CodSettlementEarningsTests : IClassFixture<WebApplicationFactory
     private async Task<Seed> SeedAsync(string status, decimal acceptedFee = 2000000m)
     {
         var store = _factory.Services.GetRequiredService<IRequestsStore>();
-        var clientId = $"client-{Guid.NewGuid()}";
-        var jeeberId = $"jeeber-{Guid.NewGuid()}";
+        // Holder ids must be GUIDs: settlement-service excludes non-GUID holders (A21 §6 / D7).
+        var clientId = Guid.NewGuid().ToString();
+        var jeeberId = Guid.NewGuid().ToString();
 
         var created = await store.CreateAsync(new CreateRequestInput
         {

@@ -83,6 +83,9 @@ public static class HealthCheckExtensions
         AddDownstreamProbe(checks, config, "geolocation-service",     "Services:Geolocation:BaseUrl",     healthPath: "health");
         AddDownstreamProbe(checks, config, "offer-service",           "Services:Offer:BaseUrl",           healthPath: "health");
         AddDownstreamProbe(checks, config, "ban-service",             "Services:Ban:BaseUrl",             healthPath: "health");
+        // gwdbx W2-R11: settlement-service owns the money rows the gateway used to hold. Unhealthy
+        // (not Degraded) — there is no local fallback left, so an unreachable one is not ready.
+        AddDownstreamProbe(checks, config, "settlement-service",      "Services:Settlement:BaseUrl",      healthPath: "health/ready");
 
         // unified-payment-gateway (Elixir UPG) was decoupled (sha-553711610c2a /
         // main 9f05a991): the old GET /health route was REMOVED (now 404) and the

@@ -27,9 +27,8 @@ src/JeebGateway/Infrastructure/INpgsqlConnectionFactory.cs
 src/JeebGateway/Infrastructure/PostgresHealthCheck.cs
 
 # --- Money / settlement stores (D1 rows 2, 3, 21, 17) — gateway-owned per JEB-1476 ---
-src/JeebGateway/Financials/PostgresSettlementStore.cs
-src/JeebGateway/Financials/PostgresSettlementEnqueueStore.cs
-src/JeebGateway/Financials/WeeklySettlementBatch.cs
+# gwdbx W2-R11: the three settlement seams are DELETED (settlement-service owns them). Pruned
+# because the ratchet only shrinks — re-adding any of them is a GR-3 violation, not a rollback.
 src/JeebGateway/Users/PostgresFinancialLedger.cs
 
 # --- Wallet ledger direct read (D1 row 6) -> wallet-service ---

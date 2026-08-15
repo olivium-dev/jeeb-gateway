@@ -24,7 +24,7 @@ namespace JeebGateway.Controllers;
 ///
 /// Authorization: service-to-service calls (admin scope or system-internal
 /// service token). The endpoint is NOT consumer-facing — it is called by the
-/// gateway's own batch jobs (WeeklySettlementBatch → JEB-57) and by
+/// gateway's own batch jobs and by
 /// operator tooling.
 /// </summary>
 [ApiController]

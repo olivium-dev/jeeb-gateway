@@ -41,22 +41,19 @@ public class StoreDurabilityGuardGapStoresTests
     private static bool InCritical(Type iface) =>
         StoreDurabilityGuard.Critical.Any(c => c.Iface == iface);
 
-    // ── JEBV4-124 — settlement enqueue is Critical (durable) ───────────────
+    // ── JEBV4-124 — settlement enqueue ─────────────────────────────────────
 
-    // INVERTED at gwdbx W2-R02: migration 0052 dropped settlement_enqueue, so the durable target
-    // this entry demanded no longer exists and the entry left the roster with it.
+    // CLOSED at gwdbx W2-R11: the settlement stores are deleted outright (settlement-service owns
+    // the rows), so there is no gateway settlement type left for any roster to classify.
     [Fact]
-    public void SettlementEnqueue_Left_Critical_When_Its_Table_Was_Dropped()
+    public void No_Settlement_Store_Type_Survives_To_Be_Classified()
     {
-        InCritical(typeof(JeebGateway.Financials.ISettlementEnqueueStore)).Should()
-            .BeFalse("demanding PostgresSettlementEnqueueStore would refuse every prod-like boot");
-
-        StoreDurabilityGuard.KnownInMemoryBacklog.Should()
-            .NotContain(typeof(JeebGateway.Financials.ISettlementEnqueueStore),
-                "the prod-like registration is the Null store, not an in-memory store of record");
-        StoreDurabilityGuard.IntentionalInMemory.Should()
-            .NotContain(typeof(JeebGateway.Financials.ISettlementEnqueueStore),
-                "laundering a money store onto a log-only list would make the guard lie");
+        typeof(StoreDurabilityGuard).Assembly.GetTypes()
+            .Where(t => t.Name.Contains("SettlementStore", StringComparison.Ordinal)
+                     || t.Name.Contains("SettlementEnqueue", StringComparison.Ordinal)
+                     || t.Name.Contains("SettlementBatchStore", StringComparison.Ordinal))
+            .Should().BeEmpty("laundering a money store onto a log-only list would make the guard lie; "
+                              + "W2-R11 removes the temptation by deleting the stores");
     }
 
     // ── JEBV4-143 — location store is IntentionalInMemory (rebuildable cache) ──
@@ -103,9 +100,7 @@ public class StoreDurabilityGuardGapStoresTests
                 .Concat(StoreDurabilityGuard.UpstreamContractIncomplete)
                 .Concat(StoreDurabilityGuard.IntentionalInMemory));
 
-        // W2-R02: ISettlementEnqueueStore is deliberately no longer classified — its table is gone
-        // and its prod-like registration is the Null store (SettlementStoreRetiredW2R02Tests.A1/A2).
-        classified.Should().NotContain(typeof(JeebGateway.Financials.ISettlementEnqueueStore));
+        // W2-R11: no settlement type remains in the assembly, so none can be classified.
         classified.Should().Contain(typeof(JeebGateway.Tracking.ILocationStore));
         classified.Should().Contain(typeof(JeebGateway.Availability.IPendingOffersStore));
     }

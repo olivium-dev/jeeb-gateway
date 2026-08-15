@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Financials;
+using JeebGateway.IntegrationTests.Financials;
 using JeebGateway.Requests;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Hosting;
@@ -52,7 +53,13 @@ public sealed class CmsDashboardEndpointTests
     [Fact]
     public async Task Summary_For_Admin_Returns_The_Full_Contract_Shape_With_Real_Counts()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        var settlements = new FakeSettlementServiceClient();
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<ISettlementServiceClient>();
+                services.AddSingleton<ISettlementServiceClient>(settlements);
+            }));
 
         SeedUser(factory, "u-jeeber", "Rami Jeeber", "+96170000001", Roles.Jeeber);
         SeedUser(factory, "u-client", "Lina Client", "+96170000002", Roles.Client);
@@ -61,7 +68,7 @@ public sealed class CmsDashboardEndpointTests
         await SeedRequestAsync(factory, "u-client", "Documents", RequestStatus.AtDoor);
         await SeedRequestAsync(factory, "u-client", "Groceries", RequestStatus.Disputed);
         await SeedRequestAsync(factory, "u-client", "Fresh order", status: null);
-        SeedSettlement(factory, "u-jeeber", goodsCost: 40m, commission: 10m);
+        SeedSettlement(settlements, "u-jeeber", goodsCost: 40m);
 
         var resp = await AdminClient(factory).GetAsync(Route);
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -78,7 +85,7 @@ public sealed class CmsDashboardEndpointTests
         kpis.GetProperty("kycPending").GetInt32().Should().Be(0);
 
         var earnings = kpis.GetProperty("earningsTotal");
-        earnings.GetProperty("value").GetDecimal().Should().Be(30m, "net = goodsCost - commission");
+        earnings.GetProperty("value").GetDecimal().Should().Be(36m, "net = goodsCost - flat 10% commission");
         earnings.GetProperty("currency").GetString().Should().Be("USD");
 
         var activity = body.GetProperty("recentActivity").EnumerateArray().ToList();
@@ -102,13 +109,14 @@ public sealed class CmsDashboardEndpointTests
     [Fact]
     public async Task Summary_Stays_200_With_One_Dead_Source_And_Only_That_Tile_Degrades()
     {
-        // The settlement store is the fail-soft probe: it throws on every read, so the earnings
+        // settlement-service is the fail-soft probe: it throws on every read, so the earnings
         // tile must zero while every other tile still reports its real number.
         using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
             builder.ConfigureServices(services =>
             {
-                services.RemoveAll<ISettlementStore>();
-                services.AddSingleton<ISettlementStore, ThrowingSettlementStore>();
+                services.RemoveAll<ISettlementServiceClient>();
+                services.AddSingleton<ISettlementServiceClient>(
+                    FakeSettlementServiceClient.Unreachable());
             }));
 
         SeedUser(factory, "u-jeeber", "Rami Jeeber", "+96170000001", Roles.Jeeber);
@@ -158,28 +166,16 @@ public sealed class CmsDashboardEndpointTests
         if (status is not null) await store.SetStatusAsync(row.Id, status, default);
     }
 
+    // Commission is computed by settlement-service (flat 10%); the test double does the same.
     private static void SeedSettlement(
-        WebApplicationFactory<Program> factory, string jeeberId, decimal goodsCost, decimal commission)
-        => factory.Services.GetRequiredService<ISettlementStore>().TryInsertAsync(new Settlement
-        {
-            Id = Guid.NewGuid().ToString(),
-            DeliveryId = Guid.NewGuid().ToString(),
-            ClientId = "u-client",
-            JeeberId = jeeberId,
-            TierId = "standard",
-            GoodsCost = goodsCost,
-            CommissionTier = CommissionTier.Standard,
-            CommissionRate = 0.25m,
-            Commission = commission,
-            Insurance = 0m,
-            Total = goodsCost,
-            MinimumFeeApplied = false,
-            Currency = "USD",
-            PaymentMethod = "cash",
-            State = SettlementState.Settled,
-            CodState = CodSettlementState.Recorded,
-            SettledAt = DateTimeOffset.UtcNow,
-        }, default).GetAwaiter().GetResult();
+        FakeSettlementServiceClient settlements, string jeeberId, decimal goodsCost)
+        => settlements.SettleAsync(new SettlementSettleCommand(
+            DeliveryId: Guid.NewGuid().ToString(),
+            HolderId: jeeberId,
+            ClientId: "u-client",
+            TierId: "standard",
+            GrossAmount: goodsCost,
+            PaymentMethod: "cash"), default).GetAwaiter().GetResult();
 
     private static async Task<JsonElement> ReadJsonAsync(HttpResponseMessage resp)
     {
@@ -187,37 +183,4 @@ public sealed class CmsDashboardEndpointTests
         return doc.RootElement.Clone();
     }
 
-    /// <summary>Test-only dead data source for the fail-soft probe.</summary>
-    private sealed class ThrowingSettlementStore : ISettlementStore
-    {
-        public Task<decimal> SumEarningsAsync(IReadOnlyCollection<string>? codStates, CancellationToken ct)
-            => throw new InvalidOperationException("settlement store is down");
-
-        public Task<(Settlement Row, bool Inserted)> TryInsertAsync(Settlement settlement, CancellationToken ct)
-            => throw new NotImplementedException();
-        public Task<Settlement?> GetByDeliveryAsync(string deliveryId, CancellationToken ct)
-            => Task.FromResult<Settlement?>(null);
-        public Task<IReadOnlyList<Settlement>> ListByJeeberAsync(
-            string jeeberId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct,
-            IReadOnlyCollection<string>? codStates = null)
-            => Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
-        public Task<Settlement?> GetByIdAsync(string settlementId, CancellationToken ct)
-            => Task.FromResult<Settlement?>(null);
-        public Task<bool> SetLedgerEntryAsync(string settlementId, string ledgerEntryId, CancellationToken ct)
-            => Task.FromResult(false);
-        public Task<IReadOnlyList<Settlement>> ListUnpostedLedgerAsync(int limit, CancellationToken ct)
-            => Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
-        public Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, DateTimeOffset at, CancellationToken ct)
-            => Task.FromResult<Settlement?>(null);
-        public Task<bool> ReplacePendingAsync(string deliveryId, Settlement settled, CancellationToken ct)
-            => Task.FromResult(false);
-        public Task<IReadOnlyList<Settlement>> ListRecordedInWindowAsync(
-            DateTimeOffset windowStart, DateTimeOffset windowEnd, int limit, CancellationToken ct)
-            => Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
-        public Task MarkBatchedAsync(
-            IReadOnlyList<string> settlementIds, Guid batchId, DateTimeOffset at, CancellationToken ct)
-            => Task.CompletedTask;
-        public Task MarkPaidByBatchAsync(Guid batchId, DateTimeOffset paidAt, CancellationToken ct)
-            => Task.CompletedTask;
-    }
 }

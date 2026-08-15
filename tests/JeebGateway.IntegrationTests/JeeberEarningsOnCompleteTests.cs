@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Financials;
+using JeebGateway.IntegrationTests.Financials;
 using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
 using JeebGateway.Tiers;
@@ -65,7 +66,7 @@ public class JeeberEarningsOnCompleteTests
         verify.StatusCode.Should().Be(HttpStatusCode.OK, "the handover completes on the upstream path");
 
         // (1) A settlement row now exists — server-authoritative amount, jeeber credited.
-        var store = factory.Services.GetRequiredService<ISettlementStore>();
+        var store = factory.Services.GetRequiredService<ISettlementServiceClient>();
         var settlement = await store.GetByDeliveryAsync(deliveryId, default);
         settlement.Should().NotBeNull("completion must create the gateway settlement row (the regression)");
         settlement!.State.Should().Be(SettlementState.Settled);
@@ -75,7 +76,6 @@ public class JeeberEarningsOnCompleteTests
         settlement.Insurance.Should().Be(ExpectedInsurance);
         settlement.Total.Should().Be(ExpectedTotal);
         settlement.PaymentMethod.Should().Be(SettlementService.PaymentMethodCash);
-        settlement.LedgerEntryId.Should().NotBeNullOrEmpty("the wallet cash_settlement credit was posted");
 
         // (2) Earnings now reflect the credit (gross = the server-authoritative amount).
         var from = Uri.EscapeDataString(DateTimeOffset.UtcNow.AddDays(-1).ToString("O"));
@@ -119,7 +119,7 @@ public class JeeberEarningsOnCompleteTests
     [Fact]
     public async Task SettleOnCompletion_Is_Idempotent_No_Double_Credit()
     {
-        await using var factory = new WebApplicationFactory<Program>();
+        await using var factory = SettlementFactory();
         var (deliveryId, jeeberId) = await SeedDoneWithFeeAsync(factory, AcceptedFee);
 
         var svc = factory.Services.GetRequiredService<ISettlementService>();
@@ -127,14 +127,12 @@ public class JeeberEarningsOnCompleteTests
         var first = await svc.SettleOnCompletionAsync(deliveryId, default);
         first.Outcome.Should().Be(SettlementOutcome.Settled);
         first.Settlement!.GoodsCost.Should().Be(AcceptedFee);
-        var firstLedgerId = first.Settlement.LedgerEntryId;
-        firstLedgerId.Should().NotBeNullOrEmpty();
 
         var second = await svc.SettleOnCompletionAsync(deliveryId, default);
         second.Outcome.Should().Be(SettlementOutcome.AlreadySettled,
             "a second completion must not create a second settlement or re-credit the jeeber");
-        second.Settlement!.Id.Should().Be(first.Settlement.Id);
-        second.Settlement.LedgerEntryId.Should().Be(firstLedgerId, "the ledger credit is posted exactly once");
+        second.Settlement!.Id.Should().Be(first.Settlement.Id,
+            "settlement-service is idempotent on the delivery id: one row, one credit");
     }
 
     /// <summary>
@@ -145,7 +143,7 @@ public class JeeberEarningsOnCompleteTests
     [Fact]
     public async Task SettleOnCompletion_Uses_Server_Authoritative_Amount_From_Delivery_Row()
     {
-        await using var factory = new WebApplicationFactory<Program>();
+        await using var factory = SettlementFactory();
         const decimal fee = 750_000m;
         var (deliveryId, _) = await SeedDoneWithFeeAsync(factory, fee);
 
@@ -182,15 +180,25 @@ public class JeeberEarningsOnCompleteTests
                 services.AddSingleton<IDeliveryServiceClient>(delivery);
                 services.RemoveAll<IServiceOTPClient>();
                 services.AddSingleton<IServiceOTPClient>(new RecordingOtpClient());
+                services.RemoveAll<ISettlementServiceClient>();
+                services.AddSingleton<ISettlementServiceClient>(new FakeSettlementServiceClient());
             });
         });
+
+    private static WebApplicationFactory<Program> SettlementFactory()
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<ISettlementServiceClient>();
+                services.AddSingleton<ISettlementServiceClient>(new FakeSettlementServiceClient());
+            }));
 
     private static async Task<(string deliveryId, string jeeberId)> SeedAtDoorWithFeeAsync(
         WebApplicationFactory<Program> factory, decimal fee)
     {
         var store = factory.Services.GetRequiredService<IRequestsStore>();
-        var clientId = $"earn-client-{Guid.NewGuid()}";
-        var jeeberId = $"earn-jeeber-{Guid.NewGuid()}";
+        var clientId = Guid.NewGuid().ToString();
+        var jeeberId = Guid.NewGuid().ToString();
 
         var created = await store.CreateAsync(new CreateRequestInput
         {
@@ -209,8 +217,8 @@ public class JeeberEarningsOnCompleteTests
         WebApplicationFactory<Program> factory, decimal fee)
     {
         var store = factory.Services.GetRequiredService<IRequestsStore>();
-        var clientId = $"earn-client-{Guid.NewGuid()}";
-        var jeeberId = $"earn-jeeber-{Guid.NewGuid()}";
+        var clientId = Guid.NewGuid().ToString();
+        var jeeberId = Guid.NewGuid().ToString();
 
         var created = await store.CreateAsync(new CreateRequestInput
         {

@@ -10,7 +10,6 @@ using FluentAssertions;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Controllers;
 using JeebGateway.Financials;
-using JeebGateway.Financials.Cod;
 using JeebGateway.Infrastructure;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
@@ -291,68 +290,51 @@ public class W26_MoneyControllerRouteCensusTests
         request.PeriodEnd.Should().Be(new DateTimeOffset(2026, 3, 6, 0, 0, 0, TimeSpan.Zero));
     }
 
-    // ── C4e — the admin controller's unhappy read path ─────────────────────
-
-    private sealed class EmptyBatchStore : ISettlementBatchStore
-    {
-        public List<string> ListedStatuses { get; } = new();
-        public Task<SettlementBatch?> GetByIdAsync(Guid id, CancellationToken ct) => Task.FromResult<SettlementBatch?>(null);
-        public Task<IReadOnlyList<SettlementBatch>> ListByStatusAsync(string status, CancellationToken ct)
-        {
-            ListedStatuses.Add(status);
-            return Task.FromResult<IReadOnlyList<SettlementBatch>>(Array.Empty<SettlementBatch>());
-        }
-        public Task<SettlementBatch> MarkPaidAsync(Guid id, string admin, DateTimeOffset at, CancellationToken ct) => throw new NotSupportedException();
-        public Task<IReadOnlyList<Settlement>> ListUnsettledAsync(int limit, CancellationToken ct) => Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
-        public Task MarkBatchProcessedAsync(IReadOnlyList<string> ids, DateTimeOffset at, CancellationToken ct) => Task.CompletedTask;
-        public Task<SettlementBatch> CreateOrGetBatchAsync(string j, DateOnly s, DateOnly e, IReadOnlyList<Settlement> x, CancellationToken ct) => throw new NotSupportedException();
-    }
+    // ── C4e — the admin controller's read path after the W2-R11 cutover ────
 
     [Fact]
-    public async Task C4e_ListBatches_Forwards_The_Status_Verbatim_And_An_Unknown_Status_Is_An_Empty_200()
+    public async Task C4e_Batch_Reads_Refuse_With_The_Typed_Scope_503_Not_An_Empty_200()
     {
-        var store = new EmptyBatchStore();
-        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
-            b.ConfigureServices(s => { s.RemoveAll<ISettlementBatchStore>(); s.AddSingleton<ISettlementBatchStore>(store); }));
+        // Pre-W2-R11 this pinned "an unknown filter is an empty 200". Batches moved behind the
+        // ADMIN scope, so every filter now gets the same typed refusal — an empty 200 would lie.
+        using var factory = new WebApplicationFactory<Program>();
         var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-User-Id", "admin-w26");
         client.DefaultRequestHeaders.Add("X-User-Roles", "admin");
 
         var unknown = await client.GetAsync("/v1/admin/settlements/batches?status=not-a-real-status");
 
-        unknown.StatusCode.Should().Be(HttpStatusCode.OK,
-            "an unrecognised filter is an empty result, not a 500 on an admin money screen");
-        (await unknown.Content.ReadAsStringAsync()).Should().Be("[]");
-        store.ListedStatuses.Should().ContainSingle().Which.Should().Be("not-a-real-status");
+        unknown.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        (await unknown.Content.ReadAsStringAsync())
+            .Should().Contain(SettlementAdminScopeException.ProblemType);
 
-        // POSITIVE CONTROL — the default really is "open", so the assertion above is
-        // about pass-through and not about a controller that ignores the query entirely.
-        (await client.GetAsync("/v1/admin/settlements/batches")).StatusCode.Should().Be(HttpStatusCode.OK);
-        store.ListedStatuses.Should().Equal("not-a-real-status", "open");
+        // POSITIVE CONTROL — the default filter takes the same path, so the assertion above is
+        // about the route and not about one odd query string.
+        (await client.GetAsync("/v1/admin/settlements/batches")).StatusCode
+            .Should().Be(HttpStatusCode.ServiceUnavailable);
     }
 
     // ── C5 — the NEGATIVE DISCRIMINATOR (explicitly NOT a GW1 defect) ──────
 
     [Fact]
-    public void C5_The_Other_MarkPaid_Is_Still_In_Process_And_Is_Not_GW1s_To_Fix()
+    public async Task C5_The_Other_MarkPaid_Refuses_Too_And_Is_Not_GW1s_To_Fix()
     {
+        // Pre-W2-R11 the OTHER mark-paid was an in-process dictionary that lost its row on
+        // restart. That ledger is deleted; both routes now refuse with the same typed scope 503.
         using var factory = new WebApplicationFactory<Program>();
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-User-Id", "admin-w26");
+        client.DefaultRequestHeaders.Add("X-User-Roles", "admin");
 
-        factory.Services.GetRequiredService<ICodSettlementLedger>()
-            .Should().BeOfType<InProcessCodSettlementLedger>(
-                "documented, not repaired: POST /admin/v1/settlements/{batchId}/mark-paid on " +
-                "CodSettlementComposeController is backed by ConcurrentDictionaries and loses its " +
-                "row across a restart for a PRE-EXISTING reason. If a restart round shows that row " +
-                "gone, it is NOT a GW1 regression — GW1 owns the ISettlementBatchStore route");
+        var resp = await client.PostAsync(
+            "/admin/v1/settlements/11111111-1111-4111-8111-111111111111/mark-paid", content: null);
 
-        StoreDurabilityGuard.Critical.Select(c => c.Iface)
-            .Should().NotContain(typeof(ICodSettlementLedger),
-                "and the durability guard is structurally blind to it — escalated separately, " +
-                "out of GW1's scope by the batch document");
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        (await resp.Content.ReadAsStringAsync())
+            .Should().Contain(SettlementAdminScopeException.ProblemType);
 
-        // POSITIVE CONTROL — the same guard DOES see other stores, so the NotContain above is a
-        // real distinction rather than an empty set. RE-TARGETED at W2-R02: ISettlementLedgerClient
-        // was the control until migration 0052 dropped its table and it left the roster.
+        // POSITIVE CONTROL — the durability guard still sees the stores it is meant to see, so
+        // the money-path claims above are not being made by an empty guard.
         StoreDurabilityGuard.Critical.Select(c => c.Iface)
             .Should().Contain(typeof(JeebGateway.Requests.IRequestsStore));
     }

@@ -54,6 +54,9 @@ public class S09TrackingSettlementBffTests : IClassFixture<WebApplicationFactory
                 services.AddSingleton<IDeliveryServiceClient>(new FakeDeliveryPresenceClient());
                 services.RemoveAll<IGeoHistoryClient>();
                 services.AddSingleton<IGeoHistoryClient>(_geoHistory);
+                services.RemoveAll<JeebGateway.Financials.ISettlementServiceClient>();
+                services.AddSingleton<JeebGateway.Financials.ISettlementServiceClient>(
+                    new Financials.FakeSettlementServiceClient());
             });
         });
     }

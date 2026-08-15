@@ -188,46 +188,9 @@ public class W18_LiveProbeInstrumentTests
         result.Description.Should().Contain("IRefreshTokenStore");
     }
 
-    // ── S5 — the one SANCTIONED signal that a row really was written ───────
-
-    [Fact]
-    public void S5_The_Ledger_Posted_Journal_Line_Can_Only_Have_Come_From_The_Durable_Client()
-    {
-        // WHY THIS MATTERS. The row-level claim (a ledger entry is written to Postgres and
-        // read back) cannot be checked with psql: the owner rule is "never connect directly
-        // to 192.168.2.20". The sanctioned substitute is the gateway's OWN journal on MSI.
-        // PostgresSettlementLedgerClient logs at Information ONLY AFTER
-        // ExecuteReaderAsync + ReadAsync have succeeded — i.e. only after the INSERT ran
-        // against the DEPLOYED schema and returned a row. So the line's presence proves
-        // migration 0044 is applied and the SQL is valid; its absence alongside
-        // SettlementService's swallowed-exception warning is the silent-failure case.
-        //
-        // That inference is only sound if the line is UNIQUE to the durable client. Assert
-        // it, rather than assuming it.
-        var root = RepoRoot();
-        var postgres = File.ReadAllText(Path.Combine(root, "src", "JeebGateway", "Financials", "PostgresSettlementLedgerClient.cs"));
-        var inMemory = File.ReadAllText(Path.Combine(root, "src", "JeebGateway", "Financials", "InMemorySettlementLedgerClient.cs"));
-
-        const string template = "Settlement ledger entry posted idempotencyKey={IdempotencyKey}";
-
-        postgres.Should().Contain(template,
-            "the durable client must emit an attributable line; without it the journal grep has no subject");
-        inMemory.Should().NotContain(template,
-            "if BOTH clients logged this, a journal hit would not distinguish durable from in-memory " +
-            "and the whole service-class inference collapses");
-
-        // Structural corroboration of the same fact, independent of the string: the
-        // in-memory client has no logger at all, so it CANNOT emit anything.
-        typeof(InMemorySettlementLedgerClient).GetConstructors().Single()
-            .GetParameters().Select(p => p.ParameterType)
-            .Should().NotContain(t => typeof(ILogger).IsAssignableFrom(t));
-
-        // POSITIVE CONTROL for the line above — the same predicate must be able to find a
-        // logger when one is there, or "no logger" is an artefact of the predicate.
-        typeof(PostgresSettlementLedgerClient).GetConstructors().Single()
-            .GetParameters().Select(p => p.ParameterType)
-            .Should().Contain(t => typeof(ILogger).IsAssignableFrom(t));
-    }
+    // ── S5 — REMOVED at gwdbx W2-R11 ──────────────────────────────────────
+    // It sealed the "Settlement ledger entry posted" journal line as unique to the durable ledger
+    // client. Both ledger clients are deleted, so there is no subject left to seal.
 
     // ── S6 — the escape hatch does NOT reach the readiness probe ───────────
 

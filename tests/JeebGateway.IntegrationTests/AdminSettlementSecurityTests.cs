@@ -142,7 +142,7 @@ public sealed class AdminSettlementSecurityTests
     public void RuntimeSettlementServices_ResolveTheLocalCodOwnerPortal()
     {
         using var factory = new WebApplicationFactory<Program>();
-        factory.Services.GetRequiredService<ISettlementStore>().Should().NotBeNull();
+        factory.Services.GetRequiredService<ISettlementServiceClient>().Should().NotBeNull();
         factory.Services.GetRequiredService<IAdminSettlementPortalService>()
             .Should().BeOfType<AdminSettlementPortalService>();
     }

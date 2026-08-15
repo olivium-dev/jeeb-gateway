@@ -34,7 +34,7 @@ public sealed class AccountDeletionPurgeOptions
 /// captures a dependency at a narrower lifetime than its own), and exposes a public
 /// force-runnable entry point (<see cref="PurgeOnceAsync"/>) for tests / an eventual
 /// test-console hook — the same role <c>SweepOnceAsync</c> /
-/// <c>WeeklySettlementBatch.RunBatchAsync</c> play for their stores.
+/// the other gateway sweep jobs play for their stores.
 ///
 /// Registered ONLY when <c>GatewayPostgres:ConnectionString</c> is configured (i.e.
 /// alongside <see cref="PostgresAccountDeletionStore"/>) — there is no equivalent

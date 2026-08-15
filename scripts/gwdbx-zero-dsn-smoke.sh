@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gwdbx W5-14 harness: prod-env cold boot with ZERO Postgres DSNs must serve the A9 final 16-name
+# gwdbx W5-14 harness: prod-env cold boot with ZERO Postgres DSNs must serve the A9 final 17-name
 # roster on /health/ready. Full contract + usage: docs/runbooks/gwdbx-deletion-ledger.md §7.
 
 # Usage: gwdbx-zero-dsn-smoke.sh <publish-dir> [--control]. The --control leg boots WITH dummy DSNs
