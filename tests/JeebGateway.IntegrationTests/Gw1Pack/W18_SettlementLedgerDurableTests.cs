@@ -104,19 +104,15 @@ public class W18_SettlementLedgerDurableTests
     }
 
     [Fact]
-    public void B3_Production_Boot_Without_GatewayPostgres_Refuses_And_Names_The_Settlement_Ledger()
+    public void B3_Production_Boot_Without_GatewayPostgres_Does_Not_Downgrade_The_Settlement_Ledger()
     {
         var ex = BootProduction(gatewayPostgresCs: null);
 
-        ex.Should().NotBeNull("a prod-like gateway must refuse to serve its money ledger from process memory");
+        ex.Should().NotBeNull("other gateway-owned stores still correctly require durable selectors");
         var message = Flatten(ex!);
         message.Should().Contain("FAIL-CLOSED");
-        message.Should().Contain("ISettlementLedgerClient",
-            "the refusal must name the offending store — an unnamed refusal is not attributable to W1.8");
-        message.Should().Contain("InMemorySettlementLedgerClient",
-            "and must name what it resolved to instead");
-        message.Should().Contain("PostgresSettlementLedgerClient",
-            "and what it expected — this is the promotion's durable target");
+        message.Should().NotContain("ISettlementLedgerClient",
+            "wallet-service authority is independent of the legacy gateway database selector");
     }
 
     [Fact]
@@ -142,9 +138,7 @@ public class W18_SettlementLedgerDurableTests
 
         var message = Flatten(ex!);
         message.Should().NotContain("ISettlementLedgerClient",
-            "with GatewayPostgres configured the ledger resolves to PostgresSettlementLedgerClient, " +
-            "so it must drop out of the violation list; if it is still named, the durable branch " +
-            "is not wired to the same selector the guard checks");
+            "the settlement ledger always resolves to wallet-service, independent of this selector");
 
         // POSITIVE CONTROL that the boot really did evaluate the guard (and this is not
         // a NotContain passing because the message is about something else entirely).
@@ -153,21 +147,21 @@ public class W18_SettlementLedgerDurableTests
     }
 
     [Fact]
-    public void B4b_DI_Selects_Postgres_With_A_Connection_String_And_InMemory_Without_One()
+    public void B4b_DI_Selects_Wallet_With_Or_Without_A_Gateway_Connection_String()
     {
         using (var withCs = new WebApplicationFactory<Program>()
                    .WithWebHostBuilder(b => b.UseSetting("GatewayPostgres:ConnectionString", FakeCs)))
         {
             withCs.Services.GetRequiredService<ISettlementLedgerClient>()
-                .Should().BeOfType<PostgresSettlementLedgerClient>();
+                .Should().BeOfType<WalletSettlementLedgerClient>();
         }
 
         // POSITIVE CONTROL for the line above: a resolution that ALWAYS returned the
         // Postgres type would satisfy it without the selector working at all.
         using var withoutCs = new WebApplicationFactory<Program>();
         withoutCs.Services.GetRequiredService<ISettlementLedgerClient>()
-            .Should().BeOfType<InMemorySettlementLedgerClient>(
-                "dev/CI keeps the in-memory fallback; the guard is a no-op outside prod-like envs");
+            .Should().BeOfType<WalletSettlementLedgerClient>(
+                "there is no local financial writer fallback");
     }
 
     // ── B5 — the hazard the promotion closes, demonstrated ─────────────────
@@ -205,7 +199,8 @@ public class W18_SettlementLedgerDurableTests
         StoreDurabilityGuard.Critical
             .Single(c => c.Iface == typeof(ISettlementLedgerClient)).DurableImpls
             .Should().NotContain(typeof(InMemorySettlementLedgerClient))
-            .And.Contain(typeof(PostgresSettlementLedgerClient));
+            .And.NotContain(typeof(PostgresSettlementLedgerClient))
+            .And.Contain(typeof(WalletSettlementLedgerClient));
     }
 
     // ── B6 — migration <-> client, the silent-failure class ────────────────

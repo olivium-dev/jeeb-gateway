@@ -33,6 +33,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\JeebGateway\JeebGateway.csproj" />
+    <ProjectReference Include="..\..\tools\WalletFinanceBackfill\WalletFinanceBackfill.csproj" />
   </ItemGroup>
 
   <ItemGroup>

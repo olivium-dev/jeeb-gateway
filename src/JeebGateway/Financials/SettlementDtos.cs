@@ -70,9 +70,8 @@ public sealed class SettleDeliveryRequest
     public decimal GoodsCost { get; set; }
 
     /// <summary>
-    /// Only "cash" is accepted in MVP — the gateway's payment policy
-    /// routes card transactions through unified_payment_gateway. Defaults
-    /// to "cash" when omitted.
+    /// Only "cash" is accepted. Non-cash payment methods are rejected; Jeeb does not route card
+    /// capture or settlement through a payment gateway. Defaults to "cash" when omitted.
     /// </summary>
     public string? PaymentMethod { get; set; }
 }
