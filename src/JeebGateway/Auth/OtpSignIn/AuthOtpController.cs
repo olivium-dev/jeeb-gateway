@@ -297,32 +297,29 @@ public sealed class AuthOtpController : ControllerBase
     /// reads — the read side <c>FeatureFlags:UserModerationMode</c> designates at its current
     /// <c>dual-write-local-read</c> rung — so login adds NO upstream call that could fail open,
     /// and the W4-06 read cutover re-points both at once.
+    ///
+    /// <para>Via <see cref="UserModerationGate"/>, so the durable-store fault the production
+    /// <see cref="Users.UpstreamBackedUsersStore"/> otherwise swallows reaches this 503.</para>
     /// </summary>
     private async Task<ObjectResult?> RefuseIfSuspendedAsync(string userId, CancellationToken ct)
     {
-        UserProfile? profile;
-        try
-        {
-            profile = await _users.GetByIdAsync(userId, ct);
-        }
-        catch (Exception ex)
+        var (verdict, reason) = await UserModerationGate.EvaluateAsync(_users, userId, _log, ct);
+
+        if (verdict == ModerationVerdict.Unavailable)
         {
             // FAIL CLOSED — minting a session on an unclassified lookup fault is this defect again.
-            _log.LogError(ex,
-                "auth.otp.verify moderation lookup failed userId={UserId}; refusing the session", userId);
             return OtpSignInProblems.Problem(this, StatusCodes.Status503ServiceUnavailable,
                 "moderation_unavailable", "Sign-in unavailable",
                 "Account status could not be verified. Please try again.");
         }
 
-        if (profile is not { IsSuspended: true }) return null;
+        if (verdict != ModerationVerdict.Suspended) return null;
 
         BusinessOutcomeTelemetry.OtpVerifyFailures.Add(1,
             new KeyValuePair<string, object?>("outcome", "account_suspended"));
         _log.LogWarning("auth.otp.verify refused: account suspended userId={UserId}", userId);
 
         // Same reason text [RequireActiveUser] returns, plus machine fields the app renders.
-        var reason = profile.SuspensionReason ?? "Contact support.";
         return OtpSignInProblems.Problem(this, StatusCodes.Status403Forbidden,
             "account_suspended", "Account is suspended.", reason,
             new Dictionary<string, object?> { ["accountStatus"] = "suspended", ["reason"] = reason });

@@ -14,6 +14,8 @@ using GwUserProfile = JeebGateway.Users.UserProfile;
 using GwDualRoleClient = JeebGateway.Users.IUserManagementDualRoleClient;
 using GwSeededRoles = JeebGateway.Users.IDevSeededRoleStore;
 using GwRoles = JeebGateway.Users.Roles;
+using GwModerationGate = JeebGateway.Users.UserModerationGate;
+using GwModerationVerdict = JeebGateway.Users.ModerationVerdict;
 using UmClient = JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient;
 using UmApiException = JeebGateway.service.ServiceUserManagement.ApiException;
 
@@ -226,6 +228,9 @@ public sealed class AuthEmailFacadeController : ControllerBase
             if (string.IsNullOrWhiteSpace(res?.UserId))
                 return Problem(401, "invalid_credentials", "Social login failed", "The social token was rejected.");
 
+            var refusal = await RefuseIfSuspendedAsync(res!.UserId!, ct);
+            if (refusal is not null) return refusal;
+
             var (roles, active) = await ResolveRolesAsync(res!.UserId!, email: null, ct);
             await ProjectAsync(res.UserId!, roles, active, ct);
             var pair = await _tokens.IssueAsync(res.UserId!, roles, ct);
@@ -252,6 +257,9 @@ public sealed class AuthEmailFacadeController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(userId))
             return Problem(401, "invalid_credentials", "Login failed", "No user was resolved.");
+
+        var refusal = await RefuseIfSuspendedAsync(userId!, ct);
+        if (refusal is not null) return refusal;
 
         var (roles, active) = await ResolveRolesAsync(userId!, email, ct);
         await ProjectAsync(userId!, roles, active, ct);
@@ -330,6 +338,28 @@ public sealed class AuthEmailFacadeController : ControllerBase
 
     private ObjectResult Problem(int status, string code, string title, string detail)
         => OtpSignInProblems.Problem(this, status, code, title, detail);
+
+    /// <summary>
+    /// Pre-mint suspension refusal; null means proceed. This facade mints the IDENTICAL
+    /// gateway session as OTP verify, so it carries the identical gate.
+    /// </summary>
+    private async Task<ObjectResult?> RefuseIfSuspendedAsync(string userId, CancellationToken ct)
+    {
+        var (verdict, reason) = await GwModerationGate.EvaluateAsync(_users, userId, _log, ct);
+
+        if (verdict == GwModerationVerdict.Unavailable)
+        {
+            return Problem(503, "moderation_unavailable",
+                "Sign-in unavailable", "Account status could not be verified. Please try again.");
+        }
+
+        if (verdict != GwModerationVerdict.Suspended) return null;
+
+        _log.LogWarning("auth.facade refused: account suspended userId={UserId}", userId);
+        return OtpSignInProblems.Problem(this, 403,
+            "account_suspended", "Account is suspended.", reason,
+            new Dictionary<string, object?> { ["accountStatus"] = "suspended", ["reason"] = reason });
+    }
 
     // ---- DTOs (mobile DioAuthRepository / social contract) ----
     public sealed class EmailLoginDto { public string? Email { get; set; } public string? Password { get; set; } }

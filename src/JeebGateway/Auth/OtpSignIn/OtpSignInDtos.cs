@@ -54,8 +54,9 @@ public static class OtpSignInProblems
     /// contract as <see cref="Problem"/>.
     /// </summary>
     public static ObjectResult UsersProblem(
-        ControllerBase c, int status, string shortType, string title, string detail)
-        => Build(c, UsersProblemBaseUri, status, shortType, title, detail);
+        ControllerBase c, int status, string shortType, string title, string detail,
+        IDictionary<string, object?>? extensions = null)
+        => Build(c, UsersProblemBaseUri, status, shortType, title, detail, extensions);
 
     /// <summary>
     /// Build a <b>429 Too Many Requests</b> <c>application/problem+json</c> result
