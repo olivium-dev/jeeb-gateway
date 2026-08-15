@@ -121,9 +121,9 @@ public sealed class WalletServiceLedgerReaderTests
         var viaWalletApi = await sut.ReadLedgerAsync(
             Guid.NewGuid(), 1, 20, null, null, null, CancellationToken.None);
 
-        var viaPostgres = PostgresJeebWalletLedgerReader.FormatUtcTimestamp(
-            new DateTime(2026, 8, 8, 21, 2, 43, DateTimeKind.Unspecified).AddTicks(9_544_940));
-        viaWalletApi[0].Ts.Should().Be(viaPostgres);
+        // W5-10 deleted the Postgres projection that used to define this format. Pin the
+        // round-trip ("o") UTC form directly so the wire contract survives the seam removal.
+        viaWalletApi[0].Ts.Should().Be("2026-08-08T21:02:43.9544940Z");
     }
 
     /// <summary>

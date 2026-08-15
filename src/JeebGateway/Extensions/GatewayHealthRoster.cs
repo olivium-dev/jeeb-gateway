@@ -32,7 +32,6 @@ public static class GatewayHealthRoster
     {
         "admin-oidc-configuration",
         "gateway-postgres",
-        "wallet-postgres",
         "whisper",
         "store-durability",
         "jeeb-state-service",
@@ -42,6 +41,7 @@ public static class GatewayHealthRoster
     public static IReadOnlyList<string> Ready { get; } =
         DownstreamProbes.Select(p => p.Name).Concat(InProcessChecks).OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
-    /// <summary>A9 asserted count. 19 through W2-R09; 20 from W2-R11 (settlement-service).</summary>
-    public const int ExpectedReadyCount = 20;
+    /// <summary>A9 asserted count. 20 from W2-R11 (settlement-service); 19 from W5-10, which
+    /// deleted the WalletPostgres seam and its readiness probe.</summary>
+    public const int ExpectedReadyCount = 19;
 }

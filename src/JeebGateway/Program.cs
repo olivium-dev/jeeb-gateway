@@ -1424,7 +1424,6 @@ builder.Services.Configure<JeebGateway.JeebWallet.WalletLedgerMigrationOptions>(
     builder.Configuration.GetSection(
         JeebGateway.JeebWallet.WalletLedgerMigrationOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.JeebWallet.WalletServiceJeebWalletLedgerReader>();
-var walletPostgresCs = builder.Configuration["WalletPostgres:ConnectionString"];
 var walletLedgerMigration = builder.Configuration
     .GetSection(JeebGateway.JeebWallet.WalletLedgerMigrationOptions.SectionName)
     .Get<JeebGateway.JeebWallet.WalletLedgerMigrationOptions>()
@@ -1434,49 +1433,11 @@ var walletLedgerApiConfigured = !string.IsNullOrWhiteSpace(
 
 builder.Services.AddSingleton<JeebGateway.JeebWallet.IJeebWalletLedgerReader>(sp =>
 {
-    var log = sp.GetRequiredService<ILoggerFactory>().CreateLogger("JeebWalletLedgerWiring");
-    var api = sp.GetRequiredService<JeebGateway.JeebWallet.WalletServiceJeebWalletLedgerReader>();
-
-    // dev/CI: no wallet DB. Keep the empty-page fallback (mobile parser tolerates it) rather than
-    // hard-depending on an unreachable wallet API.
-    if (string.IsNullOrWhiteSpace(walletPostgresCs))
-    {
-        if (walletLedgerMigration.WalletApiIsAuthoritative && walletLedgerApiConfigured)
-            return api;
-        return new JeebGateway.JeebWallet.NullJeebWalletLedgerReader();
-    }
-
-    var postgres = new JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader(
-        walletPostgresCs!,
-        sp.GetRequiredService<ILogger<JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader>>());
-
-    if (walletLedgerMigration.WalletApiIsAuthoritative && !walletLedgerApiConfigured)
-    {
-        log.LogWarning(
-            "WalletLedgerMigration:Authority=wallet-api ignored: WalletServiceApi:BaseUrl is not "
-            + "configured. Serving the WalletPostgres ledger projection.");
-    }
-
-    var serveApi = walletLedgerMigration.WalletApiIsAuthoritative && walletLedgerApiConfigured;
-    var primary = serveApi ? (JeebGateway.JeebWallet.IJeebWalletLedgerReader)api : postgres;
-    var shadow = serveApi ? (JeebGateway.JeebWallet.IJeebWalletLedgerReader)postgres : api;
-
-    if (!walletLedgerMigration.ShadowCompareEnabled || !walletLedgerApiConfigured)
-    {
-        if (walletLedgerMigration.ShadowCompareEnabled && !walletLedgerApiConfigured)
-        {
-            log.LogWarning(
-                "WalletLedgerMigration:ShadowCompareEnabled is set but WalletServiceApi:BaseUrl is "
-                + "not configured; wallet ledger shadow comparison is disabled.");
-        }
-        return primary;
-    }
-
-    return new JeebGateway.JeebWallet.ShadowComparingJeebWalletLedgerReader(
-        primary,
-        shadow,
-        sp.GetRequiredService<
-            ILogger<JeebGateway.JeebWallet.ShadowComparingJeebWalletLedgerReader>>());
+    // W5-10: the WalletPostgres projection is deleted, so wallet-service is the only ledger
+    // source. Unconfigured keeps the empty-page fallback the mobile parser tolerates.
+    if (walletLedgerMigration.WalletApiIsAuthoritative && walletLedgerApiConfigured)
+        return sp.GetRequiredService<JeebGateway.JeebWallet.WalletServiceJeebWalletLedgerReader>();
+    return new JeebGateway.JeebWallet.NullJeebWalletLedgerReader();
 });
 
 // GW12-OBS-2 (Leg-12) — readiness depth for the gateway-owned Postgres databases.
@@ -1494,14 +1455,6 @@ if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
         .AddCheck(
             "gateway-postgres",
             new JeebGateway.Infrastructure.PostgresHealthCheck(gatewayPostgresCs!, "GatewayPostgres"),
-            tags: new[] { "ready" });
-}
-if (!string.IsNullOrWhiteSpace(walletPostgresCs))
-{
-    builder.Services.AddHealthChecks()
-        .AddCheck(
-            "wallet-postgres",
-            new JeebGateway.Infrastructure.PostgresHealthCheck(walletPostgresCs!, "WalletPostgres"),
             tags: new[] { "ready" });
 }
 
