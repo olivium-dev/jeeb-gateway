@@ -47,7 +47,7 @@ public sealed class NotificationRecordWriterTests
     }
 
     [Fact]
-    public async Task AC6a_AC6b_AC6c_AC6d_AC9b_Ambiguous500_CommitsAfterOnePostAndReadBackThenPushes()
+    public async Task AC6a_AC6b_AC6c_AC6d_AC9b_Ambiguous500_CommitsAfterOnePostAndReadBack_CentreOwnsThePush()
     {
         var record = ReceivedRecord();
         var notificationId = NotificationCorrelationId.Create(
@@ -81,11 +81,12 @@ public sealed class NotificationRecordWriterTests
                 entry.Properties["classification"],
                 "committed_after_ambiguous_response"));
         logger.Entries.Should().NotContain(entry => entry.Level == LogLevel.Error);
-        push.Sends.Should().Be(1);
+        push.Sends.Should().Be(
+            0, "the read-back PROVED the row upstream, so notification-service already pushed it");
     }
 
     [Fact]
-    public async Task AC7a_AC7b_AC7c_AC7d_AC9c_Ambiguous500_MissIsUnprovenAfterOnePostThenPushes()
+    public async Task AC7a_AC7b_AC7c_AC7d_AC9c_Ambiguous500_MissIsUnproven_AndIsNotResentDirectly()
     {
         long unprovenCount = 0;
         using var meterListener = new MeterListener();
@@ -138,7 +139,11 @@ public sealed class NotificationRecordWriterTests
         error.Properties["event"].Should().Be("notif.durable_write.failed");
         error.Properties["classification"].Should().Be("unproven");
         unprovenCount.Should().Be(1);
-        push.Sends.Should().Be(1);
+        push.Sends.Should().Be(
+            0,
+            "unproven means the POST went out and the read-back could not prove the row ABSENT — "
+            + "sending anyway is how one offer became two cards on 2026-08-14. The loss is "
+            + "monitored (Error log + the unproven counter asserted above), not papered over");
     }
 
     [Fact]

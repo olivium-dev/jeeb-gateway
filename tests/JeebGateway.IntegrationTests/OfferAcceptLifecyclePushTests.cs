@@ -118,8 +118,12 @@ public class OfferAcceptLifecyclePushTests
         push.Attempts.Should().Be(0);
     }
 
+    /// <summary>
+    /// Was …WritesBeforePush. jeeb.offer_accepted has a centre route, so the write IS the push —
+    /// a direct send alongside it is the 2026-08-14 duplicate in its accept-side form.
+    /// </summary>
     [Fact]
-    public async Task OfferAccepted_WithAuthoritativeFee_WritesBeforePush_WithSameCopyAndCorrelation()
+    public async Task OfferAccepted_WithAuthoritativeFee_WritesTheRecord_AndTheCentreOwnsThePush()
     {
         var timeline = new List<string>();
         var writer = new RecordingNotificationRecordWriter(timeline);
@@ -137,13 +141,28 @@ public class OfferAcceptLifecyclePushTests
             "offer-win",
             CancellationToken.None);
 
-        timeline.Should().Equal("write", "push");
+        timeline.Should().Equal("write");
+        push.Sends.Should().BeEmpty(
+            "notification-service produces this push off the same POST — a direct send here is "
+            + "the second card measured on hardware 2026-08-14");
         var record = writer.Accepted.Should().ContainSingle().Subject;
-        var payload = PayloadOf(push.Sends.Single());
         record.Payload.AcceptedAmount.Should().Be(12.5m);
         record.Payload.JeeberId.Should().Be("jeeber-winner");
         record.Payload.PickupLocation.Should().Be("Hamra");
         record.Payload.DeliveryLocation.Should().Be("Achrafieh");
+
+        // Copy + correlation parity is only observable where the centre declines to produce and
+        // the direct client is the sole producer left.
+        var fallback = new RecordingUserPushClient();
+        await new OfferPushNotifier(
+            fallback,
+            new RecordingNotificationRecordWriter(
+                classification: NotificationRecordWriteClassification.Disabled),
+            (_, _) => Task.FromResult<DeliveryRequest?>(request),
+            NullLogger<OfferPushNotifier>.Instance)
+            .NotifyOfferAcceptedAsync("jeeber-winner", request.Id, "offer-win", CancellationToken.None);
+
+        var payload = PayloadOf(fallback.Sends.Single());
         payload["title"].Should().Be(record.Title);
         payload["body"].Should().Be(record.Description);
         payload["notificationId"].Should().Be(record.NotificationCorrelationId);
@@ -468,9 +487,16 @@ public class OfferAcceptLifecyclePushTests
     private sealed class RecordingNotificationRecordWriter : FakeNotificationRecordWriterBase
     {
         private readonly List<string>? _timeline;
+        private readonly NotificationRecordWriteClassification _classification;
 
-        public RecordingNotificationRecordWriter(List<string>? timeline = null)
-            => _timeline = timeline;
+        public RecordingNotificationRecordWriter(
+            List<string>? timeline = null,
+            NotificationRecordWriteClassification classification =
+                NotificationRecordWriteClassification.Committed)
+        {
+            _timeline = timeline;
+            _classification = classification;
+        }
 
         public List<OfferAcceptedNotificationRecord> Accepted { get; } = new();
 
@@ -483,9 +509,7 @@ public class OfferAcceptLifecyclePushTests
         {
             _timeline?.Add("write");
             Accepted.Add(record);
-            return Task.FromResult(new NotificationRecordWriteOutcome(
-                NotificationRecordWriteClassification.Committed,
-                201));
+            return Task.FromResult(new NotificationRecordWriteOutcome(_classification, 201));
         }
     }
 

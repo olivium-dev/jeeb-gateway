@@ -264,8 +264,8 @@ public sealed class ServiceCallbacksController : ControllerBase
         var entityId = ResolveEntityId(body.Data);
         var payload = BuildPayload(notificationType, template, body, entityId);
 
-        // b02 step 6a — the inbox row, BEFORE the push, matching the order the offer seats already
-        // use (OfferPushNotifier writes then pushes). Row-first is the right order: the shade entry
+        // b02 step 6a — the inbox row, BEFORE the push. (The offer seats no longer push after
+        // their write at all: that POST IS the push.) Row-first is the right order: the shade entry
         // is the user's notice that something happened, and the row is what they open afterwards, so
         // if one of the two is going to be missing it must not be the row that the tap lands on.
         //
