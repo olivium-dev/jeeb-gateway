@@ -76,7 +76,7 @@ public class ScheduledDeliveryActivator : BackgroundService
 
     /// <summary>
     /// Single sweep — public so integration tests can drive it deterministically
-    /// against a fake clock, exactly like <c>RequestExpirySweeper.SweepOnceAsync</c>.
+    /// against a fake clock, exactly like the other request sweeps.
     /// </summary>
     public async Task SweepOnceAsync(CancellationToken ct)
     {

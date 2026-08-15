@@ -6,7 +6,7 @@ using Microsoft.Extensions.Options;
 namespace JeebGateway.Requests;
 
 /// <summary>
-/// Stateless replacement for <see cref="RequestExpirySweeper"/>. It computes no
+/// Stateless replacement for the retired gateway TTL sweeper. It computes no
 /// TTL: delivery-service owns the tier TTL and authors the terminal transition
 /// (<c>Cancelled</c> with trigger <c>tier_ttl_elapsed</c>). The gateway merely
 /// observes that fact and projects it onto its own read model so
@@ -19,7 +19,6 @@ public class RequestExpiryObserver : BackgroundService
     private readonly IServiceProvider _services;
     private readonly TimeProvider _clock;
     private readonly IOptions<RequestExpiryOptions> _options;
-    private readonly IOptionsMonitor<RequestExpirySourceOptions> _source;
     private readonly IDeliveryServiceClient _delivery;
     private readonly ILogger<RequestExpiryObserver> _logger;
 
@@ -27,14 +26,12 @@ public class RequestExpiryObserver : BackgroundService
         IServiceProvider services,
         TimeProvider clock,
         IOptions<RequestExpiryOptions> options,
-        IOptionsMonitor<RequestExpirySourceOptions> source,
         IDeliveryServiceClient delivery,
         ILogger<RequestExpiryObserver> logger)
     {
         _services = services;
         _clock = clock;
         _options = options;
-        _source = source;
         _delivery = delivery;
         _logger = logger;
     }
@@ -70,12 +67,8 @@ public class RequestExpiryObserver : BackgroundService
 
     public async Task ObserveOnceAsync(CancellationToken ct)
     {
-        if (!_source.CurrentValue.ObserverEnabled)
-        {
-            _logger.LogDebug("Request expiry observer is disabled by the TTL authority rollout switch");
-            return;
-        }
-
+        // Unconditional since the rollout switch was deleted: delivery-service is the only
+        // TTL authority now, so there is no longer a second one this could overlap with.
         var opts = _options.Value;
         var now = _clock.GetUtcNow();
         var minimumLookback = 2 * opts.ObserverInterval;

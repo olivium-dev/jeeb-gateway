@@ -16,7 +16,7 @@ public class InMemoryRequestsStore : IRequestsStore
     private readonly object _writeLock = new();
     private readonly TimeProvider _clock;
 
-    // Resolved from DI so test fakes (FakeClock in RequestExpirySweeperTests)
+    // Resolved from DI so test fakes (FakeClock in the request sweep tests)
     // drive CreatedAt the same way they drive the sweeper. Without this the
     // store would stamp wall-clock UtcNow while the sweeper computes its
     // cutoff against the fake clock, and no candidate would ever match.

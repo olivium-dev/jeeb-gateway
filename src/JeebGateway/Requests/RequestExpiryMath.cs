@@ -3,7 +3,7 @@ namespace JeebGateway.Requests;
 /// <summary>
 /// P7 — THE single arithmetic for the offer-wait window.
 ///
-/// The sweeper (commit side, <see cref="RequestExpirySweeper"/>) and the read
+/// The commit side (formerly the gateway TTL sweeper, now delivery-service) and the read
 /// projection (client-visible countdown, <see cref="OfferDeadlineProjector"/>)
 /// MUST both go through here — that is the guarantee a stored
 /// <c>gw_expires_at</c> column was being asked to provide, at no migration and
