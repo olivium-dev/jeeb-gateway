@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+# RETIRED (gwdbx W5-13). Its source of truth, StoreDurabilityGuard.cs, was deleted at W5-11, so
+# this cannot run or regenerate: it exits 1 at the GUARD existence check below. See guard-roster.txt.
 # G-08 / R1 — StoreDurabilityGuard roster manifest gate: (0) shape (1) drift (2) orphan (3) G-18 (4) seal.
-# Failure mode + rationale: docs/runbooks/gwdbx-program-rules.md.
-# The C# roster is the source of truth; the .txt is generated + drift-checked.
-# Regenerate with: scripts/check-guard-roster.sh --write
+# Failure mode + rationale: docs/runbooks/gwdbx-program-rules.md (archived; see §4).
+# The C# roster was the source of truth; the .txt was generated + drift-checked.
 set -euo pipefail
 
 SRC="src/JeebGateway"

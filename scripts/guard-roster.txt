@@ -1,33 +1,29 @@
-Critical JeebGateway.Users.IUsersStore -> JeebGateway.Users.UpstreamBackedUsersStore
-Critical JeebGateway.Tokens.IRefreshTokenStore -> JeebGateway.Tokens.StateServiceRefreshTokenStore
-Critical JeebGateway.StateService.Idempotency.IIdempotencyStore -> JeebGateway.StateService.Idempotency.StateServiceIdempotencyStore
-Critical JeebGateway.Services.Clients.IGenericCaseStateClient -> JeebGateway.Services.Clients.JeebStateServiceClient
-Critical JeebGateway.Services.Clients.IStateOwnershipClient -> JeebGateway.Services.Clients.JeebStateServiceClient
-Critical JeebGateway.Services.Clients.IPushDispatchRecoveryClient -> JeebGateway.Services.Clients.PushDispatchRecoveryClient
-Critical JeebGateway.Availability.IOfferRequestIndex -> JeebGateway.StateService.Durable.StateServiceOfferRequestIndex
-Critical JeebGateway.Requests.IRequestsStore -> JeebGateway.Requests.DurableRequestsStore
-Critical JeebGateway.Admin.IAdminAuditLog -> JeebGateway.Admin.PostgresAdminAuditLog, JeebGateway.Admin.MirroringAdminAuditLog
-Critical JeebGateway.Users.IAccountDeletionStore -> JeebGateway.Users.PostgresAccountDeletionStore, JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore, JeebGateway.Users.StateServiceAccountDeletionStore
-Critical JeebGateway.Users.DataExport.IDataExportStore -> JeebGateway.Users.DataExport.PostgresDataExportStore, JeebGateway.Users.DataExport.MirroringDataExportStore
-Critical JeebGateway.Requests.OtpHandover.IAdminEscalationStore -> JeebGateway.Requests.OtpHandover.PostgresAdminEscalationStore
-Critical JeebGateway.ProhibitedItems.FlaggedRequests.IFlaggedRequestStore -> JeebGateway.ProhibitedItems.FlaggedRequests.PostgresFlaggedRequestStore
-Critical JeebGateway.ProhibitedItems.IProhibitedItemsStore -> JeebGateway.ProhibitedItems.PostgresProhibitedItemsStore, JeebGateway.ProhibitedItems.StateServiceProhibitedItemsStore
-Critical JeebGateway.Availability.IAvailabilityStore -> JeebGateway.Availability.PostgresAvailabilityStore
-Critical JeebGateway.Push.IDeviceTokenStore -> JeebGateway.Push.PostgresDeviceTokenStore
-Critical JeebGateway.Users.SavedLocations.ISavedLocationStore -> JeebGateway.Users.SavedLocations.RemoteUserPreferencesSavedLocationStore
-Critical JeebGateway.Ratings.IRatingStore -> JeebGateway.Ratings.FeedbackServiceRatingStore
-Critical JeebGateway.NotificationPreferences.INotificationPreferencesStore -> JeebGateway.NotificationPreferences.RemoteUserPreferencesNotificationPreferencesStore
-Critical JeebGateway.Requests.Cancellation.IJeeberRestrictionStore -> JeebGateway.Requests.Cancellation.BanServiceJeeberRestrictionStore
-Critical JeebGateway.Auth.OtpSignIn.IOtpRequestRateLimiter -> JeebGateway.Auth.OtpSignIn.RedisOtpRequestRateLimiter
-Critical JeebGateway.Tiers.ITiersStore -> JeebGateway.Tiers.PostgresTiersStore, JeebGateway.Tiers.DeliveryServiceTiersStore
-Critical JeebGateway.Users.IFinancialLedgerAnonymizer -> JeebGateway.Users.PostgresFinancialLedger
-Critical JeebGateway.Services.Dispatch.INotificationDispatchOutbox -> JeebGateway.Services.Dispatch.PostgresNotificationDispatchOutbox, JeebGateway.Services.Dispatch.StateServiceNotificationDispatchOutbox
-Critical JeebGateway.Push.IPushDeliveryTracker -> JeebGateway.Push.PostgresPushDeliveryTracker
-Critical JeebGateway.Whisper.ITranscriptionFallbackQueue -> JeebGateway.Whisper.PostgresTranscriptionFallbackQueue
-Critical JeebGateway.Cms.ICmsSurfaceStore -> JeebGateway.Cms.PostgresCmsSurfaceStore
-Critical JeebGateway.Partner.IPartnerWalletOperationStore -> JeebGateway.Partner.StateServicePartnerWalletOperationStore
-Critical JeebGateway.Partner.IPartnerOtpChallengeStore -> JeebGateway.Partner.StateServicePartnerOtpChallengeStore
-KnownInMemoryBacklog JeebGateway.Whisper.IAudioStore
-UpstreamContractIncomplete JeebGateway.Availability.IPendingOffersStore
-IntentionalInMemory JeebGateway.Availability.IGeoIndex
-IntentionalInMemory JeebGateway.Tracking.ILocationStore
+# RETIRED 2026-08-16 (gwdbx W5-13). This manifest asserted nothing true and is now empty.
+#
+# It was GENERATED from src/JeebGateway/Infrastructure/StoreDurabilityGuard.cs, which commit
+# 8cba63b ("W5-11: delete the GatewayPostgres seam") deleted without touching this file. Its
+# source of truth is gone, so it cannot be regenerated and had drifted past repair:
+#
+#   - 14 of the 33 lines named a type that no longer exists anywhere under src/ —
+#     PostgresAdminAuditLog, PostgresAccountDeletionStore, PostgresDataExportStore,
+#     PostgresAdminEscalationStore, PostgresFlaggedRequestStore, PostgresProhibitedItemsStore,
+#     PostgresAvailabilityStore, PostgresDeviceTokenStore, PostgresTiersStore,
+#     PostgresFinancialLedger, PostgresNotificationDispatchOutbox, PostgresPushDeliveryTracker,
+#     PostgresTranscriptionFallbackQueue, PostgresCmsSurfaceStore.
+#   - 8 lines still labelled Critical ("must resolve to a durable store at boot or fail closed")
+#     named ZERO surviving implementation of any kind: IAdminEscalationStore, IFlaggedRequestStore,
+#     IAvailabilityStore, IDeviceTokenStore, IFinancialLedgerAnonymizer, IPushDeliveryTracker,
+#     ITranscriptionFallbackQueue, ICmsSurfaceStore.
+#   - Line 1 claimed IUsersStore -> UpstreamBackedUsersStore. That type file still exists, so the
+#     orphan check would have passed it, but Program.cs resolves IUsersStore unconditionally to
+#     InMemoryUsersStore and UpstreamBackedUsersStore has no DI registration at all. A Critical
+#     line that in fact resolves to an in-memory store is the exact failure the guard existed to
+#     prevent, recorded here as if it were the guarantee.
+#
+# The guard machinery it belonged to (StoreDurabilityGuard, StoreDurabilityHealthCheck, the
+# StoreDurability:FailClosedDisabled escape hatch) is already gone. Deletion ledger §6 ruled all
+# six items one same-PR set at W5-11; three shipped then, this file is the fourth.
+#
+# Do NOT repopulate. Leaving durability guarantees in a file nothing generates and nothing checks
+# is worse than having none. scripts/check-guard-roster.sh cannot run — it exits non-zero at its
+# own StoreDurabilityGuard.cs existence check, before it ever reads this manifest.

@@ -1,7 +1,18 @@
 # 0006 — Migrate the gateway's remaining in-memory stores to jeeb-state-service (audit + the one upstream primitive that unblocks the rest)
 
+> **SUPERSEDED 2026-08-16 by the gwdbx programme (gateway-db-extraction-2026-08-12).** Read as
+> history. Its central premise — that the gateway holds stores backed by its own Postgres — no
+> longer holds: the `GatewayPostgres` and `WalletPostgres` seams are deleted and the gateway owns
+> no database. Every `Program.cs` line number below is stale, and several stores it lists as
+> blocked were resolved by moving the domain to its owning service over HTTP (requests →
+> delivery-service, prohibited items → state-service published config, saved locations and
+> notification preferences → remote-user-preferences) rather than by the two generic KV primitives
+> proposed here. It also cites ADR-0001 and ADR-0005, neither of which exists in this repository
+> (`docs/adr/` holds 0002, 0003, 0004, 0006, 0007), so its authority chain dead-ends. Current
+> record: `docs/runbooks/gwdbx-deletion-ledger.md`.
+
 **Date:** 2026-06-20
-**Status:** Accepted (audit) — remaining migrations BLOCKED on one upstream primitive (see "Decision")
+**Status:** SUPERSEDED (was: Accepted (audit) — remaining migrations BLOCKED on one upstream primitive)
 **Deciders:** gw-stores work-stream (run `temp-overall-run-1`)
 **Technical story:** Close out ADR-0001 (gateway stateless + thin) / ADR-0005 (state + Support → jeeb-state-service) by moving the *remaining* in-gateway in-memory stores behind jeeb-state-service.
 

@@ -1,5 +1,8 @@
-# A9 FINAL /health/ready roster (post W5-11). One name per line, sorted. Count MUST be 17.
+# A9 FINAL /health/ready roster (post W5-11). One name per line, sorted. 17 names below.
 # Contract: docs/runbooks/gwdbx-deletion-ledger.md §7. Consumed by scripts/gwdbx-zero-dsn-smoke.sh.
+# W5-13 2026-08-16: GatewayHealthRoster.ExpectedReadyCount is 18, not 17 — this list omits
+# bundler-service, which is registered only when its BaseUrl key is set. Names unchanged pending a
+# real /health/ready read; see the count-discrepancy table in the ledger §7 before asserting either.
 admin-oidc-configuration
 ban-service
 cdn-service
