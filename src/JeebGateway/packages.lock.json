@@ -606,14 +606,6 @@
         "resolved": "8.0.0",
         "contentHash": "7mu9v0QDv66ar3DpGSZHg9NuNcxDaaAcnMULuZlaTpP9+hwXhrxNGsF5GmLkSHxFdb5bBc1TzeujsRgTrPWi+Q=="
       }
-    },
-    "net8.0/linux-x64": {
-      "QuestPDF": {
-        "type": "Direct",
-        "requested": "[2026.2.4, )",
-        "resolved": "2026.2.4",
-        "contentHash": "fajBdRJFr3hu2Mr6mEVsXjvVKD9Q/Q6hfPEUMpV/xlwxWdFebmpGdi0FLQTApMvpapy72v9dvcGuk7e7NQmQyQ=="
-      }
     }
   }
 }
