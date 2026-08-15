@@ -16,6 +16,16 @@ No code was changed. This note records the audit so the proposal is not retried.
 
 ## What actually reads the catalog
 
+> **Addendum 2026-08-16 (W5-13).** The durability argument in the next paragraph is obsolete:
+> `PostgresTiersStore`, the `tiers` table and the `gateway-postgres` health check are deleted, and
+> `StoreDurabilityGuard` no longer exists. `Program.cs` now binds `JeebGateway.Tiers.ITiersStore` to
+> `DeliveryServiceTiersStore` when `FeatureFlags:TiersMode` is `upstream-authority` **and**
+> `Services:Delivery:BaseUrl` parses, and to `InMemoryTiersStore` otherwise — and `TiersMode` defaults
+> to `local` in code. **The verdict is unchanged.** The catalog is still read on the hot path by every
+> reader listed below, so `410`-ing the writes would still strand it. What changed is that at
+> `TiersMode=local` the catalog is process-memory that resets on restart, which makes an admin write
+> path *more* necessary, not less. Read the rest of this section as the 2026-08-11 audit record.
+
 `AdminTiersController` writes `JeebGateway.Tiers.ITiersStore`. `Program.cs`
 (~1809-1815) binds that interface to `PostgresTiersStore` (durable `tiers`
 table, migrations 0029+0036) whenever `GatewayPostgres:ConnectionString` is set

@@ -1,5 +1,71 @@
 # jeeb-gateway
+
 Jeeb BFF gateway — C#/.NET 8, NSwag-generated clients, aggregates all downstream services.
+
+## What this service is
+
+jeeb-gateway is a **BFF / orchestrator**. It owns **no database**. There is no
+`DbContext`, no Npgsql or EntityFrameworkCore package reference, no migration
+folder (`db/` is not in this repo) and no `GatewayPostgres` / `WalletPostgres`
+connection string anywhere in the source. `scripts/gateway-db-seam-allowlist.txt`
+holds zero entries, which makes `scripts/check-stateless-gateway.sh` reject *any*
+database seam that reappears — that ratchet is absolute, not a budget.
+
+Systems of record live in the owning services and are reached over HTTP only. The
+gateway never opens another service's database (guardrail G-21):
+
+| Domain | System of record | Gateway seam |
+|---|---|---|
+| Requests / deliveries | delivery-service | `Requests/UpstreamRequestsStore.cs` |
+| Wallet balances + transaction ledger | wallet-service | `JeebWallet/WalletServiceJeebWalletLedgerReader` |
+| Settlements / COD money rows | settlement-service | `Financials/SettlementServiceClient.cs` |
+| Prohibited-items catalog | jeeb-state-service published config | `ProhibitedItems/StateServiceProhibitedItemsStore.cs` |
+| Offers | offer-service | `Availability/UpstreamPendingOffersStore` |
+| Identity, roles, profiles | user-management | `ServiceUserManagementClient` (generated) |
+| Idempotency, locks, work-items, audit events | jeeb-state-service | `Services/Clients/JeebStateServiceClient.cs` |
+| Saved locations, notification preferences | remote-user-preferences | `RemoteUserPreferences*Store` (`FeatureFlags:UseUpstream:RemoteUserPreferences`, default **true**) |
+| Ratings | feedback-service | `Ratings/FeedbackServiceRatingStore` (`FeatureFlags:UseUpstream:Ratings`; `InMemoryRatingStore` when off) |
+
+Three of those seams are selected by a migration flag. For the first two the
+**committed default is not the live value**, so read the flag — not the default —
+when reasoning about a running instance:
+
+| Flag | Committed default | Live MSI value |
+|---|---|---|
+| `FeatureFlags:RequestsOwnerListMode` | `local` (`Migration/GwdbxMigrationOptions.cs`; in no `appsettings*.json`) | `upstream-authority` since 2026-08-16 |
+| `FeatureFlags:ProhibitedItemsMode` | `local` (same file) | `upstream-authority` |
+| `WalletLedgerMigration:Authority` | `wallet-api` in `appsettings.json` **and** `appsettings.Production.json`; `postgres` in `appsettings.Development.json` | `wallet-api` |
+
+The wallet row is the one that bites: the WalletPostgres projection was deleted,
+so anything other than `Authority=wallet-api` now resolves
+`NullJeebWalletLedgerReader` and serves an **empty** ledger page rather than
+falling back to a database. That is deliberate in Development (there is no wallet
+DB there); it would be a silent financial-read outage anywhere else.
+
+### What is NOT done
+
+"Stateless" here describes **store ownership and direction of travel, not a
+finished state.** The process still carries in-process state and background work,
+verified on `main` at the time of writing:
+
+- **19** `AddHostedService` registrations across `src/` against an allowance of
+  **2** in `scripts/check-stateless-gateway.sh`;
+- **37** `AddSingleton` registrations in `Program.cs` that the same gate counts as
+  a local owner/state implementation (24 `InMemory*` store files under `src/`).
+  Several are still the authoritative leg — `IDataExportStore`,
+  `IAccountDeletionStore`, `IFlaggedRequestStore`, `ITiersStore` (at
+  `TiersMode=local`), `IAvailabilityStore` and `IUsersStore` all resolve to a
+  local implementation that a restart clears.
+
+`scripts/check-stateless-gateway.sh` is therefore **red by design** on the
+hosted-service and local-store arms. Do not describe this service as fully
+stateless, and do not describe the gwdbx extraction programme as complete. The
+`jeeb_gateway` database is **not** being dropped (owner directive 2026-08-16); it
+is retained, unread by this service, with a small number of orphaned rows.
+
+Programme record: `docs/runbooks/gwdbx-deletion-ledger.md` (what was deleted and
+when) and `docs/runbooks/gwdbx-program-rules.md` (archived; §0 lists the clauses
+that outlive the programme).
 
 ## Case callback deployment
 
@@ -64,7 +130,7 @@ ticket expiry. Failed or invalid CDN responses are never cached as successes.
 
 Caller identity is taken from the `sub`/`NameIdentifier` claim, with `X-User-Id` as an MVP fallback until JWT validation is wired up.
 
-Backed by `InMemoryNotificationPreferencesStore` for the MVP. Production wiring will replace it with an NSwag-generated client for the notification-service preferences endpoints.
+Backed by `RemoteUserPreferencesNotificationPreferencesStore` — the generic remote-user-preferences service, storing an opaque JSON blob so the shared service learns nothing about Jeeb topics. `InMemoryNotificationPreferencesStore` survives only as the local-dev fallback when `FeatureFlags:UseUpstream:RemoteUserPreferences` is set `false`; it defaults **true** (`Program.cs`). Preferences are not a gateway-owned store and will not become one.
 
 ### Data export (T-backend-042, GDPR-like right of access)
 
@@ -72,11 +138,11 @@ Backed by `InMemoryNotificationPreferencesStore` for the MVP. Production wiring 
 - `GET  /users/me/data-export` — returns the caller's latest export record so the mobile app can poll until `status` flips to `ready` and `downloadUrl` is populated.
 - `GET  /users/me/data-export/{token}/download` — single-use; the unguessable token is the credential, not the session. Returns the payload bytes (`application/json`); subsequent hits on the same token are `404`. Links expire after 7 days by default (configurable).
 
-Backed by `InMemoryDataExportStore` + the `DataExportProcessor` hosted worker for the MVP. Notification fan-out (email + push) goes through `IDataExportNotifier`; production wiring will replace the in-memory implementations with Postgres-backed equivalents and an NSwag-generated notification-service client. The 72-hour SLA lives in `DataExportOptions.Sla`.
+Backed by `InMemoryDataExportStore`, decorated by `MirroringDataExportStore`, plus the `DataExportProcessor` hosted worker. **The in-memory store is still the authoritative leg** while `FeatureFlags:DataExportMode` is `local` or `dual-write-local-read`, so a queued export and its download token do not survive a gateway restart. The durable target is jeeb-state-service work-items (`Users/DataExport/DataExportRelayPlan.cs`, runner `tools/DataExportRelay`) — **not** a gateway-owned Postgres; the gateway will not grow one. Notification fan-out (email + push) goes through `IDataExportNotifier`. The 72-hour SLA lives in `DataExportOptions.Sla`.
 
 ### Prohibited-item NLP scan (T-backend-048)
 
-- `POST /prohibited-items/scan` — body: `{ "description": "...", "requestId": "optional" }`. Runs the active catalog through normalization → exact, synonym, and Damerau–Levenshtein fuzzy matching. Response contains the matches array, a `requiresReview` flag, and `autoBlocked: false` (always). When `requiresReview` is true the gateway records a `FlaggedRequest` row and returns its id; the caller MUST NOT auto-block on the response.
+- `POST /prohibited-items/scan` — body: `{ "description": "...", "requestId": "optional" }`. Runs the active catalog through normalization → exact, synonym, and Damerau–Levenshtein fuzzy matching. Response contains the matches array, a `requiresReview` flag, and `autoBlocked: false` (always). When `requiresReview` is true the gateway records a `FlaggedRequest` entry in `IFlaggedRequestStore` — `InMemoryFlaggedRequestStore` today, so the moderation queue is process-memory; the durable target is state-service work-items — and returns its id; the caller MUST NOT auto-block on the response.
 - `GET  /admin/prohibited-items/flagged?status=pending|cleared|upheld&page=&pageSize=` — admin queue.
 - `GET  /admin/prohibited-items/flagged/{id}` — single flagged record.
 - `POST /admin/prohibited-items/flagged/{id}/decision` — body: `{ "decision": "cleared" | "upheld", "note": "..." }`.
@@ -112,14 +178,22 @@ created only when an explicit HTTP call hits `POST /dev/seed/user`.
   env var, prod stays OFF (404) by default even though normal deploys now
   **preserve** the flag rather than scrubbing it (see below).
 
-#### Toggling the flag — `dev_endpoints` workflow input is the ONLY supported way
+#### Toggling the flag — `dev_endpoints` workflow input (HISTORICAL MECHANISM)
 
-The flag is controlled **exclusively** through the `dev_endpoints` input of the
-vendored `.github/workflows/deploy-to-jeeb.yml` deploy workflow. **Do NOT** flip it
-with a manual `docker service update --env-add/--env-rm` from an operator shell, and
-do NOT commit `Features__DevEndpoints__Enabled=true` to any appsettings file. All
-deploy and live-config/flag changes go through GitHub Actions only (the workflow uses
-SSH internally; operators trigger it via `gh workflow run` and verify via HTTP).
+> **Not operable as written (owner directive A27, 2026-08-15).** Every workflow in
+> this repository is disabled at the GitHub level, and deploys go direct to MSI.
+> `gh workflow run` deploys nothing today, so the recipes below describe the
+> historical mechanism and the env-var semantics it produced — not a procedure you
+> can follow. The `[DevOnly]` / `Features:DevEndpoints` semantics above are still
+> exactly how the running service behaves. This section is left in place rather
+> than rewritten because replacing it would mean documenting a deploy path this
+> repo has no mandate to define; ask the owner for the current one.
+
+The flag was controlled **exclusively** through the `dev_endpoints` input of the
+vendored `.github/workflows/deploy-to-jeeb.yml` deploy workflow. The standing part of
+that rule survives the workflow's retirement: do NOT commit
+`Features__DevEndpoints__Enabled=true` to any appsettings file, and treat the flag as
+an environment-only switch on the single environment that runs the seeding harness.
 
 The input is **3-state**, and the default is `preserve` — **a normal deploy never
 changes the `/dev/*` flag.** This fixes a footgun where the old 2-state default
@@ -155,9 +229,9 @@ keeps every env var that the command does not explicitly `--env-add`/`--env-rm`.
 when `dev_endpoints=preserve` the workflow emits no dev-flag argument at all and the
 flag's current value carries over untouched. The `true`/`false` mutations are
 idempotent: `--env-add` overwrites an existing value, and `--env-rm` is a no-op when
-the var is already absent, so an explicit run never errors. Verify the resulting state
-via HTTP only — `GET /dev/data/users` returns `404` when off and `200` when on —
-never by SSH-ing in to inspect the service env.
+the var is already absent, so an explicit run never errors. However the state is
+verified, `GET /dev/data/users` returning `404` when off and `200` when on is the
+observable that matters — the flag's value in a service env is not proof on its own.
 - The whole change is additive: one new controller, one options class, one
   attribute, and three committed `false` config lines. No existing route, DTO,
   status code, or auth requirement changes.

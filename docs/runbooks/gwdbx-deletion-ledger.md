@@ -28,7 +28,7 @@ Already dropped (13, W0 waves — history): `ratings`, `disputes`, `kyc_submissi
 
 | table | deleting wave | notes |
 |---|---|---|
-| `users` | **W4-13** `[OWNER-GO]` | both O5 outcomes must empty GatewayPostgres (A8); guard-roster edit same PR |
+| `users` | **W4-13** `[OWNER-GO]` | both O5 outcomes must empty GatewayPostgres (A8). (The "guard-roster edit same PR" clause is void — G-08 retired at W5-13, §6.) |
 | `tiers` | **W4-14** `[OWNER-GO]` | after O4 ruling + freeze-import-flip; snapshot first |
 | `delivery_requests` | **W5-08** `[OWNER-GO]` | dep: A6 precondition green (BR-9 cap guard + idempotent pre-accept cancel live in delivery-service) + O11 bug-compat test green |
 | `delivery_tiers` | **W5-08** `[OWNER-GO]` | FK-held; drops only AFTER `delivery_requests` severs the FK — never early |
@@ -52,7 +52,7 @@ Already dropped (13, W0 waves — history): `ratings`, `disputes`, `kyc_submissi
 | `cms_surfaces` | **W5-09** `[OWNER-GO]` | ADR-0008: NO freeze-import precondition (bundler-service owns CMS); table verified **0 rows** 2026-08-16 |
 | `cms_surface_versions` | **W5-09** `[OWNER-GO]` | with `cms_surfaces`; also **0 rows** |
 | `transcription_fallback_queue` | **W5-09** `[OWNER-GO]` | A12: DELETED not migrated — drop table + enqueue write, log the fallback event |
-| `schema_migrations` | **W5-12** `[OWNER-GO]` | deliberate retain until the end; dies with `DROP DATABASE jeeb_gateway` |
+| `schema_migrations` | ~~**W5-12**~~ **RETAINED** | **Owner directive 2026-08-16: `jeeb_gateway` is NEVER dropped.** The DROP DATABASE step and the whole pipelines phase were removed from the programme; the database is kept, unread by the gateway, with roughly 64 orphaned rows by decision. This row does not authorise a drop. |
 
 Every DROP: G-07 archive (`pg_dump` + `sha256sum -c`) BEFORE; G-18 migration shape (table-scoped,
 row-count assert, self-registering tombstone, idempotent re-apply).
@@ -133,17 +133,25 @@ step-6 release; `forbidden` rows (incl. `UseUpstream:Payments`, G-05) stay forev
 | `StateWorkItemClaimWorker` (#417), fan-out drain, `CourierPositionQueue` | **RETAINED** (named transients / new mechanism, hold no authoritative state) |
 | `ConfigImportWorker` (W3-07 one-shot, ships disarmed) | **RETIRABLE** from ADR-0008 — it was spared the hosted-service purge solely because it armed the CMS leg; that leg is void, the lexicon leg is imported + flipped. Deleting it is owner-gated and moves the hosted-service ratchet **19 -> 18**; until then it stays disarmed |
 
-## 6. Guard entries (StoreDurabilityGuard / `scripts/guard-roster.txt`)
+## 6. Guard entries (StoreDurabilityGuard / `scripts/guard-roster.txt`) — CLOSED
 
-- Interim rule unchanged (G-08): any PR changing a store edits the manifest **in the same PR**;
-  `guard-roster-gate` enforces.
-- Each roster line pointing at a `Postgres*` implementation is rewritten to its upstream implementation at
-  its domain's flip, and **deleted** when the interface itself retires. Waves: tiers/users lines at **W4**
-  step-6; every remaining line's Postgres mapping at **W5-11**.
-- **The guard machinery itself** — `StoreDurabilityGuard`, `StoreDurabilityHealthCheck`,
-  `scripts/guard-roster.txt`, `scripts/check-guard-roster.sh`, the `guard-roster-gate` CI job and the
-  `StoreDurability:FailClosedDisabled` escape hatch — is deleted at **W5-11** (A8 same-PR set). Rationale:
-  once no local durable store exists, "critical store resolved to in-memory" is unrepresentable.
+**Status 2026-08-16 (W5-13): the guard machinery is retired, and the W5-11 set did not land whole.**
+
+- G-08 is **retired**. The interim "edit the manifest in the same PR" rule is void — there is no
+  manifest and no runnable gate.
+- What W5-11 (`8cba63b`) actually deleted: `StoreDurabilityGuard`, `StoreDurabilityHealthCheck` and the
+  `StoreDurability:FailClosedDisabled` escape hatch. What it did **not** touch:
+  `scripts/guard-roster.txt` and `scripts/check-guard-roster.sh`. The manifest was left behind
+  asserting 29 `Critical` durability guarantees, 14 of them naming types that no longer existed and 8
+  naming no surviving implementation at all — an orphaned contract that read as live. W5-13 emptied it
+  to a comment-only tombstone recording exactly that drift.
+- `scripts/check-guard-roster.sh` is retired in place: it exits non-zero at its own
+  `StoreDurabilityGuard.cs` existence check before reading anything, so it can neither verify nor
+  regenerate. It also still requires `./db/apply.sh` / `./db/seed.sh` in `build.yml` (invariant 3,
+  G-18) — `db/` went in the same commit, so that invariant can never pass either.
+- The `guard-roster-gate` job in `.github/workflows/ci.yml` survives because `.github/workflows/**` is
+  out of programme scope: nothing under it may be added, edited or re-enabled. Every workflow in this
+  repo is disabled at the GitHub level, so the job does not run.
 
 ## 7. Health checks — the A9 roster contract
 
@@ -178,38 +186,55 @@ on both completion legs. Set the ≥32-char SERVICE-scope `Services:Settlement:A
 file, and after the swap make **one authed settlement read through the gateway** (e.g.
 `GET /v1/jeeb/earnings` with a minted token) — that, not readiness, is what proves the token.
 
-The declared roster lives in code at `Extensions/GatewayHealthRoster.cs` (`ExpectedReadyCount = 20`).
-`SettlementServiceCutoverW2R11Tests.C3/C4` seal the count and the 14 `DownstreamProbes` against what
-`AddDownstreamHealthChecks` registers; the 6 in-process checks are declared prose and several are
-env-conditional, so drift there is caught only by the post-deploy assert.
+The declared roster lives in code at `Extensions/GatewayHealthRoster.cs`.
 
-**FINAL roster (17)** — machine-readable copy in `scripts/gwdbx-final-health-roster.txt`:
+**Count discrepancy — read this before asserting a number (W5-13, 2026-08-16).** Four figures for the
+post-W5-11 roster are in circulation and they disagree:
+
+| source | figure |
+|---|---|
+| `Extensions/GatewayHealthRoster.cs` — `ExpectedReadyCount` | **18** (15 `DownstreamProbes` + 3 `InProcessChecks`) |
+| this section's transition table (below), pre-announced | 17 |
+| `scripts/gwdbx-final-health-roster.txt` — "Count MUST be 17" | 17 names |
+| the CI-harness paragraph below, as originally written | 16 |
+
+The code figure is the one backed by the registration list: `bundler-service` was registered by
+`HealthCheckExtensions` but never declared, so every pre-announced figure undercounted by one until
+W5-11 added the declaration. `scripts/gwdbx-final-health-roster.txt` is one name short for the same
+reason. It is **left unchanged here on purpose** — the probe is only registered when its BaseUrl key is
+set, so whether a given deployment serves 17 or 18 names depends on live configuration this PR did not
+inspect (no service was probed this round, by instruction). Reconcile it against a real
+`/health/ready` before treating either number as the contract.
+
+**FINAL roster** — machine-readable copy in `scripts/gwdbx-final-health-roster.txt`:
 `admin-oidc-configuration, ban-service, cdn-service, contract-signing-service, delivery-service,
 form-builder-service, geolocation-service, jeeb-state-service, notification-service, offer-service,
 push-notification, realtime-comunication-service, settlement-service, user-management, voice-transcription,
-wallet-service, whisper` (+ `self` on the live tag, which is not part of the ready roster).
+wallet-service, whisper` (+ `bundler-service` when `BundlerCmsSurfaceStore.BaseUrlConfigurationKey` is set,
+which is what the code declares; + `self` on the live tag, which is not part of the ready roster).
 
-Note: the `gateway-postgres`/`wallet-postgres` checks and the durable-store wiring are both gated on the
-DSN being present, so the W5-10/W5-11 code deletions and the env-file DSN removals must land in the same
-deploy window or the roster assert fails — that is the assert doing its job, not a flake.
+Historical note: the `gateway-postgres`/`wallet-postgres` checks and the durable-store wiring were both
+gated on the DSN being present, so the W5-10/W5-11 code deletions and the env-file DSN removals had to
+land in the same deploy window. Both are done; neither check exists any more.
 
-CI harness: `scripts/gwdbx-zero-dsn-smoke.sh` (workflow `zero-dsn-cold-boot.yml`) proves this contract on
-every build — control leg (with dummy DSNs, gating for the harness) must see the 3 DB-era checks; the
-zero-DSN leg passes only when /health/ready serves exactly the final 16 names. **Arming at W5-11:** delete
-the workflow's `continue-on-error` line and its control-DB migrations step (db/ is gone by then).
+Harness: `scripts/gwdbx-zero-dsn-smoke.sh` (workflow `zero-dsn-cold-boot.yml`) checks this contract — the
+zero-DSN leg passes only when `/health/ready` serves exactly the names in
+`scripts/gwdbx-final-health-roster.txt`. It is **not** enforced automatically: every workflow in this repo
+is disabled at the GitHub level, so the harness only runs when someone runs it.
 
 ## 8. Docs
 
-| doc | fate |
-|---|---|
-| `src/JeebGateway/contracts/SPECS-STATUS.md:118-135` (stale UPG block, "one env var arms it") | rewrite at **W5-13** (known-stale since S3.56) |
-| `db/README.md` | dies with `db/` at **W5-11** |
-| `docs/runbooks/db-backup-and-recovery.md` | rewritten at **W5-11** (no gateway DB left to back up) |
-| `docs/runbooks/gwdbx-program-rules.md` | archived at **W5-13** (rules dissolve with the program) |
-| Gateway `README.md` / architecture docs | reclassified "stateless BFF/orchestrator" at **W5-13** |
-| `scripts/gwdbx-flag-registry.txt` + registry gate | program rows empty by **W5-14** (exit gate); file + gate retire post-program with `forbidden` rows preserved in `gwdbx-program-rules` archive |
-| `scripts/check-stateless-gateway.sh` (red by design R9) | flips to a GREEN required gate at **W5-11**; stays forever |
-| this file | closed out at **W5-14** with the exit proof (zero-DSN cold boot + two-replica proof) |
+| doc | fate | status |
+|---|---|---|
+| `src/JeebGateway/contracts/SPECS-STATUS.md` (stale UPG block, "one env var arms it") | rewrite at **W5-13** | **DONE W5-13.** Whole "What was NOT removed" section replaced; there is no env var that arms UPG. |
+| `db/README.md` | dies with `db/` at **W5-11** | **DONE W5-11.** `db/` is absent from the tree. |
+| `docs/runbooks/db-backup-and-recovery.md` | rewritten at **W5-11** (no gateway DB left to back up) | **MISSED at W5-11, DONE W5-13.** It survived as a live-looking Postgres 16 runbook whose every script was already deleted. Now a RETIRED tombstone. |
+| `docs/runbooks/gwdbx-program-rules.md` | archived at **W5-13** (rules dissolve with the program) | **DONE W5-13.** Status-stamped in place, not moved — five inbound pointers (two scripts, `scripts/gwdbx-flag-registry.txt`, `CourierPositionQueue.cs`, this file) keep resolving. A new **§0** restates the clauses that outlive the programme, G-21 first. |
+| Gateway `README.md` / architecture docs | reclassified "stateless BFF/orchestrator" at **W5-13** | **DONE W5-13.** README gained a "What this service is" section: owns no database, systems-of-record table, and an explicit "What is NOT done" naming the 19 hosted services vs the allowance of 2. `WALLET-FINANCE-CUTOVER.md`, ADR-0006, ADR-0007 and the admin-tiers waiver were banner-marked in the same PR. |
+| `scripts/guard-roster.txt` + `scripts/check-guard-roster.sh` | part of the W5-11 A8 set (§6) | **MISSED at W5-11, DONE W5-13.** See §6. |
+| `scripts/gwdbx-flag-registry.txt` + registry gate | program rows empty by **W5-14** (exit gate); file + gate retire post-program with `forbidden` rows preserved in the `gwdbx-program-rules` archive (§0) | open |
+| `scripts/check-stateless-gateway.sh` (red by design R9) | ~~flips to a GREEN required gate at W5-11~~ | **STILL RED, by design.** Its DB arms are green — the allowlist is empty and no seam exists — but the hosted-service arm pins 2 against 19 registrations and the local-store arm sees 37. It cannot go green until the remaining in-process state moves. It is also not a *required* gate: every workflow in this repo is disabled at the GitHub level. |
+| this file | closed out at **W5-14** with the exit proof | open. Note the exit proof no longer includes a `DROP DATABASE` — `jeeb_gateway` is retained (§1). |
 
 ## 9. Deliberate retains (named, NEVER deleted by this program)
 

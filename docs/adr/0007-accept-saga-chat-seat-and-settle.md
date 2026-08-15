@@ -1,7 +1,13 @@
 # ADR-0007 — Post-accept chat: one seat-and-settle call, plus a reconciler
 
-Status: accepted (GW5 / W1.6-gateway)
+Status: accepted (GW5 / W1.6-gateway); storage claims superseded 2026-08-16 by gwdbx
 Supersedes: nothing. Extends the S03 P1 post-accept chat-readiness path.
+
+> **Storage note, W5-13 (2026-08-16).** The seat-and-settle decision stands. Its storage claims do
+> not: the gateway owns no database, so the `ListAssignedSinceAsync` consequence bullet's "on the
+> durable store it reads the **Postgres mirror**" describes a mirror that no longer exists.
+> delivery-service is the system of record for requests and the gateway reaches it over HTTP
+> (`Requests/UpstreamRequestsStore.cs`). Read the storage sentences as history.
 
 ## Context
 
