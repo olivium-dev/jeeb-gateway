@@ -28,7 +28,7 @@ namespace JeebGateway.IntegrationTests.StateService;
 /// the handler up directly), state's own auth triad passed, and <c>/health/ready</c> reported 19/19
 /// — because the state health check probes <c>{BaseUrl}/health</c>, outside the authenticated
 /// <c>/v1</c> surface. Meanwhile <c>POST /v1/auth/otp/verify</c> 500'd for ~2.5 minutes on live:
-/// <c>StateServiceRefreshTokenStore → StateServiceIdempotencyStore → PUT /v1/state/idempotency</c>
+/// <c>StateServiceRefreshTokenStore → StateServiceIdempotencyStore → PUT /state/idempotency</c>
 /// went out with no <c>Authorization</c> header and came back 401.</para>
 ///
 /// <para>These tests boot the whole app with that exact configuration, put an upstream in front of
@@ -40,7 +40,7 @@ public sealed class StateServiceCredentialProductionWiringTests : IDisposable
 {
     private const string StateBaseUrl = "http://state.test:10073";
     private const string OtpAppId = "jeeb-test-app";
-    private const string IdempotencyPath = "/v1/state/idempotency";
+    private const string IdempotencyPath = "/state/idempotency";
 
     private readonly string _dir = Directory.CreateTempSubdirectory("jeeb-state-wiring").FullName;
 
@@ -64,7 +64,7 @@ public sealed class StateServiceCredentialProductionWiringTests : IDisposable
 
         verify.StatusCode.Should().Be(HttpStatusCode.OK,
             "this is the live login canary: the refresh-token store writes through "
-            + "PUT /v1/state/idempotency, which 401'd unauthenticated and surfaced as a 500");
+            + "PUT /state/idempotency, which 401'd unauthenticated and surfaced as a 500");
 
         var session = await verify.Content.ReadFromJsonAsync<VerifyResponse>();
         session!.AccessToken.Should().NotBeNullOrWhiteSpace();
@@ -103,7 +103,7 @@ public sealed class StateServiceCredentialProductionWiringTests : IDisposable
         {
             var http = factory.Services.GetRequiredService<IHttpClientFactory>().CreateClient(name);
             if (http.BaseAddress is null) continue;
-            await http.GetAsync("/v1/state/bundles");
+            await http.GetAsync("/state/bundles");
         }
 
         upstream.Unauthenticated.Should().BeEmpty();

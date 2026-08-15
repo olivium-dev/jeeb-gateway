@@ -147,9 +147,9 @@ public sealed class AvailabilityMirrorDrainer : BackgroundService
         // this jeeber) is an expected pre-backfill outcome, not an error.
         using var response = signal.IdleOffline
             ? await client.PostAsJsonAsync(
-                $"api/v1/providers/{id}/availability",
+                $"providers/{id}/availability",
                 new AvailabilityMirrorOfflineRequest(), Json, ct)
-            : await client.PostAsJsonAsync($"api/v1/providers/{id}/interaction", new { }, Json, ct);
+            : await client.PostAsJsonAsync($"providers/{id}/interaction", new { }, Json, ct);
 
         if (!response.IsSuccessStatusCode && response.StatusCode != System.Net.HttpStatusCode.NotFound)
         {

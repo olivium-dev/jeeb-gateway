@@ -32,7 +32,7 @@ public class MatchingRunContractTests
     [Fact]
     public async Task RunMatchingAsync_Binds_The_Literal_Go_SnakeCase_Body()
     {
-        // The LITERAL Go 200 body for POST /api/v1/matching/run (design §2.1).
+        // The LITERAL Go 200 body for POST /matching/run (design §2.1).
         var client = ClientReturning(
             HttpStatusCode.OK,
             """

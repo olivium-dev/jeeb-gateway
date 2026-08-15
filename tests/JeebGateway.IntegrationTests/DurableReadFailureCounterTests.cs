@@ -18,7 +18,7 @@ namespace JeebGateway.IntegrationTests;
 /// <c>durable.read_failures</c> — the counter whose absence made a six-week outage
 /// invisible.
 ///
-/// <para>WHAT WENT WRONG. <c>GET /v1/state/idempotency/by-prefix</c> returned 404 on
+/// <para>WHAT WENT WRONG. <c>GET /state/idempotency/by-prefix</c> returned 404 on
 /// EVERY call for six weeks. The gateway's degrade-don't-fail contract behaved exactly
 /// as designed: caught the fault, logged a <c>warn</c>, served the in-memory fallback,
 /// stayed 200. Writes had <c>durable.write_failures</c> the whole time. Reads had
@@ -260,13 +260,13 @@ public sealed class DurableReadFailureCounterTests
     {
         public Task<IdempotencyOutcome> PutOrGetAsync(
             string key, int statusCode, string responseBodyJson, int ttlSeconds, CancellationToken ct)
-            => throw new HttpRequestException("state-service PUT /v1/state/idempotency -> 404");
+            => throw new HttpRequestException("state-service PUT /state/idempotency -> 404");
 
         public Task<IdempotencyOutcome?> GetAsync(string key, CancellationToken ct)
-            => throw new HttpRequestException("state-service GET /v1/state/idempotency -> 404");
+            => throw new HttpRequestException("state-service GET /state/idempotency -> 404");
 
         public Task<IReadOnlyList<IdempotencyOutcome>> FindByPrefixAsync(string prefix, CancellationToken ct)
-            => throw new HttpRequestException("state-service GET /v1/state/idempotency/by-prefix -> 404");
+            => throw new HttpRequestException("state-service GET /state/idempotency/by-prefix -> 404");
     }
 
     /// <summary>Healthy store, genuinely empty. The negative control's dependency.</summary>

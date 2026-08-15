@@ -397,7 +397,7 @@ public class CatalogBackedTiersStoreUpstreamOnTests
     private const string UpstreamFlashTierId = "1a2b3c4d-5e6f-5a1b-8c2d-3e4f5a6b7c8d";
     private const string UpstreamExpressTierId = "9f1c0e6b-1b2a-5c3d-8e4f-0a1b2c3d4e5f";
     // The live delivery-service Standard tier id (UUIDv5), exactly as
-    // GET /api/v1/tiers returns it and the mobile tier-picker submits it.
+    // GET /tiers returns it and the mobile tier-picker submits it.
     private const string UpstreamStandardTierId = "2bd0d5df-db76-5d14-9e4d-741d60b2fa12";
 
     private static CatalogBackedTiersStore UpstreamOnStore()
@@ -477,7 +477,7 @@ public class CatalogBackedTiersStoreUpstreamOnTests
     }
 
     // Serves the delivery-service tier catalog (UUIDv5 ids + Flash/Express/Standard
-    // names, exactly like the live upstream) at GET /api/v1/tiers.
+    // names, exactly like the live upstream) at GET /tiers.
     private sealed class UpstreamTiersHandler : HttpMessageHandler
     {
         private static readonly System.Text.Json.JsonSerializerOptions Json =
@@ -488,7 +488,7 @@ public class CatalogBackedTiersStoreUpstreamOnTests
         {
             var path = request.RequestUri!.AbsolutePath;
             if (request.Method == HttpMethod.Get
-                && path.EndsWith("/api/v1/tiers", StringComparison.Ordinal))
+                && path.EndsWith("/tiers", StringComparison.Ordinal))
             {
                 var tiers = new[]
                 {

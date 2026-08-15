@@ -506,7 +506,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         body.Status.Should().Be(RequestStatus.Delivered);
 
         // B3 / AC2 + JEBV4-268: completion routes EXCLUSIVELY through the canonical
-        // SM-1 transition (POST api/v1/deliveries/{id}/transition, to=Done) — NEVER
+        // SM-1 transition (POST deliveries/{id}/transition, to=Done) — NEVER
         // the retired PATCH jeeb/deliveries/{id}/status forward (404/502 on Done).
         delivery.CanonicalTransitionCalls.Should().ContainSingle();
         delivery.CanonicalTransitionCalls[0].DeliveryId.Should().Be(seed.Id);

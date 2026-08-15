@@ -308,7 +308,7 @@ public sealed class AdminDeliveryEvidenceSecurityTests
         result.Should().BeOfType<ContentResult>().Which.StatusCode.Should().Be(StatusCodes.Status200OK);
         deliveryHandler.LastRequest!.Method.Should().Be(HttpMethod.Post);
         deliveryHandler.LastRequest.RequestUri!.PathAndQuery.Should()
-            .Be("/api/v1/admin/deliveries/delivery%2F42/transition");
+            .Be("/admin/deliveries/delivery%2F42/transition");
         deliveryHandler.LastRequest.Headers.GetValues("X-Admin-Id").Should().Equal("ops-42");
         deliveryHandler.LastRequest.Headers.GetValues("Idempotency-Key").Should().Equal("delivery-operation-42");
         deliveryHandler.LastRequest.Headers.Authorization.Should().BeNull();

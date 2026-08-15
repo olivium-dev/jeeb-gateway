@@ -11,7 +11,7 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests.StateService;
 
-/// <summary>W1-09 — the notification outbox on state-service /v1/work-items
+/// <summary>W1-09 — the notification outbox on state-service /work-items
 /// (kind=notification-dispatch): enqueue, claim, complete/fail, Idempotency-Key passthrough.</summary>
 public class StateServiceNotificationDispatchOutboxTests
 {

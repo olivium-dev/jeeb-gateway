@@ -10,7 +10,7 @@ namespace JeebGateway.IntegrationTests;
 /// <summary>
 /// A4 (durable response-binding) contract-seam guard. The rest of the suite stubs
 /// <see cref="IDeliveryServiceClient"/>, so the REAL JSON deserialization of the
-/// 2xx body of <c>POST /api/v1/deliveries</c> is never exercised. delivery-service
+/// 2xx body of <c>POST /deliveries</c> is never exercised. delivery-service
 /// (Go, rest.go) keys the echoed row id as <b><c>delivery_id</c></b> — the same
 /// snake_case shape as the OTP issue/verify bodies — NOT <c>id</c>.
 ///
@@ -43,7 +43,7 @@ public class DeliveryCreateRowContractTests
     [Fact]
     public async Task CreateDeliveryRowAsync_Binds_SnakeCase_delivery_id_From_201_Body()
     {
-        // The LITERAL Go 201 body for POST /api/v1/deliveries.
+        // The LITERAL Go 201 body for POST /deliveries.
         var client = ClientReturning(
             HttpStatusCode.Created,
             $$"""{"delivery_id":"{{RowId}}","tenant_id":"tenant-1","status":"Ordered"}""");

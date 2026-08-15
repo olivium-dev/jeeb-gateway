@@ -54,10 +54,10 @@ public sealed class BundlerCmsSurfaceStoreTests
         surfaces[0].Title.Should().Be("Orders Console");
         surfaces[1].Title.Should().Be("Users Console");
         handler.Requests.Select(request => request.Path).Should().Equal(
-            "/api/v1/namespaces/jeeb.cms/documents?limit=200&archived=false",
-            "/api/v1/namespaces/jeeb.cms/documents?limit=200&archived=false&after=ofl-cms-orders-mfe",
-            "/api/v1/namespaces/jeeb.cms/documents/ofl-cms-orders-mfe",
-            "/api/v1/namespaces/jeeb.cms/documents/ofl-cms-users-mfe");
+            "/api/namespaces/jeeb.cms/documents?limit=200&archived=false",
+            "/api/namespaces/jeeb.cms/documents?limit=200&archived=false&after=ofl-cms-orders-mfe",
+            "/api/namespaces/jeeb.cms/documents/ofl-cms-orders-mfe",
+            "/api/namespaces/jeeb.cms/documents/ofl-cms-users-mfe");
         handler.Requests.Should().OnlyContain(request =>
             request.Authorization == $"Bearer {TemporarySecret.Value}");
     }
@@ -100,9 +100,9 @@ public sealed class BundlerCmsSurfaceStoreTests
         surface.Versions[0].Config.Data["banner"].ToString().Should().Be("live");
         surface.Versions[0].PublishedByUserId.Should().Be("admin-1");
         handler.Requests.Select(request => request.Path).Should().Equal(
-            "/api/v1/namespaces/jeeb.cms/documents/surface-a",
-            "/api/v1/namespaces/jeeb.cms/documents/surface-a/versions?after=0&limit=200",
-            "/api/v1/namespaces/jeeb.cms/documents/surface-a/publications?after=0&limit=200");
+            "/api/namespaces/jeeb.cms/documents/surface-a",
+            "/api/namespaces/jeeb.cms/documents/surface-a/versions?after=0&limit=200",
+            "/api/namespaces/jeeb.cms/documents/surface-a/publications?after=0&limit=200");
     }
 
     [Fact]

@@ -390,7 +390,7 @@ public sealed class CaseEventCallbackContractTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
-            request.RequestUri!.AbsolutePath.Should().Be("/api/v1/deliveries/delivery-1/status-history");
+            request.RequestUri!.AbsolutePath.Should().Be("/deliveries/delivery-1/status-history");
             return Task.FromResult(Json(HttpStatusCode.OK, """
                 {
                   "delivery_id":"delivery-1",

@@ -28,7 +28,7 @@ public sealed class GenericCaseClientContractTests
 
         var request = handler.Requests.Single();
         request.Method.Should().Be(HttpMethod.Post);
-        request.Uri.AbsolutePath.Should().Be("/v1/cases");
+        request.Uri.AbsolutePath.Should().Be("/cases");
         request.Headers["Idempotency-Key"].Should().Be("create-key");
         request.Headers["X-Actor-Ref"].Should().Be("client-1");
         request.Headers["X-Actor-Role"].Should().Be("client");
@@ -57,7 +57,7 @@ public sealed class GenericCaseClientContractTests
 
         var request = handler.Requests.Single();
         request.Method.Should().Be(HttpMethod.Patch);
-        request.Uri.AbsolutePath.Should().Be($"/v1/cases/{CaseId:D}");
+        request.Uri.AbsolutePath.Should().Be($"/cases/{CaseId:D}");
         request.Headers.Should().NotContainKey("If-Match");
         request.Headers["Idempotency-Key"].Should().Be("patch-key");
         request.Headers["X-Actor-Ref"].Should().Be("admin-1");
@@ -85,7 +85,7 @@ public sealed class GenericCaseClientContractTests
 
         var request = handler.Requests.Single();
         request.Method.Should().Be(HttpMethod.Post);
-        request.Uri.AbsolutePath.Should().Be($"/v1/cases/{CaseId:D}/status-message");
+        request.Uri.AbsolutePath.Should().Be($"/cases/{CaseId:D}/status-message");
         request.Headers["Idempotency-Key"].Should().Be("status-message-key");
         request.Headers["X-Actor-Ref"].Should().Be("admin-1");
         request.Headers["X-Actor-Role"].Should().Be("admin");
@@ -126,9 +126,9 @@ public sealed class GenericCaseClientContractTests
             Cursor = "opaque+/=cursor",
         }, default);
 
-        handler.Requests[0].Uri.AbsolutePath.Should().Be($"/v1/cases/{CaseId:D}/messages");
+        handler.Requests[0].Uri.AbsolutePath.Should().Be($"/cases/{CaseId:D}/messages");
         handler.Requests[1].Uri.PathAndQuery.Should().Be(
-            "/v1/cases?kind=support&status=open&priority=urgent&assigneeRef=agent-1"
+            "/cases?kind=support&status=open&priority=urgent&assigneeRef=agent-1"
             + "&assigned=true&requesterRef=client-1&participantRef=courier-1"
             + "&subjectType=delivery&subjectRef=delivery-1"
             + "&dueBefore=2026-08-06T00%3A00%3A00.0000000%2B00%3A00"
@@ -148,7 +148,7 @@ public sealed class GenericCaseClientContractTests
         }, default);
 
         handler.Requests.Single().Uri.PathAndQuery.Should().Be(
-            "/v1/cases?sort=recent&limit=25&cursor=recent%2B%2F%3Dcursor");
+            "/cases?sort=recent&limit=25&cursor=recent%2B%2F%3Dcursor");
     }
 
     [Fact]
@@ -162,7 +162,7 @@ public sealed class GenericCaseClientContractTests
             CaseId, includeInternal: false, limit: 25, cursor: "opaque+/=message", default);
 
         handler.Requests.Single().Uri.PathAndQuery.Should().Be(
-            $"/v1/cases/{CaseId:D}/messages?includeInternal=false&order=newest&limit=25&cursor=opaque%2B%2F%3Dmessage");
+            $"/cases/{CaseId:D}/messages?includeInternal=false&order=newest&limit=25&cursor=opaque%2B%2F%3Dmessage");
         page.NextCursor.Should().Be("earlier-state-cursor");
     }
 
@@ -195,7 +195,7 @@ public sealed class GenericCaseClientContractTests
             limit: 1, cursor: null, default);
 
         handler.Requests.Single().Uri.PathAndQuery.Should().Be(
-            $"/v1/cases/{CaseId:D}/messages?includeInternal=true&order=oldest&limit=1");
+            $"/cases/{CaseId:D}/messages?includeInternal=true&order=oldest&limit=1");
     }
 
     [Fact]
@@ -218,10 +218,10 @@ public sealed class GenericCaseClientContractTests
         await client.RequeueCaseDeadLetterAsync(eventId, "requeue-1", "admin-1", default);
 
         handler.Requests[0].Uri.PathAndQuery.Should().Be(
-            "/v1/case-outbox/dead-letters?limit=20&cursor=opaque%2B%2F%3Ddead");
+            "/case-outbox/dead-letters?limit=20&cursor=opaque%2B%2F%3Ddead");
         handler.Requests[0].Headers["X-Actor-Role"].Should().Be("admin");
         handler.Requests[1].Uri.AbsolutePath.Should().Be(
-            $"/v1/case-outbox/dead-letters/{eventId:D}/requeue");
+            $"/case-outbox/dead-letters/{eventId:D}/requeue");
         handler.Requests[1].Headers["Idempotency-Key"].Should().Be("requeue-1");
         handler.Requests[1].Headers["X-Actor-Ref"].Should().Be("admin-1");
         handler.Requests[1].Headers["X-Actor-Role"].Should().Be("admin");

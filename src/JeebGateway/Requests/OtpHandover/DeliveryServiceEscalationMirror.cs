@@ -134,7 +134,7 @@ public sealed class EscalationMirrorDrainer : BackgroundService
     private async Task PostAsync(AdminEscalation row, CancellationToken ct)
     {
         var client = _http.CreateClient(HttpClientName);
-        using var response = await client.PostAsJsonAsync("api/v1/escalations", new EscalationMirrorRequest
+        using var response = await client.PostAsJsonAsync("escalations", new EscalationMirrorRequest
         {
             // G-15 — the idempotency key IS admin_escalations.id.
             EscalationId = row.Id,

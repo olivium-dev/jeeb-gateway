@@ -99,6 +99,14 @@ public sealed class CaseIdempotencyMiddlewareTests
     [InlineData("/admin/v1/support/tickets/case-id/reply")]
     [InlineData("/deliveries/delivery-id/dispute")]
     [InlineData("/admin/disputes/case-id/resolve")]
+    // W6-03 — the W6-02 unversioned twins must get the SAME policy as their v1 siblings.
+    [InlineData("/disputes")]
+    [InlineData("/disputes/case-id/reply")]
+    [InlineData("/support/tickets")]
+    [InlineData("/support/tickets/case-id/messages")]
+    [InlineData("/deliveries/delivery-id/escalate")]
+    [InlineData("/admin/cases/case-id/close")]
+    [InlineData("/admin/support/tickets/case-id/reply")]
     public void Case_mutations_bypass_key_only_gateway_response_cache(string path)
     {
         IdempotencyMiddleware.IsCaseMutation(new PathString(path)).Should().BeTrue();
@@ -106,6 +114,7 @@ public sealed class CaseIdempotencyMiddlewareTests
 
     [Theory]
     [InlineData("/admin/v1/cases")]
+    [InlineData("/admin/cases")]
     [InlineData("/requests")]
     public void Unrelated_mutation_routes_keep_their_existing_policy(string path)
     {

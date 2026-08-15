@@ -80,7 +80,7 @@ public sealed class StateAuditClient(HttpClient http) : IStateAuditClient
         CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKey);
-        using var message = new HttpRequestMessage(HttpMethod.Post, "v1/audit-events")
+        using var message = new HttpRequestMessage(HttpMethod.Post, "audit-events")
         {
             Content = JsonContent.Create(request, options: Json)
         };
@@ -106,7 +106,7 @@ public sealed class StateAuditClient(HttpClient http) : IStateAuditClient
         var suffix = string.Join("&", values.Select(pair =>
             Uri.EscapeDataString(pair.Key) + "=" + Uri.EscapeDataString(pair.Value)));
         using var response = await http.GetAsync(
-            "v1/audit-events?" + suffix,
+            "audit-events?" + suffix,
             HttpCompletionOption.ResponseHeadersRead,
             ct);
         await EnsureSuccessAsync(response, "find", ct);

@@ -200,7 +200,7 @@ public sealed class UpsertRequestUpstream
 /// <inheritdoc cref="IRequestsOwnerClient"/>
 public sealed class RequestsOwnerClient(HttpClient http) : IRequestsOwnerClient
 {
-    private const string Base = "api/v1/requests";
+    private const string Base = "requests";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     public async Task UpsertAsync(UpsertRequestUpstream request, CancellationToken ct)

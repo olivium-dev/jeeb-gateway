@@ -19,7 +19,7 @@ namespace JeebGateway.IntegrationTests;
 /// Courier matching was relocated out of the gateway into delivery-service. The
 /// gateway no longer owns a matching engine; <c>POST /matching/run</c> is a thin
 /// BFF that always delegates to delivery-service
-/// <c>POST /api/v1/matching/run</c> via <see cref="IDeliveryServiceClient"/>.
+/// <c>POST /matching/run</c> via <see cref="IDeliveryServiceClient"/>.
 ///
 /// These tests therefore exercise the DELEGATION contract — the request is
 /// forwarded to the delivery upstream, the snake_case Go result is mapped onto
@@ -37,7 +37,7 @@ public class MatchingEndpointTests
     [Fact]
     public async Task Run_Forwards_To_Delivery_Upstream_And_Maps_Result()
     {
-        // Happy path: the controller forwards to delivery-service /api/v1/matching/run
+        // Happy path: the controller forwards to delivery-service /matching/run
         // and maps the snake_case result onto the gateway MatchingRunResponse.
         var captured = new CapturedRequests();
         var stub = new StubHttpMessageHandler(req =>
@@ -79,7 +79,7 @@ public class MatchingEndpointTests
         body.Candidates[0].Rating.Should().Be(4.8);
 
         // The request hit the canonical delivery-service route.
-        captured.Single().RequestUri!.AbsolutePath.Should().Be("/api/v1/matching/run");
+        captured.Single().RequestUri!.AbsolutePath.Should().Be("/matching/run");
     }
 
     [Theory]

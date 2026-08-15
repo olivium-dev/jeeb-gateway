@@ -20,7 +20,7 @@ namespace JeebGateway.IntegrationTests;
 ///   <item>accept the canonical PATCH body the suite drives
 ///     (<c>{trigger:"pickup"}</c>, <c>{to:"Picked"}</c>, legacy <c>{status:"in_transit"}</c>)
 ///     and forward it to delivery-service's
-///     <c>POST /api/v1/deliveries/{id}/transition</c>, returning the canonical
+///     <c>POST /deliveries/{id}/transition</c>, returning the canonical
 ///     status (Ordered/Picked/InTransit/AtDoor/Done) verbatim — NOT the legacy
 ///     snake_case literal;</item>
 ///   <item>forward without any in-gateway legacy-enum guard (the linear

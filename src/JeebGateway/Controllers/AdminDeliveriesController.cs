@@ -88,7 +88,7 @@ public sealed class AdminDeliveriesController : ControllerBase
         [FromQuery(Name = "limit"), Range(1, 200)] int? limit,
         [FromQuery(Name = "cursor"), StringLength(2048)] string? cursor,
         CancellationToken ct) =>
-        RelayDeliveryAsync("api/v1/admin/deliveries" + Request.QueryString, null, ct);
+        RelayDeliveryAsync("admin/deliveries" + Request.QueryString, null, ct);
 
     [HttpGet("admin/v1/deliveries/{deliveryId}/timeline")]
     [HttpGet("admin/deliveries/{deliveryId}/timeline")]
@@ -100,7 +100,7 @@ public sealed class AdminDeliveriesController : ControllerBase
         [FromQuery(Name = "cursor"), StringLength(2048)] string? cursor,
         CancellationToken ct) =>
         RelayDeliveryAsync(
-            $"api/v1/admin/deliveries/{Uri.EscapeDataString(deliveryId)}/timeline{Request.QueryString}",
+            $"admin/deliveries/{Uri.EscapeDataString(deliveryId)}/timeline{Request.QueryString}",
             deliveryId,
             ct);
 
@@ -145,7 +145,7 @@ public sealed class AdminDeliveriesController : ControllerBase
         if (client.BaseAddress is null) return DeliveryOwnerUnavailable();
         using var message = new HttpRequestMessage(
             HttpMethod.Post,
-            $"api/v1/admin/deliveries/{Uri.EscapeDataString(deliveryId.Trim())}/transition")
+            $"admin/deliveries/{Uri.EscapeDataString(deliveryId.Trim())}/transition")
         {
             Content = JsonContent.Create(new
             {
@@ -192,7 +192,7 @@ public sealed class AdminDeliveriesController : ControllerBase
         if (deliveryClient.BaseAddress is null) return DependencyUnavailable("delivery");
 
         var escaped = Uri.EscapeDataString(deliveryId);
-        var deliveryResult = await FetchJsonAsync(deliveryClient, $"api/v1/admin/deliveries/{escaped}", ct);
+        var deliveryResult = await FetchJsonAsync(deliveryClient, $"admin/deliveries/{escaped}", ct);
         if (deliveryResult.StatusCode == StatusCodes.Status404NotFound) return NotFound();
         if (deliveryResult.Node is null) return DependencyUnavailable("delivery");
 
@@ -205,7 +205,7 @@ public sealed class AdminDeliveriesController : ControllerBase
 
         var clientId = deliveryResult.Node["party_ids"]?["client_id"]?.GetValue<string>();
         var timelineTask = FetchJsonAsync(deliveryClient,
-            $"api/v1/admin/deliveries/{escaped}/timeline?limit=200", ct);
+            $"admin/deliveries/{escaped}/timeline?limit=200", ct);
         var casesTask = HasCapability(Capabilities.AdminCasesRead)
             ? FetchCasesAsync(deliveryId, ct)
             : Task.FromResult(new SourceResult(
@@ -303,9 +303,9 @@ public sealed class AdminDeliveriesController : ControllerBase
         if (deliveryClient.BaseAddress is null) return DependencyUnavailable("delivery");
 
         var escaped = Uri.EscapeDataString(deliveryId);
-        var detailTask = FetchJsonAsync(deliveryClient, $"api/v1/admin/deliveries/{escaped}", ct);
+        var detailTask = FetchJsonAsync(deliveryClient, $"admin/deliveries/{escaped}", ct);
         var timelineTask = FetchJsonAsync(
-            deliveryClient, $"api/v1/admin/deliveries/{escaped}/timeline?limit=200", ct);
+            deliveryClient, $"admin/deliveries/{escaped}/timeline?limit=200", ct);
         await Task.WhenAll(detailTask, timelineTask);
         var detail = await detailTask;
         var timeline = await timelineTask;

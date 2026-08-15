@@ -30,7 +30,7 @@ public class DeliveryServiceClientTierTests
         var delivery = await client.GetDeliveryAsync("delivery-1", CancellationToken.None);
 
         handler.LastMethod.Should().Be(HttpMethod.Get);
-        handler.LastRequestUri!.AbsolutePath.Should().Be("/api/v1/deliveries/delivery-1");
+        handler.LastRequestUri!.AbsolutePath.Should().Be("/deliveries/delivery-1");
         delivery.Id.Should().Be("delivery-1");
         delivery.TenantId.Should().Be("tenant-1");
         delivery.ClientId.Should().Be("client-1");
