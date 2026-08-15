@@ -1606,6 +1606,22 @@ var durableRequests = builder.Configuration
 // the inner delegate of the durable decorator).
 builder.Services.AddSingleton<InMemoryRequestsStore>();
 
+// W5-04: upstream-authority swaps ONLY the store root (durable decorator still wraps it);
+// no silent fallback — an unwired Services:Delivery:BaseUrl is refused at boot above.
+var requestsOwnerAuthority = JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(
+        builder.Configuration["FeatureFlags:RequestsOwnerListMode"])
+    == JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority;
+if (requestsOwnerAuthority)
+{
+    builder.Services.AddSingleton<UpstreamRequestsStore>(sp => new UpstreamRequestsStore(
+        sp.GetRequiredService<JeebGateway.Requests.IRequestsOwnerClient>(),
+        sp.GetRequiredService<TimeProvider>(),
+        sp.GetRequiredService<ILogger<UpstreamRequestsStore>>()));
+}
+Func<IServiceProvider, IRequestsStore> requestsRootStore = requestsOwnerAuthority
+    ? sp => sp.GetRequiredService<UpstreamRequestsStore>()
+    : sp => sp.GetRequiredService<InMemoryRequestsStore>();
+
 if (durableRequests.Enabled)
 {
     // Saga bundle recorder — typed HttpClient over jeeb-state-service
@@ -1652,7 +1668,7 @@ if (durableRequests.Enabled)
         .AddStandardResilienceHandler();
 
     builder.Services.AddSingleton<IRequestsStore>(sp => new DurableRequestsStore(
-        sp.GetRequiredService<InMemoryRequestsStore>(),
+        requestsRootStore(sp),
         sp.GetRequiredService<JeebGateway.Services.Clients.IDeliveryServiceClient>(),
         sp.GetRequiredService<JeebGateway.StateService.Durable.ISagaBundleRecorder>(),
         sp.GetRequiredService<JeebGateway.Conversations.IConversationProvisioner>(),
@@ -1668,7 +1684,7 @@ if (durableRequests.Enabled)
 }
 else
 {
-    builder.Services.AddSingleton<IRequestsStore>(sp => sp.GetRequiredService<InMemoryRequestsStore>());
+    builder.Services.AddSingleton<IRequestsStore>(sp => requestsRootStore(sp));
 }
 
 // S06 (B1/B2/B3/ALT-2/ALT-3/ALT-4/ALT-4b/N5/N6): just-in-time delivery-row
