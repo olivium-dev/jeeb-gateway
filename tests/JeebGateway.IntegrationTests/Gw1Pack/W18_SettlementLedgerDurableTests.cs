@@ -39,7 +39,7 @@ namespace JeebGateway.IntegrationTests.Gw1Pack;
 ///   <item><b>B1/B2</b> (in <c>tests/gw1-pack/lib/critical-parse.py</c>, not in this
 ///   file) — the <c>Critical</c> set measured by parsing the C# at two git refs, so the
 ///   base→head delta is computed rather than asserted. An in-suite
-///   <c>HaveCount(33)</c> is a tripwire: the writer knew the sealed number.</item>
+///   <c>HaveCount(26)</c> is a tripwire after the owner-service and GDPR state-work cutovers.</item>
 ///   <item><b>B3/B4</b> — a REAL host boot in <c>Production</c> with the gate ARMED.
 ///   B3 is the red (no <c>GatewayPostgres</c> ⇒ the violation list names the ledger);
 ///   B4 is its discriminating control (with <c>GatewayPostgres</c> set the ledger

@@ -115,6 +115,44 @@ public class BanServiceContractTests
         result.Status.Should().Be("WARNING");
     }
 
+    [Fact]
+    public async Task ApplyTerminalBan_Puts_To_Idempotent_Terminal_Route()
+    {
+        var capture = new CapturingHandler(HttpStatusCode.OK,
+            $$"""
+            {"user_id":"{{JeeberId}}","ban_type":"red","current_stage":2,"status":"BAN","message":"suspended","banned_until":null,"last_updated":"2026-06-01T15:46:25Z","is_currently_banned":true}
+            """);
+        var client = new BanServiceClient(
+            new HttpClient(capture) { BaseAddress = new Uri("http://ban.test/") });
+
+        var result = await client.ApplyTerminalBanAsync(
+            JeeberId, "red", CancellationToken.None);
+
+        capture.LastMethod.Should().Be(HttpMethod.Put);
+        capture.LastUri!.AbsolutePath.Should().Be($"/api/v1/ban/{JeeberId}/red/terminal");
+        result.Status.Should().Be("BAN");
+        result.IsCurrentlyBanned.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ForceReset_Posts_To_Owner_Reset_Route_And_Binds_Update()
+    {
+        var capture = new CapturingHandler(HttpStatusCode.OK,
+            $$"""
+            {"old_status":{"user_id":"{{JeeberId}}","ban_type":"red","current_stage":2,"status":"BAN","message":"suspended","banned_until":null,"last_updated":"2026-06-01T15:46:25Z","is_currently_banned":true},"new_status":null,"updated":true}
+            """);
+        var client = new BanServiceClient(
+            new HttpClient(capture) { BaseAddress = new Uri("http://ban.test/") });
+
+        var result = await client.ForceResetAsync(JeeberId, CancellationToken.None);
+
+        capture.LastMethod.Should().Be(HttpMethod.Post);
+        capture.LastUri!.AbsolutePath.Should().Be($"/api/v1/ban/{JeeberId}/force-reset");
+        result.Updated.Should().BeTrue();
+        result.OldStatus!.Status.Should().Be("BAN");
+        result.NewStatus.Should().BeNull();
+    }
+
     // -----------------------------------------------------------------
     // (2) Restriction-store seam — BanServiceJeeberRestrictionStore over
     //     the real client, proving the read/write path CancellationService uses.

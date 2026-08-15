@@ -8,8 +8,9 @@ namespace JeebGateway.Controllers;
 
 /// <summary>
 /// E2E 8.2 / 8.3 / 8.4 — admin user roster + account-suspension moderation.
-/// This is a THIN BFF over the gateway's user projection seam
-/// (<see cref="IUsersStore"/>) plus the gateway-owned token-revocation seam
+/// This is a THIN BFF over <see cref="IAdminUserProjection"/>, which composes
+/// user-management identity, ban-service suspension, and feedback-service ratings
+/// on demand, plus the gateway-owned token-revocation seam
 /// (<see cref="ITokenService"/>). It holds NO user state itself.
 ///
 /// <para><b>Why the gateway owns suspend, not user-management.</b> The live
@@ -48,13 +49,13 @@ public class AdminUsersController : ControllerBase
     private const string ActionSuspend = "suspend_user";
     private const string ActionUnsuspend = "unsuspend_user";
 
-    private readonly IUsersStore _users;
+    private readonly IAdminUserProjection _users;
     private readonly ITokenService _tokens;
     private readonly IAdminAuditLog _auditLog;
     private readonly ILogger<AdminUsersController> _log;
 
     public AdminUsersController(
-        IUsersStore users,
+        IAdminUserProjection users,
         ITokenService tokens,
         IAdminAuditLog auditLog,
         ILogger<AdminUsersController> log)
@@ -266,6 +267,9 @@ public class AdminUsersController : ControllerBase
         Roles = u.Roles.ToList(),
         Rating = u.Rating,
         CreatedAt = u.CreatedAt,
+        IsSuspended = u.IsSuspended,
+        SuspensionReason = u.SuspensionReason,
+        SuspendedAt = u.SuspendedAt,
         // BR-10: a Jeeber with zero ratings renders a "New" badge in the roster.
         IsNew = u.RatingCount == 0
     };

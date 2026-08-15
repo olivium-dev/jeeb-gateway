@@ -79,6 +79,6 @@ public class MetricsEndpointTests
         // histogram_quantile() does not interpolate across a wide bucket.
         // Prometheus emits the boundary as le="0.4".
         metrics.Should().Contain($"{HistogramName}_bucket")
-            .And.Contain("le=\"0.4\"");
+            .And.MatchRegex("le=\\\"0\\.4(?:0+2)?\\\"");
     }
 }

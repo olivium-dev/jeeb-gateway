@@ -13,19 +13,9 @@ using Xunit;
 namespace JeebGateway.IntegrationTests.Push;
 
 /// <summary>
-/// Gateway durability hardening (JEBV4-144 / 137 / 136, AUDIT-A IN-MEM-LIVE) — the
-/// push-reliability trio (INotificationDispatchOutbox, IPushRetryQueue,
-/// IPushDeliveryTracker) is migrated from process memory to durable Postgres
-/// (push-reliability tables, migration 0030) behind GatewayPostgres:ConnectionString.
-/// Mirrors PostgresTiersStoreTests — the established DI-resolution-smoke + guard-
-/// promotion pattern for a flag-gated store swap.
-///
-/// <para>The DI-resolution tests run for real, no live Postgres required: each
-/// Postgres store's constructor only stores its collaborators (INpgsqlConnectionFactory
-/// merely holds the connection string), so resolving the singleton never opens a
-/// socket. Round-trip properties that genuinely need a live database are documented
-/// as deferred-to-Testcontainers-QV placeholders, matching PostgresTiersStoreTests
-/// (this project carries no Testcontainers dependency today).</para>
+/// Ownership regression: notification-service owns tokens, outbox, retry, and
+/// delivery tracking. Gateway runtime DI must expose none of the former stores,
+/// regardless of whether GatewayPostgres is configured.
 /// </summary>
 public class PostgresPushReliabilityStoresTests
 {
@@ -50,44 +40,37 @@ public class PostgresPushReliabilityStoresTests
     // ── DI wiring: durable impls selected when GatewayPostgres is configured ────
 
     [Fact]
-    public void DispatchOutbox_Resolves_To_Postgres_When_GatewayPostgres_Configured()
+    public void DispatchOutbox_Is_Not_Runtime_Registered_When_GatewayPostgres_Configured()
     {
         using var factory = PostgresConfiguredFactory();
         using var scope = factory.Services.CreateScope();
 
-        var act = () => scope.ServiceProvider.GetRequiredService<INotificationDispatchOutbox>();
-        act.Should().NotThrow("PostgresNotificationDispatchOutbox's constructor does no I/O");
-        scope.ServiceProvider.GetRequiredService<INotificationDispatchOutbox>()
-            .Should().BeOfType<PostgresNotificationDispatchOutbox>(
-                "GatewayPostgres:ConnectionString is configured, so the durable outbox must be selected");
+        scope.ServiceProvider.GetService<INotificationDispatchOutbox>().Should().BeNull();
     }
 
     [Fact]
-    public void RetryQueue_Resolves_To_Postgres_When_GatewayPostgres_Configured()
+    public void RetryQueue_Is_Not_Runtime_Registered_When_GatewayPostgres_Configured()
     {
         using var factory = PostgresConfiguredFactory();
         using var scope = factory.Services.CreateScope();
 
-        scope.ServiceProvider.GetRequiredService<IPushRetryQueue>()
-            .Should().BeOfType<PostgresPushRetryQueue>(
-                "GatewayPostgres:ConnectionString is configured, so the durable retry queue must be selected");
+        scope.ServiceProvider.GetService<IPushRetryQueue>().Should().BeNull();
     }
 
     [Fact]
-    public void DeliveryTracker_Resolves_To_Postgres_When_GatewayPostgres_Configured()
+    public void DeliveryTracker_Is_Not_Runtime_Registered_When_GatewayPostgres_Configured()
     {
         using var factory = PostgresConfiguredFactory();
         using var scope = factory.Services.CreateScope();
 
-        scope.ServiceProvider.GetRequiredService<IPushDeliveryTracker>()
-            .Should().BeOfType<PostgresPushDeliveryTracker>(
-                "GatewayPostgres:ConnectionString is configured, so the durable delivery tracker must be selected");
+        scope.ServiceProvider.GetService<IPushDeliveryTracker>().Should().BeNull();
+        scope.ServiceProvider.GetService<IDeviceTokenStore>().Should().BeNull();
     }
 
     // ── DI wiring: in-memory fallback preserved when GatewayPostgres is absent ──
 
     [Fact]
-    public void Trio_Resolves_To_InMemory_When_GatewayPostgres_Absent()
+    public void Retired_Stores_Have_No_InMemory_Fallback_When_GatewayPostgres_Absent()
     {
         // Default test config carries no GatewayPostgres:ConnectionString, so the
         // in-memory fallbacks must remain the live path (unchanged behaviour for every
@@ -95,16 +78,14 @@ public class PostgresPushReliabilityStoresTests
         using var factory = new WebApplicationFactory<Program>();
         using var scope = factory.Services.CreateScope();
 
-        scope.ServiceProvider.GetRequiredService<INotificationDispatchOutbox>()
-            .Should().BeOfType<InMemoryNotificationDispatchOutbox>();
-        scope.ServiceProvider.GetRequiredService<IPushRetryQueue>()
-            .Should().BeOfType<InMemoryPushRetryQueue>();
-        scope.ServiceProvider.GetRequiredService<IPushDeliveryTracker>()
-            .Should().BeOfType<InMemoryPushDeliveryTracker>();
+        scope.ServiceProvider.GetService<INotificationDispatchOutbox>().Should().BeNull();
+        scope.ServiceProvider.GetService<IPushRetryQueue>().Should().BeNull();
+        scope.ServiceProvider.GetService<IPushDeliveryTracker>().Should().BeNull();
+        scope.ServiceProvider.GetService<IDeviceTokenStore>().Should().BeNull();
     }
 
     [Fact]
-    public void InMemoryDeliveryTracker_Concrete_Still_Resolvable_Without_Postgres()
+    public void InMemoryDeliveryTracker_Concrete_Is_Not_Runtime_Registered()
     {
         // DisputeServiceTests / DisputeCaseEndpointTests resolve the concrete
         // InMemoryPushDeliveryTracker to assert recorded outcomes — the in-memory
@@ -112,9 +93,7 @@ public class PostgresPushReliabilityStoresTests
         using var factory = new WebApplicationFactory<Program>();
         using var scope = factory.Services.CreateScope();
 
-        scope.ServiceProvider.GetRequiredService<InMemoryPushDeliveryTracker>()
-            .Should().BeSameAs(scope.ServiceProvider.GetRequiredService<IPushDeliveryTracker>(),
-                "the interface must bind to the same singleton the concrete registration exposes");
+        scope.ServiceProvider.GetService<InMemoryPushDeliveryTracker>().Should().BeNull();
     }
 
     // ── Durability guard promotion (JEBV4-144 / 137 / 136) ─────────────────────
@@ -123,14 +102,11 @@ public class PostgresPushReliabilityStoresTests
     [InlineData(typeof(INotificationDispatchOutbox), typeof(PostgresNotificationDispatchOutbox))]
     [InlineData(typeof(IPushRetryQueue), typeof(PostgresPushRetryQueue))]
     [InlineData(typeof(IPushDeliveryTracker), typeof(PostgresPushDeliveryTracker))]
-    public void Store_Is_Now_A_Critical_Durable_Store_Requiring_Its_Postgres_Impl(Type iface, Type durableImpl)
+    [InlineData(typeof(IDeviceTokenStore), typeof(PostgresDeviceTokenStore))]
+    public void Retired_Store_Is_Not_A_Gateway_Critical_Requirement(Type iface, Type durableImpl)
     {
-        var critical = StoreDurabilityGuard.Critical.FirstOrDefault(c => c.Iface == iface);
-
-        critical.Iface.Should().Be(iface,
-            $"{iface.Name} must be promoted to the Critical fail-closed set now that a durable target exists");
-        critical.DurableImpls.Should().Contain(durableImpl,
-            $"the only durable implementation that satisfies the prod-like gate is {durableImpl.Name}");
+        StoreDurabilityGuard.Critical.Select(entry => entry.Iface).Should().NotContain(iface);
+        durableImpl.Should().NotBeNull(); // concrete remains only for migration/history tests
     }
 
     [Theory]
@@ -147,7 +123,7 @@ public class PostgresPushReliabilityStoresTests
     [InlineData(typeof(INotificationDispatchOutbox), typeof(InMemoryNotificationDispatchOutbox), "INotificationDispatchOutbox", "InMemoryNotificationDispatchOutbox")]
     [InlineData(typeof(IPushRetryQueue), typeof(InMemoryPushRetryQueue), "IPushRetryQueue", "InMemoryPushRetryQueue")]
     [InlineData(typeof(IPushDeliveryTracker), typeof(InMemoryPushDeliveryTracker), "IPushDeliveryTracker", "InMemoryPushDeliveryTracker")]
-    public void EnsureDurable_ProdLike_With_InMemory_Impl_Fails_Closed(
+    public void Retired_InMemory_Impl_Is_Irrelevant_To_Gateway_Durability_Guard(
         Type iface, Type inMemoryImpl, string ifaceName, string inMemoryName)
     {
         // Prove the promotion is live: a prod-like gateway resolving one of the trio
@@ -160,8 +136,9 @@ public class PostgresPushReliabilityStoresTests
         var provider = new MapServiceProvider(map);
         var violations = StoreDurabilityGuard.Evaluate(t => provider.GetService(t)?.GetType());
 
-        violations.Should().ContainSingle()
-            .Which.Should().Contain(ifaceName).And.Contain(inMemoryName);
+        violations.Should().BeEmpty();
+        ifaceName.Should().NotBeNull();
+        inMemoryName.Should().NotBeNull();
     }
 
     // ── Round-trip / concurrency (deferred to Testcontainers QV) ───────────────

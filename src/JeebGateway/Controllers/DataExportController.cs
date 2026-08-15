@@ -20,13 +20,11 @@ namespace JeebGateway.Controllers;
 [Route("users/me/data-export")]
 public class DataExportController : ControllerBase
 {
-    private readonly IDataExportStore _store;
-    private readonly TimeProvider _clock;
+    private readonly IDataExportWorkflow _workflow;
 
-    public DataExportController(IDataExportStore store, TimeProvider clock)
+    public DataExportController(IDataExportWorkflow workflow)
     {
-        _store = store;
-        _clock = clock;
+        _workflow = workflow;
     }
 
     [HttpPost]
@@ -52,7 +50,7 @@ public class DataExportController : ControllerBase
             });
         }
 
-        var record = await _store.RequestAsync(userId, format, ct);
+        var record = await _workflow.RequestAsync(userId, format, ct);
         return StatusCode(StatusCodes.Status202Accepted, ToResponse(record));
     }
 
@@ -66,7 +64,7 @@ public class DataExportController : ControllerBase
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var problem)) return problem;
 
-        var record = await _store.GetLatestForUserAsync(userId, ct);
+        var record = await _workflow.GetLatestForUserAsync(userId, ct);
         if (record is null) return NotFound();
         return Ok(ToResponse(record));
     }
@@ -80,27 +78,19 @@ public class DataExportController : ControllerBase
     // [AllowAnonymous] opts out of L1 (matches the existing ADR-004 D1 decision above).
     [PublicEndpoint("Capability-URL data-export download — token is the credential (ADR-004 D1).")]
     [HttpGet("{token}/download")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status302Found)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Download(string token, CancellationToken ct)
     {
-        var now = _clock.GetUtcNow();
-        var record = await _store.GetByDownloadTokenAsync(token, now, ct);
-        if (record is null || record.Payload is null)
+        var download = await _workflow.RedeemDownloadAsync(token, ct);
+        if (download is null)
         {
             return NotFound();
         }
-
-        var bytes = record.Payload;
-        var contentType = record.PayloadContentType ?? "application/octet-stream";
-        var fileName = $"jeeb-data-export-{record.Id}.{(record.Format == DataExportFormat.Pdf ? "pdf" : "json")}";
-
-        // Mark delivered AFTER capturing the bytes — MarkDelivered clears
-        // the payload so a second download attempt returns 404 (the link
-        // is single-use). Capture-before-clear keeps the response intact.
-        await _store.MarkDeliveredAsync(record.Id, now, ct);
-
-        return File(bytes, contentType, fileName);
+        // The gateway never re-streams export bytes. The capability was
+        // atomically consumed in state-service before this redirect; the
+        // artifact owner minted a short-lived, private, single-use GET URL.
+        return Redirect(download.AbsoluteUri);
     }
 
     private DataExportResponse ToResponse(DataExportRequest r) => new()

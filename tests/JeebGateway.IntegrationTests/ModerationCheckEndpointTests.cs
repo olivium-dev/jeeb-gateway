@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
+using JeebGateway.IntegrationTests.Fakes;
 using JeebGateway.ProhibitedItems;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,8 +16,8 @@ namespace JeebGateway.IntegrationTests;
 /// allow / warn / block verdict that mirrors the create-gate outcome exactly, plus
 /// the current lexicon version so a warn caller can drive the version-pinned ack flow.
 ///
-/// The gate-on factory auto-seeds "arak" (block) and "kitchen knife" (warn) via
-/// DefaultLexiconSeeder, so no admin step is needed to exercise the verdicts.
+/// The gate-on factory installs an explicit ban-owner double seeded with "arak"
+/// (block) and "kitchen knife" (warn), so no live owner is needed.
 /// </summary>
 public class ModerationCheckEndpointTests : IClassFixture<ModerationCheckEndpointTests.ModerationOnFactory>
 {
@@ -31,7 +32,13 @@ public class ModerationCheckEndpointTests : IClassFixture<ModerationCheckEndpoin
     {
         protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:CreateModeration:Enabled", "true");
+            builder.ConfigureServices(services =>
+            {
+                OwnerServiceFakes.AllowAllAccounts(services);
+                OwnerServiceFakes.UseSeededModerationCatalog(services);
+            });
         }
     }
 
@@ -142,10 +149,12 @@ public class ModerationCheckFailClosedTests
     {
         protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:CreateModeration:Enabled", "true");
 
             builder.ConfigureServices(services =>
             {
+                OwnerServiceFakes.AllowAllAccounts(services);
                 var descriptor = services.SingleOrDefault(
                     d => d.ServiceType == typeof(IProhibitedItemsStore));
                 if (descriptor is not null)
@@ -153,15 +162,6 @@ public class ModerationCheckFailClosedTests
 
                 services.AddSingleton<IProhibitedItemsStore, EmptyStore>();
 
-                // The DefaultLexiconSeeder IHostedService seeds the default lexicon on startup
-                // whenever the store is empty — which an always-empty store always is — so it
-                // would call EmptyStore.CreateAsync at boot and crash the host. This test's
-                // whole premise is an EMPTY lexicon (fail-closed), so the seeder must not run;
-                // drop it so the lexicon genuinely stays empty and the host can boot.
-                var seeder = services.SingleOrDefault(
-                    d => d.ImplementationType == typeof(JeebGateway.ProhibitedItems.DefaultLexiconSeeder));
-                if (seeder is not null)
-                    services.Remove(seeder);
             });
         }
     }

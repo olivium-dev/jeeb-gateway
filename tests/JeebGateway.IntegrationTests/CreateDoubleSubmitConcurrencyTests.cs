@@ -46,6 +46,7 @@ public class CreateDoubleSubmitConcurrencyTests
     {
         protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("JeebStateService:BaseUrl", "http://localhost:10073");
             builder.ConfigureTestServices(services =>
             {

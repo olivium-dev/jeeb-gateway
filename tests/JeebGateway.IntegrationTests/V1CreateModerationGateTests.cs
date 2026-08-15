@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.ProhibitedItems;
+using JeebGateway.IntegrationTests.Fakes;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
@@ -34,7 +35,13 @@ public class V1CreateModerationGateTests : IClassFixture<V1CreateModerationGateT
     {
         protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:CreateModeration:Enabled", "true");
+            builder.ConfigureServices(services =>
+            {
+                OwnerServiceFakes.AllowAllAccounts(services);
+                OwnerServiceFakes.UseSeededModerationCatalog(services);
+            });
         }
     }
 
@@ -125,10 +132,12 @@ public class V1CreateModerationFailClosedTests
     {
         protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:CreateModeration:Enabled", "true");
 
             builder.ConfigureServices(services =>
             {
+                OwnerServiceFakes.AllowAllAccounts(services);
                 var descriptor = services.SingleOrDefault(
                     d => d.ServiceType == typeof(IProhibitedItemsStore));
                 if (descriptor is not null)

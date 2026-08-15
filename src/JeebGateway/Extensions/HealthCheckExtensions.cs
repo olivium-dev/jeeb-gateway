@@ -78,6 +78,7 @@ public static class HealthCheckExtensions
         // matching-service readiness probe REMOVED (JEBV4-220 / E25) — the
         // standalone matching-service read path is retired; nothing dials it.
         AddDownstreamProbe(checks, config, "notification-service",    "ServiceNotificationClient:BaseUrl", healthPath: "health");
+        AddDownstreamProbe(checks, config, "bundler-service",         JeebGateway.Cms.BundlerCmsSurfaceStore.BaseUrlConfigurationKey, healthPath: "health/live");
         AddDownstreamProbe(checks, config, "push-notification",       "PushNotificationServiceApi:BaseUrl", healthPath: "health");
         AddDownstreamProbe(checks, config, "delivery-service",        "Services:Delivery:BaseUrl",        healthPath: "health");
         AddDownstreamProbe(checks, config, "geolocation-service",     "Services:Geolocation:BaseUrl",     healthPath: "health");
@@ -97,8 +98,9 @@ public static class HealthCheckExtensions
         // live 192.168.2.50 destination), so probing it would dial a banned host and fail a
         // CRITICAL readiness check for a service Jeeb deliberately no longer uses. Do not re-add.
 
-        // voice-transcription serves /healthz (not /health).
-        AddDownstreamProbe(checks, config, "voice-transcription",     "Services:VoiceTranscription:BaseUrl", healthPath: "healthz");
+        // voice-transcription owns durable retry state; /readyz verifies its
+        // dependencies, whereas /healthz is deliberately liveness-only.
+        AddDownstreamProbe(checks, config, "voice-transcription",     "Services:VoiceTranscription:BaseUrl", healthPath: "readyz");
 
         // user-management is the identity service the gateway proxies to via the
         // NSwag-generated ServiceUserManagementClient (UserController). Unlike the

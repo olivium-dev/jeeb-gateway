@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,7 +16,6 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <PackageReference Include="FluentAssertions" Version="6.12.1" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="8.0.21" />
-    <PackageReference Include="Testcontainers.PostgreSql" Version="3.10.0" />
 
     <!--
       JEB-471 / T-BE-001 — additional packages for the OTP sign-in
@@ -25,7 +25,7 @@
       directly against HmacShaPhoneHasher (PR #32 review B1).
     -->
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="8.10.0" />
-    <PackageReference Include="OpenTelemetry" Version="1.9.0" />
+    <PackageReference Include="OpenTelemetry" Version="1.17.0" />
     <PackageReference Include="libphonenumber-csharp" Version="8.13.51" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.19.1" />
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
@@ -33,7 +33,74 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\JeebGateway\JeebGateway.csproj" />
-    <ProjectReference Include="..\..\tools\WalletFinanceBackfill\WalletFinanceBackfill.csproj" />
+    <!-- Explicit test fixture only; excluded from the gateway project/binary. -->
+    <Compile Include="..\..\src\JeebGateway\Users\InMemoryUsersStore.cs"
+             Link="Fixtures\InMemoryUsersStore.cs" />
+    <Compile Remove="UpstreamBackedUsersStoreTests.cs" />
+    <Compile Remove="Users\PostgresUserProjectionPhoneNullableTests.cs" />
+    <!-- Retired gateway-Postgres coverage. The production providers and package
+         no longer exist; owner-adapter and stateless-composition tests replace
+         these database-specific suites. -->
+    <Compile Remove="Admin\Postgres*.cs" />
+    <Compile Remove="Availability\Postgres*.cs" />
+    <Compile Remove="Cms\Postgres*.cs" />
+    <Compile Remove="Financials\Postgres*.cs" />
+    <Compile Remove="Financials\SettlementBatchesCanonicalShapeTests.cs" />
+    <Compile Remove="Financials\SettlementIdempotencyTests.cs" />
+    <Compile Remove="Financials\WeeklyBatchTests.cs" />
+    <Compile Remove="Postgres*.cs" />
+    <Compile Remove="ProhibitedItems\FlaggedRequests\Postgres*.cs" />
+    <Compile Remove="Push\Postgres*.cs" />
+    <Compile Remove="Requests\OtpHandover\Postgres*.cs" />
+    <Compile Remove="Tiers\Postgres*.cs" />
+    <Compile Remove="Users\Postgres*.cs" />
+    <Compile Remove="Users\DataExport\Postgres*.cs" />
+    <Compile Remove="Whisper\Postgres*.cs" />
+    <Compile Remove="Gw1Pack\W18_*.cs" />
+    <Compile Remove="Gw3Pack\W35c_OfferStoreAndLocalAcceptDeletedTests.cs" />
+    <Compile Remove="Infrastructure\StoreDurabilityFailClosedTests.cs" />
+    <Compile Remove="Infrastructure\StoreDurabilityGuardGapStoresTests.cs" />
+    <Compile Remove="Infrastructure\PostgresHealthCheckTests.cs" />
+    <Compile Remove="DurableReadFailureCounterTests.cs" />
+    <Compile Remove="NewRequestPushNotifierTests.cs" />
+
+    <!-- Retired in-gateway owner state and scheduler coverage. These suites
+         exercised implementations that are no longer part of the gateway
+         assembly; owner-adapter, bounded-job, and production-composition tests
+         are the replacement coverage. -->
+    <Compile Remove="AccountDeletionRemoteUserPreferencesGuardTests.cs" />
+    <Compile Remove="Availability\AutoOfflineSweeperTests.cs" />
+    <Compile Remove="AvailabilityEndpointTests.cs" />
+    <Compile Remove="ChatServiceConversationProvisionerTests.cs" />
+    <Compile Remove="ConversationBoundaryGuardTests.cs" />
+    <Compile Remove="DataExportEndpointTests.cs" />
+    <Compile Remove="DispatchingRequestExpiryNotifierTests.cs" />
+    <Compile Remove="DurableRequestsFlagWiringTests.cs" />
+    <Compile Remove="DurableRequestsStoreTests.cs" />
+    <Compile Remove="FT08DurableExpirySweepTests.cs" />
+    <Compile Remove="Financials\SettlementLedgerReconcilerTests.cs" />
+    <Compile Remove="Gw1Pack\W06_FcmTransportDeletedTests.cs" />
+    <Compile Remove="Gw5Pack\G2_AcceptSettleReconcileTests.cs" />
+    <Compile Remove="Gw5Pack\G3_ReconcileDurabilityTests.cs" />
+    <Compile Remove="Gw5Pack\G4_CompositionScheduleAndTelemetryTests.cs" />
+    <Compile Remove="JeebNotificationCatalogSeederTests.cs" />
+    <Compile Remove="JeeberEarningsOnCompleteTests.cs" />
+    <Compile Remove="JeeberNameProjectionTests.cs" />
+    <Compile Remove="LocationTrackingTests.cs" />
+    <Compile Remove="NotificationDurableWriteStartupAlarmTests.cs" />
+    <Compile Remove="OfferAcceptColdIndexReconcileTests.cs" />
+    <Compile Remove="OtpHandoverEndpointTests.cs" />
+    <Compile Remove="Push\PushNotificationServiceTests.cs" />
+    <Compile Remove="Ratings\RatingStoreSwapWiringTests.cs" />
+    <Compile Remove="RequestExpiryObserverTests.cs" />
+    <Compile Remove="RequestExpirySweeperTests.cs" />
+    <Compile Remove="Requests\RequestExpiryMathParityTests.cs" />
+    <Compile Remove="S08GatewayCloseoutTests.cs" />
+    <Compile Remove="S09TrackingSettlementBffTests.cs" />
+    <Compile Remove="S10CodSettlementEarningsTests.cs" />
+    <Compile Remove="ScheduledDeliveryTests.cs" />
+    <Compile Remove="Tiers\AdminTierTtlGuardTests.cs" />
+    <Compile Remove="Tracking\CourierPositionRealtimeTests.cs" />
   </ItemGroup>
 
   <ItemGroup>

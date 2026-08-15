@@ -1,8 +1,8 @@
 namespace JeebGateway.ProhibitedItems;
 
 /// <summary>
-/// Moderation severity for a gateway-owned prohibited-items lexicon entry
-/// (JEB-63). The create-time moderation gate maps severity to an HTTP outcome:
+/// Gateway projection of the moderation severity owned with the prohibited-item
+/// catalog in ban-service. The create-time gate maps severity to an HTTP outcome:
 ///   <list type="bullet">
 ///     <item><see cref="Block"/> — hard reject the create with 409
 ///       <c>prohibited_item_blocked</c>; an ack must NOT override it (AC7).</item>
@@ -10,10 +10,8 @@ namespace JeebGateway.ProhibitedItems;
 ///       <c>prohibited_item_requires_ack</c> until the caller has acknowledged
 ///       the current lexicon version, then it is allowed (AC3).</item>
 ///   </list>
-/// Additive on the existing catalog row. The lexicon stays gateway-owned (the
-/// N11 boundary guard requires the lexicon to live ONLY under the gateway's
-/// list key <see cref="JeebModerationList.ListKey"/> = <c>jeeb-prohibited-items</c>,
-/// never in ban-service), so severity is a gateway concern.
+/// Jeeb chooses the namespace through <see cref="JeebModerationList.ListKey"/>;
+/// ban-service owns the generic row, immutable version, and severity data.
 /// </summary>
 public enum ProhibitedSeverity
 {

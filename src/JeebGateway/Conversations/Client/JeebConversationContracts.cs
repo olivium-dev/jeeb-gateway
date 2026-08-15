@@ -388,6 +388,36 @@ public sealed class JeebConversationExportPage
 }
 
 /// <summary>
+/// Stable bounded conversation discovery for data export. Chat-service filters
+/// membership and pins <see cref="AsOf"/> on the first page.
+/// </summary>
+public sealed class JeebConversationExportIndexPage
+{
+    [JsonProperty("viewer_id")]
+    [Stj.JsonPropertyName("viewer_id")]
+    public string ViewerId { get; set; } = string.Empty;
+
+    [JsonProperty("as_of")]
+    [Stj.JsonPropertyName("as_of")]
+    public DateTimeOffset AsOf { get; set; }
+
+    [JsonProperty("limit")]
+    public int Limit { get; set; }
+
+    [JsonProperty("has_more")]
+    [Stj.JsonPropertyName("has_more")]
+    public bool HasMore { get; set; }
+
+    [JsonProperty("next_cursor")]
+    [Stj.JsonPropertyName("next_cursor")]
+    public string? NextCursor { get; set; }
+
+    [JsonProperty("conversation_ids")]
+    [Stj.JsonPropertyName("conversation_ids")]
+    public IList<string> ConversationIds { get; set; } = new List<string>();
+}
+
+/// <summary>
 /// S08 (B) — add-participant body for chat-service's
 /// <c>POST /api/conversations/{id}/participants</c> (AddParticipantAsync). The
 /// gateway seats the offer jeeber as a member when they submit an offer so the

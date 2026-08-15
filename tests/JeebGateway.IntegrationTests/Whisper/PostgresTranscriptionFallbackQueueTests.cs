@@ -15,26 +15,9 @@ using Xunit;
 namespace JeebGateway.IntegrationTests.Whisper;
 
 /// <summary>
-/// Gateway durability hardening (JEBV4-126, AUDIT-A IN-MEM-LIVE) — the voice-note
-/// transcription FALLBACK queue (ITranscriptionFallbackQueue) is migrated from process
-/// memory to durable Postgres (transcription_fallback_queue, migration 0033) behind
-/// GatewayPostgres:ConnectionString. Mirrors PostgresPushReliabilityStoresTests — the
-/// established DI-resolution-smoke + guard-promotion pattern for a flag-gated store swap.
-///
-/// <para>These tests document TWO verdicts of the voice-store durability sweep:
-/// <list type="bullet">
-/// <item>ITranscriptionFallbackQueue (126) → MIGRATED to Postgres: small metadata rows,
-/// so gateway Postgres is the right durable home (like the push retry queue).</item>
-/// <item>IAudioStore (133) → deliberately LEFT in-memory: it holds the raw audio BYTES,
-/// which do not belong in the gateway DB; documented as an intentional transient buffer,
-/// not a store of record — it stays on the KnownInMemoryBacklog and is NOT promoted.</item>
-/// </list></para>
-///
-/// <para>The DI-resolution tests run for real, no live Postgres required: the Postgres
-/// store's constructor only stores its collaborators (INpgsqlConnectionFactory merely
-/// holds the connection string), so resolving the singleton never opens a socket. The
-/// round-trip property that genuinely needs a live database is documented as a
-/// deferred-to-Testcontainers-QV placeholder, matching PostgresPushReliabilityStoresTests.</para>
+/// Ownership regression: voice-transcription-service owns audio and retry state.
+/// The gateway must register neither a fallback queue nor an audio buffer in any
+/// runtime configuration.
 /// </summary>
 public class PostgresTranscriptionFallbackQueueTests
 {
@@ -59,22 +42,18 @@ public class PostgresTranscriptionFallbackQueueTests
     // ── DI wiring: durable impl selected when GatewayPostgres is configured ─────
 
     [Fact]
-    public void FallbackQueue_Resolves_To_Postgres_When_GatewayPostgres_Configured()
+    public void FallbackQueue_Is_Not_Registered_When_GatewayPostgres_Configured()
     {
         using var factory = PostgresConfiguredFactory();
         using var scope = factory.Services.CreateScope();
 
-        var act = () => scope.ServiceProvider.GetRequiredService<ITranscriptionFallbackQueue>();
-        act.Should().NotThrow("PostgresTranscriptionFallbackQueue's constructor does no I/O");
-        scope.ServiceProvider.GetRequiredService<ITranscriptionFallbackQueue>()
-            .Should().BeOfType<PostgresTranscriptionFallbackQueue>(
-                "GatewayPostgres:ConnectionString is configured, so the durable fallback queue must be selected");
+        scope.ServiceProvider.GetService<ITranscriptionFallbackQueue>().Should().BeNull();
     }
 
     // ── DI wiring: in-memory fallback preserved when GatewayPostgres is absent ──
 
     [Fact]
-    public void FallbackQueue_Resolves_To_InMemory_When_GatewayPostgres_Absent()
+    public void FallbackQueue_Has_No_InMemory_Fallback_When_GatewayPostgres_Absent()
     {
         // Default test config carries no GatewayPostgres:ConnectionString, so the
         // in-memory fallback must remain the live path (unchanged behaviour for every
@@ -82,12 +61,11 @@ public class PostgresTranscriptionFallbackQueueTests
         using var factory = new WebApplicationFactory<Program>();
         using var scope = factory.Services.CreateScope();
 
-        scope.ServiceProvider.GetRequiredService<ITranscriptionFallbackQueue>()
-            .Should().BeOfType<InMemoryTranscriptionFallbackQueue>();
+        scope.ServiceProvider.GetService<ITranscriptionFallbackQueue>().Should().BeNull();
     }
 
     [Fact]
-    public void AudioStore_Stays_InMemory_Even_When_GatewayPostgres_Configured()
+    public void AudioStore_Is_Not_Registered_Even_When_GatewayPostgres_Configured()
     {
         // JEBV4-133 verdict: IAudioStore holds raw audio bytes and is an INTENTIONAL
         // transient buffer — it must NOT be swapped to a gateway-Postgres impl even when
@@ -95,23 +73,16 @@ public class PostgresTranscriptionFallbackQueueTests
         using var factory = PostgresConfiguredFactory();
         using var scope = factory.Services.CreateScope();
 
-        scope.ServiceProvider.GetRequiredService<IAudioStore>()
-            .Should().BeOfType<InMemoryAudioStore>(
-                "IAudioStore is a deliberate transient audio buffer, not a durable store of record");
+        scope.ServiceProvider.GetService<IAudioStore>().Should().BeNull();
     }
 
     // ── Durability guard promotion (JEBV4-126) ─────────────────────────────────
 
     [Fact]
-    public void FallbackQueue_Is_Now_A_Critical_Durable_Store_Requiring_Its_Postgres_Impl()
+    public void FallbackQueue_Is_Not_A_Gateway_Critical_Store()
     {
-        var critical = StoreDurabilityGuard.Critical
-            .FirstOrDefault(c => c.Iface == typeof(ITranscriptionFallbackQueue));
-
-        critical.Iface.Should().Be(typeof(ITranscriptionFallbackQueue),
-            "ITranscriptionFallbackQueue must be promoted to the Critical fail-closed set now that a durable target exists");
-        critical.DurableImpls.Should().Contain(typeof(PostgresTranscriptionFallbackQueue),
-            "the only durable implementation that satisfies the prod-like gate is PostgresTranscriptionFallbackQueue");
+        StoreDurabilityGuard.Critical.Select(entry => entry.Iface)
+            .Should().NotContain(typeof(ITranscriptionFallbackQueue));
     }
 
     [Fact]
@@ -122,7 +93,7 @@ public class PostgresTranscriptionFallbackQueueTests
     }
 
     [Fact]
-    public void EnsureDurable_ProdLike_With_InMemory_FallbackQueue_Fails_Closed()
+    public void Retired_FallbackQueue_Does_Not_Affect_Durability_Guard()
     {
         // Prove the promotion is live: a prod-like gateway resolving the fallback queue to
         // its in-memory store must now refuse to boot, naming the offending store.
@@ -135,20 +106,18 @@ public class PostgresTranscriptionFallbackQueueTests
         var provider = new MapServiceProvider(map);
         var violations = StoreDurabilityGuard.Evaluate(t => provider.GetService(t)?.GetType());
 
-        violations.Should().ContainSingle()
-            .Which.Should().Contain("ITranscriptionFallbackQueue").And.Contain("InMemoryTranscriptionFallbackQueue");
+        violations.Should().BeEmpty();
     }
 
     // ── IAudioStore stays an intentional in-memory transient (JEBV4-133) ───────
 
     [Fact]
-    public void AudioStore_Remains_An_Intentional_InMemory_Backlog_Entry_Not_Critical()
+    public void AudioStore_Is_Not_A_Gateway_Store_Category()
     {
         // IAudioStore holds raw audio bytes — deliberately NOT migrated to gateway
         // Postgres. It must stay on the backlog (logged loudly, non-blocking) and must
         // NOT appear in the Critical fail-closed set.
-        StoreDurabilityGuard.KnownInMemoryBacklog.Should().Contain(typeof(IAudioStore),
-            "IAudioStore is intentionally in-memory (transient audio buffer, not a store of record)");
+        StoreDurabilityGuard.KnownInMemoryBacklog.Should().NotContain(typeof(IAudioStore));
         StoreDurabilityGuard.Critical.Select(c => c.Iface).Should().NotContain(typeof(IAudioStore),
             "raw audio blobs do not belong in the gateway DB, so IAudioStore is never a critical durable store");
     }

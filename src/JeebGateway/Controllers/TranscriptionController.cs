@@ -1,9 +1,7 @@
 using JeebGateway.Auth.Capabilities;
-using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Controllers;
 
@@ -12,30 +10,11 @@ namespace JeebGateway.Controllers;
 [Route("transcribe")]
 public class TranscriptionController : ControllerBase
 {
-    private readonly ITranscriptionService _service;
-    private readonly IWhisperCircuitBreaker _breaker;
-    private readonly IFallbackTranscriptionProvider _fallbackProvider;
-    private readonly ITranscriptionFallbackQueue _queue;
     private readonly IVoiceTranscriptionClient _upstream;
-    private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
-    private readonly IOptionsMonitor<WhisperOptions> _whisperOptions;
 
-    public TranscriptionController(
-        ITranscriptionService service,
-        IWhisperCircuitBreaker breaker,
-        IFallbackTranscriptionProvider fallbackProvider,
-        ITranscriptionFallbackQueue queue,
-        IVoiceTranscriptionClient upstream,
-        IOptionsMonitor<UpstreamFeatureFlags> flags,
-        IOptionsMonitor<WhisperOptions> whisperOptions)
+    public TranscriptionController(IVoiceTranscriptionClient upstream)
     {
-        _service = service;
-        _breaker = breaker;
-        _fallbackProvider = fallbackProvider;
-        _queue = queue;
         _upstream = upstream;
-        _flags = flags;
-        _whisperOptions = whisperOptions;
     }
 
     [HttpPost]
@@ -72,34 +51,28 @@ public class TranscriptionController : ControllerBase
 
         var audio = new WhisperAudio(bytes, body.FileName, body.ContentType);
 
-        // thin-BFF fan-out (3 of 4): when FeatureFlags:UseUpstream:Voice is ON,
-        // proxy voice-transcription-service via the typed client. When OFF (the
-        // default), use the in-process resilient Whisper path
-        // (ITranscriptionService) — circuit breaker, retries, fallback queue —
-        // which is preserved and NOT deleted in this PR. A transient upstream
-        // failure (WhisperUnavailableException after the resilience pipeline is
-        // exhausted) degrades to the same "queued" 202 shape rather than a 500,
-        // so the mobile contract is identical on both paths.
         TranscriptionResult result;
-        if (_flags.CurrentValue.Voice)
+        try
         {
-            try
-            {
-                result = await _upstream.TranscribeAsync(
-                    audio, _whisperOptions.CurrentValue.Language, ct);
-            }
-            catch (WhisperUnavailableException)
-            {
-                result = new TranscriptionResult(
-                    AudioId: Guid.NewGuid().ToString("n"),
-                    Outcome: TranscriptionOutcome.QueuedForRetry,
-                    Transcription: null,
-                    Reason: "upstream_unavailable");
-            }
+            result = await _upstream.TranscribeAsync(audio, "ar", ct);
         }
-        else
+        catch (VoiceAudioRejectedException rejected)
         {
-            result = await _service.TranscribeAsync(audio, ct);
+            return StatusCode(rejected.StatusCode, new ProblemDetails
+            {
+                Title = rejected.Reason,
+                Status = rejected.StatusCode,
+                Type = $"https://jeeb.dev/errors/{rejected.Reason.Replace('_', '-')}",
+            });
+        }
+        catch (WhisperUnavailableException)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Title = "Voice transcription owner is unavailable.",
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Type = "https://jeeb.dev/errors/voice-unavailable",
+            });
         }
 
         if (result.Outcome == TranscriptionOutcome.Transcribed)
@@ -125,15 +98,57 @@ public class TranscriptionController : ControllerBase
     // ADR-005 L2 §A public: Whisper subsystem status/health probe (circuit-breaker state) — no user-type gate.
     [PublicEndpoint("Whisper subsystem status probe — ADR-005 §A public (health/status family).")]
     [ProducesResponseType(typeof(WhisperStatusResponse), StatusCodes.Status200OK)]
-    public IActionResult GetStatus()
+    public async Task<IActionResult> GetStatus(CancellationToken ct)
     {
-        var state = _breaker.State;
-        var queueDepth = _queue.Snapshot().Count;
+        try
+        {
+            var readiness = await _upstream.GetReadinessAsync(ct);
+            var healthy = readiness.TryGetProperty("status", out var status)
+                          && string.Equals(status.GetString(), "ok", StringComparison.OrdinalIgnoreCase);
 
-        return Ok(new WhisperStatusResponse(
-            CircuitState: state.ToString(),
-            FallbackAvailable: _fallbackProvider.IsAvailable,
-            PendingQueueDepth: queueDepth,
-            Healthy: state != CircuitState.Open));
+            return Ok(new WhisperStatusResponse(
+                CircuitState: "OwnedByVoiceTranscriptionService",
+                FallbackAvailable: false,
+                PendingQueueDepth: -1,
+                Healthy: healthy));
+        }
+        catch (Exception)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Title = "Voice transcription owner is unavailable.",
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Type = "https://jeeb.dev/errors/voice-unavailable",
+            });
+        }
+    }
+
+    /// <summary>Proxy the durable status of one owner-managed transcription.</summary>
+    [HttpGet("status/{audioId}")]
+    [PublicEndpoint("Owner-managed transcription status probe.")]
+    [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> GetTranscriptionStatus(
+        string audioId,
+        CancellationToken ct)
+    {
+        try
+        {
+            return Ok(await _upstream.GetTranscriptionStatusAsync(audioId, ct));
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return NotFound();
+        }
+        catch (Exception)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Title = "Voice transcription owner is unavailable.",
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Type = "https://jeeb.dev/errors/voice-unavailable",
+            });
+        }
     }
 }

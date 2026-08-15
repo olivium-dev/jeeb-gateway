@@ -23,9 +23,8 @@ namespace JeebGateway.Requests;
 public static class DeliverySm
 {
     /// <summary>
-    /// The frozen <c>(from, trigger) → to</c> table. 13 explicit in-SM edges;
-    /// the 14th transition (JEB-45 AC8) is the entry edge
-    /// <c>[*] → Ordered</c> which lives in the offer/auction context and is
+    /// The mirrored <c>(from, trigger) → to</c> table. The implicit entry edge
+    /// <c>[*] → Ordered</c> lives in the offer/auction context and is
     /// intentionally NOT in this table (ADR-002 §2.3). Edge numbers in the
     /// comments match the ADR-002 §2.3 table and <c>status.go</c> verbatim.
     /// </summary>
@@ -38,17 +37,21 @@ public static class DeliverySm
                 [DeliveryTrigger.ClientCancelNoFee]  = CanonicalDeliveryStatus.Cancelled,             // 2
                 [DeliveryTrigger.JeeberCancelStrike] = CanonicalDeliveryStatus.Cancelled,             // 3
                 [DeliveryTrigger.EscalateEither]     = CanonicalDeliveryStatus.FailedNeedsEscalation, // 4
+                [DeliveryTrigger.CancelRequested]    = CanonicalDeliveryStatus.Cancelled,
+                [DeliveryTrigger.TierTtlElapsed]     = CanonicalDeliveryStatus.Cancelled,
             },
             [CanonicalDeliveryStatus.Picked] = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 [DeliveryTrigger.JeeberTap]              = CanonicalDeliveryStatus.InTransit,             // 5
                 [DeliveryTrigger.JeeberCancelHighStrike] = CanonicalDeliveryStatus.Cancelled,             // 6
                 [DeliveryTrigger.EscalateEither]         = CanonicalDeliveryStatus.FailedNeedsEscalation, // 7
+                [DeliveryTrigger.CancelRequested]        = CanonicalDeliveryStatus.Cancelled,
             },
             [CanonicalDeliveryStatus.InTransit] = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 [DeliveryTrigger.JeeberTap]      = CanonicalDeliveryStatus.AtDoor,                // 8
                 [DeliveryTrigger.EscalateEither] = CanonicalDeliveryStatus.FailedNeedsEscalation, // 9
+                [DeliveryTrigger.CancelRequested] = CanonicalDeliveryStatus.Cancelled,
             },
             [CanonicalDeliveryStatus.AtDoor] = new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -59,11 +62,13 @@ public static class DeliverySm
                 // of an existing edge, NOT a 15th transition — frozen as-is to
                 // match status.go's third AtDoor row exactly.
                 [DeliveryTrigger.EscalateEither]          = CanonicalDeliveryStatus.FailedNeedsEscalation,
+                [DeliveryTrigger.CancelRequested]         = CanonicalDeliveryStatus.Cancelled,
             },
             [CanonicalDeliveryStatus.FailedNeedsEscalation] = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 [DeliveryTrigger.AdminResolve] = CanonicalDeliveryStatus.Done,      // 12
                 [DeliveryTrigger.AdminCancel]  = CanonicalDeliveryStatus.Cancelled, // 13
+                [DeliveryTrigger.CancelRequested] = CanonicalDeliveryStatus.Cancelled,
             },
             // Done and Cancelled are terminal — no outgoing rows (mirror of
             // status.go where they are absent from the transitions map).
@@ -158,7 +163,7 @@ public static class DeliverySm
     /// </summary>
     public static IReadOnlyList<CanonicalTransition> AllValidTransitions()
     {
-        var output = new List<CanonicalTransition>(16);
+        var output = new List<CanonicalTransition>(20);
         foreach (var (from, row) in Transitions)
         {
             foreach (var (trigger, to) in row)

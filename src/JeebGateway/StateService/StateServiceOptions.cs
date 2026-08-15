@@ -27,9 +27,15 @@ public sealed class StateServiceOptions
     public int TimeoutSeconds { get; init; } = 5;
 
     /// <summary>
-    /// Master switch. When false (or BaseUrl unset) the gateway falls back to
-    /// the legacy in-memory stores. This keeps the rewire additive and lets
-    /// local/CI runs stand up without a live state-service.
+    /// Absolute path of the Docker/Swarm secret shared with jeeb-state-service.
+    /// The credential itself is never accepted from appsettings or an env value.
+    /// </summary>
+    public string ServiceTokenFile { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Master switch. When false (or BaseUrl unset), state-owned production
+    /// surfaces fail closed; explicit development/test harnesses may register
+    /// local fakes for unrelated legacy contracts.
     /// </summary>
     public bool Enabled { get; init; } = true;
 

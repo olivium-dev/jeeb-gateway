@@ -1,15 +1,27 @@
 namespace JeebGateway.ProhibitedItems;
 
 /// <summary>
-/// Storage abstraction for the moderated prohibited-items catalog and per-user
-/// acknowledgment ledger. The default in-memory implementation is intended for
-/// early-MVP local runs and integration tests; production wiring will hit
-/// Postgres directly using the schema in db/migrations/0005, with the ack
-/// ledger added in a follow-up migration.
+/// Gateway projection over the prohibited-items catalog and per-user
+/// acknowledgment ledger owned by ban-service. Runtime wiring is stateless;
+/// the local implementations remain only as isolated test fixtures.
 /// </summary>
 public interface IProhibitedItemsStore
 {
     Task<IReadOnlyList<ProhibitedItem>> ListActiveAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Returns an immutable active catalog snapshot and its exact opaque owner
+    /// version. The default keeps legacy test stores source-compatible; the
+    /// ban-service adapter overrides it with a version-pinned owner read.
+    /// </summary>
+    async Task<ProhibitedCatalogSnapshot> GetActiveCatalogAsync(CancellationToken ct)
+    {
+        var items = await ListActiveAsync(ct);
+        var version = items.Count == 0
+            ? "empty"
+            : items.Max(item => item.UpdatedAt).ToUniversalTime().ToString("O");
+        return new ProhibitedCatalogSnapshot(items, version);
+    }
 
     Task<ProhibitedItemsPage> ListAllAsync(int page, int pageSize, CancellationToken ct);
 
@@ -20,6 +32,22 @@ public interface IProhibitedItemsStore
     Task<ProhibitedItem?> UpdateAsync(string id, ProhibitedItemPatch patch, string adminUserId, CancellationToken ct);
 
     Task<UserAcknowledgment?> GetAcknowledgmentAsync(string userId, CancellationToken ct);
+
+    /// <summary>
+    /// Reads the acknowledgement for one exact opaque catalog version. Owner
+    /// adapters must not substitute a numeric storage revision or a newer tag.
+    /// </summary>
+    async Task<UserAcknowledgment?> GetAcknowledgmentAsync(
+        string userId,
+        string version,
+        CancellationToken ct)
+    {
+        var acknowledgement = await GetAcknowledgmentAsync(userId, ct);
+        return acknowledgement is not null
+               && string.Equals(acknowledgement.Version, version, StringComparison.Ordinal)
+            ? acknowledgement
+            : null;
+    }
 
     Task<UserAcknowledgment> AcknowledgeAsync(string userId, string version, CancellationToken ct);
 
@@ -35,6 +63,10 @@ public class UserAcknowledgmentPage
     public required IReadOnlyList<UserAcknowledgment> Items { get; init; }
     public required int Total { get; init; }
 }
+
+public sealed record ProhibitedCatalogSnapshot(
+    IReadOnlyList<ProhibitedItem> Items,
+    string Version);
 
 public class ProhibitedItemCreate
 {
@@ -78,4 +110,31 @@ public class DuplicateProhibitedItemNameException : Exception
 {
     public DuplicateProhibitedItemNameException(string name)
         : base($"A prohibited item named '{name}' already exists.") { }
+}
+
+/// <summary>
+/// ban-service rejected a catalog mutation because the owner state changed.
+/// This is deliberately distinct from a duplicate-name conflict so callers do
+/// not mislabel every owner-side 409 as a uniqueness violation.
+/// </summary>
+public class ProhibitedCatalogConflictException : Exception
+{
+    public ProhibitedCatalogConflictException(string message)
+        : base(message) { }
+}
+
+/// <summary>
+/// The immutable catalog tag supplied to the atomic acknowledgement write was
+/// no longer current when ban-service committed the request.
+/// </summary>
+public sealed class StaleProhibitedCatalogVersionException
+    : ProhibitedCatalogConflictException
+{
+    public StaleProhibitedCatalogVersionException(string version, string message)
+        : base(message)
+    {
+        Version = version;
+    }
+
+    public string Version { get; }
 }

@@ -57,7 +57,7 @@ public static class CanonicalDeliveryStatus
 }
 
 /// <summary>
-/// The frozen canonical trigger lexicon (ADR-002 §2.2, 9 triggers). Mirrors
+/// The canonical trigger lexicon mirrored from delivery-service's
 /// <c>status.go</c> <c>Trigger</c> constants. The trigger is the business reason
 /// for an edge and is the ONLY thing that disambiguates the two
 /// <c>Ordered → Cancelled</c> edges (<see cref="ClientCancelNoFee"/> vs
@@ -76,11 +76,14 @@ public static class DeliveryTrigger
     public const string OtpFailOrJeeberEscalate = "otp_fail_or_jeeber_escalate";
     public const string AdminResolve = "admin_resolve";
     public const string AdminCancel = "admin_cancel";
+    public const string CancelRequested = "cancel_requested";
+    public const string TierTtlElapsed = "tier_ttl_elapsed";
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.Ordinal)
     {
         JeeberTap, ClientCancelNoFee, JeeberCancelStrike, JeeberCancelHighStrike,
-        EscalateEither, OtpVerified, OtpFailOrJeeberEscalate, AdminResolve, AdminCancel
+        EscalateEither, OtpVerified, OtpFailOrJeeberEscalate, AdminResolve, AdminCancel,
+        CancelRequested, TierTtlElapsed
     };
 
     public static bool IsKnown(string trigger) => All.Contains(trigger);

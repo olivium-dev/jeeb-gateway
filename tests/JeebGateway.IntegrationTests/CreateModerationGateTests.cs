@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
+using JeebGateway.IntegrationTests.Fakes;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
@@ -18,10 +19,10 @@ namespace JeebGateway.IntegrationTests;
 ///           current lexicon version, then the create is allowed (A1.3).
 ///   * H3  — a clean description is unaffected (still 201).
 ///
-/// The lexicon is gateway-owned (N11) and auto-seeded by DefaultLexiconSeeder
-/// when the flag is on, so "arak"/"kitchen knife" match without an admin step.
-/// Each test uses a per-test X-User-Id so the shared in-memory ack ledger does
-/// not bleed across cases.
+/// The catalog and acknowledgement ledger are ban-service-owned in runtime.
+/// This endpoint-focused suite opts into an explicit seeded owner double so it
+/// tests gateway gate behavior without reaching a live owner service. Each test
+/// uses a per-test X-User-Id so acknowledgement state does not bleed across cases.
 /// </summary>
 public class CreateModerationGateTests : IClassFixture<CreateModerationGateTests.ModerationOnFactory>
 {
@@ -36,7 +37,13 @@ public class CreateModerationGateTests : IClassFixture<CreateModerationGateTests
     {
         protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:CreateModeration:Enabled", "true");
+            builder.ConfigureServices(services =>
+            {
+                OwnerServiceFakes.AllowAllAccounts(services);
+                OwnerServiceFakes.UseSeededModerationCatalog(services);
+            });
         }
     }
 

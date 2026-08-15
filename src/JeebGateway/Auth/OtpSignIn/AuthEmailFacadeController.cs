@@ -9,8 +9,6 @@ using JeebGateway.Tokens;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
-using GwUsersStore = JeebGateway.Users.IUsersStore;
-using GwUserProfile = JeebGateway.Users.UserProfile;
 using GwDualRoleClient = JeebGateway.Users.IUserManagementDualRoleClient;
 using GwSeededRoles = JeebGateway.Users.IDevSeededRoleStore;
 using GwRoles = JeebGateway.Users.Roles;
@@ -65,7 +63,6 @@ public sealed class AuthEmailFacadeController : ControllerBase
 {
     private readonly UmClient _um;
     private readonly ITokenService _tokens;
-    private readonly GwUsersStore _users;
     private readonly GwDualRoleClient _userManagement;
     private readonly GwSeededRoles _seededRoles;
     private readonly ILogger<AuthEmailFacadeController> _log;
@@ -73,14 +70,12 @@ public sealed class AuthEmailFacadeController : ControllerBase
     public AuthEmailFacadeController(
         UmClient um,
         ITokenService tokens,
-        GwUsersStore users,
         GwDualRoleClient userManagement,
         GwSeededRoles seededRoles,
         ILogger<AuthEmailFacadeController> log)
     {
         _um = um;
         _tokens = tokens;
-        _users = users;
         _userManagement = userManagement;
         _seededRoles = seededRoles;
         _log = log;
@@ -232,8 +227,8 @@ public sealed class AuthEmailFacadeController : ControllerBase
             if (refusal is not null) return refusal;
 
             var (roles, active) = await ResolveRolesAsync(res!.UserId!, email: null, ct);
-            await ProjectAsync(res.UserId!, roles, active, ct);
-            var pair = await _tokens.IssueAsync(res.UserId!, roles, ct);
+            var pair = await _tokens.IssueAsync(
+                res.UserId!, roles, active, authentication: null, ct);
             _log.LogInformation("auth.social facade minted gateway session userId={UserId} recentlyCreated={Rc}",
                 res.UserId, res.RecentlyCreated);
 
@@ -262,8 +257,8 @@ public sealed class AuthEmailFacadeController : ControllerBase
         if (refusal is not null) return refusal;
 
         var (roles, active) = await ResolveRolesAsync(userId!, email, ct);
-        await ProjectAsync(userId!, roles, active, ct);
-        var pair = await _tokens.IssueAsync(userId!, roles, ct);
+        var pair = await _tokens.IssueAsync(
+            userId!, roles, active, authentication: null, ct);
         _log.LogInformation("auth.facade minted gateway session userId={UserId}", userId);
 
         return Ok(new
@@ -309,18 +304,6 @@ public sealed class AuthEmailFacadeController : ControllerBase
             active = roles.Count > 0 ? roles[0] : GwRoles.Client;
         return (roles, active);
     }
-
-    private Task ProjectAsync(string userId, IReadOnlyList<string> roles, string active, CancellationToken ct)
-        => _users.UpsertProjectionAsync(new GwUserProfile
-        {
-            Id = userId,
-            Phone = string.Empty,
-            Name = string.Empty,
-            Roles = roles.ToList(),
-            ActiveRole = active,
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow,
-        }, ct);
 
     private IActionResult Upstream(UmApiException ex, string leg)
     {

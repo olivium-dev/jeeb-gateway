@@ -1,18 +1,34 @@
 using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
+using JeebGateway.IntegrationTests.Fakes;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
 
-public class ProhibitedItemsEndpointTests : IClassFixture<WebApplicationFactory<Program>>
+public class ProhibitedItemsEndpointTests
+    : IClassFixture<ProhibitedItemsEndpointTests.OwnerFixture>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly OwnerFixture _factory;
 
-    public ProhibitedItemsEndpointTests(WebApplicationFactory<Program> factory)
+    public ProhibitedItemsEndpointTests(OwnerFixture factory)
     {
         _factory = factory;
+    }
+
+    public sealed class OwnerFixture : WebApplicationFactory<Program>
+    {
+        protected override void ConfigureWebHost(
+            Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
+        {
+            base.ConfigureWebHost(builder);
+            builder.ConfigureServices(services =>
+            {
+                OwnerServiceFakes.AllowAllAccounts(services);
+                OwnerServiceFakes.UseEmptyModerationCatalog(services);
+            });
+        }
     }
 
     // -----------------------------------------------------------------

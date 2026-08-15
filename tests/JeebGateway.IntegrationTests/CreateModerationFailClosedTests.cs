@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
+using JeebGateway.IntegrationTests.Fakes;
 using JeebGateway.ProhibitedItems;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -27,21 +28,21 @@ public class CreateModerationFailClosedTests
     /// <summary>
     /// Factory that enables the moderation gate AND replaces the
     /// <see cref="IProhibitedItemsStore"/> with an always-empty stub so
-    /// the lexicon is never populated, simulating a seeder failure or
-    /// an unreachable backing store on startup.
+    /// the lexicon is never populated, simulating an empty or unreachable
+    /// owner catalog.
     /// </summary>
     public sealed class EmptyLexiconFactory : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:CreateModeration:Enabled", "true");
 
             builder.ConfigureServices(services =>
             {
-                // Remove the real IProhibitedItemsStore registration so the
-                // empty stub takes over. The DefaultLexiconSeeder will try to
-                // call ListActiveAsync at startup and find 0 items but will
-                // not seed anything because CreateAsync on the stub is a no-op.
+                OwnerServiceFakes.AllowAllAccounts(services);
+                // Remove the real owner adapter so the explicit empty-owner
+                // test double takes over.
                 var descriptor = services.SingleOrDefault(
                     d => d.ServiceType == typeof(IProhibitedItemsStore));
                 if (descriptor is not null)
@@ -97,8 +98,7 @@ public class CreateModerationFailClosedTests
 
     /// <summary>
     /// Stub store that always returns 0 active items, simulating a failed
-    /// lexicon load. All mutation operations are no-ops so the
-    /// <see cref="DefaultLexiconSeeder"/> does not accidentally populate it.
+    /// lexicon load. Mutation operations are irrelevant to this read-path test.
     /// </summary>
     private sealed class AlwaysEmptyProhibitedItemsStore : IProhibitedItemsStore
     {

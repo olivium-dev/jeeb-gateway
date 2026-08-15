@@ -42,6 +42,10 @@ public sealed class UpstreamExceptionHandler : IExceptionHandler
     {
         var (status, title, type) = exception switch
         {
+            OwnerCapabilityUnavailableException => (
+                StatusCodes.Status503ServiceUnavailable,
+                "The owning service does not expose this capability yet.",
+                "https://jeeb.dev/errors/owner-capability-unavailable"),
             HttpRequestException => (
                 StatusCodes.Status502BadGateway,
                 "An upstream service returned an unexpected response.",

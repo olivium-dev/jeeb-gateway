@@ -444,9 +444,8 @@ public class RequestsController : ControllerBase
 
     /// <summary>
     /// JEB-63 (S05 N1 / A1.1) create-time moderation gate. Pure orchestration:
-    /// composes the gateway-owned <see cref="IProhibitedItemScanner"/> over the
-    /// gateway-owned lexicon (N11 keeps the lexicon out of ban-service) and the
-    /// per-user ack ledger. Returns:
+    /// composes the gateway scanner over the immutable ban-service-owned
+    /// catalog and acknowledgement ledger. Returns:
     ///   <list type="bullet">
     ///     <item>null — allowed (gate off, no review-grade match, or warn already
     ///       acknowledged): the create proceeds.</item>

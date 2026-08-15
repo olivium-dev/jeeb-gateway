@@ -68,7 +68,7 @@ public enum PushDeliveryMode
 ///
 /// <para><b>STATELESS.</b> Everything here is a pure static lookup over compile-time
 /// constants. The gateway holds no notification state; the notification centre
-/// (<c>:10026</c>) owns the stored rows, which is why the only decision made here is
+/// owns the stored rows, which is why the only decision made here is
 /// whether to call it at all.</para>
 ///
 /// <para><b>⚠️ REACHABILITY — READ THIS BEFORE BELIEVING THE TESTS.</b> The silent branch

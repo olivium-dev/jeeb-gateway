@@ -80,6 +80,45 @@ public sealed class BanServiceClient : IBanServiceClient
         return MapStatus(wire);
     }
 
+    public async Task<BanStatusItem> ApplyTerminalBanAsync(
+        string userId, string policyKey, CancellationToken ct)
+    {
+        var url = $"api/v1/ban/{Uri.EscapeDataString(userId)}/{Uri.EscapeDataString(policyKey)}/terminal";
+        using var request = new HttpRequestMessage(HttpMethod.Put, url);
+        using var response = await _http.SendAsync(request, ct);
+        response.EnsureSuccessStatusCode();
+
+        var wire = await response.Content.ReadFromJsonAsync<WireStatus>(JsonOptions, ct);
+        if (wire is null)
+        {
+            throw new HttpRequestException(
+                $"ban-service {response.RequestMessage?.RequestUri} returned an empty body.");
+        }
+
+        return MapStatus(wire);
+    }
+
+    public async Task<BanResetResult> ForceResetAsync(string userId, CancellationToken ct)
+    {
+        var url = $"api/v1/ban/{Uri.EscapeDataString(userId)}/force-reset";
+        using var response = await _http.PostAsync(url, content: null, ct);
+        response.EnsureSuccessStatusCode();
+
+        var wire = await response.Content.ReadFromJsonAsync<WireUpdate>(JsonOptions, ct);
+        if (wire is null)
+        {
+            throw new HttpRequestException(
+                $"ban-service {response.RequestMessage?.RequestUri} returned an empty body.");
+        }
+
+        return new BanResetResult
+        {
+            OldStatus = wire.OldStatus is null ? null : MapStatus(wire.OldStatus),
+            NewStatus = wire.NewStatus is null ? null : MapStatus(wire.NewStatus),
+            Updated = wire.Updated,
+        };
+    }
+
     private static BanStatusItem MapStatus(WireStatus w) => new()
     {
         UserId = w.UserId ?? string.Empty,
@@ -110,5 +149,12 @@ public sealed class BanServiceClient : IBanServiceClient
         [JsonPropertyName("banned_until")] public DateTimeOffset? BannedUntil { get; init; }
         [JsonPropertyName("last_updated")] public DateTimeOffset LastUpdated { get; init; }
         [JsonPropertyName("is_currently_banned")] public bool IsCurrentlyBanned { get; init; }
+    }
+
+    private sealed class WireUpdate
+    {
+        [JsonPropertyName("old_status")] public WireStatus? OldStatus { get; init; }
+        [JsonPropertyName("new_status")] public WireStatus? NewStatus { get; init; }
+        [JsonPropertyName("updated")] public bool Updated { get; init; }
     }
 }

@@ -1,0 +1,111 @@
+name: Durable ownership work sweep
+
+"on":
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jeeb-production-durable-work-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    environment: production
+    env:
+      SSH_HOST: jeeb-ssh.fds-1.com
+      SSH_USER: ec2-user
+      PUBLIC_GATEWAY: https://jeeb.fds-1.com
+      GATEWAY_JOB_TOKEN: ${{ secrets.JEEB_GATEWAY_JOB_TOKEN }}
+    steps:
+      - name: Validate executor credential
+        run: |
+          set -euo pipefail
+          length=${#GATEWAY_JOB_TOKEN}
+          if (( length < 32 || length > 4096 )); then
+            echo '::error::JEEB_GATEWAY_JOB_TOKEN must contain 32-4096 characters'
+            exit 1
+          fi
+          if [[ "$GATEWAY_JOB_TOKEN" =~ [[:space:]] ]]; then
+            echo '::error::JEEB_GATEWAY_JOB_TOKEN must not contain whitespace'
+            exit 1
+          fi
+
+      - name: Install cloudflared and configure pinned SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.JEEB_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.JEEB_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${SSH_PRIVATE_KEY:?JEEB_SSH_PRIVATE_KEY is required}"
+          : "${SSH_KNOWN_HOSTS:?JEEB_SSH_KNOWN_HOSTS is required}"
+          curl -fsSL --retry 3 -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
+          install -d -m 700 "$HOME/.ssh"
+          if printf '%s' "$SSH_PRIVATE_KEY" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          else
+            printf '%s' "$SSH_PRIVATE_KEY" | base64 --decode > "$HOME/.ssh/id_ed25519"
+          fi
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "$SSH_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null || {
+            echo '::error::JEEB_SSH_KNOWN_HOSTS does not pin the production SSH host'
+            exit 1
+          }
+          {
+            printf '%s\n' 'Host jeeb'
+            printf '  HostName %s\n' "$SSH_HOST"
+            printf '  User %s\n' "$SSH_USER"
+            printf '%s\n' \
+              '  IdentityFile ~/.ssh/id_ed25519' \
+              '  ProxyCommand cloudflared access ssh --hostname %h' \
+              '  UserKnownHostsFile ~/.ssh/known_hosts' \
+              '  StrictHostKeyChecking yes'
+          } > "$HOME/.ssh/config"
+          chmod 600 "$HOME/.ssh/config"
+
+      - name: Verify loopback and public-ingress boundaries
+        run: |
+          set -euo pipefail
+          loopback_code=$(ssh jeeb \
+            "curl --silent --output /dev/null --write-out '%{http_code}' --request POST --max-time 10 'http://127.0.0.1:10000/internal/jobs/account-deletions/sweep?limit=1'")
+          test "$loopback_code" = 401 || {
+            echo "::error::Loopback executor boundary returned $loopback_code without a credential; expected 401"
+            exit 1
+          }
+          public_code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --request POST --max-time 15 \
+            "$PUBLIC_GATEWAY/internal/jobs/account-deletions/sweep?limit=1")
+          case "$public_code" in
+            403|404) ;;
+            *)
+              echo "::error::Public ingress exposed the internal executor route (HTTP $public_code)"
+              exit 1
+              ;;
+          esac
+
+      - name: Sweep account deletion and data export work
+        run: |
+          set -euo pipefail
+          printf '%s' "$GATEWAY_JOB_TOKEN" | ssh jeeb 'set -euo pipefail
+            token=$(cat)
+            escaped_token=${token//\\/\\\\}
+            escaped_token=${escaped_token//\"/\\\"}
+            for job in account-deletions data-exports; do
+              {
+                printf '\''request = "POST"\n'\''
+                printf '\''url = "http://127.0.0.1:10000/internal/jobs/%s/sweep?limit=20"\n'\'' "$job"
+                printf '\''header = "X-Jeeb-Job-Token: %s"\n'\'' "$escaped_token"
+                printf '\''max-time = 120\nfail-with-body\nsilent\nshow-error\n'\''
+              } | curl --config -
+              printf '\''\n'\''
+            done
+            unset token escaped_token'

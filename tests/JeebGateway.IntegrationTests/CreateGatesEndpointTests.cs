@@ -2,8 +2,10 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
 using FluentAssertions;
+using JeebGateway.IntegrationTests.Fakes;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -19,13 +21,27 @@ namespace JeebGateway.IntegrationTests;
 ///
 /// Default factory = FeatureFlags:CreateModeration:Enabled unset (ON by default).
 /// </summary>
-public class CreateGatesEndpointTests : IClassFixture<WebApplicationFactory<Program>>
+public class CreateGatesEndpointTests : IClassFixture<CreateGatesEndpointTests.OwnerFixture>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly OwnerFixture _factory;
 
-    public CreateGatesEndpointTests(WebApplicationFactory<Program> factory)
+    public CreateGatesEndpointTests(OwnerFixture factory)
     {
         _factory = factory;
+    }
+
+    public sealed class OwnerFixture : WebApplicationFactory<Program>
+    {
+        protected override void ConfigureWebHost(
+            Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
+        {
+            base.ConfigureWebHost(builder);
+            builder.ConfigureServices(services =>
+            {
+                OwnerServiceFakes.AllowAllAccounts(services);
+                OwnerServiceFakes.UseSeededModerationCatalog(services);
+            });
+        }
     }
 
     // ----- N5: illegal initial transition -------------------------------------

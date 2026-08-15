@@ -3,15 +3,13 @@ using System.Collections.Concurrent;
 namespace JeebGateway.Users;
 
 /// <summary>
-/// Account-deletion seam for the financial ledger. The actual ledger
-/// (db/migrations/0008) lives behind the payment/finance services; the
-/// gateway only needs a contract that says "replace this user id with
-/// the pseudonym on every retained row". Production wiring proxies to
-/// unified_payment_gateway via an NSwag-generated client.
+/// Account-deletion seam for the financial ledger. Wallet-service owns the
+/// retained rows and chooses its own pseudonym. The gateway uses this contract
+/// only to request idempotent holder closure; it stores no wallet projection.
 ///
-/// Returns the number of rows rewritten so the deletion store and
-/// integration tests can assert "financial records retained for
-/// accounting" without exposing the ledger schema to the gateway.
+/// The legacy integer result is zero when the owner does not expose row counts;
+/// callers must interpret successful completion, not a positive count, as the
+/// owner acknowledgement.
 /// </summary>
 public interface IFinancialLedgerAnonymizer
 {

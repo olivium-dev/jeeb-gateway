@@ -42,18 +42,15 @@ namespace JeebGateway.Controllers;
 public sealed class PartnerAuthController : ControllerBase
 {
     private readonly IPartnerCredentialStore _credentials;
-    private readonly IUsersStore _users;
     private readonly ITokenService _tokens;
     private readonly ILogger<PartnerAuthController> _log;
 
     public PartnerAuthController(
         IPartnerCredentialStore credentials,
-        IUsersStore users,
         ITokenService tokens,
         ILogger<PartnerAuthController> log)
     {
         _credentials = credentials;
-        _users = users;
         _tokens = tokens;
         _log = log;
     }
@@ -84,21 +81,8 @@ public sealed class PartnerAuthController : ControllerBase
 
         var userId = account.HolderId.ToString();
 
-        // Project the partner identity locally BEFORE minting so the gateway-signed JWT embeds
-        // roles=[partner] + active_role=partner (TokenService reads active_role from the store) —
-        // mirroring the OTP-verify / super-login UpsertProjectionAsync step. Idempotent.
-        await _users.UpsertProjectionAsync(new UserProfile
-        {
-            Id = userId,
-            Phone = string.Empty,
-            Name = account.DisplayName,
-            Roles = new System.Collections.Generic.List<string> { Roles.Partner },
-            ActiveRole = Roles.Partner,
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow,
-        }, ct);
-
-        var pair = await _tokens.IssueAsync(userId, new[] { Roles.Partner }, ct);
+        var pair = await _tokens.IssueAsync(
+            userId, new[] { Roles.Partner }, Roles.Partner, authentication: null, ct);
 
         _log.LogInformation("partner.auth.login ok partnerId={PartnerId}", userId);
 

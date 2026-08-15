@@ -53,8 +53,6 @@ public class LocationController : ControllerBase
     private readonly IDeliveryServiceClient _delivery;
     private readonly IGeoHistoryClient _geoHistory;
     private readonly IDeliveryParticipantResolver _participants;
-    private readonly ICourierPositionQueue _positions;
-    private readonly IOptionsMonitor<CourierPositionPublishOptions> _publishOptions;
     private readonly UpstreamFeatureFlags _flags;
     private readonly ILogger<LocationController> _logger;
 
@@ -66,8 +64,6 @@ public class LocationController : ControllerBase
         IDeliveryServiceClient delivery,
         IGeoHistoryClient geoHistory,
         IDeliveryParticipantResolver participants,
-        ICourierPositionQueue positions,
-        IOptionsMonitor<CourierPositionPublishOptions> publishOptions,
         IOptions<UpstreamFeatureFlags> flags,
         ILogger<LocationController> logger)
     {
@@ -78,8 +74,6 @@ public class LocationController : ControllerBase
         _delivery = delivery;
         _geoHistory = geoHistory;
         _participants = participants;
-        _positions = positions;
-        _publishOptions = publishOptions;
         _flags = flags.Value;
         _logger = logger;
     }
@@ -267,39 +261,6 @@ public class LocationController : ControllerBase
                     ex,
                     "delivery-service presence heartbeat for jeeber {JeeberId} failed at transport level; GPS fix retained locally, presence not bumped.",
                     jeeberId);
-            }
-        }
-
-        // Continuous courier position: hand the accepted fix to the realtime fan-out so a
-        // watching customer's map moves without anyone polling for it. The store write
-        // above is the money path and has already happened; this is strictly additive.
-        //
-        // FIRE-AND-FORGET, and specifically: a non-blocking TryEnqueue onto a BOUNDED
-        // channel drained by CourierPositionPublisher. No await, no I/O, no HttpClient on
-        // this thread, and the request's CancellationToken is deliberately NOT passed on —
-        // see CourierPositionPublisher's remarks for the four properties that make a
-        // realtime outage unable to fail or slow this response.
-        if (latest is not null
-            && _publishOptions.CurrentValue.Enabled
-            && _flags.Realtime
-            && CourierPositionTopic.IsSafeDeliveryId(body?.DeliveryId))
-        {
-            var queued = _positions.TryEnqueue(new CourierPosition(
-                DeliveryId: body!.DeliveryId!,
-                JeeberId: jeeberId,
-                Lat: latest.Lat,
-                Lng: latest.Lng,
-                Accuracy: latest.Accuracy,
-                DeviceTimestamp: latest.Timestamp));
-
-            if (!queued)
-            {
-                // Observable shedding, not a silent drop. The fix is already durable in
-                // the store; only the live fan-out of this one position is lost, and the
-                // next fix supersedes it.
-                _logger.LogWarning(
-                    "Realtime position buffer full ({Pending} pending); position for delivery {DeliveryId} not fanned out.",
-                    _positions.PendingCount, body!.DeliveryId);
             }
         }
 

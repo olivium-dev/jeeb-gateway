@@ -196,6 +196,7 @@ public sealed class KycManualApprovalFlowTests : IClassFixture<KycManualApproval
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             // WI-4 auto-provisioning absent AND the KYC upstream off: nothing is
             // provisioned, nothing is reachable. The gateway must fail closed.
             builder.UseSetting("FeatureFlags:UseUpstream:Kyc", "false");
@@ -292,6 +293,7 @@ public sealed class KycManualApprovalFlowTests : IClassFixture<KycManualApproval
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:UseUpstream:Kyc", "true");
             builder.ConfigureServices(services =>
             {

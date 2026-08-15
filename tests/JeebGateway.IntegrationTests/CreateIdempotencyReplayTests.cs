@@ -34,6 +34,7 @@ public sealed class CreateIdempotencyReplayTests : IClassFixture<CreateIdempoten
     {
         protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             // Mount the gateway-wide idempotency middleware (gated on a configured
             // state-service) without needing the real service.
             builder.UseSetting("JeebStateService:BaseUrl", "http://localhost:10073");

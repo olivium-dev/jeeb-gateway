@@ -81,7 +81,7 @@ public sealed class GatewayDbProbeController : ControllerBase
     // ── notification-service (Mongo read) ──────────────────────────────────
     /// <summary>
     /// GET /api/notification/notifications — proxies the notification-service
-    /// Mongo-backed list (<c>GET /notifications</c>, host port 10026), forwarding
+    /// owner-backed list (<c>GET /notifications</c>), forwarding
     /// the <c>receiver</c> / <c>page</c> / <c>page_size</c> query. Additive: the
     /// existing <c>/api/notification/messages</c> stub is left untouched.
     /// </summary>

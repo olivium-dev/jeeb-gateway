@@ -1,5 +1,6 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.DTOs.Notification;
+using JeebGateway.Notifications;
 using JeebGateway.Services.Dispatch;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -27,16 +28,16 @@ namespace JeebGateway.Controllers;
 public class JeebNotificationsController : ControllerBase
 {
     private readonly IJeebNotificationDispatcher _dispatcher;
-    private readonly INotificationDispatchOutbox _outbox;
+    private readonly INotificationOwnerClient _owner;
     private readonly ILogger<JeebNotificationsController> _logger;
 
     public JeebNotificationsController(
         IJeebNotificationDispatcher dispatcher,
-        INotificationDispatchOutbox outbox,
+        INotificationOwnerClient owner,
         ILogger<JeebNotificationsController> logger)
     {
         _dispatcher = dispatcher;
-        _outbox = outbox;
+        _owner = owner;
         _logger = logger;
     }
 
@@ -45,11 +46,11 @@ public class JeebNotificationsController : ControllerBase
     /// </summary>
     /// <remarks>
     /// Renders the named template in the requested locale, substitutes the
-    /// supplied parameters, then dispatches the result through the existing
-    /// push-notification pipeline with outbox durability and retry.
+    /// supplied parameters, then submits it to notification-service for durable
+    /// dispatch, retry, tracking, and DLQ ownership.
     ///
     /// Supply <c>Idempotency-Key</c> header to make the call idempotent — duplicate
-    /// requests with the same key are silently deduplicated.
+    /// requests with the same key resolve to the same owner notification ID.
     /// </remarks>
     /// <param name="request">Dispatch request body.</param>
     /// <param name="idempotencyKey">Optional idempotency key from the HTTP header.</param>
@@ -59,7 +60,7 @@ public class JeebNotificationsController : ControllerBase
     /// <response code="400">Bad request — missing required fields or unknown template key.</response>
     /// <response code="401">Unauthorized.</response>
     /// <response code="403">Forbidden — caller does not hold the <c>notification.dispatch</c> capability.</response>
-    /// <response code="500">Internal server error.</response>
+    /// <response code="503">The notification owner did not durably accept the command.</response>
     [HttpPost]
     [Authorize]
     [RequireCapability(Capabilities.NotificationDispatch)] // ADR-005 §N {admin}
@@ -67,7 +68,7 @@ public class JeebNotificationsController : ControllerBase
     [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(string), StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<ActionResult<DispatchNotificationResponseDto>> DispatchNotification(
         [FromBody] DispatchNotificationRequestDto request,
         [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey = null,
@@ -80,13 +81,38 @@ public class JeebNotificationsController : ControllerBase
             "Notification dispatch request. TemplateKey={Template} Locale={Locale} Recipient={UserId} IdempotencyKey={Key}",
             request.TemplateKey, request.Locale, request.RecipientUserId, idempotencyKey);
 
-        var result = await _dispatcher.DispatchAsync(
-            request.TemplateKey,
-            request.Locale,
-            request.Parameters,
-            request.RecipientUserId,
-            idempotencyKey,
-            ct);
+        NotificationDispatchResult result;
+        try
+        {
+            result = await _dispatcher.DispatchAsync(
+                request.TemplateKey,
+                request.Locale,
+                request.Parameters,
+                request.RecipientUserId,
+                idempotencyKey,
+                ct);
+        }
+        catch (NotificationOwnerConflictException ex)
+        {
+            return Conflict(new ProblemDetails
+            {
+                Title = ex.Message,
+                Status = StatusCodes.Status409Conflict,
+                Type = "https://jeeb.dev/errors/notification-idempotency-conflict",
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Notification owner did not durably accept command for {RecipientUserId}",
+                request.RecipientUserId);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Title = "Notification owner is unavailable.",
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Type = "https://jeeb.dev/errors/notification-owner-unavailable",
+            });
+        }
 
         if (result.Status == NotificationDispatchStatus.DLQ && !result.WasDeduplicated)
         {
@@ -120,22 +146,24 @@ public class JeebNotificationsController : ControllerBase
     [HttpGet("dlq")]
     [Authorize]
     [RequireCapability(Capabilities.NotificationDispatch)] // ADR-005 §N {admin}
-    [ProducesResponseType(typeof(IReadOnlyList<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(string), StatusCodes.Status403Forbidden)]
-    public async Task<ActionResult<IReadOnlyList<object>>> GetDlq(CancellationToken ct = default)
+    public async Task<IActionResult> GetDlq(CancellationToken ct = default)
     {
-        var entries = await _outbox.GetDlqAsync(ct);
-        return Ok(entries.Select(e => new
+        try
         {
-            e.Id,
-            e.TemplateKey,
-            e.Locale,
-            e.RecipientUserId,
-            e.AttemptCount,
-            e.LastError,
-            e.CreatedAt,
-            e.IdempotencyKey
-        }).ToList());
+            return Ok(await _owner.GetDeadLettersAsync(ct));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Notification owner DLQ query failed");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Title = "Notification owner DLQ is unavailable.",
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Type = "https://jeeb.dev/errors/notification-owner-unavailable",
+            });
+        }
     }
 }

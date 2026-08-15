@@ -426,32 +426,6 @@
         }
       }
     },
-    "/v1/state/otp-escalations": {
-      "post": {
-        "tags": [
-          "State"
-        ],
-        "operationId": "EscalateOtp",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/OtpEscalateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "201": {
-            "description": "OK"
-          }
-        }
-      }
-    },
     "/v1/state/rate-limits/hit": {
       "post": {
         "tags": [
@@ -727,21 +701,6 @@
           "ttlSeconds": {
             "type": "integer",
             "format": "int32"
-          }
-        },
-        "additionalProperties": false
-      },
-      "OtpEscalateRequest": {
-        "type": "object",
-        "properties": {
-          "identity": {
-            "type": "string",
-            "nullable": true
-          },
-          "lockSeconds": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
           }
         },
         "additionalProperties": false

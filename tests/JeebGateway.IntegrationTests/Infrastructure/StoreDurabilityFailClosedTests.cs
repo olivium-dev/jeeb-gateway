@@ -229,12 +229,10 @@ public class StoreDurabilityFailClosedTests
     public void Backlog_And_Critical_Do_Not_Overlap()
     {
         var criticalIfaces = StoreDurabilityGuard.Critical.Select(c => c.Iface).ToHashSet();
-        StoreDurabilityGuard.KnownInMemoryBacklog.Should()
-            .OnlyContain(t => !criticalIfaces.Contains(t),
-                "a store with a durable target must not also be listed as a known-in-memory exemption");
-        StoreDurabilityGuard.UpstreamContractIncomplete.Should()
-            .OnlyContain(t => !criticalIfaces.Contains(t),
-                "a store with a durable target must not also be listed as an incomplete upstream contract");
+        criticalIfaces.Intersect(StoreDurabilityGuard.KnownInMemoryBacklog).Should().BeEmpty(
+            "a store with a durable target must not also be listed as a known-in-memory exemption");
+        criticalIfaces.Intersect(StoreDurabilityGuard.UpstreamContractIncomplete).Should().BeEmpty(
+            "a store with a durable target must not also be listed as an incomplete upstream contract");
     }
 
     // ---- Readiness health check mirrors the gate -----------------------------------------------

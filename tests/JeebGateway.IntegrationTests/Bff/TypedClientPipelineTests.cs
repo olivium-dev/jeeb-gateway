@@ -3,6 +3,8 @@ using JeebGateway.Extensions;
 using JeebGateway.Services.Bff;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests.Bff;
@@ -91,6 +93,7 @@ public class TypedClientPipelineTests
         // ServiceAuthSigningHandler depends on TimeProvider; Program.cs registers
         // it but AddDownstreamClients does not, so supply it here.
         services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<IHostEnvironment>(new PipelineHostEnvironment());
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -106,6 +109,7 @@ public class TypedClientPipelineTests
                 ["ServiceAuth:Caller"] = "jeeb-gateway",
                 ["ServiceAuth:SigningKey"] = "integration-test-signing-key-32-chars-or-longer",
                 ["ServiceAuth:Enabled"] = "true",
+                ["DELIVERY_SERVICE_TOKEN"] = new string('t', 48),
             })
             .Build();
         services.AddSingleton<IConfiguration>(config);
@@ -115,6 +119,14 @@ public class TypedClientPipelineTests
         services.AddDownstreamClients(config);
 
         return services.BuildServiceProvider();
+    }
+
+    private sealed class PipelineHostEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = "Testing";
+        public string ApplicationName { get; set; } = "JeebGateway.IntegrationTests";
+        public string ContentRootPath { get; set; } = Directory.GetCurrentDirectory();
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 
     private static IReadOnlyList<HttpMessageHandler> WalkHandlerChain(HttpMessageHandler root)

@@ -1,4 +1,5 @@
 using JeebGateway.Whisper;
+using System.Text.Json;
 
 namespace JeebGateway.Services.Clients;
 
@@ -6,24 +7,10 @@ namespace JeebGateway.Services.Clients;
 /// Typed proxy over voice-transcription-service (FastAPI, host port 10062,
 /// liveness probe <c>/healthz</c>, readiness <c>/readyz</c>).
 ///
-/// thin-BFF fan-out (3 of 4). Consumed by
-/// <see cref="JeebGateway.Controllers.TranscriptionController"/> when
-/// <c>FeatureFlags:UseUpstream:Voice</c> is true; the in-process Whisper /
-/// circuit-breaker / fallback path (<see cref="ITranscriptionService"/>) stays
-/// the flag-OFF default and is NOT deleted in this PR.
-///
-/// REPOINT-VS-NEW: the existing <see cref="WhisperClient"/> targets OpenAI's
-/// <c>POST audio/transcriptions</c> (multipart <c>file</c>/<c>model</c>/
-/// <c>language</c>/<c>response_format</c> → <c>{ "text": ... }</c>). The upstream
-/// here exposes a DIFFERENT route — <c>POST /v1/transcribe</c> — with an EMPTY
-/// OpenAPI requestBody and an <c>additionalProperties: string</c> response, and
-/// at the time of wiring returns <c>501 {"detail":"T-BE-007 not yet implemented"}</c>
-/// for every payload shape probed (empty, JSON, multipart). The routes and
-/// contracts differ materially, so this is a NET-NEW thin client rather than a
-/// repoint of <see cref="WhisperClient"/>. It posts a forward-compatible JSON
-/// envelope (base64 audio + filename/contentType/language) and tolerates the
-/// upstream's not-yet-implemented placeholder so the seam is in place the moment
-/// the upstream implements T-BE-007.
+/// This is the sole runtime transcription boundary. The owner accepts multipart
+/// audio at <c>POST /v1/transcribe</c>, may return a completed 200 or a durable
+/// queued 202, and exposes the queued job at <c>/v1/transcriptions/{audioId}</c>.
+/// The gateway has no local Whisper, audio store, circuit, retry queue, or DLQ.
 /// </summary>
 public interface IVoiceTranscriptionClient
 {
@@ -48,4 +35,12 @@ public interface IVoiceTranscriptionClient
     /// </summary>
     Task<TranscriptionResult> TranscribeVoiceAsync(
         WhisperAudio audio, string language, string? idempotencyKey, CancellationToken ct);
+
+    /// <summary>Returns the owner service readiness document.</summary>
+    Task<JsonElement> GetReadinessAsync(CancellationToken ct) =>
+        throw new NotSupportedException("Voice readiness is not implemented by this test adapter.");
+
+    /// <summary>Returns durable owner state for one queued transcription.</summary>
+    Task<JsonElement> GetTranscriptionStatusAsync(string audioId, CancellationToken ct) =>
+        throw new NotSupportedException("Voice status is not implemented by this test adapter.");
 }

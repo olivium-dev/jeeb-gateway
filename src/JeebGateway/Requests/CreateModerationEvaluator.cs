@@ -15,10 +15,9 @@ namespace JeebGateway.Requests;
 /// uses) was NOT blocked. Extracting the orchestration here guarantees both routes enforce
 /// identical block/warn/fail-closed semantics and can never drift.
 ///
-/// <para>GR-3: the gate is a stateless check — it composes the gateway-owned
-/// <see cref="IProhibitedItemScanner"/> over the gateway-owned lexicon and the existing
-/// per-user ack ledger. It persists NO new moderation record and introduces NO new gateway
-/// store seam.</para>
+/// <para>GR-3: the gate is a stateless check — it composes the gateway scanner
+/// over an immutable ban-service catalog snapshot and its acknowledgement
+/// ledger. It persists no gateway moderation state.</para>
 /// </summary>
 public sealed class CreateModerationEvaluator
 {
@@ -104,7 +103,7 @@ public sealed class CreateModerationEvaluator
         // Warn severity: allowed only once the caller has acknowledged the CURRENT lexicon
         // version (same version semantics as GET /prohibited-items + the acknowledge route).
         var currentVersion = outcome.Version;
-        var ack = await _prohibited.GetAcknowledgmentAsync(clientId, ct);
+        var ack = await _prohibited.GetAcknowledgmentAsync(clientId, currentVersion, ct);
         var acknowledged = ack is not null && string.Equals(ack.Version, currentVersion, StringComparison.Ordinal);
 
         if (acknowledged) return null;

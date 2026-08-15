@@ -14,8 +14,6 @@ using JeebGateway.service.ServiceUserManagement;
 using JeebGateway.Tokens;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
-using GwUsersStore = JeebGateway.Users.IUsersStore;
-using GwUserProfile = JeebGateway.Users.UserProfile;
 using GwDualRoleClient = JeebGateway.Users.IUserManagementDualRoleClient;
 using GwRoles = JeebGateway.Users.Roles;
 using UserManagementApiException = JeebGateway.service.ServiceUserManagement.ApiException;
@@ -31,7 +29,6 @@ namespace JeebGateway.Controllers
     {
         private readonly ServiceUserManagementClient _serviceUserManagementClient;
         private readonly ITokenService _tokens;
-        private readonly GwUsersStore _users;
         private readonly GwDualRoleClient _userManagement;
         private readonly IOptions<DemoUsersOptions> _demoUsers;
         private readonly IOptions<SuperLoginOptions> _superLogin;
@@ -43,7 +40,6 @@ namespace JeebGateway.Controllers
         public UserController(
             ServiceUserManagementClient serviceUserManagementClient,
             ITokenService tokens,
-            GwUsersStore users,
             GwDualRoleClient userManagement,
             IOptions<DemoUsersOptions> demoUsers,
             IOptions<SuperLoginOptions> superLogin,
@@ -54,7 +50,6 @@ namespace JeebGateway.Controllers
         {
             _serviceUserManagementClient = serviceUserManagementClient;
             _tokens = tokens;
-            _users = users;
             _userManagement = userManagement;
             _demoUsers = demoUsers;
             _superLogin = superLogin;
@@ -527,21 +522,9 @@ namespace JeebGateway.Controllers
                 {
                     var (opaqueRoles, opaqueActiveRole) = await ResolveSuperLoginRolesAsync(userId!);
 
-                    // Project the UM-resolved identity locally so the gateway-minted JWT embeds
-                    // the SAME active_role/roles claims (TokenService reads active_role from the
-                    // store) — mirrors the OTP verify path's UpsertProjectionAsync.
-                    await _users.UpsertProjectionAsync(new GwUserProfile
-                    {
-                        Id = userId!,
-                        Phone = string.Empty,
-                        Name = string.Empty,
-                        Roles = opaqueRoles.ToList(),
-                        ActiveRole = opaqueActiveRole,
-                        CreatedAt = DateTimeOffset.UtcNow,
-                        UpdatedAt = DateTimeOffset.UtcNow,
-                    }, HttpContext.RequestAborted);
-
-                    var pair = await _tokens.IssueAsync(userId!, opaqueRoles, HttpContext.RequestAborted);
+                    var pair = await _tokens.IssueAsync(
+                        userId!, opaqueRoles, opaqueActiveRole,
+                        authentication: null, HttpContext.RequestAborted);
 
                     // Swap UM's user-management-audience token for the gateway session token.
                     response!.AuthToken = pair.AccessToken;
@@ -839,9 +822,7 @@ namespace JeebGateway.Controllers
 
                 var response = await _serviceUserManagementClient.UpdateAsync(request);
 
-                // jeeberName gap fix: mirror the updated display fields into the
-                // gateway's local users projection (best-effort, never fails the 200).
-                await MirrorProfileUpdateToLocalProjectionAsync(request, response);
+                InvalidateProfileCache(request, response);
 
                 return Ok(response);
             }
@@ -874,8 +855,7 @@ namespace JeebGateway.Controllers
 
                 var response = await _serviceUserManagementClient.UpdateAsync(request);
 
-                // jeeberName gap fix: same local-projection mirror as PUT /profile.
-                await MirrorProfileUpdateToLocalProjectionAsync(request, response);
+                InvalidateProfileCache(request, response);
 
                 return Ok(response);
             }
@@ -943,50 +923,21 @@ namespace JeebGateway.Controllers
         /// (before the local-mirror early-return below) so a blank-field update
         /// that skips the local projection write still busts the /me cache.</para>
         /// </summary>
-        private async Task MirrorProfileUpdateToLocalProjectionAsync(
+        private void InvalidateProfileCache(
             UpdateUserProfileRequest request, UpdateUserProfileResponse? response)
         {
-            try
+            var userId = response?.UserId;
+            if (string.IsNullOrWhiteSpace(userId)) userId = request.UserId;
+            if (string.IsNullOrWhiteSpace(userId))
             {
-                var userId = response?.UserId;
-                if (string.IsNullOrWhiteSpace(userId)) userId = request.UserId;
-                if (string.IsNullOrWhiteSpace(userId))
-                {
-                    userId = User.FindFirst(ClaimTypes.Sid)?.Value
-                             ?? User.FindFirst("sid")?.Value
-                             ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                             ?? User.FindFirst("sub")?.Value;
-                }
-                if (string.IsNullOrWhiteSpace(userId)) return;
-
+                userId = User.FindFirst(ClaimTypes.Sid)?.Value
+                         ?? User.FindFirst("sid")?.Value
+                         ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                         ?? User.FindFirst("sub")?.Value;
+            }
+            if (!string.IsNullOrWhiteSpace(userId))
                 _cache.Remove(ProfileCacheKeys.ForUser(userId));
-
-                // Prefer the upstream-echoed values (what UM actually persisted) and
-                // fall back to the submitted ones. Null patch fields are left untouched
-                // by the store, so a partial update never blanks the other fields.
-                var name = FirstNonBlank(response?.Username, request.Username);
-                var avatar = FirstNonBlank(response?.ProfilePic, request.ProfilePic);
-                var email = FirstNonBlank(response?.Email, request.Email);
-                if (name is null && avatar is null && email is null) return;
-
-                await _users.UpdateProfileAsync(userId!, new JeebGateway.Users.ProfilePatch
-                {
-                    Name = name,
-                    AvatarUrl = avatar,
-                    Email = email,
-                }, HttpContext.RequestAborted);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "user.profile update local-projection mirror failed; upstream update already succeeded.");
-            }
         }
-
-        private static string? FirstNonBlank(string? preferred, string? fallback)
-            => !string.IsNullOrWhiteSpace(preferred) ? preferred
-             : !string.IsNullOrWhiteSpace(fallback) ? fallback
-             : null;
 
         /// <summary>
         /// Delete user profile
@@ -1137,7 +1088,7 @@ namespace JeebGateway.Controllers
                 ScheduledPurgeAt = record.ScheduledPurgeAt,
                 CompletedAt = record.CompletedAt,
                 // Single source of truth for the grace window (mirrors the client's kAccountPurgeGraceDays=30).
-                GraceDays = (int)JeebGateway.Users.InMemoryAccountDeletionStore.PurgeDelay.TotalDays,
+                GraceDays = (int)JeebGateway.Users.AccountDeletionPolicy.PurgeDelay.TotalDays,
             };
 
         /// <summary>

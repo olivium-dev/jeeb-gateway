@@ -27,7 +27,10 @@ namespace JeebGateway.IntegrationTests.Fakes;
 public class FakeOfferStoreWebApplicationFactory : WebApplicationFactory<Program>
 {
     protected override void ConfigureWebHost(IWebHostBuilder builder)
-        => builder.ConfigureTestServices(UseFakeOfferStore);
+    {
+        base.ConfigureWebHost(builder);
+        builder.ConfigureTestServices(UseFakeOfferStore);
+    }
 
     /// <summary>
     /// The same swap, exposed for tests that already build their own factory with

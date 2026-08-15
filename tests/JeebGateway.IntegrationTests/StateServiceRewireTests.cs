@@ -335,8 +335,6 @@ internal sealed class FakeStateClient : IJeebStateServiceClient
     public Task AddStrikeAsync(StrikeAddRequest body, CancellationToken ct) => Task.CompletedTask;
     public Task BumpCancellationCounterAsync(CancellationBumpRequest body) => Task.CompletedTask;
     public Task BumpCancellationCounterAsync(CancellationBumpRequest body, CancellationToken ct) => Task.CompletedTask;
-    public Task EscalateOtpAsync(OtpEscalateRequest body) => Task.CompletedTask;
-    public Task EscalateOtpAsync(OtpEscalateRequest body, CancellationToken ct) => Task.CompletedTask;
     public Task HitRateLimitAsync(RateLimitHitRequest body) => Task.CompletedTask;
     public Task HitRateLimitAsync(RateLimitHitRequest body, CancellationToken ct) => Task.CompletedTask;
 }

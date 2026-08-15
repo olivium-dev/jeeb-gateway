@@ -196,10 +196,10 @@ public sealed class WalletServiceLedgerReaderTests
         public Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
             Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to,
             CancellationToken ct) =>
-            throw new Npgsql.NpgsqlException("shadow unavailable");
+            throw new IOException("shadow unavailable");
 
         public Task<JeebWalletLedgerEntry?> ReadEntryAsync(
             Guid holderId, string detailId, CancellationToken ct) =>
-            throw new Npgsql.NpgsqlException("shadow unavailable");
+            throw new IOException("shadow unavailable");
     }
 }

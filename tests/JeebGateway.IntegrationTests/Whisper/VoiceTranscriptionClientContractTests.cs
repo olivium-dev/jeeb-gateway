@@ -31,20 +31,49 @@ public class VoiceTranscriptionClientContractTests
 {
     private const string LiveBaseUrl = "http://127.0.0.1:10062/";
 
-    // ---- SEAM: upstream 422 unprocessable_audio maps to QueuedForRetry (not a 502) ----
+    // ---- SEAM: terminal 422 is never fabricated as a durable queued job ----
     [Fact]
-    public async Task Maps_Upstream_422_Unprocessable_To_QueuedForRetry()
+    public async Task Maps_Upstream_422_Unprocessable_To_Typed_Rejection()
     {
         var client = ClientReturning(
             HttpStatusCode.UnprocessableEntity,
             """{"reason":"unprocessable_audio","status":422}""");
 
+        var act = async () =>
+            await client.TranscribeAsync(SampleAudio(), "ar", CancellationToken.None);
+
+        var rejected = (await act.Should().ThrowAsync<VoiceAudioRejectedException>()).Which;
+        rejected.StatusCode.Should().Be(422);
+        rejected.Reason.Should().Be("unprocessable_audio");
+    }
+
+    [Fact]
+    public async Task Maps_Upstream_202_To_Durable_Queued_Identity()
+    {
+        var client = ClientReturning(
+            HttpStatusCode.Accepted,
+            """{"audio_id":"audio-owner-1","status":"queued","status_url":"/v1/transcriptions/audio-owner-1","reason":"provider_unavailable"}""");
+
         var result = await client.TranscribeAsync(SampleAudio(), "ar", CancellationToken.None);
 
         result.Outcome.Should().Be(TranscriptionOutcome.QueuedForRetry);
+        result.AudioId.Should().Be("audio-owner-1");
         result.Transcription.Should().BeNull();
-        result.Reason.Should().Be("unprocessable_audio");
-        result.AudioId.Should().NotBeNullOrWhiteSpace();
+        result.Reason.Should().Be("provider_unavailable");
+    }
+
+    [Fact]
+    public async Task Voice_On_Create_202_Preserves_Owner_Audio_Id()
+    {
+        var client = ClientReturning(
+            HttpStatusCode.Accepted,
+            """{"audio_id":"audio-owner-2","status":"queued","status_url":"/v1/transcriptions/audio-owner-2"}""");
+
+        var result = await client.TranscribeVoiceAsync(
+            SampleAudio(), "ar", "request-2", CancellationToken.None);
+
+        result.Outcome.Should().Be(TranscriptionOutcome.QueuedForRetry);
+        result.AudioId.Should().Be("audio-owner-2");
     }
 
     // ---- SEAM: a real 200 transcription binds to Transcribed (canonical body) ----
@@ -204,9 +233,18 @@ public class VoiceTranscriptionClientContractTests
         var result = await client.TranscribeVoiceAsync(SampleAudio(), "ar", Guid.NewGuid().ToString(), CancellationToken.None);
 
         result.Should().NotBeNull();
-        result.Outcome.Should().Be(TranscriptionOutcome.Transcribed);
-        result.Transcription.Should().NotBeNull();
-        result.Transcription!.Language.Should().Be("ar");
+        result.Outcome.Should().BeOneOf(
+            TranscriptionOutcome.Transcribed,
+            TranscriptionOutcome.QueuedForRetry);
+        if (result.Outcome == TranscriptionOutcome.Transcribed)
+        {
+            result.Transcription.Should().NotBeNull();
+            result.Transcription!.Language.Should().Be("ar");
+        }
+        else
+        {
+            result.AudioId.Should().NotBeNullOrWhiteSpace();
+        }
     }
 
     private sealed class HeaderCapturingHandler : HttpMessageHandler

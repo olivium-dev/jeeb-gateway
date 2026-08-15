@@ -88,20 +88,16 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
 
         using var _ = response;
 
-        // 422 unprocessable_audio is a CLIENT outcome (supported format but
-        // empty/silent/too-short/corrupt audio). It is NOT an upstream outage,
-        // so do NOT throw (which the controller maps to a 502). Degrade to the
-        // same queued shape used for other non-transcribed outcomes — the
-        // gateway accepted the audio, it simply could not be transcribed.
         if (response.StatusCode == HttpStatusCode.UnprocessableEntity)
         {
             _log.LogInformation(
-                "voice-transcription-service returned 422 (unprocessable audio); deferring transcription");
-            return new TranscriptionResult(
-                AudioId: Guid.NewGuid().ToString("n"),
-                Outcome: TranscriptionOutcome.QueuedForRetry,
-                Transcription: null,
-                Reason: "unprocessable_audio");
+                "voice-transcription-service rejected unprocessable audio");
+            throw new VoiceAudioRejectedException(422, "unprocessable_audio");
+        }
+
+        if (response.StatusCode == HttpStatusCode.Accepted)
+        {
+            return await ReadQueuedAsync(response, ct);
         }
 
         if ((int)response.StatusCode >= 500 || response.StatusCode == HttpStatusCode.TooManyRequests
@@ -181,6 +177,16 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
         {
             throw new VoiceAudioRejectedException(415, "unsupported_format");
         }
+        if (response.StatusCode == HttpStatusCode.UnprocessableEntity)
+        {
+            _log.LogInformation(
+                "voice-transcription-service rejected unprocessable voice-order audio");
+            throw new VoiceAudioRejectedException(422, "unprocessable_audio");
+        }
+        if (response.StatusCode == HttpStatusCode.Accepted)
+        {
+            return await ReadQueuedAsync(response, ct);
+        }
         if ((int)response.StatusCode >= 500 || response.StatusCode == HttpStatusCode.TooManyRequests
             || response.StatusCode == HttpStatusCode.ServiceUnavailable)
         {
@@ -199,12 +205,52 @@ public sealed class VoiceTranscriptionClient : IVoiceTranscriptionClient
             Reason: null);
     }
 
+    public async Task<JsonElement> GetReadinessAsync(CancellationToken ct)
+    {
+        using var response = await _http.GetAsync("readyz", ct);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
+    }
+
+    public async Task<JsonElement> GetTranscriptionStatusAsync(string audioId, CancellationToken ct)
+    {
+        using var response = await _http.GetAsync(
+            $"v1/transcriptions/{Uri.EscapeDataString(audioId)}",
+            ct);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
+    }
+
+    private static async Task<TranscriptionResult> ReadQueuedAsync(
+        HttpResponseMessage response,
+        CancellationToken ct)
+    {
+        var queued = await response.Content.ReadFromJsonAsync<QueuedVoiceUpstreamResponse>(Json, ct);
+        if (queued is null || string.IsNullOrWhiteSpace(queued.AudioId))
+        {
+            throw new WhisperUnavailableException(
+                "voice-transcription returned 202 without a durable audio id");
+        }
+
+        return new TranscriptionResult(
+            AudioId: queued.AudioId,
+            Outcome: TranscriptionOutcome.QueuedForRetry,
+            Transcription: null,
+            Reason: queued.Reason ?? "queued_by_owner");
+    }
+
     // Canonical /v1/transcribe response: {transcript, confidence, language, duration_ms}.
     private sealed record V1VoiceUpstreamResponse(
         [property: JsonPropertyName("transcript")] string? Transcript,
         [property: JsonPropertyName("confidence")] double? Confidence,
         [property: JsonPropertyName("language")] string? Language,
         [property: JsonPropertyName("duration_ms")] int? DurationMs);
+
+    private sealed record QueuedVoiceUpstreamResponse(
+        [property: JsonPropertyName("audio_id")] string AudioId,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("status_url")] string? StatusUrl,
+        [property: JsonPropertyName("reason")] string? Reason);
 }
 
 /// <summary>

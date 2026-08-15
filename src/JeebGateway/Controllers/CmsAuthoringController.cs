@@ -62,9 +62,9 @@ public sealed class CmsAuthoringController : ControllerBase
 
     [HttpGet("surfaces")]
     [ProducesResponseType(typeof(CmsSurfaceListResponse), StatusCodes.Status200OK)]
-    public IActionResult ListSurfaces()
+    public async Task<IActionResult> ListSurfaces(CancellationToken ct)
     {
-        var summaries = _store.ListSurfaces()
+        var summaries = (await _store.ListSurfacesAsync(ct))
             .Select(s => new CmsSurfaceSummaryDto(
                 s.SurfaceId, s.Title, s.LatestPublishedVersion, s.Draft is not null))
             .ToList();
@@ -76,9 +76,9 @@ public sealed class CmsAuthoringController : ControllerBase
     [HttpGet("config/{surfaceId}/published")]
     [ProducesResponseType(typeof(CmsConfigEnvelopeDto), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public IActionResult GetPublished(string surfaceId)
+    public async Task<IActionResult> GetPublished(string surfaceId, CancellationToken ct)
     {
-        var surface = _store.GetSurface(surfaceId);
+        var surface = await _store.GetSurfaceAsync(surfaceId, ct);
         if (surface is null)
         {
             return SurfaceNotFound(surfaceId);
@@ -97,9 +97,9 @@ public sealed class CmsAuthoringController : ControllerBase
     [HttpGet("config/{surfaceId}/draft")]
     [ProducesResponseType(typeof(CmsConfigEnvelopeDto), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public IActionResult GetDraft(string surfaceId)
+    public async Task<IActionResult> GetDraft(string surfaceId, CancellationToken ct)
     {
-        var surface = _store.GetSurface(surfaceId);
+        var surface = await _store.GetSurfaceAsync(surfaceId, ct);
         if (surface is null || surface.Draft is null)
         {
             return SurfaceNotFound(surfaceId);
@@ -115,7 +115,10 @@ public sealed class CmsAuthoringController : ControllerBase
     [ProducesResponseType(typeof(CmsConfigEnvelopeDto), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public IActionResult UpsertDraft(string surfaceId, [FromBody] CmsDraftUpsertRequest? body)
+    public async Task<IActionResult> UpsertDraft(
+        string surfaceId,
+        [FromBody] CmsDraftUpsertRequest? body,
+        CancellationToken ct)
     {
         if (IsCapabilityDenied())
         {
@@ -127,7 +130,7 @@ public sealed class CmsAuthoringController : ControllerBase
             Data = body?.Config ?? new Dictionary<string, object?>(),
         };
 
-        var surface = _store.UpsertDraft(surfaceId, config);
+        var surface = await _store.UpsertDraftAsync(surfaceId, config, ct);
         if (surface is null)
         {
             return SurfaceNotFound(surfaceId);
@@ -144,7 +147,7 @@ public sealed class CmsAuthoringController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public IActionResult Publish(string surfaceId)
+    public async Task<IActionResult> Publish(string surfaceId, CancellationToken ct)
     {
         // §4 ordering: capability deny FIRST, then step-up, then surface lookup.
         if (IsCapabilityDenied())
@@ -169,10 +172,11 @@ public sealed class CmsAuthoringController : ControllerBase
         // clearing the CMS capability/TOTP gates. The header is honoured ONLY when EdgeIdentityTrust
         // permits it (Dev/Testing or a secret-gated trusted edge); otherwise the actor is "unknown".
         var userId = ResolvePublishActor();
-        var version = _store.Publish(
+        var version = await _store.PublishAsync(
             surfaceId,
             string.IsNullOrWhiteSpace(userId) ? "unknown" : userId,
-            _clock.GetUtcNow());
+            _clock.GetUtcNow(),
+            ct);
 
         if (version is null)
         {
@@ -189,9 +193,9 @@ public sealed class CmsAuthoringController : ControllerBase
     [HttpGet("config/{surfaceId}/versions")]
     [ProducesResponseType(typeof(CmsVersionListResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public IActionResult GetVersions(string surfaceId)
+    public async Task<IActionResult> GetVersions(string surfaceId, CancellationToken ct)
     {
-        var surface = _store.GetSurface(surfaceId);
+        var surface = await _store.GetSurfaceAsync(surfaceId, ct);
         if (surface is null)
         {
             return SurfaceNotFound(surfaceId);
@@ -209,9 +213,13 @@ public sealed class CmsAuthoringController : ControllerBase
     [ProducesResponseType(typeof(CmsDiffResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public IActionResult GetDiff(string surfaceId, [FromQuery] int? from, [FromQuery] int? to)
+    public async Task<IActionResult> GetDiff(
+        string surfaceId,
+        [FromQuery] int? from,
+        [FromQuery] int? to,
+        CancellationToken ct)
     {
-        var surface = _store.GetSurface(surfaceId);
+        var surface = await _store.GetSurfaceAsync(surfaceId, ct);
         if (surface is null)
         {
             return SurfaceNotFound(surfaceId);
