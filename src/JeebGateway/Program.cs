@@ -1947,7 +1947,6 @@ else
 
 // Request expiry + no-offer nudge (T-backend-028).
 builder.Services.Configure<RequestExpiryOptions>(builder.Configuration.GetSection(RequestExpiryOptions.SectionName));
-builder.Services.Configure<RequestExpirySourceOptions>(builder.Configuration.GetSection(RequestExpirySourceOptions.SectionName));
 builder.Services.AddSingleton<InMemoryRequestExpiryNotifier>();
 // Until now IRequestExpiryNotifier was bound to InMemoryRequestExpiryNotifier in EVERY
 // environment including production, so NO expiry push has ever reached a device; this is the fix.
@@ -1966,8 +1965,6 @@ builder.Services.AddSingleton<TierExpiryWindowResolver>();
 // the 60 s tier-catalog cache only caches if the instance survives the request, and
 // without it every list/feed read acquires an upstream delivery-service dependency.
 builder.Services.AddSingleton<OfferDeadlineProjector>();
-builder.Services.AddSingleton<RequestExpirySweeper>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<RequestExpirySweeper>());
 builder.Services.AddSingleton<RequestNudgeSweeper>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RequestNudgeSweeper>());
 builder.Services.AddSingleton<RequestExpiryObserver>();
@@ -2906,7 +2903,6 @@ if (app.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
 // WS-A will wire in the real RunBatchAsync after implementing durable settlement.
 var testJobRegistry = app.Services.GetRequiredService<JeebGateway.TestControlPlane.ITestJobRegistry>();
 var ratingRevealJob = app.Services.GetRequiredService<JeebGateway.Ratings.RatingRevealJob>();
-var requestExpirySweeper = app.Services.GetRequiredService<RequestExpirySweeper>();
 var requestNudgeSweeper = app.Services.GetRequiredService<RequestNudgeSweeper>();
 var requestExpiryObserver = app.Services.GetRequiredService<RequestExpiryObserver>();
 
@@ -2915,12 +2911,6 @@ testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
     Name = "rating-reveal",
     Description = "Reveal mutually rated windows and close one-sided windows past the 7-day blind window (RatingRevealJob.SweepOnceAsync).",
     RunAsync = ct => ratingRevealJob.SweepOnceAsync(ct)
-});
-testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
-{
-    Name = "request-expiry-sweep",
-    Description = "Expire overdue requests using the legacy gateway TTL authority (RequestExpirySweeper.SweepOnceAsync).",
-    RunAsync = ct => requestExpirySweeper.SweepOnceAsync(ct)
 });
 testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
 {

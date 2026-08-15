@@ -16,32 +16,6 @@ public class RequestExpiryObserverTests
         new(2026, 7, 21, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public async Task Observer_Is_A_NoOp_When_Source_Is_Gateway()
-    {
-        var clock = new FakeClock(ClockStart);
-        using var services = BuildSweeperServices(clock);
-        var store = services.GetRequiredService<IRequestsStore>();
-        var request = await CreateRequestAsync(store, "gateway-authority-client");
-        var delivery = new StubExpiredDeliveryClient([
-            ExpiredRow(request, clock.GetUtcNow()),
-        ]);
-        var observer = new RequestExpiryObserver(
-            services,
-            clock,
-            Options.Create(new RequestExpiryOptions()),
-            new StaticSourceMonitor(new RequestExpirySourceOptions { Source = "gateway" }),
-            delivery,
-            new RecordingLogger<RequestExpiryObserver>());
-
-        await observer.ObserveOnceAsync(CancellationToken.None);
-
-        (await store.GetAsync(request.Id, CancellationToken.None))!.Status
-            .Should().Be(RequestStatus.Pending);
-        delivery.Calls.Should().BeEmpty(
-            "there must never be two TTL authorities active at once");
-    }
-
-    [Fact]
     public async Task Observer_Projects_Upstream_Expiry_Onto_Local_Status()
     {
         var clock = new FakeClock(ClockStart);
@@ -56,7 +30,6 @@ public class RequestExpiryObserverTests
             services,
             clock,
             Options.Create(new RequestExpiryOptions()),
-            DeliveryServiceSource(),
             delivery,
             new RecordingLogger<RequestExpiryObserver>());
 
@@ -83,7 +56,6 @@ public class RequestExpiryObserverTests
             services,
             clock,
             Options.Create(new RequestExpiryOptions()),
-            DeliveryServiceSource(),
             delivery,
             new RecordingLogger<RequestExpiryObserver>());
 
@@ -112,7 +84,6 @@ public class RequestExpiryObserverTests
             services,
             clock,
             Options.Create(new RequestExpiryOptions()),
-            DeliveryServiceSource(),
             delivery,
             new RecordingLogger<RequestExpiryObserver>());
 
@@ -141,7 +112,6 @@ public class RequestExpiryObserverTests
             services,
             clock,
             Options.Create(options),
-            DeliveryServiceSource(),
             delivery,
             new RecordingLogger<RequestExpiryObserver>());
 
@@ -167,7 +137,6 @@ public class RequestExpiryObserverTests
             services,
             clock,
             Options.Create(options),
-            DeliveryServiceSource(),
             delivery,
             new RecordingLogger<RequestExpiryObserver>());
 
@@ -192,7 +161,6 @@ public class RequestExpiryObserverTests
             services,
             clock,
             Options.Create(options),
-            DeliveryServiceSource(),
             delivery,
             new RecordingLogger<RequestExpiryObserver>());
 
@@ -222,7 +190,6 @@ public class RequestExpiryObserverTests
             services,
             clock,
             Options.Create(options),
-            DeliveryServiceSource(),
             delivery,
             new RecordingLogger<RequestExpiryObserver>());
 
@@ -251,7 +218,6 @@ public class RequestExpiryObserverTests
             services,
             clock,
             Options.Create(new RequestExpiryOptions()),
-            DeliveryServiceSource(),
             delivery,
             new RecordingLogger<RequestExpiryObserver>());
 
@@ -277,7 +243,6 @@ public class RequestExpiryObserverTests
             services,
             clock,
             Options.Create(options),
-            DeliveryServiceSource(),
             delivery,
             logger);
 
@@ -306,7 +271,6 @@ public class RequestExpiryObserverTests
             services,
             clock,
             Options.Create(options),
-            DeliveryServiceSource(),
             delivery,
             new RecordingLogger<RequestExpiryObserver>());
 
@@ -346,7 +310,6 @@ public class RequestExpiryObserverTests
             services,
             clock,
             Options.Create(new RequestExpiryOptions()),
-            DeliveryServiceSource(),
             delivery,
             new RecordingLogger<RequestExpiryObserver>());
 
@@ -355,9 +318,6 @@ public class RequestExpiryObserverTests
         (await store.GetAsync(request.Id, CancellationToken.None))!.Status
             .Should().Be(RequestStatus.Expired);
     }
-
-    private static StaticSourceMonitor DeliveryServiceSource() =>
-        new(new RequestExpirySourceOptions { Source = "delivery-service" });
 
     private static ExpiredDeliveryUpstream ExpiredRow(
         DeliveryRequest request,
@@ -423,17 +383,6 @@ public class RequestExpiryObserverTests
             Exception? exception,
             Func<TState, Exception?, string> formatter) =>
             Messages.Enqueue(formatter(state, exception));
-    }
-
-    private sealed class StaticSourceMonitor : IOptionsMonitor<RequestExpirySourceOptions>
-    {
-        public StaticSourceMonitor(RequestExpirySourceOptions value) => CurrentValue = value;
-
-        public RequestExpirySourceOptions CurrentValue { get; }
-
-        public RequestExpirySourceOptions Get(string? name) => CurrentValue;
-
-        public IDisposable? OnChange(Action<RequestExpirySourceOptions, string?> listener) => null;
     }
 
     private sealed class StubExpiredDeliveryClient

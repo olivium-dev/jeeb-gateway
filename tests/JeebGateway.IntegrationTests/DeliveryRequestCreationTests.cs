@@ -252,7 +252,7 @@ public class DeliveryRequestCreationTests : IClassFixture<WebApplicationFactory<
 
     /// <summary>
     /// Acceptance criterion: request expiry is tier-specific. The sweeper
-    /// itself has its own unit-test file (RequestExpirySweeperTests) — here
+    /// itself is owned by delivery-service now — here
     /// we lock in the seeded catalog TTLs so a future catalog tweak surfaces
     /// as a failed test rather than silent regression.
     /// </summary>
