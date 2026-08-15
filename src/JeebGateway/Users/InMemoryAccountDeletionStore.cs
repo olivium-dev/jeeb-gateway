@@ -98,8 +98,11 @@ public class InMemoryAccountDeletionStore : IAccountDeletionStore
         return Task.FromResult(record);
     }
 
-    public async Task AdvanceAsync(DateTimeOffset now, CancellationToken ct)
+    public async Task<IReadOnlyList<AccountDeletionRequest>> AdvanceAsync(DateTimeOffset now, CancellationToken ct)
     {
+        // Every row this tick actually moved, so the W3-05 mirror can push the transition upstream.
+        var advanced = new List<AccountDeletionRequest>();
+
         // Snapshot the candidates under the lock; do downstream IO outside
         // it so a slow purge can't stall RequestAsync callers.
         List<AccountDeletionRequest> toSchedule;
@@ -129,6 +132,7 @@ public class InMemoryAccountDeletionStore : IAccountDeletionStore
 
             await _requests.AnonymizeForClientAsync(record.UserId, record.AnonymizedUserHash, ct);
             await _ledger.AnonymizeForUserAsync(record.UserId, record.AnonymizedUserHash, ct);
+            advanced.Add(record);
         }
 
         foreach (var record in toComplete)
@@ -139,7 +143,10 @@ public class InMemoryAccountDeletionStore : IAccountDeletionStore
                 record.Status = AccountDeletionStatus.Completed;
                 record.CompletedAt = now;
             }
+            advanced.Add(record);
         }
+
+        return advanced;
     }
 
     internal static string HashUserId(string userId)

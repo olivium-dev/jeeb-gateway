@@ -1,35 +1,36 @@
 using JeebGateway.ProhibitedItems;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.Services.Clients;
-using JeebGateway.StateService.Ownership;
 using Microsoft.Extensions.Logging;
 
 namespace JeebGateway.StateService.Config;
 
-// gwdbx W3-07 PREP — read-only parity check between the gateway-local config stores and the
-// state-service primitive. Writes NOTHING. The CMS leg was removed by ADR-0008.
+// gwdbx W3-07 PREP — read-only parity check between the gateway-LOCAL config stores and the
+// surfaces the read rung serves from. Writes NOTHING. The CMS leg was removed by ADR-0008.
+// Both sides are resolved explicitly (local markers vs upstream projections): reading the serving
+// interfaces would compare upstream with itself and report clean by construction.
 public sealed class ConfigParityChecker
 {
     private const int PageSize = 200;
     private const int MaxPages = 500;
 
-    private readonly IProhibitedItemsStore _lexicon;
-    private readonly IFlaggedRequestStore _flagged;
+    private readonly ILocalProhibitedItemsStore _lexicon;
+    private readonly ILocalFlaggedRequestStore _flaggedLocal;
+    private readonly IUpstreamFlaggedRequestStore _flaggedUpstream;
     private readonly IStateConfigClient _config;
-    private readonly IStateOwnershipClient _ownership;
     private readonly ILogger<ConfigParityChecker> _log;
 
     public ConfigParityChecker(
-        IProhibitedItemsStore lexicon,
-        IFlaggedRequestStore flagged,
+        ILocalProhibitedItemsStore lexicon,
+        ILocalFlaggedRequestStore flaggedLocal,
+        IUpstreamFlaggedRequestStore flaggedUpstream,
         IStateConfigClient config,
-        IStateOwnershipClient ownership,
         ILogger<ConfigParityChecker> log)
     {
         _lexicon = lexicon;
-        _flagged = flagged;
+        _flaggedLocal = flaggedLocal;
+        _flaggedUpstream = flaggedUpstream;
         _config = config;
-        _ownership = ownership;
         _log = log;
     }
 
@@ -42,11 +43,12 @@ public sealed class ConfigParityChecker
 
         _log.LogInformation(
             "gwdbx W3-07 config parity: clean={Clean} lexicon={LexLocal}/{LexUp} tag={LocalTag}|{UpTag} " +
-            "acks={AcksMatched}/{AcksChecked} flagged={FlaggedMatched}/{FlaggedSubjects} " +
+            "acks={AcksMatched}/{AcksChecked} flagged={FlaggedMatched}/{FlaggedRows} upstreamFlagged={FlaggedUp} " +
             "mismatches={Count}{Truncated}",
             report.Clean, report.LexiconLocalActive, report.LexiconUpstreamActive,
             report.LexiconLocalTag, report.LexiconUpstreamTag,
-            report.AcksMatched, report.AcksChecked, report.FlaggedMatched, report.FlaggedSubjects,
+            report.AcksMatched, report.AcksChecked, report.FlaggedMatched, report.FlaggedRows,
+            report.FlaggedUpstreamRows,
             report.Mismatches.Count, report.Truncated ? " (TRUNCATED)" : string.Empty);
         return report;
     }
@@ -133,37 +135,45 @@ public sealed class ConfigParityChecker
         }
     }
 
+    // Row-for-row against the CASE engine — the same surface the import writes and the read rung
+    // serves. The old work-items check proved only per-subject existence on a dead surface.
     private async Task CheckFlaggedAsync(ConfigParityReport report, CancellationToken ct)
     {
-        var subjects = new HashSet<string>(StringComparer.Ordinal);
-        for (var page = 1; page <= MaxPages; page++)
-        {
-            var slice = await _flagged.ListAsync(null, page, PageSize, ct);
-            foreach (var row in slice.Items)
-            {
-                report.FlaggedRows++;
-                subjects.Add(row.UserId);
-            }
-            if (slice.Items.Count < PageSize || report.FlaggedRows >= slice.Total) break;
-        }
+        var local = await DrainAsync(_flaggedLocal, ct);
+        report.FlaggedRows = local.Count;
 
-        // The work-items API exposes only the LATEST item per subject, so this leg proves
-        // per-subject existence; per-row parity is the import report's count.
-        report.FlaggedSubjects = subjects.Count;
-        foreach (var subject in subjects)
+        var upstream = await DrainAsync(_flaggedUpstream, ct);
+        report.FlaggedUpstreamRows = upstream.Count;
+        var upstreamKeys = new HashSet<string>(upstream.Select(RowKey), StringComparer.Ordinal);
+
+        foreach (var row in local)
         {
-            var latest = await _ownership.GetLatestWorkItemAsync(
-                StateServiceConfigImporter.Application, StateServiceConfigImporter.FlaggedWorkKind, subject, ct);
-            if (latest is null)
-            {
-                report.Add($"flagged: subject {subject} has no '{StateServiceConfigImporter.FlaggedWorkKind}' work item upstream");
-            }
-            else
+            if (upstreamKeys.Contains(RowKey(row)))
             {
                 report.FlaggedMatched++;
             }
+            else
+            {
+                report.Add($"flagged: row {row.Id} (user {row.UserId}) has no matching moderation case upstream");
+            }
         }
     }
+
+    private static async Task<List<FlaggedRequest>> DrainAsync(IFlaggedRequestStore store, CancellationToken ct)
+    {
+        var rows = new List<FlaggedRequest>();
+        for (var page = 1; page <= MaxPages; page++)
+        {
+            var slice = await store.ListAsync(null, page, PageSize, ct);
+            rows.AddRange(slice.Items);
+            if (slice.Items.Count < PageSize || rows.Count >= slice.Total) break;
+        }
+        return rows;
+    }
+
+    // The upstream case id is minted by state-service, so identity is the replayed content.
+    private static string RowKey(FlaggedRequest row) =>
+        row.UserId + "|" + (row.RequestId ?? "-") + "|" + row.Description;
 
     private static List<ProhibitedItem> Sort(IEnumerable<ProhibitedItem> items) =>
         items.OrderBy(i => i.Category, StringComparer.OrdinalIgnoreCase)
@@ -183,7 +193,7 @@ public sealed class ConfigParityReport
     public int AcksChecked { get; set; }
     public int AcksMatched { get; set; }
     public int FlaggedRows { get; set; }
-    public int FlaggedSubjects { get; set; }
+    public int FlaggedUpstreamRows { get; set; }
     public int FlaggedMatched { get; set; }
     public bool Truncated { get; private set; }
     public List<string> Mismatches { get; } = new();

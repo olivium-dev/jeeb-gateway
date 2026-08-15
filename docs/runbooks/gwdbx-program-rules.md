@@ -73,6 +73,15 @@ and this document is their only definition in the repo:
   a CMS leg again — replaying bundler documents into state-service forks the catalog into two writable
   owners with no reconciler.
 
+- **Never let a W3 mode key reach a read rung without a read path.** ADR-0009 (2026-08-16): every
+  mode key is in exactly one of three states, and each is enforced in code — REAL (the serving
+  interface is bound behind the mode, the upstream read is implemented, and a `ValidateOnStart` guard
+  refuses the rung when the upstream is unwired), REFUSED (the guard rejects every rung at or above
+  `dual-write-upstream-read` and names the missing upstream capability), or PINNED (superseded; the
+  key is kept only so a stale value fails loudly). A key that is merely `IsKnown`-validated is the
+  green no-op this programme keeps re-buying. Corollary: import and parity tools resolve the LOCAL
+  store explicitly, never the serving interface, which IS upstream once a rung is live. — ADR-0009
+
 ## 2. Backfill standard (PRE-07 — rider R2, guardrail G-21)
 
 **Items 1–3 survive this file's archiving (§0).** Every backfill in this program had — and any future

@@ -8,9 +8,10 @@ using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Users;
 
-// gwdbx W3-05 — dual-writes the GDPR account-deletion lifecycle to state-service /v1/work-items
-// behind FeatureFlags:AccountDeletionMode. The gateway-local record stays authoritative; a mirror
-// failure never fails the user-facing deletion request. Same shape as MirroringDataExportStore.
+// gwdbx W3-05 — mirrors the GDPR account-deletion lifecycle to state-service /v1/work-items behind
+// FeatureFlags:AccountDeletionMode, and from dual-write-upstream-read up SERVES the read from there.
+// Below that rung the gateway-local record stays authoritative and a mirror failure never fails the
+// user-facing deletion request. Same shape as MirroringDataExportStore.
 public sealed class StateServiceAccountDeletionStore : IAccountDeletionStore
 {
     // Application scope the state-service credential grants this gateway.
@@ -45,7 +46,17 @@ public sealed class StateServiceAccountDeletionStore : IAccountDeletionStore
     // G-15 — one open deletion per user upstream, reproducing the one-record-per-user local rule.
     public static string IdempotencyKeyFor(string userId) => "account-deletion:" + userId;
 
+    /// <summary>
+    /// G-15 for the lifecycle. /v1/work-items has no update route the gateway may call without the
+    /// claim/lease rail, so each transition is its own item and the READ takes the LATEST one.
+    /// </summary>
+    public static string TransitionKeyFor(string userId, string status) =>
+        "account-deletion:" + userId + ":" + status;
+
     private bool Mirroring => _mode.CurrentValue.AccountDeletion >= GwdbxMigrationPhase.DualWriteLocalRead;
+
+    private bool UpstreamReads =>
+        GwdbxMigrationOptions.RequiresUpstream(_mode.CurrentValue.AccountDeletion);
 
     public async Task<AccountDeletionRequest> RequestAsync(string userId, bool hasActiveDelivery, CancellationToken ct)
     {
@@ -55,20 +66,50 @@ public sealed class StateServiceAccountDeletionStore : IAccountDeletionStore
 
         if (Mirroring)
         {
-            await MirrorRequestAsync(record, ct);
+            // From the read rung up the caller is handed a record it will next read OUT of upstream,
+            // so a swallowed mirror failure would make the deletion vanish on the very next GET.
+            await MirrorAsync(record, IdempotencyKeyFor(record.UserId), rethrow: UpstreamReads, ct);
         }
         return record;
     }
 
-    // Reads stay local at dual-write-local-read; the upstream read cutover is a later rung.
-    public Task<AccountDeletionRequest?> GetAsync(string userId, CancellationToken ct) =>
-        _inner.GetAsync(userId, ct);
+    public async Task<AccountDeletionRequest?> GetAsync(string userId, CancellationToken ct)
+    {
+        if (!UpstreamReads)
+        {
+            return await _inner.GetAsync(userId, ct);
+        }
 
-    // The state machine + purge lives in the inner store. AdvanceAsync yields no per-record
-    // result, so the pending->scheduled dueAt refresh mirrors at the read cutover, not here.
-    public Task AdvanceAsync(DateTimeOffset now, CancellationToken ct) => _inner.AdvanceAsync(now, ct);
+        // FAIL CLOSED. The local chain ends in an in-memory store that empties on every bounce, so
+        // answering a GDPR status read from it would report "no deletion requested" during an outage.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(MirrorBudget);
+        using var scope = _scopeFactory.CreateScope();
+        var client = scope.ServiceProvider.GetRequiredService<IStateOwnershipClient>();
 
-    private async Task MirrorRequestAsync(AccountDeletionRequest record, CancellationToken ct)
+        var latest = await client.GetLatestWorkItemAsync(Application, WorkKind, userId, budget.Token);
+        return latest is null ? null : Map(userId, latest);
+    }
+
+    // The state machine + purge lives in the inner store; the purge worker drives it. Every row it
+    // moved is mirrored as its own transition item so the upstream read cannot freeze at creation.
+    public async Task<IReadOnlyList<AccountDeletionRequest>> AdvanceAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        var advanced = await _inner.AdvanceAsync(now, ct);
+        if (!Mirroring || advanced.Count == 0)
+        {
+            return advanced;
+        }
+
+        foreach (var record in advanced)
+        {
+            await MirrorAsync(record, TransitionKeyFor(record.UserId, record.Status), rethrow: false, ct);
+        }
+        return advanced;
+    }
+
+    private async Task MirrorAsync(
+        AccountDeletionRequest record, string idempotencyKey, bool rethrow, CancellationToken ct)
     {
         try
         {
@@ -77,25 +118,72 @@ public sealed class StateServiceAccountDeletionStore : IAccountDeletionStore
             using var scope = _scopeFactory.CreateScope();
             var client = scope.ServiceProvider.GetRequiredService<IStateOwnershipClient>();
 
-            // Payload carries NO PII: the pseudonym hash and the lifecycle status only.
+            // Payload carries NO PII: the pseudonym hash and the lifecycle stamps only.
             var body = new WorkItemCreateRequestV1
             {
                 Application = Application,
                 Kind = WorkKind,
                 SubjectRef = record.UserId,
                 Payload = JsonSerializer.SerializeToElement(
-                    new { status = record.Status, anonymizedUserHash = record.AnonymizedUserHash }, Json),
+                    new DeletionPayload
+                    {
+                        Status = record.Status,
+                        RequestedAt = record.RequestedAt,
+                        ScheduledPurgeAt = record.ScheduledPurgeAt,
+                        CompletedAt = record.CompletedAt,
+                        AnonymizedUserHash = record.AnonymizedUserHash,
+                    },
+                    Json),
                 // The 30-day purge deadline; null while active deliveries hold the clock.
                 DueAt = record.ScheduledPurgeAt,
             };
-            await client.CreateWorkItemAsync(body, IdempotencyKeyFor(record.UserId), budget.Token);
+            await client.CreateWorkItemAsync(body, idempotencyKey, budget.Token);
         }
         catch (Exception ex)
         {
+            if (rethrow) throw;
+
             _log.LogWarning(ex,
                 "account-deletion mirror: create work item failed for {UserId} (key {Key}); the local " +
                 "record is durable and the deletion request is unaffected.",
-                record.UserId, IdempotencyKeyFor(record.UserId));
+                record.UserId, idempotencyKey);
         }
+    }
+
+    // Upstream is the record of truth at this rung, so every field comes from the work item. The
+    // payload is the gateway's own shape (written by MirrorAsync), never a foreign schema.
+    private static AccountDeletionRequest Map(string userId, WorkItemRecordV1 item)
+    {
+        DeletionPayload? payload = null;
+        try
+        {
+            payload = item.Payload.ValueKind == JsonValueKind.Object
+                ? item.Payload.Deserialize<DeletionPayload>(Json)
+                : null;
+        }
+        catch (JsonException)
+        {
+            // A payload the gateway cannot read must not masquerade as "no deletion requested".
+            payload = null;
+        }
+
+        return new AccountDeletionRequest
+        {
+            UserId = userId,
+            Status = payload?.Status ?? AccountDeletionStatus.PendingActiveDelivery,
+            RequestedAt = payload?.RequestedAt ?? item.CreatedAt,
+            ScheduledPurgeAt = payload?.ScheduledPurgeAt,
+            CompletedAt = payload?.CompletedAt,
+            AnonymizedUserHash = payload?.AnonymizedUserHash ?? AccountDeletionPolicy.HashUserId(userId),
+        };
+    }
+
+    private sealed class DeletionPayload
+    {
+        public string Status { get; set; } = AccountDeletionStatus.PendingActiveDelivery;
+        public DateTimeOffset RequestedAt { get; set; }
+        public DateTimeOffset? ScheduledPurgeAt { get; set; }
+        public DateTimeOffset? CompletedAt { get; set; }
+        public string AnonymizedUserHash { get; set; } = string.Empty;
     }
 }

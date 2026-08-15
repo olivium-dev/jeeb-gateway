@@ -1828,7 +1828,18 @@ builder.Services.Configure<OtpHandoverOptions>(builder.Configuration.GetSection(
 // Durability register #5 — admin escalations. Postgres-backed (admin_escalations,
 // migration 0021) when GatewayPostgres is configured so the unbounded escalation list
 // survives a restart; in-memory fallback for dev/CI/test.
-builder.Services.AddSingleton<IAdminEscalationStore, InMemoryAdminEscalationStore>();
+builder.Services.AddSingleton<InMemoryAdminEscalationStore>();
+
+// gwdbx W3-02 (ADR-0009) — from dual-write-upstream-read up, delivery-service SERVES the admin
+// escalation queue over the same route the mirror writes. Below that rung the local row is
+// authoritative. No local fallback at the read rung: an empty triage queue reads as "nothing to do".
+builder.Services.AddSingleton<IAdminEscalationStore>(sp =>
+    JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(
+        JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(builder.Configuration["FeatureFlags:OtpEscalationsMode"]))
+        ? new JeebGateway.Requests.OtpHandover.DeliveryServiceAdminEscalationStore(
+            sp.GetRequiredService<System.Net.Http.IHttpClientFactory>(),
+            sp.GetRequiredService<ILogger<JeebGateway.Requests.OtpHandover.DeliveryServiceAdminEscalationStore>>())
+        : sp.GetRequiredService<InMemoryAdminEscalationStore>());
 builder.Services.AddSingleton<OtpHandoverSweeper>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper>());
 
@@ -2009,9 +2020,15 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ScheduledDeliveryA
 // admin edits and per-user acknowledgements survive a restart; in-memory fallback otherwise.
 builder.Services.AddSingleton<InMemoryProhibitedItemsStore>();
 
+// The LOCAL catalog root, reachable past the decorator below. The freeze-import and the parity
+// check resolve this, never the serving interface, which IS upstream once the rung is live.
+builder.Services.AddSingleton<JeebGateway.ProhibitedItems.ILocalProhibitedItemsStore>(
+    sp => sp.GetRequiredService<InMemoryProhibitedItemsStore>());
+
 // gwdbx W3-03 — StateServiceProhibitedItemsStore DECORATES the authoritative local catalog. At
-// "local" it is pass-through; from the W3-11 read flip up the published config surface serves
-// ListActiveAsync and fails OPEN back to the local lexicon. No dual-write: catalog leg (A11).
+// "local" it is pass-through; from the W3-11 read flip up the published config surface serves the
+// active catalog, the admin list AND the acks, catalog authoring fails closed, and the active-read
+// fails OPEN onto the last-known-good snapshot (never onto a local store that is empty by design).
 builder.Services.AddSingleton<IProhibitedItemsStore>(sp =>
 {
     IProhibitedItemsStore inner = sp.GetRequiredService<InMemoryProhibitedItemsStore>();
@@ -2034,7 +2051,24 @@ builder.Services.AddSingleton<IProhibitedItemScanner, ProhibitedItemScanner>();
 // Durability register #13 — flagged requests. Postgres-backed (flagged_requests,
 // migration 0019) when GatewayPostgres is configured so moderation queue entries survive
 // a restart; in-memory fallback for dev/CI/test.
-builder.Services.AddSingleton<IFlaggedRequestStore, InMemoryFlaggedRequestStore>();
+builder.Services.AddSingleton<InMemoryFlaggedRequestStore>();
+builder.Services.AddSingleton<JeebGateway.ProhibitedItems.FlaggedRequests.ILocalFlaggedRequestStore>(
+    sp => sp.GetRequiredService<InMemoryFlaggedRequestStore>());
+
+// gwdbx W3-03 (ADR-0009) — ONE upstream for this leg: state-service generic cases, kind
+// moderation_review. The freeze-import replays onto this exact surface, so importer and read
+// store can no longer point at different owners (the old work-items leg wrote a dead kind).
+builder.Services.AddTransient<JeebGateway.ProhibitedItems.FlaggedRequests.IUpstreamFlaggedRequestStore>(
+    sp => new JeebGateway.ProhibitedItems.FlaggedRequests.StateServiceFlaggedRequestStore(
+        sp.GetRequiredService<IGenericCaseStateClient>()));
+
+// Scoped, not singleton: the upstream projection wraps the transient state-service client, and the
+// in-memory queue stays a singleton behind its own registration.
+builder.Services.AddScoped<IFlaggedRequestStore>(sp =>
+    JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(
+        JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(builder.Configuration["FeatureFlags:ProhibitedItemsMode"]))
+        ? sp.GetRequiredService<JeebGateway.ProhibitedItems.FlaggedRequests.IUpstreamFlaggedRequestStore>()
+        : sp.GetRequiredService<InMemoryFlaggedRequestStore>());
 
 // JEB-63 (S05 N1 / A1.1): gateway-owned create-time prohibited-items moderation
 // gate flag (default ON, INDEPENDENT of FeatureFlags:DurableRequests). When ON,
@@ -2750,6 +2784,11 @@ builder.Services.AddHealthChecks()
 var stateOptions = JeebGateway.StateService.StateServiceOptionsFactory.FromConfiguration(builder.Configuration);
 var stateServiceWired = stateOptions.Enabled && !string.IsNullOrWhiteSpace(stateOptions.BaseUrl);
 
+// A10 — the escalation leg's upstream is delivery-service, not state-service, so its read rung
+// guards on the delivery base URL the mirror already requires.
+var gwdbxDeliveryWired = Uri.TryCreate(
+    builder.Configuration["Services:Delivery:BaseUrl"], UriKind.Absolute, out _);
+
 // A10 fail-closed boot guard (W1-14): from dual-write-upstream-read up, upstream SERVES READS, so an
 // unwired dependency must refuse the boot rather than silently read sessions out of process memory.
 builder.Services
@@ -2764,6 +2803,28 @@ builder.Services
         o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.ProhibitedItems)
              || stateServiceWired,
         $"FeatureFlags:ProhibitedItemsMode is at or above dual-write-upstream-read, which makes jeeb-state-service the lexicon READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}).")
+    // W3-05 (A10): from the read flip up state-service /v1/work-items serves the GDPR deletion
+    // status, so an unwired dependency must refuse the boot rather than answer from a store that
+    // empties on every bounce.
+    .Validate(
+        o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.AccountDeletion) || stateServiceWired,
+        $"FeatureFlags:AccountDeletionMode is at or above dual-write-upstream-read, which makes jeeb-state-service the account-deletion READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}).")
+    // W3-02 (A10): the admin escalation queue is served by delivery-service from the read flip up.
+    .Validate(
+        o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.OtpEscalations) || gwdbxDeliveryWired,
+        "FeatureFlags:OtpEscalationsMode is at or above dual-write-upstream-read, which makes "
+        + "jeeb-delivery-service the admin-escalation READ authority, but Services:Delivery:BaseUrl "
+        + "is not an absolute URL. Refusing to start rather than serving an empty triage queue.")
+    // W3-13 (ADR-0009): availability CANNOT reach a read rung. DeliveryServiceAvailabilityStore
+    // throws OwnerCapabilityUnavailableException for ListOnlineAsync / ListKnownJeebersAsync, and
+    // the admin ops-map and AutoOfflineSweeper both need them — G-10 keeps the gateway the single
+    // presence authority until delivery-service ships those two endpoints.
+    .Validate(
+        o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.Availability),
+        "FeatureFlags:AvailabilityMode is REFUSED at or above dual-write-upstream-read (ADR-0009): "
+        + "delivery-service exposes no online-list and no known-since-list endpoint, so the read rung "
+        + "would break the admin ops-map and the auto-offline sweeper. Valid rungs today: \"local\", "
+        + "\"dual-write-local-read\".")
     // ADR-0008 — CmsConfig needs no upstream guard here: it is pinned to "local", so it can never
     // reach a rung that would make state-service the CMS read authority.
     .ValidateOnStart();

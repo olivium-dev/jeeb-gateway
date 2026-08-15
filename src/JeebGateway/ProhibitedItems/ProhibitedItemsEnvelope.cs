@@ -33,6 +33,17 @@ public static class ProhibitedItemsEnvelope
             .ToList();
     }
 
+    /// <summary>Every item in the published envelope, active or not, for the admin catalog.</summary>
+    public static IReadOnlyList<ProhibitedItem> ReadAll(JsonElement data)
+    {
+        var envelope = data.Deserialize<EnvelopeDto>(Json);
+        return (envelope?.Items ?? new List<ItemDto>())
+            .Select(FromDto)
+            .OrderBy(i => i.Category, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     private static ItemDto ToDto(ProhibitedItem i) => new()
     {
         Id = i.Id,
