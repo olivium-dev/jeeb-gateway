@@ -1,24 +1,21 @@
-using System.Runtime.CompilerServices;
-using System.Text.Json;
 using FluentAssertions;
+using JeebGateway.Extensions;
 using JeebGateway.JeebWallet;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// P1-12 re-cut guard: pins the serving side, the readiness guard and the production config so the
-/// blind wallet-API cutover the original 6d46e69 performed cannot silently return.
+/// W5-10 re-cut of the P1-12 guard. The WalletPostgres seam is deleted, so wallet-service is the
+/// only ledger source and no configuration may resolve a database-backed reader ever again.
 /// </summary>
 public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicationFactory<Program>>
 {
-    // Never opened: every assertion here resolves DI or reads config, it never issues a query.
-    private const string FakeWalletCs = "Host=127.0.0.1;Port=5432;Database=wallet;Username=u;Password=p";
+    // Never opened: every assertion resolves DI or reads the roster, it never issues a query.
+    private const string RetiredWalletCs =
+        "Host=127.0.0.1;Port=5432;Database=wallet;Username=u;Password=p";
 
     private readonly WebApplicationFactory<Program> _factory;
 
@@ -26,405 +23,61 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
         _factory = factory;
 
     [Fact]
-    public void No_wallet_postgres_connection_string_resolves_null_reader()
+    public void No_wallet_api_configured_resolves_null_reader()
     {
         using var scope = _factory.Services.CreateScope();
         var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
 
         reader.Should().BeOfType<NullJeebWalletLedgerReader>(
-            "dev/CI has no wallet DB and must keep the empty-page fallback rather than hard-"
-            + "depending on an unreachable wallet API (B4)");
+            "dev/CI has no wallet API and must keep the empty-page fallback rather than hard-"
+            + "depending on an unreachable upstream (B4)");
     }
 
     [Fact]
-    public void Shadow_disabled_resolves_postgres_reader_alone()
+    public void Wallet_api_authority_serves_the_wallet_service_reader()
     {
         var factory = _factory.WithWebHostBuilder(builder =>
         {
-            builder.UseSetting("WalletPostgres:ConnectionString", FakeWalletCs);
-            builder.UseSetting("WalletLedgerMigration:ShadowCompareEnabled", "false");
-        });
-
-        using var scope = factory.Services.CreateScope();
-        var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
-
-        reader.Should().BeOfType<PostgresJeebWalletLedgerReader>(
-            "with the shadow off the live read path must be exactly today's Postgres projection");
-    }
-
-    [Fact]
-    public void Shadow_enabled_serves_postgres_and_shadows_the_wallet_api()
-    {
-        var factory = _factory.WithWebHostBuilder(builder =>
-        {
-            builder.UseSetting("WalletPostgres:ConnectionString", FakeWalletCs);
-            builder.UseSetting("WalletLedgerMigration:ShadowCompareEnabled", "true");
-            builder.UseSetting("WalletServiceApi:BaseUrl", "http://127.0.0.1:10014");
-        });
-
-        using var scope = factory.Services.CreateScope();
-        var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
-
-        reader.Should().BeOfType<ShadowComparingJeebWalletLedgerReader>();
-        Primary(reader).Should().BeOfType<PostgresJeebWalletLedgerReader>(
-            "Authority defaults to postgres: the wallet API must NOT serve the money-read path (B3)");
-        Shadow(reader).Should().BeOfType<WalletServiceJeebWalletLedgerReader>();
-    }
-
-    [Fact]
-    public void Authority_wallet_api_swaps_the_roles()
-    {
-        var factory = _factory.WithWebHostBuilder(builder =>
-        {
-            builder.UseSetting("WalletPostgres:ConnectionString", FakeWalletCs);
-            builder.UseSetting("WalletLedgerMigration:ShadowCompareEnabled", "true");
+            builder.UseSetting("WalletServiceApi:BaseUrl", "http://127.0.0.1:19999");
             builder.UseSetting("WalletLedgerMigration:Authority", "wallet-api");
-            builder.UseSetting("WalletServiceApi:BaseUrl", "http://127.0.0.1:10014");
-        });
-
-        using var scope = factory.Services.CreateScope();
-        var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
-
-        reader.Should().BeOfType<ShadowComparingJeebWalletLedgerReader>();
-        Primary(reader).Should().BeOfType<WalletServiceJeebWalletLedgerReader>(
-            "the eventual flip must be a one-line env change, no further PR");
-        Shadow(reader).Should().BeOfType<PostgresJeebWalletLedgerReader>();
-    }
-
-    [Fact]
-    public void Shadow_enabled_without_a_wallet_api_base_url_degrades_to_postgres()
-    {
-        var factory = _factory.WithWebHostBuilder(builder =>
-        {
-            builder.UseSetting("WalletPostgres:ConnectionString", FakeWalletCs);
-            builder.UseSetting("WalletLedgerMigration:ShadowCompareEnabled", "true");
-            builder.UseSetting("WalletServiceApi:BaseUrl", string.Empty);
-        });
-
-        using var scope = factory.Services.CreateScope();
-        var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
-
-        reader.Should().BeOfType<PostgresJeebWalletLedgerReader>(
-            "a missing shadow target must warn and degrade, never throw at startup");
-    }
-
-    // B1 / 19-of-19 rule: the check must be registered off the connection string alone, in ANY
-    // migration-flag state. The probe's own health is irrelevant here (the CS is a fake).
-    [Theory]
-    [InlineData("false", "postgres")]
-    [InlineData("true", "postgres")]
-    [InlineData("true", "wallet-api")]
-    public async Task Ready_probe_registers_wallet_postgres_in_every_flag_state(
-        string shadowEnabled, string authority)
-    {
-        var factory = _factory.WithWebHostBuilder(builder =>
-        {
-            builder.UseSetting("WalletPostgres:ConnectionString", FakeWalletCs);
-            builder.UseSetting("WalletLedgerMigration:ShadowCompareEnabled", shadowEnabled);
-            builder.UseSetting("WalletLedgerMigration:Authority", authority);
-        });
-
-        using var client = factory.CreateClient();
-        // 503 is expected (the connection string is fake); the payload still names every check.
-        using var response = await client.GetAsync("/health/ready");
-
-        ReadyCheckNames(await response.Content.ReadAsStringAsync())
-            .Should().Contain("wallet-postgres",
-                "the migration flag must never deregister a readiness check (B1)");
-    }
-
-    [Fact]
-    public async Task Ready_probe_omits_wallet_postgres_when_unconfigured()
-    {
-        using var client = _factory.CreateClient();
-        using var response = await client.GetAsync("/health/ready");
-
-        ReadyCheckNames(await response.Content.ReadAsStringAsync())
-            .Should().NotContain("wallet-postgres",
-                "dev/CI without a wallet DB keeps its existing green readiness surface");
-    }
-
-    private static IEnumerable<string> ReadyCheckNames(string body)
-    {
-        using var doc = JsonDocument.Parse(body);
-        return doc.RootElement.GetProperty("checks")
-            .EnumerateArray()
-            .Select(check => check.GetProperty("name").GetString()!)
-            .ToArray();
-    }
-
-    [Fact]
-    public void Production_config_targets_the_native_wallet_and_serves_the_wallet_api()
-    {
-        using var doc = JsonDocument.Parse(File.ReadAllText(ProductionSettingsPath()));
-        var root = doc.RootElement;
-
-        root.GetProperty("WalletServiceApi").GetProperty("BaseUrl").GetString()
-            .Should().Be("http://127.0.0.1:10014",
-                "MSI runs native systemd; the swarm hostname also breaks the fail-closed "
-                + "WalletGuard that shares this key (B2)");
-
-        var migration = root.GetProperty("WalletLedgerMigration");
-        migration.GetProperty("ShadowCompareEnabled").GetBoolean().Should().BeTrue();
-        migration.GetProperty("Authority").GetString().Should().Be("wallet-api",
-            "the completed flip lived only in gateway.env; a rebuilt env file or a fresh host "
-            + "must not silently revert the money read to the Postgres projection (W0-05)");
-    }
-
-    // W0-05: drive the composition root off the SHIPPED Production values, not off literals, so
-    // an edit to appsettings.Production.json alone cannot demote the wallet API out of the serving slot.
-    [Fact]
-    public void Production_config_resolves_the_wallet_api_reader_as_primary()
-    {
-        var production = new ConfigurationBuilder()
-            .AddJsonFile(ProductionSettingsPath(), optional: false)
-            .Build();
-
-        var factory = _factory.WithWebHostBuilder(builder =>
-        {
-            builder.UseSetting("WalletPostgres:ConnectionString", FakeWalletCs);
-            builder.UseSetting(
-                "WalletServiceApi:BaseUrl", production["WalletServiceApi:BaseUrl"]);
-            builder.UseSetting(
-                "WalletLedgerMigration:ShadowCompareEnabled",
-                production["WalletLedgerMigration:ShadowCompareEnabled"]);
-            builder.UseSetting(
-                "WalletLedgerMigration:Authority", production["WalletLedgerMigration:Authority"]);
-        });
-
-        using var scope = factory.Services.CreateScope();
-        var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
-
-        reader.Should().BeOfType<ShadowComparingJeebWalletLedgerReader>();
-        Primary(reader).Should().BeOfType<WalletServiceJeebWalletLedgerReader>(
-            "Production must serve wallet-service; the Postgres projection fail-opens to an "
-            + "empty 200 when WalletPostgres is missing, which reads as a zeroed ledger");
-        Shadow(reader).Should().BeOfType<PostgresJeebWalletLedgerReader>();
-    }
-
-    private static string ProductionSettingsPath() =>
-        Path.Combine(FindRepoRoot(), "src", "JeebGateway", "appsettings.Production.json");
-
-    private static string BaseSettingsPath() =>
-        Path.Combine(FindRepoRoot(), "src", "JeebGateway", "appsettings.json");
-
-    // W0-05 residual: Production.json only wins while the environment resolves to Production.
-    // The BASE file must pin wallet-api so no lost/rewritten env var can demote the money read.
-    [Fact]
-    public void Base_config_pins_wallet_api_and_dev_overlay_records_the_postgres_fallback()
-    {
-        using (var doc = JsonDocument.Parse(File.ReadAllText(BaseSettingsPath())))
-        {
-            doc.RootElement.GetProperty("WalletLedgerMigration").GetProperty("Authority").GetString()
-                .Should().Be("wallet-api",
-                    "the base file is the last layer standing when ASPNETCORE_ENVIRONMENT is lost or "
-                    + "misspelled; it must serve wallet-service, not the Postgres projection (W0-05)");
-        }
-
-        var devPath = Path.Combine(
-            FindRepoRoot(), "src", "JeebGateway", "appsettings.Development.json");
-        using var dev = JsonDocument.Parse(File.ReadAllText(devPath));
-        dev.RootElement.GetProperty("WalletLedgerMigration").GetProperty("Authority").GetString()
-            .Should().Be("postgres",
-                "dev/CI keeps the empty-page fallback (B4) as a RECORDED choice in the Development "
-                + "overlay, never by the base default");
-    }
-
-    // Simulates a gateway.env rebuild that loses ASPNETCORE_ENVIRONMENT and the Authority export:
-    // composition driven by the shipped BASE values alone must still serve the wallet API.
-    [Fact]
-    public void Base_config_alone_resolves_the_wallet_api_reader_as_primary()
-    {
-        var baseConfig = new ConfigurationBuilder()
-            .AddJsonFile(BaseSettingsPath(), optional: false)
-            .Build();
-
-        var factory = _factory.WithWebHostBuilder(builder =>
-        {
-            builder.UseSetting("WalletPostgres:ConnectionString", FakeWalletCs);
-            builder.UseSetting("WalletServiceApi:BaseUrl", baseConfig["WalletServiceApi:BaseUrl"]);
-            builder.UseSetting(
-                "WalletLedgerMigration:ShadowCompareEnabled",
-                baseConfig["WalletLedgerMigration:ShadowCompareEnabled"]);
-            builder.UseSetting(
-                "WalletLedgerMigration:Authority", baseConfig["WalletLedgerMigration:Authority"]);
-        });
-
-        using var scope = factory.Services.CreateScope();
-        var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
-
-        reader.Should().BeOfType<ShadowComparingJeebWalletLedgerReader>();
-        Primary(reader).Should().BeOfType<WalletServiceJeebWalletLedgerReader>(
-            "losing ASPNETCORE_ENVIRONMENT must not silently revert the money read to Postgres "
-            + "(S3.56 §2.5 open residual)");
-        Shadow(reader).Should().BeOfType<PostgresJeebWalletLedgerReader>();
-    }
-
-    // Worst rebuild: BOTH the environment and the WalletPostgres CS are gone. The base values must
-    // pick the wallet API outright — never NullJeebWalletLedgerReader's silent empty ledger.
-    [Fact]
-    public void Base_config_without_wallet_postgres_still_serves_the_wallet_api()
-    {
-        var baseConfig = new ConfigurationBuilder()
-            .AddJsonFile(BaseSettingsPath(), optional: false)
-            .Build();
-
-        var factory = _factory.WithWebHostBuilder(builder =>
-        {
-            builder.UseSetting("WalletServiceApi:BaseUrl", baseConfig["WalletServiceApi:BaseUrl"]);
-            builder.UseSetting(
-                "WalletLedgerMigration:ShadowCompareEnabled",
-                baseConfig["WalletLedgerMigration:ShadowCompareEnabled"]);
-            builder.UseSetting(
-                "WalletLedgerMigration:Authority", baseConfig["WalletLedgerMigration:Authority"]);
         });
 
         using var scope = factory.Services.CreateScope();
         var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
 
         reader.Should().BeOfType<WalletServiceJeebWalletLedgerReader>(
-            "with no WalletPostgres CS and Authority=wallet-api the API serves directly; the "
-            + "silent-empty-ledger Null reader is only for the recorded Development fallback");
+            "wallet-service is the sole ledger authority once WalletPostgres is deleted");
     }
 
+    /// <summary>
+    /// The regression W5-10 exists to make impossible: a stale WalletPostgres key left in a
+    /// deployment must not resurrect a database read path. The key is inert, never authoritative.
+    /// </summary>
     [Fact]
-    public void No_appsettings_file_reintroduces_the_swarm_wallet_hostname()
+    public void A_stale_wallet_postgres_key_can_never_resurrect_a_database_reader()
     {
-        var offenders = Directory
-            .EnumerateFiles(
-                Path.Combine(FindRepoRoot(), "src", "JeebGateway"), "appsettings*.json")
-            .Where(path => File.ReadAllText(path).Contains("wallet-service:8080"))
-            .ToArray();
-
-        offenders.Should().BeEmpty(
-            "the swarm name belongs in the .20 staging env overlay, never in checked-in config");
-    }
-
-    [Fact]
-    public async Task Shadow_mismatch_is_logged_but_the_primary_response_is_served()
-    {
-        var primary = new StubLedgerReader(new JeebWalletLedgerEntry
+        var factory = _factory.WithWebHostBuilder(builder =>
         {
-            Id = "a", Type = "topup", Amount = 10m, Sign = 1, Ref = "r", Ts = "2026-08-10T10:00:00Z",
+            builder.UseSetting("WalletPostgres:ConnectionString", RetiredWalletCs);
+            builder.UseSetting("WalletLedgerMigration:ShadowCompareEnabled", "true");
         });
-        var shadow = new StubLedgerReader(new JeebWalletLedgerEntry
-        {
-            Id = "b", Type = "topup", Amount = 99m, Sign = 1, Ref = "r", Ts = "2026-08-10T10:00:00Z",
-        });
-        var log = new CapturingLogger<ShadowComparingJeebWalletLedgerReader>();
-        var sut = new ShadowComparingJeebWalletLedgerReader(primary, shadow, log);
 
-        var result = await sut.ReadLedgerAsync(
-            Guid.NewGuid(), 1, 20, null, null, null, CancellationToken.None);
+        using var scope = factory.Services.CreateScope();
+        var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
 
-        result.Should().ContainSingle().Which.Amount.Should().Be(10m);
-        (await log.WaitForMessagesAsync()).Should()
-            .ContainSingle(m => m.Contains("WalletLedgerShadowMismatch"));
+        reader.Should().BeOfType<NullJeebWalletLedgerReader>(
+            "WalletPostgres is deleted; the key is inert and must not select a DB-backed reader");
+        typeof(IJeebWalletLedgerReader).Assembly
+            .GetType("JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader")
+            .Should().BeNull("the Postgres ledger reader is deleted, not merely unwired");
     }
 
+    /// <summary>A9 roster contract: W5-10 drops wallet-postgres, 21 -> 20.</summary>
     [Fact]
-    public async Task Shadow_match_is_logged_for_the_observation_window()
+    public void Ready_roster_no_longer_declares_the_wallet_database_probe()
     {
-        var entry = new JeebWalletLedgerEntry
-        {
-            Id = "a", Type = "topup", Amount = 10m, Sign = 1, Ref = "r", Ts = "2026-08-10T10:00:00Z",
-        };
-        var log = new CapturingLogger<ShadowComparingJeebWalletLedgerReader>();
-        var sut = new ShadowComparingJeebWalletLedgerReader(
-            new StubLedgerReader(entry), new StubLedgerReader(entry), log);
-
-        await sut.ReadLedgerAsync(Guid.NewGuid(), 1, 20, null, null, null, CancellationToken.None);
-
-        (await log.WaitForMessagesAsync()).Should()
-            .ContainSingle(m => m.Contains("WalletLedgerShadowMatch"));
-    }
-
-    [Fact]
-    public async Task Shadow_failure_never_fails_the_served_read()
-    {
-        var entry = new JeebWalletLedgerEntry
-        {
-            Id = "a", Type = "topup", Amount = 10m, Sign = 1, Ref = "r", Ts = "2026-08-10T10:00:00Z",
-        };
-        var sut = new ShadowComparingJeebWalletLedgerReader(
-            new StubLedgerReader(entry),
-            new ThrowingLedgerReader(),
-            NullLogger<ShadowComparingJeebWalletLedgerReader>.Instance);
-
-        var result = await sut.ReadLedgerAsync(
-            Guid.NewGuid(), 1, 20, null, null, null, CancellationToken.None);
-
-        result.Should().ContainSingle();
-    }
-
-    private static IJeebWalletLedgerReader Primary(IJeebWalletLedgerReader reader) =>
-        Field(reader, "_primary");
-
-    private static IJeebWalletLedgerReader Shadow(IJeebWalletLedgerReader reader) =>
-        Field(reader, "_shadow");
-
-    private static IJeebWalletLedgerReader Field(IJeebWalletLedgerReader reader, string name)
-    {
-        var field = typeof(ShadowComparingJeebWalletLedgerReader).GetField(
-            name,
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        field.Should().NotBeNull($"{name} pins which side serves the live money read");
-        return (IJeebWalletLedgerReader)field!.GetValue(reader)!;
-    }
-
-    private static string FindRepoRoot([CallerFilePath] string thisFile = "")
-    {
-        var dir = new FileInfo(thisFile).Directory!;
-        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "JeebGateway")))
-            dir = dir.Parent!;
-
-        (dir is not null).Should().BeTrue("could not locate repo root from test source file path");
-        return dir!.FullName;
-    }
-
-    private sealed class StubLedgerReader(JeebWalletLedgerEntry entry) : IJeebWalletLedgerReader
-    {
-        public Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
-            Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to,
-            CancellationToken ct) =>
-            Task.FromResult<IReadOnlyList<JeebWalletLedgerEntry>>(new[] { entry });
-    }
-
-    private sealed class ThrowingLedgerReader : IJeebWalletLedgerReader
-    {
-        public Task<IReadOnlyList<JeebWalletLedgerEntry>> ReadLedgerAsync(
-            Guid holderId, int page, int pageSize, string? type, DateOnly? from, DateOnly? to,
-            CancellationToken ct) =>
-            throw new WalletLedgerUnavailableException("shadow unavailable");
-    }
-
-    private sealed class CapturingLogger<T> : ILogger<T>
-    {
-        private readonly List<string> _messages = new();
-
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(
-            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-            Func<TState, Exception?, string> formatter)
-        {
-            lock (_messages) _messages.Add(formatter(state, exception));
-        }
-
-        /// <summary>The shadow comparison is deliberately detached from the request, so its
-        /// log line lands after the read returns.</summary>
-        public async Task<IReadOnlyList<string>> WaitForMessagesAsync()
-        {
-            for (var attempt = 0; attempt < 100 && Snapshot().Count == 0; attempt++)
-                await Task.Delay(20);
-            return Snapshot();
-        }
-
-        private IReadOnlyList<string> Snapshot()
-        {
-            lock (_messages) return _messages.ToArray();
-        }
+        GatewayHealthRoster.Ready.Should().NotContain("wallet-postgres");
+        GatewayHealthRoster.ExpectedReadyCount.Should().Be(20);
+        GatewayHealthRoster.Ready.Should().HaveCount(GatewayHealthRoster.ExpectedReadyCount);
     }
 }

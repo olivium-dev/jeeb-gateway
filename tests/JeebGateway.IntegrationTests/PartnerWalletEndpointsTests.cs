@@ -879,7 +879,7 @@ public sealed class PartnerWalletEndpointsTests
     // ── PP-8: ledger filters (type / from / to) ───────────────────────────────────────
     //
     // The IJeebWalletLedgerReader is swapped for a fake that (a) records the filter args the
-    // controller parsed + forwarded and (b) applies the SAME predicate the PostgresJeebWalletLedgerReader
+    // controller parsed + forwarded and (b) applies the SAME predicate the retired wallet-DB projection
     // applies in SQL (exact type equality; from/to inclusive on the UTC calendar date). So the frozen
     // PP-8 contract — no-params-unchanged, type match/miss, inclusive date boundaries, malformed→400,
     // unknown-type→empty-200 — is proven fully offline (no Postgres, no Docker). The real server-side
@@ -1065,7 +1065,7 @@ public sealed class PartnerWalletEndpointsTests
 
     /// <summary>
     /// Offline fake ledger reader — records the filter args the controller forwarded and returns canned
-    /// rows using the SAME predicate PostgresJeebWalletLedgerReader applies in SQL (exact type equality;
+    /// rows using the SAME predicate the retired wallet-DB projection applied in SQL (exact type equality;
     /// from/to inclusive on the UTC calendar date). Proves the PP-8 pass-through + boundary contract with
     /// no Postgres; the real server-side filter is the SQL WHERE in JeebWalletLedgerReader.cs.
     /// </summary>

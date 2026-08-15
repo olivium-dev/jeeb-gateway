@@ -32,7 +32,6 @@ src/JeebGateway/Infrastructure/PostgresHealthCheck.cs
 src/JeebGateway/Users/PostgresFinancialLedger.cs
 
 # --- Wallet ledger direct read (D1 row 6) -> wallet-service ---
-src/JeebGateway/JeebWallet/JeebWalletLedgerReader.cs
 
 # --- Notification / push stores (D1 rows 7, 8, 9, 10) -> notification-service ---
 src/JeebGateway/Push/PostgresDeviceTokenStore.cs
