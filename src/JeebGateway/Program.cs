@@ -911,6 +911,13 @@ builder.Services.AddScoped<JeebGateway.service.ServiceUserManagement.ServiceUser
     return new JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient(baseUrl, client);
 });
 
+// Admin users projection: never registered, so every authed /admin/users/* threw at
+// controller activation (AdminUsersEndpointTests would catch it; that project does not compile).
+builder.Services.Configure<JeebGateway.Users.AdminUserBanOptions>(
+    builder.Configuration.GetSection(JeebGateway.Users.AdminUserBanOptions.SectionName));
+builder.Services.AddScoped<JeebGateway.Users.IAdminUserProjection,
+    JeebGateway.Users.OwnerComposedAdminUsers>();
+
 // Technician-review orchestrator (feedback + catalog + user-management),
 // matching salehly Program.cs:254. Scoped because it depends on the scoped
 // NSwag clients above.
@@ -2270,6 +2277,9 @@ builder.Services.AddDataExportRatingsProvider(builder.Configuration);
 // and logs the documented per-user enumeration limitation pending a generic
 // list-channels-for-member chat-service endpoint.
 builder.Services.AddScoped<IDataExportChatHistoryProvider, ChatServiceDataExportChatHistoryProvider>();
+// The provider requires this index; unregistered it failed every 30s sweep since 2026-08-15.
+builder.Services.AddScoped<JeebGateway.Users.DataExport.IChatConversationExportIndex,
+    JeebGateway.Users.DataExport.ChatServiceConversationExportIndex>();
 builder.Services.AddSingleton<InMemoryDataExportNotifier>();
 builder.Services.AddSingleton<IDataExportNotifier>(sp => sp.GetRequiredService<InMemoryDataExportNotifier>());
 // Scoped (was singleton): the packager now depends on the scoped
