@@ -422,14 +422,9 @@ builder.Services.AddHealthChecks()
 // silently skip — local dev does not have to spin up every backend.
 // ---------------------------------------------------------------------------
 builder.Services.AddBffAggregation(builder.Configuration);
-// WS-01: gateway-owned CMS authoring plane (W4/W7a). Durable Postgres store
-// (cms_surfaces + cms_surface_versions, migration 0032) when
-// GatewayPostgres:ConnectionString is set (JEBV4-132, AUDIT-A IN-MEM-LIVE);
-// in-memory fallback for dev/CI/test. The INpgsqlConnectionFactory the Postgres
-// store depends on is registered later in this file inside the same
-// GatewayPostgres block — DI resolution happens at container-build time, so the
-// registration order here is irrelevant.
-builder.Services.AddCmsAuthoringPlane(builder.Configuration["GatewayPostgres:ConnectionString"]);
+// WS-01: CMS authoring routes stay in the gateway (W4/W7a) but bundler-service
+// owns the store; BUNDLER_CMS_BASE_URL is read from configuration.
+builder.Services.AddCmsAuthoringPlane(builder.Configuration);
 // AddDownstreamClients also registers the typed IContractSigningServiceClient
 // (contract-signing-service / immutable contract templates + per-party
 // signatures; consumed by ContractSigningController, gated by

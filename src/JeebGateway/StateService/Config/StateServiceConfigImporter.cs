@@ -212,7 +212,7 @@ public sealed class StateServiceConfigImporter
     private async Task<int> ImportCmsAsync(ConfigImportReport report, CancellationToken ct)
     {
         var versions = 0;
-        foreach (var surface in _cms.ListSurfaces())
+        foreach (var surface in await _cms.ListSurfacesAsync(ct))
         {
             // Replay the published history in order so upstream version numbers match the CMS
             // deep links the back-office already holds.

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using JeebGateway.Requests;
 using JeebGateway.StateService.Work;
 using JeebGateway.Tokens;
@@ -24,13 +25,15 @@ public sealed class AccountDeletionWorkHandler(
     public const string WaitingForDeliveryMarker = "account-deletion:waiting-active-delivery";
     public const string PurgeScheduledMarker = "account-deletion:purge-scheduled";
 
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+
     public string Kind => DurableWorkContract.AccountDeletionKind;
 
     public async Task<DurableWorkExecutionResult> ExecuteAsync(
         StateWorkItem item,
         CancellationToken ct)
     {
-        var payload = StateServiceAccountDeletionStore.DeserializePayload(item);
+        var payload = DeserializePayload(item);
         var deliveryHash = payload?.EffectiveDeliveryAnonymizedUserHash;
         if (payload is null
             || string.IsNullOrWhiteSpace(payload.UserId)
@@ -100,4 +103,34 @@ public sealed class AccountDeletionWorkHandler(
         });
         return DurableWorkExecutionResult.Completed(result);
     }
+
+    private static AccountDeletionWorkPayload? DeserializePayload(StateWorkItem item)
+    {
+        try
+        {
+            return item.Payload.ValueKind == JsonValueKind.Object
+                ? item.Payload.Deserialize<AccountDeletionWorkPayload>(Json)
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+}
+
+public sealed record AccountDeletionWorkPayload(
+    string UserId,
+    string? DeliveryAnonymizedUserHash,
+    bool HadActiveDeliveryAtRequest)
+{
+    // Existing state records used this property name. Read it during the
+    // cutover, but never write it for newly-created work.
+    [JsonPropertyName("anonymizedUserHash")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LegacyAnonymizedUserHash { get; init; }
+
+    [JsonIgnore]
+    public string? EffectiveDeliveryAnonymizedUserHash =>
+        DeliveryAnonymizedUserHash ?? LegacyAnonymizedUserHash;
 }

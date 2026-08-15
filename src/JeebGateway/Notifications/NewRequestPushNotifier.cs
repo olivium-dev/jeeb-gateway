@@ -110,6 +110,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     private readonly ILogger<NewRequestPushNotifier> _logger;
     private readonly IAvailabilityStore _availability;
     private readonly IUsersStore _users;
+    private readonly INewRequestFanoutQueue _queue;
     private readonly NewRequestFanoutOptions _options;
     private readonly TimeProvider _clock;
     private readonly IGenericEventDispatcher _events;
@@ -121,6 +122,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         ILogger<NewRequestPushNotifier> logger,
         IAvailabilityStore availability,
         IUsersStore users,
+        INewRequestFanoutQueue queue,
         IOptions<NewRequestFanoutOptions> options,
         TimeProvider clock)
         : this(push, tiers, logger, availability, users, queue, options, clock,
@@ -145,6 +147,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         _logger = logger;
         _availability = availability;
         _users = users;
+        _queue = queue;
         _options = options.Value;
         _clock = clock;
         _events = events;
@@ -153,8 +156,34 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
     // ── Hot path ──────────────────────────────────────────────────────────────
 
-    public Task NotifyNewRequestAsync(NewRequestNotification notification, CancellationToken ct) =>
-        FanOutAsync(notification, ct);
+    public Task NotifyNewRequestAsync(NewRequestNotification notification, CancellationToken ct)
+    {
+        try
+        {
+            if (notification is null || string.IsNullOrWhiteSpace(notification.RequestId))
+            {
+                return Task.CompletedTask;
+            }
+
+            if (!_queue.TryEnqueue(notification))
+            {
+                // The buffer is full — the push is dropped, LOUDLY. The create still 201s;
+                // it never blocks and never throws on the hot path.
+                _logger.LogWarning(
+                    "newreq-fanout queue full; dropping push for {RequestId}", notification.RequestId);
+            }
+        }
+        catch (Exception ex)
+        {
+            // DEGRADE-DON'T-FAIL: the request row was already durable and the 201 is
+            // committed. An enqueue fault must never surface to the create path.
+            _logger.LogWarning(ex,
+                "New-request push enqueue for request {RequestId} failed; create stays 201.",
+                notification?.RequestId ?? "(none)");
+        }
+
+        return Task.CompletedTask;
+    }
 
     // ── Background path ───────────────────────────────────────────────────────
 

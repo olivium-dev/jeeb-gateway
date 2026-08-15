@@ -61,6 +61,7 @@ public sealed class UsersMeController : ControllerBase
     private const int ProfileCacheSeconds = 30;
 
     private readonly UmServiceClient _umProfile;
+    private readonly IUsersStore _users;
     private readonly IMemoryCache _cache;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IUserManagementDualRoleClient _dualRole;
@@ -75,6 +76,7 @@ public sealed class UsersMeController : ControllerBase
 
     public UsersMeController(
         UmServiceClient umProfile,
+        IUsersStore users,
         IMemoryCache cache,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         IUserManagementDualRoleClient dualRole,
@@ -88,6 +90,7 @@ public sealed class UsersMeController : ControllerBase
         ILogger<UsersMeController> log)
     {
         _umProfile = umProfile;
+        _users = users;
         _cache = cache;
         _flags = flags;
         _dualRole = dualRole;
