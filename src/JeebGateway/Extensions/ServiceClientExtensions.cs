@@ -61,6 +61,8 @@ public static class ServiceClientExtensions
         // scheme, so the gateway authenticates as the trusted caller process via
         // this static key. No-op when the key is unconfigured (flag-off default).
         services.AddTransient<Services.Clients.HeartBeatServiceAuthKeyHandler>();
+        // W5-02 request-owner surface credential (delivery-service importauth bearer).
+        services.AddTransient<Services.Clients.DeliveryImportCredentialHandler>();
 
         // role-service (net-new grant/revoke seam) — static X-Api-Key auth.
         services.AddTransient<Services.Clients.RoleServiceApiKeyHandler>();
@@ -171,6 +173,15 @@ public static class ServiceClientExtensions
         AttachResilienceOnly(
             services.AddHttpClient<ICaseDeliveryClient, CaseDeliveryClient>(http =>
                 BindBaseAddress(http, config, "Services:Delivery")));
+        // W5-02 request-owner surface. Resilience only + the importauth bearer: the
+        // standard pipeline forwards the CALLER's bearer, which is an end-user token and
+        // would fail a service-credential check. Deliberately not the
+        // X-Delivery-Service-Token handler — delivery-service does not read that header.
+        AttachResilienceOnly(
+            services.AddHttpClient<JeebGateway.Requests.IRequestsOwnerClient,
+                                   JeebGateway.Requests.RequestsOwnerClient>(http =>
+                BindBaseAddress(http, config, "Services:Delivery")))
+            .AddHttpMessageHandler<DeliveryImportCredentialHandler>();
         // IMatchingServiceClient typed registration — REMOVED (JEBV4-220 / E25).
         // The standalone matching-service read path is retired; nothing dials
         // Services:Matching anymore.
