@@ -67,7 +67,25 @@ public sealed class RequestVoiceController : ControllerBase
     /// Submit a voice-note order. Multipart fields: <c>audio</c> (file),
     /// <c>requestId</c> (text, idempotency anchor), <c>tier</c> (text).
     /// </summary>
-    [HttpPost]
+    /// <remarks>
+    /// R2-6 tie-break. This action and
+    /// <see cref="JeebGateway.Controllers.V1.JeebRequestsController.Create"/> both map
+    /// <c>POST v1/requests</c>, separated by <c>[Consumes]</c>. That separation is total for
+    /// every request that CARRIES a Content-Type (json =&gt; Create, multipart =&gt; here,
+    /// anything else =&gt; 415), but ASP.NET Core treats an ABSENT Content-Type as a wildcard:
+    /// both actions stay valid, score equally, and routing throws AmbiguousMatchException — a
+    /// 500 raised inside UseRouting, i.e. BEFORE authentication, so an anonymous caller could
+    /// trigger it on the product's busiest write route.
+    ///
+    /// <c>Order = 1</c> breaks that tie by score, so the JSON action wins the header-less case
+    /// and answers 401/415 from its own filters. This is NOT the JEBV4-61 shadowing mistake
+    /// (see <see cref="GetVoiceById"/>): there an integer picked between two actions that were
+    /// BOTH always eligible, so the loser became dead code. Here <c>[Consumes]</c> still decides
+    /// every request that has a Content-Type, and the integer is consulted only when that
+    /// discriminator is silent — a case in which this action cannot run anyway, because it
+    /// requires a multipart body. Both actions stay reachable on their own media types.
+    /// </remarks>
+    [HttpPost(Order = 1)]
     // Explicit [Consumes("multipart/form-data")] disambiguates this voice action from
     // JeebRequestsController.Create's [Consumes("application/json")] on the SAME
     // POST v1/requests route. Without it Swashbuckle's swagger-gen sees two actions on
