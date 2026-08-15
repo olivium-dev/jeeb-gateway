@@ -37,7 +37,7 @@ Every backfill in this program has the same shape. No exceptions, no "just this 
 3. It is **dryRun-capable and re-runnable** end to end — a double run is a no-op.
 4. ~~The **owner runs it**.~~ **SUPERSEDED by owner grant A19 (2026-08-13, EXEC-LEDGER S3.41):** backfills and deploys
    are authorised without a per-run approval. Shape rules 1–3 are unchanged, the A18 deploy mechanics still apply, and
-   `192.168.2.20` is out of scope for control operations by the owner's later instruction (S3.54).
+   `[decommissioned-host]` is out of scope for control operations by the owner's later instruction (S3.54).
 
 ### 2.1 W1-04 — the admin-audit relay
 
