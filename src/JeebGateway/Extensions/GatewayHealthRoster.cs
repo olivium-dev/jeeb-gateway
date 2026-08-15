@@ -35,9 +35,7 @@ public static class GatewayHealthRoster
     public static readonly string[] InProcessChecks =
     {
         "admin-oidc-configuration",
-        "gateway-postgres",
         "whisper",
-        "store-durability",
         "jeeb-state-service",
     };
 
@@ -45,9 +43,10 @@ public static class GatewayHealthRoster
     public static IReadOnlyList<string> Ready { get; } =
         DownstreamProbes.Select(p => p.Name).Concat(InProcessChecks).OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
-    /// <summary>A9 asserted count. Production registers 15 downstream + in-process checks.
-    /// 21 through W2-R11; 20 from W5-10, which deleted the WalletPostgres seam and its
-    /// readiness probe. (The pre-W5-10 figure of 20 undercounted: bundler-service was
-    /// registered but undeclared.)</summary>
-    public const int ExpectedReadyCount = 20;
+    /// <summary>A9 asserted count. Production registers 15 downstream probes plus the
+    /// in-process checks. 21 through W2-R11; 20 from W5-10 (WalletPostgres seam deleted);
+    /// 18 from W5-11, which deleted the GatewayPostgres seam and with it both the
+    /// gateway-postgres probe and the store-durability guard. (The pre-W5-10 figure of 20
+    /// undercounted: bundler-service was registered but undeclared.)</summary>
+    public const int ExpectedReadyCount = 18;
 }

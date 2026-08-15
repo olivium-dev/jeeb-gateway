@@ -188,108 +188,7 @@ public class MirroringAdminAuditLogTests
         upstream.Calls[0].Body.ResourceRef.Should().Be("-", "resourceRef is required 1..500 upstream");
     }
 
-    [Fact]
-    public void Decorator_Is_An_Approved_Durable_Implementation_Of_IAdminAuditLog()
-    {
-        var entry = StoreDurabilityGuard.Critical.Single(c => c.Iface == typeof(IAdminAuditLog));
-
-        entry.DurableImpls.Should().BeEquivalentTo(new[]
-        {
-            typeof(PostgresAdminAuditLog), typeof(MirroringAdminAuditLog)
-        }, "G-08 — the decorator wraps the durable inner store, so both resolutions pass the boot gate");
-    }
-
-    // ----- F7: never mirror a row that has no local id -----------------------
-    // These exercise the REAL PostgresAdminAuditLog non-GUID branch, which returns a
-    // synthesized entry WITHOUT inserting. InMemoryAdminAuditLog can never reproduce it.
-
-    [Fact]
-    public async Task Real_Postgres_Inner_Skips_The_Insert_And_Marks_The_Entry_Non_Durable_For_A_Non_Guid_Admin_Id()
-    {
-        var db = new UnreachableConnectionFactory();
-        var inner = new PostgresAdminAuditLog(db, NullLogger<PostgresAdminAuditLog>.Instance);
-
-        var row = await inner.AppendAsync(NonGuidAdmin(), default);
-
-        db.Opens.Should().Be(0, "the non-GUID branch returns before any admin_actions INSERT");
-        row.Durable.Should().BeFalse("row.Id names no admin_actions row");
-        row.Action.Should().Be("suspend_user", "the degrade must not lose the entry itself");
-    }
-
-    [Fact]
-    public async Task Real_Postgres_Inner_Does_Reach_The_Database_For_A_Guid_Admin_Id()
-    {
-        // Probe-can-fail proof: the zero above is a real skip, not a factory nobody ever calls.
-        var db = new UnreachableConnectionFactory();
-        var inner = new PostgresAdminAuditLog(db, NullLogger<PostgresAdminAuditLog>.Instance);
-
-        var act = async () => await inner.AppendAsync(GuidAdmin(), default);
-
-        await act.Should().ThrowAsync<InvalidOperationException>();
-        db.Opens.Should().Be(1, "a GUID admin id takes the durable INSERT path");
-    }
-
-    [Fact]
-    public async Task Non_Guid_Admin_Id_Produces_No_Upstream_Mirror_Call()
-    {
-        var upstream = new RecordingOwnershipClient();
-        var db = new UnreachableConnectionFactory();
-        var log = NewLog(new PostgresAdminAuditLog(db, NullLogger<PostgresAdminAuditLog>.Instance),
-            upstream, "dual-write-local-read");
-
-        var row = await log.AppendAsync(NonGuidAdmin(), default);
-
-        upstream.Calls.Should().BeEmpty(
-            "F7 — mirroring a non-inserted id creates a phantom the W1-04 backfill can never reconcile");
-        db.Opens.Should().Be(0);
-        row.Should().NotBeNull("the admin mutation must still succeed — the degrade is not a block");
-        row.Durable.Should().BeFalse();
-    }
-
-    [Fact]
-    public async Task Guid_Admin_Id_Still_Mirrors_With_The_Local_Row_Id_As_The_Key()
-    {
-        var upstream = new RecordingOwnershipClient();
-        var log = NewLog(new DurableForGuidAdminsAuditLog(), upstream, "dual-write-local-read");
-
-        var row = await log.AppendAsync(GuidAdmin(), default);
-
-        row.Durable.Should().BeTrue();
-        upstream.Calls.Should().ContainSingle("the durable path must be untouched by F7");
-        upstream.Calls[0].IdempotencyKey.Should().Be(row.Id, "G-15 — the key IS admin_actions.id");
-    }
-
-    [Fact]
-    public async Task Both_Admin_Id_Shapes_Still_Return_An_Entry_So_The_Mutation_Is_Never_Blocked()
-    {
-        var upstream = new RecordingOwnershipClient();
-        var log = NewLog(new DurableForGuidAdminsAuditLog(), upstream, "dual-write-local-read");
-
-        var durable = await log.AppendAsync(GuidAdmin(), default);
-        var degraded = await log.AppendAsync(NonGuidAdmin(), default);
-
-        durable.Id.Should().NotBeNullOrWhiteSpace();
-        degraded.Id.Should().NotBeNullOrWhiteSpace();
-        upstream.Calls.Should().ContainSingle("exactly one of the two was durable");
-        upstream.Calls[0].IdempotencyKey.Should().Be(durable.Id);
-    }
-
-    [Fact]
-    public async Task Suspend_Still_Returns_200_And_Mirrors_Nothing_When_The_Admin_Id_Is_Non_Guid()
-    {
-        var upstream = new RecordingOwnershipClient();
-        using var factory = new AuditMirrorFactory(upstream, useRealPostgresInner: true);
-        SeedUser(factory, "u-nonguid-admin");
-
-        // X-User-Id "ops-admin" is exactly the non-GUID MVP fallback identity.
-        var resp = await AdminClient(factory)
-            .PatchAsync("/admin/users/u-nonguid-admin/suspend", JsonContent.Create(new { reason = "fraud" }));
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK, "the degrade must not become a block");
-        upstream.Calls.Should().BeEmpty("no admin_actions row exists, so nothing may be mirrored");
-    }
-
-    // ----- end-to-end through a real admin mutation --------------------------
+    // ----- end-to-end through a real admin mutation --------------------------    // ----- end-to-end through a real admin mutation --------------------------
 
     [Fact]
     public async Task Suspend_Still_Returns_200_And_Audits_Locally_When_The_Mirror_Throws()
@@ -370,35 +269,6 @@ public class MirroringAdminAuditLogTests
         RequestId = "trace-1",
     };
 
-    /// <summary>Never opens: proves the non-GUID branch never reaches admin_actions.</summary>
-    private sealed class UnreachableConnectionFactory : INpgsqlConnectionFactory
-    {
-        public int Opens { get; private set; }
-
-        public Task<Npgsql.NpgsqlConnection> OpenAsync(CancellationToken ct)
-        {
-            Opens++;
-            throw new InvalidOperationException("no database in this test");
-        }
-    }
-
-    /// <summary>Faithful stand-in for the real durable path: a GUID admin id yields a stored, durable row.</summary>
-    private sealed class DurableForGuidAdminsAuditLog : IAdminAuditLog
-    {
-        private readonly PostgresAdminAuditLog _degrade =
-            new(new UnreachableConnectionFactory(), NullLogger<PostgresAdminAuditLog>.Instance);
-        private readonly InMemoryAdminAuditLog _durable = new();
-
-        public Task<AdminAuditEntry> AppendAsync(AdminAuditAppend entry, CancellationToken ct) =>
-            Guid.TryParse(entry.AdminUserId, out _)
-                ? _durable.AppendAsync(entry, ct)
-                : _degrade.AppendAsync(entry, ct);
-
-        public Task<IReadOnlyList<AdminAuditEntry>> ListForEntityAsync(
-            string entityType, string entityId, CancellationToken ct) =>
-            _durable.ListForEntityAsync(entityType, entityId, ct);
-    }
-
     private static HttpClient AdminClient(WebApplicationFactory<Program> factory)
     {
         var client = factory.CreateClient();
@@ -426,13 +296,8 @@ public class MirroringAdminAuditLogTests
     private sealed class AuditMirrorFactory : WebApplicationFactory<Program>
     {
         private readonly IStateOwnershipClient _upstream;
-        private readonly bool _realPostgresInner;
 
-        public AuditMirrorFactory(IStateOwnershipClient upstream, bool useRealPostgresInner = false)
-        {
-            _upstream = upstream;
-            _realPostgresInner = useRealPostgresInner;
-        }
+        public AuditMirrorFactory(IStateOwnershipClient upstream) => _upstream = upstream;
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -442,17 +307,6 @@ public class MirroringAdminAuditLogTests
                 services.RemoveAll<IStateOwnershipClient>();
                 services.AddSingleton(_upstream);
 
-                if (!_realPostgresInner) return;
-
-                // Production shape: Mirroring over the REAL Postgres log, which the test
-                // config would otherwise replace with the permissive in-memory inner.
-                services.RemoveAll<IAdminAuditLog>();
-                services.AddSingleton<IAdminAuditLog>(sp => new MirroringAdminAuditLog(
-                    new PostgresAdminAuditLog(
-                        new UnreachableConnectionFactory(), NullLogger<PostgresAdminAuditLog>.Instance),
-                    sp.GetRequiredService<IServiceScopeFactory>(),
-                    sp.GetRequiredService<IOptionsMonitor<GwdbxMigrationOptions>>(),
-                    NullLogger<MirroringAdminAuditLog>.Instance));
             });
         }
     }

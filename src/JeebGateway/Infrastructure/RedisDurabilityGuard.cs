@@ -23,10 +23,17 @@ internal static class RedisDurabilityGuard
     /// Refuses to start (naming <see cref="ConnectionStringKey"/>) when Redis is unwired/misconfigured
     /// in a prod-like env. Armed for the WHOLE prod-like range; no-op in Development / Testing.
     /// </summary>
+    /// <summary>Development/Testing are exempt; every other environment is prod-like.</summary>
+    internal static bool IsExempt(IHostEnvironment environment)
+        => environment is null
+           || environment.IsDevelopment()
+           || string.Equals(environment.EnvironmentName, "Testing", StringComparison.OrdinalIgnoreCase);
+
     public static void EnsureWired(IConfiguration? configuration, IHostEnvironment environment)
     {
-        // Same prod-like range as the durability gate: Development/Testing exempt, everything else armed.
-        if (StoreDurabilityGuard.IsExempt(environment))
+        // Development/Testing exempt, everything else armed. (W5-11 deleted StoreDurabilityGuard
+        // with the gateway database; this guard keeps its own copy of that exemption.)
+        if (IsExempt(environment))
         {
             return;
         }

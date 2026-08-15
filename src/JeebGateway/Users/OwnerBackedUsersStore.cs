@@ -41,6 +41,40 @@ public sealed class OwnerBackedUsersStore : IUsersStore
         }
     }
 
+    /// <summary>
+    /// R5: moderation-authoritative read. Deliberately NOT the interface default — that
+    /// delegates to <see cref="GetByIdAsync"/>, which resolves identity from
+    /// user-management, and that contract carries no suspension field. A suspended user
+    /// would therefore read back as active and be minted a session. Suspension is owned
+    /// by ban-service, so it is read from there and any fault PROPAGATES: the caller
+    /// (<see cref="UserModerationGate"/>) turns it into Unavailable, never into a pass.
+    /// </summary>
+    public async Task<UserProfile?> GetForModerationAsync(string userId, CancellationToken ct)
+    {
+        var profile = await GetByIdAsync(userId, ct);
+        if (profile is null)
+        {
+            // A genuinely absent identity still proceeds, matching UserModerationGate.
+            return null;
+        }
+
+        await using var scope = _scopes.CreateAsyncScope();
+        var statuses = await scope.ServiceProvider.GetRequiredService<IBanServiceClient>()
+            .GetStatusAsync(userId, ct);
+
+        var active = statuses.BanStatuses
+            .Where(status => status.IsCurrentlyBanned)
+            .OrderByDescending(status => status.LastUpdated)
+            .FirstOrDefault();
+        if (active is not null)
+        {
+            profile.IsSuspended = true;
+            profile.SuspensionReason = active.Message;
+        }
+
+        return profile;
+    }
+
     public async Task<UserProfile> GetOrCreateAsync(string userId, CancellationToken ct)
     {
         var existing = await GetByIdAsync(userId, ct);
