@@ -71,6 +71,14 @@ public sealed class GwdbxMigrationOptions
     // only "local" and "upstream-authority" are valid; dual-write rungs are rejected at boot.
     public string TiersMode { get; init; } = "local";
 
+    // delivery requests -> delivery-service, W5-02 (registry token: RequestsOwnerListMode).
+    // Freeze-import-flip like Tiers: only "local" and "upstream-authority" are valid.
+    // A dual-write rung is REFUSED at boot rather than merely unused — after the
+    // GatewayPostgres seam was deleted the gateway's local leg is in-memory only, so a
+    // dual-write-local-read rung would read from a store that empties on restart and would
+    // manufacture the data loss it exists to prevent.
+    public string RequestsOwnerListMode { get; init; } = "local";
+
     public GwdbxMigrationPhase AdminAudit => Read(AdminAuditMode);
 
     public GwdbxMigrationPhase DataExport => Read(DataExportMode);
@@ -94,6 +102,8 @@ public sealed class GwdbxMigrationOptions
     public GwdbxMigrationPhase UserModeration => Read(UserModerationMode);
 
     public GwdbxMigrationPhase Tiers => Read(TiersMode);
+
+    public GwdbxMigrationPhase RequestsOwnerList => Read(RequestsOwnerListMode);
 
     public static string LadderValues => string.Join(", ", Ladder.Select(entry => entry.Wire));
 

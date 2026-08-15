@@ -23,41 +23,22 @@
 # Blank lines and lines starting with '#' are ignored.
 
 # --- Infrastructure seams (D1 rows 23, 24, 25) ---
-src/JeebGateway/Infrastructure/INpgsqlConnectionFactory.cs
-src/JeebGateway/Infrastructure/PostgresHealthCheck.cs
 
 # --- Money / settlement stores (D1 rows 2, 3, 21, 17) — gateway-owned per JEB-1476 ---
 # gwdbx W2-R11: the three settlement seams are DELETED (settlement-service owns them). Pruned
 # because the ratchet only shrinks — re-adding any of them is a GR-3 violation, not a rollback.
-src/JeebGateway/Users/PostgresFinancialLedger.cs
 
 # --- Wallet ledger direct read (D1 row 6) -> wallet-service ---
 
 # --- Notification / push stores (D1 rows 7, 8, 9, 10) -> notification-service ---
-src/JeebGateway/Push/PostgresDeviceTokenStore.cs
-src/JeebGateway/Push/PostgresPushRetryQueue.cs
-src/JeebGateway/Push/PostgresPushDeliveryTracker.cs
-src/JeebGateway/Services/Dispatch/PostgresNotificationDispatchOutbox.cs
 
 # --- Delivery / presence / moderation stores (D1 rows 4, 12, 13, 14, 20) -> delivery-service ---
-src/JeebGateway/Requests/PostgresDurableRequestsMirror.cs
-src/JeebGateway/Tiers/PostgresTiersStore.cs
-src/JeebGateway/ProhibitedItems/PostgresProhibitedItemsStore.cs
-src/JeebGateway/ProhibitedItems/FlaggedRequests/PostgresFlaggedRequestStore.cs
-src/JeebGateway/Availability/PostgresAvailabilityStore.cs
 
 # --- User-scoped state (D1 rows 18, 19) -> remote-user-preferences ---
 # D1 row 5 (saved-locations) ELIMINATED under JEBV4-165 / JEBV4-194 D5: migrated to
 # remote-user-preferences (RemoteUserPreferencesSavedLocationStore); the gateway-Postgres
 # PostgresSavedLocationStore.cs is deleted, so its allowlist line is pruned (ratchet shrinks).
-src/JeebGateway/Users/PostgresAccountDeletionStore.cs
-src/JeebGateway/Users/DataExport/PostgresDataExportStore.cs
 
 # --- Admin escalation (D1 row 11) -> one-time-password ---
-src/JeebGateway/Requests/OtpHandover/PostgresAdminEscalationStore.cs
 
 # --- RAISE-FLAG seams (D1 rows 1, 15, 16, 22) — owner ruling pending on owning service ---
-src/JeebGateway/Cms/PostgresCmsSurfaceStore.cs
-src/JeebGateway/Admin/PostgresAdminAuditLog.cs
-src/JeebGateway/Users/PostgresUserProjectionStore.cs
-src/JeebGateway/Whisper/PostgresTranscriptionFallbackQueue.cs
