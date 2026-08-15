@@ -11,6 +11,13 @@ public interface IUsersStore
 {
     Task<UserProfile?> GetByIdAsync(string userId, CancellationToken ct);
 
+    /// <summary>
+    /// Moderation-authoritative point read for the session-mint gate: a durable-store FAULT
+    /// PROPAGATES instead of degrading to a read that cannot observe suspension.
+    /// </summary>
+    Task<UserProfile?> GetForModerationAsync(string userId, CancellationToken ct)
+        => GetByIdAsync(userId, ct);
+
     Task<UserProfile> GetOrCreateAsync(string userId, CancellationToken ct);
 
     /// <summary>

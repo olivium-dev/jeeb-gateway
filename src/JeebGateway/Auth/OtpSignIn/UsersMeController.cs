@@ -239,6 +239,11 @@ public sealed class UsersMeController : ControllerBase
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauth))
             return unauth;
 
+        // This route RE-MINTS a full session below, and admin suspend revokes only REFRESH
+        // tokens — so without this gate a suspended user rotates a fresh family and evades it.
+        var refusal = await RefuseIfSuspendedAsync(userId, ct);
+        if (refusal is not null) return refusal;
+
         // N6 — validate the inbound Jeeb contract role and translate to OPAQUE BEFORE any UM
         // call. Anything outside {client, jeeber} is invalid_role 400 (no upstream dialed).
         var opaque = JeebRoleTranslator.ToOpaque(body?.Role);
@@ -349,6 +354,7 @@ public sealed class UsersMeController : ControllerBase
     [RequireCapability(Caps.ProfileWriteSelf)]
     [ProducesResponseType(typeof(RoleSwitchResponseDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
@@ -361,6 +367,10 @@ public sealed class UsersMeController : ControllerBase
         // I4 — identity ALWAYS from the bearer, never body/query.
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauth))
             return unauth;
+
+        // Re-mints a full token pair below, exactly like role/switch — same gate.
+        var suspended = await RefuseIfSuspendedAsync(userId, ct);
+        if (suspended is not null) return suspended;
 
         // Must currently hold the jeeber role — fires before RevokeRoleAsync's own no-op
         // semantics are reachable, so a second call is 404, not a silent 200 (correction 10).
@@ -603,6 +613,28 @@ public sealed class UsersMeController : ControllerBase
 
     private ObjectResult Problem(int status, string shortType, string title, string detail)
         => OtpSignInProblems.UsersProblem(this, status, shortType, title, detail);
+
+    /// <summary>
+    /// Pre-mint suspension refusal for the two role re-mints; null means proceed.
+    /// Same verdict source as OTP verify, so both close on an unreadable moderation status.
+    /// </summary>
+    private async Task<ObjectResult?> RefuseIfSuspendedAsync(string userId, CancellationToken ct)
+    {
+        var (verdict, reason) = await UserModerationGate.EvaluateAsync(_users, userId, _log, ct);
+
+        if (verdict == ModerationVerdict.Unavailable)
+        {
+            return Problem(StatusCodes.Status503ServiceUnavailable, "moderation_unavailable",
+                "Request unavailable", "Account status could not be verified. Please try again.");
+        }
+
+        if (verdict != ModerationVerdict.Suspended) return null;
+
+        _log.LogWarning("v1/users/me role re-mint refused: account suspended userId={UserId}", userId);
+        return OtpSignInProblems.UsersProblem(this, StatusCodes.Status403Forbidden,
+            "account_suspended", "Account is suspended.", reason,
+            new Dictionary<string, object?> { ["accountStatus"] = "suspended", ["reason"] = reason });
+    }
 
     private sealed record ProfileDisplay(string? Name, string? Email, string? AvatarUrl);
 }

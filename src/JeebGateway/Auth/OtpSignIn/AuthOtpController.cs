@@ -181,6 +181,7 @@ public sealed class AuthOtpController : ControllerBase
     [HttpPost("verify")]
     [ProducesResponseType(typeof(OtpVerifyResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> VerifyOtp([FromBody] OtpVerifyDto? body, CancellationToken ct)
@@ -245,6 +246,11 @@ public sealed class AuthOtpController : ControllerBase
         var key = (body.Phone ?? string.Empty).Trim();
         var (userId, opaqueRoles, opaqueActiveRole) = await ResolveIdentityAsync(key, ct);
 
+        // Suspension used to be enforced ONLY on [RequireActiveUser] endpoints, so a
+        // suspended account still minted a session here and reached HOME.
+        var refusal = await RefuseIfSuspendedAsync(userId, ct);
+        if (refusal is not null) return refusal;
+
         // Project the UM-resolved identity locally so the gateway-minted JWT embeds the
         // SAME active_role/roles claims UM persisted (TokenService reads active_role from
         // the store). New identities default to the opaque 'customer' single role.
@@ -283,6 +289,40 @@ public sealed class AuthOtpController : ControllerBase
                     : new[] { JeebRoleTranslator.ContractClient },
             },
         });
+    }
+
+    /// <summary>
+    /// Refuses a suspended account BEFORE the session is minted; null means proceed.
+    /// Reads the SAME local users projection <see cref="Users.RequireActiveUserAttribute"/>
+    /// reads — the read side <c>FeatureFlags:UserModerationMode</c> designates at its current
+    /// <c>dual-write-local-read</c> rung — so login adds NO upstream call that could fail open,
+    /// and the W4-06 read cutover re-points both at once.
+    ///
+    /// <para>Via <see cref="UserModerationGate"/>, so the durable-store fault the production
+    /// <see cref="Users.UpstreamBackedUsersStore"/> otherwise swallows reaches this 503.</para>
+    /// </summary>
+    private async Task<ObjectResult?> RefuseIfSuspendedAsync(string userId, CancellationToken ct)
+    {
+        var (verdict, reason) = await UserModerationGate.EvaluateAsync(_users, userId, _log, ct);
+
+        if (verdict == ModerationVerdict.Unavailable)
+        {
+            // FAIL CLOSED — minting a session on an unclassified lookup fault is this defect again.
+            return OtpSignInProblems.Problem(this, StatusCodes.Status503ServiceUnavailable,
+                "moderation_unavailable", "Sign-in unavailable",
+                "Account status could not be verified. Please try again.");
+        }
+
+        if (verdict != ModerationVerdict.Suspended) return null;
+
+        BusinessOutcomeTelemetry.OtpVerifyFailures.Add(1,
+            new KeyValuePair<string, object?>("outcome", "account_suspended"));
+        _log.LogWarning("auth.otp.verify refused: account suspended userId={UserId}", userId);
+
+        // Same reason text [RequireActiveUser] returns, plus machine fields the app renders.
+        return OtpSignInProblems.Problem(this, StatusCodes.Status403Forbidden,
+            "account_suspended", "Account is suspended.", reason,
+            new Dictionary<string, object?> { ["accountStatus"] = "suspended", ["reason"] = reason });
     }
 
     /// <summary>

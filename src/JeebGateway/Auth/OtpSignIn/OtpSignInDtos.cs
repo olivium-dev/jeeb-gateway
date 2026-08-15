@@ -41,8 +41,9 @@ public static class OtpSignInProblems
     /// no OTP-adjacent data can leak to the caller.
     /// </summary>
     public static ObjectResult Problem(
-        ControllerBase c, int status, string shortType, string title, string detail)
-        => Build(c, ProblemBaseUri, status, shortType, title, detail);
+        ControllerBase c, int status, string shortType, string title, string detail,
+        IDictionary<string, object?>? extensions = null)
+        => Build(c, ProblemBaseUri, status, shortType, title, detail, extensions);
 
     /// <summary>Frozen RFC 7807 problem-type base URI for the S02 Wave-1 dual-role user surfaces.</summary>
     public const string UsersProblemBaseUri = "https://problems.jeeb.lb/users";
@@ -53,8 +54,9 @@ public static class OtpSignInProblems
     /// contract as <see cref="Problem"/>.
     /// </summary>
     public static ObjectResult UsersProblem(
-        ControllerBase c, int status, string shortType, string title, string detail)
-        => Build(c, UsersProblemBaseUri, status, shortType, title, detail);
+        ControllerBase c, int status, string shortType, string title, string detail,
+        IDictionary<string, object?>? extensions = null)
+        => Build(c, UsersProblemBaseUri, status, shortType, title, detail, extensions);
 
     /// <summary>
     /// Build a <b>429 Too Many Requests</b> <c>application/problem+json</c> result

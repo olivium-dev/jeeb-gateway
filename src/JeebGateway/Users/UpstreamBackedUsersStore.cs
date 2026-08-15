@@ -143,6 +143,14 @@ public sealed class UpstreamBackedUsersStore : IUsersStore
         return upstream;
     }
 
+    /// <summary>
+    /// NOT via <see cref="SafeProjectionGetAsync"/> — a fault must reach the caller to fail
+    /// CLOSED. Skips the UM cold read: that contract has no suspension field to read.
+    /// </summary>
+    public async Task<UserProfile?> GetForModerationAsync(string userId, CancellationToken ct)
+        => await _projection.GetByIdAsync(userId, ct)
+           ?? await _inner.GetByIdAsync(userId, ct);
+
     public Task<UserProfile> GetOrCreateAsync(string userId, CancellationToken ct)
         // Permissive bootstrap (phone-keyed OTP fallback / arbitrary ids) — in-process
         // only. The OTP-verify path immediately follows with UpsertProjectionAsync, which
