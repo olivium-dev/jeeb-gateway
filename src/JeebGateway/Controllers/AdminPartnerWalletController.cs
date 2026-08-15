@@ -28,6 +28,8 @@ namespace JeebGateway.Controllers;
 /// log for every credit.</para>
 /// </summary>
 [Route("v1/admin/partners")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("admin/partners")]
 [RequireCapability(Capabilities.PartnerWalletCredit)]
 public sealed class AdminPartnerWalletController : PartnerControllerBase
 {

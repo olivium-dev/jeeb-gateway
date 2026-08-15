@@ -20,6 +20,8 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("v1/jeebers/me/earnings")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("jeebers/me/earnings")]
 [RequireCapability(Capabilities.EarningsReadOwn)]
 public sealed class JeebEarningsController : ControllerBase
 {

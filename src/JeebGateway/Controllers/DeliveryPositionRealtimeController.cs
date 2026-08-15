@@ -63,6 +63,8 @@ public sealed class DeliveryPositionRealtimeController : ControllerBase
     // {tenant} is constrained to the configured prefix + the legacy alias, so the
     // pre-rename literal URL keeps matching byte-for-byte and unknown tenants 404.
     [HttpGet("v1/realtime/{tenant:realtimeTenant}:delivery:{deliveryId}")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpGet("realtime/{tenant:realtimeTenant}:delivery:{deliveryId}")]
     [Authorize]
     // ADR-005 L2 §C client-only delivery tracking: same capability as the one-shot
     // snapshot GET /deliveries/{id}/tracking, because this is that same read moved to a

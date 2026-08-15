@@ -31,6 +31,8 @@ namespace JeebGateway.Controllers;
 /// <c>partner.topup.execute</c> (ADR-005; every action carries a capability marker).</para>
 /// </summary>
 [Route("v1/partner/wallet")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("partner/wallet")]
 [RequireCapability(Capabilities.PartnerWalletReadOwn)]
 public sealed class PartnerWalletController : PartnerControllerBase
 {

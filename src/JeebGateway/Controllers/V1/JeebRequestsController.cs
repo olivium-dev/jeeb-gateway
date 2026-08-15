@@ -328,6 +328,8 @@ public sealed class JeebRequestsController : ControllerBase
     /// window.
     /// </summary>
     [HttpGet("v1/requests/{id}/offers")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpGet("requests/{id}/offers")]
     [RequireCapability(Capabilities.RequestReadOwn)]
     [ProducesResponseType(typeof(IReadOnlyList<OfferDto>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -392,6 +394,7 @@ public sealed class JeebRequestsController : ControllerBase
     /// the body, exactly the CLAIM/STATE split the ADR prescribes.</para>
     /// </summary>
     [HttpGet("v1/offers")]
+    [HttpGet("offers")]
     [RequireCapability(Capabilities.OfferReadOwn)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -466,6 +469,7 @@ public sealed class JeebRequestsController : ControllerBase
     /// (no id parameter to mismatch).
     /// </summary>
     [HttpGet("v1/jeebers/me/offers")]
+    [HttpGet("jeebers/me/offers")]
     [RequireCapability(Capabilities.OfferReadOwn)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

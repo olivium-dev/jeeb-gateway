@@ -32,6 +32,8 @@ public sealed class AdminCodSettlementsController : ControllerBase
     }
 
     [HttpGet("admin/v1/settlements")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpGet("admin/settlements")]
     [RequireCapability(Capabilities.AdminSettlementsRead)]
     [ProducesResponseType(typeof(AdminSettlementPageResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> Index(
@@ -60,6 +62,7 @@ public sealed class AdminCodSettlementsController : ControllerBase
     }
 
     [HttpGet("admin/v1/settlements/{settlementId}")]
+    [HttpGet("admin/settlements/{settlementId}")]
     [RequireCapability(Capabilities.AdminSettlementsRead)]
     [ProducesResponseType(typeof(AdminSettlementDetailResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> Detail(string settlementId, CancellationToken ct)
@@ -72,6 +75,7 @@ public sealed class AdminCodSettlementsController : ControllerBase
     }
 
     [HttpGet("admin/v1/settlement-batches/{batchId}")]
+    [HttpGet("admin/settlement-batches/{batchId}")]
     [RequireCapability(Capabilities.AdminSettlementsRead)]
     [ProducesResponseType(typeof(AdminSettlementBatchResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> Batch(string batchId, CancellationToken ct)
@@ -84,6 +88,7 @@ public sealed class AdminCodSettlementsController : ControllerBase
     }
 
     [HttpPost("admin/v1/settlement-batches/{batchId}/mark-paid")]
+    [HttpPost("admin/settlement-batches/{batchId}/mark-paid")]
     [RequireCapability(Capabilities.AdminSettlementsManage)]
     [ProducesResponseType(typeof(AdminSettlementReconcileResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> ReconcileBatch(
@@ -139,6 +144,7 @@ public sealed class AdminCodSettlementsController : ControllerBase
     }
 
     [HttpPost("admin/v1/settlements/{settlementId}/dispute")]
+    [HttpPost("admin/settlements/{settlementId}/dispute")]
     [RequireCapability(Capabilities.AdminSettlementsManage)]
     [ProducesResponseType(typeof(AdminSettlementDetailResponse), StatusCodes.Status200OK)]
     public Task<IActionResult> Dispute(
@@ -149,6 +155,7 @@ public sealed class AdminCodSettlementsController : ControllerBase
             settlementId, request?.ExpectedVersion, request?.Reason, idempotencyKey);
 
     [HttpPost("admin/v1/settlements/{settlementId}/resolve")]
+    [HttpPost("admin/settlements/{settlementId}/resolve")]
     [RequireCapability(Capabilities.AdminSettlementsManage)]
     [ProducesResponseType(typeof(AdminSettlementDetailResponse), StatusCodes.Status200OK)]
     public Task<IActionResult> Resolve(

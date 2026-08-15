@@ -452,6 +452,8 @@ public class RequestOffersController : ControllerBase
     /// guards as the nested route.
     /// </summary>
     [HttpDelete("v1/offers/{offerId}")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpDelete("offers/{offerId}")]
     [RequireCapability(Capabilities.OfferWithdraw)]
     [RequireActiveUser]
     [ProducesResponseType(StatusCodes.Status204NoContent)]

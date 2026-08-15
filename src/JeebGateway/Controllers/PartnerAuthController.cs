@@ -34,6 +34,8 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("v1/partner/auth")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("partner/auth")]
 [EnableRateLimiting(RateLimitingExtensions.AuthTokenBucketPolicy)]
 // The login PRECEDES a session token (it mints one) — anonymous-by-design, bypasses L2. Mirrors
 // AuthOtpController / TokensController (ADR-004 D1 / ADR-005 §A public).

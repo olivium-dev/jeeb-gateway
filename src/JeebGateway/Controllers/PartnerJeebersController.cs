@@ -29,6 +29,8 @@ namespace JeebGateway.Controllers;
 /// microservice via <see cref="IPartnerJeeberSearchClient"/> (no direct DB access from the gateway).</para>
 /// </summary>
 [Route("v1/partner/jeebers")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("partner/jeebers")]
 [RequireCapability(Capabilities.PartnerJeeberLookup)]
 public sealed class PartnerJeebersController : PartnerControllerBase
 {

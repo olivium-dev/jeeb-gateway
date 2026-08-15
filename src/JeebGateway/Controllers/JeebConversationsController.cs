@@ -83,6 +83,8 @@ public sealed class JeebConversationsController : ControllerBase
     /// Create (or idempotently get) the broadcasting conversation for a request.
     /// </summary>
     [HttpPost("v1/chat/jeeb/conversations")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpPost("chat/jeeb/conversations")]
     [Authorize]
     [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE (chat-service)
     [ProducesResponseType(typeof(JeebConversationResponse), StatusCodes.Status201Created)]
@@ -152,6 +154,7 @@ public sealed class JeebConversationsController : ControllerBase
     /// post-accept membership flip / removal (H7).
     /// </summary>
     [HttpGet("v1/conversations")]
+    [HttpGet("conversations")]
     [Authorize]
     [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; scoping = STATE (chat-service)
     [ProducesResponseType(typeof(JeebConversationResponse), StatusCodes.Status200OK)]
@@ -204,6 +207,7 @@ public sealed class JeebConversationsController : ControllerBase
     /// unknown request).
     /// </summary>
     [HttpGet("v1/chat/jeeb/conversations/by-request/{requestId}")]
+    [HttpGet("chat/jeeb/conversations/by-request/{requestId}")]
     [Authorize]
     [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; scoping = STATE (chat-service)
     [ProducesResponseType(typeof(JeebConversationResponse), StatusCodes.Status200OK)]
@@ -250,6 +254,7 @@ public sealed class JeebConversationsController : ControllerBase
     /// after chat-service confirms the bearer is an active participant.
     /// </summary>
     [HttpGet("v1/conversations/{conversationId}")]
+    [HttpGet("conversations/{conversationId}")]
     [Authorize]
     [RequireCapability(Capabilities.ChatRead)]
     [ProducesResponseType(typeof(JeebConversationResponse), StatusCodes.Status200OK)]
@@ -314,6 +319,7 @@ public sealed class JeebConversationsController : ControllerBase
     /// author_id is stamped from the BEARER, never the caller body.
     /// </summary>
     [HttpPost("v1/conversations/{conversationId}/messages")]
+    [HttpPost("conversations/{conversationId}/messages")]
     [Authorize]
     [RequireCapability(Capabilities.ChatSend)] // ADR-005 §F {client,jeeber}; membership = STATE (chat-service)
     [ProducesResponseType(typeof(JeebMessageResponse), StatusCodes.Status201Created)]
@@ -430,6 +436,7 @@ public sealed class JeebConversationsController : ControllerBase
     /// empty 200) by chat-service's membership gate — forwarded verbatim.
     /// </summary>
     [HttpGet("v1/conversations/{conversationId}/messages")]
+    [HttpGet("conversations/{conversationId}/messages")]
     [Authorize]
     [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; membership = STATE (chat-service)
     [ProducesResponseType(typeof(JeebMessageListResponse), StatusCodes.Status200OK)]
@@ -482,6 +489,7 @@ public sealed class JeebConversationsController : ControllerBase
     /// 403 by chat-service's membership gate — forwarded verbatim, never an empty 200.
     /// </summary>
     [HttpGet("v1/conversations/{conversationId}/messages/since/{cursor}")]
+    [HttpGet("conversations/{conversationId}/messages/since/{cursor}")]
     [Authorize]
     [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; membership = STATE (chat-service)
     [ProducesResponseType(typeof(JeebMessageListResponse), StatusCodes.Status200OK)]
@@ -541,6 +549,7 @@ public sealed class JeebConversationsController : ControllerBase
     // {tenant} is constrained to the configured prefix + the legacy alias, so the
     // pre-rename literal URL keeps matching byte-for-byte and unknown tenants 404.
     [HttpGet("v1/realtime/{tenant:realtimeTenant}:chat:{conversationId}")]
+    [HttpGet("realtime/{tenant:realtimeTenant}:chat:{conversationId}")]
     [Authorize]
     [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; membership = STATE (chat-service)
     [ProducesResponseType(typeof(RealtimeChannelDescriptor), StatusCodes.Status200OK)]

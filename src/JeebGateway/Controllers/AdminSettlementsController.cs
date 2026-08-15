@@ -15,6 +15,8 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("v1/admin/settlements")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("admin/settlements")]
 [RequireCapability(Capabilities.SettlementsManage)]
 public sealed class AdminSettlementsController : ControllerBase
 {

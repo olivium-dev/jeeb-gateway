@@ -66,6 +66,8 @@ public sealed class ChatFirebaseTokenController : ControllerBase
     /// division of labour <see cref="JeebConversationsController"/> already uses.
     /// </remarks>
     [HttpPost("v1/chat/firebase-token")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpPost("chat/firebase-token")]
     [Authorize]
     [RequireCapability(Capabilities.ChatRead)] // ADR-005 §F {client,jeeber}; membership = STATE (Firestore rules)
     [ProducesResponseType(typeof(FirebaseTokenResponse), StatusCodes.Status200OK)]

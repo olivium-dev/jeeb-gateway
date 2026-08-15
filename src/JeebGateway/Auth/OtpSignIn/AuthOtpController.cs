@@ -41,6 +41,8 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// </summary>
 [ApiController]
 [Route("v1/auth/otp")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("auth/otp")]
 // NOTE (JEBV4-261): intentionally NO class-level [Produces(...)]. A [Produces] filter
 // CLEARS an ObjectResult's own ContentTypes and forces the FIRST listed media type,
 // which downgraded the RFC 7807 error bodies emitted by OtpSignInProblems.Problem

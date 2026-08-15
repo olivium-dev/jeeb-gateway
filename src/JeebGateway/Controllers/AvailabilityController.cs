@@ -184,12 +184,15 @@ public class AvailabilityController : ControllerBase
     // -----------------------------------------------------------------------
 
     [HttpGet("/v1/availability/{jeeberId}")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpGet("/availability/{jeeberId}")]
     [ProducesResponseType(typeof(AvailabilityResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     public Task<IActionResult> GetV1Alias(string jeeberId, CancellationToken ct) => Get(ct);
 
     [HttpPost("/v1/availability")]
+    [HttpPost("/availability")]
     [ProducesResponseType(typeof(AvailabilityResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

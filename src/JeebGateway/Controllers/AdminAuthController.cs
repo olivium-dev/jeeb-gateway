@@ -18,6 +18,8 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("admin/v1/auth")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("admin/auth")]
 [AllowAnonymous]
 [PublicEndpoint("Admin login and cookie rotation authenticate before a bearer exists.")]
 [EnableRateLimiting(RateLimitingExtensions.AuthTokenBucketPolicy)]

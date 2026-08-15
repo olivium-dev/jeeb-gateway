@@ -73,6 +73,8 @@ public sealed class AdminDeliveriesController : ControllerBase
     }
 
     [HttpGet("admin/v1/deliveries")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpGet("admin/deliveries")]
     [RequireCapability(Capabilities.AdminDeliveriesRead)]
     [ProducesResponseType(typeof(AdminDeliveryListResponse), StatusCodes.Status200OK)]
     public Task<IActionResult> Index(
@@ -89,6 +91,7 @@ public sealed class AdminDeliveriesController : ControllerBase
         RelayDeliveryAsync("api/v1/admin/deliveries" + Request.QueryString, null, ct);
 
     [HttpGet("admin/v1/deliveries/{deliveryId}/timeline")]
+    [HttpGet("admin/deliveries/{deliveryId}/timeline")]
     [RequireCapability(Capabilities.AdminDeliveriesRead)]
     [ProducesResponseType(typeof(AdminDeliveryTimelineResponse), StatusCodes.Status200OK)]
     public Task<IActionResult> Timeline(
@@ -102,6 +105,7 @@ public sealed class AdminDeliveriesController : ControllerBase
             ct);
 
     [HttpPost("admin/v1/deliveries/{deliveryId}/transition")]
+    [HttpPost("admin/deliveries/{deliveryId}/transition")]
     [RequireCapability(Capabilities.AdminDeliveriesOperate)]
     [ProducesResponseType(typeof(AdminDeliveryTransitionResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -179,6 +183,7 @@ public sealed class AdminDeliveriesController : ControllerBase
     }
 
     [HttpGet("admin/v1/deliveries/{deliveryId}")]
+    [HttpGet("admin/deliveries/{deliveryId}")]
     [RequireCapability(Capabilities.AdminDeliveriesRead)]
     [ProducesResponseType(typeof(AdminDeliveryAggregateResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> Detail(string deliveryId, CancellationToken ct)
@@ -285,6 +290,7 @@ public sealed class AdminDeliveriesController : ControllerBase
     /// never receives a storage URL, signed URL, bucket name, or raw object ref.
     /// </summary>
     [HttpGet("admin/v1/deliveries/{deliveryId}/evidence/{token}")]
+    [HttpGet("admin/deliveries/{deliveryId}/evidence/{token}")]
     [RequireCapability(Capabilities.AdminDeliveriesRead)]
     public async Task<IActionResult> Evidence(string deliveryId, string token, CancellationToken ct)
     {

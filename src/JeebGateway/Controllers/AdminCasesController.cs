@@ -37,6 +37,8 @@ public sealed class AdminCasesController : CaseControllerBase
     }
 
     [HttpGet("admin/v1/cases")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpGet("admin/cases")]
     [RequireCapability(Capabilities.AdminCasesRead)]
     [ProducesResponseType(typeof(CasePageResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Queue([FromQuery] string? query, [FromQuery] string? kind, [FromQuery] string? status,
@@ -47,6 +49,7 @@ public sealed class AdminCasesController : CaseControllerBase
         QueueCore(query, kind, status, priority, assignedTo, unassigned, dueBefore, active, sort, limit, cursor, ct);
 
     [HttpGet("admin/v1/disputes")]
+    [HttpGet("admin/disputes")]
     [RequireCapability(Capabilities.AdminCasesRead)]
     [ProducesResponseType(typeof(CasePageResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> DisputeQueue([FromQuery] string? query, [FromQuery] string? status, [FromQuery] string? priority,
@@ -57,6 +60,7 @@ public sealed class AdminCasesController : CaseControllerBase
             assignedTo, unassigned, dueBefore, active, sort, limit, cursor, ct);
 
     [HttpGet("admin/v1/support/tickets")]
+    [HttpGet("admin/support/tickets")]
     [RequireCapability(Capabilities.AdminCasesRead)]
     [ProducesResponseType(typeof(CasePageResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> SupportQueue([FromQuery] string? query, [FromQuery] string? status, [FromQuery] string? priority,
@@ -67,8 +71,11 @@ public sealed class AdminCasesController : CaseControllerBase
             assignedTo, unassigned, dueBefore, active, sort, limit, cursor, ct);
 
     [HttpGet("admin/v1/cases/{id}")]
+    [HttpGet("admin/cases/{id}")]
     [HttpGet("admin/v1/disputes/{id}")]
+    [HttpGet("admin/disputes/{id}")]
     [HttpGet("admin/v1/support/tickets/{id}")]
+    [HttpGet("admin/support/tickets/{id}")]
     [RequireCapability(Capabilities.AdminCasesRead)]
     [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public async Task<IActionResult> Detail(string id, CancellationToken ct)
@@ -85,6 +92,7 @@ public sealed class AdminCasesController : CaseControllerBase
     }
 
     [HttpGet("admin/v1/cases/{id}/messages")]
+    [HttpGet("admin/cases/{id}/messages")]
     [RequireCapability(Capabilities.AdminCasesRead)]
     [ProducesResponseType(typeof(CaseMessagePageResponseV2), StatusCodes.Status200OK)]
     public async Task<IActionResult> Messages(string id, [FromQuery] int limit = 100,
@@ -111,6 +119,7 @@ public sealed class AdminCasesController : CaseControllerBase
     }
 
     [HttpGet("admin/v1/cases/{id}/evidence/{token}")]
+    [HttpGet("admin/cases/{id}/evidence/{token}")]
     [RequireCapability(Capabilities.AdminCasesRead)]
     public async Task<IActionResult> Evidence(string id, string token, CancellationToken ct)
     {
@@ -172,8 +181,11 @@ public sealed class AdminCasesController : CaseControllerBase
     }
 
     [HttpPost("admin/v1/cases/{id}/claim")]
+    [HttpPost("admin/cases/{id}/claim")]
     [HttpPost("admin/v1/disputes/{id}/claim")]
+    [HttpPost("admin/disputes/{id}/claim")]
     [HttpPost("admin/v1/support/tickets/{id}/claim")]
+    [HttpPost("admin/support/tickets/{id}/claim")]
     [RequireCapability(Capabilities.AdminCasesUpdate)]
     [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Claim(string id, [FromBody] CaseClaimRequestV1? request,
@@ -182,8 +194,11 @@ public sealed class AdminCasesController : CaseControllerBase
             (version, admin) => new PatchGenericCaseRequestV1 { ExpectedVersion = version, AssigneeRef = admin }, null, ct);
 
     [HttpPost("admin/v1/cases/{id}/reassign")]
+    [HttpPost("admin/cases/{id}/reassign")]
     [HttpPost("admin/v1/disputes/{id}/reassign")]
+    [HttpPost("admin/disputes/{id}/reassign")]
     [HttpPost("admin/v1/support/tickets/{id}/reassign")]
+    [HttpPost("admin/support/tickets/{id}/reassign")]
     [RequireCapability(Capabilities.AdminCasesUpdate)]
     [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Reassign(string id, [FromBody] CaseReassignRequestV1? request,
@@ -196,8 +211,11 @@ public sealed class AdminCasesController : CaseControllerBase
         }, null, ct);
 
     [HttpPost("admin/v1/cases/{id}/priority")]
+    [HttpPost("admin/cases/{id}/priority")]
     [HttpPost("admin/v1/disputes/{id}/priority")]
+    [HttpPost("admin/disputes/{id}/priority")]
     [HttpPost("admin/v1/support/tickets/{id}/priority")]
+    [HttpPost("admin/support/tickets/{id}/priority")]
     [RequireCapability(Capabilities.AdminCasesUpdate)]
     [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Priority(string id, [FromBody] CasePriorityRequestV1? request,
@@ -210,8 +228,11 @@ public sealed class AdminCasesController : CaseControllerBase
     }
 
     [HttpPost("admin/v1/cases/{id}/due")]
+    [HttpPost("admin/cases/{id}/due")]
     [HttpPost("admin/v1/disputes/{id}/due")]
+    [HttpPost("admin/disputes/{id}/due")]
     [HttpPost("admin/v1/support/tickets/{id}/due")]
+    [HttpPost("admin/support/tickets/{id}/due")]
     [RequireCapability(Capabilities.AdminCasesUpdate)]
     [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Due(string id, [FromBody] CaseDueRequestV1? request,
@@ -223,8 +244,11 @@ public sealed class AdminCasesController : CaseControllerBase
         }, null, ct);
 
     [HttpPost("admin/v1/cases/{id}/reply")]
+    [HttpPost("admin/cases/{id}/reply")]
     [HttpPost("admin/v1/disputes/{id}/reply")]
+    [HttpPost("admin/disputes/{id}/reply")]
     [HttpPost("admin/v1/support/tickets/{id}/reply")]
+    [HttpPost("admin/support/tickets/{id}/reply")]
     [RequireCapability(Capabilities.AdminCasesUpdate)]
     [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Reply(string id, [FromBody] CaseReplyRequestV2? request,
@@ -233,8 +257,11 @@ public sealed class AdminCasesController : CaseControllerBase
             request?.Body, request?.ReplyToId, request?.Attachments, ct);
 
     [HttpPost("admin/v1/cases/{id}/note")]
+    [HttpPost("admin/cases/{id}/note")]
     [HttpPost("admin/v1/disputes/{id}/note")]
+    [HttpPost("admin/disputes/{id}/note")]
     [HttpPost("admin/v1/support/tickets/{id}/note")]
+    [HttpPost("admin/support/tickets/{id}/note")]
     [RequireCapability(Capabilities.AdminCasesUpdate)]
     [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Note(string id, [FromBody] CaseNoteRequestV1? request,
@@ -242,8 +269,11 @@ public sealed class AdminCasesController : CaseControllerBase
         Message(id, request?.ExpectedVersion, key, "internal_note", request?.Body, null, null, ct);
 
     [HttpPost("admin/v1/cases/{id}/mark-fixed")]
+    [HttpPost("admin/cases/{id}/mark-fixed")]
     [HttpPost("admin/v1/disputes/{id}/mark-fixed")]
+    [HttpPost("admin/disputes/{id}/mark-fixed")]
     [HttpPost("admin/v1/support/tickets/{id}/mark-fixed")]
+    [HttpPost("admin/support/tickets/{id}/mark-fixed")]
     [RequireCapability(Capabilities.AdminCasesUpdate)]
     [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> MarkFixed(string id, [FromBody] CaseStatusRequestV1? request,
@@ -251,8 +281,11 @@ public sealed class AdminCasesController : CaseControllerBase
         Status(id, GenericCaseStatuses.Fixed, request, key, ct);
 
     [HttpPost("admin/v1/cases/{id}/close")]
+    [HttpPost("admin/cases/{id}/close")]
     [HttpPost("admin/v1/disputes/{id}/close")]
+    [HttpPost("admin/disputes/{id}/close")]
     [HttpPost("admin/v1/support/tickets/{id}/close")]
+    [HttpPost("admin/support/tickets/{id}/close")]
     [RequireCapability(Capabilities.AdminCasesClose)]
     [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public Task<IActionResult> Close(string id, [FromBody] CaseStatusRequestV1? request,
@@ -260,8 +293,11 @@ public sealed class AdminCasesController : CaseControllerBase
         Status(id, GenericCaseStatuses.Closed, request, key, ct);
 
     [HttpPost("admin/v1/cases/{id}/reopen")]
+    [HttpPost("admin/cases/{id}/reopen")]
     [HttpPost("admin/v1/disputes/{id}/reopen")]
+    [HttpPost("admin/disputes/{id}/reopen")]
     [HttpPost("admin/v1/support/tickets/{id}/reopen")]
+    [HttpPost("admin/support/tickets/{id}/reopen")]
     [RequireCapability(Capabilities.AdminCasesClose)]
     [ProducesResponseType(typeof(CaseDetailResponseV2), StatusCodes.Status200OK)]
     public async Task<IActionResult> Reopen(string id, [FromBody] CaseStatusRequestV1? request,
@@ -285,6 +321,7 @@ public sealed class AdminCasesController : CaseControllerBase
     }
 
     [HttpPost("admin/v1/disputes/{id}/review")]
+    [HttpPost("admin/disputes/{id}/review")]
     [RequireCapability(Capabilities.AdminCasesUpdate)]
     public Task<IActionResult> LegacyReview(string id, [FromBody] CaseStatusRequestV1? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct) =>
@@ -293,6 +330,7 @@ public sealed class AdminCasesController : CaseControllerBase
             : LegacyPatch(id, GenericCaseStatuses.Pending, request?.Reason, request?.ExpectedVersion, key, ct);
 
     [HttpPost("admin/v1/disputes/{id}/resolve")]
+    [HttpPost("admin/disputes/{id}/resolve")]
     [RequireCapability(Capabilities.AdminCasesClose)]
     public Task<IActionResult> LegacyResolve(string id, [FromBody] LegacyCaseResolutionRequest? request,
         [FromHeader(Name = "Idempotency-Key")] string? key, CancellationToken ct)

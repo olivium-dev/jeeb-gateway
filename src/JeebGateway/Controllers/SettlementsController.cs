@@ -215,6 +215,8 @@ public class SettlementsController : ControllerBase
     /// </para>
     /// </summary>
     [HttpGet("/v1/deliveries/{deliveryId}/settlement")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpGet("/deliveries/{deliveryId}/settlement")]
     // ADR-005 L2 §E: the settlement intent is read by the delivery PARTIES — coarse
     // cap delivery.participate {client, jeeber}. Exact party/admin membership is STATE,
     // resolved in-action against delivery-service (same shape as the receipt read).

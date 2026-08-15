@@ -9,6 +9,8 @@ namespace JeebGateway.Controllers;
 
 [ApiController]
 [Route("admin/v1/case-recovery")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("admin/case-recovery")]
 [RequireCapability(Capabilities.DisputeResolve)]
 public sealed class AdminCaseRecoveryController : ControllerBase
 {

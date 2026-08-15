@@ -40,6 +40,8 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("v1/jeeb/wallet")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("jeeb/wallet")]
 [RequireCapability(Capabilities.WalletReadOwn)]
 public sealed class JeebWalletController : ControllerBase
 {

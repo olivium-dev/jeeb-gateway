@@ -42,6 +42,8 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("v1/ratings/jeeb/deliveries/{deliveryId}")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("ratings/jeeb/deliveries/{deliveryId}")]
 [RequireCapability(Capabilities.DeliveryParticipate)]
 public class JeebRatingsController : ControllerBase
 {

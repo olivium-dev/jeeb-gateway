@@ -13,6 +13,8 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("admin/v1/session")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("admin/session")]
 public sealed class AdminSessionController : ControllerBase
 {
     [HttpGet]

@@ -94,6 +94,8 @@ public class OffersController : ControllerBase
     /// upstream status verbatim. ProblemDetails on every negative (RFC 7807).
     /// </summary>
     [HttpPut("/v1/offers/{offerId}")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpPut("/offers/{offerId}")]
     [RequireCapability(Capabilities.OfferEditOwn)] // {jeeber}; ownership (offer.jeeber_id == actor) = STATE (offer-service)
     [RequireActiveUser]
     [ProducesResponseType(typeof(OfferWire), StatusCodes.Status200OK)]
@@ -227,6 +229,7 @@ public class OffersController : ControllerBase
     /// nothing. ProblemDetails on every negative (RFC 7807).
     /// </summary>
     [HttpPost("/v1/offers/{offerId}/reject")]
+    [HttpPost("/offers/{offerId}/reject")]
     [RequireCapability(Capabilities.OfferReject)] // {client}; authz (request.client_id == actor) = STATE (offer-service)
     [RequireActiveUser]
     [ProducesResponseType(StatusCodes.Status200OK)]

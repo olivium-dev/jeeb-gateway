@@ -43,6 +43,8 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// </summary>
 [ApiController]
 [Route("v1/users/me")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("users/me")]
 // ADR-004: enforce the default authorization policy (GatewayBearerScheme only, aud=jeeb-clients).
 // Without this, the issuer-routing policy scheme would still establish a UM principal for an
 // aud=user-management token and the manual UserIdentity check would let it through. With
