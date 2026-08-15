@@ -54,7 +54,8 @@ public sealed class DeliveryServiceEscalationMirror : IEscalationMirror
     private void OnEvicted(AdminEscalation row) =>
         _log.LogWarning(
             "escalation mirror EVICTED escalationId={EscalationId} deliveryId={DeliveryId}: " +
-            "queue full at {Capacity}; the local row stays authoritative and W3-07 replays this id.",
+            "queue full at {Capacity}; the local row stays authoritative. NO escalation backfill "
+            + "exists yet (ADR-0009) — this id is lost upstream until one is written.",
             row.Id, row.DeliveryId, QueueCapacity);
 
     /// <summary>Rows waiting to be mirrored; the drainer is the only reader.</summary>
@@ -125,7 +126,8 @@ public sealed class EscalationMirrorDrainer : BackgroundService
             {
                 _log.LogWarning(ex,
                     "escalation mirror POST failed for escalationId={EscalationId} deliveryId={DeliveryId}; " +
-                    "the local admin_escalations row is authoritative and the W3-07 backfill replays this id.",
+                    "the local admin_escalations row is authoritative. NO escalation backfill exists yet " +
+                    "(ADR-0009) — this id is lost upstream until one is written.",
                     row.Id, row.DeliveryId);
             }
         }

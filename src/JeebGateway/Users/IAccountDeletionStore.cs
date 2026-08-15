@@ -38,6 +38,8 @@ public interface IAccountDeletionStore
     ///   - executes the PII hard-delete on <see cref="AccountDeletionStatus.Scheduled"/>
     ///     rows whose <c>ScheduledPurgeAt</c> is at or before <paramref name="now"/>,
     ///     moving them to <see cref="AccountDeletionStatus.Completed"/>.
+    /// Returns every record it advanced, so the W3-05 mirror can push each
+    /// transition upstream (/v1/work-items has no update route the gateway may call).
     /// </summary>
-    Task AdvanceAsync(DateTimeOffset now, CancellationToken ct);
+    Task<IReadOnlyList<AccountDeletionRequest>> AdvanceAsync(DateTimeOffset now, CancellationToken ct);
 }

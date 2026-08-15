@@ -195,10 +195,10 @@ public class StateServiceAccountDeletionStoreTests
         public Task<AccountDeletionRequest?> GetAsync(string userId, CancellationToken ct) =>
             Task.FromResult(_records.TryGetValue(userId, out var record) ? record : null);
 
-        public Task AdvanceAsync(DateTimeOffset now, CancellationToken ct)
+        public Task<IReadOnlyList<AccountDeletionRequest>> AdvanceAsync(DateTimeOffset now, CancellationToken ct)
         {
             Advances++;
-            return Task.CompletedTask;
+            return Task.FromResult<IReadOnlyList<AccountDeletionRequest>>(Array.Empty<AccountDeletionRequest>());
         }
     }
 

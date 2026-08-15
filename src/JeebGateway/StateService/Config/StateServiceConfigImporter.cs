@@ -1,9 +1,7 @@
-using System.Text.Json;
 using JeebGateway.Migration;
 using JeebGateway.ProhibitedItems;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.Services.Clients;
-using JeebGateway.StateService.Ownership;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -11,12 +9,17 @@ namespace JeebGateway.StateService.Config;
 
 /// <summary>
 /// gwdbx W3-03 — the freeze-import half of freeze-import-flip (W3-10 freezes authoring, W3-07 runs
-/// this, W3-11 flips). Reads the authoritative gateway-local stores and replays them onto the
-/// unified state-service config primitive; every leg is idempotent, paged and re-runnable (G-21).
+/// this, W3-11 flips). Reads the authoritative gateway-LOCAL stores and replays them onto the
+/// surfaces the read rung will serve from; every leg is idempotent, paged and re-runnable (G-21).
 ///
 /// <para>There is deliberately NO dual-write decorator on these catalog legs: two independently
 /// writable catalogs with no reconciler diverge silently. The import is the only writer upstream
 /// until the flip.</para>
+///
+/// <para>Both sides are resolved EXPLICITLY — <see cref="ILocalProhibitedItemsStore"/> /
+/// <see cref="ILocalFlaggedRequestStore"/> for the source, <see cref="IUpstreamFlaggedRequestStore"/>
+/// and <see cref="IStateConfigClient"/> for the target. Resolving the serving interfaces would read
+/// upstream and re-publish it to itself once the rung is live.</para>
 ///
 /// <para>The CMS leg was DELETED by ADR-0008: bundler-service owns every CMS row, so replaying it
 /// into state-service would fork the catalog into exactly the two-writer shape above.</para>
@@ -26,34 +29,32 @@ public sealed class StateServiceConfigImporter
     // Application scope the state-service credential grants this gateway.
     public const string Application = "jeeb-gateway";
 
-    // G-28: holder-generic work kind for the moderation review queue.
-    public const string FlaggedWorkKind = "content-flag";
+    // Recorded as the deciding admin when a replayed row was already decided locally.
+    public const string ImportActor = "gwdbx-w3-07-import";
 
     // Bulk-import size caps: a page cap keeps one request small, the page cap bounds a runaway loop.
     private const int PageSize = 200;
     private const int MaxPages = 500;
 
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
-
-    private readonly IProhibitedItemsStore _lexicon;
-    private readonly IFlaggedRequestStore _flagged;
+    private readonly ILocalProhibitedItemsStore _lexicon;
+    private readonly ILocalFlaggedRequestStore _flaggedLocal;
+    private readonly IUpstreamFlaggedRequestStore _flaggedUpstream;
     private readonly IStateConfigClient _config;
-    private readonly IStateOwnershipClient _ownership;
     private readonly IOptionsMonitor<GwdbxMigrationOptions> _mode;
     private readonly ILogger<StateServiceConfigImporter> _log;
 
     public StateServiceConfigImporter(
-        IProhibitedItemsStore lexicon,
-        IFlaggedRequestStore flagged,
+        ILocalProhibitedItemsStore lexicon,
+        ILocalFlaggedRequestStore flaggedLocal,
+        IUpstreamFlaggedRequestStore flaggedUpstream,
         IStateConfigClient config,
-        IStateOwnershipClient ownership,
         IOptionsMonitor<GwdbxMigrationOptions> mode,
         ILogger<StateServiceConfigImporter> log)
     {
         _lexicon = lexicon;
-        _flagged = flagged;
+        _flaggedLocal = flaggedLocal;
+        _flaggedUpstream = flaggedUpstream;
         _config = config;
-        _ownership = ownership;
         _mode = mode;
         _log = log;
     }
@@ -61,9 +62,6 @@ public sealed class StateServiceConfigImporter
     // G-15 — publishing the same lexicon version twice is one upstream version, never two.
     public static string LexiconPublishKey(string versionTag) =>
         "config-import:" + ProhibitedItemsEnvelope.SurfaceKey + ":" + versionTag;
-
-    public static string FlaggedWorkKey(string flaggedRequestId) =>
-        FlaggedWorkKind + ":" + flaggedRequestId;
 
     /// <summary>
     /// Runs every leg. <paramref name="force"/> is required once a leg's mode has reached
@@ -161,34 +159,33 @@ public sealed class StateServiceConfigImporter
         return imported;
     }
 
+    // Replays onto the state-service CASE engine — the one surface StateServiceFlaggedRequestStore
+    // serves the read rung from. The old work-items leg wrote a kind nothing ever read.
     private async Task<int> ImportFlaggedAsync(CancellationToken ct)
     {
         var imported = 0;
         for (var page = 1; page <= MaxPages; page++)
         {
-            var slice = await _flagged.ListAsync(null, page, PageSize, ct);
+            var slice = await _flaggedLocal.ListAsync(null, page, PageSize, ct);
             foreach (var row in slice.Items)
             {
-                await _ownership.CreateWorkItemAsync(
-                    new WorkItemCreateRequestV1
+                var created = await _flaggedUpstream.CreateAsync(
+                    new FlaggedRequestCreate
                     {
-                        Application = Application,
-                        Kind = FlaggedWorkKind,
-                        SubjectRef = row.UserId,
-                        Payload = JsonSerializer.SerializeToElement(
-                            new
-                            {
-                                flaggedRequestId = row.Id,
-                                requestId = row.RequestId,
-                                status = row.Status.ToString(),
-                                decidedBy = row.DecidedBy,
-                                decidedAt = row.DecidedAt,
-                                decisionNote = row.DecisionNote,
-                            },
-                            Json),
+                        RequestId = row.RequestId,
+                        UserId = row.UserId,
+                        Description = row.Description,
+                        Matches = row.Matches,
                     },
-                    FlaggedWorkKey(row.Id),
                     ct);
+
+                // A decided row replays its decision too, otherwise the flip would re-open every
+                // cleared/upheld case. Both keys are content digests, so a re-run no-ops (G-21).
+                if (row.Status != FlaggedRequestStatus.Pending)
+                {
+                    await _flaggedUpstream.DecideAsync(
+                        created.Id, row.Status, row.DecidedBy ?? ImportActor, row.DecisionNote, ct);
+                }
                 imported++;
             }
             if (slice.Items.Count < PageSize || imported >= slice.Total) break;

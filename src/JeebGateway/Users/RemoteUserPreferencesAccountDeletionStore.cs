@@ -90,10 +90,10 @@ public sealed class RemoteUserPreferencesAccountDeletionStore : IAccountDeletion
         // The gateway-local store is authoritative for reads (the remote blob is a mirror).
         => _inner.GetAsync(userId, ct);
 
-    public async Task AdvanceAsync(DateTimeOffset now, CancellationToken ct)
+    public async Task<IReadOnlyList<AccountDeletionRequest>> AdvanceAsync(DateTimeOffset now, CancellationToken ct)
     {
         // The state machine + purge lives in the inner store; the purge worker drives this.
-        await _inner.AdvanceAsync(now, ct);
+        return await _inner.AdvanceAsync(now, ct);
     }
 
     /// <summary>

@@ -161,7 +161,8 @@ public class AccountDeletionRelayPlanTests
         public Task<AccountDeletionRequest?> GetAsync(string userId, CancellationToken ct) =>
             Task.FromResult(_records.TryGetValue(userId, out var record) ? record : null);
 
-        public Task AdvanceAsync(DateTimeOffset now, CancellationToken ct) => Task.CompletedTask;
+        public Task<IReadOnlyList<AccountDeletionRequest>> AdvanceAsync(DateTimeOffset now, CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<AccountDeletionRequest>>(Array.Empty<AccountDeletionRequest>());
     }
 
     private sealed class RecordingOwnershipClient : IStateOwnershipClient

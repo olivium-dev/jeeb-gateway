@@ -1,5 +1,7 @@
 using System.Data.Common;
+using JeebGateway.Migration;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 
 namespace JeebGateway.ProhibitedItems;
 
@@ -41,16 +43,31 @@ public sealed class DefaultLexiconSeeder : IHostedService
     };
 
     private readonly IProhibitedItemsStore _store;
+    private readonly IOptionsMonitor<GwdbxMigrationOptions> _mode;
     private readonly ILogger<DefaultLexiconSeeder> _logger;
 
-    public DefaultLexiconSeeder(IProhibitedItemsStore store, ILogger<DefaultLexiconSeeder> logger)
+    public DefaultLexiconSeeder(
+        IProhibitedItemsStore store,
+        IOptionsMonitor<GwdbxMigrationOptions> mode,
+        ILogger<DefaultLexiconSeeder> logger)
     {
         _store = store;
+        _mode = mode;
         _logger = logger;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        // From the read rung up the published config surface OWNS the catalog and local authoring
+        // fails closed, so seeding here would either throw at boot or write rows nothing reads.
+        if (GwdbxMigrationOptions.RequiresUpstream(_mode.CurrentValue.ProhibitedItems))
+        {
+            _logger.LogInformation(
+                "Prohibited-items lexicon is upstream-owned (FeatureFlags:ProhibitedItemsMode={Mode}); skipping default seed.",
+                _mode.CurrentValue.ProhibitedItemsMode);
+            return;
+        }
+
         // Degrade-don't-crash: with a durable (Postgres-backed) IProhibitedItemsStore the
         // startup catalog read can fail transiently (DB briefly unreachable at boot). The
         // seeder must NEVER fault host startup over it — a missing lexicon degrades the

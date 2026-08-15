@@ -14,7 +14,7 @@ namespace JeebGateway.ProhibitedItems.FlaggedRequests;
 /// vocabulary and JSON translation required by the existing public contract.
 /// </summary>
 public sealed class StateServiceFlaggedRequestStore(IGenericCaseStateClient cases)
-    : IFlaggedRequestStore
+    : IUpstreamFlaggedRequestStore
 {
     private const string Kind = "moderation_review";
     private const string Category = "prohibited_item";

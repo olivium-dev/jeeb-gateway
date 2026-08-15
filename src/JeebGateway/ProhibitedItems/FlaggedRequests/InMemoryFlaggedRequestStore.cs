@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 
 namespace JeebGateway.ProhibitedItems.FlaggedRequests;
 
-public class InMemoryFlaggedRequestStore : IFlaggedRequestStore
+public class InMemoryFlaggedRequestStore : ILocalFlaggedRequestStore
 {
     private readonly ConcurrentDictionary<string, FlaggedRequest> _items = new();
 

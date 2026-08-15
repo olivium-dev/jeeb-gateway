@@ -13,7 +13,7 @@ namespace JeebGateway.ProhibitedItems;
 /// map happen under <see cref="_writeLock"/> so the uniqueness check and the
 /// insert/update form a single critical section.
 /// </summary>
-public class InMemoryProhibitedItemsStore : IProhibitedItemsStore
+public class InMemoryProhibitedItemsStore : ILocalProhibitedItemsStore
 {
     private readonly ConcurrentDictionary<string, ProhibitedItem> _items = new();
     private readonly ConcurrentDictionary<string, UserAcknowledgment> _acks = new();

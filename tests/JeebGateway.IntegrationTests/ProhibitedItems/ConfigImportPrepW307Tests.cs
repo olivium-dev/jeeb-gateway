@@ -36,7 +36,7 @@ public class ConfigImportPrepW307Tests
         report.AcksChecked.Should().Be(2);
         report.AcksMatched.Should().Be(2);
         report.FlaggedRows.Should().Be(2);
-        report.FlaggedSubjects.Should().Be(2);
+        report.FlaggedUpstreamRows.Should().Be(2);
         report.FlaggedMatched.Should().Be(2);
     }
 
@@ -186,15 +186,17 @@ public class ConfigImportPrepW307Tests
         public StatefulConfigClient Config { get; } = new();
         public StatefulOwnershipClient Ownership { get; } = new();
 
+        public RecordingUpstreamFlaggedStore FlaggedUpstream { get; } = new();
+
         public StateServiceConfigImporter Importer => new(
-            Lexicon, Flagged, Config, Ownership,
+            Lexicon, Flagged, FlaggedUpstream, Config,
             new StaticOptionsMonitor<GwdbxMigrationOptions>(new GwdbxMigrationOptions()),
             NullLogger<StateServiceConfigImporter>.Instance);
 
         public ConfigParityChecker Checker => NewChecker(Config);
 
         public ConfigParityChecker NewChecker(IStateConfigClient config) => new(
-            Lexicon, Flagged, config, Ownership, NullLogger<ConfigParityChecker>.Instance);
+            Lexicon, Flagged, FlaggedUpstream, config, NullLogger<ConfigParityChecker>.Instance);
 
         public static async Task<World> SeededAsync()
         {
@@ -228,17 +230,13 @@ public class ConfigImportPrepW307Tests
             services.AddSingleton<IOptionsMonitor<GwdbxMigrationOptions>>(
                 new StaticOptionsMonitor<GwdbxMigrationOptions>(new GwdbxMigrationOptions()));
             services.AddTransient(sp => new StateServiceConfigImporter(
-                sp.GetRequiredService<IProhibitedItemsStore>(),
-                sp.GetRequiredService<IFlaggedRequestStore>(),
+                Lexicon, Flagged, FlaggedUpstream,
                 sp.GetRequiredService<IStateConfigClient>(),
-                sp.GetRequiredService<IStateOwnershipClient>(),
                 sp.GetRequiredService<IOptionsMonitor<GwdbxMigrationOptions>>(),
                 NullLogger<StateServiceConfigImporter>.Instance));
             services.AddTransient(sp => new ConfigParityChecker(
-                sp.GetRequiredService<IProhibitedItemsStore>(),
-                sp.GetRequiredService<IFlaggedRequestStore>(),
+                Lexicon, Flagged, FlaggedUpstream,
                 sp.GetRequiredService<IStateConfigClient>(),
-                sp.GetRequiredService<IStateOwnershipClient>(),
                 NullLogger<ConfigParityChecker>.Instance));
 
             return new ConfigImportWorker(
@@ -410,7 +408,59 @@ public class ConfigImportPrepW307Tests
             throw new NotSupportedException();
     }
 
-    private sealed class MutableFlaggedRequestStore : IFlaggedRequestStore
+
+    // Stands in for the state-service case engine the import now replays onto. Create is keyed on
+    // the replayed content, exactly like the real store's digest key, so a re-run no-ops.
+    private sealed class RecordingUpstreamFlaggedStore : IUpstreamFlaggedRequestStore
+    {
+        private readonly List<FlaggedRequest> _rows = new();
+
+        public List<FlaggedRequestCreate> Created { get; } = new();
+
+        public List<(string Id, FlaggedRequestStatus Status)> Decisions { get; } = new();
+
+        public Task<FlaggedRequest> CreateAsync(FlaggedRequestCreate input, CancellationToken ct)
+        {
+            var existing = _rows.FirstOrDefault(r =>
+                r.UserId == input.UserId && r.RequestId == input.RequestId
+                && r.Description == input.Description);
+            if (existing is not null) return Task.FromResult(existing);
+
+            Created.Add(input);
+            var row = new FlaggedRequest
+            {
+                Id = "case-" + (_rows.Count + 1),
+                RequestId = input.RequestId,
+                UserId = input.UserId,
+                Description = input.Description,
+                Matches = input.Matches,
+                Status = FlaggedRequestStatus.Pending,
+                CreatedAt = DateTimeOffset.UnixEpoch,
+            };
+            _rows.Add(row);
+            return Task.FromResult(row);
+        }
+
+        public Task<FlaggedRequest?> GetAsync(string id, CancellationToken ct) =>
+            Task.FromResult(_rows.FirstOrDefault(r => r.Id == id));
+
+        public Task<FlaggedRequestPage> ListAsync(
+            FlaggedRequestStatus? status, int page, int pageSize, CancellationToken ct) =>
+            Task.FromResult(new FlaggedRequestPage
+            {
+                Items = _rows.Skip((page - 1) * pageSize).Take(pageSize).ToList(),
+                Total = _rows.Count,
+            });
+
+        public Task<FlaggedRequest?> DecideAsync(
+            string id, FlaggedRequestStatus status, string adminUserId, string? note, CancellationToken ct)
+        {
+            Decisions.Add((id, status));
+            return Task.FromResult(_rows.FirstOrDefault(r => r.Id == id));
+        }
+    }
+
+    private sealed class MutableFlaggedRequestStore : ILocalFlaggedRequestStore
     {
         private readonly List<FlaggedRequest> _rows = new();
 

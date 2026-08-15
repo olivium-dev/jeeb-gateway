@@ -168,21 +168,23 @@ public class StateServiceConfigW303Tests
     }
 
     [Fact]
-    public async Task Import_Moves_Flagged_Requests_Onto_Work_Items_With_A_Stable_Key()
+    public async Task Import_Replays_Flagged_Requests_Onto_The_Surface_The_Read_Rung_Serves()
     {
         var config = new RecordingConfigClient();
-        var ownership = new RecordingOwnershipClient();
+        var upstream = new RecordingUpstreamFlaggedStore();
         var flagged = new FakeFlaggedRequestStore(NewFlag("f-1", "u-1"), NewFlag("f-2", "u-2"));
-        var importer = NewImporter(config, ownership: ownership, flagged: flagged);
+        var importer = NewImporter(config, flagged: flagged, flaggedUpstream: upstream);
 
         var report = await importer.ImportAsync(force: false, default);
 
         report.FlaggedRequests.Should().Be(2);
-        ownership.Creates.Select(c => c.IdempotencyKey)
-            .Should().Equal("content-flag:f-1", "content-flag:f-2");
-        ownership.Creates[0].Body.Kind.Should().Be("content-flag",
-            "G-28 — the moderation queue rides the existing work-item rail with neutral vocabulary");
-        ownership.Creates[0].Body.SubjectRef.Should().Be("u-1");
+        upstream.Created.Select(c => c.UserId).Should().Equal("u-1", "u-2",
+            "ADR-0009 — the import writes the CASE surface StateServiceFlaggedRequestStore reads, "
+            + "not the work-item kind nothing ever consumed");
+        upstream.Decisions.Should().BeEmpty("both replayed rows are still pending");
+
+        await importer.ImportAsync(force: false, default);
+        upstream.Created.Should().HaveCount(2, "G-21 — a re-run replays the same content key");
     }
 
     [Fact]
@@ -255,15 +257,15 @@ public class StateServiceConfigW303Tests
 
     private static StateServiceConfigImporter NewImporter(
         IStateConfigClient config,
-        IProhibitedItemsStore? lexicon = null,
-        IFlaggedRequestStore? flagged = null,
-        IStateOwnershipClient? ownership = null,
+        ILocalProhibitedItemsStore? lexicon = null,
+        ILocalFlaggedRequestStore? flagged = null,
+        IUpstreamFlaggedRequestStore? flaggedUpstream = null,
         string prohibitedMode = "local") =>
         new(
             lexicon ?? new InMemoryProhibitedItemsStore(),
             flagged ?? new FakeFlaggedRequestStore(),
+            flaggedUpstream ?? new RecordingUpstreamFlaggedStore(),
             config,
-            ownership ?? new RecordingOwnershipClient(),
             new StaticOptionsMonitor<GwdbxMigrationOptions>(new GwdbxMigrationOptions
             {
                 ProhibitedItemsMode = prohibitedMode,
@@ -437,7 +439,59 @@ public class StateServiceConfigW303Tests
             throw new NotSupportedException();
     }
 
-    private sealed class FakeFlaggedRequestStore : IFlaggedRequestStore
+
+    // Stands in for the state-service case engine the import now replays onto. Create is keyed on
+    // the replayed content, exactly like the real store's digest key, so a re-run no-ops.
+    private sealed class RecordingUpstreamFlaggedStore : IUpstreamFlaggedRequestStore
+    {
+        private readonly List<FlaggedRequest> _rows = new();
+
+        public List<FlaggedRequestCreate> Created { get; } = new();
+
+        public List<(string Id, FlaggedRequestStatus Status)> Decisions { get; } = new();
+
+        public Task<FlaggedRequest> CreateAsync(FlaggedRequestCreate input, CancellationToken ct)
+        {
+            var existing = _rows.FirstOrDefault(r =>
+                r.UserId == input.UserId && r.RequestId == input.RequestId
+                && r.Description == input.Description);
+            if (existing is not null) return Task.FromResult(existing);
+
+            Created.Add(input);
+            var row = new FlaggedRequest
+            {
+                Id = "case-" + (_rows.Count + 1),
+                RequestId = input.RequestId,
+                UserId = input.UserId,
+                Description = input.Description,
+                Matches = input.Matches,
+                Status = FlaggedRequestStatus.Pending,
+                CreatedAt = DateTimeOffset.UnixEpoch,
+            };
+            _rows.Add(row);
+            return Task.FromResult(row);
+        }
+
+        public Task<FlaggedRequest?> GetAsync(string id, CancellationToken ct) =>
+            Task.FromResult(_rows.FirstOrDefault(r => r.Id == id));
+
+        public Task<FlaggedRequestPage> ListAsync(
+            FlaggedRequestStatus? status, int page, int pageSize, CancellationToken ct) =>
+            Task.FromResult(new FlaggedRequestPage
+            {
+                Items = _rows.Skip((page - 1) * pageSize).Take(pageSize).ToList(),
+                Total = _rows.Count,
+            });
+
+        public Task<FlaggedRequest?> DecideAsync(
+            string id, FlaggedRequestStatus status, string adminUserId, string? note, CancellationToken ct)
+        {
+            Decisions.Add((id, status));
+            return Task.FromResult(_rows.FirstOrDefault(r => r.Id == id));
+        }
+    }
+
+    private sealed class FakeFlaggedRequestStore : ILocalFlaggedRequestStore
     {
         private readonly List<FlaggedRequest> _rows;
 
