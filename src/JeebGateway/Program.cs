@@ -976,6 +976,13 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.CmsConfigMode),
         "FeatureFlags:CmsConfigMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    // ADR-0008 — the CMS leg is SUPERSEDED: bundler-service owns every surface/draft/publication
+    // row, so a rung above "local" would assert a cutover with no read path behind it.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.CmsConfigMode)
+                is JeebGateway.Migration.GwdbxMigrationPhase.Local,
+        "FeatureFlags:CmsConfigMode is pinned to \"local\" (ADR-0008): bundler-service owns the CMS "
+            + "surfaces, so there is no upstream rung to flip to.")
     .Validate(
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.AvailabilityMode),
         "FeatureFlags:AvailabilityMode must be one of: "
@@ -2757,10 +2764,8 @@ builder.Services
         o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.ProhibitedItems)
              || stateServiceWired,
         $"FeatureFlags:ProhibitedItemsMode is at or above dual-write-upstream-read, which makes jeeb-state-service the lexicon READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}).")
-    .Validate(
-        o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.CmsConfig)
-             || stateServiceWired,
-        $"FeatureFlags:CmsConfigMode is at or above dual-write-upstream-read, which makes jeeb-state-service the CMS config READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}).")
+    // ADR-0008 — CmsConfig needs no upstream guard here: it is pinned to "local", so it can never
+    // reach a rung that would make state-service the CMS read authority.
     .ValidateOnStart();
 
 if (stateServiceWired)
@@ -2775,8 +2780,8 @@ if (stateServiceWired)
     builder.Services.AddTransient<IStateOwnershipClient>(services =>
         (IStateOwnershipClient)services.GetRequiredService<IJeebStateServiceClient>());
 
-    // W3-03 (G-27) — the ONE versioned-config primitive. Consumers arrive with ProhibitedItemsMode
-    // / CmsConfigMode, both "local" in this PR; the freeze-import is the only upstream writer.
+    // W3-03 (G-27) — the ONE versioned-config primitive. Its consumer is ProhibitedItemsMode;
+    // CmsConfigMode is pinned "local" (ADR-0008) and no longer rides this rail.
     builder.Services.AddTransient<IStateConfigClient>(services =>
         (IStateConfigClient)services.GetRequiredService<IJeebStateServiceClient>());
     builder.Services.AddTransient<JeebGateway.StateService.Config.StateServiceConfigImporter>();

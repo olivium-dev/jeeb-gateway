@@ -1,6 +1,5 @@
 using System.Text.Json;
 using FluentAssertions;
-using JeebGateway.Cms;
 using JeebGateway.Infrastructure;
 using JeebGateway.Migration;
 using JeebGateway.ProhibitedItems;
@@ -16,9 +15,9 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests.ProhibitedItems;
 
-// gwdbx W3-03 — the prohibited-items trio + cms-config pair on ONE state-service config primitive
-// (G-27). Charter cases: import path, both modes default to "local", and an upstream failure never
-// fails the user-facing lexicon read at the "local" rung.
+// gwdbx W3-03 — the prohibited-items trio on ONE state-service config primitive (G-27). Charter
+// cases: import path, the mode defaults to "local", and an upstream failure never fails the
+// user-facing lexicon read at the "local" rung. The cms-config pair left at ADR-0008.
 public class StateServiceConfigW303Tests
 {
     // ----- ladder defaults ----------------------------------------------------
@@ -187,37 +186,6 @@ public class StateServiceConfigW303Tests
     }
 
     [Fact]
-    public async Task Import_Replays_The_Cms_Version_History_In_Order_Then_The_Draft()
-    {
-        var config = new RecordingConfigClient();
-        var cms = new FakeCmsSurfaceStore();
-        var importer = NewImporter(config, cms: cms);
-
-        var report = await importer.ImportAsync(force: false, default);
-
-        report.CmsVersions.Should().Be(2);
-        report.CmsDrafts.Should().Be(1);
-        config.Publishes.Where(p => p.SurfaceKey == "ofl-cms-orders-mfe")
-            .Select(p => p.IdempotencyKey)
-            .Should().Equal("config-import:ofl-cms-orders-mfe:v1", "config-import:ofl-cms-orders-mfe:v2");
-        config.Drafts.Last(d => d.SurfaceKey == "ofl-cms-orders-mfe").Body.Data.GetRawText()
-            .Should().Contain("draft-value", "the working copy lands last so the replay cannot bury it");
-    }
-
-    [Fact]
-    public async Task Import_Covers_Every_Seeded_Cms_Surface()
-    {
-        var config = new RecordingConfigClient();
-        var cms = new InMemoryCmsSurfaceStore();
-        var importer = NewImporter(config, cms: cms);
-
-        var report = await importer.ImportAsync(force: false, default);
-
-        report.CmsVersions.Should().Be(cms.ListSurfaces().Sum(s => s.Versions.Count));
-        report.CmsVersions.Should().BeGreaterThan(0, "the real seed publishes a v1 per surface");
-    }
-
-    [Fact]
     public async Task Import_Is_Idempotent_By_Key_Across_Re_Runs()
     {
         var config = new RecordingConfigClient();
@@ -289,20 +257,16 @@ public class StateServiceConfigW303Tests
         IStateConfigClient config,
         IProhibitedItemsStore? lexicon = null,
         IFlaggedRequestStore? flagged = null,
-        ICmsSurfaceStore? cms = null,
         IStateOwnershipClient? ownership = null,
-        string prohibitedMode = "local",
-        string cmsMode = "local") =>
+        string prohibitedMode = "local") =>
         new(
             lexicon ?? new InMemoryProhibitedItemsStore(),
             flagged ?? new FakeFlaggedRequestStore(),
-            cms ?? new FakeCmsSurfaceStore(empty: true),
             config,
             ownership ?? new RecordingOwnershipClient(),
             new StaticOptionsMonitor<GwdbxMigrationOptions>(new GwdbxMigrationOptions
             {
                 ProhibitedItemsMode = prohibitedMode,
-                CmsConfigMode = cmsMode,
             }),
             NullLogger<StateServiceConfigImporter>.Instance);
 
@@ -496,42 +460,5 @@ public class StateServiceConfigW303Tests
         public Task<FlaggedRequest?> DecideAsync(
             string id, FlaggedRequestStatus status, string adminUserId, string? note, CancellationToken ct) =>
             throw new NotSupportedException();
-    }
-
-    private sealed class FakeCmsSurfaceStore : ICmsSurfaceStore
-    {
-        private readonly List<CmsSurface> _surfaces = new();
-
-        public FakeCmsSurfaceStore(bool empty = false)
-        {
-            if (empty) return;
-
-            var surface = new CmsSurface { SurfaceId = "ofl-cms-orders-mfe", Title = "Orders MFE" };
-            surface.Versions.Add(NewVersion(1, "v1-value"));
-            surface.Versions.Add(NewVersion(2, "v2-value"));
-            surface.Draft = NewConfig("draft-value");
-            _surfaces.Add(surface);
-        }
-
-        public IReadOnlyList<CmsSurface> ListSurfaces() => _surfaces;
-
-        public CmsSurface? GetSurface(string surfaceId) =>
-            _surfaces.FirstOrDefault(s => s.SurfaceId == surfaceId);
-
-        public CmsSurface? UpsertDraft(string surfaceId, CmsConfig draft) => throw new NotSupportedException();
-
-        public CmsConfigVersion? Publish(string surfaceId, string publishedByUserId, DateTimeOffset publishedAt) =>
-            throw new NotSupportedException();
-
-        private static CmsConfigVersion NewVersion(int version, string value) => new()
-        {
-            Version = version,
-            Config = NewConfig(value),
-            PublishedAt = DateTimeOffset.UnixEpoch,
-            PublishedByUserId = "admin",
-        };
-
-        private static CmsConfig NewConfig(string value) =>
-            new() { Data = new Dictionary<string, object?> { ["key"] = value } };
     }
 }

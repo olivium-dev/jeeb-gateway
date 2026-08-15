@@ -51,8 +51,8 @@ public sealed class GwdbxMigrationOptions
     // W3-03 (registry token: ProhibitedItemsMode). Freeze-import-flip: no dual-write rung is used.
     public string ProhibitedItemsMode { get; init; } = "local";
 
-    // cms_surfaces pair -> state-service /v1/config-surfaces, W3-03 (registry token: CmsConfigMode).
-    // Freeze-import-flip; the W3-11 flip moves it off "local".
+    // cms_surfaces pair (registry token: CmsConfigMode). SUPERSEDED by ADR-0008: bundler-service
+    // owns every CMS row, so Program.cs pins this key to "local" and no higher rung validates.
     public string CmsConfigMode { get; init; } = "local";
 
     // jeeber_availability -> delivery-service /api/v1/providers/*, W3-04 (registry token:

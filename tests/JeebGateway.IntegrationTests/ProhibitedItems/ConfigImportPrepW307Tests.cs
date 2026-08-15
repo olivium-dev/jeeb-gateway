@@ -1,6 +1,5 @@
 using System.Text.Json;
 using FluentAssertions;
-using JeebGateway.Cms;
 using JeebGateway.Migration;
 using JeebGateway.ProhibitedItems;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
@@ -39,9 +38,6 @@ public class ConfigImportPrepW307Tests
         report.FlaggedRows.Should().Be(2);
         report.FlaggedSubjects.Should().Be(2);
         report.FlaggedMatched.Should().Be(2);
-        // InMemoryCmsSurfaceStore seeds the five canonical surfaces, each with a published v1.
-        report.CmsSurfacesChecked.Should().Be(5);
-        report.CmsSurfacesMatched.Should().Be(5);
     }
 
     [Fact]
@@ -71,7 +67,6 @@ public class ConfigImportPrepW307Tests
         report.Mismatches.Should().Contain(m => m.StartsWith("lexicon:"));
         report.Mismatches.Should().Contain(m => m.StartsWith("acks:"));
         report.Mismatches.Should().Contain(m => m.StartsWith("flagged:"));
-        report.Mismatches.Should().Contain(m => m.StartsWith("cms:"));
     }
 
     [Fact]
@@ -103,20 +98,6 @@ public class ConfigImportPrepW307Tests
 
         report.Clean.Should().BeFalse();
         report.Mismatches.Should().Contain(m => m.Contains("user-3-late"));
-    }
-
-    [Fact]
-    public async Task Parity_Catches_Cms_Version_Drift_After_Import()
-    {
-        var world = await World.SeededAsync();
-        await world.Importer.ImportAsync(force: false, default);
-
-        world.Cms.Publish("ofl-cms-orders-mfe", "admin", DateTimeOffset.UtcNow);
-
-        var report = await world.Checker.CheckAsync(default);
-
-        report.Clean.Should().BeFalse();
-        report.Mismatches.Should().Contain(m => m.StartsWith("cms:") && m.Contains("version differs"));
     }
 
     [Fact]
@@ -202,19 +183,18 @@ public class ConfigImportPrepW307Tests
     {
         public InMemoryProhibitedItemsStore Lexicon { get; } = new();
         public MutableFlaggedRequestStore Flagged { get; } = new();
-        public InMemoryCmsSurfaceStore Cms { get; } = new();
         public StatefulConfigClient Config { get; } = new();
         public StatefulOwnershipClient Ownership { get; } = new();
 
         public StateServiceConfigImporter Importer => new(
-            Lexicon, Flagged, Cms, Config, Ownership,
+            Lexicon, Flagged, Config, Ownership,
             new StaticOptionsMonitor<GwdbxMigrationOptions>(new GwdbxMigrationOptions()),
             NullLogger<StateServiceConfigImporter>.Instance);
 
         public ConfigParityChecker Checker => NewChecker(Config);
 
         public ConfigParityChecker NewChecker(IStateConfigClient config) => new(
-            Lexicon, Flagged, Cms, config, Ownership, NullLogger<ConfigParityChecker>.Instance);
+            Lexicon, Flagged, config, Ownership, NullLogger<ConfigParityChecker>.Instance);
 
         public static async Task<World> SeededAsync()
         {
@@ -235,10 +215,6 @@ public class ConfigImportPrepW307Tests
 
             world.Flagged.AddRow("f-1", "user-1");
             world.Flagged.AddRow("f-2", "user-2");
-
-            world.Cms.UpsertDraft("ofl-cms-orders-mfe", NewConfig("v1-value"));
-            world.Cms.Publish("ofl-cms-orders-mfe", "admin", DateTimeOffset.UnixEpoch);
-            world.Cms.UpsertDraft("ofl-cms-orders-mfe", NewConfig("draft-value"));
             return world;
         }
 
@@ -247,7 +223,6 @@ public class ConfigImportPrepW307Tests
             var services = new ServiceCollection();
             services.AddSingleton<IProhibitedItemsStore>(Lexicon);
             services.AddSingleton<IFlaggedRequestStore>(Flagged);
-            services.AddSingleton<ICmsSurfaceStore>(Cms);
             services.AddSingleton(config ?? (IStateConfigClient)Config);
             services.AddSingleton<IStateOwnershipClient>(Ownership);
             services.AddSingleton<IOptionsMonitor<GwdbxMigrationOptions>>(
@@ -255,7 +230,6 @@ public class ConfigImportPrepW307Tests
             services.AddTransient(sp => new StateServiceConfigImporter(
                 sp.GetRequiredService<IProhibitedItemsStore>(),
                 sp.GetRequiredService<IFlaggedRequestStore>(),
-                sp.GetRequiredService<ICmsSurfaceStore>(),
                 sp.GetRequiredService<IStateConfigClient>(),
                 sp.GetRequiredService<IStateOwnershipClient>(),
                 sp.GetRequiredService<IOptionsMonitor<GwdbxMigrationOptions>>(),
@@ -263,7 +237,6 @@ public class ConfigImportPrepW307Tests
             services.AddTransient(sp => new ConfigParityChecker(
                 sp.GetRequiredService<IProhibitedItemsStore>(),
                 sp.GetRequiredService<IFlaggedRequestStore>(),
-                sp.GetRequiredService<ICmsSurfaceStore>(),
                 sp.GetRequiredService<IStateConfigClient>(),
                 sp.GetRequiredService<IStateOwnershipClient>(),
                 NullLogger<ConfigParityChecker>.Instance));
@@ -273,9 +246,6 @@ public class ConfigImportPrepW307Tests
                 Microsoft.Extensions.Options.Options.Create(options),
                 NullLogger<ConfigImportWorker>.Instance);
         }
-
-        private static CmsConfig NewConfig(string value) =>
-            new() { Data = new Dictionary<string, object?> { ["key"] = value } };
     }
 
     // ----- stateful fakes (draft->publish + idempotent keys, like the real primitive) --------

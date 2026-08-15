@@ -1,5 +1,4 @@
 using System.Text.Json;
-using JeebGateway.Cms;
 using JeebGateway.Migration;
 using JeebGateway.ProhibitedItems;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
@@ -18,6 +17,9 @@ namespace JeebGateway.StateService.Config;
 /// <para>There is deliberately NO dual-write decorator on these catalog legs: two independently
 /// writable catalogs with no reconciler diverge silently. The import is the only writer upstream
 /// until the flip.</para>
+///
+/// <para>The CMS leg was DELETED by ADR-0008: bundler-service owns every CMS row, so replaying it
+/// into state-service would fork the catalog into exactly the two-writer shape above.</para>
 /// </summary>
 public sealed class StateServiceConfigImporter
 {
@@ -35,7 +37,6 @@ public sealed class StateServiceConfigImporter
 
     private readonly IProhibitedItemsStore _lexicon;
     private readonly IFlaggedRequestStore _flagged;
-    private readonly ICmsSurfaceStore _cms;
     private readonly IStateConfigClient _config;
     private readonly IStateOwnershipClient _ownership;
     private readonly IOptionsMonitor<GwdbxMigrationOptions> _mode;
@@ -44,7 +45,6 @@ public sealed class StateServiceConfigImporter
     public StateServiceConfigImporter(
         IProhibitedItemsStore lexicon,
         IFlaggedRequestStore flagged,
-        ICmsSurfaceStore cms,
         IStateConfigClient config,
         IStateOwnershipClient ownership,
         IOptionsMonitor<GwdbxMigrationOptions> mode,
@@ -52,7 +52,6 @@ public sealed class StateServiceConfigImporter
     {
         _lexicon = lexicon;
         _flagged = flagged;
-        _cms = cms;
         _config = config;
         _ownership = ownership;
         _mode = mode;
@@ -62,9 +61,6 @@ public sealed class StateServiceConfigImporter
     // G-15 — publishing the same lexicon version twice is one upstream version, never two.
     public static string LexiconPublishKey(string versionTag) =>
         "config-import:" + ProhibitedItemsEnvelope.SurfaceKey + ":" + versionTag;
-
-    public static string CmsPublishKey(string surfaceId, int version) =>
-        "config-import:" + surfaceId + ":v" + version.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     public static string FlaggedWorkKey(string flaggedRequestId) =>
         FlaggedWorkKind + ":" + flaggedRequestId;
@@ -89,19 +85,10 @@ public sealed class StateServiceConfigImporter
             report.FlaggedRequests = await ImportFlaggedAsync(ct);
         }
 
-        if (Serving(_mode.CurrentValue.CmsConfig) && !force)
-        {
-            report.SkippedLegs.Add("cms-config: mode is serving upstream reads; pass force to re-import");
-        }
-        else
-        {
-            report.CmsVersions = await ImportCmsAsync(report, ct);
-        }
-
         _log.LogInformation(
-            "gwdbx W3-03 config import: items={Items} acks={Acks} flagged={Flagged} cmsVersions={Versions} " +
+            "gwdbx W3-03 config import: items={Items} acks={Acks} flagged={Flagged} " +
             "lexiconVersion={VersionTag} skipped=[{Skipped}]",
-            report.LexiconItems, report.Acks, report.FlaggedRequests, report.CmsVersions,
+            report.LexiconItems, report.Acks, report.FlaggedRequests,
             report.LexiconVersionTag, string.Join("; ", report.SkippedLegs));
         return report;
     }
@@ -208,60 +195,6 @@ public sealed class StateServiceConfigImporter
         }
         return imported;
     }
-
-    private async Task<int> ImportCmsAsync(ConfigImportReport report, CancellationToken ct)
-    {
-        var versions = 0;
-        foreach (var surface in await _cms.ListSurfacesAsync(ct))
-        {
-            // Replay the published history in order so upstream version numbers match the CMS
-            // deep links the back-office already holds.
-            foreach (var version in surface.Versions.OrderBy(v => v.Version))
-            {
-                await _config.UpsertDraftAsync(
-                    surface.SurfaceId,
-                    new ConfigDraftUpsertRequestV1
-                    {
-                        Application = Application,
-                        Title = surface.Title,
-                        Data = ToElement(version.Config),
-                    },
-                    ct);
-
-                await _config.PublishAsync(
-                    surface.SurfaceId,
-                    new ConfigPublishRequestV1
-                    {
-                        Application = Application,
-                        PublishedByRef = version.PublishedByUserId,
-                        PublishedAt = version.PublishedAt,
-                        VersionTag = version.Version.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    },
-                    CmsPublishKey(surface.SurfaceId, version.Version),
-                    ct);
-                versions++;
-            }
-
-            // The unpublished working copy lands last so it is not overwritten by the replay.
-            if (surface.Draft is { } draft)
-            {
-                await _config.UpsertDraftAsync(
-                    surface.SurfaceId,
-                    new ConfigDraftUpsertRequestV1
-                    {
-                        Application = Application,
-                        Title = surface.Title,
-                        Data = ToElement(draft),
-                    },
-                    ct);
-                report.CmsDrafts++;
-            }
-        }
-        return versions;
-    }
-
-    private static JsonElement ToElement(CmsConfig config) =>
-        JsonSerializer.SerializeToElement(config.Data, Json);
 }
 
 /// <summary>Per-leg counts the W3-07 operator records against the import run.</summary>
@@ -270,8 +203,6 @@ public sealed class ConfigImportReport
     public int LexiconItems { get; set; }
     public int Acks { get; set; }
     public int FlaggedRequests { get; set; }
-    public int CmsVersions { get; set; }
-    public int CmsDrafts { get; set; }
     public string LexiconVersionTag { get; set; } = string.Empty;
     public List<string> SkippedLegs { get; } = new();
 }
