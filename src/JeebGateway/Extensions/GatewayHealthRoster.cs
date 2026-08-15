@@ -25,6 +25,10 @@ public static class GatewayHealthRoster
         ("contract-signing-service", "Services:ContractSigning:BaseUrl"),
         ("cdn-service", "Services:Cdn:BaseUrl"),
         ("form-builder-service", "Services:FormBuilder:BaseUrl"),
+        // Registered by HealthCheckExtensions but never declared here, so the
+        // asserted count sat one below production. Keyed off the store's own
+        // constant so the declaration and the registration cannot drift again.
+        ("bundler-service", JeebGateway.Cms.BundlerCmsSurfaceStore.BaseUrlConfigurationKey),
     };
 
     /// <summary>Ready-tagged checks registered in <c>Program.cs</c> rather than the extension.</summary>
@@ -41,7 +45,9 @@ public static class GatewayHealthRoster
     public static IReadOnlyList<string> Ready { get; } =
         DownstreamProbes.Select(p => p.Name).Concat(InProcessChecks).OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
-    /// <summary>A9 asserted count. 20 from W2-R11 (settlement-service); 19 from W5-10, which
-    /// deleted the WalletPostgres seam and its readiness probe.</summary>
-    public const int ExpectedReadyCount = 19;
+    /// <summary>A9 asserted count. Production registers 15 downstream + in-process checks.
+    /// 21 through W2-R11; 20 from W5-10, which deleted the WalletPostgres seam and its
+    /// readiness probe. (The pre-W5-10 figure of 20 undercounted: bundler-service was
+    /// registered but undeclared.)</summary>
+    public const int ExpectedReadyCount = 20;
 }

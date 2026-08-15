@@ -77,7 +77,7 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
     public void Ready_roster_no_longer_declares_the_wallet_database_probe()
     {
         GatewayHealthRoster.Ready.Should().NotContain("wallet-postgres");
-        GatewayHealthRoster.ExpectedReadyCount.Should().Be(19);
+        GatewayHealthRoster.ExpectedReadyCount.Should().Be(20);
         GatewayHealthRoster.Ready.Should().HaveCount(GatewayHealthRoster.ExpectedReadyCount);
     }
 }
