@@ -43,7 +43,8 @@ public sealed record SettlementSettleCommand(
 /// promotion/replay (200); <see cref="HolderExcluded"/> is the non-GUID holder rule (A21 §6 / D7).</summary>
 public sealed record SettlementSettleResult(Settlement? Row, bool Created, bool HolderExcluded = false);
 
-/// <summary>Bounded list filter over GET /settlements.</summary>
+/// <summary>List filter over GET /settlements. <see cref="Limit"/> is the upstream PAGE size,
+/// not a row cap — the client follows the cursor and returns every row in the window.</summary>
 public sealed record SettlementListQuery(
     string? HolderId = null,
     IReadOnlyCollection<string>? States = null,
@@ -67,6 +68,8 @@ public interface ISettlementServiceClient
 
     Task<Settlement?> GetByIdAsync(string settlementId, CancellationToken ct);
 
+    /// <summary>GET /settlements. Follows the upstream cursor so the whole window is returned,
+    /// not just the first page; a truncation at the page bound is logged, never silent.</summary>
     Task<IReadOnlyList<Settlement>> ListAsync(SettlementListQuery query, CancellationToken ct);
 
     /// <summary>POST /settlements/{id}/receipt — first-write-wins stamp; a replay returns the
@@ -85,6 +88,10 @@ public interface ISettlementServiceClient
 public sealed class SettlementServiceClient : ISettlementServiceClient
 {
     public const string HttpClientName = "settlement-service";
+
+    /// <summary>Cursor-follow bound on a list read (25 x 200 rows). Guards an upstream that
+    /// keeps handing back a cursor; exceeding it is logged, never silently trimmed.</summary>
+    private const int MaxListPages = 25;
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -190,14 +197,36 @@ public sealed class SettlementServiceClient : ISettlementServiceClient
         if (query.From is { } from) url += "&from=" + Uri.EscapeDataString(from.ToString("O"));
         if (query.To is { } to) url += "&to=" + Uri.EscapeDataString(to.ToString("O"));
 
-        using var response = await SendAsync(
-            () => new HttpRequestMessage(HttpMethod.Get, url), nameof(ListAsync), ct);
-        await EnsureSuccessAsync(response, nameof(ListAsync), ct);
+        // Upstream caps a page at 200; the deleted ListByJeeberAsync had no LIMIT. Follow the
+        // cursor so a window wider than one page cannot silently under-count money.
+        var rows = new List<Settlement>();
+        string? cursor = null;
+        for (var page = 0; page < MaxListPages; page++)
+        {
+            var pageUrl = string.IsNullOrEmpty(cursor)
+                ? url
+                : url + "&cursor=" + Uri.EscapeDataString(cursor);
+
+            using var response = await SendAsync(
+                () => new HttpRequestMessage(HttpMethod.Get, pageUrl), nameof(ListAsync), ct);
+            await EnsureSuccessAsync(response, nameof(ListAsync), ct);
+
+            var wire = await ReadJsonAsync<SettlementPageWire>(response, nameof(ListAsync), ct);
+            rows.AddRange((wire?.Items ?? []).Select(Map));
+            cursor = wire?.NextCursor;
+            if (string.IsNullOrEmpty(cursor)) break;
+        }
+
+        // A truncated money read must never look like a complete one.
+        if (!string.IsNullOrEmpty(cursor))
+            _log.LogError(
+                "settlement.list TRUNCATED after {Pages} pages ({Rows} rows) for holder {HolderId}: "
+                + "totals built on this page set are INCOMPLETE.",
+                MaxListPages, rows.Count, query.HolderId ?? "(all)");
 
         // Oldest-first, matching the deleted ListByJeeberAsync contract the earnings
         // projection depends on (its period start is the first row's settled_at).
-        var page = await ReadJsonAsync<SettlementPageWire>(response, nameof(ListAsync), ct);
-        return (page?.Items ?? []).Select(Map).OrderBy(s => s.SettledAt).ToArray();
+        return rows.OrderBy(s => s.SettledAt).ToArray();
     }
 
     public async Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, CancellationToken ct)

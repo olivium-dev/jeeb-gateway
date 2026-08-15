@@ -163,10 +163,21 @@ Pre-announced transitions (deploy checklists MUST assert names + count before th
 | **W5-11** | `gateway-postgres` + `store-durability` removed | **17** |
 
 **W2-R11 deploy precondition.** The probe is registered only when `Services:Settlement:BaseUrl` is set
-(`AddDownstreamProbe` skips an unset BaseUrl). Set it — and the SERVICE-scope `Services:Settlement:ApiToken`
-— in the env file BEFORE the symlink swap, or the roster lands at 19 and the post-deploy assert fails.
-The declared roster lives in code at `Extensions/GatewayHealthRoster.cs`
-(`ExpectedReadyCount = 20`), asserted by `SettlementServiceCutoverW2R11Tests.C3/C4`.
+(`AddDownstreamProbe` skips an unset BaseUrl). Set it in the env file BEFORE the symlink swap, or the
+roster lands at 19 and the post-deploy assert fails.
+
+**Readiness does NOT cover the gateway's token.** The probe dials settlement-service `/health/ready`,
+which is `AllowPublic()` upstream — it never presents `Services:Settlement:ApiToken`, and the auth-config
+check behind it covers settlement-service's OWN secrets, not the gateway's copy. A missing, typo'd or
+under-length SERVICE-scope token therefore lands **20/20 green** while every settle 401s and is swallowed
+on both completion legs. Set the ≥32-char SERVICE-scope `Services:Settlement:ApiToken` in the same env
+file, and after the swap make **one authed settlement read through the gateway** (e.g.
+`GET /v1/jeeb/earnings` with a minted token) — that, not readiness, is what proves the token.
+
+The declared roster lives in code at `Extensions/GatewayHealthRoster.cs` (`ExpectedReadyCount = 20`).
+`SettlementServiceCutoverW2R11Tests.C3/C4` seal the count and the 14 `DownstreamProbes` against what
+`AddDownstreamHealthChecks` registers; the 6 in-process checks are declared prose and several are
+env-conditional, so drift there is caught only by the post-deploy assert.
 
 **FINAL roster (17)** — machine-readable copy in `scripts/gwdbx-final-health-roster.txt`:
 `admin-oidc-configuration, ban-service, cdn-service, contract-signing-service, delivery-service,

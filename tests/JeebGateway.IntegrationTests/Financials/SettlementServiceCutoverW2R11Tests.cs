@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -12,6 +13,7 @@ using FluentAssertions;
 using JeebGateway.Conversations;
 using JeebGateway.Extensions;
 using JeebGateway.Financials;
+using JeebGateway.Observability;
 using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
 using JeebGateway.Tiers;
@@ -25,6 +27,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests.Financials;
@@ -217,7 +220,183 @@ public class SettlementServiceCutoverW2R11Tests
             .Should().BeEquivalentTo(new[] { "BaseUrl", "ApiToken" });
     }
 
+    // ── E. Review hardening: the money surfaces the cutover narrowed ────────
+
+    [Fact]
+    public async Task E1_Earnings_Read_Pages_Past_The_Upstream_Limit_Instead_Of_Under_Counting()
+    {
+        // The deleted PostgresSettlementStore.ListByJeeberAsync had NO LIMIT. Upstream clamps
+        // GET /settlements to 200 a page, so past 200 settlements a jeeber silently lost money.
+        const int total = 250;
+        var holderId = Guid.NewGuid().ToString();
+        await using var upstream = await StubSettlementListAsync(holderId, total);
+        var client = RealSettlementClient(upstream.BaseUrl);
+
+        var rows = await client.ListAsync(new SettlementListQuery(HolderId: holderId), default);
+
+        rows.Should().HaveCount(total, "one upstream page is not the whole window");
+        rows.Select(r => r.DeliveryId).Distinct(StringComparer.Ordinal).Should().HaveCount(total);
+        upstream.Requests.Count.Should().BeGreaterThan(1, "the nextCursor must actually be followed");
+        upstream.Requests.Skip(1).Should()
+            .OnlyContain(q => q.Contains("cursor=", StringComparison.Ordinal));
+
+        // The jeeber-facing money screen is the real victim: gross must cover every row.
+        var projection = await new EarningsAggregationService(client)
+            .GetLifetimeProjectionAsync(holderId, default);
+
+        projection.DeliveryCount.Should().Be(total);
+        projection.Entries.Should().HaveCount(total);
+        projection.Totals.Gross.Should().Be(Enumerable.Range(0, total).Sum(GrossFor));
+    }
+
+    [Fact]
+    public async Task E2_Receipt_Read_Refuses_A_Pending_Settlement_Instead_Of_Emitting_A_Zero_Receipt()
+    {
+        // After a bounce the self-heal can record an amount-less PENDING intent (upstream stores
+        // money as NULL while pending). Rendering that is a $0.00 receipt on a completed COD job.
+        var settlements = new FakeSettlementServiceClient();
+        await using var factory = CompletionFactory(
+            new ConfigurableDeliveryClient(), new CapturingLoggerProvider(), settlements);
+        var (deliveryId, jeeberId) = await SeedAtDoorWithFeeAsync(factory);
+
+        await settlements.SettleAsync(
+            new SettlementSettleCommand(
+                DeliveryId: deliveryId,
+                HolderId: jeeberId,
+                ClientId: Guid.NewGuid().ToString(),
+                TierId: null,
+                GrossAmount: null,
+                PaymentMethod: SettlementService.PaymentMethodCash),
+            default);
+        settlements.Rows[deliveryId].State.Should().Be(SettlementState.PendingSettlement);
+
+        var response = await ClientFor(factory, jeeberId, "driver")
+            .GetAsync($"/deliveries/{deliveryId}/receipt");
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound,
+            "a pending intent carries no money — there is no receipt to render yet");
+        settlements.Rows[deliveryId].ReceiptGeneratedAt.Should().BeNull(
+            "a pending row must not be stamped as if a receipt had been issued");
+    }
+
+    [Fact]
+    public async Task E3_A_Swallowed_Settle_Increments_The_Dropped_Settle_Counter()
+    {
+        // Both completion legs swallow settlement faults so a handover can never 5xx. The only
+        // trace was one ERROR line, and it promised a reconciler this step deleted.
+        var logs = new CapturingLoggerProvider();
+        await using var factory = CompletionFactory(
+            SuccessfulVerifyClient(), logs, FakeSettlementServiceClient.Unreachable());
+        var (deliveryId, jeeberId) = await SeedAtDoorWithFeeAsync(factory);
+
+        using var counted = new CounterProbe("settlement.ledger.post_failures");
+        var verify = await ClientFor(factory, jeeberId, "driver")
+            .PostAsJsonAsync($"/deliveries/{deliveryId}/otp/verify", new { code = ValidCode });
+
+        verify.StatusCode.Should().Be(HttpStatusCode.OK);
+        counted.Total.Should().BeGreaterThan(0,
+            "a settle that did not land must be observable as more than a log line");
+
+        var swallowed = SwallowedSettlementLines(logs);
+        swallowed.Should().ContainSingle();
+        swallowed.Single().Should().NotContain("reconcil",
+            "the reconciler is deleted — the log must not promise a replay that never comes");
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
+
+    private static decimal GrossFor(int index) => 100m + index;
+
+    private static SettlementServiceClient RealSettlementClient(string baseUrl)
+        => new(
+            new HttpClient { BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/") },
+            NullLogger<SettlementServiceClient>.Instance);
+
+    /// <summary>Stands in for GET /settlements with the upstream paging contract: keyset cursor,
+    /// created_at DESC, and nextCursor set only when the page came back full.</summary>
+    private static async Task<StubList> StubSettlementListAsync(string holderId, int total)
+    {
+        var rows = Enumerable.Range(0, total)
+            .Select(i => new
+            {
+                settlementId = Guid.NewGuid(),
+                deliveryId = $"dlv-{i:D4}",
+                holderId,
+                clientId = Guid.NewGuid().ToString(),
+                tierId = string.Empty,
+                state = "settled",
+                currency = SettlementService.CurrencyUsd,
+                paymentMethod = SettlementService.PaymentMethodCash,
+                grossAmount = GrossFor(i),
+                commissionRate = 0.10m,
+                commissionAmount = decimal.Round(GrossFor(i) * 0.10m, 2, MidpointRounding.AwayFromZero),
+                settledAt = DateTimeOffset.UnixEpoch.AddMinutes(i),
+                createdAt = DateTimeOffset.UnixEpoch.AddMinutes(i),
+            })
+            .OrderByDescending(r => r.createdAt)
+            .ToArray();
+
+        var seen = new ConcurrentQueue<string>();
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        app.MapGet("/settlements", (HttpContext ctx, int? limit, string? cursor) =>
+        {
+            seen.Enqueue(ctx.Request.QueryString.Value ?? string.Empty);
+            var take = Math.Clamp(limit ?? 50, 1, 200);
+            var offset = string.IsNullOrWhiteSpace(cursor) ? 0 : int.Parse(cursor);
+            var page = rows.Skip(offset).Take(take).ToArray();
+            var next = page.Length == take && page.Length > 0 ? (offset + take).ToString() : null;
+            return Results.Ok(new { items = page, nextCursor = next });
+        });
+        await app.StartAsync();
+        return new StubList(app, seen);
+    }
+
+    private sealed class StubList : IAsyncDisposable
+    {
+        private readonly WebApplication _app;
+        private readonly ConcurrentQueue<string> _seen;
+
+        public StubList(WebApplication app, ConcurrentQueue<string> seen)
+        {
+            _app = app;
+            _seen = seen;
+            BaseUrl = app.Urls.First();
+        }
+
+        public string BaseUrl { get; }
+        public IReadOnlyList<string> Requests => _seen.ToArray();
+
+        public async ValueTask DisposeAsync()
+        {
+            await _app.StopAsync();
+            await _app.DisposeAsync();
+        }
+    }
+
+    /// <summary>Sums one gateway-meter counter for the lifetime of the probe.</summary>
+    private sealed class CounterProbe : IDisposable
+    {
+        private readonly MeterListener _listener = new();
+        private long _total;
+
+        public CounterProbe(string instrument)
+        {
+            _listener.InstrumentPublished = (i, l) =>
+            {
+                if (i.Meter.Name == BusinessOutcomeTelemetry.MeterName && i.Name == instrument)
+                    l.EnableMeasurementEvents(i);
+            };
+            _listener.SetMeasurementEventCallback<long>((_, v, _, _) => Interlocked.Add(ref _total, v));
+            _listener.Start();
+        }
+
+        public long Total => Interlocked.Read(ref _total);
+
+        public void Dispose() => _listener.Dispose();
+    }
 
     private static async Task<HealthReport> ProbeSettlementServiceAsync(string baseUrl)
     {

@@ -179,6 +179,13 @@ public class SettlementsController : ControllerBase
             });
         }
 
+        // A pending intent stores money as NULL upstream, so rendering it would issue a $0.00
+        // receipt for a completed COD delivery. No receipt exists until the amount lands.
+        if (settlement.State == SettlementState.PendingSettlement)
+        {
+            return NotFound();
+        }
+
         // Advance state on first read so admins can tell apart "Jeeber
         // settled but no one looked at it" from "client picked up their
         // receipt". The store method is idempotent — repeat reads keep the

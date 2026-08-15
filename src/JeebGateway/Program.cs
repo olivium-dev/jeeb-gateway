@@ -1267,20 +1267,12 @@ builder.Services.AddSingleton<RequestLatencyMetrics>();
 
 // Cash settlement + receipt API (T-backend-016 / JEEB-34 → JEB-56).
 //
-// JEB-56: PostgresSettlementStore replaces InMemorySettlementStore when
-// GatewayPostgres:ConnectionString is configured. The store is the durable
-// COD settlement ledger (settlements table, migration 0015). When the
-// connection string is absent (local dev / CI without Postgres), the in-memory
-// fallback keeps the vertical exercisable.
-//
-// SettlementService re-computes the Jeeb fee (flat 10% commission,
-// no insurance or floor) from the row's tier and posts a single
-// best-effort ledger entry via ISettlementLedgerClient. The settlement row
-// is the gateway-side system of record; the ledger post is idempotent on the
-// settlement id. Cash settlement is a Jeeb product concern and keeps its own
-// slim ledger contract in the Financials module — it does NOT ride on the
-// wallet integration, which now mirrors the salehly-gateway sibling's
-// upstream wallet API byte-for-byte (WalletController + ServiceWalletClient).
+// gwdbx W2-R11: the gateway no longer owns settlement rows or a ledger. The store selection
+// (Postgres/InMemory), ISettlementLedgerClient and the settlements table are DELETED —
+// settlement-service owns the rows, the commission arithmetic and the ledger behind the single
+// ISettlementServiceClient HTTP seam (see Extensions/ServiceClientExtensions.cs). SettlementService
+// keeps only the orchestration the gateway is entitled to: delivery resolution, authorization and
+// settle-ability. Nothing below this comment registers a settlement store.
 var gatewayPostgresCs = builder.Configuration["GatewayPostgres:ConnectionString"];
 if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 {

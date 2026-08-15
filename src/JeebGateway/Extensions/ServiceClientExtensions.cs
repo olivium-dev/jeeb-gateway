@@ -546,9 +546,9 @@ public static class ServiceClientExtensions
         // (UpgSettlementLedgerClient) was behind FeatureFlags:UseUpstream:Payments,
         // so "Services:UnifiedPayment:BaseUrl" stayed a live configuration string
         // compiled into the shipped assembly. Both the clients and this binding are
-        // deleted — the cash-settlement ledger is now in-process unconditionally
-        // (see Program.cs / InProcessCodSettlementLedger). Do NOT re-add a payments
-        // HttpClient here; see docs/batches/b02-20260726/UPG-REMOVAL.md.
+        // deleted. gwdbx W2-R11: the cash-settlement ledger is not in-process either —
+        // settlement-service owns it (see the settlement-service registration above). Do NOT
+        // re-add a payments HttpClient here; see docs/batches/b02-20260726/UPG-REMOVAL.md.
 
         AddDbProbeClients(services, config);
 

@@ -2663,9 +2663,10 @@ public class DeliveriesController : ControllerBase
     /// COD amount server-authoritatively from the delivery row (BR-16), posts the
     /// wallet <c>cash_settlement</c> credit, and is idempotent/exactly-once so it is
     /// safe to fire from BOTH completion legs (OTP verify + customer PATCH → Done).
-    /// Best-effort: every fault is swallowed + logged so a settlement hiccup can
-    /// never turn a committed, verified handover into a 5xx (the settlement row is
-    /// the gateway system of record and the ledger reconciler replays a missed post).
+    /// Best-effort: every fault is swallowed + logged so a settlement hiccup can never turn a
+    /// committed, verified handover into a 5xx. gwdbx W2-R11: NOTHING replays a swallowed settle
+    /// automatically — recovery is the other completion leg, the receipt-read self-heal, or a
+    /// manual settle, and the miss is counted on settlement.ledger.post_failures.
     /// </summary>
     private async Task CreditJeeberOnCompletionAsync(string deliveryId, string correlationId, CancellationToken ct)
     {
@@ -2679,9 +2680,11 @@ public class DeliveriesController : ControllerBase
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.SettlementLedgerPostFailures.Add(1);
             _log.LogError(ex,
                 "settlement.on_complete_failed deliveryId={DeliveryId} correlationId={CorrelationId}; "
-                + "the handover stays complete, the jeeber credit will be reconciled/retried.",
+                + "the handover stays complete but the jeeber credit did NOT land and nothing replays "
+                + "it automatically — re-drive via the other completion leg, the receipt read, or settle manually.",
                 deliveryId, correlationId);
         }
 
@@ -2951,6 +2954,7 @@ public class DeliveriesController : ControllerBase
         }
         catch (Exception ex)
         {
+            BusinessOutcomeTelemetry.SettlementLedgerPostFailures.Add(1);
             _log.LogWarning(ex,
                 "settlement.pending_enqueue_failed deliveryId={DeliveryId}; window still open via settlement intent endpoint",
                 deliveryId);
