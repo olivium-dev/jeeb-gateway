@@ -92,7 +92,8 @@ public sealed class GeoServiceLocationStore : ILocationStore
                 .ToList(),
         };
 
-        var response = await _client.UpdateLocationAsync(body, ct).ConfigureAwait(false);
+        var response = await GuardAsync(
+            () => _client.UpdateLocationAsync(body, ct), nameof(RecordAsync), jeeberId).ConfigureAwait(false);
 
         var latest = MapLatest(response.Latest);
         return new LocationStoreUpdateResult(response.Accepted, response.Rejected, latest);
@@ -102,7 +103,8 @@ public sealed class GeoServiceLocationStore : ILocationStore
     {
         if (string.IsNullOrEmpty(jeeberId)) return null;
 
-        var upstream = await _client.GetUserLocationAsync(jeeberId, ct).ConfigureAwait(false);
+        var upstream = await GuardAsync(
+            () => _client.GetUserLocationAsync(jeeberId, ct), nameof(GetLatestAsync), jeeberId).ConfigureAwait(false);
         if (upstream is null)
         {
             // 404 from /locations/user/{id} == no fix, not an error.
@@ -126,6 +128,33 @@ public sealed class GeoServiceLocationStore : ILocationStore
             Accuracy: null,
             DeviceTimestamp: receivedAt,
             ReceivedAt: receivedAt);
+    }
+
+    /// <summary>Translates the generated ApiException into the domain failure the pipeline
+    /// maps to 503. 401/403 is OUR credential refused, logged as operator-actionable (W3-18).</summary>
+    private async Task<T> GuardAsync<T>(Func<Task<T>> call, string member, string jeeberId)
+    {
+        try
+        {
+            return await call().ConfigureAwait(false);
+        }
+        catch (Generated.ApiException ex)
+        {
+            if (ex.StatusCode is 401 or 403)
+            {
+                _logger.LogError(ex,
+                    "geolocation-service REFUSED THE GATEWAY CREDENTIAL ({Status}) on {Member} for {JeeberId}: GPS fixes are being dropped. Check the gateway's geolocation-service token/role map.",
+                    ex.StatusCode, member, jeeberId);
+            }
+            else
+            {
+                _logger.LogError(ex,
+                    "geolocation-service returned {Status} on {Member} for {JeeberId}: GPS fixes are being dropped.",
+                    ex.StatusCode, member, jeeberId);
+            }
+
+            throw new LocationUpstreamUnavailableException(member, ex.StatusCode, ex);
+        }
     }
 
     private StoredPosition? MapLatest(Generated.GpsBatchLatest? latest)
