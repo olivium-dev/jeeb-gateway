@@ -19,15 +19,12 @@ namespace JeebGateway.Services.Clients;
 /// (<c>ok</c>, <c>id</c>, <c>seq</c>) and reads a body of
 /// <c>{ "data": {...}, "meta": {...} }</c>, so the default
 /// <see cref="JsonSerializerDefaults.Web"/> options bind it without per-field
-/// attributes. The topic/stream path segments are URL-escaped because the Jeeb
-/// product topic (<c>jeeb:chat</c>) and stream (<c>user:{id}</c>) both contain a
+/// attributes. The topic/stream path segments are URL-escaped because the product
+/// topic (<c>{tenant}:chat</c>) and stream (<c>user:{id}</c>) both contain a
 /// colon.
 /// </summary>
 public sealed class RealtimeCommunicationClient : IRealtimeCommunicationClient
 {
-    /// <summary>The fixed product topic for Jeeb 1:1 chat fan-out.</summary>
-    public const string ChatTopic = "jeeb:chat";
-
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -35,11 +32,16 @@ public sealed class RealtimeCommunicationClient : IRealtimeCommunicationClient
 
     private readonly HttpClient _http;
     private readonly IRealtimeGuardianTokenIssuer _guardian;
+    private readonly RealtimeTopicNames _topics;
 
-    public RealtimeCommunicationClient(HttpClient http, IRealtimeGuardianTokenIssuer guardian)
+    public RealtimeCommunicationClient(
+        HttpClient http,
+        IRealtimeGuardianTokenIssuer guardian,
+        RealtimeTopicNames topics)
     {
         _http = http;
         _guardian = guardian;
+        _topics = topics;
     }
 
     public async Task<RealtimePublishResult> PublishAsync(
@@ -60,7 +62,7 @@ public sealed class RealtimeCommunicationClient : IRealtimeCommunicationClient
         ArgumentNullException.ThrowIfNull(data);
 
         // POST /api/ingest/{topic}/{stream} — IngestController.publish/2.
-        // Both segments are escaped: jeeb:chat / user:{id} contain a colon.
+        // Both segments are escaped: {tenant}:chat / user:{id} contain a colon.
         var url = $"api/ingest/{Uri.EscapeDataString(topic)}/{Uri.EscapeDataString(stream)}";
 
         var body = new IngestBody
@@ -132,7 +134,7 @@ public sealed class RealtimeCommunicationClient : IRealtimeCommunicationClient
         // Per-recipient fan-out filter: one recipient per publish, encoded into the
         // stream so only that user's subscription receives the 1:1 message.
         var stream = $"user:{recipientId}";
-        return PublishAsync(ChatTopic, stream, data, meta: null, ct);
+        return PublishAsync(_topics.ChatTopic, stream, data, meta: null, ct);
     }
 
     private static string PublishSubject(

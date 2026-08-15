@@ -412,7 +412,7 @@ public static class ServiceClientExtensions
         // realtime-comunication-service/lib/live_comm_web/router.ex +
         // controllers/ingest_controller.ex) for SERVER-SIDE per-recipient chat
         // fan-out; mobile clients connect the Phoenix WebSocket channel
-        // (topic:jeeb:chat, membership-validated join) directly, so the gateway
+        // (topic:{tenant}:chat, membership-validated join) directly, so the gateway
         // does not proxy the WebSocket. Serves JEB-1453/1449/1432/626/444/50/51/52.
         //
         // NOT-YET-DEPLOYED: realtime-comunication-service is in the olivium fleet

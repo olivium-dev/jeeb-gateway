@@ -10,7 +10,7 @@ namespace JeebGateway.Conversations.Realtime;
 
 /// <summary>
 /// S08 (D / H6,N2) — issues the short-lived, signed <b>realtime membership
-/// ticket</b> the gateway hands a member at the <c>/v1/realtime/jeeb:chat:{id}</c>
+/// ticket</b> the gateway hands a member at the <c>/v1/realtime/{tenant}:chat:{id}</c>
 /// gate. The ticket is the WS-join authorization: the gateway runs the
 /// chat-service membership check (the authority), then mints a ticket scoped to
 /// (conversation_id, viewer_id, role); realtime-comunication-service verifies the

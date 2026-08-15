@@ -278,6 +278,7 @@ public class CourierPositionRealtimeTests : IClassFixture<WebApplicationFactory<
                 ThrottleFallbackDelayMs = 5,
                 MaxThrottleDelayMs = 50,
             }),
+            new RealtimeTopicNames(Options.Create(new RealtimeGuardianOptions())),
             NullLogger<CourierPositionPublisher>.Instance);
         var t0 = DateTimeOffset.Parse("2026-08-06T12:00:00Z");
         queue.TryEnqueue(new CourierPosition("delivery-1", "courier-1", 1, 1, 5, t0))

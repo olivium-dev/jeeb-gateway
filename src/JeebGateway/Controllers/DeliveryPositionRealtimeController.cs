@@ -12,9 +12,9 @@ namespace JeebGateway.Controllers;
 
 /// <summary>
 /// The customer's entry point to live courier position:
-/// <c>GET /v1/realtime/jeeb:delivery:{deliveryId}</c>.
+/// <c>GET /v1/realtime/{tenant}:delivery:{deliveryId}</c> (tenant default <c>jeeb</c>).
 ///
-/// <para>Mirrors the chat gate <c>GET /v1/realtime/jeeb:chat:{conversationId}</c>
+/// <para>Mirrors the chat gate <c>GET /v1/realtime/{tenant}:chat:{conversationId}</c>
 /// (<see cref="JeebConversationsController.RealtimeVisibilityGate"/>) exactly: authorize
 /// against the authoritative service, then hand back a descriptor naming the topic to
 /// subscribe to plus a short-lived credential to subscribe with. The gateway never
@@ -39,17 +39,20 @@ public sealed class DeliveryPositionRealtimeController : ControllerBase
     private readonly IDeliveryParticipantResolver _participants;
     private readonly IRealtimeGuardianTokenIssuer _guardian;
     private readonly RealtimeGuardianOptions _realtimeOptions;
+    private readonly RealtimeTopicNames _topics;
     private readonly UpstreamFeatureFlags _flags;
 
     public DeliveryPositionRealtimeController(
         IDeliveryParticipantResolver participants,
         IRealtimeGuardianTokenIssuer guardian,
         IOptions<RealtimeGuardianOptions> realtimeOptions,
+        RealtimeTopicNames topics,
         IOptions<UpstreamFeatureFlags> flags)
     {
         _participants = participants;
         _guardian = guardian;
         _realtimeOptions = realtimeOptions.Value;
+        _topics = topics;
         _flags = flags.Value;
     }
 
@@ -57,7 +60,9 @@ public sealed class DeliveryPositionRealtimeController : ControllerBase
     /// Tell an authorized party what to subscribe to for this delivery's live courier
     /// position, and give them the credential to do it with.
     /// </summary>
-    [HttpGet("v1/realtime/jeeb:delivery:{deliveryId}")]
+    // {tenant} is constrained to the configured prefix + the legacy alias, so the
+    // pre-rename literal URL keeps matching byte-for-byte and unknown tenants 404.
+    [HttpGet("v1/realtime/{tenant:realtimeTenant}:delivery:{deliveryId}")]
     [Authorize]
     // ADR-005 L2 §C client-only delivery tracking: same capability as the one-shot
     // snapshot GET /deliveries/{id}/tracking, because this is that same read moved to a
@@ -70,7 +75,8 @@ public sealed class DeliveryPositionRealtimeController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
-    public async Task<IActionResult> GetPositionChannel(string deliveryId, CancellationToken ct)
+    public async Task<IActionResult> GetPositionChannel(
+        string tenant, string deliveryId, CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var viewerId, out var unauthorized))
         {
@@ -86,7 +92,7 @@ public sealed class DeliveryPositionRealtimeController : ControllerBase
                 statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 
-        var topic = CourierPositionTopic.For(deliveryId);
+        var topic = _topics.DeliveryTopicFor(deliveryId);
         if (topic is null)
         {
             // Refused rather than escaped: see CourierPositionTopic's remarks on why a
@@ -159,7 +165,7 @@ public sealed class DeliveryPositionChannelDescriptor
     /// <summary>The delivery this descriptor is for.</summary>
     public required string DeliveryId { get; init; }
 
-    /// <summary>The realtime topic, <c>jeeb:delivery:{deliveryId}</c>.</summary>
+    /// <summary>The realtime topic, <c>{tenant}:delivery:{deliveryId}</c>.</summary>
     public required string Topic { get; init; }
 
     /// <summary>The Phoenix channel to join, <c>topic:{topic}</c>.</summary>

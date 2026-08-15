@@ -235,6 +235,14 @@ public sealed class RealtimeGuardianOptions
 {
     public const string SectionName = "Services:Realtime";
 
+    /// <summary>Legacy tenant segment; stays the accepted route alias forever so
+    /// pre-rename phone URLs keep resolving after any config flip.</summary>
+    public const string DefaultTenantPrefix = "jeeb";
+
+    /// <summary>Tenant segment for every LiveComm name ("{p}:chat", "{p}:delivery:{id}",
+    /// "{p}_conversation:{id}"); the default keeps live names byte-identical.</summary>
+    public string TenantPrefix { get; set; } = DefaultTenantPrefix;
+
     /// <summary>
     /// The realtime service's Guardian signing secret — the value its own
     /// <c>LiveComm.Guardian</c> verifies with. HS512, so >= 64 bytes.
