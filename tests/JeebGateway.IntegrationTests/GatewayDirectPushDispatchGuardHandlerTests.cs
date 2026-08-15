@@ -1,8 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
-using System.Text.Json;
 using FluentAssertions;
-using JeebGateway.Notifications;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -61,83 +59,14 @@ public sealed class GatewayDirectPushDispatchGuardHandlerTests
         downstream.RequestCount.Should().Be(1);
     }
 
-    [Fact]
-    public async Task Disabled_Routes_PerUser_Dispatch_To_Notification_Owner()
-    {
-        var downstream = new RecordingHandler();
-        var owner = new RecordingNotificationOwner();
-        using var client = Client(enabled: false, downstream, owner);
-
-        using var response = await client.PostAsJsonAsync(
-            "api/v1/sent-payload/user/user-42",
-            new
-            {
-                payload = new
-                {
-                    title = "Ready",
-                    body = "Parcel ready",
-                    type = "request_ready",
-                    notification_id = "request-ready:42",
-                },
-            });
-
-        response.StatusCode.Should().Be(HttpStatusCode.Created);
-        downstream.RequestCount.Should().Be(0);
-        owner.Events.Should().ContainSingle();
-        var accepted = owner.Events[0];
-        accepted.Receiver.Should().Be("user-42");
-        accepted.EventType.Should().Be("gateway.request_ready");
-        accepted.NotificationId.Should().NotBeEmpty();
-    }
-
-    [Fact]
-    public async Task Disabled_Does_Not_Fabricate_Acceptance_When_Owner_Fails()
-    {
-        var downstream = new RecordingHandler();
-        var owner = new RecordingNotificationOwner { Failure = new HttpRequestException("down") };
-        using var client = Client(enabled: false, downstream, owner);
-
-        using var response = await client.PostAsJsonAsync(
-            "api/v1/sent-payload/user/user-42",
-            new { payload = new { title = "Ready", body = "Parcel ready" } });
-
-        response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        downstream.RequestCount.Should().Be(0);
-    }
-
-    private static HttpClient Client(
-        bool enabled,
-        HttpMessageHandler downstream,
-        INotificationOwnerClient? owner = null)
+    private static HttpClient Client(bool enabled, HttpMessageHandler downstream)
     {
         var guard = new GatewayDirectPushDispatchGuardHandler(
-            Options.Create(new GatewayDirectPushDispatchOptions { Enabled = enabled }),
-            owner)
+            Options.Create(new GatewayDirectPushDispatchOptions { Enabled = enabled }))
         {
             InnerHandler = downstream,
         };
         return new HttpClient(guard) { BaseAddress = new Uri("http://push.test/") };
-    }
-
-    private sealed class RecordingNotificationOwner : INotificationOwnerClient
-    {
-        public List<NotificationOwnerEvent> Events { get; } = [];
-        public Exception? Failure { get; init; }
-
-        public Task<NotificationOwnerAcceptance> PublishAsync(
-            NotificationOwnerEvent notification,
-            CancellationToken cancellationToken)
-        {
-            if (Failure is not null)
-            {
-                throw Failure;
-            }
-            Events.Add(notification);
-            return Task.FromResult(new NotificationOwnerAcceptance(notification.NotificationId));
-        }
-
-        public Task<JsonElement> GetDeadLettersAsync(CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
     }
 
     private sealed class RecordingHandler : HttpMessageHandler
