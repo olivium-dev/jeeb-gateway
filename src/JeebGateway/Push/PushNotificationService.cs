@@ -17,49 +17,41 @@ namespace JeebGateway.Push;
 ///   3. Fan out to the platform-matched <see cref="IPushTransport"/> for
 ///      every device under a single per-attempt CTS bounded by
 ///      <see cref="PushOptions.DeliverySla"/>.
-///   4. Any transport exception schedules a single retry through
-///      <see cref="IPushRetryQueue"/> 30 seconds out; retry-path delivery
-///      reports <see cref="PushDeliveryOutcome.DeliveredOnRetry"/>, a second
-///      failure is terminal and reported as <see cref="PushDeliveryOutcome.Failed"/>.
+///   4. A fan-out where every transport fails is terminal and reported as
+///      <see cref="PushDeliveryOutcome.Failed"/> (retry rail deleted, W5 retire-4).
 /// </summary>
 public sealed class PushNotificationService : IPushNotificationService
 {
     private readonly INotificationPreferencesStore _prefs;
     private readonly IDeviceTokenStore _devices;
     private readonly IReadOnlyDictionary<DevicePlatform, IPushTransport> _transports;
-    private readonly IPushRetryQueue _retryQueue;
     private readonly IPushDeliveryTracker _tracker;
     private readonly IUsersStore _users;
     private readonly PushOptions _options;
-    private readonly TimeProvider _clock;
     private readonly ILogger<PushNotificationService> _log;
 
     public PushNotificationService(
         INotificationPreferencesStore prefs,
         IDeviceTokenStore devices,
         IEnumerable<IPushTransport> transports,
-        IPushRetryQueue retryQueue,
         IPushDeliveryTracker tracker,
         IUsersStore users,
         IOptions<PushOptions> options,
-        TimeProvider clock,
         ILogger<PushNotificationService> log)
     {
         _prefs = prefs;
         _devices = devices;
         _transports = transports.ToDictionary(t => t.Platform);
-        _retryQueue = retryQueue;
         _tracker = tracker;
         _users = users;
         _options = options.Value;
-        _clock = clock;
         _log = log;
     }
 
     public async Task<PushDeliveryResult> SendAsync(PushNotificationRequest request, CancellationToken ct)
     {
         var enriched = await ResolveLanguageAsync(request, ct);
-        var result = await SendInternalAsync(enriched, attempt: 1, ct);
+        var result = await SendInternalAsync(enriched, ct);
         await _tracker.RecordAsync(result, ct);
         return result;
     }
@@ -82,20 +74,7 @@ public sealed class PushNotificationService : IPushNotificationService
         return request with { Language = profile.Language };
     }
 
-    /// <summary>
-    /// Used by <see cref="PushRetryQueueProcessor"/> to drive the retry path.
-    /// The retry attempt MUST NOT re-enqueue on failure — the AC is "retried
-    /// once", not "retried until success".
-    /// </summary>
-    internal async Task<PushDeliveryResult> SendForRetryAsync(PushNotificationRequest request, CancellationToken ct)
-    {
-        var enriched = await ResolveLanguageAsync(request, ct);
-        var result = await SendInternalAsync(enriched, attempt: 2, ct);
-        await _tracker.RecordAsync(result, ct);
-        return result;
-    }
-
-    private async Task<PushDeliveryResult> SendInternalAsync(PushNotificationRequest request, int attempt, CancellationToken ct)
+    private async Task<PushDeliveryResult> SendInternalAsync(PushNotificationRequest request, CancellationToken ct)
     {
         UserNotificationPreferences prefs;
         try
@@ -119,7 +98,7 @@ public sealed class PushNotificationService : IPushNotificationService
                 request.UserId, request.Trigger);
             return new PushDeliveryResult(
                 request.UserId, request.Trigger,
-                PushDeliveryOutcome.SuppressedByPreference, attempt - 1);
+                PushDeliveryOutcome.SuppressedByPreference, 0);
         }
 
         var devices = await _devices.GetForUserAsync(request.UserId, ct);
@@ -130,7 +109,7 @@ public sealed class PushNotificationService : IPushNotificationService
                 request.UserId, request.Trigger);
             return new PushDeliveryResult(
                 request.UserId, request.Trigger,
-                PushDeliveryOutcome.NoDevices, attempt - 1);
+                PushDeliveryOutcome.NoDevices, 0);
         }
 
         using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -165,67 +144,54 @@ public sealed class PushNotificationService : IPushNotificationService
             {
                 failures.Add($"{device.Platform} timed out");
                 _log.LogWarning(ex,
-                    "push timed out on {Platform} for user {UserId}, trigger {Trigger} (attempt {Attempt})",
-                    device.Platform, request.UserId, request.Trigger, attempt);
+                    "push timed out on {Platform} for user {UserId}, trigger {Trigger}",
+                    device.Platform, request.UserId, request.Trigger);
             }
             catch (PushTransportException ex)
             {
                 failures.Add($"{device.Platform}: {ex.Message}");
                 _log.LogWarning(ex,
-                    "push transport failed for user {UserId}, trigger {Trigger} (attempt {Attempt})",
-                    request.UserId, request.Trigger, attempt);
+                    "push transport failed for user {UserId}, trigger {Trigger}",
+                    request.UserId, request.Trigger);
             }
             catch (Exception ex)
             {
                 failures.Add($"{device.Platform}: {ex.GetType().Name}");
                 _log.LogError(ex,
-                    "push unexpected failure for user {UserId}, trigger {Trigger} (attempt {Attempt})",
-                    request.UserId, request.Trigger, attempt);
+                    "push unexpected failure for user {UserId}, trigger {Trigger}",
+                    request.UserId, request.Trigger);
             }
         }
 
         sw.Stop();
 
         // Partial success counts as success — at least one device got the
-        // push, the user saw it on at least one screen. We only retry when
-        // every transport attempt failed (zero deliveries).
+        // push; a fan-out where every transport failed is terminal.
         if (delivered > 0)
         {
             if (sw.Elapsed > _options.DeliverySla)
             {
                 _log.LogWarning(
-                    "push for user {UserId} trigger {Trigger} exceeded {Sla}ms SLA ({Elapsed}ms) on attempt {Attempt}",
+                    "push for user {UserId} trigger {Trigger} exceeded {Sla}ms SLA ({Elapsed}ms)",
                     request.UserId, request.Trigger,
-                    _options.DeliverySla.TotalMilliseconds, sw.Elapsed.TotalMilliseconds, attempt);
+                    _options.DeliverySla.TotalMilliseconds, sw.Elapsed.TotalMilliseconds);
             }
 
             return new PushDeliveryResult(
                 request.UserId, request.Trigger,
-                attempt == 1 ? PushDeliveryOutcome.Delivered : PushDeliveryOutcome.DeliveredOnRetry,
-                attempt,
+                PushDeliveryOutcome.Delivered,
+                1,
                 failures.Count == 0 ? null : string.Join("; ", failures));
         }
 
         var reason = failures.Count == 0 ? "no transports attempted" : string.Join("; ", failures);
 
-        if (attempt == 1)
-        {
-            var dueAt = _clock.GetUtcNow().Add(_options.RetryDelay);
-            await _retryQueue.EnqueueAsync(new PushRetryEntry(request, dueAt, reason), ct);
-            _log.LogInformation(
-                "push first attempt failed for user {UserId} trigger {Trigger}; queued for retry at {DueAt} ({Reason})",
-                request.UserId, request.Trigger, dueAt, reason);
-            return new PushDeliveryResult(
-                request.UserId, request.Trigger,
-                PushDeliveryOutcome.QueuedForRetry, attempt, reason);
-        }
-
-        // Second attempt failure is terminal — AC is "retried once after 30 seconds".
+        // Retry rail deleted (W5 retire-4): a fully failed fan-out is terminal.
         _log.LogError(
-            "push retry failed for user {UserId} trigger {Trigger}: {Reason}",
+            "push delivery failed for user {UserId} trigger {Trigger}: {Reason}",
             request.UserId, request.Trigger, reason);
         return new PushDeliveryResult(
             request.UserId, request.Trigger,
-            PushDeliveryOutcome.Failed, attempt, reason);
+            PushDeliveryOutcome.Failed, 1, reason);
     }
 }

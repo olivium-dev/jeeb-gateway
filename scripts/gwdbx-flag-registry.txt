@@ -12,7 +12,7 @@ OtpEscalationsMode       program create=W3;delete=W5 # admin_escalations -> deli
 RequestsOwnerListMode    program create=W5;delete=W5 # delivery_requests mirror -> delivery-service; supersedes UseUpstream:RequestsOwnerList
 AvailabilityMode         program create=W3;delete=W5 # jeeber_availability -> delivery-service; supersedes UseUpstream:Availability; key CREATED at W3-04 as FeatureFlags:AvailabilityMode (GwdbxMigrationOptions), code default "local"; write-through seam DeliveryServiceAvailabilityMirror (/api/v1/providers/*), gateway stays sole presence authority (G-10); W3-13 flips it
 TiersMode                program create=W4;delete=W4 # tiers catalog -> delivery-service; supersedes UseUpstream:Tiers; delete one release after the W4-14 drop; key CREATED at W4-09 as FeatureFlags:TiersMode (GwdbxMigrationOptions), code default "local"; freeze-import-flip so ONLY "local"/"upstream-authority" validate; read/CRUD seam DeliveryServiceTiersStore (60s cache, fail-open-to-last-known) onto delivery-service /api/v1/tiers + /api/v1/admin/tiers (W4-08); W4-11 flips it after the O4-gated W4-10 import
-UserModerationMode       program create=W4;delete=W4 # users projection -> user-management; supersedes UseUpstream:UserModeration; delete one release after the W4-13 drop; key CREATED at W4-04 as FeatureFlags:UserModerationMode (GwdbxMigrationOptions), code default "local"; write seam UserManagementModerationMirror -> /api/User/{id}/moderation/* (W4-03); Program.cs Validate pins it <= dual-write-local-read until O5 + the W4-06 read cutover
+UserModerationMode       program create=W4;delete=W4 # users projection -> user-management; supersedes UseUpstream:UserModeration; delete one release after the W4-13 drop; key CREATED at W4-04 as FeatureFlags:UserModerationMode (GwdbxMigrationOptions), code default "local"; write seam onto /api/User/{id}/moderation/* (W4-03) DELETED 2026-08-15 (W5 retire-4); Program.cs Validate pins it <= dual-write-local-read until O5 + the W4-06 read cutover
 PushDispatchMode         program create=W3;delete=W5 # push trio -> push-notification; supersedes UseUpstream:PushDispatchDurability; key CREATED at W3-14 as FeatureFlags:PushDispatchMode (GwdbxMigrationOptions), code default "local"; re-points JeebNotificationDispatcher onto ServicePushNotificationClient with Idempotency-Key passthrough; only "local"/"upstream-authority" are used (a dual-write rung = 2 push producers, D1), and "upstream-authority" also requires PushNotificationServiceApi:GatewayDirectDispatch:Enabled=true
 NotificationOutboxMode   program create=W1;delete=W5 # outbox -> state-service work-items, drain-and-switch; supersedes UseUpstream:NotificationOutbox; key CREATED at W1-09 as FeatureFlags:NotificationOutboxMode (GwdbxMigrationOptions), default "local"
 CmsConfigMode            program create=W3;delete=W5 # cms_surfaces pair -> state-service; supersedes UseUpstream:CmsConfig; key CREATED at W3-03 as FeatureFlags:CmsConfigMode (GwdbxMigrationOptions), code default "local"; freeze-import-flip via StateServiceConfigImporter onto the same /v1/config-surfaces primitive (G-27); W3-11 flips it
@@ -155,9 +155,6 @@ Jwt:Issuer                                           setting -
 Jwt:RefreshRotationGraceSeconds                      setting -
 Jwt:RefreshTokenDays                                 setting -
 Jwt:SigningKey                                       setting -
-LowRatingFlag:MinRatingsRequired                     setting -
-LowRatingFlag:SweepInterval                          setting -
-LowRatingFlag:ThresholdScore                         setting -
 MaskedCalls:Enabled                                  setting -
 MaskedCalls:SessionDuration                          setting -
 MaskedCalls:TwilioAccountSid                         setting -
@@ -169,12 +166,8 @@ OtpHandover:MaxAttempts                              setting -
 OtpHandover:SweepInterval                            setting -
 Push:DeliverySla                                     setting -
 Push:RetryDelay                                      setting -
-Push:RetryQueueScanInterval                          setting -
 Push:TransportTimeout                                setting -
 PushNotificationServiceApi:GatewayDirectDispatch:Enabled setting -
-RatingReveal:RatingWindow                            setting -
-RatingReveal:SweepInterval                           setting -
-RatingReveal:WindowName                              setting -
 Ratings:RatingWindow                                 setting -
 Requests:Expiry:NoOfferNudgeWindow                   setting -
 Requests:Expiry:ObserverBatchLimit                   setting -

@@ -1510,7 +1510,7 @@ builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOpt
 // PushController + IPushNotificationClient device-register passthrough was removed
 // with the salehly mirror. InMemoryDeviceTokenStore is deliberately KEPT because
 // the SEND path (PushNotificationService fan-out, consumed by KycService,
-// ChatDispatcher, DisputeService, RatingRevealJob, PushAutoOfflineNotifier) still
+// ChatDispatcher, DisputeService, PushAutoOfflineNotifier) still
 // reads device tokens from it — that is a separate C-domain (push transport /
 // retry / SLA) with no upstream owner yet. Do not delete this store until the
 // push-transport service lands; deleting it now would break the send pipeline.
@@ -1518,16 +1518,8 @@ builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOpt
 // when GatewayPostgres is configured so push fan-out targets survive a restart; the
 // in-memory store is kept as the dev/CI/test fallback.
 builder.Services.AddSingleton<IDeviceTokenStore, InMemoryDeviceTokenStore>();
-// Durability register #12 — push-reliability trio (JEBV4-137 retry queue,
-// JEBV4-136 delivery tracker, JEBV4-144 dispatch outbox below). All three used
-// to live ONLY in gateway process memory, so every pending retry, delivery-log
-// record and queued dispatch was silently DROPPED on each restart/replica move.
-// Postgres-backed (push_retry_queue / push_delivery_tracker / notification_dispatch_outbox,
-// migration 0030) whenever GatewayPostgres:ConnectionString is configured — the
-// established FAIL-OPEN-then-gate pattern (StoreDurabilityGuard now enforces the
-// Postgres impls in prod-like envs). The in-memory stores stay the dev/CI/test
-// fallback when the connection string is absent.
-builder.Services.AddSingleton<IPushRetryQueue, InMemoryPushRetryQueue>();
+// Durability register #12 — push-reliability pair (JEBV4-136 delivery tracker,
+// JEBV4-144 dispatch outbox below); the JEBV4-137 retry rail was deleted (W5 retire-4).
 builder.Services.AddSingleton<InMemoryPushDeliveryTracker>();
 builder.Services.AddSingleton<IPushDeliveryTracker>(sp => sp.GetRequiredService<InMemoryPushDeliveryTracker>());
 
@@ -1542,8 +1534,6 @@ builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(Dev
 builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
 
 builder.Services.AddSingleton<IPushNotificationService, PushNotificationService>();
-builder.Services.AddSingleton<PushRetryQueueProcessor>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<PushRetryQueueProcessor>());
 
 // JEB-1494: Gateway notification render→dispatch primitive.
 // INotificationDispatchOutbox (JEBV4-144): Postgres-backed
@@ -1791,10 +1781,8 @@ if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
     builder.Services.AddSingleton<JeebGateway.Ratings.FeedbackServiceRatingStore>();
     builder.Services.AddSingleton<IRatingStore>(
         sp => sp.GetRequiredService<JeebGateway.Ratings.FeedbackServiceRatingStore>());
-    // Fail-closed honesty guard: feedback-service currently exposes submit/reveal
-    // only, not the list-expired-windows + mark-revealed/closed operations needed
-    // for the gateway-owned 7-day sweep. Register an explicit extended adapter so
-    // RatingRevealJob does not silently skip the upstream path.
+    // Fail-closed honesty guard: feedback-service exposes submit/reveal only, so the
+    // extended adapter refuses sweep operations rather than fabricating reveal state.
     builder.Services.AddSingleton<IRatingStoreExtended, JeebGateway.Ratings.UnsupportedUpstreamRatingStoreExtended>();
 }
 else
@@ -2138,32 +2126,6 @@ builder.Services.AddScoped<JeebGateway.Admin.KycAdminReviewComposer>();
 // In-memory store for the MVP; production wiring will proxy to auth-service
 // via an NSwag-generated client, backed by the schema in 0001 + 0006.
 builder.Services.AddSingleton<InMemoryUsersStore>();
-
-// gwdbx W4-04 — best-effort suspension write-through to user-management's W4-03
-// moderation surface, behind FeatureFlags:UserModerationMode (code default "local"
-// = strict no-op; a Validate above pins it <= dual-write-local-read until O5/W4-06).
-// NOT a durable store: the gateway users projection stays authoritative, so this
-// mirror is deliberately absent from the StoreDurabilityGuard roster (G-08 n/a).
-// Unwired base URL => NoOp, matching the escalation-mirror seam shape.
-if (Uri.TryCreate(builder.Configuration["UserManagementServiceApi:BaseUrl"],
-        UriKind.Absolute, out var moderationMirrorUri))
-{
-    ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
-        JeebGateway.Users.Moderation.ModerationMirrorDrainer.HttpClientName, client =>
-        {
-            client.BaseAddress = new Uri(moderationMirrorUri.ToString().TrimEnd('/') + "/");
-            client.Timeout = TimeSpan.FromSeconds(8);
-        }));
-    builder.Services.AddSingleton<JeebGateway.Users.Moderation.UserManagementModerationMirror>();
-    builder.Services.AddSingleton<JeebGateway.Users.Moderation.IUserModerationMirror>(sp =>
-        sp.GetRequiredService<JeebGateway.Users.Moderation.UserManagementModerationMirror>());
-    builder.Services.AddHostedService<JeebGateway.Users.Moderation.ModerationMirrorDrainer>();
-}
-else
-{
-    builder.Services.AddSingleton<JeebGateway.Users.Moderation.IUserModerationMirror,
-        JeebGateway.Users.Moderation.NoOpUserModerationMirror>();
-}
 
 // Durability register #8 — users-durable. When GatewayPostgres is configured, IUsersStore
 // resolves to UpstreamBackedUsersStore: admin user-search + the token-mint active_role read
@@ -2667,20 +2629,6 @@ builder.Services.AddSingleton<JeebGateway.Financials.IEarningsPdfGenerator>(sp =
 // T-backend-033: Admin finance dashboard API.
 builder.Services.AddSingleton<JeebGateway.Financials.IAdminFinanceDashboardService, JeebGateway.Financials.AdminFinanceDashboardService>();
 
-// T-backend-021: 7-day rating reveal cron job.
-// JEB-1502: registered as singleton first so ITestJobRegistry can resolve it and call
-// SweepOnceAsync (the same code path the background loop uses).
-builder.Services.Configure<JeebGateway.Ratings.RatingRevealOptions>(
-    builder.Configuration.GetSection(JeebGateway.Ratings.RatingRevealOptions.SectionName));
-builder.Services.AddSingleton<JeebGateway.Ratings.RatingRevealJob>();
-builder.Services.AddHostedService(sp =>
-    sp.GetRequiredService<JeebGateway.Ratings.RatingRevealJob>());
-
-// T-backend-040: Low-rating auto-flag and admin notification.
-builder.Services.Configure<JeebGateway.Ratings.LowRatingFlagOptions>(
-    builder.Configuration.GetSection(JeebGateway.Ratings.LowRatingFlagOptions.SectionName));
-builder.Services.AddHostedService<JeebGateway.Ratings.LowRatingAutoFlag>();
-
 // T-backend-037: Chat data retention is now a chat-service concern.
 // The in-gateway retention sweeper + in-memory retention store have been DELETED:
 // the gateway holds no chat record-of-truth, so it cannot (and must not) purge
@@ -2891,27 +2839,14 @@ JeebGateway.Auth.Oidc.AdminOidcStartupGuard.EnsureConfigured(
 
 JeebGateway.StateService.StateServiceCredentialStartupGuard.Validate(stateOptions, app.Logger);
 
-if (app.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Ratings"))
-{
-    app.Logger.LogCritical(
-        "FeatureFlags:UseUpstream:Ratings is ON, but feedback-service does not expose list-expired-windows or mark-revealed/closed rating APIs; the gateway reveal sweep is registered fail-closed and will not fabricate upstream reveal state.");
-}
-
 // JEB-1502: populate the test job registry. Each entry delegates to the job's
 // own sweep method — the SAME code path the background scheduler calls. No
 // test-only forks. settlement-batch is registered here as a placeholder;
 // WS-A will wire in the real RunBatchAsync after implementing durable settlement.
 var testJobRegistry = app.Services.GetRequiredService<JeebGateway.TestControlPlane.ITestJobRegistry>();
-var ratingRevealJob = app.Services.GetRequiredService<JeebGateway.Ratings.RatingRevealJob>();
 var requestNudgeSweeper = app.Services.GetRequiredService<RequestNudgeSweeper>();
 var requestExpiryObserver = app.Services.GetRequiredService<RequestExpiryObserver>();
 
-testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
-{
-    Name = "rating-reveal",
-    Description = "Reveal mutually rated windows and close one-sided windows past the 7-day blind window (RatingRevealJob.SweepOnceAsync).",
-    RunAsync = ct => ratingRevealJob.SweepOnceAsync(ct)
-});
 testJobRegistry.Register(new JeebGateway.TestControlPlane.RegisteredJob
 {
     Name = "request-nudge-sweep",

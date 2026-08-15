@@ -49,15 +49,6 @@ public class PostgresPushReliabilityStoresTests
     }
 
     [Fact]
-    public void RetryQueue_Is_Not_Runtime_Registered_When_GatewayPostgres_Configured()
-    {
-        using var factory = PostgresConfiguredFactory();
-        using var scope = factory.Services.CreateScope();
-
-        scope.ServiceProvider.GetService<IPushRetryQueue>().Should().BeNull();
-    }
-
-    [Fact]
     public void DeliveryTracker_Is_Not_Runtime_Registered_When_GatewayPostgres_Configured()
     {
         using var factory = PostgresConfiguredFactory();
@@ -79,7 +70,6 @@ public class PostgresPushReliabilityStoresTests
         using var scope = factory.Services.CreateScope();
 
         scope.ServiceProvider.GetService<INotificationDispatchOutbox>().Should().BeNull();
-        scope.ServiceProvider.GetService<IPushRetryQueue>().Should().BeNull();
         scope.ServiceProvider.GetService<IPushDeliveryTracker>().Should().BeNull();
         scope.ServiceProvider.GetService<IDeviceTokenStore>().Should().BeNull();
     }
@@ -100,7 +90,6 @@ public class PostgresPushReliabilityStoresTests
 
     [Theory]
     [InlineData(typeof(INotificationDispatchOutbox), typeof(PostgresNotificationDispatchOutbox))]
-    [InlineData(typeof(IPushRetryQueue), typeof(PostgresPushRetryQueue))]
     [InlineData(typeof(IPushDeliveryTracker), typeof(PostgresPushDeliveryTracker))]
     [InlineData(typeof(IDeviceTokenStore), typeof(PostgresDeviceTokenStore))]
     public void Retired_Store_Is_Not_A_Gateway_Critical_Requirement(Type iface, Type durableImpl)
@@ -111,7 +100,6 @@ public class PostgresPushReliabilityStoresTests
 
     [Theory]
     [InlineData(typeof(INotificationDispatchOutbox))]
-    [InlineData(typeof(IPushRetryQueue))]
     [InlineData(typeof(IPushDeliveryTracker))]
     public void Store_Is_No_Longer_On_The_InMemory_Backlog(Type iface)
     {
@@ -121,7 +109,6 @@ public class PostgresPushReliabilityStoresTests
 
     [Theory]
     [InlineData(typeof(INotificationDispatchOutbox), typeof(InMemoryNotificationDispatchOutbox), "INotificationDispatchOutbox", "InMemoryNotificationDispatchOutbox")]
-    [InlineData(typeof(IPushRetryQueue), typeof(InMemoryPushRetryQueue), "IPushRetryQueue", "InMemoryPushRetryQueue")]
     [InlineData(typeof(IPushDeliveryTracker), typeof(InMemoryPushDeliveryTracker), "IPushDeliveryTracker", "InMemoryPushDeliveryTracker")]
     public void Retired_InMemory_Impl_Is_Irrelevant_To_Gateway_Durability_Guard(
         Type iface, Type inMemoryImpl, string ifaceName, string inMemoryName)
@@ -158,17 +145,6 @@ public class PostgresPushReliabilityStoresTests
         // 'DLQ' at >= maxAttempts — the exact branch InMemoryNotificationDispatchOutbox
         // takes; GetDlqAsync reads the DLQ rows.
         Assert.True(true, "Outbox round-trip + claim/lease verified against a live Postgres in the QV Testcontainers suite.");
-    }
-
-    [Fact]
-    public void RetryQueue_Enqueue_DrainDue_Atomic_NeverReEnqueues_DeferredToPostgresQV()
-    {
-        // Property: EnqueueAsync appends the serialized PushNotificationRequest;
-        // DrainDueAsync atomically DELETEs … RETURNING every due row (due_at <= now),
-        // so each entry is handed to exactly one sweeper and is NOT re-enqueued —
-        // the "retried once, then a hard failure" policy InMemoryPushRetryQueue's
-        // DrainDue-then-RemoveAll enforced, now concurrency-safe across replicas.
-        Assert.True(true, "Retry-queue atomic drain verified against a live Postgres in the QV Testcontainers suite.");
     }
 
     [Fact]

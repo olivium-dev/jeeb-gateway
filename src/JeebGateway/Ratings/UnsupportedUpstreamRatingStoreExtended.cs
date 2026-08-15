@@ -49,13 +49,4 @@ public sealed class UnsupportedUpstreamRatingStoreExtended : IRatingStoreExtende
         return Task.FromResult(new RatingWindowSweepResult(RevealedCount: 0, ClosedCount: 0));
     }
 
-    public Task<IReadOnlyList<JeeberRatingSummary>> ListJeebersBelowAverageAsync(
-        double threshold,
-        int minRatings,
-        CancellationToken ct)
-    {
-        _logger.LogWarning(
-            "Low-rating auto-flag cannot aggregate upstream ratings: ServiceFeedbackClient is missing an all-ratee rating-summary operation.");
-        return Task.FromResult<IReadOnlyList<JeeberRatingSummary>>(Array.Empty<JeeberRatingSummary>());
-    }
 }

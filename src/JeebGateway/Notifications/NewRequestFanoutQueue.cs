@@ -20,7 +20,7 @@ public sealed record NewRequestNotification(
 /// <summary>
 /// The in-memory dispatch buffer between the create 201 and the fan-out. Not a store of
 /// record: losing a queued job on restart drops a best-effort push — exactly the failure
-/// class a failed relay call already has today (same shape as <c>InMemoryPushRetryQueue</c>).
+/// class a failed relay call already has today.
 /// </summary>
 public interface INewRequestFanoutQueue
 {

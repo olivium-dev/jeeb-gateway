@@ -10,8 +10,7 @@ namespace JeebGateway.Notifications;
 
 /// <summary>
 /// P1 — drains <see cref="INewRequestFanoutQueue"/> off the create hot path and runs the
-/// recipient-resolved fan-out for each job. Same shape as
-/// <see cref="JeebGateway.Push.PushRetryQueueProcessor"/>: a <see cref="BackgroundService"/>
+/// recipient-resolved fan-out for each job. A <see cref="BackgroundService"/>
 /// over <see cref="IServiceProvider"/>, plus a public single-shot drain so an integration
 /// test can be deterministic instead of racing the hosted loop.
 /// </summary>
