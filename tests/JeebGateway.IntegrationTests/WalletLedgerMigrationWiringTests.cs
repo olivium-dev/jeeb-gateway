@@ -72,12 +72,12 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
             .Should().BeNull("the Postgres ledger reader is deleted, not merely unwired");
     }
 
-    /// <summary>A9 roster contract: W5-10 drops wallet-postgres, 20 -> 19.</summary>
+    /// <summary>A9 roster contract: W5-11 drops gateway-postgres + store-durability, 20 -> 18.</summary>
     [Fact]
     public void Ready_roster_no_longer_declares_the_wallet_database_probe()
     {
         GatewayHealthRoster.Ready.Should().NotContain("wallet-postgres");
-        GatewayHealthRoster.ExpectedReadyCount.Should().Be(19);
+        GatewayHealthRoster.ExpectedReadyCount.Should().Be(18);
         GatewayHealthRoster.Ready.Should().HaveCount(GatewayHealthRoster.ExpectedReadyCount);
     }
 }
