@@ -133,7 +133,7 @@ public sealed class DeliveryServiceTiersStore : ITiersStore
     {
         var client = _http.CreateClient(HttpClientName);
         using var request = new HttpRequestMessage(
-            HttpMethod.Delete, $"api/v1/admin/tiers/{Uri.EscapeDataString(NormalizeCode(id)!)}");
+            HttpMethod.Delete, $"admin/tiers/{Uri.EscapeDataString(NormalizeCode(id)!)}");
         using var response = await client.SendAsync(request, ct);
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
@@ -157,7 +157,7 @@ public sealed class DeliveryServiceTiersStore : ITiersStore
     private async Task<IReadOnlyList<DeliveryTier>> FetchAsync(CancellationToken ct)
     {
         var client = _http.CreateClient(HttpClientName);
-        var rows = await client.GetFromJsonAsync<List<UpstreamTier>>("api/v1/tiers", Json, ct)
+        var rows = await client.GetFromJsonAsync<List<UpstreamTier>>("tiers", Json, ct)
             ?? throw new InvalidOperationException("upstream tier catalog returned null");
         return rows.Select(Map).ToList();
     }
@@ -175,7 +175,7 @@ public sealed class DeliveryServiceTiersStore : ITiersStore
     {
         var client = _http.CreateClient(HttpClientName);
         using var request = new HttpRequestMessage(
-            HttpMethod.Put, $"api/v1/admin/tiers/{Uri.EscapeDataString(code)}")
+            HttpMethod.Put, $"admin/tiers/{Uri.EscapeDataString(code)}")
         {
             Content = JsonContent.Create(body, options: Json),
         };

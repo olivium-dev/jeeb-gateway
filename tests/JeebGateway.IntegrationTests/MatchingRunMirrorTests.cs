@@ -21,14 +21,14 @@ namespace JeebGateway.IntegrationTests;
 /// ROOT CAUSE these tests lock: a request created at the gateway lives only in the
 /// in-memory <see cref="IRequestsStore"/>; delivery-service (which owns the
 /// matching domain + the <c>deliveries</c> table) has no row, so request_id-mode
-/// <c>POST /api/v1/matching/run</c> returns <c>404 unknown_request_id</c>. The
+/// <c>POST /matching/run</c> returns <c>404 unknown_request_id</c>. The
 /// gateway now best-effort seeds the canonical row (idempotent
-/// <c>POST /api/v1/deliveries</c>) immediately before forwarding the run.
+/// <c>POST /deliveries</c>) immediately before forwarding the run.
 ///
 /// These assert the BFF orchestration contract, not delivery-service internals:
 ///  - happy path: request_id mode seeds the row THEN runs matching (seed hits
-///    /api/v1/deliveries with the SAME id + snake_case columns; run hits
-///    /api/v1/matching/run; the gateway maps the 200 result);
+///    /deliveries with the SAME id + snake_case columns; run hits
+///    /matching/run; the gateway maps the 200 result);
 ///  - negative path: the dry-run/preview shape (no requestId) NEVER seeds — only
 ///    the run is forwarded — and a request_id the gateway does not know is NOT
 ///    seeded, so delivery-service's canonical 404 surfaces as ProblemDetails.
@@ -51,7 +51,7 @@ public class MatchingRunMirrorTests
             var path = req.RequestUri!.AbsolutePath;
             paths.Add(path);
 
-            if (path == "/api/v1/deliveries")
+            if (path == "/deliveries")
             {
                 deliveriesBody.Add(req.Content!.ReadAsStringAsync().GetAwaiter().GetResult());
                 // delivery-service echoes the row id as delivery_id (snake_case).
@@ -59,7 +59,7 @@ public class MatchingRunMirrorTests
                     HttpStatusCode.Created);
             }
 
-            // /api/v1/matching/run — the resolve now succeeds because the row exists.
+            // /matching/run — the resolve now succeeds because the row exists.
             return JsonResponse(
                 """
                 {"request_id":"req-seed-1","tier_id":"uuid-x","tier_code":"flash","radius_km":5,
@@ -85,8 +85,8 @@ public class MatchingRunMirrorTests
         body.CandidateCount.Should().Be(3);
 
         // Seed ran BEFORE the run, and exactly once.
-        paths.Should().ContainInOrder("/api/v1/deliveries", "/api/v1/matching/run");
-        paths.Count(p => p == "/api/v1/deliveries").Should().Be(1);
+        paths.Should().ContainInOrder("/deliveries", "/matching/run");
+        paths.Count(p => p == "/deliveries").Should().Be(1);
 
         // The seed carried the SAME id and snake_case matching-resolve columns.
         var seed = deliveriesBody.Single();
@@ -110,7 +110,7 @@ public class MatchingRunMirrorTests
             var path = req.RequestUri!.AbsolutePath;
             paths.Add(path);
 
-            if (path == "/api/v1/deliveries")
+            if (path == "/deliveries")
             {
                 return JsonResponse("""{"reason":"already_exists"}""", HttpStatusCode.Conflict);
             }
@@ -133,7 +133,7 @@ public class MatchingRunMirrorTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<MatchingRunResponse>();
         body!.TierId.Should().Be("standard");
-        paths.Should().ContainInOrder("/api/v1/deliveries", "/api/v1/matching/run");
+        paths.Should().ContainInOrder("/deliveries", "/matching/run");
     }
 
     [Fact]
@@ -165,9 +165,9 @@ public class MatchingRunMirrorTests
         });
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        // No seed: /api/v1/deliveries was never called.
-        paths.Should().NotContain("/api/v1/deliveries");
-        paths.Should().ContainSingle().Which.Should().Be("/api/v1/matching/run");
+        // No seed: /deliveries was never called.
+        paths.Should().NotContain("/deliveries");
+        paths.Should().ContainSingle().Which.Should().Be("/matching/run");
     }
 
     [Fact]
@@ -197,8 +197,8 @@ public class MatchingRunMirrorTests
         problem.GetProperty("detail").GetString().Should().Be("unknown_request_id");
 
         // No seed was attempted for an unknown id.
-        paths.Should().NotContain("/api/v1/deliveries");
-        paths.Should().ContainSingle().Which.Should().Be("/api/v1/matching/run");
+        paths.Should().NotContain("/deliveries");
+        paths.Should().ContainSingle().Which.Should().Be("/matching/run");
     }
 
     [Fact]
@@ -213,7 +213,7 @@ public class MatchingRunMirrorTests
             var path = req.RequestUri!.AbsolutePath;
             paths.Add(path);
 
-            if (path == "/api/v1/deliveries")
+            if (path == "/deliveries")
             {
                 return JsonResponse("""{"reason":"boom"}""", HttpStatusCode.InternalServerError);
             }
@@ -237,7 +237,7 @@ public class MatchingRunMirrorTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<MatchingRunResponse>();
         body!.TierId.Should().Be("express");
-        paths.Should().ContainInOrder("/api/v1/deliveries", "/api/v1/matching/run");
+        paths.Should().ContainInOrder("/deliveries", "/matching/run");
     }
 
     [Fact]
@@ -270,8 +270,8 @@ public class MatchingRunMirrorTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         // Flag off → no seed.
-        paths.Should().NotContain("/api/v1/deliveries");
-        paths.Should().ContainSingle().Which.Should().Be("/api/v1/matching/run");
+        paths.Should().NotContain("/deliveries");
+        paths.Should().ContainSingle().Which.Should().Be("/matching/run");
     }
 
     // -----------------------------------------------------------------

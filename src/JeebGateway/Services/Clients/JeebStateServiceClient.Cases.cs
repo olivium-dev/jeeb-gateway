@@ -63,29 +63,29 @@ public partial class JeebStateServiceClient : IGenericCaseStateClient
 
     public Task<GenericCaseV1> CreateCaseAsync(CreateGenericCaseRequestV1 body,
         string idempotencyKey, string actorRef, string actorRole, CancellationToken ct) =>
-        SendMutationAsync<GenericCaseV1>(HttpMethod.Post, "v1/cases", body,
+        SendMutationAsync<GenericCaseV1>(HttpMethod.Post, "cases", body,
             idempotencyKey, actorRef, actorRole, ct);
 
     public Task<GenericCaseV1> GetCaseAsync(Guid caseId, CancellationToken ct) =>
-        SendAsync<GenericCaseV1>(HttpMethod.Get, $"v1/cases/{caseId:D}", ct);
+        SendAsync<GenericCaseV1>(HttpMethod.Get, $"cases/{caseId:D}", ct);
 
     public Task<GenericCaseV1> PatchCaseAsync(Guid caseId, PatchGenericCaseRequestV1 body,
         string idempotencyKey, string actorRef, string actorRole, CancellationToken ct) =>
-        SendMutationAsync<GenericCaseV1>(HttpMethod.Patch, $"v1/cases/{caseId:D}", body,
+        SendMutationAsync<GenericCaseV1>(HttpMethod.Patch, $"cases/{caseId:D}", body,
             idempotencyKey, actorRef, actorRole, ct);
 
     public Task<GenericCaseStatusMessageV1> ApplyCaseStatusMessageAsync(Guid caseId,
         ApplyGenericCaseStatusMessageRequestV1 body, string idempotencyKey,
         string actorRef, string actorRole, CancellationToken ct) =>
         SendMutationAsync<GenericCaseStatusMessageV1>(HttpMethod.Post,
-            $"v1/cases/{caseId:D}/status-message", body,
+            $"cases/{caseId:D}/status-message", body,
             idempotencyKey, actorRef, actorRole, ct);
 
     public Task<GenericCaseMessageCreatedV1> AddCaseMessageAsync(Guid caseId,
         CreateGenericCaseMessageRequestV1 body, string idempotencyKey,
         string actorRef, string actorRole, CancellationToken ct) =>
         SendMutationAsync<GenericCaseMessageCreatedV1>(HttpMethod.Post,
-            $"v1/cases/{caseId:D}/messages", body, idempotencyKey, actorRef, actorRole, ct);
+            $"cases/{caseId:D}/messages", body, idempotencyKey, actorRef, actorRole, ct);
 
     public async Task<IReadOnlyList<GenericCaseMessageV1>> GetCaseMessagesAsync(Guid caseId,
         bool includeInternal, CancellationToken ct) =>
@@ -101,7 +101,7 @@ public partial class JeebStateServiceClient : IGenericCaseStateClient
     {
         if (order is not (GenericCaseMessageOrders.Newest or GenericCaseMessageOrders.Oldest))
             throw new ArgumentOutOfRangeException(nameof(order));
-        var path = $"v1/cases/{caseId:D}/messages"
+        var path = $"cases/{caseId:D}/messages"
             + $"?includeInternal={includeInternal.ToString().ToLowerInvariant()}"
             + $"&order={order}"
             + $"&limit={Math.Clamp(limit, 1, 200)}";
@@ -112,16 +112,16 @@ public partial class JeebStateServiceClient : IGenericCaseStateClient
 
     public Task<IReadOnlyList<GenericCaseAttachmentV1>> GetCaseAttachmentsAsync(
         Guid caseId, CancellationToken ct) => SendAsync<IReadOnlyList<GenericCaseAttachmentV1>>(
-            HttpMethod.Get, $"v1/cases/{caseId:D}/attachments", ct);
+            HttpMethod.Get, $"cases/{caseId:D}/attachments", ct);
 
     public Task<IReadOnlyList<GenericCaseAuditEventV1>> GetCaseAuditAsync(
         Guid caseId, CancellationToken ct) => SendAsync<IReadOnlyList<GenericCaseAuditEventV1>>(
-            HttpMethod.Get, $"v1/cases/{caseId:D}/audit", ct);
+            HttpMethod.Get, $"cases/{caseId:D}/audit", ct);
 
     public Task<GenericCaseDeadLetterPageV1> GetCaseDeadLettersAsync(
         int limit, string? cursor, CancellationToken ct)
     {
-        var path = $"v1/case-outbox/dead-letters?limit={Math.Clamp(limit, 1, 200)}";
+        var path = $"case-outbox/dead-letters?limit={Math.Clamp(limit, 1, 200)}";
         if (!string.IsNullOrWhiteSpace(cursor)) path += "&cursor=" + Uri.EscapeDataString(cursor);
         var request = NewCaseRequest(HttpMethod.Get, path);
         request.Headers.TryAddWithoutValidation("X-Actor-Role", "admin");
@@ -131,7 +131,7 @@ public partial class JeebStateServiceClient : IGenericCaseStateClient
     public Task<GenericCaseDeadLetterRequeueV1> RequeueCaseDeadLetterAsync(
         Guid eventId, string idempotencyKey, string actorRef, CancellationToken ct) =>
         SendMutationAsync<GenericCaseDeadLetterRequeueV1>(HttpMethod.Post,
-            $"v1/case-outbox/dead-letters/{eventId:D}/requeue", new { },
+            $"case-outbox/dead-letters/{eventId:D}/requeue", new { },
             idempotencyKey, actorRef, "admin", ct);
 
     public Task<GenericCasePageV1> ListCasesAsync(GenericCaseQueryV1 query, CancellationToken ct)
@@ -154,7 +154,7 @@ public partial class JeebStateServiceClient : IGenericCaseStateClient
         Add("cursor", query.Cursor);
         var suffix = string.Join("&", values.Select(pair =>
             Uri.EscapeDataString(pair.Key) + "=" + Uri.EscapeDataString(pair.Value)));
-        return SendAsync<GenericCasePageV1>(HttpMethod.Get, "v1/cases?" + suffix, ct);
+        return SendAsync<GenericCasePageV1>(HttpMethod.Get, "cases?" + suffix, ct);
 
         void Add(string key, string? value)
         {

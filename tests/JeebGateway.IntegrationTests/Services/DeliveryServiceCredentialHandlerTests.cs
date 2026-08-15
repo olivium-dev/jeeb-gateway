@@ -25,7 +25,7 @@ public sealed class DeliveryServiceCredentialHandlerTests
                 InnerHandler = terminal,
             });
 
-            using var response = await client.GetAsync("http://delivery.test/api/v1/tiers");
+            using var response = await client.GetAsync("http://delivery.test/tiers");
 
             response.IsSuccessStatusCode.Should().BeTrue();
             terminal.Headers.Should().ContainKey("X-Delivery-Service-Token")
@@ -48,7 +48,7 @@ public sealed class DeliveryServiceCredentialHandlerTests
         };
         using var client = new HttpClient(handler);
 
-        var act = () => client.GetAsync("http://delivery.test/api/v1/tiers");
+        var act = () => client.GetAsync("http://delivery.test/tiers");
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*DELIVERY_SERVICE_TOKEN_FILE*");
@@ -66,7 +66,7 @@ public sealed class DeliveryServiceCredentialHandlerTests
             InnerHandler = terminal,
         });
 
-        await client.GetAsync("http://delivery.test/api/v1/tiers");
+        await client.GetAsync("http://delivery.test/tiers");
 
         terminal.Headers["X-Delivery-Service-Token"].Should().Equal(token);
     }
@@ -85,7 +85,7 @@ public sealed class DeliveryServiceCredentialHandlerTests
             InnerHandler = new CaptureHandler(),
         });
 
-        var act = () => client.GetAsync("http://delivery.test/api/v1/tiers");
+        var act = () => client.GetAsync("http://delivery.test/tiers");
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*invalid*");
@@ -109,7 +109,7 @@ public sealed class DeliveryServiceCredentialHandlerTests
                 InnerHandler = new CaptureHandler(),
             });
 
-            var act = () => client.GetAsync("http://delivery.test/api/v1/tiers");
+            var act = () => client.GetAsync("http://delivery.test/tiers");
 
             await act.Should().ThrowAsync<InvalidOperationException>()
                 .WithMessage("*invalid credential*");
@@ -136,7 +136,7 @@ public sealed class DeliveryServiceCredentialHandlerTests
                 InnerHandler = terminal,
             });
 
-            await client.GetAsync("http://delivery.test/api/v1/tiers");
+            await client.GetAsync("http://delivery.test/tiers");
 
             terminal.Headers["X-Delivery-Service-Token"].Should().Equal(token);
         }

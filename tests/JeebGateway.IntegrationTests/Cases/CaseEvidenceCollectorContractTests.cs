@@ -96,7 +96,7 @@ public sealed class CaseEvidenceCollectorContractTests
             .And.Contain("limit=1");
 
         delivery.Requests.Single().AbsolutePath.Should()
-            .Be("/api/v1/deliveries/delivery-1/status-history");
+            .Be("/deliveries/delivery-1/status-history");
         geo.Requests.Should().HaveCount(2);
         geo.Requests[0].PathAndQuery.Should().Be("/v1/geo/tracks/delivery-1/history?limit=2");
         Uri.UnescapeDataString(geo.Requests[1].PathAndQuery).Should()

@@ -65,7 +65,7 @@ public sealed class BundlerCmsSurfaceStore : ICmsSurfaceStore
             using var response = await SendAsync(
                 new HttpRequestMessage(
                     HttpMethod.Get,
-                    $"api/v1/namespaces/{_namespace}/documents?limit={PageSize}&archived=false{cursor}"),
+                    $"api/namespaces/{_namespace}/documents?limit={PageSize}&archived=false{cursor}"),
                 ct);
             response.EnsureSuccessStatusCode();
             var page = await response.Content.ReadFromJsonAsync<BundlerDocumentPage>(Json, ct)
@@ -167,7 +167,7 @@ public sealed class BundlerCmsSurfaceStore : ICmsSurfaceStore
 
         using var request = new HttpRequestMessage(
             HttpMethod.Post,
-            $"api/v1/namespaces/{_namespace}/documents/{Uri.EscapeDataString(surfaceId)}/drafts")
+            $"api/namespaces/{_namespace}/documents/{Uri.EscapeDataString(surfaceId)}/drafts")
         {
             Content = JsonContent.Create(new
             {
@@ -198,7 +198,7 @@ public sealed class BundlerCmsSurfaceStore : ICmsSurfaceStore
 
         using var request = new HttpRequestMessage(
             HttpMethod.Post,
-            $"api/v1/namespaces/{_namespace}/documents/{Uri.EscapeDataString(surfaceId)}/publish")
+            $"api/namespaces/{_namespace}/documents/{Uri.EscapeDataString(surfaceId)}/publish")
         {
             Content = JsonContent.Create(new
             {
@@ -237,7 +237,7 @@ public sealed class BundlerCmsSurfaceStore : ICmsSurfaceStore
         using var response = await SendAsync(
             new HttpRequestMessage(
                 HttpMethod.Get,
-                $"api/v1/namespaces/{_namespace}/documents/{Uri.EscapeDataString(surfaceId)}"),
+                $"api/namespaces/{_namespace}/documents/{Uri.EscapeDataString(surfaceId)}"),
             ct);
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
@@ -259,7 +259,7 @@ public sealed class BundlerCmsSurfaceStore : ICmsSurfaceStore
             using var response = await SendAsync(
                 new HttpRequestMessage(
                     HttpMethod.Get,
-                    $"api/v1/namespaces/{_namespace}/documents/{Uri.EscapeDataString(surfaceId)}/versions?after={after}&limit={PageSize}"),
+                    $"api/namespaces/{_namespace}/documents/{Uri.EscapeDataString(surfaceId)}/versions?after={after}&limit={PageSize}"),
                 ct);
             response.EnsureSuccessStatusCode();
             var page = await response.Content.ReadFromJsonAsync<BundlerVersionPage>(Json, ct)
@@ -284,7 +284,7 @@ public sealed class BundlerCmsSurfaceStore : ICmsSurfaceStore
             using var response = await SendAsync(
                 new HttpRequestMessage(
                     HttpMethod.Get,
-                    $"api/v1/namespaces/{_namespace}/documents/{Uri.EscapeDataString(surfaceId)}/publications?after={after}&limit={PageSize}"),
+                    $"api/namespaces/{_namespace}/documents/{Uri.EscapeDataString(surfaceId)}/publications?after={after}&limit={PageSize}"),
                 ct);
             response.EnsureSuccessStatusCode();
             var page = await response.Content.ReadFromJsonAsync<BundlerPublicationPage>(Json, ct)

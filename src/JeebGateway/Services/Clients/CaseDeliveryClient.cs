@@ -31,7 +31,7 @@ public sealed class CaseDeliveryClient : ICaseDeliveryClient
     public async Task<DeliveryCaseContextUpstream?> GetDeliveryCaseContextAsync(
         string deliveryId, CancellationToken ct)
     {
-        var path = $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}/status-history";
+        var path = $"deliveries/{Uri.EscapeDataString(deliveryId)}/status-history";
         using var response = await _http.GetAsync(path, ct);
         if (response.StatusCode == HttpStatusCode.NotFound) return null;
         response.EnsureSuccessStatusCode();
@@ -47,7 +47,7 @@ public sealed class CaseDeliveryClient : ICaseDeliveryClient
         string idempotencyKey, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post,
-            $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}/transition")
+            $"deliveries/{Uri.EscapeDataString(deliveryId)}/transition")
         {
             Content = JsonContent.Create(new IncidentRequest(
                 CanonicalDeliveryStatus.FailedNeedsEscalation, partySource, idempotencyKey),

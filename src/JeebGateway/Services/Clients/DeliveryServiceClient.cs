@@ -27,7 +27,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
 
     public async Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct)
     {
-        using var response = await _http.GetAsync("api/v1/tiers", ct);
+        using var response = await _http.GetAsync("tiers", ct);
         response.EnsureSuccessStatusCode();
         // Upstream returns a raw JSON array — not wrapped in an envelope.
         var tiers = await DeserializeAsync<IReadOnlyList<DeliveryTierUpstream>>(response, ct);
@@ -120,7 +120,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         // Build query string from optional filters — only append params that
         // are provided so the delivery-service default behaviour applies when
         // a filter is absent.
-        var qs = new System.Text.StringBuilder("api/v1/shipments");
+        var qs = new System.Text.StringBuilder("shipments");
         var sep = '?';
 
         if (!string.IsNullOrWhiteSpace(orderId))
@@ -157,7 +157,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         // (request_id mode) resolves. The DTO carries explicit snake_case
         // JsonPropertyName attrs, so PostAsJsonAsync with the shared web options
         // emits the Go-expected wire shape.
-        using var response = await _http.PostAsJsonAsync("api/v1/deliveries", body, JsonOptions, ct);
+        using var response = await _http.PostAsJsonAsync("deliveries", body, JsonOptions, ct);
 
         // Idempotent upstream: ON CONFLICT (id) DO NOTHING. A 409 means the row
         // already exists for this id (a retried create) — the seed goal is met,
@@ -179,7 +179,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
 
     public async Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct)
     {
-        using var response = await _http.GetAsync($"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}", ct);
+        using var response = await _http.GetAsync($"deliveries/{Uri.EscapeDataString(deliveryId)}", ct);
         response.EnsureSuccessStatusCode();
         return await DeserializeAsync<DeliveryRequestUpstream>(response, ct);
     }
@@ -270,7 +270,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         // Go service's extractActor reads (it has no JWKS of its own).
         using var request = new HttpRequestMessage(
             HttpMethod.Post,
-            $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}/transition")
+            $"deliveries/{Uri.EscapeDataString(deliveryId)}/transition")
         {
             Content = JsonContent.Create(
                 new CanonicalTransitionRequest(
@@ -303,7 +303,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
     public async Task<DeliveryReadUpstream?> GetCanonicalDeliveryAsync(string deliveryId, CancellationToken ct)
     {
         using var response = await _http.GetAsync(
-            $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}", ct);
+            $"deliveries/{Uri.EscapeDataString(deliveryId)}", ct);
 
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
@@ -321,7 +321,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
     {
         var effectiveLimit = limit is >= 1 and <= 1000 ? limit : 200;
         var sinceUtc = since.ToUniversalTime().ToString("o");
-        var uri = $"api/v1/deliveries/expired?since={Uri.EscapeDataString(sinceUtc)}&limit={effectiveLimit}";
+        var uri = $"deliveries/expired?since={Uri.EscapeDataString(sinceUtc)}&limit={effectiveLimit}";
 
         // DEGRADE-DON'T-FAIL: this route is additive on delivery-service and may
         // not be deployed yet (404), and the observer that calls it is a
@@ -374,7 +374,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         // code (AC5). When null we still send a (null) field; STJ omits it
         // under web defaults only if we drop it, so we send an explicit object.
         using var response = await _http.PostAsJsonAsync(
-            $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}/otp/issue",
+            $"deliveries/{Uri.EscapeDataString(deliveryId)}/otp/issue",
             new HandoverIssueRequest(codeHash),
             JsonOptions,
             ct);
@@ -411,7 +411,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         // delivery never reaches Done.
         using var request = new HttpRequestMessage(
             HttpMethod.Post,
-            $"api/v1/deliveries/{Uri.EscapeDataString(deliveryId)}/otp/verify")
+            $"deliveries/{Uri.EscapeDataString(deliveryId)}/otp/verify")
         {
             Content = JsonContent.Create(new HandoverVerifyRequest(success), options: JsonOptions)
         };
@@ -453,7 +453,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         // [JsonPropertyName] attributes). Replaces the never-existing
         // jeeb/jeebers/me/availability + X-User-Id-header shape.
         using var response = await _http.PostAsJsonAsync(
-            $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/availability",
+            $"jeebers/{Uri.EscapeDataString(jeeberId)}/availability",
             body,
             JsonOptions,
             ct);
@@ -468,7 +468,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         // never mutates. A 404 (no presence row yet) maps to null so the
         // controller can return a never-online default instead of a 500.
         using var response = await _http.GetAsync(
-            $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/availability",
+            $"jeebers/{Uri.EscapeDataString(jeeberId)}/availability",
             ct);
 
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
@@ -488,7 +488,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         // matching run reads for freshness. Body { lat, lng } (snake_case-clean —
         // both keys are already lowercase under the web-default policy).
         using var response = await _http.PostAsJsonAsync(
-            $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/heartbeat",
+            $"jeebers/{Uri.EscapeDataString(jeeberId)}/heartbeat",
             new HeartbeatRequest(lat, lng),
             JsonOptions,
             ct);
@@ -515,7 +515,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         // shared JsonOptions does not mis-serialize request_id / pickup_lat /
         // allowed_vehicle_types onto the Go field names. The response DTOs do the
         // same on the bind side (see DeliveryMatchingRunResult).
-        using var response = await _http.PostAsJsonAsync("api/v1/matching/run", body, JsonOptions, ct);
+        using var response = await _http.PostAsJsonAsync("matching/run", body, JsonOptions, ct);
 
         if (response.IsSuccessStatusCode)
         {
@@ -538,7 +538,7 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         // gateway never re-derives it. snake_case body (Go) — bound via the DTO's
         // explicit [JsonPropertyName] under the shared web-default options.
         using var response = await _http.GetAsync(
-            $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/active-deliveries-count",
+            $"jeebers/{Uri.EscapeDataString(jeeberId)}/active-deliveries-count",
             ct);
 
         // A jeeber with no delivery rows yet is "0 active", not an error — map the

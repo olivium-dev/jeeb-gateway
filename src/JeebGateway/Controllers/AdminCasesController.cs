@@ -694,6 +694,12 @@ public sealed class AdminCasesController : CaseControllerBase
             return GenericCaseKinds.Dispute;
         if (path?.StartsWith("/admin/v1/support/tickets/", StringComparison.OrdinalIgnoreCase) == true)
             return GenericCaseKinds.Support;
+        // W6-03 — the W6-02 unversioned twins must enforce the SAME kind, otherwise a
+        // support ticket reached via /admin/support/tickets/{id} skips the check entirely.
+        if (path?.StartsWith("/admin/disputes/", StringComparison.OrdinalIgnoreCase) == true)
+            return GenericCaseKinds.Dispute;
+        if (path?.StartsWith("/admin/support/tickets/", StringComparison.OrdinalIgnoreCase) == true)
+            return GenericCaseKinds.Support;
         return null;
     }
 }

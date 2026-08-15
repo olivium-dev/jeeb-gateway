@@ -263,7 +263,7 @@ public class TierUnificationTests
     // ---------------------------------------------------------------------
 
     // The live delivery-service Standard tier id (UUIDv5), exactly as
-    // GET /api/v1/tiers returns it and the mobile tier-picker submits it.
+    // GET /tiers returns it and the mobile tier-picker submits it.
     private const string UpstreamStandardTierId = "2bd0d5df-db76-5d14-9e4d-741d60b2fa12";
     private const string UpstreamFlashTierId = "1a2b3c4d-5e6f-5a1b-8c2d-3e4f5a6b7c8d";
     private const string UpstreamExpressTierId = "9f1c0e6b-1b2a-5c3d-8e4f-0a1b2c3d4e5f";
@@ -407,9 +407,9 @@ public class TierUnificationTests
     // Delivery-upstream-ON factory: flips FeatureFlags:UseUpstream:Delivery on (via
     // UseSetting, like S09HandoverIdempotentReverifyTests) and wires the REAL
     // DeliveryServiceClient over a stub HttpMessageHandler that serves the
-    // delivery-service tier catalog at GET /api/v1/tiers — the SAME call
+    // delivery-service tier catalog at GET /tiers — the SAME call
     // JeebTiersController.List uses — plus a benign 201 for the best-effort
-    // POST /api/v1/deliveries row seed. This drives the whole fixed path end-to-end:
+    // POST /deliveries row seed. This drives the whole fixed path end-to-end:
     // flag -> CatalogBackedTiersStore -> IDeliveryServiceClient.ListTiersAsync -> id match.
     private static WebApplicationFactory<Program> NewUpstreamDeliveryFactory(
         RecordingTopicPushClient push,
@@ -469,8 +469,8 @@ public class TierUnificationTests
 
     /// <summary>
     /// Serves the delivery-service tier catalog (UUIDv5 ids, exactly like the live
-    /// upstream) at <c>GET /api/v1/tiers</c> and a benign <c>201</c> for the
-    /// best-effort <c>POST /api/v1/deliveries</c> row seed. Any other request gets a
+    /// upstream) at <c>GET /tiers</c> and a benign <c>201</c> for the
+    /// best-effort <c>POST /deliveries</c> row seed. Any other request gets a
     /// harmless 200 — the create path under test touches only these two routes.
     /// </summary>
     private sealed class UpstreamTiersStubHandler : HttpMessageHandler
@@ -484,7 +484,7 @@ public class TierUnificationTests
             var path = request.RequestUri!.AbsolutePath;
 
             if (request.Method == HttpMethod.Get
-                && path.EndsWith("/api/v1/tiers", StringComparison.Ordinal))
+                && path.EndsWith("/tiers", StringComparison.Ordinal))
             {
                 var tiers = new[]
                 {
@@ -511,7 +511,7 @@ public class TierUnificationTests
             }
 
             if (request.Method == HttpMethod.Post
-                && path.EndsWith("/api/v1/deliveries", StringComparison.Ordinal))
+                && path.EndsWith("/deliveries", StringComparison.Ordinal))
             {
                 DeliveryCreates.Enqueue(await request.Content!.ReadAsStringAsync(cancellationToken));
                 return new HttpResponseMessage(HttpStatusCode.Created)

@@ -20,9 +20,9 @@ namespace JeebGateway.IntegrationTests;
 /// a green integration suite. These tests therefore drive the REAL store over a stub handler
 /// that reproduces the live wire behaviour observed against jeeb-state-service on MSI:</para>
 /// <code>
-/// PUT  /v1/state/idempotency       -> 201 {"inserted": true,  ...}   (first)
-/// PUT  /v1/state/idempotency       -> 200 {"inserted": false, ...}   (replay, ORIGINAL body)
-/// GET  /v1/state/idempotency/{key} -> 200 {"inserted": false, ...}   (ALWAYS false)
+/// PUT  /state/idempotency       -> 201 {"inserted": true,  ...}   (first)
+/// PUT  /state/idempotency       -> 200 {"inserted": false, ...}   (replay, ORIGINAL body)
+/// GET  /state/idempotency/{key} -> 200 {"inserted": false, ...}   (ALWAYS false)
 /// </code>
 /// </summary>
 public class StateServiceIdempotencyInsertedTests

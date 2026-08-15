@@ -35,7 +35,7 @@ public class DeliveryHandoverContractTests
     [Fact]
     public async Task IssueHandoverOtpAsync_Binds_SnakeCase_DeliveryId_And_Issued()
     {
-        // The LITERAL Go body for 200 POST /api/v1/deliveries/{id}/otp/issue.
+        // The LITERAL Go body for 200 POST /deliveries/{id}/otp/issue.
         var client = ClientReturning(
             HttpStatusCode.OK,
             $$"""{"delivery_id":"{{DeliveryId}}","issued":true}""");
@@ -49,7 +49,7 @@ public class DeliveryHandoverContractTests
     [Fact]
     public async Task VerifyHandoverOtpAsync_Binds_SnakeCase_DeliveryId_Verified_Status()
     {
-        // The LITERAL Go body for 200 POST /api/v1/deliveries/{id}/otp/verify.
+        // The LITERAL Go body for 200 POST /deliveries/{id}/otp/verify.
         var client = ClientReturning(
             HttpStatusCode.OK,
             $$"""{"delivery_id":"{{DeliveryId}}","verified":true,"status":"Done"}""");
@@ -81,7 +81,7 @@ public class DeliveryHandoverContractTests
         handler.LastRequest.Should().NotBeNull();
         handler.LastRequest!.Headers.GetValues("X-Actor-ID").Should().ContainSingle().Which.Should().Be("client_42");
         handler.LastRequest!.Headers.GetValues("X-Actor-Role").Should().ContainSingle().Which.Should().Be("client");
-        handler.LastRequest!.RequestUri!.AbsolutePath.Should().Be($"/api/v1/deliveries/{DeliveryId}/otp/verify");
+        handler.LastRequest!.RequestUri!.AbsolutePath.Should().Be($"/deliveries/{DeliveryId}/otp/verify");
     }
 
     [Fact]

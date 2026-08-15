@@ -85,7 +85,7 @@ public class UpstreamProxyTests
         body!.Items.Should().HaveCount(1);
         body.Items[0].Id.Should().Be("upstream-only");
 
-        captured.Contains("/api/v1/tiers").Should().BeTrue();
+        captured.Contains("/tiers").Should().BeTrue();
     }
 
     // -----------------------------------------------------------------
@@ -152,7 +152,7 @@ public class UpstreamProxyTests
 
         // The latest fix was forwarded to the canonical delivery-service presence
         // heartbeat route (jeeber id in the path).
-        captured.Contains("/api/v1/jeebers/jeeber-1/heartbeat").Should().BeTrue();
+        captured.Contains("/jeebers/jeeber-1/heartbeat").Should().BeTrue();
     }
 
     // NOTE: the legacy multipart KYC submit (old in-gateway KycController over the

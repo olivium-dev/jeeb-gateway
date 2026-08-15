@@ -69,7 +69,7 @@ public class PresenceThinWireTests
         // the jeeber id in the PATH.
         var setReq = captured.Single(r =>
             r.Method == HttpMethod.Post &&
-            r.RequestUri!.AbsolutePath == "/api/v1/jeebers/jeeber-1/availability");
+            r.RequestUri!.AbsolutePath == "/jeebers/jeeber-1/availability");
         setReq.Should().NotBeNull();
 
         var sent = bodies.Single();
@@ -145,7 +145,7 @@ public class PresenceThinWireTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         captured.Should().Contain(r =>
             r.Method == HttpMethod.Get &&
-            r.RequestUri!.AbsolutePath == "/api/v1/jeebers/jeeber-g/availability");
+            r.RequestUri!.AbsolutePath == "/jeebers/jeeber-g/availability");
 
         var body = await resp.Content.ReadFromJsonAsync<AvailabilityResponse>(JsonOpts);
         body!.Online.Should().BeTrue();
@@ -211,7 +211,7 @@ public class PresenceThinWireTests
         // The heartbeat hit the canonical route with the device-latest fix.
         var hb = captured.Single(r =>
             r.Method == HttpMethod.Post &&
-            r.RequestUri!.AbsolutePath == "/api/v1/jeebers/jeeber-hb/heartbeat");
+            r.RequestUri!.AbsolutePath == "/jeebers/jeeber-hb/heartbeat");
         hb.Should().NotBeNull();
 
         var sent = bodies.Single();

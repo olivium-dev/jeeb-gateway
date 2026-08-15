@@ -138,7 +138,7 @@ public sealed class StateWorkItemClient(HttpClient http) : IStateWorkItemClient
         StateWorkItemCreate request,
         CancellationToken ct)
     {
-        using var message = new HttpRequestMessage(HttpMethod.Post, "v1/work-items")
+        using var message = new HttpRequestMessage(HttpMethod.Post, "work-items")
         {
             Content = JsonContent.Create(request, options: Json)
         };
@@ -147,14 +147,14 @@ public sealed class StateWorkItemClient(HttpClient http) : IStateWorkItemClient
     }
 
     public Task<StateWorkItem?> GetAsync(Guid workItemId, CancellationToken ct) =>
-        GetOptionalAsync($"v1/work-items/{workItemId:D}", ct);
+        GetOptionalAsync($"work-items/{workItemId:D}", ct);
 
     public Task<StateWorkItem?> GetLatestAsync(
         string application,
         string kind,
         string subjectRef,
         CancellationToken ct) => GetOptionalAsync(
-        "v1/work-items/latest" +
+        "work-items/latest" +
         $"?application={Uri.EscapeDataString(application)}" +
         $"&kind={Uri.EscapeDataString(kind)}" +
         $"&subjectRef={Uri.EscapeDataString(subjectRef)}",
@@ -164,7 +164,7 @@ public sealed class StateWorkItemClient(HttpClient http) : IStateWorkItemClient
         StateWorkClaim request,
         CancellationToken ct)
     {
-        using var message = new HttpRequestMessage(HttpMethod.Post, "v1/work-items/claim")
+        using var message = new HttpRequestMessage(HttpMethod.Post, "work-items/claim")
         {
             Content = JsonContent.Create(request, options: Json)
         };
@@ -218,7 +218,7 @@ public sealed class StateWorkItemClient(HttpClient http) : IStateWorkItemClient
     {
         using var message = new HttpRequestMessage(
             HttpMethod.Post,
-            $"v1/work-items/{workItemId:D}/{action}")
+            $"work-items/{workItemId:D}/{action}")
         {
             Content = JsonContent.Create(request, options: Json)
         };

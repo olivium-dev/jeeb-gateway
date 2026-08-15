@@ -14,12 +14,12 @@ public sealed class StateServiceCredentialHandlerTests
         var capture = new CaptureHandler();
         using var client = Client(token.Path, capture);
 
-        using var response = await client.GetAsync("https://state.test/v1/work-items/id");
+        using var response = await client.GetAsync("https://state.test/work-items/id");
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         capture.Authorization.Should().Be(
             "Bearer state-service-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        capture.Uri.Should().Be("https://state.test/v1/work-items/id");
+        capture.Uri.Should().Be("https://state.test/work-items/id");
     }
 
     [Fact]
@@ -29,13 +29,13 @@ public sealed class StateServiceCredentialHandlerTests
         var capture = new CaptureHandler();
         using var client = Client(token.Path, capture);
 
-        using (await client.GetAsync("https://state.test/v1/work-items/one")) { }
+        using (await client.GetAsync("https://state.test/work-items/one")) { }
         capture.Authorization.Should().EndWith("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
         await File.WriteAllTextAsync(
             token.Path,
             "state-service-token-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n");
-        using (await client.GetAsync("https://state.test/v1/work-items/two")) { }
+        using (await client.GetAsync("https://state.test/work-items/two")) { }
 
         capture.Authorization.Should().Be(
             "Bearer state-service-token-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
@@ -50,7 +50,7 @@ public sealed class StateServiceCredentialHandlerTests
         var capture = new CaptureHandler();
         using var client = Client(path, capture);
 
-        var act = () => client.GetAsync("https://state.test/v1/work-items");
+        var act = () => client.GetAsync("https://state.test/work-items");
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*absolute mounted-secret path*");
@@ -65,7 +65,7 @@ public sealed class StateServiceCredentialHandlerTests
         var capture = new CaptureHandler();
         using var client = Client(token.Path, capture);
 
-        var act = () => client.GetAsync("https://state.test/v1/audit-events");
+        var act = () => client.GetAsync("https://state.test/audit-events");
 
         var error = await act.Should().ThrowAsync<InvalidOperationException>();
         error.Which.ToString().Should().NotContain(invalid);

@@ -249,7 +249,17 @@ public sealed class IdempotencyMiddleware
                || value.StartsWith("/admin/v1/support/tickets/", StringComparison.OrdinalIgnoreCase)
                || value.StartsWith("/deliveries/", StringComparison.OrdinalIgnoreCase)
                   && value.EndsWith("/dispute", StringComparison.OrdinalIgnoreCase)
-               || value.StartsWith("/admin/disputes/", StringComparison.OrdinalIgnoreCase);
+               || value.StartsWith("/admin/disputes/", StringComparison.OrdinalIgnoreCase)
+               // W6-03 — the W6-02 unversioned twins reach the SAME actions, so they must
+               // defer to state-service CAS exactly as their versioned siblings do.
+               || value.Equals("/disputes", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/disputes/", StringComparison.OrdinalIgnoreCase)
+               || value.Equals("/support/tickets", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/support/tickets/", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/deliveries/", StringComparison.OrdinalIgnoreCase)
+                  && value.EndsWith("/escalate", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/admin/cases/", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/admin/support/tickets/", StringComparison.OrdinalIgnoreCase);
     }
 
     internal static bool IsCaseCreateMutation(PathString path)
@@ -260,7 +270,12 @@ public sealed class IdempotencyMiddleware
                || value.StartsWith("/v1/deliveries/", StringComparison.OrdinalIgnoreCase)
                   && value.EndsWith("/escalate", StringComparison.OrdinalIgnoreCase)
                || value.StartsWith("/deliveries/", StringComparison.OrdinalIgnoreCase)
-                  && value.EndsWith("/dispute", StringComparison.OrdinalIgnoreCase);
+                  && value.EndsWith("/dispute", StringComparison.OrdinalIgnoreCase)
+               // W6-03 — unversioned twins of the three create legs above.
+               || value.Equals("/disputes", StringComparison.OrdinalIgnoreCase)
+               || value.Equals("/support/tickets", StringComparison.OrdinalIgnoreCase)
+               || value.StartsWith("/deliveries/", StringComparison.OrdinalIgnoreCase)
+                  && value.EndsWith("/escalate", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<bool> BindCaseCreateRequestAsync(

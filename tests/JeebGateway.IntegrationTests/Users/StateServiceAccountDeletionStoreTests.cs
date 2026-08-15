@@ -13,7 +13,7 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests.Users;
 
-// gwdbx W3-05 — StateServiceAccountDeletionStore dual-write over /v1/work-items. Charter cases:
+// gwdbx W3-05 — StateServiceAccountDeletionStore dual-write over /work-items. Charter cases:
 // local record stays authoritative, upstream failure never fails the delete, key, default rung.
 public class StateServiceAccountDeletionStoreTests
 {

@@ -99,7 +99,7 @@ public sealed class StateServiceBroadcastEventRecorder : IBroadcastEventRecorder
 
         try
         {
-            using var response = await _http.PostAsJsonAsync("v1/state/broadcasts", body, JsonOptions, ct);
+            using var response = await _http.PostAsJsonAsync("state/broadcasts", body, JsonOptions, ct);
 
             if (response.IsSuccessStatusCode)
             {

@@ -120,7 +120,7 @@ public class DeliveryServiceTiersStoreW409Tests
 
         created.Id.Should().Be("scheduled");
         var put = handler.Requests.Single(r => r.Method == HttpMethod.Put);
-        put.Path.Should().Be("/api/v1/admin/tiers/scheduled");
+        put.Path.Should().Be("/admin/tiers/scheduled");
         put.Headers.Should().ContainKey("X-Actor-Ref").WhoseValue.Should().Be("admin-7");
         var body = JsonSerializer.Deserialize<JsonElement>(put.Body);
         body.GetProperty("code").GetString().Should().Be("scheduled");

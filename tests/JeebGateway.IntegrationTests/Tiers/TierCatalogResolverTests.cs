@@ -32,7 +32,7 @@ namespace JeebGateway.IntegrationTests.Tiers;
 /// </summary>
 public sealed class TierCatalogResolverTests
 {
-    // The live delivery-service catalog, verbatim (ids + radii from GET /api/v1/tiers on MSI).
+    // The live delivery-service catalog, verbatim (ids + radii from GET /tiers on MSI).
     private const string FlashId = "0be308ce-01b5-5cb9-a3e8-9adb60668d9c";
     private const string ExpressId = "efe0629b-0b50-555c-b182-4bd41fcd6507";
     private const string StandardId = "2bd0d5df-db76-5d14-9e4d-741d60b2fa12";
@@ -247,7 +247,7 @@ public sealed class TierCatalogResolverTests
             Options.Create(new NewRequestFanoutOptions { FallbackToKnownJeebers = false }),
             TimeProvider.System);
 
-    /// <summary>Serves the LIVE delivery-service tier catalog at <c>GET /api/v1/tiers</c>.</summary>
+    /// <summary>Serves the LIVE delivery-service tier catalog at <c>GET /tiers</c>.</summary>
     private sealed class LiveTierCatalogHandler : HttpMessageHandler
     {
         private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
