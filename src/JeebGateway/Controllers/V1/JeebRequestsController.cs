@@ -114,6 +114,8 @@ public sealed class JeebRequestsController : ControllerBase
     // RequestVoiceController's multipart/form-data [FromForm] path on the same
     // route. ASP.NET Core selects the more-specific [Consumes("application/json")]
     // action for JSON requests and falls back to the voice controller for multipart.
+    // R2-6: [Consumes] passes through when Content-Type is ABSENT, so the voice twin carries
+    // Order=1 and this action wins that tie (401/415 here, never an AmbiguousMatch 500).
     [Consumes("application/json")]
     [RequireCapability(Capabilities.RequestCreate)]
     [RequireActiveUser]
