@@ -21,41 +21,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Retired gateway-owned user state. Keep the historical source for migration
-         archaeology, but exclude it from the shipped binary. Integration tests link
-         the in-memory implementation explicitly as a test-only fixture. -->
-    <Compile Remove="Users/InMemoryUsersStore.cs" />
-    <Compile Remove="Users/PostgresUserProjectionStore.cs" />
-    <Compile Remove="Users/UpstreamBackedUsersStore.cs" />
-
-    <!-- Stateless gateway cutover: these historical in-process ledgers, durable
-         decorators, sweepers, retry processors, reconcilers, seeders, and jobs are
-         intentionally not compiled into the production artifact. Owner services
-         persist state and execute recurring work; the gateway only exposes bounded
-         owner-backed HTTP orchestration endpoints. -->
-    <Compile Remove="Availability/AutoOfflineSweeper.cs" />
-    <Compile Remove="Conversations/AcceptChatSettleReconciler.cs" />
-    <Compile Remove="Financials/Cod/InProcessCodSettlementLedger.cs" />
-    <Compile Remove="Financials/SettlementLedgerReconciler.cs" />
-    <Compile Remove="Notifications/JeebNotificationCatalogSeeder.cs" />
-    <Compile Remove="Notifications/NewRequestFanoutProcessor.cs" />
-    <Compile Remove="Notifications/NotificationDurableWriteStartupAlarm.cs" />
-    <Compile Remove="ProhibitedItems/DefaultLexiconSeeder.cs" />
-    <Compile Remove="Push/PushRetryQueueProcessor.cs" />
-    <Compile Remove="Ratings/LowRatingAutoFlag.cs" />
-    <Compile Remove="Ratings/RatingRevealJob.cs" />
-    <Compile Remove="Realtime/CourierPositionPublisher.cs" />
-    <Compile Remove="Requests/DurableRequestsStore.cs" />
-    <Compile Remove="Requests/OtpHandover/OtpHandoverSweeper.cs" />
-    <Compile Remove="Requests/RequestExpiryObserver.cs" />
-    <Compile Remove="Requests/RequestExpirySweeper.cs" />
-    <Compile Remove="Requests/RequestNudgeSweeper.cs" />
-    <Compile Remove="Requests/ScheduledDeliveryActivator.cs" />
-    <Compile Remove="Users/AccountDeletionPurgeWorker.cs" />
-    <Compile Remove="Users/DataExport/DataExportProcessor.cs" />
-  </ItemGroup>
-
-  <ItemGroup>
     <!-- Pinned OpenAPI specs in src/JeebGateway/contracts/ are part of the build artifact. -->
     <None Include="contracts\**\*.json" CopyToOutputDirectory="Never" />
     <!-- regenerate-clients.sh is reference material; not copied. -->
@@ -64,6 +29,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.21" />
+    <PackageReference Include="Npgsql" Version="8.0.5" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
     <!--
       Newtonsoft.Json — required by every NSwag-generated salehly mirror client

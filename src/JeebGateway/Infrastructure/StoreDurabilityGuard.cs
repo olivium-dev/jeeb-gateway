@@ -130,10 +130,10 @@ internal static class StoreDurabilityGuard
         // landed. The gateway-owned CMS authoring plane (WS-01 — surfaces, drafts, and the
         // append-only published-version history that drives every MFE config envelope) is now
         // Postgres-backed (cms_surfaces + cms_surface_versions tables, migration 0032); in a
-        // prod-like env it MUST resolve to PostgresCmsSurfaceStore, never InMemoryCmsSurfaceStore —
+        // prod-like env it MUST resolve to BundlerCmsSurfaceStore, never InMemoryCmsSurfaceStore —
         // a fallback means every admin draft edit and published config version evaporates on
         // restart, flapping the MFEs back to the seeded v1 defaults.
-        (typeof(JeebGateway.Cms.ICmsSurfaceStore),                          new[] { typeof(JeebGateway.Cms.PostgresCmsSurfaceStore) }),
+        (typeof(JeebGateway.Cms.ICmsSurfaceStore),                          new[] { typeof(JeebGateway.Cms.BundlerCmsSurfaceStore) }),
         // partner-wallet-bff money-safety state is owned by jeeb-state-service. The gateway adapter
         // uses the shared atomic idempotency KV and holds no DB row or volatile partner-domain store.
         (typeof(JeebGateway.Partner.IPartnerWalletOperationStore),          new[] { typeof(JeebGateway.Partner.StateServicePartnerWalletOperationStore) }),
