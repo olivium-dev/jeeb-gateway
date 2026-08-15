@@ -169,8 +169,12 @@ public class OfferPushNotifierTests
         push.Attempts.Should().Be(0);
     }
 
+    /// <summary>
+    /// Was …BeforePush. The durable write no longer PRECEDES a push, it REPLACES it: the same
+    /// POST notification-service answers is what produces the card (2026-08-14 duplicate).
+    /// </summary>
     [Fact]
-    public async Task AC3_AC8b_AC8c_AC8d_DurableWriteUsesEtaAndAbsentClientNameBeforePush()
+    public async Task AC3_AC8b_AC8c_AC8d_DurableWriteUsesEtaAndAbsentClientName_AndOwnsThePush()
     {
         long fieldAbsentCount = 0;
         using var meterListener = new MeterListener();
@@ -223,13 +227,11 @@ public class OfferPushNotifierTests
             fee: 12.5m,
             CancellationToken.None);
 
-        timeline.Should().Equal("write", "push");
+        timeline.Should().Equal("write");
+        push.Sends.Should().BeEmpty(
+            "notification-service produces this push off the same POST — a direct send here is "
+            + "the second card measured on hardware 2026-08-14");
         var record = writer.Received.Should().ContainSingle().Subject;
-        var payload = (IDictionary<string, object?>)push.Sends.Single().Payload;
-        payload["notificationId"].Should().Be(record.NotificationCorrelationId);
-        payload["notification_id"].Should().Be(record.NotificationCorrelationId);
-        payload["title"].Should().Be(record.Title);
-        payload["body"].Should().Be(record.Description);
         record.Payload.OfferAmount.Should().Be(12.5m);
         record.Payload.DeliveryFee.Should().Be(12.5m);
         record.Payload.EstimatedDuration.Should().Be("30");
@@ -237,6 +239,23 @@ public class OfferPushNotifierTests
         record.Payload.PickupLocation.Should().Be("Hamra, Beirut");
         record.Payload.DeliveryLocation.Should().Be("Achrafieh, Beirut");
         fieldAbsentCount.Should().Be(1);
+
+        // Copy + correlation parity is only observable where the centre declines to produce and
+        // the direct client is the sole producer left.
+        var fallback = new RecordingUserPushClient();
+        await new OfferPushNotifier(
+            fallback,
+            new RecordingNotificationRecordWriter(
+                classification: NotificationRecordWriteClassification.Disabled),
+            (_, _) => Task.FromResult<DeliveryRequest?>(null),
+            NullLogger<OfferPushNotifier>.Instance)
+            .NotifyNewOfferAsync(context, Client, RequestId, OfferId, 12.5m, CancellationToken.None);
+
+        var payload = (IDictionary<string, object?>)fallback.Sends.Single().Payload;
+        payload["notificationId"].Should().Be(record.NotificationCorrelationId);
+        payload["notification_id"].Should().Be(record.NotificationCorrelationId);
+        payload["title"].Should().Be(record.Title);
+        payload["body"].Should().Be(record.Description);
     }
 
     [Fact]
@@ -406,13 +425,17 @@ public class OfferPushNotifierTests
     {
         private readonly List<string>? _timeline;
         private readonly bool _throwOnWrite;
+        private readonly NotificationRecordWriteClassification _classification;
 
         public RecordingNotificationRecordWriter(
             List<string>? timeline = null,
-            bool throwOnWrite = false)
+            bool throwOnWrite = false,
+            NotificationRecordWriteClassification classification =
+                NotificationRecordWriteClassification.Committed)
         {
             _timeline = timeline;
             _throwOnWrite = throwOnWrite;
+            _classification = classification;
         }
 
         public int Attempts { get; private set; }
@@ -429,9 +452,7 @@ public class OfferPushNotifierTests
                 throw new InvalidOperationException("writer fault");
             }
             Received.Add(record);
-            return Task.FromResult(new NotificationRecordWriteOutcome(
-                NotificationRecordWriteClassification.Committed,
-                201));
+            return Task.FromResult(new NotificationRecordWriteOutcome(_classification, 201));
         }
 
         // WriteOfferAcceptedAsync and the six step-6a writers stay on the base, which throws if

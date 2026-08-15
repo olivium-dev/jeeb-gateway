@@ -214,6 +214,7 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 clientId,
                 offerId);
             var copy = RenderNewOffer(fee);
+            NotificationRecordWriteOutcome? handover = null;
 
             if (context is not null)
             {
@@ -243,7 +244,12 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                     1,
                     new("field", "client_name"),
                     new("templateKey", OfferReceivedNotificationRecord.TemplateKey));
-                await TryWriteOfferReceivedAsync(record, offerId, ct);
+                handover = await TryWriteOfferReceivedAsync(record, offerId, ct);
+            }
+
+            if (UpstreamOwnsPush(handover))
+            {
+                return;
             }
 
             var payload = new Dictionary<string, object?>
@@ -334,6 +340,7 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
             templateKey,
             winnerJeeberId,
             offerId);
+        NotificationRecordWriteOutcome? handover = null;
 
         try
         {
@@ -363,7 +370,7 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                     1,
                     new("field", "client_name"),
                     new("templateKey", templateKey));
-                await TryWriteOfferAcceptedAsync(record, offerId, ct);
+                handover = await TryWriteOfferAcceptedAsync(record, offerId, ct);
             }
             else
             {
@@ -393,6 +400,11 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 notificationCorrelationId);
         }
 
+        if (UpstreamOwnsPush(handover))
+        {
+            return;
+        }
+
         await SendLifecycleAsync(
             winnerJeeberId,
             requestId,
@@ -403,6 +415,32 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
             template,
             notificationCorrelationId);
     }
+
+    /// <summary>
+    /// SINGLE PRODUCER — true once the durable write handed this event to notification-service,
+    /// which produces the push off that same POST, so the gateway must not send it again.
+    ///
+    /// <para>2026-08-14: one offer produced TWO FCM cards 26 ms apart because both legs ran
+    /// unconditionally. Only <see cref="JeebGateway.Services.Clients.GatewayDirectPushDispatchGuardHandler"/>'s
+    /// 503 was suppressing the second, and <c>PushDispatchMode=upstream-authority</c> FORCES that
+    /// guard off for an unrelated seat — so the guard flag cannot arbitrate this path.</para>
+    ///
+    /// <para>Owner is notification-service in every rung: these two types are the only offer types
+    /// with a centre route, and one upstream POST yields both the row and the push, so a
+    /// gateway-produced offer push would mean no inbox row. The second send is never ISSUED —
+    /// this is a producer removal, not a dedupe window.</para>
+    ///
+    /// <para><see cref="NotificationRecordWriteClassification.Unproven"/> is deliberately NOT a
+    /// fallback: the POST went out and the read-back could not prove the row absent, so sending
+    /// anyway re-opens the duplicate window. Null (no write attempted, or the writer threw) and
+    /// <see cref="NotificationRecordWriteClassification.Disabled"/> leave no upstream producer,
+    /// so the direct client still sends — matching the sibling seats, which also fall back only
+    /// when the hand-over seam declined outright.</para>
+    /// </summary>
+    private static bool UpstreamOwnsPush(NotificationRecordWriteOutcome? handover)
+        => handover is not null
+           && handover.Classification is not (NotificationRecordWriteClassification.Disabled
+               or NotificationRecordWriteClassification.SkippedSilent);
 
     // b02 step 6b — the template key is GONE from JeebNotificationCatalog (retired: the centre
     // 405s it, so no inbox row of that type can exist). Copy and deep link are therefore passed
@@ -520,14 +558,16 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
         }
     }
 
-    private async Task TryWriteOfferReceivedAsync(
+    // Null return = the write never landed an event upstream, so the direct client is still
+    // the only producer left. See UpstreamOwnsPush.
+    private async Task<NotificationRecordWriteOutcome?> TryWriteOfferReceivedAsync(
         OfferReceivedNotificationRecord record,
         string offerId,
         CancellationToken requestToken)
     {
         try
         {
-            await _recordWriter.WriteOfferReceivedAsync(record, requestToken);
+            return await _recordWriter.WriteOfferReceivedAsync(record, requestToken);
         }
         catch (Exception ex)
         {
@@ -537,17 +577,18 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 record.Receiver,
                 offerId,
                 record.NotificationCorrelationId);
+            return null;
         }
     }
 
-    private async Task TryWriteOfferAcceptedAsync(
+    private async Task<NotificationRecordWriteOutcome?> TryWriteOfferAcceptedAsync(
         OfferAcceptedNotificationRecord record,
         string offerId,
         CancellationToken requestToken)
     {
         try
         {
-            await _recordWriter.WriteOfferAcceptedAsync(record, requestToken);
+            return await _recordWriter.WriteOfferAcceptedAsync(record, requestToken);
         }
         catch (Exception ex)
         {
@@ -557,6 +598,7 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 record.Receiver,
                 offerId,
                 record.NotificationCorrelationId);
+            return null;
         }
     }
 
