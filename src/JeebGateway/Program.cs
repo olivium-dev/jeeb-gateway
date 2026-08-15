@@ -2191,13 +2191,8 @@ builder.Services.AddScoped<JeebGateway.Admin.KycAdminReviewComposer>();
 // via an NSwag-generated client, backed by the schema in 0001 + 0006.
 builder.Services.AddSingleton<InMemoryUsersStore>();
 
-// Durability register #8 — users-durable. When GatewayPostgres is configured, IUsersStore
-// resolves to UpstreamBackedUsersStore: admin user-search + the token-mint active_role read
-// are served from a durable Postgres projection (users table, migration 0025) hydrated from
-// user-management, and no longer evaporate on a bounce. Identity remains UM's source of
-// truth (Postgres is a read-model projection). The in-process InMemoryUsersStore is kept as
-// the permissive inner store (saved addresses / non-UUID OTP fallback). Absent Postgres,
-// the in-memory store IS IUsersStore exactly as before.
+// Durability register #8 — users-durable is NOT ARMED: the line below binds IUsersStore to
+// InMemoryUsersStore unconditionally. UpstreamBackedUsersStore has no DI registration.
 builder.Services.AddSingleton<IUsersStore>(sp => sp.GetRequiredService<InMemoryUsersStore>());
 
 // JEBV4-314 — gateway-local, DEV-ONLY bridge from POST /dev/seed/user (role=admin)

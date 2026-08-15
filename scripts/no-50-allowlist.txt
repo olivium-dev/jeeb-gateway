@@ -27,10 +27,16 @@
 #    .github/workflows/i18n-gate.yml without `workflow` scope"
 # (verified empirically on a throwaway branch, 2026-07-26 — not assumed).
 #
-# UNBLOCK: the owner applies
-#   docs/batches/b02-20260726/OWNER-APPLY-workflow-50-purge.patch
-# which rewrites these 10 defaults AND deletes these 10 allowlist entries AND
-# wires this gate into .github/workflows/ci.yml, in one commit.
+# UNBLOCK: the owner rewrites these 10 defaults and deletes these 10 allowlist
+# entries in one commit.
+#
+# DEAD POINTER, 2026-08-16: this paragraph used to name
+# docs/batches/b02-20260726/OWNER-APPLY-workflow-50-purge.patch as the prepared
+# fix. That path has never been committed to this repo (docs/batches/ does not
+# exist), so there is no patch to apply — the rewrite has to be authored. The
+# clause about wiring the gate into .github/workflows/ci.yml is dropped too:
+# workflows are off-limits and disabled fleet-wide (A27), so promising CI
+# enforcement here would be promising something nobody can deliver.
 # ---------------------------------------------------------------------------
 .github/workflows/deploy-to-jeeb.yml:chat_base_url:               { description: 'Chat service base URL',            required: true, default: 'http://192.168.2.50:10028' }
 .github/workflows/deploy-to-jeeb.yml:user_management_base_url:    { description: 'User-management service base URL',  required: true, default: 'http://192.168.2.50:10001' }
@@ -66,5 +72,10 @@
 # scan of the built DLL — an ASCII-only grep previously produced a FALSE
 # absence here). The standing guard is
 # tests/JeebGateway.IntegrationTests/Payments/NoPaymentGatewayDialGuardTests.cs.
-# Decision recorded in docs/batches/b02-20260726/UPG-REMOVAL.md.
+#
+# The decision used to be cited as docs/batches/b02-20260726/UPG-REMOVAL.md.
+# DEAD POINTER, 2026-08-16: docs/batches/ has never existed in this repo. The
+# surviving record of the ruling is the paragraph above, plus the
+# _comment_payments_REMOVED note in src/JeebGateway/appsettings.json (which
+# carries the same dead path — treat its text, not its link, as the record).
 # ---------------------------------------------------------------------------
