@@ -194,6 +194,9 @@ public class RefreshTokenStoreModeTests
             b.UseDefaultServiceProvider(o => o.ValidateOnBuild = false);
             b.UseSetting("Jwt:SigningKey", ProductionSigningKey);
             b.UseSetting("UmJwt:SigningKey", ProductionSigningKey);
+            // Same reason as the signing keys: Production commits no Redis endpoint (A25), so
+            // without this the Redis guard aborts first and the refresh-store guard is untested.
+            b.UseSetting("Redis:ConnectionString", "127.0.0.1:6379");
             foreach (var (key, value) in overrides)
             {
                 b.UseSetting(key, value);

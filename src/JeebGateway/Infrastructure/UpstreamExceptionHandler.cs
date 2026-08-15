@@ -81,6 +81,12 @@ public sealed class UpstreamExceptionHandler : IExceptionHandler
                 StatusCodes.Status503ServiceUnavailable,
                 "Settlement payout batches are served by settlement-service.",
                 JeebGateway.Financials.SettlementAdminScopeException.ProblemType),
+            // W3-18: never 200 (O10) and never the courier's own 401/403 — that would
+            // strand them at a re-login over a fault that is entirely ours.
+            JeebGateway.Tracking.LocationUpstreamUnavailableException => (
+                StatusCodes.Status503ServiceUnavailable,
+                "Location could not be recorded: geolocation-service is unavailable.",
+                JeebGateway.Tracking.LocationUpstreamUnavailableException.ProblemType),
             OperationCanceledException when cancellationToken.IsCancellationRequested => (
                 499, // nginx "client closed request" — request aborted, nothing to serve
                 "The request was cancelled by the client.",
@@ -109,6 +115,13 @@ public sealed class UpstreamExceptionHandler : IExceptionHandler
             httpContext.Request.Method, httpContext.Request.Path, status, correlationId, traceId);
 
         httpContext.Response.StatusCode = status;
+
+        // A bare 503 invites a hot retry loop on a high-frequency best-effort GPS
+        // stream; bound the backoff and let the next fix supersede the dropped batch.
+        if (exception is JeebGateway.Tracking.LocationUpstreamUnavailableException)
+        {
+            httpContext.Response.Headers.RetryAfter = "5";
+        }
 
         return await _problemDetails.TryWriteAsync(new ProblemDetailsContext
         {

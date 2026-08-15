@@ -47,6 +47,9 @@ public sealed class ControllerHeaderSpoofScopingTests
             // stores, so disable the fail-closed StoreDurabilityGuard ONLY here (real prod never sets
             // this → still fail-closed). Keeps these tests testing Production behaviour without a DB.
             b.UseSetting("StoreDurability:FailClosedDisabled", "true");
+            // Production commits no Redis endpoint (A25) and RedisDurabilityGuard is armed by
+            // environment, not by the hatch above — supply one so it is not what aborts this boot.
+            b.UseSetting("Redis:ConnectionString", "127.0.0.1:6379");
             // No Security:EdgeIdentity:SharedSecret → fail closed, raw X-User-* never trusted.
         });
 

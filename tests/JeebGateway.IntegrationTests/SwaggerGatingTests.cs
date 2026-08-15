@@ -174,6 +174,9 @@ public class SwaggerGatingTests
                 // host's environment.
                 builder.UseEnvironment("Production");
                 builder.UseSetting("Features:Swagger:Enabled", enabled ? "true" : "false");
+                // Production commits no Redis endpoint (A25); supply one so the armed
+                // RedisDurabilityGuard is not what aborts this Swagger-only boot.
+                builder.UseSetting("Redis:ConnectionString", "127.0.0.1:6379");
 
                 // SEC-C1: when a test drives the trusted-edge identity path, configure the shared
                 // secret the edge must present. Absent it, X-User-* headers are ignored (fail closed).

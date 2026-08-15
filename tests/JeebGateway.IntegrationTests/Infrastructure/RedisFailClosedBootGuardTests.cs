@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
@@ -32,6 +35,39 @@ public class RedisFailClosedBootGuardTests
     // A real (>=32 byte) key so a Production host boot gets past JwtSigningKeyGuard and actually
     // reaches the Redis guard — otherwise the throw would be the JWT guard's and would prove nothing.
     private const string ProdJwtKey = "w3-01-production-boot-signing-key-32+chars";
+
+    /// <summary>A25 — the shipped Production config must carry NO Redis endpoint: a baked-in value
+    /// satisfies EnsureWired's set/non-placeholder check wherever it points, so the decommissioned
+    /// host that sat here armed the guard against a black hole.</summary>
+    [Fact]
+    public void Production_Config_Commits_No_Redis_Endpoint_And_No_Decommissioned_Host()
+    {
+        var path = Path.Combine(
+            FindRepoRoot(), "src", "JeebGateway", "appsettings.Production.json");
+        var raw = File.ReadAllText(path);
+
+        raw.Should().NotContain("192.168.2.20",
+            "the .20 box is decommissioned (A25); no committed config may reference it");
+
+        using var doc = JsonDocument.Parse(raw);
+        if (doc.RootElement.TryGetProperty("Redis", out var redis)
+            && redis.TryGetProperty("ConnectionString", out var cs))
+        {
+            cs.GetString().Should().BeNullOrWhiteSpace(
+                "the deploy env supplies the real endpoint; a committed default is exactly the "
+                + "defect, because it satisfies the fail-closed guard while pointing anywhere");
+        }
+    }
+
+    private static string FindRepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = new FileInfo(thisFile).Directory!;
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "JeebGateway")))
+            dir = dir.Parent!;
+
+        (dir is not null).Should().BeTrue("could not locate repo root from test source file path");
+        return dir!.FullName;
+    }
 
     private static IConfiguration Config(params (string Key, string? Value)[] entries)
     {
@@ -153,8 +189,8 @@ public class RedisFailClosedBootGuardTests
     [Fact]
     public void RedisDown_Drill_A_Production_Host_With_The_Key_Blanked_Aborts_Explicitly()
     {
-        // The dropped-env-var deploy: appsettings.Production.json commits a Redis endpoint, so
-        // "unwired in Production" is reproduced by blanking it.
+        // The dropped-env-var deploy. appsettings.Production.json no longer commits an endpoint
+        // (A25), so blanking here just pins the explicitly-empty case too.
         using var factory = ProductionHost(redisConnectionString: "");
 
         var boot = Record.Exception(() => factory.CreateClient());
