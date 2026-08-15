@@ -1,8 +1,10 @@
 # W6-02 route compat window — what was aliased, what was REFUSED, and the one accepted overlap
 
 **Status:** current. **Wave:** gwdbx W6-02 (serve unversioned paths alongside versioned ones),
-merged as PR #457. **Judged from:** gateway `origin/main` @ `1a56711`; every line number below was
-re-read on that tree, not copied from the PR body.
+merged as PR #457. **Judged from:** gateway `origin/main` @ `ad25325`; every line number below was re-read on that
+tree, not copied from the PR body. Line numbers in a live tree drift — two of these moved between
+`1a56711` and `ad25325` when PR #461 landed. Treat them as a starting point and re-grep the route
+attribute if they miss.
 
 W6-02 added **160 unversioned route bindings** across 44 files. Every one is a routing-layer
 registration only — an extra `[Route]` on a controller or an extra `[HttpX(...)]` on the *same*
@@ -30,8 +32,8 @@ them. Neither failure shows up in a build, which is why these were reported rath
 | `GET /v1/disputes/{id}` — `V1/DisputeCasesController.cs:100` | `GET /disputes/{id}` — `Controllers/DisputesController.cs:121` | as above, single record |
 | `GET /v1/requests` — `Controllers/V1/JeebOrdersListController.cs:73` | `GET /requests` — `Controllers/RequestsController.cs:322` (class `[Route("requests")]`) | **see §2** |
 | `GET /v1/deliveries` — `V1/JeebOrdersListController.cs:199` | `GET /deliveries` — `Controllers/DeliveriesController.cs:265` (class `[Route("deliveries")]`) | **see §2** |
-| `POST /v1/requests` — `V1/JeebRequestsController.cs:112` **and** `Controllers/RequestVoiceController.cs:70` (class `[Route("v1/requests")]`) | `POST /requests` — `Controllers/RequestsController.cs:77` | the versioned path is *already* double-bound (JSON vs multipart, disambiguated by `[Consumes]`); adding a third binding on the unversioned path would have collided with the legacy create |
-| `GET /v1/requests/{id}` — `V1/JeebRequestsController.cs:295` | `GET /requests/{id}` — `Controllers/RequestsController.cs:358` | two get-by-id actions with different DTOs |
+| `POST /v1/requests` — `V1/JeebRequestsController.cs:112` **and** `Controllers/RequestVoiceController.cs:88` (class `[Route("v1/requests")]` at `:30`) | `POST /requests` — `Controllers/RequestsController.cs:77` | the versioned path is *already* double-bound (JSON vs multipart, disambiguated by `[Consumes]`, plus `Order = 1` on the voice twin since R2-6/PR #461 so a missing `Content-Type` cannot tie); adding a third binding on the unversioned path would have collided with the legacy create |
+| `GET /v1/requests/{id}` — `V1/JeebRequestsController.cs:297` | `GET /requests/{id}` — `Controllers/RequestsController.cs:358` | two get-by-id actions with different DTOs |
 | `DELETE /v1/requests/{deliveryId}` — `Controllers/DeliveriesController.cs:1195` | `DELETE /requests/{requestId}` — `Controllers/RequestsController.cs:394` | delivery-cancel vs request-cancel, different semantics |
 | `GET /v1/tiers` — `Controllers/V1/JeebTiersController.cs:55` | `GET /tiers` — `Controllers/TiersController.cs:42` (class `[Route("tiers")]`) | two tier catalogs |
 
