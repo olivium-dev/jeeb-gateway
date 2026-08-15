@@ -316,6 +316,8 @@ public sealed class RequestVoiceController : ControllerBase
     /// there is no ambiguity resolved by an integer.
     /// </summary>
     [HttpGet("{requestId}/voice")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpGet("/requests/{requestId}/voice")]
     // ADR-005 L2 §C client-only (STATE: ownership stays in-action).
     [RequireCapability(Capabilities.RequestReadOwn)]
     [RequireActiveUser]

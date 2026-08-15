@@ -49,6 +49,8 @@ public sealed class CodSettlementComposeController : ControllerBase
     /// cannot choose the commission (copied verbatim, BR-16).
     /// </summary>
     [HttpPost("api/v1/payments/cod/record")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpPost("api/payments/cod/record")]
     [RequireCapability(Capabilities.DeliveryParticipate)] // {client, jeeber}; party/admin is STATE in-action
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status201Created)]
@@ -87,6 +89,7 @@ public sealed class CodSettlementComposeController : ControllerBase
     /// be a party to the delivery (or admin).
     /// </summary>
     [HttpGet("api/v1/payments/cod_jeeb/by-delivery/{deliveryId}")]
+    [HttpGet("api/payments/cod_jeeb/by-delivery/{deliveryId}")]
     [RequireCapability(Capabilities.DeliveryParticipate)] // {client, jeeber}; party/admin is STATE in-action
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -126,6 +129,7 @@ public sealed class CodSettlementComposeController : ControllerBase
     /// 404 unknown) is re-emitted verbatim.
     /// </summary>
     [HttpPost("admin/v1/settlements/{batchId}/mark-paid")]
+    [HttpPost("admin/settlements/{batchId}/mark-paid")]
     [RequireCapability(Capabilities.SettlementsManage)] // {admin}
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

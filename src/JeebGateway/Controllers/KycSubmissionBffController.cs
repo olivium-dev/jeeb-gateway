@@ -82,6 +82,8 @@ public sealed class KycSubmissionBffController : ControllerBase
     /// and never echoed back.
     /// </summary>
     [HttpPost("v1/kyc/contract-template/sign")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpPost("kyc/contract-template/sign")]
     [ProducesResponseType(typeof(KycTosSignResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

@@ -106,6 +106,8 @@ public sealed class JeebOffersController : ControllerBase
     /// local in-memory accept was deleted with the in-memory offer store it drove.
     /// </summary>
     [HttpPost("v1/offers/{id}/accept")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpPost("offers/{id}/accept")]
     // ADR-005 L2 / S07: offer.accept {client} — the CLIENT accepts the bid, not the jeeber.
     [RequireCapability(Capabilities.OfferAccept)]
     [RequireActiveUser]

@@ -14,6 +14,8 @@ namespace JeebGateway.Controllers;
 // 404'd. Both routes map to the SAME actions (GET + PATCH) — a pure alias, no
 // behaviour change, ADR-0001 (stateless thin BFF) preserved.
 [Route("v1/notifications/preferences")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("notifications/preferences")]
 [RequireCapability(Capabilities.NotificationPrefsSelf)]
 public class NotificationPreferencesController : ControllerBase
 {

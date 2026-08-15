@@ -9,6 +9,8 @@ namespace JeebGateway.Controllers;
 
 [ApiController]
 [Route("v1/support")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("support")]
 [Produces("application/json")]
 public sealed class JeebSupportController : CaseControllerBase
 {

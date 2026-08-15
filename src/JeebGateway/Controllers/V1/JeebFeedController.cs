@@ -95,6 +95,8 @@ public sealed class JeebFeedController : ControllerBase
     /// offline/empty case (<c>{ items: [], totalCount: 0 }</c>).
     /// </summary>
     [HttpGet("v1/jeebers/me/feed")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpGet("jeebers/me/feed")]
     // ADR-005 L2 §D jeeber-only (contract-freeze §3): a client never reads the jeeber feed.
     [RequireCapability(Capabilities.JeeberFeedRead)]
     [RequireActiveUser]

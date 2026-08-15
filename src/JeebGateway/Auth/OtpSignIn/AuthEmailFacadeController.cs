@@ -53,6 +53,8 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// </summary>
 [ApiController]
 [Route("v1/auth")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("auth")]
 // NOTE (JEBV4-261): intentionally NO class-level [Produces(...)]. The single-arg
 // [Produces("application/json")] here was the worst offender — it CLEARED every
 // ObjectResult's ContentTypes and forced "application/json", so the RFC 7807 error

@@ -30,6 +30,8 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("cms-admin/v1/dashboard")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("cms-admin/dashboard")]
 // Reuses the existing finance.read capability (AdminOnly). No capability is minted here and the
 // capability→role map is untouched.
 [RequireCapability(Capabilities.FinanceRead)]

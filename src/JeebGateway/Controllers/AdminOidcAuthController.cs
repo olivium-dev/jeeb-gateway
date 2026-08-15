@@ -21,6 +21,8 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("admin/v1/auth/oidc")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("admin/auth/oidc")]
 [AllowAnonymous]
 [PublicEndpoint("External administrator OIDC authorization-code callback authenticates before a bearer exists.")]
 [EnableRateLimiting(RateLimitingExtensions.AuthTokenBucketPolicy)]

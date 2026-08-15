@@ -34,9 +34,12 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("admin/v1/cms")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("admin/cms")]
 // Legacy alias: the deployed CMS bundle still emits the browser prefix twice
 // (/gateway/gateway/admin/v1/cms/...). Drop once that bundle is retired.
 [Route("gateway/admin/v1/cms")]
+[Route("gateway/admin/cms")]
 [PublicEndpoint("CMS authoring plane: access is governed by the X-Cms-Capability header gate and step-up TOTP. ADR-005 L2 is intentionally not used here.")]
 public sealed class CmsAuthoringController : ControllerBase
 {

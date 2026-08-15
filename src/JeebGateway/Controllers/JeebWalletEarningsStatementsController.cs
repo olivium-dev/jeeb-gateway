@@ -28,6 +28,8 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("v1/wallet/jeeb/earnings/statements")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("wallet/jeeb/earnings/statements")]
 public sealed class JeebWalletEarningsStatementsController : ControllerBase
 {
     // Default look-back window for the statements list when no range is supplied.

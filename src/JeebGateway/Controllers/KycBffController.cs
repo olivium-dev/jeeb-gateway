@@ -96,6 +96,8 @@ public sealed class KycBffController : ControllerBase
     /// set is the same configuration-driven template.
     /// </summary>
     [HttpGet("v1/kyc/jeeb/form-schema")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpGet("kyc/jeeb/form-schema")]
     [ProducesResponseType(typeof(JsonElement), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
@@ -131,6 +133,7 @@ public sealed class KycBffController : ControllerBase
     /// hardcoded literal.
     /// </summary>
     [HttpGet("v1/kyc/contract-template")]
+    [HttpGet("kyc/contract-template")]
     [ProducesResponseType(typeof(JsonElement), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
@@ -182,6 +185,7 @@ public sealed class KycBffController : ControllerBase
     /// Jeeb-domain mapping (Golden Rule 2).
     /// </summary>
     [HttpGet("v1/kyc/jeeb/submission-wiring")]
+    [HttpGet("kyc/jeeb/submission-wiring")]
     [ProducesResponseType(typeof(JsonElement), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]

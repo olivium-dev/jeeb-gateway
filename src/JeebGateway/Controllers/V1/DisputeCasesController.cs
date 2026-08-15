@@ -26,6 +26,8 @@ public sealed class DisputeCasesController : CaseControllerBase
     }
 
     [HttpPost("v1/disputes")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpPost("disputes")]
     [RequireCapability(Capabilities.DisputeFile)]
     public Task<IActionResult> Create(
         [FromBody] CreateDisputeRequestV2? request,
@@ -33,6 +35,7 @@ public sealed class DisputeCasesController : CaseControllerBase
         CancellationToken ct) => CreateCore(null, request, idempotencyKey, ct);
 
     [HttpPost("v1/deliveries/{deliveryId}/escalate")]
+    [HttpPost("deliveries/{deliveryId}/escalate")]
     [RequireCapability(Capabilities.DisputeFile)]
     public Task<IActionResult> Escalate(
         string deliveryId,
@@ -78,6 +81,7 @@ public sealed class DisputeCasesController : CaseControllerBase
     }
 
     [HttpGet("v1/deliveries/{deliveryId}/disputes/evidence-preview")]
+    [HttpGet("deliveries/{deliveryId}/disputes/evidence-preview")]
     [RequireCapability(Capabilities.DisputeFile)]
     public async Task<IActionResult> PreviewEvidence(string deliveryId, CancellationToken ct)
     {
@@ -114,6 +118,7 @@ public sealed class DisputeCasesController : CaseControllerBase
     }
 
     [HttpPost("v1/disputes/{id}/reply")]
+    [HttpPost("disputes/{id}/reply")]
     [RequireCapability(Capabilities.DisputeReadMine)]
     public async Task<IActionResult> Reply(
         string id,

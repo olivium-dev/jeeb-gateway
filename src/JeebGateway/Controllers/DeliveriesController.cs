@@ -1190,6 +1190,8 @@ public class DeliveriesController : ControllerBase
     [HttpPost("{deliveryId}/cancel")]
     [HttpPost("/v1/deliveries/{deliveryId}/cancel")]
     [HttpPost("/v1/requests/{deliveryId}/cancel")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpPost("/requests/{deliveryId}/cancel")]
     [HttpDelete("/v1/requests/{deliveryId}")]
     [ProducesResponseType(typeof(CancelDeliveryResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]

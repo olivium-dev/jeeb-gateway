@@ -57,6 +57,8 @@ namespace JeebGateway.Controllers;
 /// </summary>
 [ApiController]
 [Route("v1/ratings/jeeb")]
+// W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+[Route("ratings/jeeb")]
 public sealed class JeebReviewsController : ControllerBase
 {
     private const int MinStars = 1;

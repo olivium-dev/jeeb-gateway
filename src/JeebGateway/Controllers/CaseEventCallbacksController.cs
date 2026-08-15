@@ -34,6 +34,8 @@ public sealed class CaseEventCallbacksController : ControllerBase
 
     [HttpPost("events")]
     [HttpPost("/v1/case-events")]
+    // W6-02 compat window: unversioned twin(s) of the v1 route(s) here; versioned paths unchanged.
+    [HttpPost("/case-events")]
     [AllowAnonymous]
     [PublicEndpoint("Canonical jeeb-state-service case outbox callback; unauthenticated but admitted only from a loopback peer on the shared MSI host.")]
     public async Task<IActionResult> Dispatch([FromBody] GenericCaseCallbackV1? callback, CancellationToken ct)
