@@ -43,16 +43,20 @@ public class StoreDurabilityGuardGapStoresTests
 
     // ── JEBV4-124 — settlement enqueue is Critical (durable) ───────────────
 
+    // INVERTED at gwdbx W2-R02: migration 0052 dropped settlement_enqueue, so the durable target
+    // this entry demanded no longer exists and the entry left the roster with it.
     [Fact]
-    public void SettlementEnqueue_Is_Critical_With_Postgres_DurableTarget()
+    public void SettlementEnqueue_Left_Critical_When_Its_Table_Was_Dropped()
     {
-        var entry = StoreDurabilityGuard.Critical
-            .FirstOrDefault(c => c.Iface == typeof(JeebGateway.Financials.ISettlementEnqueueStore));
+        InCritical(typeof(JeebGateway.Financials.ISettlementEnqueueStore)).Should()
+            .BeFalse("demanding PostgresSettlementEnqueueStore would refuse every prod-like boot");
 
-        entry.Iface.Should().Be(typeof(JeebGateway.Financials.ISettlementEnqueueStore),
-            "the money-adjacent settlement-enqueue intent must be fail-closed guarded");
-        entry.DurableImpls.Should().ContainSingle()
-            .Which.Should().Be(typeof(JeebGateway.Financials.PostgresSettlementEnqueueStore));
+        StoreDurabilityGuard.KnownInMemoryBacklog.Should()
+            .NotContain(typeof(JeebGateway.Financials.ISettlementEnqueueStore),
+                "the prod-like registration is the Null store, not an in-memory store of record");
+        StoreDurabilityGuard.IntentionalInMemory.Should()
+            .NotContain(typeof(JeebGateway.Financials.ISettlementEnqueueStore),
+                "laundering a money store onto a log-only list would make the guard lie");
     }
 
     // ── JEBV4-143 — location store is IntentionalInMemory (rebuildable cache) ──
@@ -99,7 +103,9 @@ public class StoreDurabilityGuardGapStoresTests
                 .Concat(StoreDurabilityGuard.UpstreamContractIncomplete)
                 .Concat(StoreDurabilityGuard.IntentionalInMemory));
 
-        classified.Should().Contain(typeof(JeebGateway.Financials.ISettlementEnqueueStore));
+        // W2-R02: ISettlementEnqueueStore is deliberately no longer classified — its table is gone
+        // and its prod-like registration is the Null store (SettlementStoreRetiredW2R02Tests.A1/A2).
+        classified.Should().NotContain(typeof(JeebGateway.Financials.ISettlementEnqueueStore));
         classified.Should().Contain(typeof(JeebGateway.Tracking.ILocationStore));
         classified.Should().Contain(typeof(JeebGateway.Availability.IPendingOffersStore));
     }
@@ -143,10 +149,12 @@ public class StoreDurabilityGuardGapStoresTests
 
         // NEGATIVE CONTROL — swap exactly ONE critical store for a real in-memory
         // store of record (money state) and require the guard to red.
+        // RE-TARGETED at W2-R02: ISettlementStore left the roster with its table, so the negative
+        // control now uses the refresh-token store, which is still Critical.
         var mutated = new Dictionary<Type, Type>(durable)
         {
-            [typeof(JeebGateway.Financials.ISettlementStore)] =
-                typeof(JeebGateway.Financials.InMemorySettlementStore),
+            [typeof(JeebGateway.Tokens.IRefreshTokenStore)] =
+                typeof(JeebGateway.Tokens.InMemoryRefreshTokenStore),
         };
 
         var violations = StoreDurabilityGuard
@@ -154,8 +162,8 @@ public class StoreDurabilityGuardGapStoresTests
 
         violations.Should().ContainSingle(
             "exactly one critical store was mutated, so exactly one violation must be reported");
-        violations[0].Should().Contain(nameof(JeebGateway.Financials.ISettlementStore))
-            .And.Contain(nameof(JeebGateway.Financials.InMemorySettlementStore),
+        violations[0].Should().Contain(nameof(JeebGateway.Tokens.IRefreshTokenStore))
+            .And.Contain(nameof(JeebGateway.Tokens.InMemoryRefreshTokenStore),
                 "the violation must name both the contract and the in-memory impl that breached it");
 
         // And the reclassified store is still absent from the fail-closed set, so this

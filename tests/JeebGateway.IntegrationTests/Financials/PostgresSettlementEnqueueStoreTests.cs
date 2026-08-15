@@ -33,8 +33,10 @@ public class PostgresSettlementEnqueueStoreTests
 
     // ── DI wiring (real, runs without Postgres) ────────────────────────────
 
+    // INVERTED at gwdbx W2-R02: migration 0052 dropped settlement_enqueue, so a configured
+    // GatewayPostgres now selects the Null store, never the Postgres one.
     [Fact]
-    public void SettlementEnqueue_Resolves_To_Postgres_When_GatewayPostgres_Configured()
+    public void SettlementEnqueue_Resolves_To_Null_When_GatewayPostgres_Configured()
     {
         using var factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(b =>
@@ -50,12 +52,9 @@ public class PostgresSettlementEnqueueStoreTests
             });
 
         using var scope = factory.Services.CreateScope();
-        var act = () => scope.ServiceProvider.GetRequiredService<ISettlementEnqueueStore>();
-
-        act.Should().NotThrow("PostgresSettlementEnqueueStore's constructor stores its collaborators and does no I/O");
         scope.ServiceProvider.GetRequiredService<ISettlementEnqueueStore>()
-            .Should().BeOfType<PostgresSettlementEnqueueStore>(
-                "GatewayPostgres:ConnectionString is configured, so the durable store must be selected");
+            .Should().BeOfType<NullSettlementEnqueueStore>(
+                "the settlement_enqueue table is gone, so the Postgres store could only 42P01");
     }
 
     [Fact]
@@ -74,16 +73,14 @@ public class PostgresSettlementEnqueueStoreTests
 
     // ── Durability guard promotion (JEBV4-124) ─────────────────────────────
 
+    // INVERTED at gwdbx W2-R02 (G-08): the entry LEFT the roster with its table. Keeping it would
+    // demand PostgresSettlementEnqueueStore and refuse every prod-like boot.
     [Fact]
-    public void SettlementEnqueue_Is_A_Critical_Durable_Store_Requiring_PostgresSettlementEnqueueStore()
+    public void SettlementEnqueue_Left_The_Critical_Roster_With_Its_Table()
     {
-        var critical = StoreDurabilityGuard.Critical
-            .FirstOrDefault(c => c.Iface == typeof(ISettlementEnqueueStore));
-
-        critical.Iface.Should().Be(typeof(ISettlementEnqueueStore),
-            "the money-adjacent settlement-enqueue intent must be in the Critical fail-closed set");
-        critical.DurableImpls.Should().Contain(typeof(PostgresSettlementEnqueueStore),
-            "the only durable implementation that satisfies the prod-like gate is PostgresSettlementEnqueueStore");
+        StoreDurabilityGuard.Critical.Select(c => c.Iface)
+            .Should().NotContain(typeof(ISettlementEnqueueStore),
+                "settlement_enqueue was dropped by migration 0052; the durable target no longer exists");
     }
 
     [Fact]
@@ -97,11 +94,12 @@ public class PostgresSettlementEnqueueStoreTests
                 "the money-adjacent enqueue intent is a store of record, not a rebuildable cache");
     }
 
+    // INVERTED at gwdbx W2-R02: with the entry off the roster the guard no longer evaluates this
+    // store at all. The replacement protection is the REGISTRATION — see
+    // SettlementStoreRetiredW2R02Tests.A2 (prod-like, zero DSN, still Null and never in-memory).
     [Fact]
-    public void EnsureDurable_ProdLike_With_InMemory_SettlementEnqueue_Fails_Closed()
+    public void EnsureDurable_No_Longer_Evaluates_SettlementEnqueue_At_All()
     {
-        // Prove the promotion is live: a prod-like gateway resolving ISettlementEnqueueStore to
-        // the in-memory store must now refuse to boot, naming the offending store.
         var map = new Dictionary<Type, object>();
         foreach (var (iface, durable) in StoreDurabilityGuard.Critical)
             map[iface] = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(durable[0]);
@@ -111,8 +109,8 @@ public class PostgresSettlementEnqueueStoreTests
         var provider = new MapServiceProvider(map);
         var violations = StoreDurabilityGuard.Evaluate(t => provider.GetService(t)?.GetType());
 
-        violations.Should().ContainSingle()
-            .Which.Should().Contain("ISettlementEnqueueStore").And.Contain("InMemorySettlementEnqueueStore");
+        violations.Should().BeEmpty(
+            "every REMAINING critical store is durable in this map, and the enqueue store is no longer one");
     }
 
     // ── Idempotency / round-trip (deferred to Testcontainers QV) ───────────

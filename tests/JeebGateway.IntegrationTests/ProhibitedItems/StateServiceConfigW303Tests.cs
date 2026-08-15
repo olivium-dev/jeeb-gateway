@@ -263,7 +263,8 @@ public class StateServiceConfigW303Tests
             typeof(PostgresProhibitedItemsStore),
             typeof(StateServiceProhibitedItemsStore)
         }, "G-08 — the seam wraps the durable inner catalog, so both resolutions pass the boot gate");
-        StoreDurabilityGuard.Critical.Should().HaveCount(34,
+        // RE-SEALED 34 -> 30 at W2-R02 (G-08): the four settlement entries left the roster.
+        StoreDurabilityGuard.Critical.Should().HaveCount(30,
             "W3-03 adds an implementation to an existing entry; the roster COUNT is unchanged");
     }
 

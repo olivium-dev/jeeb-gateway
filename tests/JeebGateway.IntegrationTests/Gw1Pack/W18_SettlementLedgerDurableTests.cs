@@ -103,20 +103,39 @@ public class W18_SettlementLedgerDurableTests
         return string.Join("\n", parts);
     }
 
+    // INVERTED at gwdbx W2-R02: the ledger left the Critical roster with its table (0052), so a
+    // zero-DSN Production boot can no longer be refused ON ITS ACCOUNT. What replaces the
+    // protection is B3b: the resolution itself is Null, never the in-memory client.
     [Fact]
-    public void B3_Production_Boot_Without_GatewayPostgres_Refuses_And_Names_The_Settlement_Ledger()
+    public void B3_Production_Boot_Without_GatewayPostgres_No_Longer_Names_The_Settlement_Ledger()
     {
         var ex = BootProduction(gatewayPostgresCs: null);
 
-        ex.Should().NotBeNull("a prod-like gateway must refuse to serve its money ledger from process memory");
+        ex.Should().NotBeNull(
+            "the other unprovisioned critical stores still refuse a host-test Production boot; if it " +
+            "now boots clean this control has stopped discriminating and must be re-authored");
         var message = Flatten(ex!);
-        message.Should().Contain("FAIL-CLOSED");
-        message.Should().Contain("ISettlementLedgerClient",
-            "the refusal must name the offending store — an unnamed refusal is not attributable to W1.8");
-        message.Should().Contain("InMemorySettlementLedgerClient",
-            "and must name what it resolved to instead");
-        message.Should().Contain("PostgresSettlementLedgerClient",
-            "and what it expected — this is the promotion's durable target");
+        message.Should().Contain("FAIL-CLOSED",
+            "the run must still have reached StoreDurabilityGuard for the NotContain below to mean anything");
+        message.Should().NotContain("ISettlementLedgerClient",
+            "the ledger is off the roster; naming it would mean the roster edit did not land");
+    }
+
+    [Fact]
+    public void B3b_Production_Zero_Dsn_Resolves_The_Ledger_To_Null_Never_InMemory()
+    {
+        // The replacement for the removed roster entry: a prod-like boot must not serve money
+        // bookkeeping out of a ConcurrentDictionary just because no DSN is configured.
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.UseEnvironment("Production");
+            b.UseSetting("Jwt:SigningKey", ProdJwtKey);
+            b.UseSetting("BffServices:RequiredInProduction", "false");
+            b.UseSetting("StoreDurability:FailClosedDisabled", "true");
+        });
+
+        factory.Services.GetRequiredService<ISettlementLedgerClient>()
+            .Should().BeOfType<NullSettlementLedgerClient>();
     }
 
     [Fact]
@@ -152,14 +171,15 @@ public class W18_SettlementLedgerDurableTests
             "the run must still have reached StoreDurabilityGuard for the NotContain above to mean anything");
     }
 
+    // INVERTED at gwdbx W2-R02: a configured DSN selects Null, not Postgres — the table is gone.
     [Fact]
-    public void B4b_DI_Selects_Postgres_With_A_Connection_String_And_InMemory_Without_One()
+    public void B4b_DI_Selects_Null_With_A_Connection_String_And_InMemory_Without_One()
     {
         using (var withCs = new WebApplicationFactory<Program>()
                    .WithWebHostBuilder(b => b.UseSetting("GatewayPostgres:ConnectionString", FakeCs)))
         {
             withCs.Services.GetRequiredService<ISettlementLedgerClient>()
-                .Should().BeOfType<PostgresSettlementLedgerClient>();
+                .Should().BeOfType<NullSettlementLedgerClient>();
         }
 
         // POSITIVE CONTROL for the line above: a resolution that ALWAYS returned the
@@ -201,11 +221,10 @@ public class W18_SettlementLedgerDurableTests
             "this is the defect W1.8 exists to close: one hand-to-hand cash collection, two ledger " +
             "entry ids, and the second silently overwrites the first on settlements.ledger_entry_id");
 
-        // …and the fix is that the durable client is not this class.
-        StoreDurabilityGuard.Critical
-            .Single(c => c.Iface == typeof(ISettlementLedgerClient)).DurableImpls
-            .Should().NotContain(typeof(InMemorySettlementLedgerClient))
-            .And.Contain(typeof(PostgresSettlementLedgerClient));
+        // W2-R02: the durable target that closed this is GONE (0052 dropped the table), so the
+        // hazard is now contained by never registering this class in a prod-like env (B3b).
+        StoreDurabilityGuard.Critical.Select(c => c.Iface)
+            .Should().NotContain(typeof(ISettlementLedgerClient));
     }
 
     // ── B6 — migration <-> client, the silent-failure class ────────────────

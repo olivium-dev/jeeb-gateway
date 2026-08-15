@@ -350,9 +350,10 @@ public class W26_MoneyControllerRouteCensusTests
                 "and the durability guard is structurally blind to it — escalated separately, " +
                 "out of GW1's scope by the batch document");
 
-        // POSITIVE CONTROL — the same guard DOES see the ledger GW1 promoted, so the
-        // NotContain above is a real distinction rather than an empty set.
+        // POSITIVE CONTROL — the same guard DOES see other stores, so the NotContain above is a
+        // real distinction rather than an empty set. RE-TARGETED at W2-R02: ISettlementLedgerClient
+        // was the control until migration 0052 dropped its table and it left the roster.
         StoreDurabilityGuard.Critical.Select(c => c.Iface)
-            .Should().Contain(typeof(ISettlementLedgerClient));
+            .Should().Contain(typeof(JeebGateway.Requests.IRequestsStore));
     }
 }

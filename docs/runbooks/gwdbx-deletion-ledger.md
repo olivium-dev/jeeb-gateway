@@ -32,10 +32,10 @@ Already dropped (13, W0 waves — history): `ratings`, `disputes`, `kyc_submissi
 | `tiers` | **W4-14** `[OWNER-GO]` | after O4 ruling + freeze-import-flip; snapshot first |
 | `delivery_requests` | **W5-08** `[OWNER-GO]` | dep: A6 precondition green (BR-9 cap guard + idempotent pre-accept cancel live in delivery-service) + O11 bug-compat test green |
 | `delivery_tiers` | **W5-08** `[OWNER-GO]` | FK-held; drops only AFTER `delivery_requests` severs the FK — never early |
-| `settlements` | **W5-09** `[OWNER-GO]` | dep: R-M3 settle-intent relocated (W2-12) + G-06 wallet-side anonymization |
-| `settlement_enqueue` | **W5-09** `[OWNER-GO]` | same dep as `settlements` |
-| `settlement_ledger_entries` | **W5-09** `[OWNER-GO]` | same dep; W1.8 durable-backing test (B6b) retires in the same PR |
-| `settlement_batches` | **W5-09** `[OWNER-GO]` | dep: W2-09 `paidAt`/clearing ruling + W2-10 backfill parity |
+| `settlements` | **W2-R02** (was W5-09) | owner ruling A23 (2026-08-14) pulled the drop forward; migration `0052`, archive WAIVED |
+| `settlement_enqueue` | **W2-R02** (was W5-09) | same file; zero production consumers |
+| `settlement_ledger_entries` | **W2-R02** (was W5-09) | same file; W1.8 durable-backing test (B6b) retires at W2-R11 with the code |
+| `settlement_batches` | **W2-R02** (was W5-09) | same file; dropped AFTER `settlements` (FK `batch_id`) |
 | `admin_actions` | **W5-09** `[OWNER-GO]` | dep: W1-05 id-contract ruling (OWNER-ACTIONS A2) resolved |
 | `data_exports` | **W5-09** `[OWNER-GO]` | dep: W1-08 key-semantics ruling (OWNER-ACTIONS A4) + artifact leg proven |
 | `account_deletions` | **W5-09** `[OWNER-GO]` | state-service work-items authority |
@@ -56,6 +56,12 @@ Already dropped (13, W0 waves — history): `ratings`, `disputes`, `kyc_submissi
 
 Every DROP: G-07 archive (`pg_dump` + `sha256sum -c`) BEFORE; G-18 migration shape (table-scoped,
 row-count assert, self-registering tombstone, idempotent re-apply).
+
+**Exception, owner ruling A23 (2026-08-14), the four settlement tables only:** the G-07 archive is
+WAIVED and the data loss accepted, so `0052` cites no archive path. It also carries **no row-count
+abort** — that assert exists to force a review before money rows are destroyed and A23 IS that
+review; keeping it would wedge every later migration on any DB still holding rows. The count is
+`RAISE WARNING`ed instead so the apply log records what was destroyed.
 
 ## 2. Flags / mode enums
 

@@ -62,8 +62,10 @@ public class PostgresSettlementLedgerClientTests
 
     // ── DI wiring (real, runs without Postgres) ────────────────────────────
 
+    // INVERTED at gwdbx W2-R02: migration 0052 dropped settlement_ledger_entries, so a configured
+    // GatewayPostgres now selects the Null client, never the Postgres one.
     [Fact]
-    public void SettlementLedger_Resolves_To_Postgres_When_GatewayPostgres_Configured()
+    public void SettlementLedger_Resolves_To_Null_When_GatewayPostgres_Configured()
     {
         using var factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(b =>
@@ -80,8 +82,8 @@ public class PostgresSettlementLedgerClientTests
 
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<ISettlementLedgerClient>()
-            .Should().BeOfType<PostgresSettlementLedgerClient>(
-                "GatewayPostgres:ConnectionString is configured, so the durable ledger must be selected");
+            .Should().BeOfType<NullSettlementLedgerClient>(
+                "the settlement_ledger_entries table is gone, so the Postgres client could only 42P01");
     }
 
     [Fact]
@@ -101,18 +103,14 @@ public class PostgresSettlementLedgerClientTests
 
     // ── Durability guard promotion (owner ruling: PROMOTE) ─────────────────
 
+    // INVERTED at gwdbx W2-R02 (G-08): the entry LEFT the roster with its table. Keeping it would
+    // demand PostgresSettlementLedgerClient and refuse every prod-like boot.
     [Fact]
-    public void SettlementLedger_Is_A_Critical_Durable_Store_Requiring_PostgresSettlementLedgerClient()
+    public void SettlementLedger_Left_The_Critical_Roster_With_Its_Table()
     {
-        var critical = StoreDurabilityGuard.Critical
-            .FirstOrDefault(c => c.Iface == typeof(ISettlementLedgerClient));
-
-        critical.Iface.Should().Be(typeof(ISettlementLedgerClient),
-            "the cash-settlement ledger carries money movement, so it belongs in the Critical fail-closed set");
-        critical.DurableImpls.Should().Contain(typeof(PostgresSettlementLedgerClient),
-            "the only durable implementation that satisfies the prod-like gate is PostgresSettlementLedgerClient");
-        critical.DurableImpls.Should().NotContain(typeof(InMemorySettlementLedgerClient),
-            "listing the in-memory client as durable would make the guard assert nothing");
+        StoreDurabilityGuard.Critical.Select(c => c.Iface)
+            .Should().NotContain(typeof(ISettlementLedgerClient),
+                "settlement_ledger_entries was dropped by migration 0052; the durable target is gone");
     }
 
     [Fact]
@@ -129,7 +127,7 @@ public class PostgresSettlementLedgerClientTests
     }
 
     [Fact]
-    public void Critical_Holds_Exactly_34_Stores_After_The_Promotion()
+    public void Critical_Holds_Exactly_30_Stores_After_The_W2R02_Settlement_Drops()
     {
         // Sealed gate value (SEALED-PREDICATES.md §4, row GW1-1): 32 at origin/main 24b3dd6,
         // 33 after this promotion. This is a TRIPWIRE, not the claim — Critical.Length is only
@@ -138,28 +136,18 @@ public class PostgresSettlementLedgerClientTests
         // interface is present and bound to the durable type) and the fail-closed test below.
         // If a later batch legitimately adds a 35th store, update this number deliberately and
         // re-seal — do not delete the assertion.
-        // RE-SEALED 33 -> 34 at W1-02 (G-08): IStateOwnershipClient joined Critical in this PR.
-        StoreDurabilityGuard.Critical.Should().HaveCount(34);
+        // RE-SEALED 33 -> 34 at W1-02, 34 -> 30 at W2-R02 (G-08): the four settlement entries left
+        // the roster when migration 0052 dropped their tables.
+        StoreDurabilityGuard.Critical.Should().HaveCount(30);
     }
 
     // ── The promotion is LIVE, not decorative ──────────────────────────────
 
+    // INVERTED at gwdbx W2-R02: the guard no longer evaluates this store, so it can no longer be
+    // the thing that refuses a boot. The replacement protection is the REGISTRATION — see
+    // SettlementStoreRetiredW2R02Tests.A2 (prod-like, zero DSN, still Null and never in-memory).
     [Fact]
-    public void Evaluate_ProdLike_With_InMemory_SettlementLedger_Is_A_Violation_Naming_The_Store()
-    {
-        var map = AllDurableMap();
-        map[typeof(ISettlementLedgerClient)] =
-            RuntimeHelpers.GetUninitializedObject(typeof(InMemorySettlementLedgerClient));
-        var provider = new MapServiceProvider(map);
-
-        var violations = StoreDurabilityGuard.Evaluate(t => provider.GetService(t)?.GetType());
-
-        violations.Should().ContainSingle()
-            .Which.Should().Contain("ISettlementLedgerClient").And.Contain("InMemorySettlementLedgerClient");
-    }
-
-    [Fact]
-    public void EnsureDurable_ProdLike_With_InMemory_SettlementLedger_Refuses_To_Boot()
+    public void EnsureDurable_No_Longer_Evaluates_The_Settlement_Ledger_At_All()
     {
         var map = AllDurableMap();
         map[typeof(ISettlementLedgerClient)] =
@@ -168,10 +156,9 @@ public class PostgresSettlementLedgerClientTests
         var act = () => StoreDurabilityGuard.EnsureDurable(
             new MapServiceProvider(map), new FakeEnv { EnvironmentName = "Production" }, NullLogger.Instance);
 
-        act.Should().Throw<InvalidOperationException>(
-                "a prod-like gateway must refuse to serve its money ledger out of process memory")
-            .WithMessage("*FAIL-CLOSED*")
-            .WithMessage("*ISettlementLedgerClient*", "the failure must name the offending store");
+        StoreDurabilityGuard.Evaluate(t => new MapServiceProvider(map).GetService(t)?.GetType())
+            .Should().BeEmpty("the ledger left the roster; every remaining critical store is durable here");
+        act.Should().NotThrow();
     }
 
     [Fact]
@@ -198,6 +185,6 @@ public class PostgresSettlementLedgerClientTests
         var result = await check.CheckHealthAsync(new HealthCheckContext());
 
         result.Status.Should().Be(HealthStatus.Healthy);
-        result.Description.Should().Be("store-durability: all 34 critical stores durable");
+        result.Description.Should().Be("store-durability: all 30 critical stores durable");
     }
 }
