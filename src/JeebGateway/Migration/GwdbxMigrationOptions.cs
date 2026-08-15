@@ -64,7 +64,7 @@ public sealed class GwdbxMigrationOptions
     public string PushDispatchMode { get; init; } = "local";
 
     // users projection suspension -> user-management, W4-04 (registry token: UserModerationMode).
-    // A Program.cs guard pins it <= dual-write-local-read until the read cutover exists (O5).
+    // W4-07 opened the read rung; a Program.cs guard pins it below upstream-authority (W4-13).
     public string UserModerationMode { get; init; } = "local";
 
     // tiers catalog -> delivery-service, W4-09 (registry token: TiersMode). Freeze-import-flip:

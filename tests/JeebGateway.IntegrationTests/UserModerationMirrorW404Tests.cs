@@ -118,18 +118,19 @@ public class UserModerationMirrorW404Tests
     }
 
     [Fact]
-    public void ReadRungs_Are_Pinned_Off_Until_O5()
+    public void Authority_Rung_Stays_Pinned_Off_After_W407()
     {
-        // Mirrors the Program.cs Validate predicate byte-for-byte; a rung at or
-        // above dual-write-upstream-read must be rejected at boot.
+        // Mirrors the Program.cs Validate predicate byte-for-byte; W4-07 opened the
+        // read rung, but upstream-authority (W4-13) must still be rejected at boot.
         static bool Guard(GwdbxMigrationOptions o) =>
             GwdbxMigrationOptions.PhaseOf(o.UserModerationMode)
-                < GwdbxMigrationPhase.DualWriteUpstreamRead;
+                < GwdbxMigrationPhase.UpstreamAuthority;
 
         Guard(new GwdbxMigrationOptions { UserModerationMode = "local" }).Should().BeTrue();
         Guard(new GwdbxMigrationOptions { UserModerationMode = "dual-write-local-read" }).Should().BeTrue();
-        Guard(new GwdbxMigrationOptions { UserModerationMode = "dual-write-upstream-read" }).Should().BeFalse();
+        Guard(new GwdbxMigrationOptions { UserModerationMode = "dual-write-upstream-read" }).Should().BeTrue();
         Guard(new GwdbxMigrationOptions { UserModerationMode = "upstream-authority" }).Should().BeFalse();
+        Guard(new GwdbxMigrationOptions { UserModerationMode = "retired" }).Should().BeFalse();
     }
 
     private static async Task WaitForAsync(Func<bool> condition)

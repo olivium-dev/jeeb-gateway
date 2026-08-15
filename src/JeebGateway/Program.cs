@@ -1008,14 +1008,23 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.UserModerationMode),
         "FeatureFlags:UserModerationMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
-    // W4-04 — user reads (admin search, moderation state) still serve from the gateway
-    // projection, and the O5 phone-privacy ruling is open. Fail closed above the write rung.
+    // W4-07 — O5 is resolved and the W4-06 read surface is live, so the read rung is open;
+    // the authority flip (W4-13) is still unbuilt. Fail closed above dual-write-upstream-read.
     .Validate(
         o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.UserModerationMode)
-            < JeebGateway.Migration.GwdbxMigrationPhase.DualWriteUpstreamRead,
-        "FeatureFlags:UserModerationMode cannot reach \"dual-write-upstream-read\" yet: the users "
-            + "read cutover needs O5 resolved and an upstream read surface (W4-06). "
-            + "Highest supported rung: \"dual-write-local-read\".")
+            < JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority,
+        "FeatureFlags:UserModerationMode cannot reach \"upstream-authority\" yet: the users "
+            + "authority cutover (W4-13) is not implemented. "
+            + "Highest supported rung: \"dual-write-upstream-read\".")
+    // W4-07 — at the read rung UM answers moderation reads; an unwired base URL would
+    // silently keep serving local, faking the cutover (the W3-13 void lesson). Fail closed.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.UserModerationMode)
+                < JeebGateway.Migration.GwdbxMigrationPhase.DualWriteUpstreamRead
+            || Uri.TryCreate(
+                builder.Configuration["UserManagementServiceApi:BaseUrl"], UriKind.Absolute, out _),
+        "UserManagementServiceApi:BaseUrl must be an absolute URL once "
+            + "FeatureFlags:UserModerationMode reaches \"dual-write-upstream-read\".")
     .Validate(
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.TiersMode),
         "FeatureFlags:TiersMode must be one of: "
@@ -2280,8 +2289,32 @@ else
 // the in-memory store IS IUsersStore exactly as before.
 if (!string.IsNullOrWhiteSpace(gatewayPostgresCs))
 {
-    builder.Services.AddSingleton<JeebGateway.Users.IUserProjectionStore,
-        JeebGateway.Users.PostgresUserProjectionStore>();
+    builder.Services.AddSingleton<JeebGateway.Users.PostgresUserProjectionStore>();
+    // gwdbx W4-07 — when UM is wired, the moderation-read decorator serves suspension
+    // state from user-management at dual-write-upstream-read+ (no-op below that rung).
+    if (moderationMirrorUri is not null)
+    {
+        ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
+            JeebGateway.Users.Moderation.UserManagementModerationReadStore.HttpClientName, client =>
+            {
+                client.BaseAddress = new Uri(moderationMirrorUri.ToString().TrimEnd('/') + "/");
+                client.Timeout = TimeSpan.FromSeconds(5);
+            }));
+        builder.Services.AddSingleton<JeebGateway.Users.IUserProjectionStore>(sp =>
+            new JeebGateway.Users.Moderation.UserManagementModerationReadStore(
+                sp.GetRequiredService<JeebGateway.Users.PostgresUserProjectionStore>(),
+                sp.GetRequiredService<IHttpClientFactory>(),
+                sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<
+                    JeebGateway.Migration.GwdbxMigrationOptions>>(),
+                sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<
+                    JeebGateway.Users.Moderation.UserManagementModerationReadStore>>()));
+    }
+    else
+    {
+        // Unwired UM + a read-rung mode cannot boot (the Validate above fails it closed).
+        builder.Services.AddSingleton<JeebGateway.Users.IUserProjectionStore>(sp =>
+            sp.GetRequiredService<JeebGateway.Users.PostgresUserProjectionStore>());
+    }
     builder.Services.AddSingleton<JeebGateway.Users.IUpstreamUserProfileClient,
         JeebGateway.Users.ScopedUserManagementProfileClient>();
     builder.Services.AddSingleton<IUsersStore, JeebGateway.Users.UpstreamBackedUsersStore>();
