@@ -23,8 +23,8 @@ public interface IStateStrikeWriter
     /// <summary>Bump the rolling weekly cancellation counter (R6 / S13).</summary>
     Task BumpCancellationAsync(string subject, DateOnly windowStart, CancellationToken ct);
 
-    /// <summary>Record an OTP-escalation step for an identity (R7 / S09, S14).</summary>
-    Task EscalateOtpAsync(string identity, int lockSeconds, CancellationToken ct);
+    // R7 OTP-escalation write-through dropped: the state-service client no longer
+    // exposes an otp-escalations operation. Had no callers.
 }
 
 public sealed class StateServiceStrikeWriter : IStateStrikeWriter
@@ -55,15 +55,6 @@ public sealed class StateServiceStrikeWriter : IStateStrikeWriter
             Subject = subject,
             // The state-service expects a date-only window start.
             WindowStart = windowStart.ToDateTime(TimeOnly.MinValue)
-        }, ct);
-    }
-
-    public async Task EscalateOtpAsync(string identity, int lockSeconds, CancellationToken ct)
-    {
-        await _client.EscalateOtpAsync(new OtpEscalateRequest
-        {
-            Identity = identity,
-            LockSeconds = lockSeconds
         }, ct);
     }
 }

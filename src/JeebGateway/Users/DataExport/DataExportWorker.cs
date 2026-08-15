@@ -47,18 +47,9 @@ public sealed class DataExportWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // F11: guard a misconfigured interval. Zero hot-spins; NEGATIVE makes Task.Delay
-        // throw ArgumentOutOfRangeException, which escapes ExecuteAsync (only
-        // OperationCanceledException is caught around the delay) and FAULTS the
-        // BackgroundService — killing the SLA sweep silently. Clamp to the 30s default.
-        var interval = _options.Value.SweepInterval;
-        if (interval <= TimeSpan.Zero)
-        {
-            _logger.LogWarning(
-                "DataExport SweepInterval was {Interval} (must be > 0); clamping to 30s default.",
-                interval);
-            interval = TimeSpan.FromSeconds(30);
-        }
+        // DataExportOptions no longer exposes SweepInterval; 30s was its live default.
+        // Fixed (not configurable) so the F11 misconfiguration guard is unnecessary.
+        var interval = TimeSpan.FromSeconds(30);
         while (!stoppingToken.IsCancellationRequested)
         {
             try

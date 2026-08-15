@@ -175,7 +175,7 @@ public sealed class ConfigParityChecker
 
     private async Task CheckCmsAsync(ConfigParityReport report, CancellationToken ct)
     {
-        foreach (var surface in _cms.ListSurfaces())
+        foreach (var surface in await _cms.ListSurfacesAsync(ct))
         {
             var localLatest = surface.LatestPublished;
             if (localLatest is null && surface.Draft is null) continue;

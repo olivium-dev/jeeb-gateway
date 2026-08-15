@@ -9,6 +9,7 @@ using JeebGateway.Tokens;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using GwUsersStore = JeebGateway.Users.IUsersStore;
 using GwDualRoleClient = JeebGateway.Users.IUserManagementDualRoleClient;
 using GwSeededRoles = JeebGateway.Users.IDevSeededRoleStore;
 using GwRoles = JeebGateway.Users.Roles;
@@ -63,6 +64,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
 {
     private readonly UmClient _um;
     private readonly ITokenService _tokens;
+    private readonly GwUsersStore _users;
     private readonly GwDualRoleClient _userManagement;
     private readonly GwSeededRoles _seededRoles;
     private readonly ILogger<AuthEmailFacadeController> _log;
@@ -70,12 +72,14 @@ public sealed class AuthEmailFacadeController : ControllerBase
     public AuthEmailFacadeController(
         UmClient um,
         ITokenService tokens,
+        GwUsersStore users,
         GwDualRoleClient userManagement,
         GwSeededRoles seededRoles,
         ILogger<AuthEmailFacadeController> log)
     {
         _um = um;
         _tokens = tokens;
+        _users = users;
         _userManagement = userManagement;
         _seededRoles = seededRoles;
         _log = log;

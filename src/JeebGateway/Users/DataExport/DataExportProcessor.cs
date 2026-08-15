@@ -10,8 +10,8 @@ namespace JeebGateway.Users.DataExport;
 /// fires the notifier so the user receives the secure download link.
 ///
 /// Tests bypass the timer loop by calling <see cref="ProcessOnceAsync"/>
-/// directly — the production cadence (<see cref="DataExportOptions.SweepInterval"/>)
-/// is well under the 72-hour SLA, so a missed tick is recoverable.
+/// directly — the production cadence (30s, see ExecuteAsync) is well under
+/// the 72-hour SLA, so a missed tick is recoverable.
 /// </summary>
 public class DataExportProcessor : BackgroundService
 {
@@ -34,7 +34,8 @@ public class DataExportProcessor : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var interval = _options.Value.SweepInterval;
+        // DataExportOptions no longer exposes SweepInterval; 30s was its live default.
+        var interval = TimeSpan.FromSeconds(30);
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -78,7 +79,7 @@ public class DataExportProcessor : BackgroundService
 
             try
             {
-                var payload = await packager.BuildAsync(claimed.UserId, claimed.Format, ct);
+                var payload = await packager.BuildAsync(claimed.UserId, claimed.Format, _clock.GetUtcNow(), ct);
                 var readyAt = _clock.GetUtcNow();
                 var token = await store.MarkReadyAsync(
                     claimed.Id,
