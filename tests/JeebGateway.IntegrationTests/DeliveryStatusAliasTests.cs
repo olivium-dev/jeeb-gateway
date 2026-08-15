@@ -57,6 +57,30 @@ public class DeliveryStatusAliasTests
         DeliveryStatusAlias.CanResolve(status).Should().BeFalse();
     }
 
+    /// <summary>
+    /// The PRE-ACCEPTANCE vocabulary must stay UNMAPPED. These are request states, not
+    /// delivery states — no delivery row exists yet — so both surfaces render them by
+    /// falling through to the raw token (<c>ToCanonical(x) ?? x</c> here, and the Go
+    /// ProjectItem fallback in delivery-service).
+    ///
+    /// <para>Pinned explicitly because the existing coverage only asserts a made-up
+    /// token ("totally_unknown") resolves to null. Adding any of these to the alias
+    /// table would fold a pending order onto a delivery state on ONE side only, and the
+    /// gateway list and the delivery-service list would then disagree about what a
+    /// pending order is — silently, and only for rows nobody has accepted yet.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(RequestStatus.Pending)]
+    [InlineData(RequestStatus.Matched)]
+    [InlineData(RequestStatus.Scheduled)]
+    [InlineData(RequestStatus.CancellationRequested)]
+    public void PreAcceptance_Vocabulary_Stays_Unmapped(string status)
+    {
+        DeliveryStatusAlias.ToCanonical(status).Should().BeNull(
+            "a pre-acceptance request has no delivery state; it must fall through raw");
+        DeliveryStatusAlias.CanResolve(status).Should().BeFalse();
+    }
+
     // ----- THE no-regression test (ADR-002 Confirmation §) -------------------
 
     [Fact]
