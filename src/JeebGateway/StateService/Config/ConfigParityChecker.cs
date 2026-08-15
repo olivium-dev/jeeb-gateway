@@ -1,6 +1,3 @@
-using System.Text.Json;
-using System.Text.Json.Nodes;
-using JeebGateway.Cms;
 using JeebGateway.ProhibitedItems;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.Services.Clients;
@@ -10,7 +7,7 @@ using Microsoft.Extensions.Logging;
 namespace JeebGateway.StateService.Config;
 
 // gwdbx W3-07 PREP — read-only parity check between the gateway-local config stores and the
-// state-service primitive. Writes NOTHING; the W3-11 flip bar is a Clean report from this.
+// state-service primitive. Writes NOTHING. The CMS leg was removed by ADR-0008.
 public sealed class ConfigParityChecker
 {
     private const int PageSize = 200;
@@ -18,7 +15,6 @@ public sealed class ConfigParityChecker
 
     private readonly IProhibitedItemsStore _lexicon;
     private readonly IFlaggedRequestStore _flagged;
-    private readonly ICmsSurfaceStore _cms;
     private readonly IStateConfigClient _config;
     private readonly IStateOwnershipClient _ownership;
     private readonly ILogger<ConfigParityChecker> _log;
@@ -26,14 +22,12 @@ public sealed class ConfigParityChecker
     public ConfigParityChecker(
         IProhibitedItemsStore lexicon,
         IFlaggedRequestStore flagged,
-        ICmsSurfaceStore cms,
         IStateConfigClient config,
         IStateOwnershipClient ownership,
         ILogger<ConfigParityChecker> log)
     {
         _lexicon = lexicon;
         _flagged = flagged;
-        _cms = cms;
         _config = config;
         _ownership = ownership;
         _log = log;
@@ -45,16 +39,14 @@ public sealed class ConfigParityChecker
         await CheckLexiconAsync(report, ct);
         await CheckAcksAsync(report, ct);
         await CheckFlaggedAsync(report, ct);
-        await CheckCmsAsync(report, ct);
 
         _log.LogInformation(
             "gwdbx W3-07 config parity: clean={Clean} lexicon={LexLocal}/{LexUp} tag={LocalTag}|{UpTag} " +
             "acks={AcksMatched}/{AcksChecked} flagged={FlaggedMatched}/{FlaggedSubjects} " +
-            "cms={CmsMatched}/{CmsChecked} mismatches={Count}{Truncated}",
+            "mismatches={Count}{Truncated}",
             report.Clean, report.LexiconLocalActive, report.LexiconUpstreamActive,
             report.LexiconLocalTag, report.LexiconUpstreamTag,
             report.AcksMatched, report.AcksChecked, report.FlaggedMatched, report.FlaggedSubjects,
-            report.CmsSurfacesMatched, report.CmsSurfacesChecked,
             report.Mismatches.Count, report.Truncated ? " (TRUNCATED)" : string.Empty);
         return report;
     }
@@ -173,66 +165,10 @@ public sealed class ConfigParityChecker
         }
     }
 
-    private async Task CheckCmsAsync(ConfigParityReport report, CancellationToken ct)
-    {
-        foreach (var surface in await _cms.ListSurfacesAsync(ct))
-        {
-            var localLatest = surface.LatestPublished;
-            if (localLatest is null && surface.Draft is null) continue;
-
-            report.CmsSurfacesChecked++;
-            var upstream = await _config.GetSurfaceAsync(
-                StateServiceConfigImporter.Application, surface.SurfaceId, ct);
-
-            var clean = true;
-            if (localLatest is not null)
-            {
-                if (upstream?.Published is not { } published)
-                {
-                    report.Add($"cms: surface '{surface.SurfaceId}' has no published version upstream");
-                    continue;
-                }
-
-                var localTag = localLatest.Version.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                if (!string.Equals(published.VersionTag, localTag, StringComparison.Ordinal))
-                {
-                    report.Add($"cms: surface '{surface.SurfaceId}' version differs local='{localTag}' upstream='{published.VersionTag}'");
-                    clean = false;
-                }
-                else if (!JsonDeepEquals(ToElement(localLatest.Config), published.Data))
-                {
-                    report.Add($"cms: surface '{surface.SurfaceId}' published payload differs at v{localTag}");
-                    clean = false;
-                }
-            }
-
-            if (surface.Draft is { } draft)
-            {
-                if (upstream is null || !JsonDeepEquals(ToElement(draft), upstream.Draft))
-                {
-                    report.Add($"cms: surface '{surface.SurfaceId}' draft differs upstream");
-                    clean = false;
-                }
-            }
-
-            if (clean) report.CmsSurfacesMatched++;
-        }
-    }
-
     private static List<ProhibitedItem> Sort(IEnumerable<ProhibitedItem> items) =>
         items.OrderBy(i => i.Category, StringComparer.OrdinalIgnoreCase)
              .ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
              .ToList();
-
-    private static JsonElement ToElement(CmsConfig config) =>
-        JsonSerializer.SerializeToElement(config.Data, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-
-    private static bool JsonDeepEquals(JsonElement a, JsonElement b)
-    {
-        if (a.ValueKind == JsonValueKind.Undefined || b.ValueKind == JsonValueKind.Undefined)
-            return a.ValueKind == b.ValueKind;
-        return JsonNode.DeepEquals(JsonNode.Parse(a.GetRawText()), JsonNode.Parse(b.GetRawText()));
-    }
 }
 
 /// <summary>Read-only parity result; Clean gates W3-11, Mismatches capped at 50.</summary>
@@ -249,8 +185,6 @@ public sealed class ConfigParityReport
     public int FlaggedRows { get; set; }
     public int FlaggedSubjects { get; set; }
     public int FlaggedMatched { get; set; }
-    public int CmsSurfacesChecked { get; set; }
-    public int CmsSurfacesMatched { get; set; }
     public bool Truncated { get; private set; }
     public List<string> Mismatches { get; } = new();
 

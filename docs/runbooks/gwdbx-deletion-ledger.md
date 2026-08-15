@@ -49,8 +49,8 @@ Already dropped (13, W0 waves — history): `ratings`, `disputes`, `kyc_submissi
 | `push_retry_queue` | **W5-09** `[OWNER-GO]` | with `device_tokens` |
 | `push_delivery_tracker` | **W5-09** `[OWNER-GO]` | with `device_tokens` |
 | `notification_dispatch_outbox` | **W5-09** `[OWNER-GO]` | drain-and-switch: legacy dispatcher drained to zero first |
-| `cms_surfaces` | **W5-09** `[OWNER-GO]` | freeze-import-flip done first |
-| `cms_surface_versions` | **W5-09** `[OWNER-GO]` | with `cms_surfaces` |
+| `cms_surfaces` | **W5-09** `[OWNER-GO]` | ADR-0008: NO freeze-import precondition (bundler-service owns CMS); table verified **0 rows** 2026-08-16 |
+| `cms_surface_versions` | **W5-09** `[OWNER-GO]` | with `cms_surfaces`; also **0 rows** |
 | `transcription_fallback_queue` | **W5-09** `[OWNER-GO]` | A12: DELETED not migrated — drop table + enqueue write, log the fallback event |
 | `schema_migrations` | **W5-12** `[OWNER-GO]` | deliberate retain until the end; dies with `DROP DATABASE jeeb_gateway` |
 
@@ -80,6 +80,9 @@ Summary — deleting wave per flag (the step-6 release of its domain):
 | `GatewayPostgres:ConnectionString` (DSN) | **W5-11** (A8 same-PR set) |
 | `WalletPostgres:ConnectionString` (DSN) | **W5-10** |
 
+`CmsConfigMode` additionally carries a **boot pin to `local`** from ADR-0008 (the state-service CMS leg is
+superseded by bundler-service) until that W5 deletion.
+
 **Exit gate (W5-14): the program section of the registry is EMPTY** — every `program` row deleted by its
 step-6 release; `forbidden` rows (incl. `UseUpstream:Payments`, G-05) stay forever.
 
@@ -97,7 +100,7 @@ step-6 release; `forbidden` rows (incl. `UseUpstream:Payments`, G-05) stay forev
 | `PostgresAdminEscalationStore` | **W5-11** |
 | `PostgresDeviceTokenStore`, `PostgresPushRetryQueue`, `PostgresPushDeliveryTracker` | **W5-11** |
 | `PostgresNotificationDispatchOutbox` (after drain-to-zero) | **W5-11** |
-| `PostgresCmsSurfaceStore` | **W5-11** |
+| `PostgresCmsSurfaceStore` | **already deleted** from `src/` (bundler promotion, W7a); row kept for the audit trail |
 | `PostgresTranscriptionFallbackQueue` + its enqueue write (A12) | **W5-09 same PR** (code + table together) |
 | `PostgresTiersStore` | **W4** step-6 (one release after W4-14) |
 | Users projection legacy leg inside `UpstreamBackedUsersStore` | **W4** step-6 (one release after W4-13) |
@@ -128,6 +131,7 @@ step-6 release; `forbidden` rows (incl. `UseUpstream:Payments`, G-05) stay forev
 | `AutoOfflineSweeper` | **RETAINED** (business logic); its Postgres store leg dies at W5-11, upstream mirror becomes the only leg |
 | GDPR export/deletion sweeps (`Users:DataExport:*`) | claim-worker (#417) takes dispatch when armed (OWNER-ACTIONS A3); legacy sweep deleted **W5-11** |
 | `StateWorkItemClaimWorker` (#417), fan-out drain, `CourierPositionQueue` | **RETAINED** (named transients / new mechanism, hold no authoritative state) |
+| `ConfigImportWorker` (W3-07 one-shot, ships disarmed) | **RETIRABLE** from ADR-0008 — it was spared the hosted-service purge solely because it armed the CMS leg; that leg is void, the lexicon leg is imported + flipped. Deleting it is owner-gated and moves the hosted-service ratchet **19 -> 18**; until then it stays disarmed |
 
 ## 6. Guard entries (StoreDurabilityGuard / `scripts/guard-roster.txt`)
 

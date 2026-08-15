@@ -24,6 +24,12 @@ not only to program PRs. Nothing here is new policy: each clause is traceable to
   its existing generic surfaces (`ServiceNotificationClient`, `JeebNotificationRecordClient`); the outbox goes to
   state-service work-items + push-notification instead. — G-25
 - **No new repos and no new deployables** — every domain lands on an already-existing fleet service. — G-26
+- **Never re-add the CMS -> state-service config leg.** ADR-0008 (2026-08-16) ruled it SUPERSEDED:
+  bundler-service owns every surface/draft/publication row, the gateway owns none, and the leg's
+  dependency (`192.168.2.20`) and source rows are both permanently gone. `FeatureFlags:CmsConfigMode` is
+  PINNED to `local` at boot, and neither `StateServiceConfigImporter` nor `ConfigParityChecker` may grow
+  a CMS leg again — replaying bundler documents into state-service forks the catalog into two writable
+  owners with no reconciler.
 
 ## 2. Backfill standard (PRE-07 — rider R2, guardrail G-21)
 
