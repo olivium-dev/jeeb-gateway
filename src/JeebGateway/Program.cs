@@ -1049,6 +1049,29 @@ builder.Services
                 builder.Configuration["Services:Delivery:BaseUrl"], UriKind.Absolute, out _),
         "Services:Delivery:BaseUrl must be an absolute URL once FeatureFlags:TiersMode "
             + "reaches \"upstream-authority\".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.RequestsOwnerListMode),
+        "FeatureFlags:RequestsOwnerListMode must be one of: "
+            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    // W5-02 — requests is freeze-import-flip. The dual-write rungs are refused rather
+    // than merely unused: with the GatewayPostgres seam deleted the local leg is
+    // in-memory only, so dual-write-local-read would read from a store that empties on
+    // restart and would manufacture the data loss it exists to prevent.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.RequestsOwnerListMode)
+                is JeebGateway.Migration.GwdbxMigrationPhase.Local
+                or JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority,
+        "FeatureFlags:RequestsOwnerListMode supports only \"local\" and \"upstream-authority\" "
+            + "(freeze-import-flip has no dual-write rung).")
+    // The flip must not silently fall back to the local store when delivery-service is
+    // unwired — that is the W3-13 green-no-op-cutover lesson.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.RequestsOwnerListMode)
+                < JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority
+            || Uri.TryCreate(
+                builder.Configuration["Services:Delivery:BaseUrl"], UriKind.Absolute, out _),
+        "Services:Delivery:BaseUrl must be an absolute URL once "
+            + "FeatureFlags:RequestsOwnerListMode reaches \"upstream-authority\".")
     .ValidateOnStart();
 
 // Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
