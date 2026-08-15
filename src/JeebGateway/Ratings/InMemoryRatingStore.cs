@@ -113,26 +113,4 @@ public sealed class InMemoryRatingStore : IRatingStoreExtended
         return Task.FromResult(new RatingWindowSweepResult(revealed, closed));
     }
 
-    public Task<IReadOnlyList<JeeberRatingSummary>> ListJeebersBelowAverageAsync(
-        double threshold,
-        int minRatings,
-        CancellationToken ct)
-    {
-        List<JeeberRatingSummary> summaries;
-
-        lock (_writeLock)
-        {
-            summaries = _pairs.Values
-                .Where(pair => pair.RevealedAt is not null && pair.ClientRating is not null)
-                .GroupBy(pair => pair.JeeberId, StringComparer.Ordinal)
-                .Select(group => new JeeberRatingSummary(
-                    JeeberId: group.Key,
-                    AverageScore: group.Average(pair => pair.ClientRating!.Stars),
-                    RatingCount: group.Count()))
-                .Where(summary => summary.RatingCount >= minRatings && summary.AverageScore < threshold)
-                .ToList();
-        }
-
-        return Task.FromResult<IReadOnlyList<JeeberRatingSummary>>(summaries);
-    }
 }

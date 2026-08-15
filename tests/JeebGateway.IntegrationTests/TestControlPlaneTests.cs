@@ -181,7 +181,7 @@ public sealed class TestControlPlaneTests : IClassFixture<WebApplicationFactory<
             (await client.SendAsync(JobsList())).StatusCode);
 
         Assert.Equal(HttpStatusCode.NotFound,
-            (await client.SendAsync(JobRun("rating-reveal"))).StatusCode);
+            (await client.SendAsync(JobRun("request-nudge-sweep"))).StatusCode);
     }
 
     // -------------------------------------------------------------------------
@@ -281,8 +281,9 @@ public sealed class TestControlPlaneTests : IClassFixture<WebApplicationFactory<
         Assert.NotNull(body);
 
         var names = body.Jobs.Select(j => j.Name).ToHashSet();
-        Assert.Contains("rating-reveal", names);
         Assert.Contains("request-expiry-sweep", names);
+        // W5 retire-4: the rating-reveal job was deleted — assert it stays gone.
+        Assert.DoesNotContain("rating-reveal", names);
         // gwdbx W2-R11: "settlement-batch" is gone — the weekly payout cron moved to
         // settlement-service. Assert it is ABSENT so the removal cannot silently regress.
         Assert.DoesNotContain("settlement-batch", names);

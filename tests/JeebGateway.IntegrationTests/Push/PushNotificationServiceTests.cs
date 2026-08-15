@@ -19,11 +19,10 @@ namespace JeebGateway.IntegrationTests.Push;
 ///   AC1. Push sent for: new offers, acceptance, status changes, chat, KYC,
 ///        rating reminders.
 ///   AC2. Delivery within 5 seconds of trigger.
-///   AC3. Failed notifications retried once after 30 seconds.
 ///   AC4. User preference filtering (muted categories not sent).
 ///
 /// Each test gets a fresh factory (and therefore a fresh push transport,
-/// retry queue, device token store, and preferences store) so cases don't
+/// device token store, and preferences store) so cases don't
 /// share state across tests.
 /// </summary>
 public class PushNotificationServiceTests
@@ -82,8 +81,8 @@ public class PushNotificationServiceTests
     [Fact]
     public async Task Push_Suppressed_When_User_Muted_Category()
     {
-        // AC4: muted preferences short-circuit the send — neither attempt
-        // fires, the transport never sees the payload, no retry is queued.
+        // AC4: muted preferences short-circuit the send — the transport
+        // never sees the payload.
         var factory = NewFactory(out _);
         await RegisterDevice(factory, "user-muted", DevicePlatform.Fcm, "tok-fcm");
         var prefs = factory.Services.GetRequiredService<INotificationPreferencesStore>();
@@ -99,9 +98,6 @@ public class PushNotificationServiceTests
             .OfType<InMemoryPushTransport>()
             .Single(t => t.Platform == DevicePlatform.Fcm);
         fcm.Sent.Should().BeEmpty();
-
-        var queue = factory.Services.GetRequiredService<IPushRetryQueue>();
-        queue.PendingCount.Should().Be(0, "suppressed pushes must not be retried");
     }
 
     [Fact]
@@ -134,76 +130,6 @@ public class PushNotificationServiceTests
     }
 
     [Fact]
-    public async Task Failed_First_Attempt_Is_Retried_Once_After_30_Seconds()
-    {
-        // AC3: the first attempt fails (injected), the entry lands in the
-        // retry queue at now+30s; the processor only fires the retry once
-        // the clock crosses that mark.
-        var factory = NewFactory(out var clock);
-        await RegisterDevice(factory, "user-retry", DevicePlatform.Fcm, "tok-fcm");
-
-        var fcm = factory.Services.GetServices<IPushTransport>()
-            .OfType<InMemoryPushTransport>()
-            .Single(t => t.Platform == DevicePlatform.Fcm);
-        fcm.FailNext(1); // first attempt only
-
-        var service = factory.Services.GetRequiredService<IPushNotificationService>();
-        var first = await service.SendAsync(
-            new PushNotificationRequest("user-retry", NotificationTrigger.Chat, "hi", "there"),
-            CancellationToken.None);
-
-        first.Outcome.Should().Be(PushDeliveryOutcome.QueuedForRetry);
-        fcm.Sent.Should().BeEmpty();
-
-        var queue = factory.Services.GetRequiredService<IPushRetryQueue>();
-        queue.PendingCount.Should().Be(1);
-
-        var processor = factory.Services.GetRequiredService<PushRetryQueueProcessor>();
-
-        // Just under the 30-second mark — sweeper must NOT fire yet.
-        clock.Advance(TimeSpan.FromSeconds(29));
-        await processor.ScanOnceAsync(default);
-        fcm.Sent.Should().BeEmpty("retry only fires once the 30s window elapses");
-        queue.PendingCount.Should().Be(1);
-
-        // Crossing the 30-second mark fires the retry exactly once.
-        clock.Advance(TimeSpan.FromSeconds(2));
-        await processor.ScanOnceAsync(default);
-
-        fcm.Sent.Should().ContainSingle("retry path delivers the previously failed push");
-        queue.PendingCount.Should().Be(0, "retry queue is drained, not re-enqueued");
-    }
-
-    [Fact]
-    public async Task Failed_Retry_Is_Terminal_And_Not_Retried_Again()
-    {
-        // AC3 (negative): "retried once" means once — a second failure must
-        // be terminal, not the start of an exponential-backoff loop.
-        var factory = NewFactory(out var clock);
-        await RegisterDevice(factory, "user-retry-fail", DevicePlatform.Fcm, "tok-fcm");
-
-        var fcm = factory.Services.GetServices<IPushTransport>()
-            .OfType<InMemoryPushTransport>()
-            .Single(t => t.Platform == DevicePlatform.Fcm);
-        fcm.FailNext(2); // both attempts
-
-        var service = factory.Services.GetRequiredService<IPushNotificationService>();
-        await service.SendAsync(
-            new PushNotificationRequest("user-retry-fail", NotificationTrigger.Chat, "hi", "there"),
-            CancellationToken.None);
-
-        var queue = factory.Services.GetRequiredService<IPushRetryQueue>();
-        queue.PendingCount.Should().Be(1);
-
-        clock.Advance(TimeSpan.FromSeconds(31));
-        var processor = factory.Services.GetRequiredService<PushRetryQueueProcessor>();
-        await processor.ScanOnceAsync(default);
-
-        fcm.Sent.Should().BeEmpty("both attempts failed in this scenario");
-        queue.PendingCount.Should().Be(0, "terminal failure must not re-enqueue");
-    }
-
-    [Fact]
     public async Task Apns_And_Fcm_Devices_Both_Receive_Push()
     {
         // A user with one Android + one iOS device must receive the push on
@@ -226,9 +152,8 @@ public class PushNotificationServiceTests
     [Fact]
     public async Task No_Devices_Returns_NoDevices_Without_Retry()
     {
-        // A user with no registered devices is a no-op — no retry queued,
-        // no transport calls. Common case for fresh signups before mobile
-        // has POSTed the device token.
+        // A user with no registered devices is a no-op — no transport calls.
+        // Common case for fresh signups before mobile has POSTed the device token.
         var factory = NewFactory(out _);
 
         var service = factory.Services.GetRequiredService<IPushNotificationService>();
@@ -237,8 +162,6 @@ public class PushNotificationServiceTests
             CancellationToken.None);
 
         result.Outcome.Should().Be(PushDeliveryOutcome.NoDevices);
-        var queue = factory.Services.GetRequiredService<IPushRetryQueue>();
-        queue.PendingCount.Should().Be(0);
     }
 
     [Fact]

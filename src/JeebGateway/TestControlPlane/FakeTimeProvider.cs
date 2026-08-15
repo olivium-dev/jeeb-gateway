@@ -6,9 +6,8 @@ namespace JeebGateway.TestControlPlane;
 ///
 /// <para>
 /// This is registered as the <em>singleton</em> <see cref="TimeProvider"/> for
-/// the entire gateway DI container so that every time-dependent service —
-/// <c>RatingRevealJob</c> and any future
-/// gateway-owned cron — automatically observes
+/// the entire gateway DI container so that every time-dependent service and
+/// any future gateway-owned cron automatically observes
 /// the shifted clock when the test control-plane advances time.
 /// </para>
 ///
