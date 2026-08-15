@@ -36,7 +36,7 @@ public interface ILocationStore
     /// client directly — no <c>GetAwaiter().GetResult()</c> sync-over-async bridge
     /// on the GPS hot path (50k updates/min budget), so flipping
     /// <c>FeatureFlags:UseUpstream:Geolocation</c> on can no longer starve the
-    /// shared ASP.NET thread pool. The flag-OFF <see cref="InMemoryLocationStore"/>
+    /// shared ASP.NET thread pool. The former in-memory store
     /// stays fully in-memory (returns a completed task), so the async signature adds
     /// no cost on the default path.
     /// </remarks>

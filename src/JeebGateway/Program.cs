@@ -2570,23 +2570,28 @@ builder.Services
     .Validate(
         o => o.MaxPointsPerBatch > 0,
         "Tracking:MaxPointsPerBatch must be greater than zero.")
+    .Validate(
+        // W3-19 — the in-memory location store is deleted, so geolocation-service is the
+        // only implementation left. An unwired base URL must fail the host at boot rather
+        // than surface as empty position reads at runtime.
+        _unusedTrackingOptions => builder.Environment.IsDevelopment()
+            || builder.Environment.IsEnvironment("Testing")
+            || Uri.TryCreate(
+                builder.Configuration["Services:Geolocation:BaseUrl"], UriKind.Absolute, out _),
+        "Services:Geolocation:BaseUrl must be an absolute URL: geolocation-service is the "
+            + "only location store since W3-19 deleted the in-memory fallback.")
     .ValidateOnStart();
-// Gap 1 flag-gated store swap (BanService precedent): when
-// FeatureFlags:UseUpstream:Geolocation is ON, the record-of-truth is the shared
-// geolocation-service via GeoServiceLocationStore (NSwag client); default OFF keeps
-// the in-memory store so neither the controller nor the SSE loop branch on the flag.
-// JEBV4-57 (GW12-PERF-1): flipping this flag ON is now SAFE — ILocationStore is
-// async end-to-end, so GeoServiceLocationStore awaits the geolocation-service client
-// with NO sync-over-async bridge. There is no longer a blocking hot path that a GPS
-// fan-out storm could use to starve the shared ASP.NET thread pool.
-if (builder.Configuration.GetValue<bool>("FeatureFlags:UseUpstream:Geolocation"))
-{
-    builder.Services.AddSingleton<ILocationStore, JeebGateway.Tracking.GeoServiceLocationStore>();
-}
-else
-{
-    builder.Services.AddSingleton<ILocationStore, InMemoryLocationStore>();
-}
+// W3-19: geolocation-service is the ONLY record of truth for locations. The
+// in-memory store and its FeatureFlags:UseUpstream:Geolocation switch are deleted —
+// a gateway that can hold positions in process memory is a gateway that owns data.
+// Production already ran with the flag ON, so this removes a dead branch rather than
+// changing behaviour.
+//
+// Unconditional by design: a flag whose OFF path no longer exists is worse than no
+// flag, because it reads as a working fallback. If geolocation-service is unwired the
+// host must fail at boot (validated below), not quietly serve positions from RAM —
+// the W3-13 green-no-op-cutover lesson.
+builder.Services.AddSingleton<ILocationStore, JeebGateway.Tracking.GeoServiceLocationStore>();
 // S09 (JEB-54): shared delivery-participant resolver backing the live-tracking
 // SSE alias, the delivery-scoped location ingest authz, and the settlement-intent
 // read. Stateless BFF composition over IRequestsStore + IDeliveryServiceClient —
