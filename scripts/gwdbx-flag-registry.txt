@@ -30,7 +30,7 @@ UseUpstream:OtpChallenges       forbidden - # SUPERSEDED (A3): door-OTP codes ex
 UseUpstream:OtpHandover         forbidden - # SUPERSEDED (§4.2 superseded by A3)
 UseUpstream:OfferById           forbidden - # STRUCK (A2): re-admission needs a plan amendment with generic participant paths + a registry entry
 UseUpstream:NotificationDispatch forbidden - # never created (F1 / §4.1: the outbox re-homes to work-items only)
-UseUpstream:DeliveryStatusEvents forbidden - # removed from the registry (A13: webhook refactor deferred post-program)
+UseUpstream:DeliveryStatusEvents forbidden - # SUPERSEDED (A13): delivery-status webhook re-point NEVER BUILT, deferred post-program; permanent stamp, never an active config key
 UseUpstream:Payments            forbidden - # UPG retired, key deleted 2026-07-27, never re-add (G-05); live gateway.env residue deleted 2026-08-14 (G-05-PAYMENTS-KEY-RESIDUE) and the env spelling FeatureFlags__UseUpstream__Payments is now caught by the D3 deploy-env arm
 
 # ---- baseline: pre-existing @66a7b9d, out of program scope ------------------
