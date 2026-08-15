@@ -274,6 +274,29 @@ public sealed class JeebMessageResponse
     /// </para>
     ///
     /// <para>
+    /// NULLABILITY IS NOT ENOUGH ON ITS OWN — the setter normalises. A nullable CLR
+    /// property only produces <c>null</c> when the field is ABSENT from the upstream
+    /// body. chat-service declares <c>DateTime CreatedAt</c> — NON-nullable
+    /// (<c>ChatService.Domain/Response/ConversationMessageResponse.cs</c>), over a
+    /// persistence base type that initialises it (<c>ChatService.Persistence/BaseModel.cs</c>)
+    /// — so an unset row does not omit the field, it EMITS the husk:
+    /// <c>"created_at":"0001-01-01T00:00:00"</c>. That text binds to a perfectly
+    /// non-null <see cref="DateTime.MinValue"/> here, and System.Text.Json re-emits it
+    /// verbatim. Declaring the property <c>DateTime?</c> therefore did nothing about
+    /// the case it was chosen for.
+    /// </para>
+    ///
+    /// <para>
+    /// So the husk is collapsed to <c>null</c> on the way in. Year 1 is not a send
+    /// time under any interpretation — chat did not exist — so nothing is lost, and
+    /// every reader downstream sees one representation of "no timestamp" instead of
+    /// two. The mobile decoder already special-cases the husk on its side
+    /// (<c>dio_chat_gateway.dart</c> → <c>_sentAtOf</c>, year &lt;= 1 -&gt; null);
+    /// that guard stays, because a client must not depend on a relay to sanitise its
+    /// input, but the gateway no longer relies on it either.
+    /// </para>
+    ///
+    /// <para>
     /// WIRE NAME — <c>created_at</c>, the name chat-service already emits and the
     /// FIRST name the mobile decoder looks for
     /// (<c>dio_chat_gateway.dart</c> → <c>_sentAtOf</c>: <c>createdAt</c> ??
@@ -284,7 +307,22 @@ public sealed class JeebMessageResponse
     /// </summary>
     [JsonProperty("created_at")]
     [Stj.JsonPropertyName("created_at")]
-    public DateTime? CreatedAt { get; set; }
+    public DateTime? CreatedAt
+    {
+        get => _createdAt;
+        set => _createdAt = IsHusk(value) ? null : value;
+    }
+
+    private DateTime? _createdAt;
+
+    /// <summary>
+    /// True for the <c>default(DateTime)</c> husk (<c>0001-01-01T00:00:00</c>) an
+    /// unset non-nullable upstream <c>DateTime</c> serialises to. Compared on YEAR,
+    /// not on equality with <see cref="DateTime.MinValue"/>, so a husk that arrives
+    /// with a kind/offset applied — or with the sub-second component a round-trip
+    /// through another serializer can leave on it — is still recognised.
+    /// </summary>
+    private static bool IsHusk(DateTime? value) => value is { Year: <= 1 };
 }
 
 /// <summary>
