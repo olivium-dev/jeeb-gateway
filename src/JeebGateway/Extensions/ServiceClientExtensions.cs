@@ -118,7 +118,7 @@ public static class ServiceClientExtensions
 
         // TODO(T-backend-bff-geo): geolocation-service (FastAPI) — wire GeolocationServiceClient
         //   contract: src/JeebGateway/contracts/geolocation-service.openapi.json
-        //   migrates: LocationController, AdminZonesController (currently InMemoryLocationStore + InMemoryGeoIndex)
+        //   migrates: LocationController, AdminZonesController (AdminZones still on InMemoryGeoIndex)
         AddNamedDownstreamClient(services, config, "geolocation", "Services:Geolocation:BaseUrl");
 
         // push-notification — registered separately as the salehly-style named

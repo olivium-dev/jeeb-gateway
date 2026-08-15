@@ -8,12 +8,12 @@ namespace JeebGateway.Tracking;
 /// <summary>
 /// Upstream-backed <see cref="ILocationStore"/> that delegates to the shared,
 /// product-agnostic geolocation-service (Python / FastAPI) via the NSwag-shaped
-/// <see cref="GeneratedClient"/>. Selected over
-/// <see cref="InMemoryLocationStore"/> at DI time when
-/// <c>FeatureFlags:UseUpstream:Geolocation</c> is true — the
-/// <see cref="BanServiceJeeberRestrictionStore"/> precedent: a flag-gated swap of
-/// the record-of-truth behind the <see cref="ILocationStore"/> seam so neither the
-/// controller nor the SSE loop branch on the flag.
+/// <see cref="GeneratedClient"/>. Since W3-19 this is the ONLY
+/// <see cref="ILocationStore"/>: the in-memory store and its
+/// <c>FeatureFlags:UseUpstream:Geolocation</c> switch are deleted, because a gateway
+/// that can hold positions in process memory is a gateway that owns data. Neither the
+/// controller nor the SSE loop ever branched on the flag, so removing it changes no
+/// call site.
 ///
 /// <para><b>Semantic mapping — read first.</b> The gateway's store contract is a
 /// per-Jeeber "latest non-expired fix with a TTL" (see <see cref="ILocationStore"/>).
@@ -115,7 +115,7 @@ public sealed class GeoServiceLocationStore : ILocationStore
         if (_clock.GetUtcNow() - receivedAt > _options.CurrentValue.PositionRetention)
         {
             // Past RETENTION (not the freshness TTL) the fix is forgotten entirely,
-            // matching InMemoryLocationStore.GetLatest. Anything younger is returned
+            // matching the freshness window the deleted in-memory store used. Anything younger is returned
             // with its age intact so the caller can classify it as live / stale /
             // lost — see the class remarks for why filtering on PositionTtl here was
             // the bug.

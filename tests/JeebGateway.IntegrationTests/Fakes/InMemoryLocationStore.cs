@@ -1,3 +1,10 @@
+// W3-19: this was src/JeebGateway/Tracking/InMemoryLocationStore.cs. It is a TEST
+// DOUBLE now, not production code — geolocation-service is the only location store
+// the gateway registers. Kept because the TTL-vs-retention semantics below are worth
+// testing and the tests need an ILocationStore they can drive deterministically;
+// deleted from the artifact because a gateway that can hold positions in process
+// memory is a gateway that owns data.
+
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 
