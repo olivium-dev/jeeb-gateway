@@ -23,18 +23,20 @@ gateway never opens another service's database (guardrail G-21):
 | Offers | offer-service | `Availability/UpstreamPendingOffersStore` |
 | Identity, roles, profiles | user-management | `ServiceUserManagementClient` (generated) |
 | Idempotency, locks, work-items, audit events | jeeb-state-service | `Services/Clients/JeebStateServiceClient.cs` |
-| Saved locations, notification preferences | remote-user-preferences | `RemoteUserPreferences*Store` (`FeatureFlags:UseUpstream:RemoteUserPreferences`, default **true**) |
+| Saved locations, notification preferences | remote-user-preferences | `RemoteUserPreferences*Store` (`FeatureFlags:UseUpstream:RemoteUserPreferences` — see the flag table below; the **committed base default is `false`**) |
 | Ratings | feedback-service | `Ratings/FeedbackServiceRatingStore` (`FeatureFlags:UseUpstream:Ratings`; `InMemoryRatingStore` when off) |
 
-Three of those seams are selected by a migration flag. For the first two the
-**committed default is not the live value**, so read the flag — not the default —
-when reasoning about a running instance:
+Four of those seams are selected by a migration flag. For three of them — every
+row below except `WalletLedgerMigration:Authority` — the **committed default is
+not the live value**, so read the flag, not the default, when reasoning about a
+running instance:
 
 | Flag | Committed default | Live MSI value |
 |---|---|---|
 | `FeatureFlags:RequestsOwnerListMode` | `local` (`Migration/GwdbxMigrationOptions.cs`; in no `appsettings*.json`) | `upstream-authority` since 2026-08-16 |
 | `FeatureFlags:ProhibitedItemsMode` | `local` (same file) | `upstream-authority` |
 | `WalletLedgerMigration:Authority` | `wallet-api` in `appsettings.json` **and** `appsettings.Production.json`; `postgres` in `appsettings.Development.json` | `wallet-api` |
+| `FeatureFlags:UseUpstream:RemoteUserPreferences` | **`false`** — pinned at `appsettings.json:37`. The C# fallback in `Program.cs` (`GetValue(..., true)`) is `true`, but it only applies when *no* config key is present, and the base file always supplies one. `appsettings.Production.json:23` sets **`true`** | `true` wherever the Production overlay loads — read from committed config, not probed |
 
 The wallet row is the one that bites: the WalletPostgres projection was deleted,
 so anything other than `Authority=wallet-api` now resolves
@@ -53,9 +55,14 @@ verified on `main` at the time of writing:
 - **37** `AddSingleton` registrations in `Program.cs` that the same gate counts as
   a local owner/state implementation (24 `InMemory*` store files under `src/`).
   Several are still the authoritative leg — `IDataExportStore`,
-  `IAccountDeletionStore`, `IFlaggedRequestStore`, `ITiersStore` (at
-  `TiersMode=local`), `IAvailabilityStore` and `IUsersStore` all resolve to a
-  local implementation that a restart clears.
+  `IAccountDeletionStore`, `ITiersStore` (at `TiersMode=local`),
+  `IAvailabilityStore` and `IUsersStore` all resolve to a local implementation
+  that a restart clears. `IFlaggedRequestStore` is **no longer** in that set
+  unconditionally: since ADR-0009 it is mode-branched at
+  `Program.cs:2067-2071` — `InMemoryFlaggedRequestStore` at
+  `FeatureFlags:ProhibitedItemsMode=local`, `StateServiceFlaggedRequestStore`
+  once the flag requires upstream (which is the live MSI value, see the flag
+  table above). The in-memory leg is the fallback, not the destination.
 
 `scripts/check-stateless-gateway.sh` is therefore **red by design** on the
 hosted-service and local-store arms. Do not describe this service as fully
@@ -130,7 +137,7 @@ ticket expiry. Failed or invalid CDN responses are never cached as successes.
 
 Caller identity is taken from the `sub`/`NameIdentifier` claim, with `X-User-Id` as an MVP fallback until JWT validation is wired up.
 
-Backed by `RemoteUserPreferencesNotificationPreferencesStore` — the generic remote-user-preferences service, storing an opaque JSON blob so the shared service learns nothing about Jeeb topics. `InMemoryNotificationPreferencesStore` survives only as the local-dev fallback when `FeatureFlags:UseUpstream:RemoteUserPreferences` is set `false`; it defaults **true** (`Program.cs`). Preferences are not a gateway-owned store and will not become one.
+Backed by `RemoteUserPreferencesNotificationPreferencesStore` — the generic remote-user-preferences service, storing an opaque JSON blob so the shared service learns nothing about Jeeb topics. `InMemoryNotificationPreferencesStore` survives only as the fallback when `FeatureFlags:UseUpstream:RemoteUserPreferences` resolves `false` — which is what the **committed base config does**: `appsettings.json:37` pins the key `false`, and only `appsettings.Production.json:23` sets it `true`. The `true` in `Program.cs` is the `GetValue` fallback for a *missing* key, and the base file never leaves it missing, so a deployment that does not load the Production overlay gets the in-memory store. Preferences are not a gateway-owned store and will not become one.
 
 ### Data export (T-backend-042, GDPR-like right of access)
 
@@ -142,7 +149,7 @@ Backed by `InMemoryDataExportStore`, decorated by `MirroringDataExportStore`, pl
 
 ### Prohibited-item NLP scan (T-backend-048)
 
-- `POST /prohibited-items/scan` — body: `{ "description": "...", "requestId": "optional" }`. Runs the active catalog through normalization → exact, synonym, and Damerau–Levenshtein fuzzy matching. Response contains the matches array, a `requiresReview` flag, and `autoBlocked: false` (always). When `requiresReview` is true the gateway records a `FlaggedRequest` entry in `IFlaggedRequestStore` — `InMemoryFlaggedRequestStore` today, so the moderation queue is process-memory; the durable target is state-service work-items — and returns its id; the caller MUST NOT auto-block on the response.
+- `POST /prohibited-items/scan` — body: `{ "description": "...", "requestId": "optional" }`. Runs the active catalog through normalization → exact, synonym, and Damerau–Levenshtein fuzzy matching. Response contains the matches array, a `requiresReview` flag, and `autoBlocked: false` (always). When `requiresReview` is true the gateway records a `FlaggedRequest` entry in `IFlaggedRequestStore` and returns its id; the caller MUST NOT auto-block on the response. That store is mode-branched (`Program.cs:2067-2071`): at `FeatureFlags:ProhibitedItemsMode=local` it is `InMemoryFlaggedRequestStore` and the moderation queue is process-memory; once the flag requires upstream it is `StateServiceFlaggedRequestStore`, which writes **state-service generic cases with kind `moderation_review`** (`Program.cs:2058-2063`, ADR-0009). The durable target is that cases surface — **not** state-service work-items. The work-items leg was deleted in the same change because the importer and the read store had drifted onto different upstreams (work-items `content-flag` vs cases `moderation_review`), so the store would have read a surface nothing wrote.
 - `GET  /admin/prohibited-items/flagged?status=pending|cleared|upheld&page=&pageSize=` — admin queue.
 - `GET  /admin/prohibited-items/flagged/{id}` — single flagged record.
 - `POST /admin/prohibited-items/flagged/{id}/decision` — body: `{ "decision": "cleared" | "upheld", "note": "..." }`.

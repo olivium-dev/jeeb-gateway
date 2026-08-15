@@ -1,9 +1,16 @@
 # gateway-db-seam-allowlist.txt — GR-3 RATCHET allowlist (JEBV4-193 / D4).
 #
-# Every repo-relative path below is an EXISTING jeeb-gateway source file that
-# opens/uses a database (raw Npgsql, or EF DbContext/UseNpgsql). These are the
-# standing GR-3 violations inventoried by D1 (JEBV4-190):
-#   docs/project-understanding/lanes/D1-gateway-store-matrix.md
+# THIS LIST IS EMPTY, AND THAT IS THE POINT. Zero entries is the terminal state,
+# not an unfinished one: with nothing allowlisted the ratchet enforces ABSOLUTE
+# ZERO — any file under src/ that opens a database (raw Npgsql, or EF
+# DbContext/UseNpgsql) hard-fails check-stateless-gateway.sh's DB arm. Do not
+# read the empty sections below as "pending"; every seam they name is deleted.
+#
+# (Historic shape, kept so the section headings read: each line used to be a
+# repo-relative path to an EXISTING gateway source file holding a DB seam. The
+# D1 inventory that enumerated them — 25 seams over 24 files, then 23 after
+# saved-locations moved to remote-user-preferences — no longer exists in this
+# repo; see docs/runbooks/gwdbx-deletion-ledger.md for what happened to each.)
 #
 # check-stateless-gateway.sh enforces a RATCHET against this list:
 #   - Any DB-seam file NOT on this list => HARD CI FAIL (a NEW seam was added,
@@ -12,13 +19,15 @@
 #     delete that store's line here in the same PR.
 #   - When this file becomes empty, the ratchet enforces absolute zero: ANY DB
 #     seam in the gateway then hard-fails CI. Emptying this list is the FINAL
-#     step of D5 (Q-010 RATIFIED / GR-3 absolute).
+#     step of D5 (Q-010 RATIFIED / GR-3 absolute). THAT STEP IS DONE.
 #
-# Do NOT add lines to this file. Adding a new gateway DB seam violates GR-3.
-# The original 25 D1 seams mapped to 24 distinct files (PostgresHealthCheck.cs backs
-# both the GatewayPostgres and WalletPostgres readiness probes — D1 rows 24 & 25).
-# D1 row 5 (saved-locations) was ELIMINATED under JEBV4-165 / JEBV4-194 D5 (migrated to
-# remote-user-preferences), so the ratchet now holds 23 files.
+# Do NOT add lines to this file. Adding a new gateway DB seam violates GR-3 —
+# and because the list is empty, a re-added seam fails the gate immediately
+# rather than being tolerated as a pre-existing violation.
+#
+# The gate is not automatically enforced today: every workflow in this repo is
+# disabled at the GitHub level, so check-stateless-gateway.sh only runs when
+# someone runs it. The ratchet is a standard, not an enforced one.
 #
 # Blank lines and lines starting with '#' are ignored.
 

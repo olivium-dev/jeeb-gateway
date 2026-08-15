@@ -8,8 +8,12 @@
 > delivery-service, prohibited items → state-service published config, saved locations and
 > notification preferences → remote-user-preferences) rather than by the two generic KV primitives
 > proposed here. It also cites ADR-0001 and ADR-0005, neither of which exists in this repository
-> (`docs/adr/` holds 0002, 0003, 0004, 0006, 0007), so its authority chain dead-ends. Current
-> record: `docs/runbooks/gwdbx-deletion-ledger.md`.
+> (`docs/adr/` holds 0002, 0003, 0004, 0006, 0007, 0008, 0009 — 0008 and 0009 landed 2026-08-16 and
+> were missing from this enumeration when the banner was first written), so its authority chain
+> dead-ends. Current record: `docs/runbooks/gwdbx-deletion-ledger.md`. The two ADRs that actually
+> supersede parts of this one are [0008](0008-cms-config-leg-superseded-by-bundler.md) (the CMS leg
+> is bundler-service's, not state-service's) and [0009](0009-w3-upstream-read-paths.md) (the W3
+> upstream read paths, including the flagged-requests leg this ADR listed as blocked).
 
 **Date:** 2026-06-20
 **Status:** SUPERSEDED (was: Accepted (audit) — remaining migrations BLOCKED on one upstream primitive)

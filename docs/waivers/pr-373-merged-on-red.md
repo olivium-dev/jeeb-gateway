@@ -74,6 +74,16 @@ Two independent, pre-existing causes:
    R9 gate FAILED — gateway is not stateless. See ADR-001-rev2.
    ```
 
+   **The quoted block above is a 2026-07 CI transcript, not a live pointer**
+   (annotated 2026-08-16). `src/JeebGateway/Financials/PostgresSettlementLedgerClient.cs`
+   no longer exists — the settlement seams were deleted at gwdbx W2-R11 and the
+   GR-3 allowlist is now empty, so this exact failure cannot recur; a DB seam
+   today fails the gate for being *new*, not for being off the list. `ADR-001-rev2`
+   has never existed in this repo either (`docs/adr/` holds 0002, 0003, 0004,
+   0006, 0007, 0008, 0009). Both strings are kept verbatim because the point of
+   this waiver is the historical record of what the gate printed; they are
+   marked so nobody follows them.
+
    Plus five `DEBT:` warnings for durable-domain `InMemory*` registrations
    (`IRefreshTokenStore`, `IDisputeCaseStore`, `IDisputeStore`,
    `IJeeberRestrictionStore`, `IAdminEscalationStore`).

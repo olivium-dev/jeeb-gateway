@@ -118,6 +118,11 @@ step-6 release; `forbidden` rows (incl. `UseUpstream:Payments`, G-05) stay forev
 - `UseUpstream:DeliveryStatusEvents` webhook re-point: **never built** (A13 deferral) — W5-05 only verifies
   the SUPERSEDED registry stamp still stands.
 - Dev/test seams (`SuperLogin`, `DevEndpoints`, `TestControlPlane`): out of program scope (OWNER-ACTIONS C3).
+- **W6-02 compat window (PR #457): 160 unversioned aliases ADDED, 0 routes removed.** The ten twins
+  that were deliberately refused, the sharper reason the mobile pair was refused, and the one accepted
+  `/admin/settlements/batches` overlap are recorded in
+  [`w6-02-route-compat-window.md`](w6-02-route-compat-window.md). Read that before adding an
+  unversioned route — several obvious-looking ones are already taken by a different handler.
 
 ## 5. Jobs / workers
 
