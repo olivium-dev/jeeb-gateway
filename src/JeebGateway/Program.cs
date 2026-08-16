@@ -1514,9 +1514,9 @@ builder.Services.AddSavedLocations();
 //
 // Production swap: the in-memory FCM/APNs transports become real Google FCM
 // HTTP v1 and Apple APNs HTTP/2 clients (NSwag-generated against the
-// notification-service surface, per the BFF aggregation pattern); the
-// in-memory device-token store becomes a Postgres-backed implementation
-// alongside the per-user row in 0006.
+// notification-service surface, per the BFF aggregation pattern).
+// The device-token half of that swap is DEAD: W5-11 deleted GatewayPostgres and every
+// migration, so no Postgres device_tokens implementation is coming. See register #10 below.
 builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOptions.SectionName));
 // The device-register HTTP surface is now the salehly-mirrored
 // PushNotificationController, backed by the NSwag ServicePushNotificationClient
@@ -1528,9 +1528,8 @@ builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOpt
 // reads device tokens from it — that is a separate C-domain (push transport /
 // retry / SLA) with no upstream owner yet. Do not delete this store until the
 // push-transport service lands; deleting it now would break the send pipeline.
-// Durability register #10 — device tokens. Postgres-backed (device_tokens, migration 0017)
-// when GatewayPostgres is configured so push fan-out targets survive a restart; the
-// in-memory store is kept as the dev/CI/test fallback.
+// Durability register #10 — device tokens. No durable store since W5-11: the line below binds
+// UNCONDITIONALLY to InMemoryDeviceTokenStore, so every push fan-out target is lost on a bounce.
 builder.Services.AddSingleton<IDeviceTokenStore, InMemoryDeviceTokenStore>();
 // Durability register #12 — push-reliability pair (JEBV4-136 delivery tracker,
 // JEBV4-144 dispatch outbox below); the JEBV4-137 retry rail was deleted (W5 retire-4).
@@ -1550,10 +1549,8 @@ builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(Dev
 builder.Services.AddSingleton<IPushNotificationService, PushNotificationService>();
 
 // JEB-1494: Gateway notification render→dispatch primitive.
-// INotificationDispatchOutbox (JEBV4-144): Postgres-backed
-// (notification_dispatch_outbox, migration 0030) whenever GatewayPostgres is
-// configured so a queued-but-undelivered dispatch survives a restart; the
-// in-memory store stays the dev/CI/test fallback.
+// INotificationDispatchOutbox (JEBV4-144): no durable gateway store since W5-11 — a queued-but-
+// undelivered dispatch sits in process memory and dies on a bounce until the W1-09 flip below.
 // INotificationTemplateRenderer: static catalog; replace with an HTTP call to
 // notification-service GET /render/{key} when that endpoint is live.
 // W1-09: NotificationOutboxMode=upstream-authority enqueues + claims on state-service
@@ -1825,9 +1822,8 @@ builder.Services.AddSingleton<IRatingService, RatingService>();
 
 // OTP handover verification + admin escalation (T-backend-015 / JEEB-33).
 builder.Services.Configure<OtpHandoverOptions>(builder.Configuration.GetSection(OtpHandoverOptions.SectionName));
-// Durability register #5 — admin escalations. Postgres-backed (admin_escalations,
-// migration 0021) when GatewayPostgres is configured so the unbounded escalation list
-// survives a restart; in-memory fallback for dev/CI/test.
+// Durability register #5 — admin escalations. No durable gateway store since W5-11: process memory,
+// lost on every bounce, at OtpEscalationsMode=local (default); delivery-service from the read rung up.
 builder.Services.AddSingleton<InMemoryAdminEscalationStore>();
 
 // gwdbx W3-02 (ADR-0009) — from dual-write-upstream-read up, delivery-service SERVES the admin
@@ -2012,12 +2008,8 @@ builder.Services.AddSingleton<ScheduledDeliveryActivator>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ScheduledDeliveryActivator>());
 
 // Prohibited items catalog + per-user acknowledgment ledger (T-backend-027).
-// In-memory store for the MVP; production wiring will hit Postgres directly
-// using the schema in db/migrations/0005 (catalog) plus a follow-up migration
-// for the acknowledgment ledger.
-// Durability register #12 — prohibited items + acks. Postgres-backed (prohibited_items
-// migration 0005 + severity/acks migration 0018) when GatewayPostgres is configured so
-// admin edits and per-user acknowledgements survive a restart; in-memory fallback otherwise.
+// Durability register #12 — prohibited items + acks. No durable gateway store since W5-11: admin
+// edits and acks sit in process memory at ProhibitedItemsMode=local (default) and die on a bounce.
 builder.Services.AddSingleton<InMemoryProhibitedItemsStore>();
 
 // The LOCAL catalog root, reachable past the decorator below. A local-vs-upstream tool resolves
@@ -2043,9 +2035,8 @@ builder.Services.AddSingleton<IProhibitedItemsStore>(sp =>
 // The scanner runs Damerau-Levenshtein fuzzy matching with a synonym
 // expansion pass against the active catalog. Matches above the review
 // threshold are recorded in IFlaggedRequestStore for admin moderation;
-// the scanner never auto-blocks. Stores are in-memory for the MVP; the
-// flagged queue gets a Postgres-backed implementation alongside the
-// admin_actions audit table in 0005.
+// the scanner never auto-blocks. The promised Postgres flagged queue is DEAD — W5-11 deleted
+// the schema with every migration; register #13 below records what actually serves it now.
 builder.Services.AddSingleton<IProhibitedItemSynonymRegistry, InMemorySynonymRegistry>();
 builder.Services.AddSingleton<IProhibitedItemScanner, ProhibitedItemScanner>();
 // Durability register #13 — flagged requests. No durable gateway store since W5-11: process
@@ -2103,12 +2094,8 @@ if (createModerationEnabled)
 }
 
 // Admin audit log (T-backend-030).
-// In-memory append-only store for the MVP; production swap writes to
-// db/migrations/0005.admin_actions on the same transaction as the
-// mutation so the audit trail can never diverge from entity state.
-// Durability register #14 — admin audit log. Postgres-backed (admin_actions, migration
-// 0005) when GatewayPostgres is configured so the append-only admin action trail survives
-// a restart; in-memory fallback for dev/CI/test.
+// Durability register #14 — admin audit log. No durable gateway store since W5-11: the local log is
+// process memory; only the /v1/audit-events mirror below survives a restart (prod: dual-write-local-read).
 builder.Services.AddSingleton<InMemoryAdminAuditLog>();
 
 // gwdbx W1-03 — MirroringAdminAuditLog DECORATES the authoritative local log, dual-writing each row
@@ -2223,9 +2210,8 @@ builder.Services.AddSingleton<IDualRoleService, DualRoleService>();
 builder.Services.AddSingleton<InMemoryFinancialLedger>();
 builder.Services.AddSingleton<IFinancialLedgerAnonymizer>(sp => sp.GetRequiredService<InMemoryFinancialLedger>());
 builder.Services.AddSingleton<InMemoryAccountDeletionStore>();
-// Durability register #15 — account-deletion (GDPR 30-day purge SLA). The authoritative
-// gateway-local store is Postgres-backed (account_deletions, migration 0010) when
-// GatewayPostgres is configured, else the in-memory fallback (dev/CI/test).
+// Durability register #15 — account-deletion (GDPR 30-day purge SLA). No durable gateway store since
+// W5-11: InMemoryAccountDeletionStore is the root, so a pending purge and its SLA clock die on a bounce.
 
 // JEBV4-215 (E20) — route the account-deletion soft status-flip THROUGH remote-user-preferences
 // (Q-079 / GR-2 DoD: the flip persists via remote-user-preferences, NOT user-management),
@@ -2269,16 +2255,11 @@ builder.Services.AddHostedService(sp =>
 // POST /users/me/data-export queues a full export (profile, orders,
 // ratings, chat history); a background processor packages the bytes,
 // stamps a single-use download token, and notifies the user. The 72-hour
-// SLA lives in DataExportOptions.Sla. Production wiring will swap the
-// in-memory store/providers for the Postgres-backed worker and an NSwag
-// notification-service client.
+// SLA lives in DataExportOptions.Sla. The promised Postgres worker is DEAD (W5-11 deleted the
+// schema and the worker); the lifecycle moves to state-service work items — see register #16.
 builder.Services.Configure<DataExportOptions>(builder.Configuration.GetSection(DataExportOptions.SectionName));
-// Durability register #16 — data-export (GDPR 72-hr SLA + single-use download tokens).
-// Postgres-backed (data_exports, migration 0023) + the DataExportWorker SLA sweeper when
-// GatewayPostgres is configured, so a queued export, its download token, and its SLA
-// deadline survive a restart. The existing DataExportProcessor (packaging) resolves
-// IDataExportStore and drives the durable store transparently; the new worker only marks
-// overdue rows failed (complementary, not a duplicate). In-memory fallback for dev/CI/test.
+// Durability register #16 — data-export (GDPR 72-hr SLA + single-use download tokens). No durable
+// store since W5-11: queued exports, download tokens and SLA deadlines die on a bounce at DataExportMode=local.
 builder.Services.AddSingleton<InMemoryDataExportStore>();
 
 // gwdbx W1-06 (G-20) — the encrypt-then-upload artifact pipeline. Dormant while
@@ -2325,8 +2306,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DataExportProcesso
 // JWT token rotation + revocation (T-backend-043).
 // 15-min access tokens, 30-day single-use refresh tokens rotated on
 // every use; revocation triggers on suspension, password change, and
-// phone change. In-memory refresh-token store for MVP — Postgres-backed
-// implementation lands with the follow-up migration.
+// phone change. NOT in-memory in a prod-like env: IRefreshTokenStore binds to
+// StateServiceRefreshTokenStore (register #3); the in-memory store is Development/Testing only.
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
 builder.Services.Configure<UmJwtOptions>(builder.Configuration.GetSection(UmJwtOptions.SectionName));
 // JEB-1502: register FakeTimeProvider as the singleton TimeProvider so the test
@@ -2542,10 +2523,8 @@ builder.Services.AddSingleton<IOfferRequestIndex>(
 // (T-backend-022, T-backend-023) so they obey the same transport and retry
 // rules as any other trigger.
 builder.Services.AddSingleton<IAutoOfflineNotifier, PushAutoOfflineNotifier>();
-// Durability register #9 — availability (admin ops-map + auto-offline). Postgres-backed
-// (jeeber_availability, migration 0003 + zone/last_interaction_at migration 0026) when
-// GatewayPostgres is configured so the gateway-owned availability view survives a restart;
-// matching is unaffected. In-memory fallback for dev/CI/test.
+// Durability register #9 — availability (admin ops-map + auto-offline). No durable store since W5-11 and
+// AvailabilityMode is capped below the read rung (G-10): in-memory only, so every Jeeber reads offline after a bounce.
 builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();
 builder.Services.AddHostedService<AutoOfflineSweeper>();
 
@@ -2749,15 +2728,8 @@ builder.Services.AddSingleton<IWhisperCircuitBreaker, WhisperCircuitBreaker>();
 // in-memory ON PURPOSE and is documented as an intentional transient on the AUDIT-A
 // backlog (StoreDurabilityGuard.KnownInMemoryBacklog) — not a pending migration.
 builder.Services.AddSingleton<IAudioStore, InMemoryAudioStore>();
-// Durability follow-up — transcription fallback queue (JEBV4-126). This queue holds
-// only SMALL metadata rows (audio_id, reason, queued_at) for voice notes whose
-// transcription fell back and must be re-driven once Whisper recovers; in-memory it
-// evaporated on every restart, silently resetting the pending backlog and the
-// PendingQueueDepth on the Whisper health check + status endpoint. Postgres-backed
-// (transcription_fallback_queue, migration 0033) whenever GatewayPostgres:ConnectionString
-// is configured — the established FAIL-OPEN-then-gate pattern (StoreDurabilityGuard now
-// enforces the Postgres impl in prod-like envs). The in-memory queue stays the
-// dev/CI/test fallback when the connection string is absent.
+// Durability follow-up — transcription fallback queue (JEBV4-126): small re-drive rows (audio_id,
+// reason, queued_at). No durable store since W5-11 — the backlog and PendingQueueDepth reset on a bounce.
 builder.Services.AddSingleton<ITranscriptionFallbackQueue, InMemoryTranscriptionFallbackQueue>();
 builder.Services.AddSingleton<IFallbackTranscriptionProvider, NoOpFallbackTranscriptionProvider>();
 builder.Services.AddScoped<ITranscriptionService, ResilientTranscriptionService>();
