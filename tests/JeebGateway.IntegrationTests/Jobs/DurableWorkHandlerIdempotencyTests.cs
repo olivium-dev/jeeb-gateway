@@ -1,3 +1,5 @@
+using System.Net;
+using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Artifacts;
@@ -8,6 +10,7 @@ using JeebGateway.StateService.Work;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Xunit;
@@ -306,15 +309,63 @@ public sealed class DurableWorkHandlerIdempotencyTests
             .WithMessage("*api/conversations/export-index*");
     }
 
+    /// <summary>
+    /// Successor to the fail-closed capability gate this case used to assert. The gate
+    /// existed because the owner API could not list the half the user AUTHORED; now that
+    /// the export exists, both halves and their request linkage must reach the package.
+    /// </summary>
     [Fact]
     public async Task Feedback_Ratings_Provider_Never_Omits_Authored_Ratings()
     {
-        var provider = new FeedbackServiceDataExportRatingsProvider();
+        var authored = Guid.NewGuid();
+        var received = Guid.NewGuid();
+        var provider = FeedbackRatingsProvider(_ => UpstreamJson(new
+        {
+            hasMore = false,
+            ratings = new object[]
+            {
+                new
+                {
+                    id = authored,
+                    correlationId = "jeeb:delivery:DEL-1",
+                    direction = "given",
+                    counterpartyId = Guid.NewGuid(),
+                    score = 5,
+                    comment = "authored by the exporting user",
+                    tags = new[] { "jeeb" },
+                    createdAt = "2026-08-10T09:00:00Z"
+                },
+                new
+                {
+                    id = received,
+                    correlationId = "jeeb:delivery:DEL-2",
+                    direction = "received",
+                    counterpartyId = Guid.NewGuid(),
+                    score = 4,
+                    tags = new[] { "jeeb" },
+                    createdAt = "2026-08-10T10:00:00Z"
+                }
+            }
+        }));
+
+        var snapshots = await provider.GetForUserAsync("user-42", CancellationToken.None);
+
+        snapshots.Select(r => r.RatingId).Should().Equal(
+            authored.ToString("D"),
+            received.ToString("D"));
+        snapshots.Select(r => r.Direction).Should().Equal("given", "received");
+        snapshots.Select(r => r.RequestId).Should().Equal("DEL-1", "DEL-2");
+    }
+
+    [Fact]
+    public async Task Feedback_Ratings_Provider_Never_Reports_An_Unreadable_Upstream_As_No_Ratings()
+    {
+        var provider = FeedbackRatingsProvider(
+            _ => throw new HttpRequestException("connection refused"));
 
         var act = () => provider.GetForUserAsync("user-42", CancellationToken.None);
 
-        await act.Should().ThrowAsync<OwnerCapabilityUnavailableException>()
-            .WithMessage("*given and received*request correlation*");
+        await act.Should().ThrowAsync<DataExportRatingsUnavailableException>();
     }
 
     private static StateWorkItem WorkItem(
@@ -507,6 +558,39 @@ public sealed class DurableWorkHandlerIdempotencyTests
             capability = Capability;
             return string.Equals(token, Capability.Token, StringComparison.Ordinal);
         }
+    }
+
+    // IHttpClientFactory double: the provider gained the dependency at 2865f0a.
+    private static FeedbackServiceDataExportRatingsProvider FeedbackRatingsProvider(
+        Func<HttpRequestMessage, HttpResponseMessage> upstream) =>
+        new(new StubHttpClientFactory(upstream),
+            new FeedbackRatingExportOptions(),
+            NullLogger<FeedbackServiceDataExportRatingsProvider>.Instance);
+
+    private static HttpResponseMessage UpstreamJson(object body) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent(
+            JsonSerializer.Serialize(body),
+            Encoding.UTF8,
+            "application/json")
+    };
+
+    private sealed class StubHttpClientFactory(
+        Func<HttpRequestMessage, HttpResponseMessage> upstream) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) =>
+            new(new StubUpstreamHandler(upstream))
+            {
+                BaseAddress = new Uri("http://feedback.test/")
+            };
+    }
+
+    private sealed class StubUpstreamHandler(
+        Func<HttpRequestMessage, HttpResponseMessage> upstream) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken ct) => Task.FromResult(upstream(request));
     }
 
     private sealed record NotificationCall(
