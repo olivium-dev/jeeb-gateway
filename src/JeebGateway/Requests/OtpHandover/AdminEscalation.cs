@@ -25,8 +25,8 @@ public static class EscalationStatus
 
 /// <summary>
 /// One admin escalation row produced by the OTP handover flow
-/// (T-backend-015 / JEEB-33). Stored in <c>IAdminEscalationStore</c> — process memory at
-/// OtpEscalationsMode=local (MSI's value today); delivery-service serves it from the read rung up.
+/// (T-backend-015 / JEEB-33). Stored in <c>IAdminEscalationStore</c> — process memory only at
+/// OtpEscalationsMode=local; delivery-service serves it from the read rung up, MSI's value since 2026-08-16.
 /// </summary>
 public sealed class AdminEscalation
 {

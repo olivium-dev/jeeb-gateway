@@ -961,10 +961,6 @@ builder.Services
         "FeatureFlags:RefreshTokenStoreMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
     .Validate(
-        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.AccountDeletionMode),
-        "FeatureFlags:AccountDeletionMode must be one of: "
-            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
-    .Validate(
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.OtpEscalationsMode),
         "FeatureFlags:OtpEscalationsMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
@@ -1778,8 +1774,8 @@ builder.Services.AddSingleton<IRatingService, RatingService>();
 
 // OTP handover verification + admin escalation (T-backend-015 / JEEB-33).
 builder.Services.Configure<OtpHandoverOptions>(builder.Configuration.GetSection(OtpHandoverOptions.SectionName));
-// Durability register #5 — admin escalations. No durable gateway store since W5-11: process memory,
-// lost on every bounce, at OtpEscalationsMode=local (default); delivery-service from the read rung up.
+// Durability register #5 — admin escalations. Durable from the read rung up (delivery-service
+// Postgres), MSI's value since 2026-08-16; process memory only at the "local" code default.
 builder.Services.AddSingleton<InMemoryAdminEscalationStore>();
 
 // gwdbx W3-02 (ADR-0009) — from dual-write-upstream-read up, delivery-service SERVES the admin
@@ -2167,8 +2163,8 @@ builder.Services.AddSingleton<InMemoryAccountDeletionStore>();
 // 192.168.2.50:10067; owner declined the env flip), so the mirror fails open there and the
 // gateway-local persistence path is the real durable fallback — exactly the fail-open-then-local
 // shape notification-prefs took post-#274. When the flag is off, the local store is used directly.
-// gwdbx W3-05 — StateServiceAccountDeletionStore then DECORATES whichever local chain is wired,
-// dual-writing the deletion to /v1/work-items once AccountDeletionMode reaches dual-write-local-read.
+// gwdbx STEP-10 — the flag-gated state-service mirror is GONE: 3ee131d made
+// IAccountDeletionWorkflow the unconditional owner of the erasure work item and its deadline.
 builder.Services.AddSingleton<IAccountDeletionStore>(sp =>
 {
     IAccountDeletionStore local = sp.GetRequiredService<InMemoryAccountDeletionStore>();
@@ -2179,11 +2175,7 @@ builder.Services.AddSingleton<IAccountDeletionStore>(sp =>
             sp.GetRequiredService<IServiceScopeFactory>(),
             sp.GetRequiredService<ILogger<JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore>>());
     }
-    return new JeebGateway.Users.StateServiceAccountDeletionStore(
-        local,
-        sp.GetRequiredService<IServiceScopeFactory>(),
-        sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<JeebGateway.Migration.GwdbxMigrationOptions>>(),
-        sp.GetRequiredService<ILogger<JeebGateway.Users.StateServiceAccountDeletionStore>>());
+    return local;
 });
 
 // AccountDeletionPurgeWorker is RETIRED: it swept the in-memory store, which no request path
@@ -2697,12 +2689,6 @@ builder.Services
         o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.ProhibitedItems)
              || stateServiceWired,
         $"FeatureFlags:ProhibitedItemsMode is at or above dual-write-upstream-read, which makes jeeb-state-service the lexicon READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}).")
-    // W3-05 (A10): from the read flip up state-service /v1/work-items serves the GDPR deletion
-    // status, so an unwired dependency must refuse the boot rather than answer from a store that
-    // empties on every bounce.
-    .Validate(
-        o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.AccountDeletion) || stateServiceWired,
-        $"FeatureFlags:AccountDeletionMode is at or above dual-write-upstream-read, which makes jeeb-state-service the account-deletion READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}).")
     // W3-02 (A10): the admin escalation queue is served by delivery-service from the read flip up.
     .Validate(
         o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.OtpEscalations) || gwdbxDeliveryWired,

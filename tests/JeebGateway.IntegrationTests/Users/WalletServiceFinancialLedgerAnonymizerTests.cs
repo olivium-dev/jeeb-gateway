@@ -75,7 +75,7 @@ public sealed class WalletServiceFinancialLedgerAnonymizerTests
         scope.ServiceProvider.GetRequiredService<IFinancialLedgerAnonymizer>()
             .Should().BeOfType<WalletServiceFinancialLedgerAnonymizer>();
         scope.ServiceProvider.GetRequiredService<IAccountDeletionStore>()
-            .Should().BeOfType<StateServiceAccountDeletionStore>();
+            .Should().BeOfType<RemoteUserPreferencesAccountDeletionStore>();
         scope.ServiceProvider.GetRequiredService<IDataExportWorkflow>()
             .Should().BeOfType<StateDataExportWorkflow>();
         scope.ServiceProvider.GetRequiredService<DurableWorkSweepExecutor>()

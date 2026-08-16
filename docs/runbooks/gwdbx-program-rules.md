@@ -27,7 +27,7 @@ files that name them from the build. Still-compiled files with a dangling refere
 `Gw1Pack/W26_MoneyControllerRouteCensusTests.cs`, `Infrastructure/RedisFailClosedBootGuardTests.cs`
 (`StoreDurabilityGuard.FailClosedDisabledKey`), `Infrastructure/StatelessGatewayGuardTests.cs`,
 `StateService/StateServiceNotificationDispatchOutboxTests.cs`,
-`Users/DataExport/MirroringDataExportStoreTests.cs`, `Users/StateServiceAccountDeletionStoreTests.cs`.
+`Users/DataExport/MirroringDataExportStoreTests.cs`. (STEP-10 settled one of them: `Users/StateServiceAccountDeletionStoreTests.cs` was deleted with the store it covered. STEP-10 also cleared a NEWER break of the same kind — `Jobs/DurableWorkHandlerIdempotencyTests.cs` called `StateServiceAccountDeletionStore.DeserializePayload`, a member that never existed on that type, so it was repointed at the live `AccountDeletionWorkHandler` parser.)
 Until they are settled, **no "the tests pass" claim about this repository is meaningful** — the suite
 cannot build. Settling them deletes durability-guard coverage, so it is an owner/assessor call, not a
 side effect of an unrelated PR.
