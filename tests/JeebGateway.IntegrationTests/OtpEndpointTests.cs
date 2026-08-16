@@ -128,7 +128,7 @@ public class OtpEndpointTests
     {
         var stub = new StubServiceOtpClient();
         using var factory = MakeFactory(stub, otpEnabled: true);
-        var http = factory.CreateClient();
+        var http = AuthedClient(factory);
 
         var resp = await http.PostAsJsonAsync("/api/otp/send", new OtpSendRequest(
             PhoneNumber: "+9613000000",
@@ -143,7 +143,7 @@ public class OtpEndpointTests
     {
         var stub = new StubServiceOtpClient();
         using var factory = MakeFactory(stub, otpEnabled: true);
-        var http = factory.CreateClient();
+        var http = AuthedClient(factory);
 
         var resp = await http.PostAsJsonAsync("/api/otp/validate", new OtpValidateRequest(
             PhoneNumber: "+9613000000",
@@ -163,7 +163,7 @@ public class OtpEndpointTests
                 "unauthorized", (int)HttpStatusCode.Unauthorized, null, EmptyHeaders, null)
         };
         using var factory = MakeFactory(stub, otpEnabled: true);
-        var http = factory.CreateClient();
+        var http = AuthedClient(factory);
 
         var resp = await http.PostAsJsonAsync("/api/otp/validate", new OtpValidateRequest(
             PhoneNumber: "+9613000000",
@@ -183,7 +183,7 @@ public class OtpEndpointTests
     {
         var stub = new StubServiceOtpClient();
         using var factory = MakeFactory(stub, otpEnabled: false);
-        var http = factory.CreateClient();
+        var http = AuthedClient(factory);
 
         var resp = await http.PostAsJsonAsync("/api/otp/send", new OtpSendRequest(
             PhoneNumber: "+9613000000",
@@ -198,7 +198,7 @@ public class OtpEndpointTests
     {
         var stub = new StubServiceOtpClient();
         using var factory = MakeFactory(stub, otpEnabled: true);
-        var http = factory.CreateClient();
+        var http = AuthedClient(factory);
 
         var resp = await http.PostAsJsonAsync("/api/otp/send", new OtpSendRequest(
             PhoneNumber: "",
@@ -216,7 +216,7 @@ public class OtpEndpointTests
     {
         var stub = new StubServiceOtpClient();
         using var factory = MakeFactory(stub, otpEnabled: true, applicationId: JeebTenantGuid);
-        var http = factory.CreateClient();
+        var http = AuthedClient(factory);
 
         var resp = await http.PostAsJsonAsync("/api/otp/send", new OtpSendRequest(
             PhoneNumber: "+9613000001",
@@ -232,7 +232,7 @@ public class OtpEndpointTests
     {
         var stub = new StubServiceOtpClient();
         using var factory = MakeFactory(stub, otpEnabled: true, applicationId: JeebTenantGuid);
-        var http = factory.CreateClient();
+        var http = AuthedClient(factory);
 
         var resp = await http.PostAsJsonAsync("/api/otp/send", new OtpSendRequest(
             PhoneNumber: "+9613000001",
@@ -248,7 +248,7 @@ public class OtpEndpointTests
     {
         var stub = new StubServiceOtpClient();
         using var factory = MakeFactory(stub, otpEnabled: true, applicationId: JeebTenantGuid);
-        var http = factory.CreateClient();
+        var http = AuthedClient(factory);
 
         var caller = "11111111-2222-3333-4444-555555555555";
         var resp = await http.PostAsJsonAsync("/api/otp/send", new OtpSendRequest(
@@ -264,7 +264,7 @@ public class OtpEndpointTests
     {
         var stub = new StubServiceOtpClient();
         using var factory = MakeFactory(stub, otpEnabled: true, applicationId: JeebTenantGuid);
-        var http = factory.CreateClient();
+        var http = AuthedClient(factory);
 
         var resp = await http.PostAsJsonAsync("/api/otp/validate", new OtpValidateRequest(
             PhoneNumber: "+9613000001",
@@ -276,11 +276,54 @@ public class OtpEndpointTests
         stub.LastValidateApplicationId.Should().Be(JeebTenantGuid);
     }
 
+    // SEC-AUTH regression: the generic /api/otp proxy is NO LONGER anonymous.
+    // An unidentified caller is rejected by the ADR-004 fallback (401) and the
+    // upstream OTP client is never dialled (no SMS-cost / no validate oracle).
+    [Fact]
+    public async Task Send_Without_Identity_Is_Rejected_And_Never_Calls_Upstream()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, otpEnabled: true);
+        var http = factory.CreateClient(); // deliberately NO X-User-Id
+
+        var resp = await http.PostAsJsonAsync("/api/otp/send", new OtpSendRequest(
+            PhoneNumber: "+9613000000",
+            ApplicationId: "app-1"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        stub.SendCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Validate_Without_Identity_Is_Rejected_And_Never_Calls_Upstream()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, otpEnabled: true);
+        var http = factory.CreateClient(); // deliberately NO X-User-Id
+
+        var resp = await http.PostAsJsonAsync("/api/otp/validate", new OtpValidateRequest(
+            PhoneNumber: "+9613000000",
+            Otp: "1234",
+            ApplicationId: "app-1"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        stub.ValidateCalls.Should().Be(0);
+    }
+
     // ---------------------------------------------------------------------
     // helpers
     // ---------------------------------------------------------------------
 
     private const string JeebTenantGuid = "0d51afe1-499f-4a29-a55a-36d2dd223b05";
+
+    // OtpController requires an identified caller since 2026-08-16; the trusted-edge
+    // X-User-Id header authenticates it under the Dev/Test host.
+    private static HttpClient AuthedClient(WebApplicationFactory<Program> factory)
+    {
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Add("X-User-Id", "otp-proxy-test");
+        return http;
+    }
 
     private static readonly IReadOnlyDictionary<string, IEnumerable<string>> EmptyHeaders =
         new Dictionary<string, IEnumerable<string>>();

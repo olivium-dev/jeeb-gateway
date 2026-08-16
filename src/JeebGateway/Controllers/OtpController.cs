@@ -46,10 +46,9 @@ namespace JeebGateway.Controllers;
 // media type — success → application/json, error → application/problem+json — while the
 // per-action [ProducesResponseType] still documents the shapes for Swagger. Mirrors the
 // AuthRefreshV1Controller fix (PR #242).
-// ADR-004 D1: public by design — OTP send/validate precede a session token.
-[Microsoft.AspNetCore.Authorization.AllowAnonymous]
-// ADR-005 §A public — bypasses L2.
-[PublicEndpoint("OTP send/validate precede the session token — ADR-005 §A public.")]
+// SEC-AUTH (2026-08-16): de-anonymised — removed [AllowAnonymous]; now requires an
+// identified caller (ADR-004 fallback). [PublicEndpoint] kept only for the L2 guard.
+[PublicEndpoint("Generic OTP proxy: identified caller required (ADR-004 fallback); no L2 capability. De-anonymised 2026-08-16 — the account-login OTP flow lives at /v1/auth/otp/*.")]
 public sealed class OtpController : ControllerBase
 {
     private readonly IServiceOTPClient _otpClient;

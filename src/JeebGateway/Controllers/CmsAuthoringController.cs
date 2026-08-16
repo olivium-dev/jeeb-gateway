@@ -247,8 +247,12 @@ public sealed class CmsAuthoringController : ControllerBase
 
     // ---- dev helper ---------------------------------------------------------
 
+    // SEC-AUTH (2026-08-16): [DevOnly] → 404 unless Features:DevEndpoints:Enabled, so
+    // the dev step-up code is never dispensed over HTTP in production.
     [HttpGet("dev/step-up-totp")]
+    [DevOnly]
     [ProducesResponseType(typeof(CmsStepUpDevCodeResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public IActionResult GetStepUpDevCode() =>
         Ok(new CmsStepUpDevCodeResponse(CmsStepUpValidator.DevStepUpCode, ExpiresInSeconds: 900));
 

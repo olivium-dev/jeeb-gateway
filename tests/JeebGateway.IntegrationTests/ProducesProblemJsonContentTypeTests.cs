@@ -94,6 +94,8 @@ public class ProducesProblemJsonContentTypeTests
     {
         using var factory = MakeOtpFactory(otpEnabled: false);
         var http = factory.CreateClient();
+        // /api/otp is no longer anonymous (de-anonymised 2026-08-16); identify the caller.
+        http.DefaultRequestHeaders.Add("X-User-Id", "otp-proxy-test");
 
         var resp = await http.PostAsync("/api/otp/send",
             new StringContent("""{ "phoneNumber": "+9613000902", "applicationId": "app-1" }""",
