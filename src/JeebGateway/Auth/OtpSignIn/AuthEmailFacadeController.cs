@@ -338,7 +338,8 @@ public sealed class AuthEmailFacadeController : ControllerBase
     /// </summary>
     private async Task<ObjectResult?> RefuseIfSuspendedAsync(string userId, CancellationToken ct)
     {
-        var (verdict, reason) = await GwModerationGate.EvaluateAsync(_suspensions, userId, _log, ct);
+        var (verdict, reason, reasonCode) =
+            await GwModerationGate.EvaluateAsync(_suspensions, userId, _log, ct);
 
         if (verdict == GwModerationVerdict.Unavailable)
         {
@@ -351,7 +352,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
         _log.LogWarning("auth.facade refused: account suspended userId={UserId}", userId);
         return OtpSignInProblems.Problem(this, 403,
             "account_suspended", "Account is suspended.", reason,
-            new Dictionary<string, object?> { ["accountStatus"] = "suspended", ["reason"] = reason });
+            OtpSignInProblems.SuspensionExtensions(reason, reasonCode));
     }
 
     // ---- DTOs (mobile DioAuthRepository / social contract) ----

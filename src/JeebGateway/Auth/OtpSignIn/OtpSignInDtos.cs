@@ -45,6 +45,23 @@ public static class OtpSignInProblems
         IDictionary<string, object?>? extensions = null)
         => Build(c, ProblemBaseUri, status, shortType, title, detail, extensions);
 
+    /// <summary>
+    /// The extension bag every <c>account_suspended</c> 403 carries. <c>reason</c> is human-safe
+    /// text; <c>reasonCode</c> (D16) is the ban-policy i18n key when there is one, so a
+    /// locale-aware client can look the copy up instead of printing the server's string. Omitted
+    /// entirely when the reason is an operator's own prose — absence means "nothing to look up".
+    /// </summary>
+    public static Dictionary<string, object?> SuspensionExtensions(string reason, string? reasonCode)
+    {
+        var extensions = new Dictionary<string, object?>
+        {
+            ["accountStatus"] = "suspended",
+            ["reason"] = reason,
+        };
+        if (!string.IsNullOrWhiteSpace(reasonCode)) extensions["reasonCode"] = reasonCode;
+        return extensions;
+    }
+
     /// <summary>Frozen RFC 7807 problem-type base URI for the S02 Wave-1 dual-role user surfaces.</summary>
     public const string UsersProblemBaseUri = "https://problems.jeeb.lb/users";
 

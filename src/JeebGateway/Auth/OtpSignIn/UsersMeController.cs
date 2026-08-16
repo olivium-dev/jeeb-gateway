@@ -570,7 +570,7 @@ public sealed class UsersMeController : ControllerBase
     /// </summary>
     private async Task<ObjectResult?> RefuseIfSuspendedAsync(string userId, CancellationToken ct)
     {
-        var (verdict, reason) = await UserModerationGate.EvaluateAsync(_suspensions, userId, _log, ct);
+        var (verdict, reason, reasonCode) = await UserModerationGate.EvaluateAsync(_suspensions, userId, _log, ct);
 
         if (verdict == ModerationVerdict.Unavailable)
         {
@@ -583,7 +583,7 @@ public sealed class UsersMeController : ControllerBase
         _log.LogWarning("v1/users/me role re-mint refused: account suspended userId={UserId}", userId);
         return OtpSignInProblems.UsersProblem(this, StatusCodes.Status403Forbidden,
             "account_suspended", "Account is suspended.", reason,
-            new Dictionary<string, object?> { ["accountStatus"] = "suspended", ["reason"] = reason });
+            OtpSignInProblems.SuspensionExtensions(reason, reasonCode));
     }
 
     private sealed record ProfileDisplay(string? Name, string? Email, string? AvatarUrl);

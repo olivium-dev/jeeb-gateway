@@ -35,8 +35,14 @@ public sealed class BanServiceUserSuspensionSource : IUserSuspensionSource
             .OrderByDescending(status => status.LastUpdated)
             .FirstOrDefault();
 
+        // D16: ban-service's message is the operator's CONFIGURED string, which in the shipped
+        // banning-rule.json is an i18n template. Split it here, at the boundary, so no caller
+        // can accidentally render `Label{{...}}` as prose.
         return active is null
             ? UserSuspension.None
-            : new UserSuspension(true, active.Message);
+            : new UserSuspension(
+                true,
+                ModerationReason.Humanize(active.Message),
+                ModerationReason.CodeOf(active.Message));
     }
 }
