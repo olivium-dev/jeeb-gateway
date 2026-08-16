@@ -218,7 +218,7 @@ public class NewRequestPushNotifierTests
 
         await act.Should().NotThrowAsync();
         push.RecipientIds.Should().BeEquivalentTo(new[] { "A", "C" });
-        log.Has(LogLevel.Information, "sent=2 failed=1").Should().BeTrue(
+        log.Has(LogLevel.Information, "sent=2 handedOver=0 noDevice=0 failed=1").Should().BeTrue(
             "the aggregate counts are the operator-facing signal; per-recipient faults stay at Debug");
     }
 

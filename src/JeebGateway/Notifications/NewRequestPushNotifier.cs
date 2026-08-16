@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -68,10 +69,12 @@ namespace JeebGateway.Notifications;
 /// <c>POST api/v1/sent-payload/user/{user_id}</c> is already in daily use.</para>
 ///
 /// <para>DEGRADE-DON'T-FAIL: best-effort. It NEVER throws and never affects the create 201 —
-/// every failure (relay blip, timeout) is logged and swallowed. A per-recipient failure is
-/// logged at Debug (a recipient with no registered device makes the relay 404, which is
-/// routine steady-state noise in a fan-out) and NEVER aborts the batch; the operator-facing
-/// signal is the aggregate <c>failed=</c> count on the summary line.</para>
+/// every failure (relay blip, timeout) is logged and swallowed, and NEVER aborts the batch.
+/// Per-recipient faults are classified by <see cref="PushSendFailure"/> before they are
+/// counted: a relay 404 is "this user has no registered device", which is terminal and
+/// expected, so it lands in <c>noDevice=</c> and never in <c>sent=</c> or <c>failed=</c>.
+/// <c>failed=</c> is retryable faults only. See <c>SendTally</c> for the full partition and
+/// for the live line that made this necessary.</para>
 ///
 /// <para>FCM DATA SHAPE: unchanged from the topic era, byte-identical on the wire so
 /// pre-P1 APKs keep deep-linking. The relay at :10040 copies each top-level payload entry
@@ -251,14 +254,28 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
             budget.CancelAfter(_options.TotalBudget);
             var tally = await SendAllAsync(resolved.Recipients, payload, budget.Token);
 
+            // PushAcceptance says an unparsed row count means UNKNOWN, never zero — and on the
+            // hand-over rail :10040 is never called at all, so a numeric 0 would be a third lie.
+            var fcmAccepted = tally.DirectOutcomes > 0
+                ? tally.DeviceRowsAccepted.ToString(CultureInfo.InvariantCulture)
+                : "n/a";
+            var fcmRejected = tally.DirectOutcomes > 0
+                ? tally.DeviceRowsRejected.ToString(CultureInfo.InvariantCulture)
+                : "n/a";
+
+            // The audience half (candidates/recipients) is OA-21's acceptance evidence and is
+            // unchanged; only the delivery half is re-cut, into a partition of the recipients.
             _logger.LogInformation(
                 "newreq-fanout requestId={RequestId} source={Source} candidates={Candidates} recipients={Recipients} "
                 + "initiatorExcluded={InitiatorExcluded} roleFiltered={RoleFiltered} roleUnknown={RoleUnknown} "
-                + "sent={Sent} failed={Failed} "
+                + "sent={Sent} handedOver={HandedOver} noDevice={NoDevice} failed={Failed} "
+                + "failedTerminal={FailedTerminal} deviceEvidence={DeviceEvidence} "
                 + "fcmAcceptedRows={AcceptedRows} fcmRejectedRows={RejectedRows} elapsedMs={ElapsedMs}",
                 n.RequestId, resolved.Source, resolved.CandidateCount, resolved.Recipients.Count,
-                resolved.InitiatorExcluded, resolved.RoleFiltered, resolved.RoleUnknown, tally.Sent, tally.Failed,
-                tally.DeviceRowsAccepted, tally.DeviceRowsRejected,
+                resolved.InitiatorExcluded, resolved.RoleFiltered, resolved.RoleUnknown,
+                tally.Sent, tally.HandedOver, tally.NoDevice, tally.Failed,
+                tally.FailedTerminal, tally.DeviceEvidence,
+                fcmAccepted, fcmRejected,
                 (int)(_clock.GetUtcNow() - started).TotalMilliseconds);
         }
         catch (PushAudienceUnavailableException ex)
@@ -523,12 +540,36 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
     // ── Sending ───────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// A PARTITION of the recipient set: <c>Sent + HandedOver + NoDevice + FailedTerminal +
+    /// Failed</c> equals the recipient count, and every recipient lands in exactly one bucket.
+    ///
+    /// <para>PHASE-V D4. Before this split there were two counters, <c>Sent</c> ("the call
+    /// completed") and <c>Failed</c> ("the call threw"), and the summary line printed them under
+    /// names an operator reads as delivery. Live on 2026-08-16 that produced
+    /// <c>sent=6 failed=0</c> for a fan-out where ONE recipient of six reached a device: the
+    /// other five had no registered device (:10040 → 404) and the six calls were hand-overs to
+    /// notification-service, which returns before any device is consulted. Both numbers were
+    /// false, and <c>fcmAcceptedRows=0</c> — the counter that already knew — sat beside them.</para>
+    ///
+    /// <para>The rule these buckets encode: NEVER report an outcome the gateway did not observe.
+    /// A hand-over is evidence about notification-service, not about a handset.</para>
+    /// </summary>
     private sealed class SendTally
     {
-        /// <summary>Recipients whose per-user call completed. NOT a delivery count.</summary>
+        /// <summary>:10040 accepted the send for this recipient. The only proven-downstream bucket.</summary>
         public int Sent;
 
-        /// <summary>Recipients whose per-user call threw (404 no rows, 500 all rows dead, timeout).</summary>
+        /// <summary>notification-service durably owns the event; the device outcome is NOT visible here.</summary>
+        public int HandedOver;
+
+        /// <summary>:10040 says this recipient has no registered device (404). Terminal, expected.</summary>
+        public int NoDevice;
+
+        /// <summary>Terminal refusals that are not "no device" — repeating them cannot help.</summary>
+        public int FailedTerminal;
+
+        /// <summary>Retryable or unrecognised faults only: 5xx, 408, 429, timeout, transport, budget.</summary>
         public int Failed;
 
         /// <summary>Device rows FCM accepted, summed over the recipients that answered.</summary>
@@ -536,6 +577,21 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
         /// <summary>Device rows FCM rejected, summed over the recipients that answered.</summary>
         public int DeviceRowsRejected;
+
+        /// <summary>Recipients whose outcome came from :10040 directly.</summary>
+        public int DirectOutcomes;
+
+        /// <summary>Recipients whose outcome came from the notification-service hand-over.</summary>
+        public int HandoverOutcomes;
+
+        /// <summary>Which rail's evidence the buckets above are made of.</summary>
+        public string DeviceEvidence => (DirectOutcomes > 0, HandoverOutcomes > 0) switch
+        {
+            (true, true) => "mixed",
+            (true, false) => "gateway-direct",
+            (false, true) => "notification-service",
+            _ => "none",
+        };
     }
 
     private async Task<SendTally> SendAllAsync(
@@ -588,13 +644,16 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                     if (handover.Classification
                         != GenericEventDispatchClassification.SkippedDirectDispatchArmed)
                     {
-                        if (handover.Classification == GenericEventDispatchClassification.Unproven)
+                        // A hand-over proves notification-service owns the event, nothing about
+                        // a device — so it is counted apart from sent=, never folded into it.
+                        Interlocked.Increment(ref tally.HandoverOutcomes);
+                        if (PushHandover.IsProducerOwned(handover.Classification))
                         {
-                            Interlocked.Increment(ref tally.Failed);
+                            Interlocked.Increment(ref tally.HandedOver);
                         }
                         else
                         {
-                            Interlocked.Increment(ref tally.Sent);
+                            Interlocked.Increment(ref tally.Failed);
                         }
 
                         return;
@@ -604,6 +663,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(_options.PerSendTimeout);
 
+                Interlocked.Increment(ref tally.DirectOutcomes);
                 var accepted = await _push.Send_notification_to_userAsync(
                     userId,
                     new SentPayloadToUserRequest { Payload = payload },
@@ -611,11 +671,8 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 
                 Interlocked.Increment(ref tally.Sent);
 
-                // The summary line's sent=/failed= counters are recipient-level and have
-                // misled two batches on their own (they counted a push "failed" that a human
-                // then watched arrive). Carry the push service's device-row accounting up to
-                // the summary so the operator signal is about tokens, not about whether the
-                // gateway's own CTS beat the response.
+                // Recipient-level counters cannot see tokens, so carry the relay's own
+                // device-row accounting up to the summary alongside them.
                 var rows = PushAcceptance.Parse(accepted);
                 if (rows.Accepted is int a)
                 {
@@ -629,13 +686,30 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
             }
             catch (Exception ex)
             {
-                // A recipient with no registered device makes the relay 404 → ApiException.
-                // That is routine steady-state noise in a fan-out, so it is DEBUG, not
-                // Warning; the aggregate failed= count on the summary line is the operator
-                // signal. A per-recipient failure must NEVER abort the batch.
-                Interlocked.Increment(ref tally.Failed);
-                _logger.LogDebug(ex,
-                    "newreq-fanout per-recipient send failed for user {UserId}; continuing", userId);
+                // D3: a 404 ("no registered device") is terminal and expected — it is neither a
+                // send nor a retryable failure. A per-recipient fault never aborts the batch.
+                switch (PushSendFailure.Classify(ex))
+                {
+                    case PushSendFailureKind.NoRegisteredDevice:
+                        Interlocked.Increment(ref tally.NoDevice);
+                        _logger.LogDebug(
+                            "newreq-fanout no-registered-device user={UserId}; terminal, not retryable",
+                            userId);
+                        break;
+
+                    case PushSendFailureKind.Terminal:
+                        Interlocked.Increment(ref tally.FailedTerminal);
+                        _logger.LogWarning(ex,
+                            "newreq-fanout terminal push refusal user={UserId}; retrying cannot help",
+                            userId);
+                        break;
+
+                    default:
+                        Interlocked.Increment(ref tally.Failed);
+                        _logger.LogDebug(ex,
+                            "newreq-fanout retryable send failure user={UserId}; continuing", userId);
+                        break;
+                }
             }
             finally
             {
