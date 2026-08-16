@@ -22,8 +22,27 @@ public sealed class DurableWorkHandlerIdempotencyTests
     private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
 
     [Fact]
-    public void AccountDeletion_Legacy_Hash_Field_Is_Read_Only_During_State_Cutover()
+    public async Task AccountDeletion_Legacy_Hash_Field_Is_Read_Only_During_State_Cutover()
     {
+        // The payload deserializer is private to the handler now, so the legacy-field READ is
+        // asserted where it is observable: the pseudonym the handler anonymizes delivery rows to.
+        var now = DateTimeOffset.Parse("2026-08-10T12:00:00Z");
+        var clock = new FakeTimeProvider(now);
+        var requests = new InMemoryRequestsStore(clock);
+        var seeded = await requests.CreateAsync(
+            new CreateRequestInput { ClientId = "legacy-user", Description = "settled row" },
+            CancellationToken.None);
+        (await requests.SetStatusAsync(seeded.Id, RequestStatus.Delivered, CancellationToken.None))
+            .Should().BeTrue();
+        var users = new InMemoryUsersStore();
+        await users.GetOrCreateAsync("legacy-user", CancellationToken.None);
+        var handler = new AccountDeletionWorkHandler(
+            users,
+            requests,
+            new CountingTokenService(),
+            new CountingLedgerOwner(),
+            clock,
+            Options.Create(new AccountDeletionExecutionOptions()));
         var legacy = WorkItem(
             DurableWorkContract.AccountDeletionKind,
             JsonSerializer.SerializeToElement(new
@@ -32,12 +51,16 @@ public sealed class DurableWorkHandlerIdempotencyTests
                 anonymizedUserHash = "legacy-delivery-hash",
                 hadActiveDeliveryAtRequest = false
             }),
-            DateTimeOffset.Parse("2026-08-10T12:00:00Z"));
+            now);
 
-        var parsed = StateServiceAccountDeletionStore.DeserializePayload(legacy);
+        var result = await handler.ExecuteAsync(legacy, CancellationToken.None);
 
-        parsed.Should().NotBeNull();
-        parsed!.EffectiveDeliveryAnonymizedUserHash.Should().Be("legacy-delivery-hash");
+        result.Outcome.Should().NotBe(DurableWorkOutcome.Fail,
+            "ignoring the legacy hash field would fail the payload-validity gate");
+        (await requests.ListForClientAsync("legacy-delivery-hash", CancellationToken.None))
+            .Should().ContainSingle().Which.Id.Should().Be(seeded.Id);
+        (await requests.ListForClientAsync("legacy-user", CancellationToken.None))
+            .Should().BeEmpty("the legacy hash is the pseudonym the delivery rows are rewritten to");
         var newWire = JsonSerializer.Serialize(
             new AccountDeletionWorkPayload("new-user", "new-delivery-hash", false),
             WebJson);
