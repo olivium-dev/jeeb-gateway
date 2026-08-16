@@ -21,7 +21,20 @@ namespace JeebGateway.IntegrationTests;
 /// Suspension was enforced ONLY on <c>[RequireActiveUser]</c>-gated endpoints; the login path
 /// (<c>auth.otp.request</c> → <c>auth.otp.verify</c> → token mint) never consulted it.
 ///
-/// <para>These tests pin the fix AND the two design decisions it rests on:
+/// <para><b>D10 (Phase V run 2, 2026-08-16) — this suite used to prove nothing.</b> The fixture
+/// below suspended by calling <c>IUsersStore.SuspendAsync</c>, and the gate read
+/// <c>IUsersStore.GetForModerationAsync</c>. In production <c>IUsersStore</c> is
+/// <c>InMemoryUsersStore</c>, so the test wrote a process-local dictionary and then read the same
+/// dictionary back: a closed RAM loop that is green by construction. The product's real suspend
+/// action goes <c>PATCH /admin/users/{id}/suspend</c> -&gt; <c>OwnerComposedAdminUsers.SuspendAsync</c>
+/// -&gt; <c>IBanServiceClient.ApplyTerminalBanAsync</c>, i.e. ban-service, which that dictionary
+/// never hears about. Suspended accounts logged in on live while this file stayed green.</para>
+///
+/// <para>The fixture now suspends through the SAME call the admin path makes, against a stateful
+/// ban-service double, so the write and the read are joined by the product's own wiring rather
+/// than by the test's assumption. S5 pins that join and its negative half.</para>
+///
+/// <para>These tests pin the fix AND the design decisions it rests on:
 /// <list type="bullet">
 ///   <item>S1 — a suspended account is REFUSED at verify, with a machine-readable moderation
 ///     reason, and NOTHING is minted.</item>
@@ -210,17 +223,73 @@ public class AuthOtpSuspendedLoginTests
     }
 
     // -----------------------------------------------------------------
+    // S5 — the store the product WRITES is the store login READS, and the
+    //      store it no longer reads demonstrably does not enforce.
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Both halves matter. (a) is the fix: a ban written by the admin path's own call refuses the
+    /// login. (b) is the falsification that (a) is not an accident of the fixture: flipping
+    /// IsSuspended on the users store — the store the gate USED to read, and the analogue of the
+    /// Phase V probe's direct user-management edit — changes nothing. If (b) ever goes red, the
+    /// gate has drifted back onto a store the product does not write.
+    /// </summary>
+    [Fact]
+    public async Task S5_Login_Enforces_The_Store_The_Admin_Suspend_Writes_And_Only_That_Store()
+    {
+        const string banned = "+9613000107";
+        const string usersStoreOnly = "+9613000108";
+
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub);
+        var http = factory.CreateClient();
+
+        // (a) written through IBanServiceClient.ApplyTerminalBanAsync — the admin path's own call.
+        await SuspendAsync(factory, banned);
+        var refused = await http.PostAsync("/v1/auth/otp/verify", JsonBody($$"""
+            { "phone": "{{banned}}", "code": "1234" }
+            """));
+        refused.StatusCode.Should().Be(HttpStatusCode.Forbidden,
+            "the login gate must read the store the product's suspend action writes");
+
+        // (b) written to IUsersStore only — process RAM no administrator can reach.
+        var store = factory.Services.GetRequiredService<IUsersStore>();
+        var profile = await store.GetOrCreateAsync(usersStoreOnly, CancellationToken.None);
+        var updated = await store.SuspendAsync(profile.Id, SuspensionReason, "admin-test", CancellationToken.None);
+        updated!.IsSuspended.Should().BeTrue("the fixture's own write must land, or (b) proves nothing");
+
+        var admitted = await http.PostAsync("/v1/auth/otp/verify", JsonBody($$"""
+            { "phone": "{{usersStoreOnly}}", "code": "1234" }
+            """));
+        admitted.StatusCode.Should().Be(HttpStatusCode.OK,
+            "the gateway's in-process users projection is NOT the suspension authority; a test that "
+            + "suspends there and sees a 403 is reading its own write back out of RAM — which is "
+            + "exactly how D10 shipped green");
+    }
+
+    // -----------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------
 
-    /// Seeds a real suspension through the REAL store the admin suspend path writes.
-    private static async Task SuspendAsync(WebApplicationFactory<Program> factory, string phone)
+    /// Suspends through the EXACT call the admin path makes — OwnerComposedAdminUsers.SuspendAsync
+    /// invokes IBanServiceClient.ApplyTerminalBanAsync — so the fixture cannot drift from the
+    /// product's real write. Returns the suspended user id.
+    private static async Task<string> SuspendAsync(WebApplicationFactory<Program> factory, string phone)
+    {
+        var userId = await ResolveUserIdAsync(factory, phone);
+        var ban = factory.Services.GetRequiredService<IBanServiceClient>();
+        var status = await ban.ApplyTerminalBanAsync(userId, "red", CancellationToken.None);
+        status.IsCurrentlyBanned.Should().BeTrue("the fixture must reproduce the measured live state");
+        return userId;
+    }
+
+    /// The controller resolves identity through the in-process store when UserManagement is off,
+    /// so the fixture asks the same question the controller will.
+    private static async Task<string> ResolveUserIdAsync(
+        WebApplicationFactory<Program> factory, string phone)
     {
         var store = factory.Services.GetRequiredService<IUsersStore>();
-        var profile = await store.GetOrCreateAsync(phone, CancellationToken.None);
-        var updated = await store.SuspendAsync(profile.Id, SuspensionReason, "admin-test", CancellationToken.None);
-        updated.Should().NotBeNull();
-        updated!.IsSuspended.Should().BeTrue("the fixture must reproduce the measured live state");
+        return (await store.GetOrCreateAsync(phone, CancellationToken.None)).Id;
     }
 
     private static async Task SeedActiveAsync(WebApplicationFactory<Program> factory, string phone)
@@ -260,74 +329,67 @@ public class AuthOtpSuspendedLoginTests
                     o.TtlSeconds = 300;
                 });
 
-                if (throwOnModerationLookup)
-                {
-                    services.RemoveAll<IUsersStore>();
-                    services.AddSingleton<IUsersStore>(sp =>
-                        new ThrowingReadUsersStore(sp.GetRequiredService<InMemoryUsersStore>()));
-                }
+                // ban-service is the suspension authority; the double is stateful so a ban
+                // written by the admin call is the same row the login gate reads.
+                services.RemoveAll<IBanServiceClient>();
+                services.AddSingleton<IBanServiceClient>(
+                    new FakeBanService { ThrowOnStatus = throwOnModerationLookup });
             });
         });
 
     private static StringContent JsonBody(string json)
         => new(json, Encoding.UTF8, "application/json");
 
-    /// Real store in every respect EXCEPT the point-lookup the login gate performs,
-    /// which faults — the "suspension lookup errored" condition.
-    private sealed class ThrowingReadUsersStore : IUsersStore
+    /// <summary>
+    /// Stateful stand-in for ban-service. ApplyTerminalBanAsync records a currently-banned row
+    /// (what the admin suspend writes) and GetStatusAsync returns it (what the login gate and
+    /// [RequireActiveUser] read) — one store, both directions, so the test cannot pass by
+    /// writing and reading two different places.
+    /// </summary>
+    private sealed class FakeBanService : IBanServiceClient
     {
-        private readonly IUsersStore _inner;
+        private readonly Dictionary<string, BanStatusItem> _bans = new();
 
-        public ThrowingReadUsersStore(IUsersStore inner) => _inner = inner;
+        /// Simulates ban-service being unreachable on the read leg.
+        public bool ThrowOnStatus { get; init; }
 
-        public Task<UserProfile?> GetByIdAsync(string userId, CancellationToken ct)
-            => throw new InvalidOperationException("moderation lookup unavailable");
+        public Task<BanStatusesResult> GetStatusAsync(string userId, CancellationToken ct)
+        {
+            if (ThrowOnStatus) throw new HttpRequestException("ban-service unreachable");
+            return Task.FromResult(new BanStatusesResult
+            {
+                UserId = userId,
+                BanStatuses = _bans.TryGetValue(userId, out var row)
+                    ? new[] { row }
+                    : Array.Empty<BanStatusItem>(),
+            });
+        }
 
-        public Task<UserProfile> GetOrCreateAsync(string userId, CancellationToken ct)
-            => _inner.GetOrCreateAsync(userId, ct);
+        public Task<BanStatusItem> ApplyTerminalBanAsync(string userId, string policyKey, CancellationToken ct)
+        {
+            var row = new BanStatusItem
+            {
+                UserId = userId,
+                BanType = policyKey,
+                CurrentStage = 3,
+                Status = "BAN",
+                Message = SuspensionReason,
+                BannedUntil = null,
+                LastUpdated = DateTimeOffset.UtcNow,
+                IsCurrentlyBanned = true,
+            };
+            _bans[userId] = row;
+            return Task.FromResult(row);
+        }
 
-        public Task UpsertProjectionAsync(UserProfile profile, CancellationToken ct)
-            => _inner.UpsertProjectionAsync(profile, ct);
+        public Task<BanStatusItem> ApplyBanAsync(string userId, string banType, CancellationToken ct)
+            => ApplyTerminalBanAsync(userId, banType, ct);
 
-        public Task<UserProfile> UpdateProfileAsync(string userId, ProfilePatch patch, CancellationToken ct)
-            => _inner.UpdateProfileAsync(userId, patch, ct);
-
-        public Task<IReadOnlyList<SavedAddress>> ListAddressesAsync(string userId, CancellationToken ct)
-            => _inner.ListAddressesAsync(userId, ct);
-
-        public Task<SavedAddress?> GetAddressAsync(string userId, string addressId, CancellationToken ct)
-            => _inner.GetAddressAsync(userId, addressId, ct);
-
-        public Task<SavedAddress> CreateAddressAsync(string userId, AddressUpsert input, CancellationToken ct)
-            => _inner.CreateAddressAsync(userId, input, ct);
-
-        public Task<SavedAddress?> UpdateAddressAsync(
-            string userId, string addressId, AddressUpsert patch, CancellationToken ct)
-            => _inner.UpdateAddressAsync(userId, addressId, patch, ct);
-
-        public Task<bool> DeleteAddressAsync(string userId, string addressId, CancellationToken ct)
-            => _inner.DeleteAddressAsync(userId, addressId, ct);
-
-        public Task<UserSearchResult> SearchAsync(UserSearchQuery query, CancellationToken ct)
-            => _inner.SearchAsync(query, ct);
-
-        public Task<UserProfile?> SuspendAsync(string userId, string reason, string adminId, CancellationToken ct)
-            => _inner.SuspendAsync(userId, reason, adminId, ct);
-
-        public Task<UserProfile?> UnsuspendAsync(string userId, string adminId, CancellationToken ct)
-            => _inner.UnsuspendAsync(userId, adminId, ct);
-
-        public Task<UserProfile?> SwitchRoleAsync(string userId, string newRole, CancellationToken ct)
-            => _inner.SwitchRoleAsync(userId, newRole, ct);
-
-        public Task<UserProfile?> GrantRoleAsync(string userId, string role, CancellationToken ct)
-            => _inner.GrantRoleAsync(userId, role, ct);
-
-        public Task<UserProfile?> RevokeRoleAsync(string userId, string role, CancellationToken ct)
-            => _inner.RevokeRoleAsync(userId, role, ct);
-
-        public Task<bool> PurgePiiAsync(string userId, CancellationToken ct)
-            => _inner.PurgePiiAsync(userId, ct);
+        public Task<BanResetResult> ForceResetAsync(string userId, CancellationToken ct)
+        {
+            _bans.Remove(userId, out var old);
+            return Task.FromResult(new BanResetResult { OldStatus = old, NewStatus = null, Updated = old is not null });
+        }
     }
 
     private sealed class StubServiceOtpClient : IServiceOTPClient

@@ -2126,6 +2126,13 @@ builder.Services.AddSingleton<InMemoryUsersStore>();
 // InMemoryUsersStore unconditionally. UpstreamBackedUsersStore has no DI registration.
 builder.Services.AddSingleton<IUsersStore>(sp => sp.GetRequiredService<InMemoryUsersStore>());
 
+// D10: the pre-mint suspension gate reads BAN-SERVICE, the store the product's own admin suspend
+// writes (AdminUsersController -> OwnerComposedAdminUsers -> IBanServiceClient.ApplyTerminalBanAsync).
+// It deliberately does NOT read IUsersStore above: that is process RAM nothing outside this process
+// can write, and reading it is why a suspended account logged in on Phase V run 2.
+builder.Services.AddScoped<JeebGateway.Users.Moderation.IUserSuspensionSource,
+    JeebGateway.Users.Moderation.BanServiceUserSuspensionSource>();
+
 // JEBV4-314 — gateway-local, DEV-ONLY bridge from POST /dev/seed/user (role=admin)
 // to the POST /v1/auth/login role mint. Always registered but only ever WRITTEN by the
 // [DevOnly] SeedUser action (404 unless Features:DevEndpoints:Enabled), so it is empty
