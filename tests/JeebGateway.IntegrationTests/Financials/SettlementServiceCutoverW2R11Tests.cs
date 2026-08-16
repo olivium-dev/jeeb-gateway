@@ -496,6 +496,10 @@ public class SettlementServiceCutoverW2R11Tests
             => Task.FromResult<IReadOnlyList<Settlement>>(Rows.Values
                 .Where(r => query.HolderId is null || r.JeeberId == query.HolderId).ToArray());
 
+        public Task<Settlement?> StampExternalRefAsync(
+            string settlementId, string externalRef, CancellationToken ct)
+            => Task.FromResult(Rows.Values.FirstOrDefault(r => r.Id == settlementId));
+
         public Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, CancellationToken ct)
             => Task.FromResult(Rows.Values.FirstOrDefault(r => r.Id == settlementId));
 
@@ -548,6 +552,10 @@ public class SettlementServiceCutoverW2R11Tests
 
         public Task<IReadOnlyList<Settlement>> ListAsync(SettlementListQuery query, CancellationToken ct)
             => throw Down(nameof(ListAsync));
+
+        public Task<Settlement?> StampExternalRefAsync(
+            string settlementId, string externalRef, CancellationToken ct)
+            => throw Down(nameof(StampExternalRefAsync));
 
         public Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, CancellationToken ct)
             => throw Down(nameof(MarkReceiptGeneratedAsync));

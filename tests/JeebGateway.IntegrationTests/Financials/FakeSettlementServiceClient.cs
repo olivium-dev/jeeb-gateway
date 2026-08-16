@@ -74,6 +74,19 @@ public sealed class FakeSettlementServiceClient : ISettlementServiceClient
             .ToArray());
     }
 
+    /// <summary>Mirrors upstream first-STAMP-wins: a second stamp is a no-op that returns the original.</summary>
+    public Task<Settlement?> StampExternalRefAsync(
+        string settlementId, string externalRef, CancellationToken ct)
+    {
+        Throw(nameof(StampExternalRefAsync));
+        var row = Rows.Values.FirstOrDefault(r => r.Id == settlementId);
+        if (row is not null && string.IsNullOrWhiteSpace(row.WalletTxId))
+        {
+            row.WalletTxId = externalRef;
+        }
+        return Task.FromResult(row);
+    }
+
     public Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, CancellationToken ct)
     {
         Throw(nameof(MarkReceiptGeneratedAsync));

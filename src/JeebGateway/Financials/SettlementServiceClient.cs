@@ -72,6 +72,10 @@ public interface ISettlementServiceClient
     /// not just the first page; a truncation at the page bound is logged, never silent.</summary>
     Task<IReadOnlyList<Settlement>> ListAsync(SettlementListQuery query, CancellationToken ct);
 
+    /// <summary>POST /settlements/{id}/external-ref — first-STAMP-wins; a second stamp is a silent
+    /// no-op upstream and returns the ORIGINAL ref, so this can never overwrite a recorded debit.</summary>
+    Task<Settlement?> StampExternalRefAsync(string settlementId, string externalRef, CancellationToken ct);
+
     /// <summary>POST /settlements/{id}/receipt — first-write-wins stamp; a replay returns the
     /// original instant.</summary>
     Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, CancellationToken ct);
@@ -229,6 +233,23 @@ public sealed class SettlementServiceClient : ISettlementServiceClient
         return rows.OrderBy(s => s.SettledAt).ToArray();
     }
 
+    public async Task<Settlement?> StampExternalRefAsync(
+        string settlementId, string externalRef, CancellationToken ct)
+    {
+        if (!Guid.TryParse(settlementId, out var id)) return null;
+
+        using var response = await SendAsync(
+            () => new HttpRequestMessage(HttpMethod.Post, $"settlements/{id:D}/external-ref")
+            {
+                Content = JsonContent.Create(new ExternalRefWire { ExternalRef = externalRef }, options: Json),
+            },
+            nameof(StampExternalRefAsync), ct);
+
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        await EnsureSuccessAsync(response, nameof(StampExternalRefAsync), ct);
+        return await ReadAsync(response, nameof(StampExternalRefAsync), ct);
+    }
+
     public async Task<Settlement?> MarkReceiptGeneratedAsync(string settlementId, CancellationToken ct)
     {
         if (!Guid.TryParse(settlementId, out var id)) return null;
@@ -321,6 +342,8 @@ public sealed class SettlementServiceClient : ISettlementServiceClient
             BatchId = w.BatchId,
             BatchedAt = w.BatchedAt,
             PaidAt = w.PaidAt,
+            // O1: the upstream first-stamp-wins ref IS the durable "fee already collected" marker.
+            WalletTxId = string.IsNullOrWhiteSpace(w.ExternalRef) ? null : w.ExternalRef,
             CodState = w.State switch
             {
                 UpstreamState.Batched => CodSettlementState.Batched,
@@ -415,6 +438,12 @@ public sealed class SettlementServiceClient : ISettlementServiceClient
         public DateTimeOffset? PaidAt { get; init; }
         public DateTimeOffset? ReceiptGeneratedAt { get; init; }
         public DateTimeOffset CreatedAt { get; init; }
+        public string? ExternalRef { get; init; }
+    }
+
+    internal sealed class ExternalRefWire
+    {
+        public required string ExternalRef { get; init; }
     }
 
     internal sealed class SettlementPageWire
