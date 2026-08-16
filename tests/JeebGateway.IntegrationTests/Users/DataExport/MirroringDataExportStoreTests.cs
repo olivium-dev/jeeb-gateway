@@ -5,7 +5,6 @@ using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Cases;
-using JeebGateway.Infrastructure;
 using JeebGateway.Migration;
 using JeebGateway.Services.Cdn;
 using JeebGateway.Services.Clients;
@@ -20,6 +19,7 @@ namespace JeebGateway.IntegrationTests.Users.DataExport;
 
 // gwdbx W1-06 — MirroringDataExportStore dual-write + the G-20 encrypt-then-upload artifact
 // pipeline. Charter cases: idempotency key, +72h dueAt, ciphertext-only cdn, consume-CAS race.
+// W5-11 deleted StoreDurabilityGuard and PostgresDataExportStore; the guard-roster case went with them.
 public class MirroringDataExportStoreTests
 {
     private const string UserId = "u-export-1";
@@ -282,19 +282,6 @@ public class MirroringDataExportStoreTests
 
         attempts.Count(ok => ok).Should().Be(1, "version CAS admits one winner; the loser gets 409");
         upstream.ConsumeAttempts.Should().Be(2, "both racers really reached the CAS");
-    }
-
-    // ----- guard roster ------------------------------------------------------
-
-    [Fact]
-    public void Decorator_Is_An_Approved_Durable_Implementation_Of_IDataExportStore()
-    {
-        var entry = StoreDurabilityGuard.Critical.Single(c => c.Iface == typeof(IDataExportStore));
-
-        entry.DurableImpls.Should().BeEquivalentTo(new[]
-        {
-            typeof(PostgresDataExportStore), typeof(MirroringDataExportStore)
-        }, "G-08 — the decorator wraps the durable inner store, so both resolutions pass the boot gate");
     }
 
     // ----- helpers -----------------------------------------------------------
