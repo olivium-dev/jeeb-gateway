@@ -123,6 +123,11 @@ step-6 release; `forbidden` rows (incl. `UseUpstream:Payments`, G-05) stay forev
   `/admin/settlements/batches` overlap are recorded in
   [`w6-02-route-compat-window.md`](w6-02-route-compat-window.md). Read that before adding an
   unversioned route — several obvious-looking ones are already taken by a different handler.
+- **Those aliases are PERMANENT, not a window (owner ruling 2026-08-16).** Route migration stops
+  after W6-03; both `/v1/...` and their unversioned twins keep working **indefinitely**; **W6-04
+  (mobile forced-upgrade gate) and W6-05 (delete the versioned routes) are DEAD**; and **no `/v1`
+  deletion is scheduled by this program or any successor**. This is the first bullet's strangler
+  rule again — now CLOSED by decision rather than merely unscheduled.
 
 ## 5. Jobs / workers
 
@@ -246,6 +251,9 @@ is disabled at the GitHub level, so the harness only runs when someone runs it.
 
 Edge Redis OTP rate-limiter (`RedisOtpRequestRateLimiter`); door-OTP Redis TTL keys
 (`otp:attempts|lockout|handovercode`) behind the Production fail-closed Redis boot guard (A3);
-`Redis:ConnectionString` (R4-sanctioned); `CourierPositionQueue` (transient back-pressure); bounded
+`Redis:ConnectionString` **and `GatewayRateLimit:RedisConnectionString`** (R4-sanctioned — and
+**CONFIRMED by owner ruling 2026-08-16**: *"No redis is not in the scope, you can keep redis"*, so
+"the gateway owns no database" does **not** include Redis; both keys are present in the live
+gateway environment today); `CourierPositionQueue` (transient back-pressure); bounded
 fan-out drain buffer; `Notifications:NewRequestFanout:Enabled` kill switch; dispute-refund 400/no-op
 (UPG retired, G-05).
