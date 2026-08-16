@@ -50,7 +50,8 @@ DB there); it would be a silent financial-read outage anywhere else.
 finished state.** The process still carries in-process state and background work,
 verified on `main` at the time of writing:
 
-- **19** `AddHostedService` registrations across `src/` against an allowance of
+- **18** `AddHostedService` registrations across `src/` (19 before ADR-0010 retired
+  `ConfigImportWorker`) against an allowance of
   **2** in `scripts/check-stateless-gateway.sh`;
 - **37** `AddSingleton` registrations in `Program.cs` that the same gate counts as
   a local owner/state implementation (24 `InMemory*` store files under `src/`).

@@ -78,7 +78,6 @@ public static class HealthCheckExtensions
         // matching-service readiness probe REMOVED (JEBV4-220 / E25) — the
         // standalone matching-service read path is retired; nothing dials it.
         AddDownstreamProbe(checks, config, "notification-service",    "ServiceNotificationClient:BaseUrl", healthPath: "health");
-        AddDownstreamProbe(checks, config, "bundler-service",         JeebGateway.Cms.BundlerCmsSurfaceStore.BaseUrlConfigurationKey, healthPath: "health/live");
         AddDownstreamProbe(checks, config, "push-notification",       "PushNotificationServiceApi:BaseUrl", healthPath: "health");
         AddDownstreamProbe(checks, config, "delivery-service",        "Services:Delivery:BaseUrl",        healthPath: "health");
         AddDownstreamProbe(checks, config, "geolocation-service",     "Services:Geolocation:BaseUrl",     healthPath: "health");
@@ -87,6 +86,16 @@ public static class HealthCheckExtensions
         // gwdbx W2-R11: settlement-service owns the money rows the gateway used to hold. Unhealthy
         // (not Degraded) — there is no local fallback left, so an unreachable one is not ready.
         AddDownstreamProbe(checks, config, "settlement-service",      "Services:Settlement:BaseUrl",      healthPath: "health/ready");
+
+        // bundler-service is NOT a URL-group probe. A Host-matching reverse proxy answers 200 with an
+        // empty body on every path when no site block matches, so a status code alone cannot fail.
+        if (!string.IsNullOrWhiteSpace(config[JeebGateway.Cms.BundlerCmsSurfaceStore.BaseUrlConfigurationKey]))
+        {
+            checks.AddCheck<JeebGateway.Cms.BundlerServiceHealthCheck>(
+                JeebGateway.Cms.BundlerServiceHealthCheck.Name,
+                failureStatus: HealthStatus.Degraded,
+                tags: new[] { "ready", "downstream" });
+        }
 
         // unified-payment-gateway (Elixir UPG) was decoupled (sha-553711610c2a /
         // main 9f05a991): the old GET /health route was REMOVED (now 404) and the

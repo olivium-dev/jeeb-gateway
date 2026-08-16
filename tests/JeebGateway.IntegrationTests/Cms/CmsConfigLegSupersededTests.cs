@@ -55,18 +55,27 @@ public class CmsConfigLegSupersededTests
             .WithMessage("*CmsConfigMode*", "the failure must name the flag an operator has to fix");
     }
 
-    /// <summary>The freeze-import leg is DELETED: replaying bundler's documents into state-service
-    /// would fork the catalog into two independently writable owners with no reconciler.</summary>
-    [Fact]
-    public void Neither_The_Freeze_Import_Nor_The_Parity_Check_Has_A_Cms_Leg()
+    /// <summary>ADR-0010 retired the whole freeze-import trio, which is strictly stronger than the
+    /// old "no ICmsSurfaceStore parameter" guard: the types themselves are gone.</summary>
+    [Theory]
+    [InlineData("JeebGateway.StateService.Config.StateServiceConfigImporter")]
+    [InlineData("JeebGateway.StateService.Config.ConfigParityChecker")]
+    [InlineData("JeebGateway.StateService.Config.ConfigImportWorker")]
+    public void The_Freeze_Import_Trio_Is_Gone_From_The_Gateway_Assembly(string typeName)
     {
-        typeof(StateServiceConfigImporter).GetConstructors().Single()
-            .GetParameters().Select(p => p.ParameterType)
-            .Should().NotContain(typeof(ICmsSurfaceStore));
+        (typeof(Program).Assembly.GetType(typeName) is null)
+            .Should().BeTrue("ADR-0010 deleted it; its source stores are process memory that local "
+                + "authoring can no longer refill, so it could only replay zero rows");
+    }
 
-        typeof(ConfigParityChecker).GetConstructors().Single()
-            .GetParameters().Select(p => p.ParameterType)
-            .Should().NotContain(typeof(ICmsSurfaceStore));
+    /// <summary>The retirement is the hosted-service ratchet's only mover here: 19 -> 18.</summary>
+    [Fact]
+    public void No_Config_Import_Hosted_Service_Remains()
+    {
+        typeof(Program).Assembly.GetTypes()
+            .Any(t => t.Namespace == "JeebGateway.StateService.Config"
+                      && typeof(IHostedService).IsAssignableFrom(t))
+            .Should().BeFalse("the config namespace keeps its DTOs and loses its worker");
     }
 
     /// <summary>The mandate itself: the CMS surface resolves to the stateless bundler adapter,

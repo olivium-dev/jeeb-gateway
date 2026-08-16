@@ -1,0 +1,121 @@
+# ADR-0010 — Retire the config import/parity trio; the moderation cold-start 503 is deliberate
+
+Status: **ACCEPTED** (gwdbx LOOP round 2, 2026-08-16)
+Supersedes the "owner-gated / not done in this PR" note in ADR-0008 §Consequences.
+
+Three findings from the round-2 assessment are answered here: the parity checker that can never report
+clean, the moderation cold-start window, and the bundler health probe that could not fail.
+
+---
+
+## 1. `ConfigImportWorker` / `StateServiceConfigImporter` / `ConfigParityChecker` are DELETED
+
+### The reported defect
+
+`ConfigParityChecker` compares `ILocalProhibitedItemsStore` against the published upstream surface.
+Reading the LOCAL store is deliberate — its own header says comparing the serving interface would
+"compare upstream with itself and report clean by construction". But post-flip
+(`FeatureFlags:ProhibitedItemsMode=upstream-authority`, live) `DefaultLexiconSeeder` self-skips, so
+local holds 0 items against 15 upstream and every upstream item reports as "not active locally". The
+check is structurally unable to report clean.
+
+### Why retirement beats making it mode-aware
+
+Making the lexicon leg mode-aware (skip or invert it when `RequiresUpstream(ProhibitedItems)`) would
+silence the noise but leave a worker whose remaining job is to compare an empty set against nothing.
+The deeper fact, verified on main:
+
+- `ILocalProhibitedItemsStore` resolves to `InMemoryProhibitedItemsStore` and
+  `ILocalFlaggedRequestStore` to `InMemoryFlaggedRequestStore` (`Program.cs`). Both are **process
+  memory**, wiped on every bounce.
+- From the read rung up, local catalog authoring **fails closed** —
+  `StateServiceProhibitedItemsStore.CreateAsync`/`UpdateAsync` throw
+  `OwnerCapabilityUnavailableException` — and `DefaultLexiconSeeder` returns early.
+
+So the importer's *source* is a store that is empty at boot and cannot be refilled at the live rung.
+The importer can only ever replay **zero rows**, and the checker can only ever compare **zero against
+fifteen**. This is not "work that is finished"; it is work that is no longer expressible. A mode-aware
+checker would be a green no-op — the exact failure shape ADR-0008 §2 refused for `CmsConfigMode`.
+
+### Adversarial dependency check (what breaks)
+
+| Depends on the deleted types | Disposition |
+| --- | --- |
+| `StateServiceConfigImporter.Application` const | Referenced only by `ConfigParityChecker` (deleted with it) and tests. The live read path has its **own** identical `StateServiceProhibitedItemsStore.Application = "jeeb-gateway"`. **Nothing breaks.** |
+| `Program.cs` DI (`ConfigImportRunOptions`, `ConfigParityChecker`, `AddHostedService<ConfigImportWorker>`, `AddTransient<StateServiceConfigImporter>`) | Removed here. |
+| `ConfigImportRun__Enabled=false` in the live drop-in | Becomes an unbound configuration key — .NET ignores unknown keys. **Do not delete `configimport.conf`**: it also carries the load-bearing `BUNDLER_CMS_BEARER_TOKEN_FILE`. |
+| `ConfigImportPrepW307Tests.cs` | Deleted — every case in it exercises the worker/importer/checker. |
+| `StateServiceConfigW303Tests.cs` | The five `Import_*` cases and their fixtures are removed; the read-seam, ladder-default and `StoreDurabilityGuard` cases are untouched. |
+| `CmsConfigLegSupersededTests.cs` reflection guard (no `ICmsSurfaceStore` parameter) | Replaced with the **stronger** assertion that the types do not exist in the assembly at all. |
+| `StateConfigContracts.cs` (same namespace) | Survives — it holds the `IStateConfigClient` DTOs the live read path uses. The namespace is not emptied, so every `using JeebGateway.StateService.Config;` stays valid. |
+| `ILocalFlaggedRequestStore` | Its last consumers were the importer and the checker. Left in place as a **vestigial** marker interface (its registration is inert); it dies with the program section at W5-14. |
+| Rollback ("what if we need to re-import?") | There is nothing to re-import *from*: the source stores are process memory and authoring fails closed. A future re-import would read from upstream, which is a different program. |
+
+### Ratchet
+
+Hosted-service registrations **19 -> 18**. `scripts/check-stateless-gateway.sh` stays red (allowance 2)
+but is one closer.
+
+---
+
+## 2. Moderation cold start: the 503 is the design, and it stays
+
+### The residual gap
+
+PR #460 gave `StateServiceProhibitedItemsStore` a last-known-good cache, so a state-service blip after
+the first successful lexicon read keeps the create-time gate serving. The LKG is **empty from boot**,
+so a blip inside that window still fails `ModerationGate` closed and 503s request creation.
+
+### Decision: accept the 503, document it, and warm the cache from more paths
+
+Rejected — **seed a local floor.** This programme already recorded "the box was moderating against 4
+terms instead of the 15 that were published" as a LIVE REGRESSION (`prohibiteditems-flip.conf`). A
+floor makes the gate *look* healthy while enforcing a strict subset of the published lexicon: prohibited
+items pass, no alarm fires, and the failure is invisible until someone audits. Explicit unavailability
+is strictly safer than silent partial enforcement on a *moderation* gate.
+
+Rejected — **warm at boot.** The only mechanism is a startup `IHostedService`, which the ratchet forbids
+(and which would trade an honest per-request 503 for a boot-time dependency on state-service).
+
+Accepted — the window stays open **on purpose** and is named honestly: the failure surfaces as
+`OwnerCapabilityUnavailableException("jeeb-state-service published moderation lexicon (no cached
+snapshot, local lexicon empty)")`, not as a silent allow. Only request *creation* is affected; the rest
+of the gateway serves normally.
+
+The window is narrowed, not closed, by one change made here: `ReadAllOrThrowAsync` (the admin catalog
+list and `GetAsync`) now populates the LKG on any successful published read. Previously only
+`ListActiveAsync` did, so an admin opening the catalog left the create-time gate cold.
+
+### Operator note
+
+If the gateway is restarted while state-service is unavailable, `POST /requests` answers 503 until the
+first successful lexicon read. That is correct fail-closed behaviour. The remedy is to restore
+state-service, not to seed terms into the gateway.
+
+---
+
+## 3. The bundler probe can now fail
+
+`HealthCheckExtensions` registered bundler-service as a URL-group probe against
+`${BUNDLER_CMS_BASE_URL}health/live`. Verified live 2026-08-16: `http://192.168.2.39:10056/` answers
+`200` with `Content-Length: 0` for **every** path (no Caddy site block matches that Host), while
+`http://127.0.0.1:10056/health/ready` answers `503`. `/health/aggregate` therefore reported
+`"bundler-service":"Healthy"` in 2.38 ms against a dead upstream.
+
+`BundlerServiceHealthCheck` replaces it: same named `HttpClient` as the data calls, bundler's own
+`health/ready`, and a **non-empty body** requirement so a proxy default can no longer read as Healthy.
+It is registered `Degraded` (was `Unhealthy`) — an admin-only authoring plane must be visible in
+`failing[]` without 503-ing `/health/ready` for the whole gateway, the same treatment cdn-service and
+form-builder-service already get.
+
+**Consequence to expect at the next deploy:** once the owner points `BUNDLER_CMS_BASE_URL` at
+`127.0.0.1`, `/health/aggregate` will report `"status":"Degraded"` with `bundler-service` in
+`failing[]`. That is the probe working. bundler's database still points at the decommissioned
+`192.168.2.20`; rehoming it is an owner action outside this programme.
+
+## Guardrails checked
+
+Gateway stays stateless (three types deleted, no store added); **no hosted service added — one
+retired** (19 -> 18); no cross-service DSN read (the probe is HTTP to the service's own health route);
+no breaking change to a reusable service (bundler-service and state-service are untouched — only the
+gateway's opinion of them changed); no live config, systemd unit or workflow touched.
