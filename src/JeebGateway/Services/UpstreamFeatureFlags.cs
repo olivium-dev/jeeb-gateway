@@ -282,8 +282,8 @@ public sealed class UpstreamFeatureFlags
     /// </summary>
     public bool Compliment { get; set; }
 
-    // RoleService REMOVED 2026-08-16 (owner O8). It was false in every environment and
-    // role-service is retired; user-management is the only role authority. Do NOT re-add.
+    // RoleService REMOVED 2026-08-16 (owner O8). It ran TRUE in production 2026-08-09..08-16
+    // until D1; role-service is retired and user-management is the authority. Do NOT re-add.
 
     /// <summary>
     /// gwdbx W1-11 — created here, DEFAULT OFF, and deliberately with NO read site yet
