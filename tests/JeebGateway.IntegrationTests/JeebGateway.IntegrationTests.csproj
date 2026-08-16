@@ -62,7 +62,8 @@
     <Compile Remove="Infrastructure\StoreDurabilityGuardGapStoresTests.cs" />
     <Compile Remove="Infrastructure\PostgresHealthCheckTests.cs" />
     <Compile Remove="DurableReadFailureCounterTests.cs" />
-    <Compile Remove="NewRequestPushNotifierTests.cs" />
+    <!-- NewRequestPushNotifierTests.cs is RE-ARMED: it compiles and passes again, and it is the
+         only suite guarding OA-21's newreq-fanout line. Excluded, the metric had no test. -->
 
     <!-- Retired in-gateway owner state and scheduler coverage. These suites
          exercised implementations that are no longer part of the gateway
