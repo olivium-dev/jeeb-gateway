@@ -17,4 +17,10 @@
     <ProjectReference Include="../../src/JeebGateway/JeebGateway.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- HealthChecks/Hosting abstractions used by the R3-3 guards; explicit so the
+         project does not depend on transitive framework-reference flow. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
 </Project>
