@@ -23,18 +23,19 @@ namespace JeebGateway.Notifications;
 /// <see cref="INewRequestFanoutQueue"/> and returns 201 immediately.
 /// <see cref="NewRequestFanoutProcessor"/> drains the queue on a background loop and
 /// calls <see cref="FanOutAsync"/> from a fresh DI scope, which resolves the recipient
-/// set from the in-process <see cref="IAvailabilityStore"/> (there is no table) and sends ONE per-user
+/// set from <see cref="IPushAudienceSource"/> — an HTTP read of delivery-service, the
+/// service that OWNS presence — and sends ONE per-user
 /// push per recipient over the same <c>Send_notification_to_userAsync</c> rail
 /// <see cref="OfferPushNotifier"/> already uses. Zero topic sends on the default path.</para>
 ///
 /// <para>The ladder (implemented literally in <c>ResolveRecipientsAsync</c>):
 /// <list type="number">
-///   <item><description><c>ListOnlineAsync()</c> → <c>source=online</c>.</description></item>
+///   <item><description><c>ListAvailableAsync()</c> → <c>source=online</c>.</description></item>
 ///   <item><description>Optional geo narrowing around the pickup point when
 ///     <see cref="NewRequestFanoutOptions.RadiusKm"/> is set (ships NULL/off) — rows with
 ///     NO stored coordinates are never dropped, and a filter that empties the set is
 ///     logged and IGNORED rather than allowed to kill the auction → <c>source=online+geo</c>.</description></item>
-///   <item><description>When nobody is online, <c>ListKnownJeebersAsync(now - KnownJeeberWindow)</c>
+///   <item><description>When nobody is online, <c>ListReachableSinceAsync(now - KnownJeeberWindow)</c>
 ///     → <c>source=known</c>. Over-notification must never become under-notification.</description></item>
 ///   <item><description>Drop blank ids, DROP THE INITIATOR (the P1 fix), de-duplicate,
 ///     cap at <see cref="NewRequestFanoutOptions.MaxRecipients"/>.</description></item>
@@ -42,15 +43,20 @@ namespace JeebGateway.Notifications;
 ///     <c>newreq-fanout</c> log line carries the whole decision.</description></item>
 /// </list></para>
 ///
-/// <para>WHY THE AVAILABILITY STORE IS A SAFE AUDIENCE SOURCE:
+/// <para>WHY THE PRESENCE OWNER IS A SAFE AUDIENCE SOURCE:
 /// <c>AvailabilityController</c> is annotated class-level
-/// <c>[RequireCapability(Capabilities.AvailabilityToggle)]</c> and is the only writer into
-/// <see cref="IAvailabilityStore"/> on a user path, so every row in the store was created by
-/// a caller holding the jeeber capability. The store IS a jeeber roster — a customer-only
+/// <c>[RequireCapability(Capabilities.AvailabilityToggle)]</c> and forwards to
+/// delivery-service, so every presence row upstream was created by a caller holding the
+/// jeeber capability. That roster IS a jeeber roster — a customer-only
 /// account can never appear in it, with no per-recipient role lookup needed.</para>
 ///
-/// <para>AUDIENCE DIES ON A BOUNCE (register #9): in-memory, so after a restart online AND known are both empty → recipients=0, no push.
-/// No self-heal — each jeeber's screen reads delivery-service and still shows online, so nobody re-toggles; only an explicit toggle restores rows. Silent: nothing errors.</para>
+/// <para>REGISTER #9 IS CLOSED (OA-21): the audience used to come from the in-process
+/// <c>InMemoryAvailabilityStore</c>, which a restart emptied — after any bounce every request
+/// fanned out to NOBODY, silently, with no self-heal (each jeeber's own screen reads
+/// delivery-service and still showed them online, so nobody re-toggled). It is now read over
+/// HTTP from delivery-service, which owns presence, so there is no gateway state to lose.
+/// A read that FAILS is logged at Error with the <c>audience-unavailable</c> marker and sends
+/// to nobody; it is never allowed to look like an empty audience.</para>
 ///
 /// <para>ROLLBACK: <c>Notifications:NewRequestFanout:Enabled=false</c> restores the legacy
 /// <c>jeeb_jeebers</c> topic blast byte-identically, with no redeploy. See
@@ -111,7 +117,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
     private readonly ServicePushNotificationClient _push;
     private readonly JeebGateway.Tiers.ITierCatalogResolver _tiers;
     private readonly ILogger<NewRequestPushNotifier> _logger;
-    private readonly IAvailabilityStore _availability;
+    private readonly IPushAudienceSource _audience;
     private readonly IUsersStore _users;
     private readonly INewRequestFanoutQueue _queue;
     private readonly NewRequestFanoutOptions _options;
@@ -123,12 +129,12 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         ServicePushNotificationClient push,
         JeebGateway.Tiers.ITierCatalogResolver tiers,
         ILogger<NewRequestPushNotifier> logger,
-        IAvailabilityStore availability,
+        IPushAudienceSource audience,
         IUsersStore users,
         INewRequestFanoutQueue queue,
         IOptions<NewRequestFanoutOptions> options,
         TimeProvider clock)
-        : this(push, tiers, logger, availability, users, queue, options, clock,
+        : this(push, tiers, logger, audience, users, queue, options, clock,
                NullGenericEventDispatcher.Instance, AlwaysOpenFanoutStatusProbe.Instance)
     {
     }
@@ -137,7 +143,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         ServicePushNotificationClient push,
         JeebGateway.Tiers.ITierCatalogResolver tiers,
         ILogger<NewRequestPushNotifier> logger,
-        IAvailabilityStore availability,
+        IPushAudienceSource audience,
         IUsersStore users,
         INewRequestFanoutQueue queue,
         IOptions<NewRequestFanoutOptions> options,
@@ -148,7 +154,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         _push = push;
         _tiers = tiers;
         _logger = logger;
-        _availability = availability;
+        _audience = audience;
         _users = users;
         _queue = queue;
         _options = options.Value;
@@ -255,6 +261,16 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                 tally.DeviceRowsAccepted, tally.DeviceRowsRejected,
                 (int)(_clock.GetUtcNow() - started).TotalMilliseconds);
         }
+        catch (PushAudienceUnavailableException ex)
+        {
+            // FAIL CLOSED AND LOUD. This is the ONE case that must not read like
+            // "nobody was online": the audience could not be read at all.
+            _logger.LogError(ex,
+                "newreq-fanout audience-unavailable requestId={RequestId} rung={Rung} "
+                + "owner=delivery-service — NO PUSH SENT. This is NOT 'nobody is online': "
+                + "the audience read itself failed, so the recipient set is UNKNOWN.",
+                n?.RequestId ?? "(none)", ex.Rung);
+        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
@@ -279,10 +295,11 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         JeebGateway.Tiers.TierCatalogSnapshot catalog,
         CancellationToken ct)
     {
-        // 1. online jeebers first.
+        // 1. available jeebers first, read from delivery-service (the presence owner).
+        // A read failure THROWS out of here — it must never be mistaken for an empty
+        // audience, which is the whole of durability register #9.
         var source = "online";
-        IReadOnlyList<JeeberAvailability> candidates = await _availability.ListOnlineAsync(ct)
-            ?? Array.Empty<JeeberAvailability>();
+        IReadOnlyList<JeeberAvailability> candidates = await _audience.ListAvailableAsync(ct);
 
         // 2. D2 fail-CLOSED geo narrowing. The radius comes from the REQUEST'S OWN TIER
         // (3/10/25 km), matching how delivery-service cuts per delivery; the global
@@ -351,8 +368,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
         if (candidates.Count == 0 && _options.FallbackToKnownJeebers)
         {
             var since = _clock.GetUtcNow() - _options.KnownJeeberWindow;
-            candidates = await _availability.ListKnownJeebersAsync(since, ct)
-                ?? Array.Empty<JeeberAvailability>();
+            candidates = await _audience.ListReachableSinceAsync(since, ct);
             source = "known";
             (candidates, roleFiltered, roleUnknown) = await FilterKnownByActiveRoleAsync(candidates, ct);
 
