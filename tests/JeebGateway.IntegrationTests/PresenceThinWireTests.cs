@@ -41,7 +41,8 @@ public class PresenceThinWireTests
         var bodies = new List<string>();
         var stub = new StubHttpMessageHandler(req =>
         {
-            captured.Add(req);
+            // #451's boot-time RequestExpiryObserver sweeps this route on every host.
+            if (req.RequestUri!.AbsolutePath != "/deliveries/expired") captured.Add(req);
             if (req.Content is not null) bodies.Add(req.Content.ReadAsStringAsync().GetAwaiter().GetResult());
             return JsonResponse(
                 """
@@ -128,7 +129,8 @@ public class PresenceThinWireTests
         var captured = new List<HttpRequestMessage>();
         var stub = new StubHttpMessageHandler(req =>
         {
-            captured.Add(req);
+            // #451's boot-time RequestExpiryObserver sweeps this route on every host.
+            if (req.RequestUri!.AbsolutePath != "/deliveries/expired") captured.Add(req);
             return JsonResponse(
                 """
                 {"jeeber_id":"jeeber-g","online":true,"vehicle_type":"car",
@@ -184,7 +186,8 @@ public class PresenceThinWireTests
         var bodies = new List<string>();
         var stub = new StubHttpMessageHandler(req =>
         {
-            captured.Add(req);
+            // #451's boot-time RequestExpiryObserver sweeps this route on every host.
+            if (req.RequestUri!.AbsolutePath != "/deliveries/expired") captured.Add(req);
             if (req.Content is not null) bodies.Add(req.Content.ReadAsStringAsync().GetAwaiter().GetResult());
             return JsonResponse(
                 """
@@ -277,7 +280,8 @@ public class PresenceThinWireTests
         var captured = new List<HttpRequestMessage>();
         var stub = new StubHttpMessageHandler(req =>
         {
-            captured.Add(req);
+            // #451's boot-time RequestExpiryObserver sweeps this route on every host.
+            if (req.RequestUri!.AbsolutePath != "/deliveries/expired") captured.Add(req);
             return JsonResponse("{}");
         });
 

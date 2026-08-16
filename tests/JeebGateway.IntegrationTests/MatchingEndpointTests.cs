@@ -42,7 +42,8 @@ public class MatchingEndpointTests
         var captured = new CapturedRequests();
         var stub = new StubHttpMessageHandler(req =>
         {
-            captured.Add(req);
+            // #451's boot-time RequestExpiryObserver sweeps this route on every host.
+            if (req.RequestUri!.AbsolutePath != "/deliveries/expired") captured.Add(req);
             return JsonResponse(
                 """
                 {
@@ -145,7 +146,8 @@ public class MatchingEndpointTests
         var captureBodies = new List<string>();
         var stub = new StubHttpMessageHandler(req =>
         {
-            captured.Add(req);
+            // #451's boot-time RequestExpiryObserver sweeps this route on every host.
+            if (req.RequestUri!.AbsolutePath != "/deliveries/expired") captured.Add(req);
             captureBodies.Add(req.Content!.ReadAsStringAsync().GetAwaiter().GetResult());
             return JsonResponse(
                 """

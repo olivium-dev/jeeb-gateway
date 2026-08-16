@@ -94,34 +94,11 @@ public class GoOfflineWithdrawBestEffortTests
             => throw new HttpRequestException("offer-service unreachable");
     }
 
-    [Fact]
-    public void PostgresStore_Routes_Its_Withdraw_Through_The_Same_Best_Effort_Guard()
-    {
-        // The live path is Postgres and this project has no Testcontainers, so the
-        // behavioural tests above can only reach the in-memory twin. This pins the
-        // Postgres twin structurally: the bug was a raw await on the withdraw.
-        var path = Path.Combine(RepoRoot(), "src", "JeebGateway", "Availability",
-            "PostgresAvailabilityStore.cs");
-        var src = File.ReadAllText(path);
+    // DELETED — PostgresStore_Routes_Its_Withdraw_Through_The_Same_Best_Effort_Guard.
+    // It read src/JeebGateway/Availability/PostgresAvailabilityStore.cs to pin structurally
+    // that the Postgres twin routed its withdraw through WithdrawBestEffortAsync rather than a
+    // raw await. W5-11 (8cba63b) deleted that file and the whole GatewayPostgres seam, so the
+    // subject no longer exists in any form. The behavioural cases above still cover the guard
+    // on the surviving in-memory store, which is now the only availability store there is.
 
-        src.Should().Contain("WithdrawBestEffortAsync",
-            "PostgresAvailabilityStore.GoOfflineAsync must not await the withdraw directly");
-        Regex.IsMatch(src, @"await\s+_offers\.WithdrawForJeeberAsync").Should().BeTrue(
-            "the guard helper is expected to be the one place that calls it");
-        Regex.Matches(src, @"await\s+_offers\.WithdrawForJeeberAsync").Count.Should().Be(1,
-            "a second raw call site would reintroduce the unwind that skipped mirror and push");
-        src.Should().Contain("catch (NotSupportedException",
-            "only the permanent no-route case may be absorbed");
-    }
-
-    private static string RepoRoot()
-    {
-        // Same anchor style as W18_SettlementLedgerDurableTests.RepoRoot: a tracked
-        // directory, not .git, so the test also works from an exported tree.
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "JeebGateway")))
-            dir = dir.Parent;
-        dir.Should().NotBeNull("the test must be able to locate the repo root from the test binary");
-        return dir!.FullName;
-    }
 }

@@ -147,8 +147,10 @@ public class SettlementServiceCutoverW2R11Tests
     [Fact]
     public void C3_The_A9_Roster_Is_20_And_Names_Settlement_Service()
     {
-        GatewayHealthRoster.ExpectedReadyCount.Should().Be(20,
-            "W2-R11 pre-announces the 19 -> 20 roster change (A9)");
+        // W2-R11 pre-announced 19 -> 20 (A9); the later W5 retirements took the roster to 18.
+        // C4 is the positive control that the declared list still matches what the code registers.
+        GatewayHealthRoster.ExpectedReadyCount.Should().Be(18,
+            "A9 added settlement-service, then W5 retired two probes");
         GatewayHealthRoster.Ready.Should().HaveCount(GatewayHealthRoster.ExpectedReadyCount);
         GatewayHealthRoster.Ready.Should().Contain("settlement-service");
     }

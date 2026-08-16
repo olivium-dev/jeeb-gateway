@@ -87,8 +87,14 @@ public class StateServiceAccountDeletionStoreTests
         await store.RequestAsync(UserId, hasActiveDelivery: false, default);
 
         var payload = upstream.Creates[0].Body.Payload!.Value;
+        // a33fb6c made upstream the record of truth, so Map() reads the three lifecycle
+        // timestamps back out of the payload; without them the purge SLA is lost. They are
+        // timestamps, not personal data. Still an EXACT set: a new field fails this test.
         payload.EnumerateObject().Select(p => p.Name)
-            .Should().BeEquivalentTo(new[] { "status", "anonymizedUserHash" });
+            .Should().BeEquivalentTo(new[]
+            {
+                "status", "requestedAt", "scheduledPurgeAt", "completedAt", "anonymizedUserHash",
+            });
         payload.GetRawText().Should().NotContain(UserId, "only the pseudonym travels in the payload");
     }
 
