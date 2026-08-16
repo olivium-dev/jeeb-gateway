@@ -15,9 +15,8 @@ namespace JeebGateway.Requests.OtpHandover;
 /// OFFER-ACCEPT response (<c>POST /v1/offers/{offerId}/accept</c>), so the gateway
 /// mints the code at accept, returns it ONCE — owner-scoped — as
 /// <c>handoverCode</c>, and later matches it at handover so the code the customer
-/// saw actually verifies (verify-precedence: additive to the existing SMS /
-/// one-time-password flow, NEVER replacing it — a miss falls through to the SMS
-/// code which keeps working unchanged).
+/// saw actually verifies. D15: this store is now the SOLE door-code authority —
+/// a miss is a wrong code, never a fall-through to the shared login OTP service.
 ///
 /// The code lives in the cross-replica-safe <see cref="IDistributedCache"/> (Redis
 /// in prod, <c>AddDistributedMemoryCache</c> in MVP/tests) keyed by
@@ -54,9 +53,8 @@ public interface IHandoverCodeStore
     /// <summary>
     /// Verify-precedence probe: true when a handover code is stored for the delivery
     /// AND it matches <paramref name="submittedCode"/> (constant-time compare, no
-    /// timing side-channel). False on no-stored-code OR mismatch — the caller then
-    /// falls through to the existing one-time-password validation so the SMS-minted
-    /// code keeps working unchanged. The submitted code is never logged.
+    /// timing side-channel). D15: false on no-stored-code OR mismatch is FINAL — the
+    /// caller rejects the code (attempt++/401). The submitted code is never logged.
     /// </summary>
     Task<bool> TryMatchAsync(string deliveryId, string submittedCode, CancellationToken ct);
 
@@ -142,17 +140,10 @@ public sealed class DistributedCacheHandoverCodeStore : IHandoverCodeStore
         }
         catch (Exception ex) when (IsCacheInfrastructureFault(ex))
         {
-            // JEBV4-38 (PP-3) — degrade-don't-fail, mirroring
-            // RedisOtpRequestRateLimiter's fail-open precedent. A Redis blip on
-            // this read must never 500 the money-adjacent handover-verify path
-            // (it fires COD settlement). Treat the fault as a MISS — the caller
-            // (DeliveriesController.VerifyHandoverOtp) falls through to the
-            // existing SMS one-time-password validation on any miss, so this is
-            // NOT a bypass: a wrong code is still independently rejected by that
-            // SMS check. Only the in-app-minted-code short-circuit is
-            // unavailable while Redis is down.
+            // A Redis blip must not 500 this money-adjacent path, so the fault is a
+            // MISS. D15: a miss now REJECTS the code — fail-closed, never a bypass.
             _log?.LogWarning(ex,
-                "handover_code.cache_fault deliveryId={DeliveryId} op=try_match; failing open to SMS verify",
+                "handover_code.cache_fault deliveryId={DeliveryId} op=try_match; rejecting the code (fail-closed)",
                 deliveryId);
             return false;
         }

@@ -496,9 +496,13 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613555666");
         var http = AuthClient(factory, seed.JeeberId);
 
+        // D15: the door code is the gateway-minted per-delivery code, never a code
+        // the shared login one-time-password service happens to accept.
+        var doorCode = await IssueDoorCodeAsync(factory, seed.Id);
+
         var resp = await http.PostAsJsonAsync(
             $"/deliveries/{seed.Id}/otp/verify",
-            new { code = "1234" });
+            new { code = doorCode });
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<OtpVerificationResponseDto>();
@@ -519,7 +523,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
             r.Message.Contains("handover.verified") && r.Message.Contains(seed.Id));
 
         // AC5 / B5: the submitted code must NEVER appear in any log line
-        logCapture.Records.Should().NotContain(r => r.Message.Contains("1234"));
+        logCapture.Records.Should().NotContain(r => r.Message.Contains(doorCode));
     }
 
     [Fact]
@@ -749,7 +753,11 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var seed = await SeedAsync(factory, RequestStatus.AtDoor, recipientPhone: "+9613555666");
         var http = AuthClient(factory, seed.JeeberId);
 
-        var resp = await http.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = "1234" });
+        // D15: the door code is the gateway-minted per-delivery code, never a code
+        // the shared login one-time-password service happens to accept.
+        var doorCode = await IssueDoorCodeAsync(factory, seed.Id);
+
+        var resp = await http.PostAsJsonAsync($"/deliveries/{seed.Id}/otp/verify", new { code = doorCode });
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<OtpVerificationResponseDto>();
@@ -773,7 +781,7 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
             r.Message.Contains("handover.verified") && r.Message.Contains(seed.Id));
 
         // AC5: the code never appears in any log line.
-        logCapture.Records.Should().NotContain(r => r.Message.Contains("1234"));
+        logCapture.Records.Should().NotContain(r => r.Message.Contains(doorCode));
     }
 
     [Fact]
@@ -959,6 +967,12 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         string? initialStatus = null,
         bool bindJeeber = true)
         => SeedAsync(_factory, initialStatus, bindJeeber, recipientPhone: null);
+
+    /// <summary>D15: mints the gateway-owned per-delivery door code — the ONLY code
+    /// the at-door verify accepts.</summary>
+    private static Task<string> IssueDoorCodeAsync(WebApplicationFactory<Program> factory, string deliveryId)
+        => factory.Services.GetRequiredService<IHandoverCodeStore>()
+            .IssueAsync(deliveryId, CancellationToken.None);
 
     private static async Task<Seed> SeedAsync(
         WebApplicationFactory<Program> factory,
