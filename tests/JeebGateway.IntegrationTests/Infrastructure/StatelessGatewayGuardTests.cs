@@ -31,9 +31,11 @@ public sealed class StatelessGatewayGuardTests
         "JeebGateway.Requests.RequestExpiryObserver",
         "JeebGateway.Requests.ScheduledDeliveryActivator",
         "JeebGateway.ProhibitedItems.DefaultLexiconSeeder",
-        "JeebGateway.Users.AccountDeletionPurgeWorker",
         "JeebGateway.Users.DataExport.DataExportProcessor",
         "JeebGateway.Availability.AutoOfflineSweeper",
+        // #473 moved the erasure purge clock onto state-service work items,
+        // retiring the account-deletion purge worker for the generic sweep worker.
+        "JeebGateway.Jobs.DurableWorkSweepWorker",
     };
 
     private static readonly Assembly Gateway = typeof(Program).Assembly;

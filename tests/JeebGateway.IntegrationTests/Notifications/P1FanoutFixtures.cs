@@ -123,8 +123,18 @@ internal sealed class RecordingPushClient : ServicePushNotificationClient
 /// Settable <see cref="IAvailabilityStore"/> backing the two reads the fan-out performs.
 /// The write methods throw — the fan-out must never mutate availability.
 /// </summary>
-internal sealed class FakeAvailabilityStore : IAvailabilityStore
+internal sealed class FakeAvailabilityStore : IAvailabilityStore, IPushAudienceSource
 {
+    // OA-21 (51a2677) moved the fan-out audience onto IPushAudienceSource. The two rungs read
+    // the same two lists this fake already serves, so the doubles stay one object. Failure is
+    // NOT emptiness here either: these delegate, they never substitute an empty list.
+    public Task<IReadOnlyList<JeeberAvailability>> ListAvailableAsync(CancellationToken ct)
+        => ListOnlineAsync(ct);
+
+    public Task<IReadOnlyList<JeeberAvailability>> ListReachableSinceAsync(
+        DateTimeOffset since, CancellationToken ct)
+        => ListKnownJeebersAsync(since, ct);
+
     public IReadOnlyList<JeeberAvailability> Online { get; set; } = Array.Empty<JeeberAvailability>();
 
     public IReadOnlyList<JeeberAvailability> Known { get; set; } = Array.Empty<JeeberAvailability>();
