@@ -37,7 +37,15 @@ public sealed class DataExportTokenProtectorTests
             "data-export-hmac-key-0123456789abcdef0123456789abcdef");
         var protector = Protector(secret.Path);
         var token = protector.Create(Guid.NewGuid()).Token;
-        var tampered = token[..^1] + (token[^1] == 'A' ? "B" : "A");
+
+        // A 32-byte signature is 43 base64url chars, so the LAST char's low 2 bits are padding the
+        // decoder discards — flipping it decoded to the same bytes 1 run in 16. Tamper a MIDDLE char.
+        var parts = token.Split('.');
+        var signature = parts[2];
+        var at = signature.Length / 2;
+        var tampered = string.Concat(
+            parts[0], ".", parts[1], ".",
+            signature[..at], signature[at] == 'A' ? 'B' : 'A', signature[(at + 1)..]);
 
         protector.TryValidate(tampered, out _).Should().BeFalse();
         protector.TryValidate("v2.not-a-guid.signature", out _).Should().BeFalse();
