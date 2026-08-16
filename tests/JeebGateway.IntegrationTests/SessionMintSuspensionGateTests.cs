@@ -20,56 +20,62 @@ using GetHolderWallets = JeebGateway.service.ServiceWallet.GetHolderWallets;
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// TRACK-1 REVIEW. <see cref="AuthOtpSuspendedLoginTests"/> proves the OTP gate against the
-/// IN-MEMORY store; PRODUCTION composes <see cref="UpstreamBackedUsersStore"/> (Program.cs,
-/// whenever <c>GatewayPostgres:ConnectionString</c> is set — every live environment). That store
-/// is engineered NEVER to throw: a durable-projection fault is swallowed and the read degrades to
-/// a cold path that CANNOT see suspension (the user-management profile contract carries no
-/// suspension field at all). So the shipped gate's fail-CLOSED 503 was unreachable in production
-/// and a durable-store blip re-opened the measured live defect.
+/// EVERY session-mint path carries the pre-mint suspension gate. <see cref="AuthOtpSuspendedLoginTests"/>
+/// pins the OTP leg; this class pins all four doors that issue a gateway session — OTP verify,
+/// role/switch, role/unregister and the email/password facade — because gating one leaves the others
+/// open to the same account.
 ///
-/// <para>These tests compose the REAL production store and cover EVERY session-mint path:
-/// <list type="bullet">
-///   <item>P1 — durable read FAULTS → OTP verify fails CLOSED (503), nothing minted.</item>
-///   <item>P2 — CONTROL: durable read healthy → the suspension is enforced (403) from the
-///     durable row alone, with the in-process store cold (post-bounce).</item>
-///   <item>P3 — CONTROL: an unknown user during a HEALTHY durable read still signs in — the
-///     gate refuses on INDETERMINATE status, not on absence, so first-time login still works.</item>
-///   <item>P4 — role/switch re-mints a full session, so it carries the same gate.</item>
-///   <item>P5 — the email/password facade mints the same session, so it carries the same gate.</item>
-/// </list></para>
+/// <para><b>D10-R (2026-08-16) — this fixture used to compose a store production does not build.</b>
+/// It stood up <c>UpstreamBackedUsersStore</c> over a fake <c>IUserProjectionStore</c> and called that
+/// "EXACTLY the production wiring". It is not: <c>UpstreamBackedUsersStore</c> has no DI registration
+/// anywhere in <c>Program.cs</c>, <c>IUserProjectionStore</c> has no implementation in the product at
+/// all, and <c>Program.cs</c> binds <c>IUsersStore</c> to <c>InMemoryUsersStore</c> unconditionally.
+/// So these tests seeded suspension into a composition the gateway never assembles — the same
+/// green-by-construction trap D10 found in the OTP suite, one layer out.</para>
+///
+/// <para>The suspension authority is ban-service: <c>PATCH /admin/users/{id}/suspend</c> ->
+/// <c>OwnerComposedAdminUsers.SuspendAsync</c> -> <c>IBanServiceClient.ApplyTerminalBanAsync</c>, and
+/// <c>BanServiceUserSuspensionSource</c> reads it back. The fixture now suspends through that same
+/// call against a stateful double, so write and read are joined by the product's own wiring.</para>
+///
+/// <para>P6 and P7 are what stop P1–P5 being vacuous: P7 shows every one of these routes MINTS when
+/// nothing is suspended (so the 403s are not unconditional), and P6 shows a suspension written only
+/// to the gateway's own users projection changes nothing (so the gate cannot have drifted back onto
+/// a store no administrator can write).</para>
 /// </summary>
 public sealed class SessionMintSuspensionGateTests
 {
     private const string AppId = "jeeb-test-app";
     private const string Reason = "Policy violation — case 4471";
 
-    // A UM-canonical id: the durable projection is Guid-keyed, so the production
-    // read path is only exercised with a well-formed id.
+    // A UM-canonical id: ban-service rejects a non-UUID with 400, and the unregister
+    // wallet guard only engages for a GUID.
     private const string UserId = "11111111-2222-3333-4444-555555555555";
 
+    /// The four routes that issue a gateway session, as the caller drives them.
+    public static TheoryData<string> MintPaths => new() { "otp/verify", "role/switch", "role/unregister", "email/login" };
+
     // -----------------------------------------------------------------
-    // P1 — the durable moderation read FAULTS → FAIL CLOSED.
+    // P1 — the suspension read FAULTS → FAIL CLOSED.
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task P1_OtpVerify_DurableModerationReadFaults_FailsClosed_AndMintsNothing()
+    public async Task P1_OtpVerify_SuspensionSourceFaults_FailsClosed_AndMintsNothing()
     {
-        var projection = SuspendedProjection();
-        projection.FaultReads = true;   // a GatewayPostgres blip: pool exhaustion / timeout / failover
-        using var factory = MakeFactory(projection);
+        var ban = new FakeBanService { ThrowOnStatus = true };
+        using var factory = MakeFactory(ban);
         var http = factory.CreateClient();
 
         var resp = await http.PostAsync("/v1/auth/otp/verify",
-            Json($$"""{ "phone": "+9613000201", "code": "1234" }"""));
+            Json("""{ "phone": "+9613000201", "code": "1234" }"""));
 
         var raw = await resp.Content.ReadAsStringAsync();
 
         resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable,
-            "the production store SWALLOWS a durable-projection fault and degrades to a cold read "
-            + "that cannot see suspension — so the gate must not treat that read as authoritative");
-        raw.ToLowerInvariant().Should().NotContain("accesstoken",
-            "a session minted while account status is unknowable is the measured live defect again");
+            "BanServiceUserSuspensionSource deliberately does not catch — an unreachable ban-service "
+            + "must reach the gate as a fault, because minting while account status is unknowable is "
+            + "the measured live defect again");
+        raw.ToLowerInvariant().Should().NotContain("accesstoken");
         raw.ToLowerInvariant().Should().NotContain("refreshtoken");
 
         using var doc = JsonDocument.Parse(raw);
@@ -78,41 +84,43 @@ public sealed class SessionMintSuspensionGateTests
     }
 
     // -----------------------------------------------------------------
-    // P2 — CONTROL: healthy durable read, in-process store cold → 403.
+    // P2 — suspended in ban-service, in-process store cold → 403.
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task P2_OtpVerify_SuspendedInDurableProjection_IsRefused_EvenWithColdInMemoryStore()
+    public async Task P2_OtpVerify_SuspendedInBanService_IsRefused_EvenWithColdInMemoryStore()
     {
-        using var factory = MakeFactory(SuspendedProjection());
+        var ban = new FakeBanService();
+        using var factory = MakeFactory(ban);
         var http = factory.CreateClient();
+        await SuspendThroughAdminPathCallAsync(ban);
 
         var resp = await http.PostAsync("/v1/auth/otp/verify",
-            Json($$"""{ "phone": "+9613000202", "code": "1234" }"""));
+            Json("""{ "phone": "+9613000202", "code": "1234" }"""));
 
         resp.StatusCode.Should().Be(HttpStatusCode.Forbidden,
-            "after a bounce the in-process store is empty; the durable row is the only witness");
+            "after a bounce the gateway's in-process store is empty; ban-service is the only witness");
 
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         doc.RootElement.GetProperty("detail").GetString().Should().Be(Reason);
     }
 
     // -----------------------------------------------------------------
-    // P3 — CONTROL: absence is NOT indeterminacy; a new user still signs in.
+    // P3 — absence is NOT indeterminacy; a new user still signs in.
     // -----------------------------------------------------------------
 
     [Fact]
-    public async Task P3_OtpVerify_UnknownUser_HealthyDurableRead_Still_Mints()
+    public async Task P3_OtpVerify_UnknownUser_HealthySuspensionRead_Still_Mints()
     {
-        using var factory = MakeFactory(new FakeUserProjectionStore());
+        using var factory = MakeFactory(new FakeBanService());
         var http = factory.CreateClient();
 
         var resp = await http.PostAsync("/v1/auth/otp/verify",
-            Json($$"""{ "phone": "+9613000203", "code": "1234" }"""));
+            Json("""{ "phone": "+9613000203", "code": "1234" }"""));
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK,
             "a first-time login must not be refused — the gate closes on an UNREADABLE status, "
-            + "never on a genuinely absent row");
+            + "never on a genuinely absent ban row (live ban-service answers 200 + [] here)");
 
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         doc.RootElement.GetProperty("accessToken").GetString()!.Split('.').Should().HaveCount(3);
@@ -125,15 +133,11 @@ public sealed class SessionMintSuspensionGateTests
     [Fact]
     public async Task P4_RoleSwitch_SuspendedAccount_Is_Refused_And_ReMints_Nothing()
     {
-        var um = new StubDualRole
-        {
-            RoleSwitch = new RoleSwitchReissueResult(UserId, "um-access", "um-refresh", Roles.Jeeber),
-        };
-        using var factory = MakeFactory(SuspendedProjection(), um);
-        var http = factory.CreateClient();
-        http.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue(
-                "Bearer", MintGatewayBearer(factory, UserId, Roles.Client, Roles.Jeeber));
+        var ban = new FakeBanService();
+        var um = new StubDualRole();
+        using var factory = MakeFactory(ban, um);
+        var http = Authorized(factory);
+        await SuspendThroughAdminPathCallAsync(ban);
 
         var resp = await http.PostAsync("/v1/users/me/role/switch", Json("""{ "role": "jeeber" }"""));
 
@@ -143,8 +147,10 @@ public sealed class SessionMintSuspensionGateTests
             "admin suspend revokes only REFRESH tokens; the live stateless access token stays valid "
             + "for its remaining TTL, and this route mints a FRESH family that is not in the revoked "
             + "set — so suspension is evaded indefinitely unless the re-mint is gated");
-        raw.Should().NotContain("\"accessToken\":\"ey",
-            "no fresh signed session may be re-minted for a suspended account");
+        ProblemType(raw).Should().Be("account_suspended",
+            "the refusal must be the moderation gate's, not role_not_available — that route emits a "
+            + "403 of its own and would otherwise satisfy this assertion for the wrong reason");
+        raw.Should().NotContain("\"accessToken\":\"ey");
         um.RoleSwitchCalls.Should().Be(0,
             "the refusal must precede the upstream role mutation, not follow it");
     }
@@ -156,20 +162,23 @@ public sealed class SessionMintSuspensionGateTests
     [Fact]
     public async Task P4b_RoleUnregister_SuspendedAccount_Is_Refused_And_ReMints_Nothing()
     {
-        // The wallet guard must PASS (no provisioned wallet) so the path actually reaches
-        // the re-mint — otherwise the test would pass on an unrelated 503.
-        using var factory = MakeFactory(SuspendedProjection(), wallet: new StubWalletClient());
-        var http = factory.CreateClient();
-        http.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue(
-                "Bearer", MintGatewayBearer(factory, UserId, Roles.Client, Roles.Jeeber));
+        var ban = new FakeBanService();
+        var um = new StubDualRole();
+        using var factory = MakeFactory(ban, um);
+        var http = Authorized(factory);
+        await SuspendThroughAdminPathCallAsync(ban);
 
         var resp = await http.PostAsync("/v1/users/me/role/unregister", Json("{}"));
+
+        var raw = await resp.Content.ReadAsStringAsync();
 
         resp.StatusCode.Should().Be(HttpStatusCode.Forbidden,
             "role/unregister re-mints the SAME access+refresh pair as role/switch, so gating only "
             + "the switch leaves an equivalent rotation route open to a suspended account");
-        (await resp.Content.ReadAsStringAsync()).Should().NotContain("\"accessToken\":\"ey");
+        ProblemType(raw).Should().Be("account_suspended");
+        raw.Should().NotContain("\"accessToken\":\"ey");
+        um.RemoveRoleCalls.Should().Be(0,
+            "the refusal must precede the upstream role revoke, not follow it");
     }
 
     // -----------------------------------------------------------------
@@ -179,8 +188,10 @@ public sealed class SessionMintSuspensionGateTests
     [Fact]
     public async Task P5_EmailLogin_SuspendedAccount_Is_Refused_AndMintsNothing()
     {
-        using var factory = MakeFactory(SuspendedProjection(), umClient: new StubUmClient(UserId));
+        var ban = new FakeBanService();
+        using var factory = MakeFactory(ban);
         var http = factory.CreateClient();
+        await SuspendThroughAdminPathCallAsync(ban);
 
         var resp = await http.PostAsync("/v1/auth/login",
             Json("""{ "email": "banned@example.com", "password": "correct-horse" }"""));
@@ -190,39 +201,111 @@ public sealed class SessionMintSuspensionGateTests
         resp.StatusCode.Should().Be(HttpStatusCode.Forbidden,
             "the email funnel mints the IDENTICAL gateway session as OTP verify — gating only the "
             + "OTP leg leaves a second, anonymous door into the same account");
+        ProblemType(raw).Should().Be("account_suspended");
         raw.ToLowerInvariant().Should().NotContain("accesstoken");
         raw.ToLowerInvariant().Should().NotContain("refreshtoken");
     }
 
     // -----------------------------------------------------------------
-    // fixtures — the PRODUCTION store composition, as Program.cs builds it
+    // P6 — FALSIFICATION: the gateway's own users projection does not enforce.
     // -----------------------------------------------------------------
 
-    /// A durable projection holding the row an admin suspend persisted, in-process store cold.
-    private static FakeUserProjectionStore SuspendedProjection()
+    /// <summary>
+    /// Suspension written ONLY to <see cref="IUsersStore"/> — process RAM no administrator can reach,
+    /// and the store the gate used to read — must change nothing on any mint path. This goes red the
+    /// moment anyone re-points the gate at a store the product does not write, which is exactly how
+    /// D10 shipped green.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(MintPaths))]
+    public async Task P6_MintPath_Admits_When_Suspension_Is_Written_Only_To_The_Gateway_Users_Projection(string path)
     {
-        var projection = new FakeUserProjectionStore();
-        projection.Seed(new UserProfile
-        {
-            Id = UserId,
-            Phone = string.Empty,
-            Name = "Suspended User",
-            Roles = new List<string> { Roles.Client, Roles.Jeeber },
-            ActiveRole = Roles.Client,
-            IsSuspended = true,
-            SuspensionReason = Reason,
-            SuspendedAt = DateTimeOffset.UtcNow.AddMinutes(-1),
-            CreatedAt = DateTimeOffset.UtcNow.AddDays(-30),
-            UpdatedAt = DateTimeOffset.UtcNow,
-        });
-        return projection;
+        var ban = new FakeBanService();
+        using var factory = MakeFactory(ban, new StubDualRole());
+
+        var store = factory.Services.GetRequiredService<IUsersStore>();
+        var profile = await store.GetOrCreateAsync(UserId, CancellationToken.None);
+        var updated = await store.SuspendAsync(profile.Id, Reason, "admin-test", CancellationToken.None);
+        updated!.IsSuspended.Should().BeTrue("the fixture's own write must land, or this proves nothing");
+
+        var resp = await CallMintPathAsync(factory, path);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "the gateway's in-process users projection is NOT the suspension authority; a suite that "
+            + "suspends there and sees a 403 is reading its own write back out of RAM");
     }
 
+    // -----------------------------------------------------------------
+    // P7 — CONTROL: with nothing suspended, every one of these routes mints.
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// The opposite-answer control for P1–P5. Without it a gate that refused unconditionally — or a
+    /// fixture whose routes 500 on a missing dependency — would satisfy every refusal assertion above.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(MintPaths))]
+    public async Task P7_MintPath_Mints_When_Nothing_Is_Suspended(string path)
+    {
+        using var factory = MakeFactory(new FakeBanService(), new StubDualRole());
+
+        var resp = await CallMintPathAsync(factory, path);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "an unsuspended account must still reach a session through every door");
+        (await resp.Content.ReadAsStringAsync()).Should().Contain("accessToken");
+    }
+
+    // -----------------------------------------------------------------
+    // helpers
+    // -----------------------------------------------------------------
+
+    /// The EXACT call OwnerComposedAdminUsers.SuspendAsync makes, so the fixture cannot drift
+    /// from the product's real write.
+    private static async Task SuspendThroughAdminPathCallAsync(IBanServiceClient ban)
+    {
+        var status = await ban.ApplyTerminalBanAsync(UserId, "red", CancellationToken.None);
+        status.IsCurrentlyBanned.Should().BeTrue("the fixture must reproduce the measured live state");
+    }
+
+    private static Task<HttpResponseMessage> CallMintPathAsync(
+        WebApplicationFactory<Program> factory, string path) => path switch
+        {
+            "otp/verify" => factory.CreateClient().PostAsync("/v1/auth/otp/verify",
+                Json("""{ "phone": "+9613000204", "code": "1234" }""")),
+            "role/switch" => Authorized(factory).PostAsync("/v1/users/me/role/switch",
+                Json("""{ "role": "jeeber" }""")),
+            "role/unregister" => Authorized(factory).PostAsync("/v1/users/me/role/unregister", Json("{}")),
+            "email/login" => factory.CreateClient().PostAsync("/v1/auth/login",
+                Json("""{ "email": "user@example.com", "password": "correct-horse" }""")),
+            _ => throw new InvalidOperationException($"unknown mint path '{path}'"),
+        };
+
+    /// The RFC 7807 `type` suffix, so a moderation 403 is distinguishable from any other 403.
+    private static string ProblemType(string raw)
+    {
+        using var doc = JsonDocument.Parse(raw);
+        return doc.RootElement.TryGetProperty("type", out var t)
+            ? (t.GetString() ?? string.Empty).Split('/').Last()
+            : string.Empty;
+    }
+
+    private static HttpClient Authorized(WebApplicationFactory<Program> factory)
+    {
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", MintGatewayBearer(factory, UserId, Roles.Client, Roles.Jeeber));
+        return http;
+    }
+
+    /// <summary>
+    /// Production wiring as Program.cs actually builds it: IUsersStore stays the InMemoryUsersStore
+    /// Program.cs binds, IUserSuspensionSource stays BanServiceUserSuspensionSource, and only the
+    /// upstream transports a test must own are doubled.
+    /// </summary>
     private static WebApplicationFactory<Program> MakeFactory(
-        FakeUserProjectionStore projection,
-        StubDualRole? dualRole = null,
-        UmClient? umClient = null,
-        WalletClient? wallet = null) =>
+        IBanServiceClient ban, StubDualRole? dualRole = null) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
@@ -231,25 +314,15 @@ public sealed class SessionMintSuspensionGateTests
                 services.AddSingleton<IServiceOTPClient>(new StubOtp());
                 services.RemoveAll<IUserManagementDualRoleClient>();
                 services.AddSingleton<IUserManagementDualRoleClient>(dualRole ?? new StubDualRole());
-                if (umClient is not null)
-                {
-                    services.RemoveAll<UmClient>();
-                    services.AddSingleton(umClient);
-                }
-                if (wallet is not null)
-                {
-                    services.RemoveAll<WalletClient>();
-                    services.AddSingleton(wallet);
-                }
+                services.RemoveAll<UmClient>();
+                services.AddSingleton<UmClient>(new StubUmClient(UserId));
+                services.RemoveAll<WalletClient>();
+                services.AddSingleton<WalletClient>(new StubWalletClient());
 
-                // EXACTLY the production wiring of Program.cs's GatewayPostgres branch:
-                // UpstreamBackedUsersStore over the durable projection + the in-process store.
-                services.RemoveAll<IUsersStore>();
-                services.RemoveAll<IUserProjectionStore>();
-                services.RemoveAll<IUpstreamUserProfileClient>();
-                services.AddSingleton<IUserProjectionStore>(projection);
-                services.AddSingleton<IUpstreamUserProfileClient>(new StubUpstreamProfileClient());
-                services.AddSingleton<IUsersStore, UpstreamBackedUsersStore>();
+                // ban-service is the suspension authority; the double is stateful so a ban written by
+                // the admin call is the same row the mint gate reads.
+                services.RemoveAll<IBanServiceClient>();
+                services.AddSingleton(ban);
 
                 services.Configure<UpstreamFeatureFlags>(f =>
                 {
@@ -265,107 +338,82 @@ public sealed class SessionMintSuspensionGateTests
         });
 
     /// <summary>
-    /// In-memory stand-in for <c>PostgresUserProjectionStore</c> with the two production
-    /// behaviours that matter: reads can FAULT, and an identity upsert PRESERVES suspension
-    /// on conflict (the real ON CONFLICT clause).
+    /// Stateful stand-in for ban-service: ApplyTerminalBanAsync records the row the admin suspend
+    /// writes and GetStatusAsync returns it, so the test cannot pass by writing and reading two
+    /// different places. <see cref="ThrowOnStatus"/> simulates the service being unreachable.
     /// </summary>
-    private sealed class FakeUserProjectionStore : IUserProjectionStore
+    private sealed class FakeBanService : IBanServiceClient
     {
-        private readonly Dictionary<string, UserProfile> _rows = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, BanStatusItem> _bans = new();
 
-        public bool FaultReads { get; set; }
+        public bool ThrowOnStatus { get; init; }
 
-        public void Seed(UserProfile p) => _rows[p.Id] = p;
-
-        public Task<UserProfile?> GetByIdAsync(string userId, CancellationToken ct)
-            => FaultReads
-                ? throw new InvalidOperationException("57P01: terminating connection due to administrator command")
-                : Task.FromResult(_rows.TryGetValue(userId, out var p) ? p : null);
-
-        public Task<UserSearchResult> SearchAsync(UserSearchQuery query, CancellationToken ct)
-            => Task.FromResult(new UserSearchResult { Items = _rows.Values.ToList(), Total = _rows.Count });
-
-        public Task UpsertIdentityAsync(UserProfile profile, CancellationToken ct)
+        public Task<BanStatusesResult> GetStatusAsync(string userId, CancellationToken ct)
         {
-            // A COPY, never the caller's instance — a real UPDATE cannot reach back
-            // into the object the caller is about to return.
-            _rows.TryGetValue(profile.Id, out var existing);
-            _rows[profile.Id] = new UserProfile
+            if (ThrowOnStatus) throw new HttpRequestException("ban-service unreachable");
+            return Task.FromResult(new BanStatusesResult
             {
-                Id = profile.Id,
-                Phone = profile.Phone,
-                Email = profile.Email,
-                Name = profile.Name,
-                Roles = profile.Roles.ToList(),
-                ActiveRole = profile.ActiveRole,
-                CreatedAt = profile.CreatedAt,
-                UpdatedAt = profile.UpdatedAt,
-                // suspension is PRESERVED on conflict, exactly like the real ON CONFLICT clause
-                IsSuspended = existing?.IsSuspended ?? profile.IsSuspended,
-                SuspensionReason = existing?.SuspensionReason ?? profile.SuspensionReason,
-                SuspendedAt = existing?.SuspendedAt ?? profile.SuspendedAt,
-            };
-            return Task.CompletedTask;
-        }
-
-        public Task SetSuspensionAsync(
-            string userId, bool isSuspended, string? reason, DateTimeOffset? at, CancellationToken ct)
-        {
-            // UPDATE-only, exactly like the real store: absent row => nothing persisted.
-            if (_rows.TryGetValue(userId, out var row))
-            {
-                row.IsSuspended = isSuspended;
-                row.SuspensionReason = isSuspended ? reason : null;
-                row.SuspendedAt = isSuspended ? at : null;
-            }
-            return Task.CompletedTask;
-        }
-
-        public Task PurgePiiAsync(string userId, CancellationToken ct) => Task.CompletedTask;
-    }
-
-    /// <summary>
-    /// Mirrors <c>ScopedUserManagementProfileClient.Map</c>: the UM profile contract
-    /// (<c>UserProfileResponse</c>) carries NO suspension field, so a cold read can only ever
-    /// manufacture a NOT-suspended profile. This is why the cold path cannot police moderation.
-    /// </summary>
-    private sealed class StubUpstreamProfileClient : IUpstreamUserProfileClient
-    {
-        public Task<UserProfile?> GetProfileAsync(string userId, CancellationToken ct)
-            => Task.FromResult<UserProfile?>(new UserProfile
-            {
-                Id = userId,
-                Phone = string.Empty,
-                Name = "Suspended User",
-                Roles = new List<string> { Roles.Client },
-                ActiveRole = Roles.Client,
-                CreatedAt = DateTimeOffset.UtcNow.AddDays(-30),
-                UpdatedAt = DateTimeOffset.UtcNow,
+                UserId = userId,
+                BanStatuses = _bans.TryGetValue(userId, out var row)
+                    ? new[] { row }
+                    : Array.Empty<BanStatusItem>(),
             });
+        }
+
+        public Task<BanStatusItem> ApplyTerminalBanAsync(string userId, string policyKey, CancellationToken ct)
+        {
+            var row = new BanStatusItem
+            {
+                UserId = userId,
+                BanType = policyKey,
+                CurrentStage = 3,
+                Status = "BAN",
+                Message = Reason,
+                BannedUntil = null,
+                LastUpdated = DateTimeOffset.UtcNow,
+                IsCurrentlyBanned = true,
+            };
+            _bans[userId] = row;
+            return Task.FromResult(row);
+        }
+
+        public Task<BanStatusItem> ApplyBanAsync(string userId, string banType, CancellationToken ct)
+            => ApplyTerminalBanAsync(userId, banType, ct);
+
+        public Task<BanResetResult> ForceResetAsync(string userId, CancellationToken ct)
+        {
+            _bans.Remove(userId, out var old);
+            return Task.FromResult(new BanResetResult { OldStatus = old, NewStatus = null, Updated = old is not null });
+        }
     }
 
     private sealed class StubDualRole : IUserManagementDualRoleClient
     {
-        public RoleSwitchReissueResult? RoleSwitch { get; init; }
         public int RoleSwitchCalls { get; private set; }
+        public int RemoveRoleCalls { get; private set; }
 
         public Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct)
-            => Task.FromResult(new PhoneFindOrCreateResult(UserId, false, new[] { Roles.Client }, Roles.Client));
+            => Task.FromResult(new PhoneFindOrCreateResult(
+                UserId, false, new[] { Roles.Client, Roles.Jeeber }, Roles.Client));
 
         public Task<RoleSwitchReissueResult> RoleSwitchAsync(string userId, string opaqueRole, CancellationToken ct)
         {
             RoleSwitchCalls++;
-            return Task.FromResult(RoleSwitch ?? new RoleSwitchReissueResult(userId, "a", "r", opaqueRole));
+            return Task.FromResult(new RoleSwitchReissueResult(userId, "um-access", "um-refresh", opaqueRole));
         }
 
         public Task<RoleGrantResult> AppendAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
-            => Task.FromResult(new RoleGrantResult(userId, new[] { Roles.Client }, false));
+            => Task.FromResult(new RoleGrantResult(userId, new[] { Roles.Client, Roles.Jeeber }, true));
 
         public Task<RoleGrantResult> RemoveAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
-            => Task.FromResult(new RoleGrantResult(userId, new[] { Roles.Client }, false));
+        {
+            RemoveRoleCalls++;
+            return Task.FromResult(new RoleGrantResult(userId, new[] { Roles.Client }, true));
+        }
 
         public Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct)
-            => Task.FromResult<UserRolesResult?>(null);
+            => Task.FromResult<UserRolesResult?>(
+                new UserRolesResult(userId, new[] { Roles.Client, Roles.Jeeber }, Roles.Client));
     }
 
     /// UM accepts the password; the gateway is what must refuse the suspended account.
@@ -385,7 +433,7 @@ public sealed class SessionMintSuspensionGateTests
             });
     }
 
-    /// No wallet provisioned — the 404 the controller reads as an honest zero balance.
+    /// No wallet provisioned — the 404 the unregister guard reads as an honest zero balance.
     private sealed class StubWalletClient : WalletClient
     {
         public StubWalletClient() : base("http://localhost", new HttpClient()) { }
