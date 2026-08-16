@@ -73,6 +73,12 @@ public sealed class UpstreamExceptionHandler : IExceptionHandler
                 StatusCodes.Status502BadGateway,
                 "An upstream service returned an unexpected response.",
                 "https://jeeb.dev/errors/upstream-unavailable"),
+            // D1 outage: the role/identity seam already carries the upstream status, but no arm
+            // matched it, so a resolved-and-typed 502 was reported to callers as a bare 500.
+            JeebGateway.Users.UserManagementCallException => (
+                StatusCodes.Status502BadGateway,
+                "An upstream service returned an unexpected response.",
+                "https://jeeb.dev/errors/upstream-unavailable"),
             // gwdbx W2-R11: settlement-service owns the money rows. An unreachable/refusing
             // upstream answers "unavailable", never a confident empty — the O10 lesson.
             JeebGateway.Financials.SettlementServiceUnavailableException => (
