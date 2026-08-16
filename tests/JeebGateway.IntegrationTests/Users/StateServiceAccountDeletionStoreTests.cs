@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using FluentAssertions;
-using JeebGateway.Infrastructure;
 using JeebGateway.Migration;
 using JeebGateway.Services.Clients;
 using JeebGateway.StateService.Ownership;
@@ -87,8 +86,13 @@ public class StateServiceAccountDeletionStoreTests
         await store.RequestAsync(UserId, hasActiveDelivery: false, default);
 
         var payload = upstream.Creates[0].Body.Payload!.Value;
+        // a33fb6c made upstream the record of truth, so the lifecycle stamps must round-trip
+        // through the payload. Still an exact allowlist: no field lands here unreviewed.
         payload.EnumerateObject().Select(p => p.Name)
-            .Should().BeEquivalentTo(new[] { "status", "anonymizedUserHash" });
+            .Should().BeEquivalentTo(new[]
+            {
+                "status", "requestedAt", "scheduledPurgeAt", "completedAt", "anonymizedUserHash"
+            });
         payload.GetRawText().Should().NotContain(UserId, "only the pseudonym travels in the payload");
     }
 
@@ -126,20 +130,8 @@ public class StateServiceAccountDeletionStoreTests
         inner.Advances.Should().Be(1, "the purge state machine is driven on the inner store");
     }
 
-    // ----- guard roster ------------------------------------------------------
-
-    [Fact]
-    public void Decorator_Is_An_Approved_Durable_Implementation_Of_IAccountDeletionStore()
-    {
-        var entry = StoreDurabilityGuard.Critical.Single(c => c.Iface == typeof(IAccountDeletionStore));
-
-        entry.DurableImpls.Should().BeEquivalentTo(new[]
-        {
-            typeof(PostgresAccountDeletionStore),
-            typeof(RemoteUserPreferencesAccountDeletionStore),
-            typeof(StateServiceAccountDeletionStore)
-        }, "G-08 — the decorator wraps the durable inner chain, so every resolution passes the boot gate");
-    }
+    // Guard-roster fact removed: W5-11 (8cba63b) deleted StoreDurabilityGuard AND
+    // PostgresAccountDeletionStore, so the boot gate it asserted no longer exists.
 
     // ----- helpers -----------------------------------------------------------
 
