@@ -27,7 +27,7 @@ files that name them from the build. Still-compiled files with a dangling refere
 `Gw1Pack/W26_MoneyControllerRouteCensusTests.cs`, `Infrastructure/RedisFailClosedBootGuardTests.cs`
 (`StoreDurabilityGuard.FailClosedDisabledKey`), `Infrastructure/StatelessGatewayGuardTests.cs`,
 `StateService/StateServiceNotificationDispatchOutboxTests.cs`,
-`Users/DataExport/MirroringDataExportStoreTests.cs`, `Users/StateServiceAccountDeletionStoreTests.cs`.
+`Users/DataExport/MirroringDataExportStoreTests.cs`. (STEP-10 settled one of them: `Users/StateServiceAccountDeletionStoreTests.cs` was deleted with the store it covered. STEP-10 also cleared a NEWER break of the same kind — `Jobs/DurableWorkHandlerIdempotencyTests.cs` called `StateServiceAccountDeletionStore.DeserializePayload`, a member that never existed on that type, so it was repointed at the live `AccountDeletionWorkHandler` parser.)
 Until they are settled, **no "the tests pass" claim about this repository is meaningful** — the suite
 cannot build. Settling them deletes durability-guard coverage, so it is an owner/assessor call, not a
 side effect of an unrelated PR.
@@ -61,6 +61,18 @@ and this document is their only definition in the repo:
   `ConfigImportWorker`; retiring one does not buy back headroom — the ceiling ratchets down to 18.
 - **The forbidden flag names** — §4.1 plus `scripts/gwdbx-flag-registry.txt`: the SUPERSEDED/retired keys
   stay inactive permanently, including after the registry gate itself retires (deletion ledger §8).
+- **Redis STAYS — "the gateway owns no database" does NOT include Redis.** Owner ruling
+  2026-08-16: *"No redis is not in the scope, you can keep redis."* `Redis:ConnectionString` and
+  `GatewayRateLimit:RedisConnectionString` are permanent (both are present in the live gateway
+  environment today), and so are the edge OTP rate-limiter (`RedisOtpRequestRateLimiter`) and the
+  door-OTP TTL keys (`otp:attempts|lockout|handovercode`) behind the Production fail-closed boot
+  guard (A3). This **restates R4 rather than changing it** — deletion ledger §9 already carried
+  Redis as a deliberate retain — and it is written here so the question cannot be re-opened by
+  someone reading "the gateway owns no database" literally.
+- **The unversioned route aliases are PERMANENT.** Owner ruling 2026-08-16: route migration stops
+  after W6-03; both `/v1/...` and their unversioned twins keep working indefinitely; **W6-04 and
+  W6-05 are dead** and **no `/v1` deletion is scheduled**. See
+  `docs/runbooks/w6-02-route-compat-window.md` — the word "window" in that filename is history.
 
 ## 1. Never-do list (PRE-06)
 
@@ -92,6 +104,21 @@ and this document is their only definition in the repo:
   last-known-good cache is still empty. Seeding hardcoded terms makes the gate enforce a silent
   subset of the published lexicon — this programme already recorded exactly that (4 terms against a
   published 15) as a LIVE REGRESSION. Explicit unavailability beats silent partial enforcement.
+
+- **Never add authentication to an internal service-to-service hop — and do not propose one.**
+  Owner ruling 2026-08-16: *"Security between microservices is not needed, keep it simple."* No
+  mTLS, no per-hop tokens, no service-user split, no new credential handler on an internal call.
+  **OA-11 is CLOSED as won't-do with the risk ACCEPTED:** every gateway→delivery-service call is
+  unauthenticated, so any process that can reach `127.0.0.1:5802` can drive delivery-service's
+  owner routes. That is a decision, not an oversight. **Consequence carried in this repo:**
+  `scripts/check-stateless-gateway.sh:111` still requires `DELIVERY_SERVICE_TOKEN_FILE` to appear
+  in the deploy workflows. That check is now **vacuous** — the credential is never sent
+  (`DeliveryServiceCredentialHandler` is attached to no HttpClient), never read (delivery-service
+  matches `delivery.service.token` in 0 files), and the workflows are disabled fleet-wide (A27).
+  **Do not read its green as evidence of anything.**
+  **NOT covered by this clause:** a credential that has actually LEAKED. OA-22 — the
+  notification→push `X-Api-Key` printed into a session transcript — is a separate decision and is
+  still open. "Internal hops need no auth" is not an answer to "this key is already public".
 
 - **Never let a W3 mode key reach a read rung without a read path.** ADR-0009 (2026-08-16): every
   mode key is in exactly one of three states, and each is enforced in code — REAL (the serving

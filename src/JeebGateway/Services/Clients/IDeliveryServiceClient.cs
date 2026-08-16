@@ -241,6 +241,38 @@ public interface IDeliveryServiceClient
     Task<JeeberAvailabilityUpstream> HeartbeatAsync(string jeeberId, double lat, double lng, CancellationToken ct);
 
     /// <summary>
+    /// OA-21 audience read. <c>GET /api/v1/providers/available</c> — the providers
+    /// delivery-service considers able to take work right now: online AND
+    /// heartbeat-fresh AND with a GPS fix. Optionally cut to a circle
+    /// (<paramref name="radiusKm"/> around lat/lng — all three or none) and to a
+    /// vehicle allowlist. This is NOT <c>/providers/online</c>, which is the raw
+    /// roster with no freshness cut.
+    /// </summary>
+    /// <exception cref="DeliveryAvailabilityException">
+    /// Any non-2xx. Deliberately NOT degraded to an empty list: an unreadable
+    /// audience must never look like an empty one (durability register #9).
+    /// </exception>
+    Task<IReadOnlyList<AvailableProviderUpstream>> ListAvailableProvidersAsync(
+        double? lat,
+        double? lng,
+        double? radiusKm,
+        IReadOnlyCollection<string>? vehicleTypes,
+        int limit,
+        CancellationToken ct);
+
+    /// <summary>
+    /// OA-21 fallback audience read. <c>GET /api/v1/providers/known?since=</c> —
+    /// every provider whose last interaction (falling back to heartbeat, then last
+    /// write) is at or after <paramref name="since"/>, ONLINE OR NOT. Presence is
+    /// reported as stored; this read decides nothing.
+    /// </summary>
+    /// <exception cref="DeliveryAvailabilityException">
+    /// Any non-2xx, for the same reason as the audience read above.
+    /// </exception>
+    Task<IReadOnlyList<JeeberAvailabilityUpstream>> ListKnownProvidersAsync(
+        DateTimeOffset since, int limit, CancellationToken ct);
+
+    /// <summary>
     /// Courier matching (relocated from the gateway's in-memory Haversine engine
     /// into delivery-service). Calls the canonical Go route
     /// <c>POST /api/v1/matching/run</c>. delivery-service owns the radius scan,
@@ -977,6 +1009,51 @@ public sealed class JeeberAvailabilityUpstream
 
     [System.Text.Json.Serialization.JsonPropertyName("updated_at")]
     public DateTimeOffset UpdatedAt { get; init; }
+}
+
+/// <summary>
+/// One row of the OA-21 audience read (<c>GET /api/v1/providers/available</c>).
+/// Leaner than <see cref="JeeberAvailabilityUpstream"/> on purpose: the audience
+/// projection carries identity, vehicle and the last-known fix, which is all a
+/// push fan-out needs. <c>provider_id</c> is the generic key; <c>jeeber_id</c> is
+/// the deprecated alias carrying the same value, so either binds.
+/// </summary>
+public sealed class AvailableProviderUpstream
+{
+    [System.Text.Json.Serialization.JsonPropertyName("provider_id")]
+    public string? ProviderId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("jeeber_id")]
+    public string? JeeberId { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("vehicle_type")]
+    public string? VehicleType { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("lat")]
+    public double? Lat { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("lng")]
+    public double? Lng { get; init; }
+
+    /// <summary>Emitted only when the caller supplied a circle centre.</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("distance_km")]
+    public double? DistanceKm { get; init; }
+
+    /// <summary>The generic key, falling back to the deprecated alias.</summary>
+    public string? Id => string.IsNullOrWhiteSpace(ProviderId) ? JeeberId : ProviderId;
+}
+
+/// <summary>
+/// The <c>{ providers, count }</c> envelope shared by every delivery-service
+/// presence list route.
+/// </summary>
+public sealed class ProvidersEnvelope<T>
+{
+    [System.Text.Json.Serialization.JsonPropertyName("providers")]
+    public List<T>? Providers { get; init; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("count")]
+    public int Count { get; init; }
 }
 
 /// <summary>

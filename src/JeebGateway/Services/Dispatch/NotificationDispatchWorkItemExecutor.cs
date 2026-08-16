@@ -1,7 +1,7 @@
 #nullable enable
 
 using JeebGateway.Migration;
-using JeebGateway.Push;
+using JeebGateway.Notifications;
 using JeebGateway.StateService.Ownership;
 using JeebGateway.StateService.Work;
 using Microsoft.Extensions.Logging;
@@ -16,18 +16,18 @@ namespace JeebGateway.Services.Dispatch;
 public sealed class NotificationDispatchWorkItemExecutor : IWorkItemExecutor
 {
     private readonly INotificationTemplateRenderer _renderer;
-    private readonly IPushNotificationService _push;
+    private readonly IGenericEventDispatcher _events;
     private readonly GwdbxMigrationPhase _phase;
     private readonly ILogger<NotificationDispatchWorkItemExecutor> _log;
 
     public NotificationDispatchWorkItemExecutor(
         INotificationTemplateRenderer renderer,
-        IPushNotificationService push,
+        IGenericEventDispatcher events,
         IOptions<GwdbxMigrationOptions> options,
         ILogger<NotificationDispatchWorkItemExecutor> log)
     {
         _renderer = renderer;
-        _push = push;
+        _events = events;
         _phase = options.Value.NotificationOutbox;
         _log = log;
     }
@@ -44,20 +44,29 @@ public sealed class NotificationDispatchWorkItemExecutor : IWorkItemExecutor
         var rendered = _renderer.Render(entry.TemplateKey, entry.Locale, entry.Parameters)
             ?? throw new InvalidOperationException($"Unknown template key '{entry.TemplateKey}'.");
 
-        // The entry's OWN idempotency key rides through to PushDispatch (§4.1 rider).
-        var result = await _push.SendAsync(
-            new PushNotificationRequest(
-                UserId: entry.RecipientUserId.ToString(),
-                Trigger: NotificationTrigger.StatusChange,
-                Title: rendered.Title,
-                Body: rendered.Body,
-                Data: entry.Parameters,
-                IdempotencyKey: entry.IdempotencyKey,
-                Language: entry.Locale),
+        var data = new Dictionary<string, string>(entry.Parameters, StringComparer.Ordinal)
+        {
+            ["type"] = entry.TemplateKey,
+            ["language"] = entry.Locale,
+        };
+
+        // The entry's OWN idempotency key rides through as the entity id (§4.1 rider).
+        var classification = await PushHandover.DispatchAsync(
+            _events, _log, entry.TemplateKey, entry.RecipientUserId.ToString(),
+            string.IsNullOrWhiteSpace(entry.IdempotencyKey) ? entry.Id.ToString() : entry.IdempotencyKey!,
+            rendered.Title, rendered.Body, data,
+            PushSilencePolicy.CategoryForTemplateKey(entry.TemplateKey) ?? PushSilencePolicy.CategoryDelivery,
             ct);
+
+        // THROW, do not log-and-return: the lease holder must fail the work item so it retries.
+        if (!PushHandover.IsProducerOwned(classification))
+        {
+            throw new InvalidOperationException(
+                $"notification-service did not own the hand-over ({classification}).");
+        }
 
         _log.LogInformation(
             "Claimed notification dispatched. WorkItemId={WorkItemId} EntryId={EntryId} Outcome={Outcome}",
-            item.WorkItemId, entry.Id, result.Outcome);
+            item.WorkItemId, entry.Id, classification);
     }
 }

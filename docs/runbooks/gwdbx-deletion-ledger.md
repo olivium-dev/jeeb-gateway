@@ -43,7 +43,7 @@ Already dropped (13, W0 waves — history): `ratings`, `disputes`, `kyc_submissi
 | `prohibited_items` | **W5-09** `[OWNER-GO]` | freeze-import-flip (W3-10/W3-11) done first |
 | `prohibited_item_acks` | **W5-09** `[OWNER-GO]` | with `prohibited_items` |
 | `flagged_requests` | **W5-09** `[OWNER-GO]` | rides state-service work-items |
-| `admin_escalations` | **W5-09** `[OWNER-GO]` | delivery-service mint (`OtpEscalationsMode`) live first |
+| `admin_escalations` | **W5-09** `[OWNER-GO]` | dep MET 2026-08-16: `OtpEscalationsMode` is live at `dual-write-upstream-read`; the orphaned gateway table held 0 rows, so nothing is owed a replay |
 | `jeeber_availability` | **W5-09** `[OWNER-GO]` | dep: W3-13 rung 2 — currently withheld on the out-of-scope `.20` duplicate sweeper (OWNER-ACTIONS A9) |
 | `device_tokens` | **W5-09** `[OWNER-GO]` | dep: W3-15 four-category push proof (gates the push-trio drop) |
 | `push_retry_queue` | **W5-09** `[OWNER-GO]` | with `device_tokens` |
@@ -72,7 +72,7 @@ Summary — deleting wave per flag (the step-6 release of its domain):
 |---|---|
 | `CodSettlementMode`, `PayoutBatchMode`, `JeeberEarningsMode` | W5 (after W5-09 money drops) |
 | `AdminAuditMode`, `DataExportMode`, `NotificationOutboxMode`, `RefreshTokenStoreMode`, `UseUpstream:FanoutWorkQueue` | W5 |
-| `AccountDeletionMode`, `ProhibitedItemsMode`, `OtpEscalationsMode`, `AvailabilityMode`, `PushDispatchMode`, `CmsConfigMode` | W5 |
+| ~~`AccountDeletionMode`~~ (DELETED 2026-08-16, STEP-10 — 3ee131d left it with no consumer), `ProhibitedItemsMode`, `OtpEscalationsMode`, `AvailabilityMode`, `PushDispatchMode`, `CmsConfigMode` | W5 |
 | `RequestsOwnerListMode`, `RequestExpiry:Source` | W5 (created W5-02/W5-04, deleted at requests step-6) |
 | `TiersMode`, `UserModerationMode` | **W4** (one release after W4-14 / W4-13 drops) |
 | `WalletLedgerMigration:Authority`, `WalletLedgerMigration:ShadowCompareEnabled` | **W5-10** (grandfathered; die with the WalletPostgres CS) |
@@ -123,6 +123,11 @@ step-6 release; `forbidden` rows (incl. `UseUpstream:Payments`, G-05) stay forev
   `/admin/settlements/batches` overlap are recorded in
   [`w6-02-route-compat-window.md`](w6-02-route-compat-window.md). Read that before adding an
   unversioned route — several obvious-looking ones are already taken by a different handler.
+- **Those aliases are PERMANENT, not a window (owner ruling 2026-08-16).** Route migration stops
+  after W6-03; both `/v1/...` and their unversioned twins keep working **indefinitely**; **W6-04
+  (mobile forced-upgrade gate) and W6-05 (delete the versioned routes) are DEAD**; and **no `/v1`
+  deletion is scheduled by this program or any successor**. This is the first bullet's strangler
+  rule again — now CLOSED by decision rather than merely unscheduled.
 
 ## 5. Jobs / workers
 
@@ -246,6 +251,9 @@ is disabled at the GitHub level, so the harness only runs when someone runs it.
 
 Edge Redis OTP rate-limiter (`RedisOtpRequestRateLimiter`); door-OTP Redis TTL keys
 (`otp:attempts|lockout|handovercode`) behind the Production fail-closed Redis boot guard (A3);
-`Redis:ConnectionString` (R4-sanctioned); `CourierPositionQueue` (transient back-pressure); bounded
+`Redis:ConnectionString` **and `GatewayRateLimit:RedisConnectionString`** (R4-sanctioned — and
+**CONFIRMED by owner ruling 2026-08-16**: *"No redis is not in the scope, you can keep redis"*, so
+"the gateway owns no database" does **not** include Redis; both keys are present in the live
+gateway environment today); `CourierPositionQueue` (transient back-pressure); bounded
 fan-out drain buffer; `Notifications:NewRequestFanout:Enabled` kill switch; dispute-refund 400/no-op
 (UPG retired, G-05).

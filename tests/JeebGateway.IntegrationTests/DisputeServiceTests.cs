@@ -2,12 +2,13 @@ using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Disputes;
-using JeebGateway.Push;
+using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -25,7 +26,7 @@ namespace JeebGateway.IntegrationTests;
 ///   * GET /disputes/{id} is filer-or-admin readable
 ///   * PUT /admin/disputes/{id}/resolve enforces the state machine (filed → under_review → resolved/dismissed)
 ///   * non-admin cannot resolve
-///   * push fan-out fires through the unified IPushNotificationService pipeline
+///   * push fan-out hands a dispute-update event to notification-service
 /// </summary>
 public class DisputeServiceTests
 {
@@ -99,11 +100,11 @@ public class DisputeServiceTests
     [Fact(Skip = "needs a reachable delivery-service: this case drives a route that calls it, and on a bare checkout the call is refused. Run it with the service up (docker compose / a stub host) - a skip here is NOT a pass.")]
     public async Task File_Sends_Filer_Push_Notification()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        var events = new CapturingGenericEventDispatcher();
+        using var factory = FactoryWith(events);
         var filer = "u-push";
         var http = ClientFor(factory, filer);
         var deliveryId = await SeedDeliveryAsync(factory, clientId: filer);
-        var tracker = factory.Services.GetRequiredService<InMemoryPushDeliveryTracker>();
 
         (await http.PostAsJsonAsync($"/deliveries/{deliveryId}/dispute", new FileDisputeRequest
         {
@@ -111,12 +112,13 @@ public class DisputeServiceTests
             Description = "driver was unsafe"
         })).EnsureSuccessStatusCode();
 
-        // No devices are registered, so the unified push pipeline records a
-        // NoDevices outcome — that's still the assertion we want: SendAsync
-        // was invoked with the filer's id under the StatusChange trigger.
-        var entries = await tracker.GetForUserAsync(filer, CancellationToken.None);
-        entries.Should().Contain(r => r.Trigger == NotificationTrigger.StatusChange,
-            "filing a dispute must fan out a StatusChange push to the filer");
+        // The old assertion read a NoDevices row off the deleted in-gateway tracker, so it
+        // passed WITH the defect present. This asserts the hand-over notification-service sees.
+        events.Sent.Should().Contain(h =>
+            h.Receiver == filer
+            && h.EventType == JeebGenericEventTypes.DisputeUpdateEventType
+            && h.Category == PushSilencePolicy.CategoryDispute,
+            "filing a dispute must hand a dispute-update event over to notification-service");
     }
 
     [Theory]
@@ -481,7 +483,8 @@ public class DisputeServiceTests
     [Fact(Skip = "needs a reachable delivery-service: this case drives a route that calls it, and on a bare checkout the call is refused. Run it with the service up (docker compose / a stub host) - a skip here is NOT a pass.")]
     public async Task Resolve_Sends_Filer_Push_Notification()
     {
-        using var factory = new WebApplicationFactory<Program>();
+        var events = new CapturingGenericEventDispatcher();
+        using var factory = FactoryWith(events);
         var filer = ClientFor(factory, "res-push-filer");
         var admin = AdminClientFor(factory, "res-push-admin");
         var deliveryId = await SeedDeliveryAsync(factory, clientId: "res-push-filer");
@@ -493,24 +496,31 @@ public class DisputeServiceTests
         });
         var dispute = await fileResp.Content.ReadFromJsonAsync<DisputeResponse>();
 
-        var tracker = factory.Services.GetRequiredService<InMemoryPushDeliveryTracker>();
-
         (await admin.PutAsJsonAsync($"/admin/disputes/{dispute!.Id}/resolve", new ResolveDisputeRequest
         {
             Action = "resolve",
             Resolution = "refunded"
         })).EnsureSuccessStatusCode();
 
-        var entries = await tracker.GetForUserAsync("res-push-filer", CancellationToken.None);
-        // The filer gets at least two StatusChange pushes — one at file time,
-        // one at resolve time. Both record through the unified pipeline.
-        entries.Count(r => r.Trigger == NotificationTrigger.StatusChange).Should().BeGreaterOrEqualTo(2,
-            "resolving must fan out a second StatusChange push to the filer");
+        // Two distinct hand-overs, keyed on the service's own idempotency keys: one at file
+        // time, one at resolve time. A single entity id would collapse them into one push.
+        var toFiler = events.Sent.Where(h => h.Receiver == "res-push-filer").ToList();
+        toFiler.Should().HaveCountGreaterOrEqualTo(2,
+            "resolving must hand a second dispute-update event over for the filer");
+        toFiler.Select(h => h.EntityId).Should().OnlyHaveUniqueItems();
     }
 
     // -------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------
+
+    private static WebApplicationFactory<Program> FactoryWith(IGenericEventDispatcher events)
+        => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IGenericEventDispatcher>();
+                services.AddSingleton(events);
+            }));
 
     private static HttpClient ClientFor(WebApplicationFactory<Program> factory, string userId)
     {

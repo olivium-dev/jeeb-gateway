@@ -1,4 +1,5 @@
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Notifications;
 using JeebGateway.Push;
 using Microsoft.AspNetCore.Mvc;
 
@@ -16,10 +17,9 @@ namespace JeebGateway.Controllers;
 ///
 ///   POST /v1/notifications/dispatch
 ///
-/// The endpoint accepts a typed dispatch request, routes it through the
-/// stateless <see cref="IPushNotificationService"/> compatibility adapter,
-/// which durably submits to notification-service, and returns 202 once the
-/// weekly batch can log per-notification results without blocking.
+/// The endpoint accepts a typed dispatch request, hands it to notification-service
+/// through <see cref="IGenericEventDispatcher"/>, and returns 202 only once that
+/// hand-over is durably owned — 503 otherwise, never a fabricated 202.
 ///
 /// Authorization: service-to-service calls (admin scope or system-internal
 /// service token). The endpoint is NOT consumer-facing — it is called by the
@@ -33,25 +33,23 @@ namespace JeebGateway.Controllers;
 [Produces("application/json", "application/problem+json")]
 public sealed class NotificationDispatchController : ControllerBase
 {
-    private readonly IPushNotificationService _push;
+    private readonly IGenericEventDispatcher _events;
     private readonly ILogger<NotificationDispatchController> _log;
 
     public NotificationDispatchController(
-        IPushNotificationService push,
+        IGenericEventDispatcher events,
         ILogger<NotificationDispatchController> log)
     {
-        _push = push;
+        _events = events;
         _log = log;
     }
 
     /// <summary>
-    /// POST /v1/notifications/dispatch — dispatch a single push notification via
-    /// the gateway's unified <see cref="IPushNotificationService"/> pipeline.
+    /// POST /v1/notifications/dispatch — hand one notification to notification-service.
     ///
     /// Returns 202 Accepted with the <see cref="DispatchOutcomeDto"/> so the
-    /// caller can log per-notification results. The underlying push is
-    /// delivery itself is asynchronous and owner-managed. A failure to obtain
-    /// durable owner acceptance returns 503 and is never fabricated as 202.
+    /// caller can log per-notification results. Delivery itself is asynchronous and
+    /// owner-managed. A failure to obtain durable owner acceptance returns 503.
     /// </summary>
     [HttpPost("dispatch")]
     [RequireCapability(Capabilities.NotificationDispatch)]
@@ -94,29 +92,41 @@ public sealed class NotificationDispatchController : ControllerBase
             });
         }
 
-        var request = new PushNotificationRequest(
-            UserId:         body.UserId,
-            Trigger:        trigger,
-            Title:          body.Title,
-            Body:           body.Body,
-            Data:           body.Data,
-            IdempotencyKey: body.IdempotencyKey,
-            Language:       body.Language);
-
-        PushDeliveryResult result;
-        try
+        var data = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            result = await _push.SendAsync(request, ct);
+            ["type"] = NotificationTriggerRouting.CategoryFor(trigger),
+            ["trigger"] = trigger.ToString(),
+        };
+        foreach (var pair in body.Data ?? new Dictionary<string, string>())
+        {
+            if (!string.IsNullOrWhiteSpace(pair.Key) && pair.Value is not null) data[pair.Key] = pair.Value;
         }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex,
-                "notification.dispatch_exception userId={UserId} trigger={Trigger}",
-                body.UserId, trigger);
+        if (!string.IsNullOrWhiteSpace(body.Language)) data["language"] = body.Language;
 
+        // The caller's key IS the entity id. Absent, mint a per-call id so an omitted key keeps
+        // its documented "no deduplication" meaning instead of collapsing distinct sends.
+        var entityId = string.IsNullOrWhiteSpace(body.IdempotencyKey)
+            ? $"dispatch:{Guid.NewGuid():N}"
+            : body.IdempotencyKey!;
+
+        var classification = await PushHandover.DispatchAsync(
+            _events,
+            _log,
+            JeebGenericEventTypes.NotificationDispatchEventType,
+            body.UserId,
+            entityId,
+            body.Title,
+            body.Body,
+            data,
+            NotificationTriggerRouting.CategoryFor(trigger),
+            ct);
+
+        if (!PushHandover.IsProducerOwned(classification))
+        {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
             {
                 Title = "Notification owner did not durably accept the command.",
+                Detail = classification.ToString(),
                 Status = StatusCodes.Status503ServiceUnavailable,
                 Type = "https://jeeb.dev/errors/notification-owner-unavailable",
             });
@@ -124,16 +134,15 @@ public sealed class NotificationDispatchController : ControllerBase
 
         _log.LogInformation(
             "notification.dispatched userId={UserId} trigger={Trigger} outcome={Outcome}",
-            body.UserId, trigger, result.Outcome);
+            body.UserId, trigger, classification);
 
         return Accepted(new DispatchOutcomeDto
         {
             UserId    = body.UserId,
             Trigger   = trigger.ToString(),
-            Delivered = result.Outcome is PushDeliveryOutcome.Delivered
-                     or PushDeliveryOutcome.DeliveredOnRetry,
-            Outcome   = result.Outcome.ToString(),
-            Detail    = result.Reason
+            Delivered = true,
+            Outcome   = classification.ToString(),
+            Detail    = null
         });
     }
 }

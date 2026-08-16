@@ -195,7 +195,7 @@ public class StateServiceNotificationDispatchOutboxTests
     public async Task The_Dispatcher_Enqueues_Only_When_The_Outbox_Is_Claim_Driven()
     {
         var state = new FakeStateOwnershipClient();
-        var push = new CapturingPushNotificationService();
+        var push = new CapturingGenericEventDispatcher();
         var dispatcher = new JeebNotificationDispatcher(
             new StaticNotificationTemplateRenderer(),
             push,
@@ -272,18 +272,6 @@ public class StateServiceNotificationDispatchOutboxTests
         Version = version,
         LeaseToken = leaseToken,
     };
-
-    private sealed class CapturingPushNotificationService : IPushNotificationService
-    {
-        public List<PushNotificationRequest> Sent { get; } = new();
-
-        public Task<PushDeliveryResult> SendAsync(PushNotificationRequest request, CancellationToken ct)
-        {
-            Sent.Add(request);
-            return Task.FromResult(new PushDeliveryResult(
-                request.UserId, request.Trigger, PushDeliveryOutcome.Delivered, 0));
-        }
-    }
 
     private sealed class FakeStateOwnershipClient : IStateOwnershipClient
     {

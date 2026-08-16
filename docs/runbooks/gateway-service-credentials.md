@@ -1,7 +1,26 @@
 # Gateway service credentials — env keys, arming order, verification
 
-Two gateway→upstream shared secrets are opt-in by env. Both are **absent** on MSI today, so the
-gateway runs exactly as it does now until an owner arms them.
+> **STATUS 2026-08-16 — REFERENCE ONLY. Arming anything NEW is not queued work.**
+> Owner ruling: *"Security between microservices is not needed, keep it simple."* No mTLS, no
+> per-hop tokens, no service-user split and no new internal-hop credential is to be added — or
+> proposed. OA-11 is closed as won't-do with the risk accepted, and the queued
+> `IMPORT_API_TOKEN` / `SETTLEMENT_API_TOKEN` rotation is cancelled. What is already armed stays
+> as it is; these recipes are kept because they are correct, not because anything is scheduled.
+> **Still open and NOT covered by that ruling: OA-22**, a push-webhook `X-Api-Key` that leaked
+> into a session transcript — a leaked key is a different question from whether internal hops
+> need auth.
+
+> **FACT CORRECTION 2026-08-16 — this file used to say both credentials were absent on MSI.
+> They are not; they are ARMED.** Measured on the live gateway (`1753f97`, started 10:05:49) by
+> listing env KEY names and value LENGTHS only, never values: both
+> `JeebStateService__ServiceTokenFile` and
+> `Users__DataExport__FeedbackRatings__ServiceTokenFile` are set to 57-character paths, both
+> target files exist under `/home/ec2-user/iter5-native/secrets/` mode `0600`, and the gateway
+> journal carries `jeeb-state-service: credential ARMED from …`. Read the arming procedure below
+> as the record of how that state was reached, **not** as pending work.
+
+Two gateway→upstream shared secrets are opt-in by env. **Both are ARMED on MSI today** (see the
+correction above); the text below describes how they are armed and how to prove it.
 
 | env key | secret file on MSI | what it switches on |
 |---|---|---|

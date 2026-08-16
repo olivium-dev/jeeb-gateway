@@ -128,20 +128,22 @@ fi
 
 # =============================================================================
 if [ "$ONLY" = "all" ] || [ "$ONLY" = "W0.6" ]; then
-item_begin "W0.6" "the in-gateway FCM transport is DELETED, not flag-disabled"
+item_begin "W0.6" "the WHOLE in-gateway push stack is DELETED, not flag-disabled"
 
-  # A1 — the delete, in a form that CAN print a zero. `git grep -c` cannot: it
-  # prints per-file counts and on zero matches prints nothing and exits 1
-  # (OWNER-DECISIONS.md, "Known UNSATISFIABLE verifier contracts").
+  # SUPERSEDED SCOPE. W0.6 originally claimed only the direct-to-Google transport was gone.
+  # The stack that hosted it — IPushNotificationService/IDeviceTokenStore/IPushTransport and
+  # their in-memory implementations — is now deleted too, so the transport legs below assert
+  # the stronger fact. DevicePlatform went with the stack; the platform discriminator now
+  # lives in push-notification (:10040), which owns the device rows.
   assert_eq A1 "no FcmPushTransport symbol anywhere under src/" 0 "$(grep_files FcmPushTransport -- src/)"
-  A1POS="$(grep_files InMemoryPushTransport -- src/)"
-  if [ "$A1POS" -gt 0 ]; then ok A1pos "POS control: the same grep form finds InMemoryPushTransport  [$A1POS file(s)]"
+  A1POS="$(grep_files JeebPushTopicMap -- src/)"
+  if [ "$A1POS" -gt 0 ]; then ok A1pos "POS control: the same grep form finds JeebPushTopicMap  [$A1POS file(s)]"
   else bad A1pos "POS control: grep reached src/ at all  [0 — the zero above proves nothing]"; fi
 
-  # A2 — the anti-OVER-deletion leg. DevicePlatform.Fcm is the device-token
-  # discriminator, not a transport; deleting it breaks routing while leaving
-  # every "is the transport gone?" assertion green.
-  assert_ge A2 "DevicePlatform.Fcm survives (platform discriminator)" 2 "$(grep_count 'DevicePlatform.Fcm' -- src/)"
+  # A2 — the whole stack, by symbol. The unit-test project holds the assembly-level twin
+  # (InGatewayPushStackDeletedTests), which is the leg that actually executes.
+  assert_eq A2 "no IPushNotificationService/IPushTransport/IDeviceTokenStore under src/" 0 \
+            "$(grep_files 'IPushNotificationService\|IPushTransport\|IDeviceTokenStore' -- src/JeebGateway/Push src/JeebGateway/Controllers src/JeebGateway/Disputes src/JeebGateway/Availability src/JeebGateway/Services)"
 
   # A3 — KEY-level, not substring: the delete leaves a _comment_Fcm_REMOVED
   # tombstone that names all three keys, so a grep reds on correct work.
@@ -154,9 +156,9 @@ item_begin "W0.6" "the in-gateway FCM transport is DELETED, not flag-disabled"
   A4POS="$(grep_count 'identitytoolkit.googleapis.com' -- src/)"
   assert_ge A4pos "POS control: the same grep finds the surviving (unrelated) Google endpoint" 1 "$A4POS"
 
-  run_filter A5_A9 "assembly/DI/options/config legs (Gw1Pack.W06_)" "FullyQualifiedName~Gw1Pack.W06_"
-  run_filter A10   "the writer's own push registration tests still green" \
-                   "FullyQualifiedName~Push.PushTransportRegistrationTests"
+  # A5_A9/A10 retired with their subject: Gw1Pack.W06_ and Push.PushTransportRegistrationTests
+  # asserted the shape of the in-memory transport registrations, which no longer exist.
+  # The executing replacement is JeebGateway.UnitTests.InGatewayPushStackDeletedTests.
 
 item_end
 fi
@@ -297,10 +299,10 @@ class for a host suite, and per §4 an honest NOT-PROVEN never counts as a pass.
            "Settlement ledger entry posted idempotencyKey=" — unique to the durable
            client, written only after the INSERT returned a row (leg S5).
 
-  device   W0.6 says nothing about whether push works. InMemoryPushTransport
-           enqueues to a ConcurrentQueue and the send is then counted Delivered.
-           The claim under test is only that the gateway no longer CONTAINS a path
-           that speaks to a push provider itself.
+  device   W0.6 says nothing about whether push ARRIVES on a handset. The claim
+           under test is only that the gateway no longer CONTAINS a path that
+           speaks to a push provider itself, and no longer contains the dead
+           in-process stack that used to absorb every send as NoDevices.
 NOTPROVEN
 
 echo

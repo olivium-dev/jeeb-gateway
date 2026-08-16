@@ -775,17 +775,10 @@ builder.Services.AddScoped<JeebGateway.Notifications.IOfferPushNotifier,
 builder.Services.AddSingleton<JeebGateway.Notifications.IDetachedPushDispatcher,
     JeebGateway.Notifications.DetachedPushDispatcher>();
 
-// b02 WAVE B.1 — the delivery-status → push trigger, on STACK B. Delivery status was the
-// LAST push category still composed inside the gateway and handed to the in-gateway
-// IPushNotificationService, whose InMemoryPushTransport enqueues to an in-process queue and
-// reports Delivered. Six mobile surfaces polled (5s/10s/60s) precisely because the push they
-// were waiting for never left the process. Scoped: composes the SCOPED
+// b02 WAVE B.1 — the delivery-status → push trigger, on STACK B. Scoped: composes the SCOPED
 // ServicePushNotificationClient (:10040), exactly like chat/offer/new-request.
-// ⛔ Do NOT "fix" the old path by re-adding an in-gateway transport that dials a push
-// provider directly — permanently forbidden (the gateway must never speak to a push
-// provider itself; b05/GW1 W0.6 DELETED the class and its config switch). It would not
-// work anyway: IDeviceTokenStore.RegisterAsync has zero production callers, so the send
-// resolves NoDevices.
+// ⛔ Never re-add an in-gateway transport that dials a push provider: permanently forbidden,
+// and the whole in-gateway stack it belonged to is now deleted.
 builder.Services.AddScoped<JeebGateway.Notifications.IDeliveryStatusPushNotifier,
     JeebGateway.Notifications.DeliveryStatusPushNotifier>();
 
@@ -795,10 +788,17 @@ builder.Services.AddScoped<JeebGateway.Notifications.IDeliveryStatusPushNotifier
 builder.Services.AddScoped<JeebGateway.Notifications.INewRequestPushNotifier,
     JeebGateway.Notifications.NewRequestPushNotifier>();
 
+// OA-21 — the fan-out's audience comes from delivery-service, which OWNS presence.
+// It used to come from the in-process InMemoryAvailabilityStore, which a restart emptied:
+// every request then fanned out to NOBODY, silently, with no self-heal (register #9).
+// Scoped to match IDeliveryServiceClient; holds no state of its own.
+builder.Services.AddScoped<JeebGateway.Availability.IPushAudienceSource,
+    JeebGateway.Availability.DeliveryServicePushAudience>();
+
 // P1 — new-request fan-out: options + the off-hot-path dispatch rail. The notifier stays
 // SCOPED (it composes the SCOPED ServicePushNotificationClient); the queue is a singleton
 // buffer and the processor is a hosted service that opens a FRESH scope per job.
-// DI lifetime note (do NOT "fix" these): IAvailabilityStore = Singleton,
+// DI lifetime note (do NOT "fix" these): IPushAudienceSource = Scoped,
 // ServicePushNotificationClient = Scoped, INewRequestPushNotifier = Scoped.
 // Singleton-into-scoped is safe; scoped-into-singleton is the captive-dependency bug the
 // per-job scope in NewRequestFanoutProcessor avoids.
@@ -959,10 +959,6 @@ builder.Services
     .Validate(
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.RefreshTokenStoreMode),
         "FeatureFlags:RefreshTokenStoreMode must be one of: "
-            + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
-    .Validate(
-        o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.AccountDeletionMode),
-        "FeatureFlags:AccountDeletionMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
     .Validate(
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.OtpEscalationsMode),
@@ -1503,50 +1499,8 @@ if (builder.Configuration.GetValue("FeatureFlags:UseUpstream:RemoteUserPreferenc
 }
 builder.Services.AddSavedLocations();
 
-// Push notification pipeline (T-backend-022).
-//
-// One unified outbound surface for every push-eligible trigger: new offers,
-// offer acceptance, status changes, chat, KYC, rating reminders. The service
-// applies the user's NotificationPreferences (always-on triggers bypass),
-// resolves registered device tokens, fans out through the platform-matched
-// IPushTransport, and queues a single 30-second retry on first-attempt
-// failure.
-//
-// Production swap: the in-memory FCM/APNs transports become real Google FCM
-// HTTP v1 and Apple APNs HTTP/2 clients (NSwag-generated against the
-// notification-service surface, per the BFF aggregation pattern).
-// The device-token half of that swap is DEAD: W5-11 deleted GatewayPostgres and every
-// migration, so no Postgres device_tokens implementation is coming. See register #10 below.
-builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOptions.SectionName));
-// The device-register HTTP surface is now the salehly-mirrored
-// PushNotificationController, backed by the NSwag ServicePushNotificationClient
-// (registered below as a named + scoped client). The former jeeb-specific
-// PushController + IPushNotificationClient device-register passthrough was removed
-// with the salehly mirror. InMemoryDeviceTokenStore is deliberately KEPT because
-// the SEND path (PushNotificationService fan-out, consumed by KycService,
-// ChatDispatcher, DisputeService, PushAutoOfflineNotifier) still
-// reads device tokens from it — that is a separate C-domain (push transport /
-// retry / SLA) with no upstream owner yet. Do not delete this store until the
-// push-transport service lands; deleting it now would break the send pipeline.
-// Durability register #10 — device tokens. No durable store since W5-11: the line below binds
-// UNCONDITIONALLY to InMemoryDeviceTokenStore, so every push fan-out target is lost on a bounce.
-builder.Services.AddSingleton<IDeviceTokenStore, InMemoryDeviceTokenStore>();
-// Durability register #12 [push] — push-reliability pair (JEBV4-136 delivery tracker, JEBV4-144 dispatch
-// outbox below); JEBV4-137 rail deleted (W5 retire-4). NOTE: #12 is used twice — see #12 [prohibited-items].
-builder.Services.AddSingleton<InMemoryPushDeliveryTracker>();
-builder.Services.AddSingleton<IPushDeliveryTracker>(sp => sp.GetRequiredService<InMemoryPushDeliveryTracker>());
-
-// b05/GW1 W0.6 — the in-gateway direct-to-Google push transport is DELETED, not
-// flag-disabled, per owner ruling: the gateway must NEVER speak to a push provider
-// itself; every push leaves via the push microservice (:10040). The switch that used
-// to select it, its two credential options and its config keys went with it, so this
-// registration is now UNCONDITIONAL and there is no branch left to flip.
-// DevicePlatform.Fcm stays — it is the platform DISCRIMINATOR on the device token, not
-// a transport, and PushNotificationService routes on it.
-builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Fcm));
-builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
-
-builder.Services.AddSingleton<IPushNotificationService, PushNotificationService>();
+// The in-gateway push stack is DELETED (durability registers #10 + #12 [push] die with it):
+// it resolved NoDevices on every send. Producers now hand over via PushHandover.
 
 // JEB-1494: Gateway notification render→dispatch primitive.
 // INotificationDispatchOutbox (JEBV4-144): no durable gateway store since W5-11 — a queued-but-
@@ -1820,8 +1774,8 @@ builder.Services.AddSingleton<IRatingService, RatingService>();
 
 // OTP handover verification + admin escalation (T-backend-015 / JEEB-33).
 builder.Services.Configure<OtpHandoverOptions>(builder.Configuration.GetSection(OtpHandoverOptions.SectionName));
-// Durability register #5 — admin escalations. No durable gateway store since W5-11: process memory,
-// lost on every bounce, at OtpEscalationsMode=local (default); delivery-service from the read rung up.
+// Durability register #5 — admin escalations. Durable from the read rung up (delivery-service
+// Postgres), MSI's value since 2026-08-16; process memory only at the "local" code default.
 builder.Services.AddSingleton<InMemoryAdminEscalationStore>();
 
 // gwdbx W3-02 (ADR-0009) — from dual-write-upstream-read up, delivery-service SERVES the admin
@@ -2121,7 +2075,9 @@ builder.Services.AddScoped<IGenericCaseGatewayService, GenericCaseGatewayService
 if (builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing"))
 {
     builder.Services.AddSingleton<IDisputeStore, InMemoryDisputeStore>();
-    builder.Services.AddSingleton<IDisputeService, DisputeService>();
+    // SCOPED since the push hand-over moved onto the SCOPED IGenericEventDispatcher;
+    // a singleton here is a captive dependency. Sole consumer DisputesController is scoped.
+    builder.Services.AddScoped<IDisputeService, DisputeService>();
     builder.Services.Configure<DisputeEvidenceOptions>(
         builder.Configuration.GetSection(DisputeEvidenceOptions.SectionName));
     builder.Services.AddSingleton<IDisputeCaseStore, InMemoryDisputeCaseStore>();
@@ -2194,8 +2150,8 @@ builder.Services.AddSingleton<IDualRoleService, DualRoleService>();
 builder.Services.AddSingleton<InMemoryFinancialLedger>();
 builder.Services.AddSingleton<IFinancialLedgerAnonymizer>(sp => sp.GetRequiredService<InMemoryFinancialLedger>());
 builder.Services.AddSingleton<InMemoryAccountDeletionStore>();
-// Durability register #15 — account-deletion (GDPR 30-day purge SLA). No durable gateway store since
-// W5-11: InMemoryAccountDeletionStore is the root, so a pending purge and its SLA clock die on a bounce.
+// Durability register #15 — account-deletion (GDPR 30-day purge SLA) is CLOSED: the erasure and its
+// deadline are state-service work items (IAccountDeletionWorkflow). This chain is now unreachable.
 
 // JEBV4-215 (E20) — route the account-deletion soft status-flip THROUGH remote-user-preferences
 // (Q-079 / GR-2 DoD: the flip persists via remote-user-preferences, NOT user-management),
@@ -2207,8 +2163,8 @@ builder.Services.AddSingleton<InMemoryAccountDeletionStore>();
 // 192.168.2.50:10067; owner declined the env flip), so the mirror fails open there and the
 // gateway-local persistence path is the real durable fallback — exactly the fail-open-then-local
 // shape notification-prefs took post-#274. When the flag is off, the local store is used directly.
-// gwdbx W3-05 — StateServiceAccountDeletionStore then DECORATES whichever local chain is wired,
-// dual-writing the deletion to /v1/work-items once AccountDeletionMode reaches dual-write-local-read.
+// gwdbx STEP-10 — the flag-gated state-service mirror is GONE: 3ee131d made
+// IAccountDeletionWorkflow the unconditional owner of the erasure work item and its deadline.
 builder.Services.AddSingleton<IAccountDeletionStore>(sp =>
 {
     IAccountDeletionStore local = sp.GetRequiredService<InMemoryAccountDeletionStore>();
@@ -2219,21 +2175,11 @@ builder.Services.AddSingleton<IAccountDeletionStore>(sp =>
             sp.GetRequiredService<IServiceScopeFactory>(),
             sp.GetRequiredService<ILogger<JeebGateway.Users.RemoteUserPreferencesAccountDeletionStore>>());
     }
-    return new JeebGateway.Users.StateServiceAccountDeletionStore(
-        local,
-        sp.GetRequiredService<IServiceScopeFactory>(),
-        sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<JeebGateway.Migration.GwdbxMigrationOptions>>(),
-        sp.GetRequiredService<ILogger<JeebGateway.Users.StateServiceAccountDeletionStore>>());
+    return local;
 });
 
-// The scheduled purge worker sweeps every open deletion (pending_active_delivery → scheduled →
-// completed hard-delete once the 30-day SLA is due). It is now ALWAYS scheduled — the soft-delete
-// flip (UserController.DeleteProfile) writes to the store in every environment, so its purge must
-// run everywhere, not only when Postgres is configured. It resolves IAccountDeletionStore per tick
-// and drives AdvanceAsync on the inner state machine through the decorator (additive).
-builder.Services.AddSingleton<JeebGateway.Users.AccountDeletionPurgeWorker>();
-builder.Services.AddHostedService(sp =>
-    sp.GetRequiredService<JeebGateway.Users.AccountDeletionPurgeWorker>());
+// AccountDeletionPurgeWorker is RETIRED: it swept the in-memory store, which no request path
+// writes to any more. The purge now runs off the durable work item (DurableWorkSweepWorker).
 
 // Data-export pipeline (T-backend-042, GDPR-like right of access).
 // POST /users/me/data-export queues a full export (profile, orders,
@@ -2242,8 +2188,8 @@ builder.Services.AddHostedService(sp =>
 // SLA lives in DataExportOptions.Sla. The promised Postgres worker is DEAD (W5-11 deleted the
 // schema and the worker); the lifecycle moves to state-service work items — see register #16.
 builder.Services.Configure<DataExportOptions>(builder.Configuration.GetSection(DataExportOptions.SectionName));
-// Durability register #16 — data-export (GDPR 72-hr SLA + single-use download tokens). No durable
-// store since W5-11: queued exports, download tokens and SLA deadlines die on a bounce at DataExportMode=local.
+// Durability register #16 — data-export (GDPR 72-hr SLA + single-use download tokens) is CLOSED:
+// the queue, the deadline and the capability hash are state-service work items. Chain unreachable.
 builder.Services.AddSingleton<InMemoryDataExportStore>();
 
 // gwdbx W1-06 (G-20) — the encrypt-then-upload artifact pipeline. Dormant while
@@ -2499,7 +2445,9 @@ builder.Services.AddSingleton<IOfferRequestIndex>(
 // rules as any other trigger.
 builder.Services.AddSingleton<IAutoOfflineNotifier, PushAutoOfflineNotifier>();
 // Durability register #9 — availability. Presence itself SURVIVES a bounce (jeeber GET/PATCH are wired through
-// to delivery-service, S06); what this wiped store kills is NewRequestPushNotifier's push audience — see its doc.
+// to delivery-service, S06). OA-21 took the PUSH AUDIENCE off this store: NewRequestPushNotifier now reads
+// IPushAudienceSource (delivery-service) instead, so a restart no longer silences every new-request fan-out.
+// The remaining readers are the admin ops-map and AutoOfflineSweeper, which ADR-0009 still pins here.
 builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();
 builder.Services.AddHostedService<AutoOfflineSweeper>();
 
@@ -2741,12 +2689,6 @@ builder.Services
         o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.ProhibitedItems)
              || stateServiceWired,
         $"FeatureFlags:ProhibitedItemsMode is at or above dual-write-upstream-read, which makes jeeb-state-service the lexicon READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}).")
-    // W3-05 (A10): from the read flip up state-service /v1/work-items serves the GDPR deletion
-    // status, so an unwired dependency must refuse the boot rather than answer from a store that
-    // empties on every bounce.
-    .Validate(
-        o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.AccountDeletion) || stateServiceWired,
-        $"FeatureFlags:AccountDeletionMode is at or above dual-write-upstream-read, which makes jeeb-state-service the account-deletion READ authority, but it is not wired ({JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey} / {JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey}).")
     // W3-02 (A10): the admin escalation queue is served by delivery-service from the read flip up.
     .Validate(
         o => !JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(o.OtpEscalations) || gwdbxDeliveryWired,
@@ -2845,6 +2787,66 @@ else
     builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,
         JeebGateway.StateService.Idempotency.InMemoryIdempotencyStore>();
 }
+
+// ---------------------------------------------------------------------------
+// Durable GDPR work (registers #15 + #16) — state-service owns both legal clocks
+// ---------------------------------------------------------------------------
+// The erasure purge deadline and the export SLA/download capability were held in process memory,
+// so a restart silently dropped a pending purge and every queued export. Both now live in
+// state-service work items: due_at carries the deadline, attempts/max_attempts the retry budget,
+// and the claim/lease rail executes them. The gateway keeps no record of either.
+builder.Services.Configure<JeebGateway.Jobs.DurableWorkExecutionOptions>(
+    builder.Configuration.GetSection(JeebGateway.Jobs.DurableWorkExecutionOptions.SectionName));
+builder.Services.Configure<JeebGateway.Jobs.AccountDeletionExecutionOptions>(
+    builder.Configuration.GetSection(JeebGateway.Jobs.AccountDeletionExecutionOptions.SectionName));
+builder.Services.Configure<JeebGateway.Jobs.DurableWorkSweepOptions>(
+    builder.Configuration.GetSection(JeebGateway.Jobs.DurableWorkSweepOptions.SectionName));
+builder.Services.AddSingleton(new JeebGateway.Artifacts.PrivateArtifactStoreOptions());
+
+if (stateServiceWired)
+{
+    var durableWorkBaseUrl = stateOptions.BaseUrl.TrimEnd('/') + "/";
+    var durableWorkClient = builder.Services
+        .AddHttpClient<JeebGateway.StateService.Work.IStateWorkItemClient,
+            JeebGateway.StateService.Work.StateWorkItemClient>(http =>
+        {
+            http.BaseAddress = new Uri(durableWorkBaseUrl);
+            http.Timeout = TimeSpan.FromSeconds(stateOptions.TimeoutSeconds);
+        });
+    if (stateOptions.HasServiceCredential)
+    {
+        durableWorkClient.AddHttpMessageHandler<JeebGateway.StateService.StateServiceCredentialHandler>();
+    }
+}
+else
+{
+    // Fails every call loudly rather than degrading to a store that forgets the legal deadline.
+    builder.Services.AddSingleton<JeebGateway.StateService.Work.IStateWorkItemClient,
+        JeebGateway.StateService.Work.UnavailableStateWorkItemClient>();
+}
+
+// Export bytes never live in the gateway; the private artifact owner holds them and fails
+// closed when PRIVATE_ARTIFACT_STORE_BASE_URL is unset, so no in-memory payload can reappear.
+builder.Services.AddHttpClient<JeebGateway.Artifacts.IPrivateArtifactStore,
+    JeebGateway.Artifacts.PrivateArtifactStoreHttpClient>();
+
+builder.Services.AddSingleton<JeebGateway.Users.DataExport.IDataExportTokenProtector,
+    JeebGateway.Users.DataExport.DataExportTokenProtector>();
+
+// The two facades the controllers talk to. Registering IDataExportWorkflow also repairs
+// DataExportController, which 500s on activation while the interface is unregistered.
+builder.Services.AddScoped<JeebGateway.Users.DataExport.IDataExportWorkflow,
+    JeebGateway.Users.DataExport.StateDataExportWorkflow>();
+builder.Services.AddScoped<JeebGateway.Users.IAccountDeletionWorkflow,
+    JeebGateway.Users.StateAccountDeletionWorkflow>();
+
+// Handlers are resolved per sweep item; the executor fans them out by Kind.
+builder.Services.AddScoped<JeebGateway.Jobs.IDurableWorkItemHandler,
+    JeebGateway.Jobs.AccountDeletionWorkHandler>();
+builder.Services.AddScoped<JeebGateway.Jobs.IDurableWorkItemHandler,
+    JeebGateway.Jobs.DataExportWorkHandler>();
+builder.Services.AddScoped<JeebGateway.Jobs.DurableWorkSweepExecutor>();
+builder.Services.AddHostedService<JeebGateway.Jobs.DurableWorkSweepWorker>();
 
 // Global RFC 7807 ProblemDetails + last-line exception handler. Guarantees an
 // unhandled exception (notably an upstream non-2xx that bubbles up as an

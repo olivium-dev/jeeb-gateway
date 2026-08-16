@@ -506,6 +506,77 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<AvailableProviderUpstream>> ListAvailableProvidersAsync(
+        double? lat,
+        double? lng,
+        double? radiusKm,
+        IReadOnlyCollection<string>? vehicleTypes,
+        int limit,
+        CancellationToken ct)
+    {
+        // OA-21 audience read. GET /api/v1/providers/available — online AND
+        // heartbeat-fresh AND located, per delivery-service's own freshness rule.
+        var query = new List<string>(4);
+
+        // The circle is all-or-nothing upstream; sending a partial one is a 400.
+        if (lat is { } centreLat && lng is { } centreLng && radiusKm is { } radius && radius > 0)
+        {
+            query.Add(FormattableString.Invariant($"lat={centreLat}"));
+            query.Add(FormattableString.Invariant($"lng={centreLng}"));
+            query.Add(FormattableString.Invariant($"radius_km={radius}"));
+        }
+
+        if (vehicleTypes is { Count: > 0 })
+        {
+            query.Add("vehicle_type=" + Uri.EscapeDataString(string.Join(',', vehicleTypes)));
+        }
+
+        if (limit > 0)
+        {
+            query.Add(FormattableString.Invariant($"limit={limit}"));
+        }
+
+        var uri = "providers/available"
+            + (query.Count == 0 ? string.Empty : "?" + string.Join('&', query));
+
+        using var response = await _http.GetAsync(uri, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            // NOT degraded to an empty list: an unreadable audience must never be
+            // indistinguishable from an empty one (durability register #9).
+            var reason = await TryReadReasonAsync(response, ct);
+            throw new DeliveryAvailabilityException((int)response.StatusCode, reason);
+        }
+
+        var body = await DeserializeAsync<ProvidersEnvelope<AvailableProviderUpstream>>(response, ct);
+        return body.Providers ?? (IReadOnlyList<AvailableProviderUpstream>)Array.Empty<AvailableProviderUpstream>();
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<JeeberAvailabilityUpstream>> ListKnownProvidersAsync(
+        DateTimeOffset since, int limit, CancellationToken ct)
+    {
+        // OA-21 fallback audience read. GET /api/v1/providers/known?since= — every
+        // provider seen since the cutoff, online or not. `since` is required upstream.
+        var uri = "providers/known?since="
+            + Uri.EscapeDataString(since.ToUniversalTime().ToString("o"));
+        if (limit > 0)
+        {
+            uri += FormattableString.Invariant($"&limit={limit}");
+        }
+
+        using var response = await _http.GetAsync(uri, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            var reason = await TryReadReasonAsync(response, ct);
+            throw new DeliveryAvailabilityException((int)response.StatusCode, reason);
+        }
+
+        var body = await DeserializeAsync<ProvidersEnvelope<JeeberAvailabilityUpstream>>(response, ct);
+        return body.Providers ?? (IReadOnlyList<JeeberAvailabilityUpstream>)Array.Empty<JeeberAvailabilityUpstream>();
+    }
+
+    /// <inheritdoc />
     public async Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct)
     {
         // Courier matching relocated to delivery-service (Go). Canonical route:
