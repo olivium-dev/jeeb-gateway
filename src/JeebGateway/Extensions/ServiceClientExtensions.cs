@@ -64,9 +64,6 @@ public static class ServiceClientExtensions
         // W5-02 request-owner surface credential (delivery-service importauth bearer).
         services.AddTransient<Services.Clients.DeliveryImportCredentialHandler>();
 
-        // role-service (net-new grant/revoke seam) — static X-Api-Key auth.
-        services.AddTransient<Services.Clients.RoleServiceApiKeyHandler>();
-
         // settlement-service — static SERVICE-scope bearer. The ADMIN scope is never wired here.
         services.AddTransient<Financials.SettlementServiceTokenHandler>();
 
@@ -524,15 +521,8 @@ public static class ServiceClientExtensions
         heartBeatBuilder.AddHttpMessageHandler<Services.Clients.HeartBeatServiceAuthKeyHandler>();
         heartBeatBuilder.AddResilienceHandler("standard", ConfigureStandardResilience);
 
-        // role-service (olivium-dev/role-service, PR #1) — KYC-approve role grant/read
-        // seam. LIVE-DARK; FeatureFlags:UseUpstream:RoleService defaults OFF everywhere.
-        AddNamedDownstreamClient(services, config, "role-service", "Services:RoleService:BaseUrl");
-        var roleServiceBuilder = services.AddHttpClient<IRoleServiceClient, HttpRoleServiceClient>(http =>
-            BindBaseAddress(http, config, "Services:RoleService"));
-        roleServiceBuilder.AddHttpMessageHandler<BearerForwardingHandler>();
-        roleServiceBuilder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
-        roleServiceBuilder.AddHttpMessageHandler<Services.Clients.RoleServiceApiKeyHandler>();
-        roleServiceBuilder.AddResilienceHandler("standard", ConfigureStandardResilience);
+        // role-service RETIRED 2026-08-16 (owner O8): never left LIVE-DARK, its DB died with
+        // 192.168.2.20 (D1). Roles are user-management's. Do NOT re-add.
 
         // settlement-service — gwdbx W2-R11. Unversioned routes (A21 §4). Breaker + timeout, NO
         // transport retry on a money POST (ServiceWalletClient precedent); completion legs re-drive.

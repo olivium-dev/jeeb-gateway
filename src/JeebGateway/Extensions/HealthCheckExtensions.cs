@@ -97,17 +97,8 @@ public static class HealthCheckExtensions
                 tags: new[] { "ready", "downstream" });
         }
 
-        // role-service is NOT a URL-group probe either: it backs GET /v1/users/me whenever
-        // FeatureFlags:UseUpstream:RoleService is on, and a status-only probe cannot fail against
-        // a bare listener that answers 200 with Content-Length: 0. The check requires a body and
-        // self-downgrades to Degraded when the kill switch is off. See the D1 outage.
-        if (!string.IsNullOrWhiteSpace(config[JeebGateway.Services.Clients.RoleServiceHealthCheck.BaseUrlConfigurationKey]))
-        {
-            checks.AddCheck<JeebGateway.Services.Clients.RoleServiceHealthCheck>(
-                JeebGateway.Services.Clients.RoleServiceHealthCheck.Name,
-                failureStatus: HealthStatus.Unhealthy,
-                tags: new[] { "ready", "downstream" });
-        }
+        // role-service probe REMOVED 2026-08-16 (owner O8): the service is retired, so the
+        // check it added at D1 has nothing to probe. It was the roster's only Degraded entry.
 
         // unified-payment-gateway (Elixir UPG) was decoupled (sha-553711610c2a /
         // main 9f05a991): the old GET /health route was REMOVED (now 404) and the

@@ -54,7 +54,7 @@ UseUpstream:Push                  baseline - # appsettings-only (property remove
 UseUpstream:Ratings               baseline - # pre-existing prod flag
 UseUpstream:Realtime              baseline - # pre-existing prod flag
 UseUpstream:RemoteUserPreferences baseline - # pre-existing prod flag, inert
-UseUpstream:RoleService           baseline - # code-only (no appsettings key)
+# UseUpstream:RoleService  DELETED 2026-08-16 (owner decision O8 — retire role-service). It was code-only, false in every environment, and never cut over. The gateway's role grant/read/revoke seam is user-management's again: RoleServiceBackedDualRoleClient, IRoleServiceClient/HttpRoleServiceClient, RoleServiceApiKeyHandler, RoleServiceOptions, RoleServiceHealthCheck and tools/RoleServiceBackfill are all gone, so the repo side of the G-22 containment is empty for this name. Evidence it was unused: a ~5-minute socket watch on MSI :10091 during a live Phase V run saw exactly ONE connection and its peer was JeebGateway itself (the readiness probe deleted in the same PR), while the identical watch on user-management :10001 showed 6-14 sockets continuously.
 UseUpstream:UserManagement        baseline - # pre-existing prod flag
 UseUpstream:Voice                 baseline - # pre-existing prod flag
 DurableRequests:Enabled           baseline - # pre-existing non-UseUpstream key
@@ -227,8 +227,8 @@ Services:Realtime:GuardianSecret                     setting -
 Services:Realtime:PublicSocketUrl                    setting -
 Services:Realtime:TenantPrefix                       setting - # RTC-rename G0: LiveComm name prefix (RealtimeTopicNames), default "jeeb" = zero behavior change; flip owner-gated
 Services:Realtime:TokenTtlSeconds                    setting -
-Services:RoleService:ApiKey                          setting -
-Services:RoleService:BaseUrl                         setting -
+# Services:RoleService:ApiKey   DELETED 2026-08-16 (owner O8) — RoleServiceOptions is gone; the key is unbindable.
+# Services:RoleService:BaseUrl  DELETED 2026-08-16 (owner O8) — it also gated the readiness probe, which is gone.
 Services:Settlement:ApiToken                         setting - # W2-R11 settlement-service SERVICE scope (>=32 chars), committed blank; the ADMIN scope is NEVER bound in the gateway
 Services:Settlement:BaseUrl                          setting - # W2-R11 settlement-service; unset SKIPS the readiness probe and lands the A9 roster at 19 instead of 20
 TestControlPlane:Enabled                             setting - # prod-off test control plane, shares TestControlPlane:SharedSecret

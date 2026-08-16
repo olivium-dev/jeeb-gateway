@@ -107,6 +107,7 @@ step-6 release; `forbidden` rows (incl. `UseUpstream:Payments`, G-05) stay forev
 | `PostgresRequestExpiryAuthority` + local requests store legs (`DurableRequestsStore` Postgres leg) | **W5-11** (after W5-04 re-points `RequestExpiry:Source`) |
 | `InMemoryLocationStore` | **W3-19** (geo-slot exit, O8-gated) |
 | 43-migration folder `db/` + `db/apply.sh` + `db/seed.sh` + Npgsql package refs | **W5-11** (A8 same-PR set) |
+| role-service seam: `RoleServiceBackedDualRoleClient`, `IRoleServiceClient`/`HttpRoleServiceClient`, `RoleServiceApiKeyHandler`, `RoleServiceOptions`, `RoleServiceHealthCheck`, `tools/RoleServiceBackfill` | **DONE 2026-08-16**, owner decision O8 (`OWNER-DECISIONS-2026-08-16.md`) — "in case we are not using this service, remove it completely". Out of gwdbx scope (never a gateway-DB dep) but recorded here because it moves the A9 roster, §7. `FeatureFlags:UseUpstream:RoleService` + `Services:RoleService:*` go with it. `IUserManagementDualRoleClient` now resolves straight to `HttpUserManagementDualRoleClient` under the D8 wallet guard. **No role data touched** — user-management is and stays the authority. |
 
 ## 4. Routes
 
@@ -184,6 +185,8 @@ Pre-announced transitions (deploy checklists MUST assert names + count before th
 | every wave W2-R11 → W5-09 | no further roster change permitted | **20** |
 | **W5-10** | `wallet-postgres` removed | **19** |
 | **W5-11** | `gateway-postgres` + `store-durability` removed | **17** |
+| **D1 fix** (2026-08-15/16) | `role-service` added — the outage proved it had no probe | **19** |
+| **O8** (2026-08-16) | `role-service` removed with the service itself | **18** |
 
 **W2-R11 deploy precondition.** The probe is registered only when `Services:Settlement:BaseUrl` is set
 (`AddDownstreamProbe` skips an unset BaseUrl). Set it in the env file BEFORE the symlink swap, or the
@@ -216,6 +219,13 @@ reason. It is **left unchanged here on purpose** — the probe is only registere
 set, so whether a given deployment serves 17 or 18 names depends on live configuration this PR did not
 inspect (no service was probed this round, by instruction). Reconcile it against a real
 `/health/ready` before treating either number as the contract.
+
+**RECONCILED 2026-08-16 (O8).** A real read of `http://127.0.0.1:10090/health/ready` on MSI returned
+**19 names, overall `Degraded`**, the single non-Healthy entry being `role-service`
+("unreachable at http://127.0.0.1:10091/health/ready"). That resolves the table above: the live figure
+was `17 (file) + bundler-service (its key IS set live) + role-service`. Owner decision O8 retired
+role-service the same day, so the contract is now **18 names, all Healthy** — equal to
+`ExpectedReadyCount`, which the code figure had right all along.
 
 **FINAL roster** — machine-readable copy in `scripts/gwdbx-final-health-roster.txt`:
 `admin-oidc-configuration, ban-service, cdn-service, contract-signing-service, delivery-service,
