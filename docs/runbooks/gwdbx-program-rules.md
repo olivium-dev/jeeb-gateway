@@ -56,8 +56,9 @@ and this document is their only definition in the repo:
   file is history.
 - **`CourierPositionQueue` disposition** — §3: a transient in-proc buffer, never a durable store. Cited
   from `src/JeebGateway/Realtime/CourierPositionQueue.cs:43-44`.
-- **Two ratchets** — `scripts/gateway-db-seam-allowlist.txt` is empty and may never gain a line; the 19
-  hosted registrations may never increase.
+- **Two ratchets** — `scripts/gateway-db-seam-allowlist.txt` is empty and may never gain a line; the 18
+  hosted registrations may never increase. The count was 19 until ADR-0010 (round 2) deleted
+  `ConfigImportWorker`; retiring one does not buy back headroom — the ceiling ratchets down to 18.
 - **The forbidden flag names** — §4.1 plus `scripts/gwdbx-flag-registry.txt`: the SUPERSEDED/retired keys
   stay inactive permanently, including after the registry gate itself retires (deletion ledger §8).
 
@@ -175,7 +176,7 @@ gate here is enforced automatically and nothing in this section may be read as a
 
 - `scripts/check-stateless-gateway.sh` — the R9 no-DB/no-volatile-store gate. Its seam allowlist
   (`scripts/gateway-db-seam-allowlist.txt`) is now **empty**, so the ratchet is absolute: a line added back is a
-  GR-3 violation, not a rollback. The script also pins `AddHostedService` at 2 while the source registers 19, so
+  GR-3 violation, not a rollback. The script also pins `AddHostedService` at 2 while the source registers 18, so
   it reports FAIL on main **by design** — that gap is the remaining stateless work, not a flake.
 - **G-08 guard-roster manifest gate** — RETIRED. Its source of truth,
   `src/JeebGateway/Infrastructure/StoreDurabilityGuard.cs`, was deleted at W5-11, so

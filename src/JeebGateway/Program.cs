@@ -2048,9 +2048,8 @@ builder.Services.AddSingleton<IProhibitedItemsStore>(sp =>
 // admin_actions audit table in 0005.
 builder.Services.AddSingleton<IProhibitedItemSynonymRegistry, InMemorySynonymRegistry>();
 builder.Services.AddSingleton<IProhibitedItemScanner, ProhibitedItemScanner>();
-// Durability register #13 — flagged requests. Postgres-backed (flagged_requests,
-// migration 0019) when GatewayPostgres is configured so moderation queue entries survive
-// a restart; in-memory fallback for dev/CI/test.
+// Durability register #13 — flagged requests. No durable gateway store since W5-11: process
+// memory when ProhibitedItemsMode is local, state-service moderation_review cases when upstream (ADR-0009).
 builder.Services.AddSingleton<InMemoryFlaggedRequestStore>();
 builder.Services.AddSingleton<JeebGateway.ProhibitedItems.FlaggedRequests.ILocalFlaggedRequestStore>(
     sp => sp.GetRequiredService<InMemoryFlaggedRequestStore>());
