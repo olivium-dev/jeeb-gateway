@@ -123,8 +123,8 @@ public class WebApplicationFactory<TEntryPoint>
         ReplaceSingleton<ISettlementStore, InMemorySettlementStore>(services);
         ReplaceSingleton<ISettlementLedgerClient,
             InMemorySettlementLedgerClient>(services);
-        ReplaceSingleton<ISettlementEnqueueStore,
-            TestSettlementEnqueueStore>(services);
+        // W2-R11 deleted ISettlementEnqueueStore from the gateway; there is no
+        // production seam left here to displace, so no test override is registered.
         ReplaceSingleton<ISettlementBatchStore,
             TestSettlementBatchStore>(services);
         ReplaceSingleton<JeebGateway.Financials.Cod.ICodSettlementLedger,
@@ -218,19 +218,6 @@ internal sealed class TestExternalIdempotencyStore : IExternalIdempotencyStore
             .Where(pair => pair.Key.StartsWith(prefix, StringComparison.Ordinal))
             .Select(pair => pair.Value)
             .ToArray());
-}
-
-internal sealed class TestSettlementEnqueueStore : ISettlementEnqueueStore
-{
-    private readonly ConcurrentDictionary<string, byte> _deliveryIds =
-        new(StringComparer.Ordinal);
-
-    public Task<bool> TryEnqueueAsync(
-        string deliveryId, DateTimeOffset at, CancellationToken ct) =>
-        Task.FromResult(_deliveryIds.TryAdd(deliveryId, 0));
-
-    public Task<bool> IsEnqueuedAsync(string deliveryId, CancellationToken ct) =>
-        Task.FromResult(_deliveryIds.ContainsKey(deliveryId));
 }
 
 internal sealed class TestSettlementBatchStore : ISettlementBatchStore
