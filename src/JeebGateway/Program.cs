@@ -775,17 +775,10 @@ builder.Services.AddScoped<JeebGateway.Notifications.IOfferPushNotifier,
 builder.Services.AddSingleton<JeebGateway.Notifications.IDetachedPushDispatcher,
     JeebGateway.Notifications.DetachedPushDispatcher>();
 
-// b02 WAVE B.1 — the delivery-status → push trigger, on STACK B. Delivery status was the
-// LAST push category still composed inside the gateway and handed to the in-gateway
-// IPushNotificationService, whose InMemoryPushTransport enqueues to an in-process queue and
-// reports Delivered. Six mobile surfaces polled (5s/10s/60s) precisely because the push they
-// were waiting for never left the process. Scoped: composes the SCOPED
+// b02 WAVE B.1 — the delivery-status → push trigger, on STACK B. Scoped: composes the SCOPED
 // ServicePushNotificationClient (:10040), exactly like chat/offer/new-request.
-// ⛔ Do NOT "fix" the old path by re-adding an in-gateway transport that dials a push
-// provider directly — permanently forbidden (the gateway must never speak to a push
-// provider itself; b05/GW1 W0.6 DELETED the class and its config switch). It would not
-// work anyway: IDeviceTokenStore.RegisterAsync has zero production callers, so the send
-// resolves NoDevices.
+// ⛔ Never re-add an in-gateway transport that dials a push provider: permanently forbidden,
+// and the whole in-gateway stack it belonged to is now deleted.
 builder.Services.AddScoped<JeebGateway.Notifications.IDeliveryStatusPushNotifier,
     JeebGateway.Notifications.DeliveryStatusPushNotifier>();
 
@@ -1510,50 +1503,8 @@ if (builder.Configuration.GetValue("FeatureFlags:UseUpstream:RemoteUserPreferenc
 }
 builder.Services.AddSavedLocations();
 
-// Push notification pipeline (T-backend-022).
-//
-// One unified outbound surface for every push-eligible trigger: new offers,
-// offer acceptance, status changes, chat, KYC, rating reminders. The service
-// applies the user's NotificationPreferences (always-on triggers bypass),
-// resolves registered device tokens, fans out through the platform-matched
-// IPushTransport, and queues a single 30-second retry on first-attempt
-// failure.
-//
-// Production swap: the in-memory FCM/APNs transports become real Google FCM
-// HTTP v1 and Apple APNs HTTP/2 clients (NSwag-generated against the
-// notification-service surface, per the BFF aggregation pattern).
-// The device-token half of that swap is DEAD: W5-11 deleted GatewayPostgres and every
-// migration, so no Postgres device_tokens implementation is coming. See register #10 below.
-builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOptions.SectionName));
-// The device-register HTTP surface is now the salehly-mirrored
-// PushNotificationController, backed by the NSwag ServicePushNotificationClient
-// (registered below as a named + scoped client). The former jeeb-specific
-// PushController + IPushNotificationClient device-register passthrough was removed
-// with the salehly mirror. InMemoryDeviceTokenStore is deliberately KEPT because
-// the SEND path (PushNotificationService fan-out, consumed by KycService,
-// ChatDispatcher, DisputeService, PushAutoOfflineNotifier) still
-// reads device tokens from it — that is a separate C-domain (push transport /
-// retry / SLA) with no upstream owner yet. Do not delete this store until the
-// push-transport service lands; deleting it now would break the send pipeline.
-// Durability register #10 — device tokens. No durable store since W5-11: the line below binds
-// UNCONDITIONALLY to InMemoryDeviceTokenStore, so every push fan-out target is lost on a bounce.
-builder.Services.AddSingleton<IDeviceTokenStore, InMemoryDeviceTokenStore>();
-// Durability register #12 [push] — push-reliability pair (JEBV4-136 delivery tracker, JEBV4-144 dispatch
-// outbox below); JEBV4-137 rail deleted (W5 retire-4). NOTE: #12 is used twice — see #12 [prohibited-items].
-builder.Services.AddSingleton<InMemoryPushDeliveryTracker>();
-builder.Services.AddSingleton<IPushDeliveryTracker>(sp => sp.GetRequiredService<InMemoryPushDeliveryTracker>());
-
-// b05/GW1 W0.6 — the in-gateway direct-to-Google push transport is DELETED, not
-// flag-disabled, per owner ruling: the gateway must NEVER speak to a push provider
-// itself; every push leaves via the push microservice (:10040). The switch that used
-// to select it, its two credential options and its config keys went with it, so this
-// registration is now UNCONDITIONAL and there is no branch left to flip.
-// DevicePlatform.Fcm stays — it is the platform DISCRIMINATOR on the device token, not
-// a transport, and PushNotificationService routes on it.
-builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Fcm));
-builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Apns));
-
-builder.Services.AddSingleton<IPushNotificationService, PushNotificationService>();
+// The in-gateway push stack is DELETED (durability registers #10 + #12 [push] die with it):
+// it resolved NoDevices on every send. Producers now hand over via PushHandover.
 
 // JEB-1494: Gateway notification render→dispatch primitive.
 // INotificationDispatchOutbox (JEBV4-144): no durable gateway store since W5-11 — a queued-but-
@@ -2128,7 +2079,9 @@ builder.Services.AddScoped<IGenericCaseGatewayService, GenericCaseGatewayService
 if (builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing"))
 {
     builder.Services.AddSingleton<IDisputeStore, InMemoryDisputeStore>();
-    builder.Services.AddSingleton<IDisputeService, DisputeService>();
+    // SCOPED since the push hand-over moved onto the SCOPED IGenericEventDispatcher;
+    // a singleton here is a captive dependency. Sole consumer DisputesController is scoped.
+    builder.Services.AddScoped<IDisputeService, DisputeService>();
     builder.Services.Configure<DisputeEvidenceOptions>(
         builder.Configuration.GetSection(DisputeEvidenceOptions.SectionName));
     builder.Services.AddSingleton<IDisputeCaseStore, InMemoryDisputeCaseStore>();

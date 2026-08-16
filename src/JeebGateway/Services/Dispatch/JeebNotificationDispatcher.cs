@@ -1,5 +1,5 @@
 using JeebGateway.Migration;
-using JeebGateway.Push;
+using JeebGateway.Notifications;
 using JeebGateway.service.ServicePushNotification;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -12,9 +12,9 @@ namespace JeebGateway.Services.Dispatch;
 /// <para><b>Durability model.</b>  The outbox binding is mode-gated, never Postgres: in-memory today (MSI
 /// sets no override) or StateServiceNotificationDispatchOutbox at NotificationOutboxMode=upstream-authority.</para>
 ///
-/// <para><b>Push transport.</b>  Uses the existing
-/// <see cref="IPushNotificationService"/> pipeline so preference filtering,
-/// device-token resolution, and platform retry are all inherited for free.</para>
+/// <para><b>Push transport.</b>  Hands over to notification-service through
+/// <see cref="IGenericEventDispatcher"/>; at upstream-authority it posts the push service
+/// directly instead. The in-gateway push stack it used to call is deleted.</para>
 /// </summary>
 public sealed class JeebNotificationDispatcher : IJeebNotificationDispatcher
 {
@@ -22,7 +22,7 @@ public sealed class JeebNotificationDispatcher : IJeebNotificationDispatcher
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
 
     private readonly INotificationTemplateRenderer _renderer;
-    private readonly IPushNotificationService _push;
+    private readonly IGenericEventDispatcher _events;
     private readonly INotificationDispatchOutbox _outbox;
     private readonly ILogger<JeebNotificationDispatcher> _logger;
     private readonly ServicePushNotificationClient? _servicePush;
@@ -30,14 +30,14 @@ public sealed class JeebNotificationDispatcher : IJeebNotificationDispatcher
 
     public JeebNotificationDispatcher(
         INotificationTemplateRenderer renderer,
-        IPushNotificationService push,
+        IGenericEventDispatcher events,
         INotificationDispatchOutbox outbox,
         ILogger<JeebNotificationDispatcher> logger,
         IOptions<GwdbxMigrationOptions>? migration = null,
         ServicePushNotificationClient? servicePush = null)
     {
         _renderer = renderer;
-        _push = push;
+        _events = events;
         _outbox = outbox;
         _logger = logger;
         _servicePush = servicePush;
@@ -119,20 +119,31 @@ public sealed class JeebNotificationDispatcher : IJeebNotificationDispatcher
                 return new NotificationDispatchResult(entry.Id, WasDeduplicated: false, NotificationDispatchStatus.Delivered);
             }
 
-            var pushRequest = new PushNotificationRequest(
-                UserId: recipientUserId.ToString(),
-                Trigger: NotificationTrigger.StatusChange,
-                Title: rendered.Title,
-                Body: rendered.Body,
-                Data: parameters,
-                IdempotencyKey: idempotencyKey,
-                Language: locale);
+            var data = new Dictionary<string, string>(parameters, StringComparer.Ordinal)
+            {
+                ["type"] = templateKey,
+                ["language"] = locale,
+            };
 
-            var result = await _push.SendAsync(pushRequest, ct);
+            // The entry's OWN idempotency key is the entity id; absent, the outbox entry id is.
+            var classification = await PushHandover.DispatchAsync(
+                _events, _logger, templateKey, recipientUserId.ToString(),
+                string.IsNullOrWhiteSpace(idempotencyKey) ? entry.Id.ToString() : idempotencyKey!,
+                rendered.Title, rendered.Body, data,
+                PushSilencePolicy.CategoryForTemplateKey(templateKey) ?? PushSilencePolicy.CategoryDelivery,
+                ct);
+
+            if (!PushHandover.IsProducerOwned(classification))
+            {
+                var reason = $"notification-service did not own the hand-over ({classification}).";
+                await _outbox.RecordFailureAsync(entry.Id, reason, MaxAttempts, RetryDelay, ct);
+                return new NotificationDispatchResult(
+                    entry.Id, WasDeduplicated: false, NotificationDispatchStatus.Pending, reason);
+            }
 
             _logger.LogInformation(
                 "Notification push dispatched. EntryId={EntryId} Outcome={Outcome}",
-                entry.Id, result.Outcome);
+                entry.Id, classification);
 
             await _outbox.MarkDeliveredAsync(entry.Id, ct);
             return new NotificationDispatchResult(entry.Id, WasDeduplicated: false, NotificationDispatchStatus.Delivered);

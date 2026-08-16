@@ -1,6 +1,6 @@
 using JeebGateway.Admin;
 using JeebGateway.Auth.Capabilities;
-using JeebGateway.Push;
+using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
 using JeebGateway.Users;
@@ -31,20 +31,20 @@ public class AdminCancellationsController : ControllerBase
 
     private readonly ICancellationService _cancellations;
     private readonly IRequestsStore _requests;
-    private readonly IPushNotificationService _push;
+    private readonly IGenericEventDispatcher _events;
     private readonly IAdminAuditLog _auditLog;
     private readonly ILogger<AdminCancellationsController> _log;
 
     public AdminCancellationsController(
         ICancellationService cancellations,
         IRequestsStore requests,
-        IPushNotificationService push,
+        IGenericEventDispatcher events,
         IAdminAuditLog auditLog,
         ILogger<AdminCancellationsController> log)
     {
         _cancellations = cancellations;
         _requests = requests;
-        _push = push;
+        _events = events;
         _auditLog = auditLog;
         _log = log;
     }
@@ -175,9 +175,16 @@ public class AdminCancellationsController : ControllerBase
         if (!string.IsNullOrEmpty(req.JeeberId)) recipients.Add(req.JeeberId);
 
         var approved = outcome == AdminCancellationDecisionOutcome.Approved;
-        var data = new Dictionary<string, string>
+
+        // FLAT string map; the relay copies every key but title/body into the FCM data map.
+        // type/category/delivery_id are the three keys the mobile handler routes on.
+        var data = new Dictionary<string, string>(StringComparer.Ordinal)
         {
+            ["type"] = "delivery",
+            ["delivery_id"] = req.Id,
             ["deliveryId"] = req.Id,
+            ["request_id"] = req.Id,
+            ["requestId"] = req.Id,
             ["status"] = req.Status,
             ["decision"] = approved ? "approved" : "rejected"
         };
@@ -193,23 +200,19 @@ public class AdminCancellationsController : ControllerBase
 
         foreach (var userId in recipients)
         {
-            try
-            {
-                var request = new PushNotificationRequest(
-                    UserId: userId,
-                    Trigger: NotificationTrigger.StatusChange,
-                    Title: title,
-                    Body: bodyText,
-                    Data: data,
-                    IdempotencyKey: $"{req.Id}:{req.Status}:cancel-decision:{userId}");
-                await _push.SendAsync(request, ct);
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex,
-                    "Cancellation-decision push failed for delivery {DeliveryId} user {UserId}",
-                    req.Id, userId);
-            }
+            // The pre-existing idempotency key IS the entity id — the notification_id is
+            // hashed from it, so a replayed decision collapses onto the same row.
+            await PushHandover.DispatchAsync(
+                _events,
+                _log,
+                JeebGenericEventTypes.CancellationDecisionEventType,
+                userId,
+                $"{req.Id}:{req.Status}:cancel-decision:{userId}",
+                title,
+                bodyText,
+                data,
+                PushSilencePolicy.CategoryDelivery,
+                ct);
         }
     }
 

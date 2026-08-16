@@ -26,7 +26,7 @@ public class WorkItemClaimWorkerTests
     public async Task The_Worker_Completes_A_Notification_Item_It_Holds_A_Lease_For()
     {
         var state = new FakeStateOwnershipClient();
-        var push = new CapturingPushNotificationService();
+        var push = new CapturingGenericEventDispatcher();
         var dispatcher = new JeebNotificationDispatcher(
             new StaticNotificationTemplateRenderer(),
             push,
@@ -68,7 +68,7 @@ public class WorkItemClaimWorkerTests
         claim.WorkerId.Should().NotBeNullOrWhiteSpace();
         claim.LeaseSeconds.Should().Be(120);
 
-        push.Sent.Should().ContainSingle().Which.IdempotencyKey
+        push.Sent.Should().ContainSingle().Which.EntityId
             .Should().Be("notif:delivery-completed:req-77",
                 "the entry's own key must reach PushDispatch through the claimer (§4.1 rider)");
 
@@ -83,7 +83,7 @@ public class WorkItemClaimWorkerTests
     public async Task A_Failed_Dispatch_Fails_The_Item_Under_The_Same_Lease_With_A_Future_RetryAt()
     {
         var state = new FakeStateOwnershipClient();
-        var push = new CapturingPushNotificationService();
+        var push = new CapturingGenericEventDispatcher();
         var workItemId = Guid.NewGuid();
         var lease = Guid.NewGuid();
         state.Claimable.Add(NotificationRecord(
@@ -106,7 +106,7 @@ public class WorkItemClaimWorkerTests
     public async Task An_Item_Claimed_Without_A_Lease_Token_Is_Never_Cas_Guessed()
     {
         var state = new FakeStateOwnershipClient();
-        var push = new CapturingPushNotificationService();
+        var push = new CapturingGenericEventDispatcher();
         var record = NotificationRecord(Guid.NewGuid(), lease: null, version: 1);
         state.Claimable.Add(record);
 
@@ -128,7 +128,7 @@ public class WorkItemClaimWorkerTests
         var state = new FakeStateOwnershipClient();
         state.Claimable.Add(NotificationRecord(Guid.NewGuid(), Guid.NewGuid(), version: 1));
 
-        var claimed = await Worker(state, new CapturingPushNotificationService())
+        var claimed = await Worker(state, new CapturingGenericEventDispatcher())
             .RunOnceAsync(CancellationToken.None);
 
         claimed.Should().Be(0);
@@ -186,7 +186,7 @@ public class WorkItemClaimWorkerTests
         });
 
         var claimed = await Worker(
-                state, new CapturingPushNotificationService(), fanoutWorkQueue: true, notifier: notifier)
+                state, new CapturingGenericEventDispatcher(), fanoutWorkQueue: true, notifier: notifier)
             .RunOnceAsync(CancellationToken.None);
 
         claimed.Should().Be(1);
@@ -203,7 +203,7 @@ public class WorkItemClaimWorkerTests
     public async Task The_Inline_Dispatcher_Calls_Neither_Complete_Nor_Fail_When_The_Outbox_Is_Claim_Driven()
     {
         var outbox = new RecordingOutbox { IsClaimDriven = true };
-        var push = new CapturingPushNotificationService();
+        var push = new CapturingGenericEventDispatcher();
         var dispatcher = new JeebNotificationDispatcher(
             new StaticNotificationTemplateRenderer(), push, outbox,
             NullLogger<JeebNotificationDispatcher>.Instance);
@@ -224,7 +224,7 @@ public class WorkItemClaimWorkerTests
     public async Task An_Unknown_Template_Is_Still_A_Caller_Visible_Failure_In_Claim_Driven_Mode()
     {
         var outbox = new RecordingOutbox { IsClaimDriven = true };
-        var push = new CapturingPushNotificationService();
+        var push = new CapturingGenericEventDispatcher();
         var dispatcher = new JeebNotificationDispatcher(
             new StaticNotificationTemplateRenderer(), push, outbox,
             NullLogger<JeebNotificationDispatcher>.Instance);
@@ -243,7 +243,7 @@ public class WorkItemClaimWorkerTests
     public async Task The_Local_Outbox_Path_Still_Pushes_Inline_And_Marks_Delivered()
     {
         var outbox = new RecordingOutbox { IsClaimDriven = false };
-        var push = new CapturingPushNotificationService();
+        var push = new CapturingGenericEventDispatcher();
         var dispatcher = new JeebNotificationDispatcher(
             new StaticNotificationTemplateRenderer(), push, outbox,
             NullLogger<JeebNotificationDispatcher>.Instance);
@@ -309,7 +309,7 @@ public class WorkItemClaimWorkerTests
 
     private static WorkItemClaimWorker Worker(
         FakeStateOwnershipClient state,
-        IPushNotificationService push,
+        IGenericEventDispatcher push,
         string notificationOutboxMode = "local",
         bool fanoutWorkQueue = false,
         INewRequestPushNotifier? notifier = null)
@@ -318,7 +318,7 @@ public class WorkItemClaimWorkerTests
         services.AddLogging();
         services.AddSingleton<IStateOwnershipClient>(state);
         services.AddSingleton<INotificationTemplateRenderer, StaticNotificationTemplateRenderer>();
-        services.AddSingleton<IPushNotificationService>(push);
+        services.AddSingleton<IGenericEventDispatcher>(push);
         services.AddSingleton<INewRequestPushNotifier>(notifier ?? new RecordingFanoutNotifier());
         services.AddSingleton<IOptions<GwdbxMigrationOptions>>(
             Options.Create(new GwdbxMigrationOptions { NotificationOutboxMode = notificationOutboxMode }));
@@ -422,18 +422,6 @@ public class WorkItemClaimWorkerTests
 
         public Task<IReadOnlyList<NotificationDispatchEntry>> GetDlqAsync(CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<NotificationDispatchEntry>>(Array.Empty<NotificationDispatchEntry>());
-    }
-
-    private sealed class CapturingPushNotificationService : IPushNotificationService
-    {
-        public List<PushNotificationRequest> Sent { get; } = new();
-
-        public Task<PushDeliveryResult> SendAsync(PushNotificationRequest request, CancellationToken ct)
-        {
-            Sent.Add(request);
-            return Task.FromResult(new PushDeliveryResult(
-                request.UserId, request.Trigger, PushDeliveryOutcome.Delivered, 0));
-        }
     }
 
     private sealed class FakeStateOwnershipClient : IStateOwnershipClient

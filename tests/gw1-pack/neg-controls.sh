@@ -199,18 +199,17 @@ py() { python3 - "$@"; }   # readability helper
 # ITEM W0.6
 # =============================================================================
 m_N1() {  # a bare mention of the deleted symbol, in a comment
-  printf '\n// FcmPushTransport\n' >> "$WORK/src/JeebGateway/Push/InMemoryPushTransport.cs"
+  printf '\n// FcmPushTransport\n' >> "$WORK/src/JeebGateway/Push/JeebPushTopicMap.cs"
 }
 control N1 W0.6 A1 "a comment naming FcmPushTransport reappears under src/" m_N1
 
 m_N2() {  # THE control that matters: the same transport, renamed
   cat > "$WORK/src/JeebGateway/Push/GooglePushTransport.cs" <<'CS'
 namespace JeebGateway.Push;
+public interface IPushTransport { Task SendAsync(string token, CancellationToken ct); }
 public sealed class GooglePushTransport : IPushTransport
 {
-    public DevicePlatform Platform => DevicePlatform.Fcm;
-    public Task SendAsync(DeviceToken device, PushNotificationRequest request, CancellationToken ct)
-        => Task.CompletedTask;
+    public Task SendAsync(string token, CancellationToken ct) => Task.CompletedTask;
 }
 CS
 }
@@ -219,12 +218,11 @@ control N2 W0.6 A5_A9 "the deleted transport is re-added under a DIFFERENT name 
 m_N3() {  # …and it dials
   cat > "$WORK/src/JeebGateway/Push/GooglePushTransport.cs" <<'CS'
 namespace JeebGateway.Push;
-public sealed class GooglePushTransport : IPushTransport
+public sealed class GooglePushTransport
 {
     private readonly HttpClient _http;
     public GooglePushTransport(HttpClient http) => _http = http;
-    public DevicePlatform Platform => DevicePlatform.Fcm;
-    public Task SendAsync(DeviceToken device, PushNotificationRequest request, CancellationToken ct)
+    public Task SendAsync(string token, CancellationToken ct)
         => _http.PostAsync("https://fcm.googleapis.com/v1/x", null, ct);
 }
 CS
@@ -241,25 +239,11 @@ PY
 }
 control N4 W0.6 A3 "a live UseFcmTransport KEY is put back in appsettings.json" m_N4
 
-m_N5() {  # the switch property returns
-  py <<'PY' "$WORK/src/JeebGateway/Push/PushOptions.cs"
-import io,sys
-p=sys.argv[1]; s=io.open(p,encoding="utf-8").read()
-i=s.rindex("}")
-io.open(p,"w",encoding="utf-8").write(s[:i]+"    public bool UseFcmTransport { get; set; }\n"+s[i:])
-PY
-}
-control N5 W0.6 A5_A9 "PushOptions regrows a transport switch property" m_N5
+# N5 RETIRED: PushOptions was deleted with the in-gateway stack, so there is no options
+# type left to regrow a transport switch on.
 
-m_N6() {  # over-delete the platform discriminator's registration
-  py <<'PY' "$WORK/src/JeebGateway/Program.cs"
-import io,sys
-p=sys.argv[1]; s=io.open(p,encoding="utf-8").read()
-s=s.replace("builder.Services.AddSingleton<IPushTransport>(_ => new InMemoryPushTransport(DevicePlatform.Fcm));","",1)
-io.open(p,"w",encoding="utf-8").write(s)
-PY
-}
-control N6 W0.6 A5_A9 "the InMemoryPushTransport(Fcm) registration is dropped" m_N6
+# N6 RETIRED: the InMemoryPushTransport registrations were deleted, so there is no
+# registration left to over-delete.
 
 # =============================================================================
 # ITEM W1.8
@@ -468,7 +452,7 @@ control N20 W2.6 C1_C5 "the PDF period widens from the settlement day to the who
 # ITEM HYGIENE
 # =============================================================================
 m_N21() {  # a LIVE .50 reference
-  py <<'PY' "$WORK/src/JeebGateway/Push/InMemoryPushTransport.cs"
+  py <<'PY' "$WORK/src/JeebGateway/Push/JeebPushTopicMap.cs"
 import io,sys
 p=sys.argv[1]; s=io.open(p,encoding="utf-8").read()
 i=s.rindex("}")

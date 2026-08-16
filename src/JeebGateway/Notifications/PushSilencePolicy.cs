@@ -186,6 +186,13 @@ public static class PushSilencePolicy
     /// <summary>Not named by D4; ShadeAndStored (behaviour-preserving).</summary>
     public const string CategoryRequestExpired = "requestExpired";
 
+    // Two categories the deleted in-gateway push stack served and D4 never named.
+    // Human-addressed, so ShadeAndStored; mobile has no route for either yet, shade only.
+    public const string CategoryAvailability = "availability";
+
+    /// <summary>Not named by D4; ShadeAndStored (behaviour-preserving).</summary>
+    public const string CategoryPromotion = "promotion";
+
     // A category maps to EXACTLY ONE mode. That single-valuedness IS the corollary's
     // enforcement: there is no way to express "this category is both", so no event can
     // legally produce a silent push and a stored push as two separate sends.
@@ -213,6 +220,10 @@ public static class PushSilencePolicy
             [CategoryOfferUpdated] = PushDeliveryMode.ShadeAndStored,
             [CategoryOfferLost] = PushDeliveryMode.ShadeAndStored,
             [CategoryRequestExpired] = PushDeliveryMode.ShadeAndStored,
+
+            // Migrated off the deleted in-gateway stack; both address a human.
+            [CategoryAvailability] = PushDeliveryMode.ShadeAndStored,
+            [CategoryPromotion] = PushDeliveryMode.ShadeAndStored,
         };
 
     // Notification TYPE (gateway-owned catalog template key) -> refresh category.

@@ -2,7 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Availability;
-using JeebGateway.Push;
+using JeebGateway.Notifications;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -201,16 +201,16 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
     }
 
     [Fact]
-    public async Task Auto_Offline_Push_Flows_Through_PushNotificationService()
+    public async Task Auto_Offline_Push_Hands_Over_To_Notification_Service()
     {
-        var factory = _fixture.FactoryWithProductionNotifier();
+        // The old version registered a device by hand and asserted the in-memory transport saw
+        // it — production never registers one, so it passed while the push reached nobody.
+        var events = new CapturingGenericEventDispatcher();
+        var factory = _fixture.FactoryWithProductionNotifier(events);
         var client = factory.CreateClient();
         var userId = $"jeeber-{Guid.NewGuid()}";
         client.DefaultRequestHeaders.Add("X-User-Id", userId);
         client.DefaultRequestHeaders.Add("X-User-Roles", "driver");
-
-        var devices = factory.Services.GetRequiredService<IDeviceTokenStore>();
-        await devices.RegisterAsync(new DeviceToken(userId, DevicePlatform.Fcm, $"tok-{userId}"), default);
 
         await client.PatchAsJsonAsync("/jeebers/me/availability", new
         {
@@ -225,12 +225,10 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
         var sweeper = factory.Services.GetServices<IHostedService>().OfType<AutoOfflineSweeper>().Single();
         await sweeper.SweepOnceAsync(default);
 
-        var fcm = factory.Services.GetServices<IPushTransport>()
-            .OfType<InMemoryPushTransport>()
-            .Single(t => t.Platform == DevicePlatform.Fcm);
-        fcm.Sent.Should().ContainSingle(s =>
-            s.Request.UserId == userId &&
-            s.Request.Trigger == NotificationTrigger.AutoOffline);
+        events.Sent.Should().ContainSingle(h =>
+            h.Receiver == userId &&
+            h.EventType == JeebGenericEventTypes.AutoOfflineEventType &&
+            h.Category == PushSilencePolicy.CategoryAvailability);
     }
 
     [Theory]
@@ -327,11 +325,17 @@ public class AvailabilityEndpointTests : IClassFixture<AvailabilityEndpointTests
         /// wired so we can assert the auto-offline trigger really flows through
         /// the shared push pipeline (preferences, transports, retry).
         /// </summary>
-        public WebApplicationFactory<Program> FactoryWithProductionNotifier() => new WebApplicationFactory<Program>()
+        public WebApplicationFactory<Program> FactoryWithProductionNotifier(
+            IGenericEventDispatcher? events = null) => new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
                 builder.ConfigureServices(services =>
                 {
+                    if (events is not null)
+                    {
+                        services.RemoveAll<IGenericEventDispatcher>();
+                        services.AddSingleton(events);
+                    }
                     services.RemoveAll<TimeProvider>();
                     services.AddSingleton<TimeProvider>(new FakeClock(new DateTimeOffset(2026, 5, 15, 12, 0, 0, TimeSpan.Zero)));
 

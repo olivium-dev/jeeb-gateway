@@ -49,4 +49,11 @@ public static class JeebGenericEventTypes
     public const string NewRequestEventType = "jeeb.new_request";
     public const string RequestExpiringEventType = "jeeb.request_expiring";
     public const string OfferLostEventType = "jeeb.offer_lost";
+
+    // The five categories migrated off the deleted in-gateway push stack.
+    // "jeeb.dispute_resolved" is NOT reused: that is a centre TemplateKey with a closed payload.
+    public const string DisputeUpdateEventType = "jeeb.dispute_update";
+    public const string CancellationDecisionEventType = "jeeb.cancellation_decision";
+    public const string AutoOfflineEventType = "jeeb.auto_offline";
+    public const string NotificationDispatchEventType = "jeeb.notification_dispatch";
 }
