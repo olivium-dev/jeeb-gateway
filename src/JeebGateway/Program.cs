@@ -795,10 +795,17 @@ builder.Services.AddScoped<JeebGateway.Notifications.IDeliveryStatusPushNotifier
 builder.Services.AddScoped<JeebGateway.Notifications.INewRequestPushNotifier,
     JeebGateway.Notifications.NewRequestPushNotifier>();
 
+// OA-21 — the fan-out's audience comes from delivery-service, which OWNS presence.
+// It used to come from the in-process InMemoryAvailabilityStore, which a restart emptied:
+// every request then fanned out to NOBODY, silently, with no self-heal (register #9).
+// Scoped to match IDeliveryServiceClient; holds no state of its own.
+builder.Services.AddScoped<JeebGateway.Availability.IPushAudienceSource,
+    JeebGateway.Availability.DeliveryServicePushAudience>();
+
 // P1 — new-request fan-out: options + the off-hot-path dispatch rail. The notifier stays
 // SCOPED (it composes the SCOPED ServicePushNotificationClient); the queue is a singleton
 // buffer and the processor is a hosted service that opens a FRESH scope per job.
-// DI lifetime note (do NOT "fix" these): IAvailabilityStore = Singleton,
+// DI lifetime note (do NOT "fix" these): IPushAudienceSource = Scoped,
 // ServicePushNotificationClient = Scoped, INewRequestPushNotifier = Scoped.
 // Singleton-into-scoped is safe; scoped-into-singleton is the captive-dependency bug the
 // per-job scope in NewRequestFanoutProcessor avoids.
@@ -2499,7 +2506,9 @@ builder.Services.AddSingleton<IOfferRequestIndex>(
 // rules as any other trigger.
 builder.Services.AddSingleton<IAutoOfflineNotifier, PushAutoOfflineNotifier>();
 // Durability register #9 — availability. Presence itself SURVIVES a bounce (jeeber GET/PATCH are wired through
-// to delivery-service, S06); what this wiped store kills is NewRequestPushNotifier's push audience — see its doc.
+// to delivery-service, S06). OA-21 took the PUSH AUDIENCE off this store: NewRequestPushNotifier now reads
+// IPushAudienceSource (delivery-service) instead, so a restart no longer silences every new-request fan-out.
+// The remaining readers are the admin ops-map and AutoOfflineSweeper, which ADR-0009 still pins here.
 builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();
 builder.Services.AddHostedService<AutoOfflineSweeper>();
 
