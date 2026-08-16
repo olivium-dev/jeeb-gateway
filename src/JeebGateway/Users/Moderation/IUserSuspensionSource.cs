@@ -1,9 +1,13 @@
 namespace JeebGateway.Users.Moderation;
 
-/// <summary>Whether an account is suspended, and the operator-facing reason if it is.</summary>
-public readonly record struct UserSuspension(bool IsSuspended, string? Reason)
+/// <summary>
+/// Whether an account is suspended, the operator-facing reason if it is, and — D16 — the
+/// i18n code when that reason is a <c>Label{{…}}</c> template rather than prose. Reason is
+/// already human-safe; Code is what a locale-aware client looks up.
+/// </summary>
+public readonly record struct UserSuspension(bool IsSuspended, string? Reason, string? Code = null)
 {
-    public static readonly UserSuspension None = new(false, null);
+    public static readonly UserSuspension None = new(false, null, null);
 }
 
 /// <summary>

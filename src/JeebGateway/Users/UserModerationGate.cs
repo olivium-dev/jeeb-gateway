@@ -25,17 +25,17 @@ public enum ModerationVerdict
 /// </summary>
 public static class UserModerationGate
 {
-    /// <summary>Reason surfaced when an operator recorded none.</summary>
-    public const string DefaultReason = "Contact support.";
+    /// <summary>Reason surfaced when an operator recorded none, or recorded an unresolved template.</summary>
+    public const string DefaultReason = Moderation.ModerationReason.Fallback;
 
     /// <summary>
     /// A lookup fault is Unavailable, NOT a silent pass. A user with no suspension on record
     /// still proceeds, so a first-time login is unaffected.
     /// </summary>
-    public static async Task<(ModerationVerdict Verdict, string Reason)> EvaluateAsync(
+    public static async Task<(ModerationVerdict Verdict, string Reason, string? ReasonCode)> EvaluateAsync(
         IUserSuspensionSource suspensions, string? userId, ILogger log, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(userId)) return (ModerationVerdict.Proceed, string.Empty);
+        if (string.IsNullOrWhiteSpace(userId)) return (ModerationVerdict.Proceed, string.Empty, null);
 
         UserSuspension suspension;
         try
@@ -46,16 +46,17 @@ public static class UserModerationGate
         {
             log.LogError(ex,
                 "moderation lookup failed userId={UserId}; refusing to mint a session", userId);
-            return (ModerationVerdict.Unavailable, string.Empty);
+            return (ModerationVerdict.Unavailable, string.Empty, null);
         }
 
-        if (!suspension.IsSuspended) return (ModerationVerdict.Proceed, string.Empty);
+        if (!suspension.IsSuspended) return (ModerationVerdict.Proceed, string.Empty, null);
 
         // ban-service supplies the configured policy message, which can be blank; a blank must
-        // not reach the client as an empty detail.
+        // not reach the client as an empty detail. D16: the source has already stripped any
+        // unresolved i18n template into ReasonCode, so Reason here is always renderable.
         var reason = string.IsNullOrWhiteSpace(suspension.Reason)
             ? DefaultReason
             : suspension.Reason!;
-        return (ModerationVerdict.Suspended, reason);
+        return (ModerationVerdict.Suspended, reason, suspension.Code);
     }
 }

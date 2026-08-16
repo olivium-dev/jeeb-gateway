@@ -58,15 +58,18 @@ public sealed class RequireActiveUserAttribute : Attribute, IAsyncActionFilter
             .FirstOrDefault();
         if (active is not null)
         {
-            context.Result = new ObjectResult(new ProblemDetails
+            // D16: ban-service ships i18n TEMPLATES as its message; never render one as prose.
+            var problem = new ProblemDetails
             {
                 Title = "Account is suspended.",
-                Detail = string.IsNullOrWhiteSpace(active.Message)
-                    ? "Contact support."
-                    : active.Message,
+                Detail = Moderation.ModerationReason.Humanize(active.Message),
                 Status = StatusCodes.Status403Forbidden,
                 Type = "https://jeeb.dev/errors/account-suspended"
-            })
+            };
+            var code = Moderation.ModerationReason.CodeOf(active.Message);
+            if (code is not null) problem.Extensions["reasonCode"] = code;
+
+            context.Result = new ObjectResult(problem)
             {
                 StatusCode = StatusCodes.Status403Forbidden
             };

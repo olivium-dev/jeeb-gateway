@@ -107,6 +107,80 @@ public class AuthOtpSuspendedLoginTests
     }
 
     // -----------------------------------------------------------------
+    // S6 (D16) — the raw i18n template ban-service really ships must never
+    //            reach the client as prose; its CODE must reach it instead.
+    // -----------------------------------------------------------------
+
+    /// <summary>The literal string in ban-service's shipped config/banning-rule.json, red stage 1.</summary>
+    private const string ShippedBanTemplate = "Label{{Ban.Label.YOU_ARE_BANNED_FOR_3_DAYS}}";
+
+    [Fact]
+    public async Task S6_Suspension_Reason_That_Is_An_I18n_Template_Is_Not_Rendered_Raw()
+    {
+        const string phone = "+9613000106";
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, configuredBanMessage: ShippedBanTemplate);
+        var http = factory.CreateClient();
+
+        await SuspendAsync(factory, phone);
+
+        var resp = await http.PostAsync("/v1/auth/otp/verify", JsonBody($$"""
+            { "phone": "{{phone}}", "code": "1234" }
+            """));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var raw = await resp.Content.ReadAsStringAsync();
+
+        // The measured D16 body: detail and reason both carried the template verbatim.
+        raw.Should().NotContain("Label{{",
+            "Phase V run 3 measured this exact string on the wire; a suspended user reads it");
+        raw.Should().NotContain("}}");
+
+        using var doc = JsonDocument.Parse(raw);
+        var root = doc.RootElement;
+
+        root.GetProperty("detail").GetString().Should().Be("Contact support.");
+        root.GetProperty("reason").GetString().Should().Be("Contact support.");
+
+        // The client cannot localize what it cannot identify: the KEY must survive, because
+        // the app ships en + ar and only the app knows which one the viewer reads.
+        root.GetProperty("reasonCode").GetString().Should()
+            .Be("Ban.Label.YOU_ARE_BANNED_FOR_3_DAYS");
+    }
+
+    /// <summary>
+    /// DISCRIMINATING CONTROL for S6. Every assertion above would also be satisfied by a
+    /// gateway that threw the moderation reason away entirely and always said "Contact
+    /// support." — which would be a worse defect wearing the fix's clothes. So the SAME
+    /// probe, pointed at an operator's typed prose, must see that prose reach the client
+    /// UNCHANGED and must see NO reasonCode (there is no key to look up).
+    /// </summary>
+    [Fact]
+    public async Task S6b_Control_Operator_Prose_Still_Reaches_The_Client_Verbatim_With_No_Code()
+    {
+        const string phone = "+9613000107";
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, configuredBanMessage: SuspensionReason);
+        var http = factory.CreateClient();
+
+        await SuspendAsync(factory, phone);
+
+        var resp = await http.PostAsync("/v1/auth/otp/verify", JsonBody($$"""
+            { "phone": "{{phone}}", "code": "1234" }
+            """));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var root = doc.RootElement;
+
+        root.GetProperty("detail").GetString().Should().Be(SuspensionReason,
+            "the fix must strip TEMPLATES, not moderation reasons");
+        root.GetProperty("reason").GetString().Should().Be(SuspensionReason);
+        root.TryGetProperty("reasonCode", out _).Should().BeFalse(
+            "absence is the signal that there is nothing for the app to look up");
+    }
+
+    // -----------------------------------------------------------------
     // S2 — CONTROL: a non-suspended account's login is untouched.
     // -----------------------------------------------------------------
 
@@ -309,7 +383,9 @@ public class AuthOtpSuspendedLoginTests
         new Dictionary<string, IEnumerable<string>>();
 
     private static WebApplicationFactory<Program> MakeFactory(
-        IServiceOTPClient stub, bool throwOnModerationLookup = false) =>
+        IServiceOTPClient stub,
+        bool throwOnModerationLookup = false,
+        string? configuredBanMessage = null) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
@@ -333,7 +409,11 @@ public class AuthOtpSuspendedLoginTests
                 // written by the admin call is the same row the login gate reads.
                 services.RemoveAll<IBanServiceClient>();
                 services.AddSingleton<IBanServiceClient>(
-                    new FakeBanService { ThrowOnStatus = throwOnModerationLookup });
+                    new FakeBanService
+                    {
+                        ThrowOnStatus = throwOnModerationLookup,
+                        ConfiguredMessage = configuredBanMessage ?? SuspensionReason,
+                    });
             });
         });
 
@@ -352,6 +432,10 @@ public class AuthOtpSuspendedLoginTests
 
         /// Simulates ban-service being unreachable on the read leg.
         public bool ThrowOnStatus { get; init; }
+
+        /// D16: the message ban-service actually stores. Defaults to operator prose; the
+        /// template arm supplies the string the shipped banning-rule.json really holds.
+        public string ConfiguredMessage { get; init; } = SuspensionReason;
 
         public Task<BanStatusesResult> GetStatusAsync(string userId, CancellationToken ct)
         {
@@ -373,7 +457,7 @@ public class AuthOtpSuspendedLoginTests
                 BanType = policyKey,
                 CurrentStage = 3,
                 Status = "BAN",
-                Message = SuspensionReason,
+                Message = ConfiguredMessage,
                 BannedUntil = null,
                 LastUpdated = DateTimeOffset.UtcNow,
                 IsCurrentlyBanned = true,

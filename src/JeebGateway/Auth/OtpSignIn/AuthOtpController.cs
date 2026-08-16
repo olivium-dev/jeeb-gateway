@@ -312,7 +312,7 @@ public sealed class AuthOtpController : ControllerBase
     /// </summary>
     private async Task<ObjectResult?> RefuseIfSuspendedAsync(string userId, CancellationToken ct)
     {
-        var (verdict, reason) = await UserModerationGate.EvaluateAsync(_suspensions, userId, _log, ct);
+        var (verdict, reason, reasonCode) = await UserModerationGate.EvaluateAsync(_suspensions, userId, _log, ct);
 
         if (verdict == ModerationVerdict.Unavailable)
         {
@@ -331,7 +331,7 @@ public sealed class AuthOtpController : ControllerBase
         // Same reason text [RequireActiveUser] returns, plus machine fields the app renders.
         return OtpSignInProblems.Problem(this, StatusCodes.Status403Forbidden,
             "account_suspended", "Account is suspended.", reason,
-            new Dictionary<string, object?> { ["accountStatus"] = "suspended", ["reason"] = reason });
+            OtpSignInProblems.SuspensionExtensions(reason, reasonCode));
     }
 
     /// <summary>
