@@ -56,4 +56,7 @@ public static class JeebGenericEventTypes
     public const string CancellationDecisionEventType = "jeeb.cancellation_decision";
     public const string AutoOfflineEventType = "jeeb.auto_offline";
     public const string NotificationDispatchEventType = "jeeb.notification_dispatch";
+
+    // D12: the support/ticket leg of the case callback. Disputes reuse DisputeUpdateEventType.
+    public const string SupportCaseUpdateEventType = "jeeb.support_update";
 }
