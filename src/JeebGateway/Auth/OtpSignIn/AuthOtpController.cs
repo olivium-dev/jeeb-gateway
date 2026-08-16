@@ -4,6 +4,7 @@ using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
+using JeebGateway.Users.Moderation;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 
@@ -60,6 +61,7 @@ public sealed class AuthOtpController : ControllerBase
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IOptions<OtpSignInOptions> _options;
     private readonly IUsersStore _users;
+    private readonly IUserSuspensionSource _suspensions;
     private readonly ITokenService _tokens;
     private readonly IPhonePolicy _phonePolicy;
     private readonly IOtpRequestRateLimiter _rateLimiter;
@@ -71,6 +73,7 @@ public sealed class AuthOtpController : ControllerBase
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         IOptions<OtpSignInOptions> options,
         IUsersStore users,
+        IUserSuspensionSource suspensions,
         ITokenService tokens,
         IPhonePolicy phonePolicy,
         IOtpRequestRateLimiter rateLimiter,
@@ -81,6 +84,7 @@ public sealed class AuthOtpController : ControllerBase
         _flags = flags;
         _options = options;
         _users = users;
+        _suspensions = suspensions;
         _tokens = tokens;
         _phonePolicy = phonePolicy;
         _rateLimiter = rateLimiter;
@@ -295,17 +299,20 @@ public sealed class AuthOtpController : ControllerBase
 
     /// <summary>
     /// Refuses a suspended account BEFORE the session is minted; null means proceed.
-    /// Reads the SAME local users projection <see cref="Users.RequireActiveUserAttribute"/>
-    /// reads — the read side <c>FeatureFlags:UserModerationMode</c> designates at its current
-    /// <c>dual-write-local-read</c> rung — so login adds NO upstream call that could fail open,
-    /// and the W4-06 read cutover re-points both at once.
+    /// Reads ban-service — the store the product's own suspend action
+    /// (<c>PATCH /admin/users/{id}/suspend</c>) writes and the SAME store
+    /// <see cref="Users.RequireActiveUserAttribute"/> reads, so login and every gated endpoint
+    /// now agree.
     ///
-    /// <para>Via <see cref="UserModerationGate"/>, so the durable-store fault the production
-    /// <see cref="Users.UpstreamBackedUsersStore"/> otherwise swallows reaches this 503.</para>
+    /// <para>D10: this comment used to say the gate read "the SAME local users projection", which
+    /// was true and was the bug — that projection is <c>InMemoryUsersStore</c>, process RAM no
+    /// administrator can write, so a suspended account logged in. Adding one upstream call to the
+    /// login path is the price; it fails CLOSED (503 via <see cref="UserModerationGate"/>), never
+    /// open, so the outage case cannot mint a session either.</para>
     /// </summary>
     private async Task<ObjectResult?> RefuseIfSuspendedAsync(string userId, CancellationToken ct)
     {
-        var (verdict, reason) = await UserModerationGate.EvaluateAsync(_users, userId, _log, ct);
+        var (verdict, reason) = await UserModerationGate.EvaluateAsync(_suspensions, userId, _log, ct);
 
         if (verdict == ModerationVerdict.Unavailable)
         {

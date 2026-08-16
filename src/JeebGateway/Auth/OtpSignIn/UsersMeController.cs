@@ -5,6 +5,7 @@ using JeebGateway.Requests;
 using JeebGateway.Services;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
+using JeebGateway.Users.Moderation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 // Alias the capability registry CLASS: inside the JeebGateway.Auth.* namespace, the bare name
@@ -64,6 +65,7 @@ public sealed class UsersMeController : ControllerBase
 
     private readonly UmServiceClient _umProfile;
     private readonly IUsersStore _users;
+    private readonly IUserSuspensionSource _suspensions;
     private readonly IMemoryCache _cache;
     private readonly IOptionsMonitor<UpstreamFeatureFlags> _flags;
     private readonly IUserManagementDualRoleClient _dualRole;
@@ -79,6 +81,7 @@ public sealed class UsersMeController : ControllerBase
     public UsersMeController(
         UmServiceClient umProfile,
         IUsersStore users,
+        IUserSuspensionSource suspensions,
         IMemoryCache cache,
         IOptionsMonitor<UpstreamFeatureFlags> flags,
         IUserManagementDualRoleClient dualRole,
@@ -93,6 +96,7 @@ public sealed class UsersMeController : ControllerBase
     {
         _umProfile = umProfile;
         _users = users;
+        _suspensions = suspensions;
         _cache = cache;
         _flags = flags;
         _dualRole = dualRole;
@@ -566,7 +570,7 @@ public sealed class UsersMeController : ControllerBase
     /// </summary>
     private async Task<ObjectResult?> RefuseIfSuspendedAsync(string userId, CancellationToken ct)
     {
-        var (verdict, reason) = await UserModerationGate.EvaluateAsync(_users, userId, _log, ct);
+        var (verdict, reason) = await UserModerationGate.EvaluateAsync(_suspensions, userId, _log, ct);
 
         if (verdict == ModerationVerdict.Unavailable)
         {

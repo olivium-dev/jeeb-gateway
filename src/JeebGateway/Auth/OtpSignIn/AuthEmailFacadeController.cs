@@ -14,6 +14,7 @@ using GwDualRoleClient = JeebGateway.Users.IUserManagementDualRoleClient;
 using GwSeededRoles = JeebGateway.Users.IDevSeededRoleStore;
 using GwRoles = JeebGateway.Users.Roles;
 using GwModerationGate = JeebGateway.Users.UserModerationGate;
+using GwSuspensionSource = JeebGateway.Users.Moderation.IUserSuspensionSource;
 using GwModerationVerdict = JeebGateway.Users.ModerationVerdict;
 using UmClient = JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient;
 using UmApiException = JeebGateway.service.ServiceUserManagement.ApiException;
@@ -67,6 +68,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
     private readonly UmClient _um;
     private readonly ITokenService _tokens;
     private readonly GwUsersStore _users;
+    private readonly GwSuspensionSource _suspensions;
     private readonly GwDualRoleClient _userManagement;
     private readonly GwSeededRoles _seededRoles;
     private readonly ILogger<AuthEmailFacadeController> _log;
@@ -75,6 +77,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
         UmClient um,
         ITokenService tokens,
         GwUsersStore users,
+        GwSuspensionSource suspensions,
         GwDualRoleClient userManagement,
         GwSeededRoles seededRoles,
         ILogger<AuthEmailFacadeController> log)
@@ -82,6 +85,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
         _um = um;
         _tokens = tokens;
         _users = users;
+        _suspensions = suspensions;
         _userManagement = userManagement;
         _seededRoles = seededRoles;
         _log = log;
@@ -334,7 +338,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
     /// </summary>
     private async Task<ObjectResult?> RefuseIfSuspendedAsync(string userId, CancellationToken ct)
     {
-        var (verdict, reason) = await GwModerationGate.EvaluateAsync(_users, userId, _log, ct);
+        var (verdict, reason) = await GwModerationGate.EvaluateAsync(_suspensions, userId, _log, ct);
 
         if (verdict == GwModerationVerdict.Unavailable)
         {
