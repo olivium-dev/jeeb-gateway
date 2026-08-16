@@ -594,7 +594,9 @@ public sealed class KycSubmissionBffController : ControllerBase
             string? knownVersion = null;
             try
             {
-                var catalog = await _contractSigning.ListTemplatesAsync(ct);
+                // D17: name-filtered so the cross-link cannot go quiet just because
+                // the catalog outgrew the upstream's default page.
+                var catalog = await _contractSigning.ListTemplatesAsync(JeebTosTemplateName, ct);
                 knownVersion = ResolveKnownTosVersion(catalog);
             }
             catch (HttpRequestException ex)
