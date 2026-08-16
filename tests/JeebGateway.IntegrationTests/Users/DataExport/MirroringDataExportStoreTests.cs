@@ -284,17 +284,19 @@ public class MirroringDataExportStoreTests
         upstream.ConsumeAttempts.Should().Be(2, "both racers really reached the CAS");
     }
 
-    // ----- guard roster ------------------------------------------------------
+    // ----- live composition --------------------------------------------------
 
+    // W5-11 deleted StoreDurabilityGuard's catalog; the surviving owner of "which store a boot
+    // resolves" is the Program.cs registration, so the claim is made against the container.
     [Fact]
-    public void Decorator_Is_An_Approved_Durable_Implementation_Of_IDataExportStore()
+    public void A_Booted_Host_Resolves_IDataExportStore_To_The_Mirroring_Decorator()
     {
-        var entry = StoreDurabilityGuard.Critical.Single(c => c.Iface == typeof(IDataExportStore));
+        // The FRAMEWORK factory, not this suite's shadowing one, which swaps in test owners.
+        using var host = new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>();
 
-        entry.DurableImpls.Should().BeEquivalentTo(new[]
-        {
-            typeof(PostgresDataExportStore), typeof(MirroringDataExportStore)
-        }, "G-08 — the decorator wraps the durable inner store, so both resolutions pass the boot gate");
+        host.Services.GetRequiredService<IDataExportStore>()
+            .Should().BeOfType<MirroringDataExportStore>(
+                "the dual-write cases above only describe production if the decorator is what a boot gets");
     }
 
     // ----- helpers -----------------------------------------------------------
