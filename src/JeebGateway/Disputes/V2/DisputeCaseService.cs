@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using JeebGateway.Push;
+using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Logging;
@@ -47,7 +47,7 @@ public sealed class DisputeCaseService : IDisputeCaseService
     private readonly IRequestsStore _deliveries;
     private readonly IDisputeEvidenceOrchestrator _evidence;
     private readonly IPaymentRefundClient _refund;
-    private readonly IPushNotificationService _push;
+    private readonly IGenericEventDispatcher _events;
     private readonly TimeProvider _clock;
     private readonly ILogger<DisputeCaseService> _log;
 
@@ -56,7 +56,7 @@ public sealed class DisputeCaseService : IDisputeCaseService
         IRequestsStore deliveries,
         IDisputeEvidenceOrchestrator evidence,
         IPaymentRefundClient refund,
-        IPushNotificationService push,
+        IGenericEventDispatcher events,
         TimeProvider clock,
         ILogger<DisputeCaseService> log)
     {
@@ -64,7 +64,7 @@ public sealed class DisputeCaseService : IDisputeCaseService
         _deliveries = deliveries;
         _evidence = evidence;
         _refund = refund;
-        _push = push;
+        _events = events;
         _clock = clock;
         _log = log;
     }
@@ -447,21 +447,23 @@ public sealed class DisputeCaseService : IDisputeCaseService
 
     private async Task NotifyEscalateAsync(DisputeCase @case, CancellationToken ct)
     {
-        await SendBestEffortAsync(BuildPush(
+        await SendBestEffortAsync(
             @case.OpenedByUserId,
             "Dispute opened",
             "We received your dispute and a reviewer will follow up shortly.",
             @case,
-            "opened"), ct).ConfigureAwait(false);
+            "opened",
+            ct).ConfigureAwait(false);
 
         if (!string.IsNullOrEmpty(@case.CounterpartyUserId))
         {
-            await SendBestEffortAsync(BuildPush(
+            await SendBestEffortAsync(
                 @case.CounterpartyUserId,
                 "Delivery escalated",
                 "A dispute has been opened on a delivery you were part of — no action needed yet.",
                 @case,
-                "opened_counterparty"), ct).ConfigureAwait(false);
+                "opened_counterparty",
+                ct).ConfigureAwait(false);
         }
     }
 
@@ -474,8 +476,8 @@ public sealed class DisputeCaseService : IDisputeCaseService
             ? $"Your dispute has been resolved. A refund of ${@case.RefundUsd:0.00} is on the way."
             : "Your dispute has been reviewed and closed.";
 
-        await SendBestEffortAsync(BuildPush(
-            @case.OpenedByUserId, openerTitle, openerBody, @case, "resolved"), ct).ConfigureAwait(false);
+        await SendBestEffortAsync(
+            @case.OpenedByUserId, openerTitle, openerBody, @case, "resolved", ct).ConfigureAwait(false);
 
         if (!string.IsNullOrEmpty(@case.CounterpartyUserId))
         {
@@ -486,46 +488,37 @@ public sealed class DisputeCaseService : IDisputeCaseService
                 ? $"A dispute on one of your deliveries was resolved with a ${@case.RefundUsd:0.00} refund."
                 : "A dispute on one of your deliveries was reviewed and closed.";
 
-            await SendBestEffortAsync(BuildPush(
-                @case.CounterpartyUserId, counterTitle, counterBody, @case, "resolved_counterparty"),
+            await SendBestEffortAsync(
+                @case.CounterpartyUserId, counterTitle, counterBody, @case, "resolved_counterparty",
                 ct).ConfigureAwait(false);
         }
     }
 
-    private static PushNotificationRequest BuildPush(
-        string userId, string title, string body, DisputeCase @case, string subEvent)
-        => new(
+    // Best-effort for the CASE MUTATION only: the row is already written, so a hand-over
+    // failure never rolls it back. PushHandover still counts and Error-logs every loss.
+    private Task SendBestEffortAsync(
+        string userId, string title, string body, DisputeCase @case, string subEvent, CancellationToken ct)
+    {
+        var data = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["type"] = "dispute",
+            ["case_id"] = @case.Id,
+            ["delivery_id"] = @case.DeliveryId,
+            ["case_state"] = @case.State,
+            ["sub_event"] = subEvent
+        };
+
+        // The pre-existing idempotency key IS the entity id; no new key is minted.
+        return PushHandover.DispatchAsync(
+            _events,
+            _log,
+            JeebGenericEventTypes.DisputeUpdateEventType,
             userId,
-            NotificationTrigger.DisputeUpdate,
+            $"dispute:{@case.Id}:{subEvent}",
             title,
             body,
-            new Dictionary<string, string>
-            {
-                ["case_id"] = @case.Id,
-                ["delivery_id"] = @case.DeliveryId,
-                ["case_state"] = @case.State,
-                ["sub_event"] = subEvent
-            },
-            IdempotencyKey: $"dispute:{@case.Id}:{subEvent}");
-
-    private async Task SendBestEffortAsync(PushNotificationRequest request, CancellationToken ct)
-    {
-        try
-        {
-            await _push.SendAsync(request, ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            // Push fan-out must never block the case mutation — the row
-            // is already written and the user can read the latest state
-            // via GET /v1/disputes/{id} on next foreground.
-            _log.LogWarning(ex,
-                "dispute push fan-out failed for user {UserId} case {CaseId} trigger {Trigger}",
-                request.UserId, request.Data?["case_id"] ?? "?", request.Trigger);
-        }
+            data,
+            PushSilencePolicy.CategoryDispute,
+            ct);
     }
 }

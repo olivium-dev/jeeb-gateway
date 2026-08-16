@@ -1,4 +1,4 @@
-using JeebGateway.Push;
+using JeebGateway.Notifications;
 using Microsoft.Extensions.Logging;
 
 namespace JeebGateway.Disputes;
@@ -12,18 +12,18 @@ public class DisputeService : IDisputeService
     private static readonly string[] AllowedPhotoSchemes = { "https://", "http://", "s3://" };
 
     private readonly IDisputeStore _store;
-    private readonly IPushNotificationService _push;
+    private readonly IGenericEventDispatcher _events;
     private readonly TimeProvider _clock;
     private readonly ILogger<DisputeService> _log;
 
     public DisputeService(
         IDisputeStore store,
-        IPushNotificationService push,
+        IGenericEventDispatcher events,
         TimeProvider clock,
         ILogger<DisputeService> log)
     {
         _store = store;
-        _push = push;
+        _events = events;
         _clock = clock;
         _log = log;
     }
@@ -75,11 +75,9 @@ public class DisputeService : IDisputeService
 
         var saved = await _store.AddAsync(dispute, ct);
 
-        // Best-effort notify the filer so they know the case is in the
-        // queue. Admin notification piggy-backs on the same trigger with
-        // a distinct idempotency key — production wiring will route this
-        // to a moderator inbox via notification-service.
-        await SendBestEffortAsync(BuildFiledPush(saved), ct);
+        // Best-effort for the ROW, not for the alarm: a lost hand-over is Error-logged
+        // and counted by PushHandover, never swallowed.
+        await SendFiledPushAsync(saved, ct);
 
         return saved;
     }
@@ -129,7 +127,7 @@ public class DisputeService : IDisputeService
 
         if (updated is null) return null;
 
-        await SendBestEffortAsync(BuildResolutionPush(updated, input.Action), ct);
+        await SendResolutionPushAsync(updated, input.Action, ct);
         return updated;
     }
 
@@ -165,22 +163,32 @@ public class DisputeService : IDisputeService
         return cleaned;
     }
 
-    private static PushNotificationRequest BuildFiledPush(Dispute dispute) =>
-        new(
+    private Task SendFiledPushAsync(Dispute dispute, CancellationToken ct)
+    {
+        var data = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["type"] = "dispute",
+            ["dispute_id"] = dispute.Id,
+            ["delivery_id"] = dispute.DeliveryId,
+            ["dispute_state"] = dispute.State,
+            ["dispute_category"] = dispute.Category
+        };
+
+        // The pre-existing idempotency key IS the entity id; no new key is minted.
+        return PushHandover.DispatchAsync(
+            _events, _log,
+            JeebGenericEventTypes.DisputeUpdateEventType,
             dispute.FiledByUserId,
-            NotificationTrigger.StatusChange,
+            $"dispute:{dispute.Id}:filed",
             "Dispute filed",
             "We received your dispute and a reviewer will follow up shortly.",
-            new Dictionary<string, string>
-            {
-                ["dispute_id"] = dispute.Id,
-                ["delivery_id"] = dispute.DeliveryId,
-                ["dispute_state"] = dispute.State,
-                ["dispute_category"] = dispute.Category
-            },
-            IdempotencyKey: $"dispute:{dispute.Id}:filed");
+            data,
+            PushSilencePolicy.CategoryDispute,
+            ct);
+    }
 
-    private static PushNotificationRequest BuildResolutionPush(Dispute dispute, DisputeResolveAction action)
+    private Task SendResolutionPushAsync(
+        Dispute dispute, DisputeResolveAction action, CancellationToken ct)
     {
         var (title, body) = action switch
         {
@@ -200,38 +208,24 @@ public class DisputeService : IDisputeService
             _ => ("Dispute updated", "Your dispute status has changed.")
         };
 
-        return new PushNotificationRequest(
+        var data = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["type"] = "dispute",
+            ["dispute_id"] = dispute.Id,
+            ["delivery_id"] = dispute.DeliveryId,
+            ["dispute_state"] = dispute.State
+        };
+
+        // The pre-existing idempotency key IS the entity id; no new key is minted.
+        return PushHandover.DispatchAsync(
+            _events, _log,
+            JeebGenericEventTypes.DisputeUpdateEventType,
             dispute.FiledByUserId,
-            NotificationTrigger.StatusChange,
+            $"dispute:{dispute.Id}:{dispute.State}",
             title,
             body,
-            new Dictionary<string, string>
-            {
-                ["dispute_id"] = dispute.Id,
-                ["delivery_id"] = dispute.DeliveryId,
-                ["dispute_state"] = dispute.State
-            },
-            IdempotencyKey: $"dispute:{dispute.Id}:{dispute.State}");
-    }
-
-    private async Task SendBestEffortAsync(PushNotificationRequest request, CancellationToken ct)
-    {
-        try
-        {
-            await _push.SendAsync(request, ct);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            // Push fan-out must never block the dispute mutation — the row
-            // is already written and the user can read the latest state via
-            // GET /disputes/{id} on next foreground.
-            _log.LogWarning(ex,
-                "dispute push fan-out failed for user {UserId} dispute {DisputeId} trigger {Trigger}",
-                request.UserId, request.Data?["dispute_id"] ?? "?", request.Trigger);
-        }
+            data,
+            PushSilencePolicy.CategoryDispute,
+            ct);
     }
 }

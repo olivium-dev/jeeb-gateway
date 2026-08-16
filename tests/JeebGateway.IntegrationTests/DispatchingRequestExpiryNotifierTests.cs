@@ -1,7 +1,6 @@
 using System.Net;
 using System.Text;
 using FluentAssertions;
-using JeebGateway.Push;
 using JeebGateway.Requests;
 using JeebGateway.Services.Dispatch;
 using JeebGateway.service.ServicePushNotification;
@@ -45,8 +44,8 @@ public class DispatchingRequestExpiryNotifierTests
         payload.Value<string>("request_id").Should().Be(RequestId);
         payload.Value<string>("language").Should().Be("en");
 
-        services.GetService<IPushNotificationService>().Should().BeNull(
-            "expiry delivery must not reach the in-gateway device-token registry");
+        // The IPushNotificationService leg is gone: the type itself no longer exists.
+        // InGatewayPushStackDeletedTests holds that, and it runs in the project that compiles.
         services.GetService<IJeebNotificationDispatcher>().Should().BeNull(
             "the old dispatcher terminates in the in-gateway NoDevices path");
     }

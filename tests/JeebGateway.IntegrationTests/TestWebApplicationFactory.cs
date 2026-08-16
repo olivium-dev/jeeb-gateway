@@ -156,8 +156,6 @@ public class WebApplicationFactory<TEntryPoint>
 
         services.RemoveAll<INotificationOwnerClient>();
         services.AddSingleton<INotificationOwnerClient, TestNotificationOwnerClient>();
-        services.RemoveAll<IPushNotificationService>();
-        services.AddSingleton<IPushNotificationService, NotificationOwnerPushService>();
     }
 
     private static void ReplaceSingleton<TContract, TImplementation>(IServiceCollection services)

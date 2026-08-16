@@ -22,7 +22,7 @@ namespace JeebGateway.IntegrationTests;
 ///
 /// Each test seeds a unique delivery to keep the shared in-memory store
 /// from bleeding state across cases. Pushes go through the real
-/// <see cref="IPushNotificationService"/> so the in-memory FCM/APNs
+/// <c>IPushNotificationService</c> (now deleted) so the in-memory FCM/APNs
 /// transports record the outbound fan-out — letting us assert that the
 /// "other party" receives a status-change notification on every commit.
 /// </summary>

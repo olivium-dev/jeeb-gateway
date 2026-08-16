@@ -121,8 +121,6 @@ public class AssignmentMirrorRaceTests
             {
                 services.RemoveAll<IDeliveryServiceClient>();
                 services.AddSingleton<IDeliveryServiceClient>(delivery);
-                services.RemoveAll<IPushNotificationService>();
-                services.AddSingleton<IPushNotificationService>(new NoopPushService());
             });
         });
 
@@ -235,9 +233,4 @@ public class AssignmentMirrorRaceTests
         public Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct) => throw new NotSupportedException();
     }
 
-    private sealed class NoopPushService : IPushNotificationService
-    {
-        public Task<PushDeliveryResult> SendAsync(PushNotificationRequest request, CancellationToken ct)
-            => Task.FromResult(new PushDeliveryResult(request.UserId, request.Trigger, PushDeliveryOutcome.Delivered, 1));
-    }
 }
