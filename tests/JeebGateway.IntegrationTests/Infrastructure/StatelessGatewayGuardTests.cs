@@ -1,7 +1,6 @@
 using System.Reflection;
 using FluentAssertions;
 using JeebGateway.Services.Clients;
-using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -13,8 +12,29 @@ namespace JeebGateway.IntegrationTests.Infrastructure;
 // interrogated is gone. What survives is asserted here against its real owner.
 public sealed class StatelessGatewayGuardTests
 {
-    // Ratchet value, not a target. Lower it when a worker retires; never raise it silently.
-    private const int HostedServiceRatchet = 18;
+    // The gateway-owned background workers, by name. Framework-registered hosted services
+    // (OpenTelemetry, DataProtection, health-check publisher, GenericWebHostService) are not
+    // the gateway's to ratchet and are excluded by namespace.
+    private static readonly string[] GatewayOwnedHostedServices =
+    {
+        "JeebGateway.Auth.Capabilities.CapabilityCoverageGuard",
+        "JeebGateway.Services.Bff.BffStartupValidator",
+        "JeebGateway.Conversations.AcceptChatSettleReconciler",
+        "JeebGateway.Realtime.CourierPositionPublisher",
+        "JeebGateway.Notifications.NotificationDurableWriteStartupAlarm",
+        "JeebGateway.Notifications.NewRequestFanoutProcessor",
+        "JeebGateway.StateService.Work.WorkItemClaimWorker",
+        "JeebGateway.Requests.OtpHandover.OtpHandoverSweeper",
+        "JeebGateway.Requests.OtpHandover.EscalationMirrorDrainer",
+        "JeebGateway.Availability.AvailabilityMirrorDrainer",
+        "JeebGateway.Requests.RequestNudgeSweeper",
+        "JeebGateway.Requests.RequestExpiryObserver",
+        "JeebGateway.Requests.ScheduledDeliveryActivator",
+        "JeebGateway.ProhibitedItems.DefaultLexiconSeeder",
+        "JeebGateway.Users.AccountDeletionPurgeWorker",
+        "JeebGateway.Users.DataExport.DataExportProcessor",
+        "JeebGateway.Availability.AutoOfflineSweeper",
+    };
 
     private static readonly Assembly Gateway = typeof(Program).Assembly;
 
@@ -41,22 +61,22 @@ public sealed class StatelessGatewayGuardTests
 
     /// <summary>
     /// Successor to Only_startup_and_coverage_validators_are_allowed_as_hosted_services. The
-    /// AllowedHostedServices catalog described an aspiration (two validators) that the gateway
-    /// never reached; the surviving mechanism is the ratchet in the gwdbx deletion ledger, which
-    /// moved 19 -> 18 at ADR-0010. Pinning the count is what stops a worker sneaking back.
+    /// AllowedHostedServices catalog described an aspiration (two validators) the gateway never
+    /// reached; the surviving mechanism is the deletion ledger ratchet. Pinning the exact SET,
+    /// not a count, is what makes a new background worker fail with its own name.
     /// </summary>
     [Fact]
-    public void The_Hosted_Service_Ratchet_Holds_And_Still_Carries_Both_Startup_Validators()
+    public void The_Hosted_Service_Roster_Is_Exactly_The_Ratcheted_Set()
     {
-        using var host = new WebApplicationFactory<Program>();
+        // The FRAMEWORK factory, not this suite's shadowing one, so the roster is production's.
+        using var host = new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>();
 
-        var hosted = host.Services.GetServices<IHostedService>().ToList();
-
-        hosted.Should().Contain(service => service is JeebGateway.Auth.Capabilities.CapabilityCoverageGuard);
-        hosted.Should().Contain(service => service is JeebGateway.Services.Bff.BffStartupValidator);
-        hosted.Count.Should().Be(HostedServiceRatchet,
-            "the deletion ledger ratchets this DOWN only; a new background worker in a gateway "
-            + "meant to be stateless must be an explicit decision, not a merge artefact");
+        host.Services.GetServices<IHostedService>()
+            .Select(service => service.GetType().FullName!)
+            .Where(name => name.StartsWith("JeebGateway.", StringComparison.Ordinal))
+            .Should().BeEquivalentTo(GatewayOwnedHostedServices,
+                "the deletion ledger ratchets background workers DOWN only; a stateless gateway "
+                + "growing a new one must be an explicit decision, not a merge artefact");
     }
 
     /// <summary>

@@ -286,6 +286,7 @@ public sealed class CmsKycAdminCompatTests : IClassFixture<CmsKycAdminCompatTest
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:UseUpstream:Kyc", "true");
             builder.ConfigureServices(services =>
             {

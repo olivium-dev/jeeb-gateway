@@ -301,6 +301,7 @@ public class MirroringAdminAuditLogTests
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:AdminAuditMode", "dual-write-local-read");
             builder.ConfigureServices(services =>
             {

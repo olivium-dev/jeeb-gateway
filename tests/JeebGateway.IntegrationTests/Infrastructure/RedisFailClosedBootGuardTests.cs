@@ -163,6 +163,8 @@ public class RedisFailClosedBootGuardTests
         return new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
             b.UseEnvironment("Production");
+            b.UseSetting(Fakes.ProductionMountedSecrets.StateServiceTokenFileKey,
+                Fakes.ProductionMountedSecrets.StateServiceTokenFile);
             b.UseSetting("Jwt:SigningKey", ProdJwtKey);
             b.UseSetting("UmJwt:SigningKey", ProdJwtKey);
             b.UseSetting("BffServices:RequiredInProduction", "false");

@@ -38,6 +38,8 @@ public sealed class ControllerHeaderSpoofScopingTests
         => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
             b.UseEnvironment("Production");
+            b.UseSetting(Fakes.ProductionMountedSecrets.StateServiceTokenFileKey,
+                Fakes.ProductionMountedSecrets.StateServiceTokenFile);
             b.UseSetting("Security:RateLimit:Enabled", "false");
             b.UseSetting("Security:TokenMint:Enabled", "false");
             b.UseSetting("Jwt:SigningKey", ValidSigningKey);
