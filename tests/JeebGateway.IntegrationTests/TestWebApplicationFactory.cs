@@ -129,7 +129,9 @@ public class WebApplicationFactory<TEntryPoint>
             InMemoryAccountDeletionStore>(services);
 
         ReplaceSingleton<IDisputeStore, InMemoryDisputeStore>(services);
-        ReplaceSingleton<IDisputeService, DisputeService>(services);
+        // SCOPED, matching Program.cs: DisputeService consumes the scoped
+        // IGenericEventDispatcher, so a singleton here is a captive dependency.
+        ReplaceScoped<IDisputeService, DisputeService>(services);
         ReplaceSingleton<IDisputeCaseStore, InMemoryDisputeCaseStore>(services);
         services.RemoveAll<IDisputeEvidenceOrchestrator>();
         services.AddScoped<IDisputeEvidenceOrchestrator, DisputeEvidenceOrchestrator>();

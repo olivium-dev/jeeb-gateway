@@ -7,7 +7,6 @@ using JeebGateway.Cases;
 using JeebGateway.Notifications;
 using JeebGateway.Services.Clients;
 using JeebGateway.service.ServiceNotification;
-using JeebGateway.service.ServicePushNotification;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -19,17 +18,15 @@ public sealed class CaseEventCallbacksController : ControllerBase
 {
     private readonly ICaseDeliveryClient _delivery;
     private readonly ServiceNotificationClient _notifications;
-    private readonly ServicePushNotificationClient _push;
-    private readonly IPushDispatchRecoveryClient _pushRecovery;
+    private readonly IGenericEventDispatcher _events;
     private readonly ILogger<CaseEventCallbacksController> _log;
 
     public CaseEventCallbacksController(ICaseDeliveryClient delivery,
-        ServiceNotificationClient notifications, ServicePushNotificationClient push,
-        IPushDispatchRecoveryClient pushRecovery,
+        ServiceNotificationClient notifications, IGenericEventDispatcher events,
         ILogger<CaseEventCallbacksController> log)
     {
-        _delivery = delivery; _notifications = notifications; _push = push;
-        _pushRecovery = pushRecovery; _log = log;
+        _delivery = delivery; _notifications = notifications;
+        _events = events; _log = log;
     }
 
     [HttpPost("events")]
@@ -124,45 +121,30 @@ public sealed class CaseEventCallbacksController : ControllerBase
                         },
                     }, ct);
 
-                try
+                // The notification-service hand-over rail every other push seat uses. The
+                // in-gateway direct dispatcher this seat used to call is 503 by design.
+                var classification = await PushHandover.DispatchAsync(
+                    _events,
+                    _log,
+                    HandoverEventType(callback),
+                    recipient.UserId,
+                    downstreamIdempotencyKey,
+                    title,
+                    message,
+                    HandoverData(callback, recipient, notificationType, deepLink, downstreamIdempotencyKey),
+                    HandoverCategory(callback),
+                    ct);
+
+                if (!PushHandover.IsProducerOwned(classification))
                 {
-                    await _push.Send_notification_to_userAsync(recipient.UserId,
-                        new SentPayloadToUserRequest
-                        {
-                            AdditionalProperties = new Dictionary<string, object>
-                            {
-                                ["idempotency_key"] = downstreamIdempotencyKey,
-                            },
-                            Payload = new Dictionary<string, object?>
-                            {
-                                ["notificationId"] = notificationId.ToString("D"),
-                                ["idempotencyKey"] = downstreamIdempotencyKey,
-                                ["type"] = notificationType,
-                                ["eventType"] = callback.EventType,
-                                ["caseId"] = callback.Case.CaseId.ToString("D"),
-                                ["caseKind"] = callback.Case.Kind,
-                                ["status"] = callback.Case.Status,
-                                ["recipientRole"] = recipient.Role,
-                                ["deepLink"] = deepLink,
-                                ["title"] = title,
-                                ["body"] = message,
-                                ["data"] = callback.Data,
-                            },
-                        }, ct);
-                }
-                catch (Exception pushError) when (pushError is not OperationCanceledException)
-                {
-                    var dispatch = await ResolvePushOutcomeAsync(
-                        downstreamIdempotencyKey, callback, recipient, pushError, ct);
-                    if (dispatch.State == "failed")
-                    {
-                        degradedPushes++;
-                        _log.LogWarning(
-                            "event=case.callback_push_degraded case_event_id={EventId} recipient_id={RecipientId} "
-                            + "push_key={PushKey} push_state={PushState} correlation_id={CorrelationId}",
-                            callback.EventId, recipient.UserId, downstreamIdempotencyKey, dispatch.State,
-                            Activity.Current?.TraceId.ToString() ?? HttpContext.TraceIdentifier);
-                    }
+                    // Degraded, NOT retryable. The case row and the notification-centre record
+                    // are already committed; PushHandover has already counted and alarmed.
+                    degradedPushes++;
+                    _log.LogWarning(
+                        "event=case.callback_push_degraded case_event_id={EventId} recipient_id={RecipientId} "
+                        + "push_key={PushKey} push_state={PushState} correlation_id={CorrelationId}",
+                        callback.EventId, recipient.UserId, downstreamIdempotencyKey, classification,
+                        Activity.Current?.TraceId.ToString() ?? HttpContext.TraceIdentifier);
                 }
             }
 
@@ -200,29 +182,38 @@ public sealed class CaseEventCallbacksController : ControllerBase
         }
     }
 
-    private async Task<PushDispatchStatusV1> ResolvePushOutcomeAsync(
-        string idempotencyKey, GenericCaseCallbackV1 callback, CaseRecipient recipient,
-        Exception pushError, CancellationToken ct)
-    {
-        PushDispatchStatusV1 dispatch;
-        try
-        {
-            dispatch = await _pushRecovery.GetAsync(idempotencyKey, staleAfterSeconds: 300, ct);
-        }
-        catch (Exception recoveryError) when (recoveryError is not OperationCanceledException)
-        {
-            throw new InvalidOperationException(
-                $"Push outcome for case event {callback.EventId:D} and recipient {recipient.UserId} is undeterminable.",
-                new AggregateException(pushError, recoveryError));
-        }
+    private static string HandoverEventType(GenericCaseCallbackV1 callback) =>
+        callback.Case.Kind == GenericCaseKinds.Dispute
+            ? JeebGenericEventTypes.DisputeUpdateEventType
+            : JeebGenericEventTypes.SupportCaseUpdateEventType;
 
-        if (dispatch.State is "succeeded" or "failed")
-            return dispatch;
+    private static string HandoverCategory(GenericCaseCallbackV1 callback) =>
+        callback.Case.Kind == GenericCaseKinds.Dispute
+            ? PushSilencePolicy.CategoryDispute
+            : PushSilencePolicy.CategorySupport;
 
-        throw new InvalidOperationException(
-            $"Push outcome for case event {callback.EventId:D} and recipient {recipient.UserId} remains {dispatch.State}.",
-            pushError);
-    }
+    /// <summary>
+    /// FLAT string routing map, as the relay requires. <c>status</c> is deliberately absent —
+    /// notification-service reserves it and overwrites a producer's value.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> HandoverData(
+        GenericCaseCallbackV1 callback, CaseRecipient recipient,
+        string notificationType, string deepLink, string idempotencyKey) =>
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["type"] = callback.Case.Kind == GenericCaseKinds.Dispute ? "dispute" : "support",
+            ["notificationType"] = notificationType,
+            ["notificationId"] = idempotencyKey,
+            ["idempotencyKey"] = idempotencyKey,
+            ["eventType"] = callback.EventType,
+            ["caseId"] = callback.Case.CaseId.ToString("D"),
+            ["case_id"] = callback.Case.CaseId.ToString("D"),
+            ["caseKind"] = callback.Case.Kind,
+            ["caseStatus"] = callback.Case.Status,
+            ["recipientRole"] = recipient.Role,
+            ["deepLink"] = deepLink,
+            ["deep_link"] = deepLink,
+        };
 
     private async Task<IReadOnlyList<CaseRecipient>> ResolveRecipientsAsync(
         GenericCaseCallbackV1 callback, CancellationToken ct)
