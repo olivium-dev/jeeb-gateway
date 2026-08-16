@@ -139,6 +139,19 @@ public class DeliveriesController : ControllerBase
     private string ResolveOtpApplicationId()
         => _otpSignInOptions.Value.ApplicationId;
 
+    /// <summary>D15: the at-door code is matched ONLY against the gateway-minted
+    /// per-delivery code — never the shared login one-time-password service.</summary>
+    private async Task<bool> VerifyDoorCodeAsync(
+        string deliveryId,
+        string code,
+        Activity? activity,
+        CancellationToken ct)
+    {
+        var matched = await _handoverCodes.TryMatchAsync(deliveryId, code, ct);
+        activity?.SetTag("otp.match_source", matched ? "gateway_minted" : "no_match");
+        return matched;
+    }
+
     /// <summary>
     /// Gap G4 (run-24 CHECK C) store-miss fallback: the accept-issued in-app handover
     /// code, echoed on <c>GET /otp</c> ONLY to the delivery's OWN client (owner-scoped
@@ -2032,75 +2045,12 @@ public class DeliveriesController : ControllerBase
         }
 
         var attemptCount = await ReadAttemptCountAsync(deliveryId, ct);
-        // JEB-1516: forward the configured tenant GUID, not the non-GUID
-        // delivery_handover_{id} label (which made the upstream Guid.Parse throw → 502).
-        var applicationId = ResolveOtpApplicationId();
 
-        bool verified;
-        int upstreamStatus = 0;
+        // D15: no upstream code hop remains on this path; kept so the failure log
+        // below keeps its stable shape.
+        const int upstreamStatus = 0;
 
-        // Gap G4 (run-24 CHECK C) verify-precedence: when the customer read the code
-        // IN-APP (minted at offer-accept), the gateway holds it — match it FIRST
-        // (constant-time). A hit is a valid handover code, short-circuiting the
-        // one-time-password round-trip; a miss (or no stored code) falls through to
-        // the existing SMS-code validation, so the SMS-minted code keeps working
-        // unchanged. The downstream transition/settlement below is untouched; a wrong
-        // code still 400s. The submitted code is never logged.
-        if (await _handoverCodes.TryMatchAsync(deliveryId, body.Code!, ct))
-        {
-            verified = true;
-            activity?.SetTag("otp.match_source", "gateway_minted");
-        }
-        else if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
-        {
-            // BUG B: no recipient phone → the SMS-code channel never existed for this
-            // delivery, so the in-app code above was the only valid code. A miss here
-            // is a wrong/absent code and is handled exactly like a failed SMS verify
-            // (attempt++/401 below) — NOT a 400 that blocks the whole handover.
-            activity?.SetTag("otp.match_source", "in_app_only_no_sms");
-            verified = false;
-        }
-        else
-        {
-            activity?.SetTag("otp.match_source", "one_time_password");
-            try
-            {
-                await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
-                {
-                    PhoneNumber   = delivery.RecipientPhone,
-                    Otp           = body.Code,
-                    ApplicationId = applicationId
-                }, ct);
-                verified = true;
-            }
-            catch (ApiException apiEx)
-            {
-                // PR review B5: NEVER log apiEx / apiEx.Message — the NSwag
-                // ApiException embeds the upstream response body in Message,
-                // which may echo the submitted code or other OTP-adjacent data.
-                // Log only the upstream HTTP status.
-                verified       = false;
-                upstreamStatus = apiEx.StatusCode;
-            }
-            catch (OperationCanceledException)
-            {
-                // Request was cancelled (caller disconnect / shutdown). Surface
-                // 499-equivalent via the framework default by rethrowing.
-                throw;
-            }
-            catch (Exception ex)
-            {
-                // Network / timeout failure before reaching upstream — safe to
-                // log the exception type but NOT the message (defense in depth).
-                _log.LogWarning(
-                    "Handover OTP verify pre-upstream failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
-                    deliveryId, ex.GetType().Name, correlationId);
-                return Problem(
-                    title:      "OTP verification failed",
-                    detail:     "Unable to reach the one-time-password service.",
-                    statusCode: StatusCodes.Status502BadGateway);
-            }
-        }
+        var verified = await VerifyDoorCodeAsync(deliveryId, body.Code!, activity, ct);
 
         if (verified)
         {
@@ -2441,68 +2391,9 @@ public class DeliveriesController : ControllerBase
         // blanket 400. B6 still holds where a phone is present (SMS validate uses the
         // row's phone, never a placeholder).
 
-        // JEB-1516: forward the configured tenant GUID, not the non-GUID
-        // delivery_handover_{id} label (which made the upstream Guid.Parse throw → 502).
-        var applicationId = ResolveOtpApplicationId();
-
-        // 1) Code-validation hop. one-time-password returns 2xx for a correct
-        //    code; the NSwag client throws ApiException for a wrong/expired
-        //    code. We collapse that to a success boolean — the raw code is
-        //    discarded here and NEVER forwarded to delivery-service (AC5).
-        // Gap G4 (run-24 CHECK C) verify-precedence: when the customer read the code
-        // IN-APP (minted at offer-accept), the gateway holds it — match it FIRST
-        // (constant-time) and, on a hit, treat as a valid code INSTEAD OF the
-        // one-time-password round-trip. On no-stored-code-or-mismatch, fall through to
-        // the existing SMS-code validation so the SMS-minted code keeps working. Either
-        // way only the success boolean reaches delivery-service (AC5); the raw code
-        // never leaves the gateway and is never logged.
-        bool success;
-        if (await _handoverCodes.TryMatchAsync(deliveryId, code, ct))
-        {
-            success = true;
-            activity?.SetTag("otp.match_source", "gateway_minted");
-        }
-        else if (string.IsNullOrWhiteSpace(delivery.RecipientPhone))
-        {
-            // BUG B: no recipient phone → no SMS-code channel ever existed, so the in-app
-            // code above was the only valid code. A miss is a wrong code (success=false),
-            // handled like any failed verify — NOT a 400 that blocks the handover.
-            activity?.SetTag("otp.match_source", "in_app_only_no_sms");
-            success = false;
-        }
-        else
-        {
-            activity?.SetTag("otp.match_source", "one_time_password");
-            try
-            {
-                await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
-                {
-                    PhoneNumber   = delivery.RecipientPhone,
-                    Otp           = code,
-                    ApplicationId = applicationId
-                }, ct);
-                success = true;
-            }
-            catch (ApiException)
-            {
-                // Wrong/expired code. Do NOT log apiEx/Message (B5/AC5).
-                success = false;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(
-                    "Handover OTP verify (upstream path) pre-validate failure for delivery {DeliveryId}: {ExceptionType}, correlationId {CorrelationId}",
-                    deliveryId, ex.GetType().Name, correlationId);
-                return Problem(
-                    title:      "OTP verification failed",
-                    detail:     "Unable to reach the one-time-password service.",
-                    statusCode: StatusCodes.Status502BadGateway);
-            }
-        }
+        // 1) Code check. D15: matched ONLY against the gateway-minted per-delivery
+        //    code; only the success boolean reaches delivery-service (AC5).
+        var success = await VerifyDoorCodeAsync(deliveryId, code, activity, ct);
 
         activity?.SetTag("otp.path", "upstream");
         activity?.SetTag("otp.code_valid", success ? "true" : "false");
