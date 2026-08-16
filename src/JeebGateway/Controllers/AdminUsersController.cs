@@ -49,6 +49,12 @@ public class AdminUsersController : ControllerBase
     private const string ActionSuspend = "suspend_user";
     private const string ActionUnsuspend = "unsuspend_user";
 
+    // The CMS status contract (OA-34): {action:"suspend"|"reinstate"} and the panel's
+    // activeRole sentinel for a suspended account.
+    private const string CmsActionSuspend = "suspend";
+    private const string CmsActionReinstate = "reinstate";
+    private const string SuspendedRoleLabel = "suspended";
+
     private readonly IAdminUserProjection _users;
     private readonly ITokenService _tokens;
     private readonly IAdminAuditLog _auditLog;
@@ -258,6 +264,96 @@ public class AdminUsersController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// OA-34 / owner decision O3 — CMS-compat alias for the two actions above. The DEPLOYED
+    /// back-office bundle issues
+    /// <c>PATCH &lt;origin&gt;/gateway/user-management/admin/users/{userId}/status</c> with
+    /// <c>{action:"suspend"|"reinstate", reason?}</c> (verbatim in the live release's
+    /// <c>mf/users/606.js</c>); the vhost strips one <c>/gateway/</c>, so the gateway must serve
+    /// <c>user-management/admin/users/{id}/status</c>. It served nothing there, so the suspend
+    /// button has been hitting a 404. Same compat-facade pattern as
+    /// <see cref="CmsKycAdminController"/>: serve the path the shipped bundle already emits, no CMS
+    /// redeploy. The <c>user-management/</c> segment is a CMS URL namespace, not a proxy — nothing
+    /// here calls user-management beyond the projection the native routes already use.
+    ///
+    /// <para><b>Why this lives on THIS controller and delegates to its own actions (OA-36).</b>
+    /// <c>POST /v1/auth/refresh</c> is a fifth session-minting door and carries NO suspension gate.
+    /// A suspended account is stopped there only because <see cref="Suspend"/> revokes the
+    /// refresh-token family on the SAME request as the ban write. A route that wrote ban-service
+    /// directly — or a CMS repointed at ban-service — would refuse the account at every gated door
+    /// while it rotated refresh tokens indefinitely. Delegating to <see cref="Suspend"/> /
+    /// <see cref="Unsuspend"/> makes that drift impossible by construction: there is exactly one
+    /// suspend implementation, and it is the one that revokes.</para>
+    /// </summary>
+    [HttpPatch("/user-management/admin/users/{id}/status")]
+    [RequireCapability(Capabilities.UsersAdminManage)]
+    [ProducesResponseType(typeof(CmsUserStatusResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> CmsUpdateStatus(
+        string id, [FromBody] CmsUserStatusRequest? body, CancellationToken ct)
+    {
+        var action = body?.Action?.Trim().ToLowerInvariant();
+        if (action is not (CmsActionSuspend or CmsActionReinstate))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = $"action must be '{CmsActionSuspend}' or '{CmsActionReinstate}'.",
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
+
+        var suspending = action == CmsActionSuspend;
+
+        // The one suspend/unsuspend implementation, ban write and refresh-family revocation
+        // included. Any non-200 (400/401/404) is returned unchanged.
+        var inner = suspending
+            ? await Suspend(id, new SuspendUserRequest { Reason = body!.Reason }, ct)
+            : await Unsuspend(id, ct);
+
+        if (inner is not OkObjectResult ok)
+        {
+            return inner;
+        }
+
+        var profile = await _users.GetByIdAsync(id, ct);
+        return Ok(ToCmsRow(id, profile, suspending, ok.Value));
+    }
+
+    /// <summary>
+    /// The CMS <c>AdminUserListItem</c> the panel merges over its row. It reports suspension TWICE
+    /// on purpose: the shipped panel derives state from <c>activeRole === "suspended"</c> while the
+    /// newer bundle reads <c>isSuspended</c>, and the button only flips if both agree.
+    /// </summary>
+    private static CmsUserStatusResponse ToCmsRow(
+        string id, UserProfile? profile, bool suspending, object? innerBody)
+    {
+        var suspend = innerBody as SuspendUserResponse;
+
+        return new CmsUserStatusResponse
+        {
+            Id = profile?.Id ?? id,
+            UserId = profile?.Id ?? id,
+            Phone = profile?.Phone ?? string.Empty,
+            Email = profile?.Email,
+            Name = profile?.Name ?? string.Empty,
+            AvatarUrl = profile?.AvatarUrl,
+            Language = profile?.Language ?? "en",
+            AvailableRoles = profile?.Roles.ToList() ?? new List<string>(),
+            ActiveRole = suspending ? SuspendedRoleLabel : profile?.ActiveRole ?? Roles.Client,
+            CreatedAt = profile?.CreatedAt,
+            Rating = profile?.Rating,
+            RatingCount = profile?.RatingCount ?? 0,
+            IsSuspended = suspending,
+            SuspensionReason = suspending ? suspend?.Reason ?? profile?.SuspensionReason : null,
+            SuspendedAt = suspending ? suspend?.SuspendedAt ?? profile?.SuspendedAt : null,
+            SuspendedBy = suspending ? suspend?.SuspendedBy : null,
+            RevokedTokenCount = suspend?.RevokedTokenCount
+        };
+    }
+
     private static AdminUserSearchResultItem ToSearchItem(UserProfile u) => new()
     {
         Id = u.Id,
@@ -273,4 +369,37 @@ public class AdminUsersController : ControllerBase
         // BR-10: a Jeeber with zero ratings renders a "New" badge in the roster.
         IsNew = u.RatingCount == 0
     };
+}
+
+/// <summary>CMS <c>UserStatusAction</c>: <c>{ action: suspend|reinstate, reason?: string }</c>.</summary>
+public sealed class CmsUserStatusRequest
+{
+    public string? Action { get; init; }
+    public string? Reason { get; init; }
+}
+
+/// <summary>
+/// CMS <c>AdminUserListItem</c>, plus the suspension fields the panel merges over its row.
+/// The CMS spreads this onto its cached detail, so every field it reads must be present.
+/// </summary>
+public sealed class CmsUserStatusResponse
+{
+    public required string Id { get; init; }
+    public required string UserId { get; init; }
+    public required string Phone { get; init; }
+    public string? Email { get; init; }
+    public required string Name { get; init; }
+    public string? AvatarUrl { get; init; }
+    public required string Language { get; init; }
+    public required IReadOnlyList<string> AvailableRoles { get; init; }
+    public required string ActiveRole { get; init; }
+    public DateTimeOffset? CreatedAt { get; init; }
+    public decimal? Rating { get; init; }
+    public required int RatingCount { get; init; }
+    public required bool IsSuspended { get; init; }
+    public string? SuspensionReason { get; init; }
+    public DateTimeOffset? SuspendedAt { get; init; }
+    public string? SuspendedBy { get; init; }
+    /// <summary>How many refresh tokens the suspension swept — the OA-36 invariant, made visible.</summary>
+    public int? RevokedTokenCount { get; init; }
 }
