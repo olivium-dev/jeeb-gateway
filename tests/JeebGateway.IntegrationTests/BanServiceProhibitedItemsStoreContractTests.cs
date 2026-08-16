@@ -358,6 +358,12 @@ public sealed class BanServiceProhibitedItemsStoreContractTests
             string userId,
             string version,
             CancellationToken ct) => throw new NotSupportedException();
+
+        // gwdbx W3-03 ack-ledger enumeration: importer-only, never exercised by these fixtures.
+        public Task<UserAcknowledgmentPage> ListAcknowledgmentsAsync(
+            int page,
+            int pageSize,
+            CancellationToken ct) => throw new NotSupportedException();
     }
 
     private sealed class StaleAcknowledgementStore(string version)
@@ -396,5 +402,11 @@ public sealed class BanServiceProhibitedItemsStoreContractTests
             CancellationToken ct) => throw new StaleProhibitedCatalogVersionException(
                 acknowledgedVersion,
                 "catalog changed during write");
+
+        // gwdbx W3-03 ack-ledger enumeration: importer-only, never exercised by these fixtures.
+        public Task<UserAcknowledgmentPage> ListAcknowledgmentsAsync(
+            int page,
+            int pageSize,
+            CancellationToken ct) => throw new NotSupportedException();
     }
 }
