@@ -289,12 +289,31 @@ public sealed class CmsAuthoringEndpointTests
     }
 
     [Fact]
-    public async Task DevStepUpTotp_Returns_Documented_Code()
+    public async Task DevStepUpTotp_Returns_Documented_Code_When_DevEndpoints_Enabled()
     {
         using var f = new CmsControllerFactory();
-        var body = await Client(f).GetFromJsonAsync<JsonElement>($"{Base}/dev/step-up-totp");
+        var http = f.WithWebHostBuilder(
+            b => b.UseSetting("Features:DevEndpoints:Enabled", "true")).CreateClient();
+        http.DefaultRequestHeaders.Add("X-User-Id", "cms-admin-1");
+
+        var body = await http.GetFromJsonAsync<JsonElement>($"{Base}/dev/step-up-totp");
 
         body.GetProperty("code").GetString().Should().Be("424242");
         body.GetProperty("expiresInSeconds").GetInt32().Should().Be(900);
+    }
+
+    // SEC-AUTH (2026-08-16): the dispenser is [DevOnly] — 404 in every non-dev env
+    // (Features:DevEndpoints:Enabled off, the committed production default).
+    [Fact]
+    public async Task DevStepUpTotp_Is_404_When_DevEndpoints_Disabled()
+    {
+        using var f = new CmsControllerFactory();
+        var http = f.WithWebHostBuilder(
+            b => b.UseSetting("Features:DevEndpoints:Enabled", "false")).CreateClient();
+        http.DefaultRequestHeaders.Add("X-User-Id", "cms-admin-1");
+
+        var resp = await http.GetAsync($"{Base}/dev/step-up-totp");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 }
