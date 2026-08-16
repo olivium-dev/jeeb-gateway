@@ -127,8 +127,8 @@ public class WebApplicationFactory<TEntryPoint>
             TestSettlementEnqueueStore>(services);
         ReplaceSingleton<ISettlementBatchStore,
             TestSettlementBatchStore>(services);
-        ReplaceSingleton<JeebGateway.Financials.Cod.ICodSettlementLedger,
-            TestCodSettlementLedger>(services);
+        // gwdbx W2-R11 deleted the in-gateway COD ledger; CodSettlementComposeController now
+        // projects COD from the settlement row, so this registration bound nothing.
         ReplaceSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>(services);
         ReplaceSingleton<IFinancialLedgerAnonymizer,
             InMemoryFinancialLedger>(services);

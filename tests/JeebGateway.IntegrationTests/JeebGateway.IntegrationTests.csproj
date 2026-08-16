@@ -97,7 +97,6 @@
     <Compile Remove="Requests\RequestExpiryMathParityTests.cs" />
     <Compile Remove="S08GatewayCloseoutTests.cs" />
     <Compile Remove="S09TrackingSettlementBffTests.cs" />
-    <Compile Remove="S10CodSettlementEarningsTests.cs" />
     <Compile Remove="ScheduledDeliveryTests.cs" />
     <Compile Remove="Tiers\AdminTierTtlGuardTests.cs" />
     <Compile Remove="Tracking\CourierPositionRealtimeTests.cs" />
