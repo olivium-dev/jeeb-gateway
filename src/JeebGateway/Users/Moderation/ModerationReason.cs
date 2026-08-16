@@ -43,6 +43,21 @@ public static class ModerationReason
     }
 
     /// <summary>
+    /// Operator-facing variant. Same rule, but an unresolved template degrades to its bare
+    /// KEY rather than to <see cref="Fallback"/> — an admin triaging a suspension is better
+    /// served by <c>Ban.Label.YOU_ARE_BANNED_FOR_3_DAYS</c> than by "Contact support.",
+    /// and either beats a broken template.
+    /// </summary>
+    public static string? ForOperator(string? raw)
+    {
+        var code = CodeOf(raw);
+        if (code is not null) return code;
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var trimmed = raw.Trim();
+        return trimmed.Contains(AnyPlaceholder, StringComparison.Ordinal) ? null : trimmed;
+    }
+
+    /// <summary>
     /// Text safe to render to a human. Prose passes through UNCHANGED (an operator's typed
     /// reason must still reach the client); anything still carrying <c>{{</c> is an
     /// unsubstituted template and is replaced by <paramref name="fallback"/>.

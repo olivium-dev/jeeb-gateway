@@ -255,7 +255,7 @@ public sealed class OwnerComposedAdminUsers : IAdminUserProjection
     private static void ApplyBan(UserProfile profile, BanStatusItem status)
     {
         profile.IsSuspended = status.IsCurrentlyBanned;
-        profile.SuspensionReason = status.Message;
+        profile.SuspensionReason = Moderation.ModerationReason.ForOperator(status.Message);
         profile.SuspendedAt = status.LastUpdated;
     }
 

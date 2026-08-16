@@ -69,7 +69,7 @@ public sealed class OwnerBackedUsersStore : IUsersStore
         if (active is not null)
         {
             profile.IsSuspended = true;
-            profile.SuspensionReason = active.Message;
+            profile.SuspensionReason = Moderation.ModerationReason.ForOperator(active.Message);
         }
 
         return profile;

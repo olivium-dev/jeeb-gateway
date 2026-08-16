@@ -180,6 +180,27 @@ public class AuthOtpSuspendedLoginTests
             "absence is the signal that there is nothing for the app to look up");
     }
 
+    /// <summary>
+    /// D16, the operator half. The CMS user panel reads the SAME ban message through
+    /// OwnerBackedUsersStore. An admin must not be shown a broken template either — but
+    /// "Contact support." would be a downgrade for them, so the key survives instead.
+    /// </summary>
+    [Fact]
+    public void S6c_Operator_Projection_Degrades_A_Template_To_Its_Key_Not_To_Boilerplate()
+    {
+        JeebGateway.Users.Moderation.ModerationReason.ForOperator(ShippedBanTemplate)
+            .Should().Be("Ban.Label.YOU_ARE_BANNED_FOR_3_DAYS");
+
+        // CONTROL: prose is untouched, so this is not "always show a key".
+        JeebGateway.Users.Moderation.ModerationReason.ForOperator(SuspensionReason)
+            .Should().Be(SuspensionReason);
+
+        // And the two audiences genuinely differ — otherwise one of them is wrong.
+        JeebGateway.Users.Moderation.ModerationReason.Humanize(ShippedBanTemplate)
+            .Should().NotBe(
+                JeebGateway.Users.Moderation.ModerationReason.ForOperator(ShippedBanTemplate));
+    }
+
     // -----------------------------------------------------------------
     // S2 — CONTROL: a non-suspended account's login is untouched.
     // -----------------------------------------------------------------
