@@ -1,7 +1,17 @@
-# W6-02 route compat window — what was aliased, what was REFUSED, and the one accepted overlap
+# W6-02 unversioned route aliases — PERMANENT. What was aliased, what was REFUSED, and the one accepted overlap
 
-**Status:** current. **Wave:** gwdbx W6-02 (serve unversioned paths alongside versioned ones),
-merged as PR #457. **Judged from:** gateway `origin/main` @ `ad25325`; every line number below was re-read on that
+**Status:** current — and **PERMANENT**. **Wave:** gwdbx W6-02 (serve unversioned paths alongside
+versioned ones), merged as PR #457.
+
+> **OWNER RULING 2026-08-16 — this is not a "window".** Route migration stops **permanently**
+> after W6-03. The unversioned aliases are the **permanent end state**, not a temporary
+> compatibility period: both `/v1/...` and their unversioned twins keep working **indefinitely**.
+> **W6-04** (mobile migration + forced-upgrade gate) and **W6-05** (delete the versioned routes)
+> are **DEAD** — a store release is out of scope, and W6-05 was only ever reachable through
+> W6-04. **No `/v1` deletion is scheduled anywhere.** Any future proposal to delete a versioned
+> route is a NEW decision, not the completion of this one. The file keeps its
+> `w6-02-route-compat-window.md` name so its inbound links keep resolving — read "window" in the
+> filename as history. **Judged from:** gateway `origin/main` @ `ad25325`; every line number below was re-read on that
 tree, not copied from the PR body. Line numbers in a live tree drift — two of these moved between
 `1a56711` and `ad25325` when PR #461 landed. Treat them as a starting point and re-grep the route
 attribute if they miss.
@@ -84,12 +94,20 @@ and `admin/v1/*` onto one `admin/*` root is what brings them adjacent.
    settlement-service" stub (gwdbx W2-R11); it is not serving data that the detail route would
    otherwise return.
 
-**Clean fix — a W6-04-window candidate, not a now-change.** Rename the *alias* to
-`GET /admin/cod-settlements/{settlementId}` so the COD detail surface stops sharing a root with the
-batch surface. It is deliberately deferred because renaming an unversioned admin path is a client
-break for jeeb-cms, and the compat window's whole premise is that unversioned paths stay stable
-until W6-04 (mobile migration + forced-upgrade gate) releases the fleet. Do it in that window, with
-jeeb-cms's caller list in the same change — not before.
+**~~Clean fix — a W6-04-window candidate, not a now-change.~~ THERE IS NO WINDOW. The overlap is
+PERMANENT by decision (owner ruling 2026-08-16).**
+
+The proposed fix was to rename the *alias* to `GET /admin/cod-settlements/{settlementId}` so the
+COD detail surface stops sharing a root with the batch surface. It was deferred to the W6-04
+window because renaming an unversioned admin path is a client break for jeeb-cms. **W6-04 no
+longer exists**, so that deferral has no landing place and the overlap stands.
+
+That is acceptable on the four reasons above, none of which depended on a future window: the
+behaviour is deterministic (literal outranks parameter, so there is no tie and no
+`AmbiguousMatchException`), the only casualty is a settlement whose id is *literally* the string
+`batches`, even that id stays reachable at the untouched `GET /admin/v1/settlements/batches`, and
+`ListBatches` is a `503` stub that serves no data anyway. If the rename is ever wanted it is a
+**new decision with jeeb-cms's caller list attached**, not the completion of a scheduled step.
 
 ## 4. Fleet context for this wave
 
@@ -108,4 +126,9 @@ dashboard's "17 via a prefix loop" was one high.
   deleted by the extraction programme.
 - Deploy ordering: a gateway build carrying these aliases also *dials* unversioned paths on
   delivery-service, jeeb-state-service and bundler-service, so those must be deployed first. That
-  constraint is owner-tracked (OA-18); it is not a route-table property and is not restated here.
+  constraint is owner-tracked (OA-18, **discharged 2026-08-16** — state `f7281dd`, delivery
+  `1708a59`, gateway `1753f97` deployed in that order); it is not a route-table property and is not
+  restated here.
+- Ruling of record for the permanence statement above: `OWNER-ACTIONS-gwdbx.md` →
+  "OWNER EXPORT 2026-08-16" §5. That file lives in the owner's workspace, **not** in this
+  repository, so it cannot be resolved from a clone.
