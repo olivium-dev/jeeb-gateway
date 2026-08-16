@@ -1,3 +1,5 @@
+using System.Net;
+using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Artifacts;
@@ -8,6 +10,7 @@ using JeebGateway.StateService.Work;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Xunit;
@@ -19,8 +22,27 @@ public sealed class DurableWorkHandlerIdempotencyTests
     private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
 
     [Fact]
-    public void AccountDeletion_Legacy_Hash_Field_Is_Read_Only_During_State_Cutover()
+    public async Task AccountDeletion_Legacy_Hash_Field_Is_Read_Only_During_State_Cutover()
     {
+        // The payload deserializer is private to the handler now, so the legacy-field READ is
+        // asserted where it is observable: the pseudonym the handler anonymizes delivery rows to.
+        var now = DateTimeOffset.Parse("2026-08-10T12:00:00Z");
+        var clock = new FakeTimeProvider(now);
+        var requests = new InMemoryRequestsStore(clock);
+        var seeded = await requests.CreateAsync(
+            new CreateRequestInput { ClientId = "legacy-user", Description = "settled row" },
+            CancellationToken.None);
+        (await requests.SetStatusAsync(seeded.Id, RequestStatus.Delivered, CancellationToken.None))
+            .Should().BeTrue();
+        var users = new InMemoryUsersStore();
+        await users.GetOrCreateAsync("legacy-user", CancellationToken.None);
+        var handler = new AccountDeletionWorkHandler(
+            users,
+            requests,
+            new CountingTokenService(),
+            new CountingLedgerOwner(),
+            clock,
+            Options.Create(new AccountDeletionExecutionOptions()));
         var legacy = WorkItem(
             DurableWorkContract.AccountDeletionKind,
             JsonSerializer.SerializeToElement(new
@@ -29,12 +51,16 @@ public sealed class DurableWorkHandlerIdempotencyTests
                 anonymizedUserHash = "legacy-delivery-hash",
                 hadActiveDeliveryAtRequest = false
             }),
-            DateTimeOffset.Parse("2026-08-10T12:00:00Z"));
+            now);
 
-        var parsed = AccountDeletionWorkHandler.DeserializePayload(legacy);
+        var result = await handler.ExecuteAsync(legacy, CancellationToken.None);
 
-        parsed.Should().NotBeNull();
-        parsed!.EffectiveDeliveryAnonymizedUserHash.Should().Be("legacy-delivery-hash");
+        result.Outcome.Should().NotBe(DurableWorkOutcome.Fail,
+            "ignoring the legacy hash field would fail the payload-validity gate");
+        (await requests.ListForClientAsync("legacy-delivery-hash", CancellationToken.None))
+            .Should().ContainSingle().Which.Id.Should().Be(seeded.Id);
+        (await requests.ListForClientAsync("legacy-user", CancellationToken.None))
+            .Should().BeEmpty("the legacy hash is the pseudonym the delivery rows are rewritten to");
         var newWire = JsonSerializer.Serialize(
             new AccountDeletionWorkPayload("new-user", "new-delivery-hash", false),
             WebJson);
@@ -306,15 +332,63 @@ public sealed class DurableWorkHandlerIdempotencyTests
             .WithMessage("*api/conversations/export-index*");
     }
 
+    /// <summary>
+    /// Successor to the fail-closed capability gate this case used to assert. The gate
+    /// existed because the owner API could not list the half the user AUTHORED; now that
+    /// the export exists, both halves and their request linkage must reach the package.
+    /// </summary>
     [Fact]
     public async Task Feedback_Ratings_Provider_Never_Omits_Authored_Ratings()
     {
-        var provider = new FeedbackServiceDataExportRatingsProvider();
+        var authored = Guid.NewGuid();
+        var received = Guid.NewGuid();
+        var provider = FeedbackRatingsProvider(_ => UpstreamJson(new
+        {
+            hasMore = false,
+            ratings = new object[]
+            {
+                new
+                {
+                    id = authored,
+                    correlationId = "jeeb:delivery:DEL-1",
+                    direction = "given",
+                    counterpartyId = Guid.NewGuid(),
+                    score = 5,
+                    comment = "authored by the exporting user",
+                    tags = new[] { "jeeb" },
+                    createdAt = "2026-08-10T09:00:00Z"
+                },
+                new
+                {
+                    id = received,
+                    correlationId = "jeeb:delivery:DEL-2",
+                    direction = "received",
+                    counterpartyId = Guid.NewGuid(),
+                    score = 4,
+                    tags = new[] { "jeeb" },
+                    createdAt = "2026-08-10T10:00:00Z"
+                }
+            }
+        }));
+
+        var snapshots = await provider.GetForUserAsync("user-42", CancellationToken.None);
+
+        snapshots.Select(r => r.RatingId).Should().Equal(
+            authored.ToString("D"),
+            received.ToString("D"));
+        snapshots.Select(r => r.Direction).Should().Equal("given", "received");
+        snapshots.Select(r => r.RequestId).Should().Equal("DEL-1", "DEL-2");
+    }
+
+    [Fact]
+    public async Task Feedback_Ratings_Provider_Never_Reports_An_Unreadable_Upstream_As_No_Ratings()
+    {
+        var provider = FeedbackRatingsProvider(
+            _ => throw new HttpRequestException("connection refused"));
 
         var act = () => provider.GetForUserAsync("user-42", CancellationToken.None);
 
-        await act.Should().ThrowAsync<OwnerCapabilityUnavailableException>()
-            .WithMessage("*given and received*request correlation*");
+        await act.Should().ThrowAsync<DataExportRatingsUnavailableException>();
     }
 
     private static StateWorkItem WorkItem(
@@ -507,6 +581,39 @@ public sealed class DurableWorkHandlerIdempotencyTests
             capability = Capability;
             return string.Equals(token, Capability.Token, StringComparison.Ordinal);
         }
+    }
+
+    // IHttpClientFactory double: the provider gained the dependency at 2865f0a.
+    private static FeedbackServiceDataExportRatingsProvider FeedbackRatingsProvider(
+        Func<HttpRequestMessage, HttpResponseMessage> upstream) =>
+        new(new StubHttpClientFactory(upstream),
+            new FeedbackRatingExportOptions(),
+            NullLogger<FeedbackServiceDataExportRatingsProvider>.Instance);
+
+    private static HttpResponseMessage UpstreamJson(object body) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent(
+            JsonSerializer.Serialize(body),
+            Encoding.UTF8,
+            "application/json")
+    };
+
+    private sealed class StubHttpClientFactory(
+        Func<HttpRequestMessage, HttpResponseMessage> upstream) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) =>
+            new(new StubUpstreamHandler(upstream))
+            {
+                BaseAddress = new Uri("http://feedback.test/")
+            };
+    }
+
+    private sealed class StubUpstreamHandler(
+        Func<HttpRequestMessage, HttpResponseMessage> upstream) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken ct) => Task.FromResult(upstream(request));
     }
 
     private sealed record NotificationCall(

@@ -147,8 +147,10 @@ public class SettlementServiceCutoverW2R11Tests
     [Fact]
     public void C3_The_A9_Roster_Is_20_And_Names_Settlement_Service()
     {
-        GatewayHealthRoster.ExpectedReadyCount.Should().Be(20,
-            "W2-R11 pre-announces the 19 -> 20 roster change (A9)");
+        // W2-R11 pre-announced 19 -> 20 (A9); the later W5 retirements took the roster to 18.
+        // C4 is the positive control that the declared list still matches what the code registers.
+        GatewayHealthRoster.ExpectedReadyCount.Should().Be(18,
+            "A9 added settlement-service, then W5 retired two probes");
         GatewayHealthRoster.Ready.Should().HaveCount(GatewayHealthRoster.ExpectedReadyCount);
         GatewayHealthRoster.Ready.Should().Contain("settlement-service");
     }
@@ -665,6 +667,19 @@ public class SettlementServiceCutoverW2R11Tests
     /// status; every other member is loud so an unexpected call cannot pass silently.</summary>
     private sealed class ConfigurableDeliveryClient : IDeliveryServiceClient
     {
+    // OA-21 (51a2677) added the provider-audience reads to IDeliveryServiceClient. This double's
+    // subject is elsewhere; an empty audience is the neutral answer, not a simulated fault.
+    public Task<IReadOnlyList<JeebGateway.Services.Clients.AvailableProviderUpstream>> ListAvailableProvidersAsync(
+        double? lat, double? lng, double? radiusKm,
+        IReadOnlyCollection<string>? roles, int limit, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<JeebGateway.Services.Clients.AvailableProviderUpstream>>(
+            System.Array.Empty<JeebGateway.Services.Clients.AvailableProviderUpstream>());
+
+    public Task<IReadOnlyList<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>> ListKnownProvidersAsync(
+        System.DateTimeOffset since, int limit, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>>(
+            System.Array.Empty<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>());
+
         public Func<bool, DeliveryHandoverVerifyResult> VerifyOutcome { get; init; }
             = _ => throw new DeliveryHandoverException((int)HttpStatusCode.Conflict, "not_at_door");
 

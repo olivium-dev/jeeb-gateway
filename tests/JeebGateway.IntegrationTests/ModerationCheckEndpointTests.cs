@@ -190,8 +190,16 @@ public class ModerationCheckFailClosedTests
         public Task<ProhibitedItem?> GetAsync(string id, CancellationToken ct) =>
             Task.FromResult<ProhibitedItem?>(null);
 
+        // Accept the boot-time DefaultLexiconSeeder write and drop it: the subject is an
+        // empty ACTIVE catalog, and a throw here would fault host startup instead.
         public Task<ProhibitedItem> CreateAsync(ProhibitedItemCreate input, string adminUserId, CancellationToken ct) =>
-            throw new NotSupportedException();
+            Task.FromResult(new ProhibitedItem
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Name = input.Name,
+                Category = input.Category,
+                Severity = input.Severity,
+            });
 
         public Task<ProhibitedItem?> UpdateAsync(string id, ProhibitedItemPatch patch, string adminUserId, CancellationToken ct) =>
             Task.FromResult<ProhibitedItem?>(null);

@@ -120,15 +120,8 @@ public class WebApplicationFactory<TEntryPoint>
         ReplaceSingleton<IAdminAuditLog, InMemoryAdminAuditLog>(services);
         ReplaceSingleton<IFlaggedRequestStore, InMemoryFlaggedRequestStore>(services);
 
-        ReplaceSingleton<ISettlementStore, InMemorySettlementStore>(services);
-        ReplaceSingleton<ISettlementLedgerClient,
-            InMemorySettlementLedgerClient>(services);
-        ReplaceSingleton<ISettlementEnqueueStore,
-            TestSettlementEnqueueStore>(services);
-        ReplaceSingleton<ISettlementBatchStore,
-            TestSettlementBatchStore>(services);
-        ReplaceSingleton<JeebGateway.Financials.Cod.ICodSettlementLedger,
-            TestCodSettlementLedger>(services);
+        // gwdbx W2-R11: the local settlement store, ledger client, enqueue store, batch store
+        // and COD ledger are all deleted; settlement-service owns them behind ISettlementServiceClient.
         ReplaceSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>(services);
         ReplaceSingleton<IFinancialLedgerAnonymizer,
             InMemoryFinancialLedger>(services);
@@ -216,53 +209,6 @@ internal sealed class TestExternalIdempotencyStore : IExternalIdempotencyStore
             .Where(pair => pair.Key.StartsWith(prefix, StringComparison.Ordinal))
             .Select(pair => pair.Value)
             .ToArray());
-}
-
-internal sealed class TestSettlementEnqueueStore : ISettlementEnqueueStore
-{
-    private readonly ConcurrentDictionary<string, byte> _deliveryIds =
-        new(StringComparer.Ordinal);
-
-    public Task<bool> TryEnqueueAsync(
-        string deliveryId, DateTimeOffset at, CancellationToken ct) =>
-        Task.FromResult(_deliveryIds.TryAdd(deliveryId, 0));
-
-    public Task<bool> IsEnqueuedAsync(string deliveryId, CancellationToken ct) =>
-        Task.FromResult(_deliveryIds.ContainsKey(deliveryId));
-}
-
-internal sealed class TestSettlementBatchStore : ISettlementBatchStore
-{
-    public Task<IReadOnlyList<Settlement>> ListUnsettledAsync(int limit, CancellationToken ct) =>
-        Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
-
-    public Task MarkBatchProcessedAsync(
-        IReadOnlyList<string> settlementIds, DateTimeOffset at, CancellationToken ct) =>
-        Task.CompletedTask;
-
-    public Task<SettlementBatch> CreateOrGetBatchAsync(
-        string jeeberId, DateOnly periodStart, DateOnly periodEnd,
-        IReadOnlyList<Settlement> settlements, CancellationToken ct) =>
-        Task.FromResult(new SettlementBatch
-        {
-            Id = Guid.NewGuid(),
-            JeeberId = jeeberId,
-            PeriodStart = periodStart,
-            PeriodEnd = periodEnd,
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow,
-        });
-
-    public Task<SettlementBatch?> GetByIdAsync(Guid batchId, CancellationToken ct) =>
-        Task.FromResult<SettlementBatch?>(null);
-
-    public Task<IReadOnlyList<SettlementBatch>> ListByStatusAsync(
-        string status, CancellationToken ct) =>
-        Task.FromResult<IReadOnlyList<SettlementBatch>>(Array.Empty<SettlementBatch>());
-
-    public Task<SettlementBatch> MarkPaidAsync(
-        Guid batchId, string adminUserId, DateTimeOffset paidAt, CancellationToken ct) =>
-        Task.FromException<SettlementBatch>(new InvalidOperationException("batch not found"));
 }
 
 internal sealed class TestNotificationOwnerClient : INotificationOwnerClient

@@ -22,8 +22,11 @@ public class RefreshTokenStoreModeTests
 {
     // UseSetting (not ConfigureAppConfiguration): the store is selected while Program.cs runs,
     // and only host settings are visible to those reads.
-    private static WebApplicationFactory<Program> FactoryWith(params (string Key, string Value)[] settings) =>
-        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+    // The FRAMEWORK factory: this suite's shadowing one replaces IRefreshTokenStore with the
+    // in-memory store on every boot, which would make every rung on the ladder look identical.
+    private static Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program> FactoryWith(
+        params (string Key, string Value)[] settings) =>
+        new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             foreach (var (key, value) in settings)
             {
@@ -197,6 +200,11 @@ public class RefreshTokenStoreModeTests
             // Same reason as the signing keys: Production commits no Redis endpoint (A25), so
             // without this the Redis guard aborts first and the refresh-store guard is untested.
             b.UseSetting("Redis:ConnectionString", "127.0.0.1:6379");
+            // Same reason again: the OTP application-id guard was added after this suite and
+            // now aborts the Production boot first, leaving the refresh-store guard untested.
+            b.UseSetting("Auth:Otp:ApplicationId", "refresh-store-boot-gate-otp-app");
+            b.UseSetting(Fakes.ProductionMountedSecrets.StateServiceTokenFileKey,
+                Fakes.ProductionMountedSecrets.StateServiceTokenFile);
             foreach (var (key, value) in overrides)
             {
                 b.UseSetting(key, value);

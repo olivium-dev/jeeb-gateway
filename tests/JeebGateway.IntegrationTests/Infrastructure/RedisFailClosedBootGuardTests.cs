@@ -32,6 +32,9 @@ public class RedisFailClosedBootGuardTests
 
     private const string RealRedis = "127.0.0.1:6379";
 
+    // W5-11 deleted StoreDurabilityGuard; its escape-hatch key survives as this literal only.
+    private const string StoreDurabilityFailClosedKey = "StoreDurability:FailClosedDisabled";
+
     // A real (>=32 byte) key so a Production host boot gets past JwtSigningKeyGuard and actually
     // reaches the Redis guard — otherwise the throw would be the JWT guard's and would prove nothing.
     private const string ProdJwtKey = "w3-01-production-boot-signing-key-32+chars";
@@ -141,13 +144,14 @@ public class RedisFailClosedBootGuardTests
         act.Should().Throw<InvalidOperationException>().WithMessage("*placeholder*");
     }
 
-    /// <summary>Mirrors W18 S6: StoreDurability:FailClosedDisabled exists so the harness can boot
-    /// without PROVISIONING durable infrastructure; a missing config key is not provisioning.</summary>
+    /// <summary>Mirrors W18 S6: the StoreDurability hatch let the harness boot without
+    /// PROVISIONING durable infrastructure. W5-11 deleted its guard, so the key is now inert —
+    /// and an inert key must still not disarm the Redis guard.</summary>
     [Fact]
     public void The_StoreDurability_Escape_Hatch_Does_Not_Disarm_This_Guard()
     {
         var act = () => RedisDurabilityGuard.EnsureWired(
-            Config((StoreDurabilityGuard.FailClosedDisabledKey, "true")), new FakeEnv());
+            Config((StoreDurabilityFailClosedKey, "true")), new FakeEnv());
 
         act.Should().Throw<InvalidOperationException>();
     }
@@ -159,12 +163,14 @@ public class RedisFailClosedBootGuardTests
         return new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
             b.UseEnvironment("Production");
+            b.UseSetting(Fakes.ProductionMountedSecrets.StateServiceTokenFileKey,
+                Fakes.ProductionMountedSecrets.StateServiceTokenFile);
             b.UseSetting("Jwt:SigningKey", ProdJwtKey);
             b.UseSetting("UmJwt:SigningKey", ProdJwtKey);
             b.UseSetting("BffServices:RequiredInProduction", "false");
-            // Disarms only the OTHER gate (StoreDurabilityGuard), which no host test can satisfy,
-            // so the single variable between the two drills below is the Redis key.
-            b.UseSetting("StoreDurability:FailClosedDisabled", "true");
+            // Inert since W5-11 deleted the store-durability gate; kept so the single variable
+            // between the two drills below stays the Redis key.
+            b.UseSetting(StoreDurabilityFailClosedKey, "true");
             if (redisConnectionString is not null)
             {
                 b.UseSetting(RedisDurabilityGuard.ConnectionStringKey, redisConnectionString);

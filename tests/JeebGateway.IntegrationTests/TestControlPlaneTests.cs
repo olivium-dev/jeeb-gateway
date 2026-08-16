@@ -281,7 +281,8 @@ public sealed class TestControlPlaneTests : IClassFixture<WebApplicationFactory<
         Assert.NotNull(body);
 
         var names = body.Jobs.Select(j => j.Name).ToHashSet();
-        Assert.Contains("request-expiry-sweep", names);
+        // #451 (7bf835d) retired the legacy TTL sweeper; the registered job is the observer.
+        Assert.Contains("request-expiry-observe", names);
         // W5 retire-4: the rating-reveal job was deleted — assert it stays gone.
         Assert.DoesNotContain("rating-reveal", names);
         // gwdbx W2-R11: "settlement-batch" is gone — the weekly payout cron moved to

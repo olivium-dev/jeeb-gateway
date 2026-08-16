@@ -458,6 +458,19 @@ public class StatusChangePushTests
     /// <summary>Delivery-service double: the transition + verify hops return configurable results; all else is loud.</summary>
     private sealed class ConfigurableDeliveryClient : IDeliveryServiceClient
     {
+    // OA-21 (51a2677) added the provider-audience reads to IDeliveryServiceClient. This double's
+    // subject is elsewhere; an empty audience is the neutral answer, not a simulated fault.
+    public Task<IReadOnlyList<JeebGateway.Services.Clients.AvailableProviderUpstream>> ListAvailableProvidersAsync(
+        double? lat, double? lng, double? radiusKm,
+        IReadOnlyCollection<string>? roles, int limit, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<JeebGateway.Services.Clients.AvailableProviderUpstream>>(
+            System.Array.Empty<JeebGateway.Services.Clients.AvailableProviderUpstream>());
+
+    public Task<IReadOnlyList<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>> ListKnownProvidersAsync(
+        System.DateTimeOffset since, int limit, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>>(
+            System.Array.Empty<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>());
+
         public Func<string, DeliveryTransitionUpstream> TransitionOutcome { get; init; }
             = to => throw new DeliveryTransitionException((int)HttpStatusCode.UnprocessableEntity, "transition_not_allowed", null, to, null);
 

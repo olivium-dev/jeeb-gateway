@@ -25,7 +25,12 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
     [Fact]
     public void No_wallet_api_configured_resolves_null_reader()
     {
-        using var scope = _factory.Services.CreateScope();
+        // W0-05 (f31e421) pinned WalletServiceApi:BaseUrl in the BASE appsettings, so the
+        // unconfigured rung has to be produced explicitly instead of inherited by default.
+        var factory = _factory.WithWebHostBuilder(builder =>
+            builder.UseSetting("WalletServiceApi:BaseUrl", string.Empty));
+
+        using var scope = factory.Services.CreateScope();
         var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
 
         reader.Should().BeOfType<NullJeebWalletLedgerReader>(
@@ -65,7 +70,10 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
         using var scope = factory.Services.CreateScope();
         var reader = scope.ServiceProvider.GetRequiredService<IJeebWalletLedgerReader>();
 
-        reader.Should().BeOfType<NullJeebWalletLedgerReader>(
+        // The invariant is "never a DATABASE reader". Since W0-05 (f31e421) pinned
+        // Authority=wallet-api in the base appsettings the resolved reader is the
+        // wallet-service HTTP one, which satisfies it just as the null reader did.
+        reader.GetType().Name.Should().NotContain("Postgres",
             "WalletPostgres is deleted; the key is inert and must not select a DB-backed reader");
         typeof(IJeebWalletLedgerReader).Assembly
             .GetType("JeebGateway.JeebWallet.PostgresJeebWalletLedgerReader")

@@ -57,15 +57,25 @@ public class W26_MoneyControllerRouteCensusTests
 
     private static IEnumerable<(string Method, string Template)> Census(Type controller)
     {
-        var prefix = controller.GetCustomAttribute<RouteAttribute>()?.Template ?? string.Empty;
-        foreach (var action in controller.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+        // W6-02 (abf7c75) opened a compat window: every money controller now carries BOTH the
+        // versioned prefix and an unversioned twin. Census every prefix — a twin that escaped
+        // the census would be an uncovered money route, which is exactly what C1 exists to stop.
+        var prefixes = controller.GetCustomAttributes<RouteAttribute>()
+            .Select(route => route.Template ?? string.Empty).ToArray();
+        if (prefixes.Length == 0)
+            prefixes = new[] { string.Empty };
+
+        foreach (var prefix in prefixes)
         {
-            foreach (var http in action.GetCustomAttributes().OfType<IActionHttpMethodProvider>())
+            foreach (var action in controller.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
             {
-                var template = (http as IRouteTemplateProvider)?.Template;
-                var full = string.IsNullOrEmpty(template) ? prefix : $"{prefix}/{template}";
-                foreach (var verb in http.HttpMethods)
-                    yield return (verb, full);
+                foreach (var http in action.GetCustomAttributes().OfType<IActionHttpMethodProvider>())
+                {
+                    var template = (http as IRouteTemplateProvider)?.Template;
+                    var full = string.IsNullOrEmpty(template) ? prefix : $"{prefix}/{template}";
+                    foreach (var verb in http.HttpMethods)
+                        yield return (verb, full);
+                }
             }
         }
     }
@@ -86,6 +96,10 @@ public class W26_MoneyControllerRouteCensusTests
             ("GET",  "v1/admin/settlements/batches"),
             ("GET",  "v1/admin/settlements/batches/{id:guid}"),
             ("POST", "v1/admin/settlements/batches/{id:guid}/mark-paid"),
+            // W6-02 compat-window twins. They serve the same actions, so they are money routes.
+            ("GET",  "admin/settlements/batches"),
+            ("GET",  "admin/settlements/batches/{id:guid}"),
+            ("POST", "admin/settlements/batches/{id:guid}/mark-paid"),
         }, "a new action on a money controller must not slip in uncovered — update this census " +
            "AND add the route test, in that order");
 
@@ -93,6 +107,8 @@ public class W26_MoneyControllerRouteCensusTests
         {
             ("GET", "v1/wallet/jeeb/earnings/statements"),
             ("GET", "v1/wallet/jeeb/earnings/statements/{id}/pdf"),
+            ("GET", "wallet/jeeb/earnings/statements"),
+            ("GET", "wallet/jeeb/earnings/statements/{id}/pdf"),
         });
     }
 
@@ -333,9 +349,9 @@ public class W26_MoneyControllerRouteCensusTests
         (await resp.Content.ReadAsStringAsync())
             .Should().Contain(SettlementAdminScopeException.ProblemType);
 
-        // POSITIVE CONTROL — the durability guard still sees the stores it is meant to see, so
-        // the money-path claims above are not being made by an empty guard.
-        StoreDurabilityGuard.Critical.Select(c => c.Iface)
-            .Should().Contain(typeof(JeebGateway.Requests.IRequestsStore));
+        // POSITIVE CONTROL — the same host still routes normally, so the 503 above is this
+        // action's typed scope refusal and not a blanket failure of the booted app.
+        (await client.GetAsync("/w26-no-such-route")).StatusCode
+            .Should().Be(HttpStatusCode.NotFound);
     }
 }

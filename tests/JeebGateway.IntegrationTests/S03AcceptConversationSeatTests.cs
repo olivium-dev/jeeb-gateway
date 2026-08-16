@@ -368,6 +368,19 @@ public class S03AcceptConversationSeatTests
     /// Every other member throws.</summary>
     private sealed class NoopDeliveryClient : IDeliveryServiceClient
     {
+    // OA-21 (51a2677) added the provider-audience reads to IDeliveryServiceClient. This double's
+    // subject is elsewhere; an empty audience is the neutral answer, not a simulated fault.
+    public Task<IReadOnlyList<JeebGateway.Services.Clients.AvailableProviderUpstream>> ListAvailableProvidersAsync(
+        double? lat, double? lng, double? radiusKm,
+        IReadOnlyCollection<string>? roles, int limit, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<JeebGateway.Services.Clients.AvailableProviderUpstream>>(
+            System.Array.Empty<JeebGateway.Services.Clients.AvailableProviderUpstream>());
+
+    public Task<IReadOnlyList<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>> ListKnownProvidersAsync(
+        System.DateTimeOffset since, int limit, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>>(
+            System.Array.Empty<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>());
+
         public Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct)
             => Task.FromResult(new DeliveryRowUpstream { Id = body.Id, TenantId = body.TenantId, Status = "Ordered" });
 

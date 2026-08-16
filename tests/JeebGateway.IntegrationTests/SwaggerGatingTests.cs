@@ -173,6 +173,8 @@ public class SwaggerGatingTests
                 // Development/Testing branch) is exercised — this is the live
                 // host's environment.
                 builder.UseEnvironment("Production");
+                builder.UseSetting(Fakes.ProductionMountedSecrets.StateServiceTokenFileKey,
+                    Fakes.ProductionMountedSecrets.StateServiceTokenFile);
                 builder.UseSetting("Features:Swagger:Enabled", enabled ? "true" : "false");
                 // Production commits no Redis endpoint (A25); supply one so the armed
                 // RedisDurabilityGuard is not what aborts this Swagger-only boot.

@@ -6,6 +6,7 @@ using JeebGateway.Push;
 using JeebGateway.Services.Clients;
 using JeebGateway.Services.Dispatch;
 using JeebGateway.StateService.Ownership;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -217,17 +218,32 @@ public class StateServiceNotificationDispatchOutboxTests
         state.Failed.Should().BeEmpty();
     }
 
+    // W5-11 deleted StoreDurabilityGuard's catalog; the surviving owner of "which outbox a
+    // boot resolves" is the Program.cs registration, so the claim is made against the container.
     [Fact]
-    public void The_Adapter_Is_An_Approved_Durable_Resolution_For_The_Outbox()
+    public void UpstreamAuthority_Resolves_The_State_Service_Outbox_Not_The_InMemory_One()
     {
-        var durable = StoreDurabilityGuard.Critical
-            .Single(entry => entry.Iface == typeof(INotificationDispatchOutbox)).DurableImpls;
+        using var upstream = OutboxHost("upstream-authority");
+        using var local = OutboxHost("local");
 
-        durable.Should().Contain(typeof(StateServiceNotificationDispatchOutbox),
-            "a NotificationOutboxMode=upstream-authority boot must not be fail-closed (G-08)");
-        durable.Should().Contain(typeof(PostgresNotificationDispatchOutbox));
-        durable.Should().NotContain(typeof(InMemoryNotificationDispatchOutbox));
+        upstream.Services.GetRequiredService<INotificationDispatchOutbox>()
+            .Should().BeOfType<StateServiceNotificationDispatchOutbox>(
+                "a NotificationOutboxMode=upstream-authority boot must not be fail-closed (G-08)");
+        local.Services.GetRequiredService<INotificationDispatchOutbox>()
+            .Should().BeOfType<InMemoryNotificationDispatchOutbox>(
+                "positive control: the mode key is the only thing that moves the resolution");
     }
+
+    // The FRAMEWORK factory, not this suite's shadowing one: the claim is about Program.cs
+    // composition, and the test factory swaps explicit test owners in.
+    private static Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program> OutboxHost(string mode) =>
+        new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.UseSetting("FeatureFlags:NotificationOutboxMode", mode);
+            b.UseSetting(JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey, "true");
+            b.UseSetting(
+                JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey, "http://127.0.0.1:9/");
+        });
 
     [Fact]
     public void The_Outbox_Mode_Key_Defaults_To_Local_On_The_Shared_A10_Ladder()

@@ -311,6 +311,19 @@ public class DeliveryCanonicalVocabTests : IClassFixture<WebApplicationFactory<P
 
     private sealed class RecordingDeliveryClient : IDeliveryServiceClient
     {
+    // OA-21 (51a2677) added the provider-audience reads to IDeliveryServiceClient. This double's
+    // subject is elsewhere; an empty audience is the neutral answer, not a simulated fault.
+    public Task<IReadOnlyList<JeebGateway.Services.Clients.AvailableProviderUpstream>> ListAvailableProvidersAsync(
+        double? lat, double? lng, double? radiusKm,
+        IReadOnlyCollection<string>? roles, int limit, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<JeebGateway.Services.Clients.AvailableProviderUpstream>>(
+            System.Array.Empty<JeebGateway.Services.Clients.AvailableProviderUpstream>());
+
+    public Task<IReadOnlyList<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>> ListKnownProvidersAsync(
+        System.DateTimeOffset since, int limit, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>>(
+            System.Array.Empty<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>());
+
         public List<(string DeliveryId, string To, string PartySource, string ActorId, string ActorRole, string? EvidenceUrl)> TransitionCalls { get; } = new();
         public List<string> ReadCalls { get; } = new();
         public DeliveryTransitionException? TransitionThrows { get; set; }

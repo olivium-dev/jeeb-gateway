@@ -78,7 +78,8 @@ public sealed class BundlerServiceHealthCheckTests
 
         await CheckAsync(handler);
 
-        handler.Paths.Should().Equal("/health/ready",
+        // Equal(params object[]) would read the reason as a second expected element.
+        handler.Paths.Should().Equal(new[] { "/health/ready" },
             "health/live is liveness-only; readiness is what reflects bundler's own dependencies");
     }
 

@@ -49,7 +49,8 @@ public class MatchingRunMirrorTests
         var stub = new StubHttpMessageHandler(req =>
         {
             var path = req.RequestUri!.AbsolutePath;
-            paths.Add(path);
+            // #451's boot-time RequestExpiryObserver sweeps this route on every host.
+            if (path != "/deliveries/expired") paths.Add(path);
 
             if (path == "/deliveries")
             {
@@ -108,7 +109,8 @@ public class MatchingRunMirrorTests
         var stub = new StubHttpMessageHandler(req =>
         {
             var path = req.RequestUri!.AbsolutePath;
-            paths.Add(path);
+            // #451's boot-time RequestExpiryObserver sweeps this route on every host.
+            if (path != "/deliveries/expired") paths.Add(path);
 
             if (path == "/deliveries")
             {
@@ -145,7 +147,9 @@ public class MatchingRunMirrorTests
         var paths = new List<string>();
         var stub = new StubHttpMessageHandler(req =>
         {
-            paths.Add(req.RequestUri!.AbsolutePath);
+            // #451 boot-time RequestExpiryObserver sweeps this route on every host.
+            if (req.RequestUri!.AbsolutePath != "/deliveries/expired")
+                paths.Add(req.RequestUri!.AbsolutePath);
             return JsonResponse(
                 """
                 {"request_id":"","tier_id":"same-day","radius_km":15,
@@ -180,7 +184,8 @@ public class MatchingRunMirrorTests
         var stub = new StubHttpMessageHandler(req =>
         {
             var path = req.RequestUri!.AbsolutePath;
-            paths.Add(path);
+            // #451's boot-time RequestExpiryObserver sweeps this route on every host.
+            if (path != "/deliveries/expired") paths.Add(path);
             // delivery-service rejects the unknown request id.
             return JsonResponse("""{"reason":"unknown_request_id"}""", HttpStatusCode.NotFound);
         });
@@ -211,7 +216,8 @@ public class MatchingRunMirrorTests
         var stub = new StubHttpMessageHandler(req =>
         {
             var path = req.RequestUri!.AbsolutePath;
-            paths.Add(path);
+            // #451's boot-time RequestExpiryObserver sweeps this route on every host.
+            if (path != "/deliveries/expired") paths.Add(path);
 
             if (path == "/deliveries")
             {
@@ -248,7 +254,9 @@ public class MatchingRunMirrorTests
         var paths = new List<string>();
         var stub = new StubHttpMessageHandler(req =>
         {
-            paths.Add(req.RequestUri!.AbsolutePath);
+            // #451 boot-time RequestExpiryObserver sweeps this route on every host.
+            if (req.RequestUri!.AbsolutePath != "/deliveries/expired")
+                paths.Add(req.RequestUri!.AbsolutePath);
             return JsonResponse(
                 """
                 {"request_id":"req-off","tier_id":"uuid-off","tier_code":"flash","radius_km":1,

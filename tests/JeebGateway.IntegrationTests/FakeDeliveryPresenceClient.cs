@@ -26,6 +26,19 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 internal class FakeDeliveryPresenceClient : IDeliveryServiceClient
 {
+    // OA-21 (51a2677) added the provider-audience reads to IDeliveryServiceClient. This double's
+    // subject is elsewhere; an empty audience is the neutral answer, not a simulated fault.
+    public Task<IReadOnlyList<JeebGateway.Services.Clients.AvailableProviderUpstream>> ListAvailableProvidersAsync(
+        double? lat, double? lng, double? radiusKm,
+        IReadOnlyCollection<string>? roles, int limit, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<JeebGateway.Services.Clients.AvailableProviderUpstream>>(
+            System.Array.Empty<JeebGateway.Services.Clients.AvailableProviderUpstream>());
+
+    public Task<IReadOnlyList<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>> ListKnownProvidersAsync(
+        System.DateTimeOffset since, int limit, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>>(
+            System.Array.Empty<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>());
+
     private readonly ConcurrentDictionary<string, JeeberAvailabilityUpstream> _store = new();
 
     public Task<JeeberAvailabilityUpstream> SetAvailabilityAsync(JeeberAvailabilityUpstreamRequest body, string jeeberId, CancellationToken ct)
