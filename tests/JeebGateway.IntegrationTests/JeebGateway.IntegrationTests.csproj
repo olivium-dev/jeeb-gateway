@@ -100,7 +100,8 @@
     <Compile Remove="S09TrackingSettlementBffTests.cs" />
     <Compile Remove="ScheduledDeliveryTests.cs" />
     <Compile Remove="Tiers\AdminTierTtlGuardTests.cs" />
-    <Compile Remove="Tracking\CourierPositionRealtimeTests.cs" />
+    <!-- D14/OA-43: RE-ARMED. 94c2b63 excluded this suite in the same commit that
+         deleted the publish it guards, so the positive control never ran. -->
   </ItemGroup>
 
   <ItemGroup>
