@@ -34,8 +34,10 @@ public sealed class AdminSessionController : ControllerBase
             .OrderBy(static value => value, StringComparer.Ordinal)
             .ToArray();
 
+        // OA-39: project the OPERATOR-PLANE capabilities these roles hold. The old `admin.` prefix
+        // test dropped kyc.review / users.admin.manage / wallet.manage — real caps a real admin holds.
         var capabilities = CapabilityRolePolicy.Map
-            .Where(pair => pair.Key.StartsWith("admin.", StringComparison.Ordinal)
+            .Where(pair => CapabilityRolePolicy.IsOperatorPlane(pair.Key)
                 && roles.Any(role => pair.Value.Contains(role, StringComparer.OrdinalIgnoreCase)))
             .Select(static pair => pair.Key)
             .OrderBy(static value => value, StringComparer.Ordinal)

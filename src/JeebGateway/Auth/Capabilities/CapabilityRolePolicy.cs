@@ -216,4 +216,18 @@ public static class CapabilityRolePolicy
 
     /// <summary>True if <paramref name="capability"/> is a known capability in the map.</summary>
     public static bool IsKnown(string capability) => Map.ContainsKey(capability);
+
+    // OA-39 operator plane: a capability NO {client, jeeber} holds. Derived from this map, not from
+    // the `admin.` name prefix, which §K/§M operator caps (kyc.review, wallet.manage, …) never use.
+    public static bool IsOperatorPlane(string capability) =>
+        Map.TryGetValue(capability, out var roles)
+        && !roles.Contains(JeebRoleTranslator.ContractClient, StringComparer.OrdinalIgnoreCase)
+        && !roles.Contains(JeebRoleTranslator.ContractJeeber, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Every operator-plane capability name (see <see cref="IsOperatorPlane"/>).</summary>
+    public static IEnumerable<string> OperatorPlane => Map.Keys.Where(IsOperatorPlane);
+
+    /// <summary>True when any <c>{client, jeeber}</c> holds <paramref name="capability"/>.</summary>
+    public static bool IsParticipantPlane(string capability) =>
+        Map.ContainsKey(capability) && !IsOperatorPlane(capability);
 }
