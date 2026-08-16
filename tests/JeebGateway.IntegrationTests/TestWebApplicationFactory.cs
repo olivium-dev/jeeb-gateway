@@ -123,10 +123,8 @@ public class WebApplicationFactory<TEntryPoint>
         ReplaceSingleton<ISettlementStore, InMemorySettlementStore>(services);
         ReplaceSingleton<ISettlementLedgerClient,
             InMemorySettlementLedgerClient>(services);
-        // W2-R11 deleted ISettlementEnqueueStore from the gateway; there is no
-        // production seam left here to displace, so no test override is registered.
-        ReplaceSingleton<ISettlementBatchStore,
-            TestSettlementBatchStore>(services);
+        // W2-R11 deleted ISettlementEnqueueStore and ISettlementBatchStore from the
+        // gateway; the surviving batch surface is IAdminSettlementPortalService.
         ReplaceSingleton<JeebGateway.Financials.Cod.ICodSettlementLedger,
             TestCodSettlementLedger>(services);
         ReplaceSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>(services);
@@ -218,40 +216,6 @@ internal sealed class TestExternalIdempotencyStore : IExternalIdempotencyStore
             .Where(pair => pair.Key.StartsWith(prefix, StringComparison.Ordinal))
             .Select(pair => pair.Value)
             .ToArray());
-}
-
-internal sealed class TestSettlementBatchStore : ISettlementBatchStore
-{
-    public Task<IReadOnlyList<Settlement>> ListUnsettledAsync(int limit, CancellationToken ct) =>
-        Task.FromResult<IReadOnlyList<Settlement>>(Array.Empty<Settlement>());
-
-    public Task MarkBatchProcessedAsync(
-        IReadOnlyList<string> settlementIds, DateTimeOffset at, CancellationToken ct) =>
-        Task.CompletedTask;
-
-    public Task<SettlementBatch> CreateOrGetBatchAsync(
-        string jeeberId, DateOnly periodStart, DateOnly periodEnd,
-        IReadOnlyList<Settlement> settlements, CancellationToken ct) =>
-        Task.FromResult(new SettlementBatch
-        {
-            Id = Guid.NewGuid(),
-            JeeberId = jeeberId,
-            PeriodStart = periodStart,
-            PeriodEnd = periodEnd,
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow,
-        });
-
-    public Task<SettlementBatch?> GetByIdAsync(Guid batchId, CancellationToken ct) =>
-        Task.FromResult<SettlementBatch?>(null);
-
-    public Task<IReadOnlyList<SettlementBatch>> ListByStatusAsync(
-        string status, CancellationToken ct) =>
-        Task.FromResult<IReadOnlyList<SettlementBatch>>(Array.Empty<SettlementBatch>());
-
-    public Task<SettlementBatch> MarkPaidAsync(
-        Guid batchId, string adminUserId, DateTimeOffset paidAt, CancellationToken ct) =>
-        Task.FromException<SettlementBatch>(new InvalidOperationException("batch not found"));
 }
 
 internal sealed class TestNotificationOwnerClient : INotificationOwnerClient
