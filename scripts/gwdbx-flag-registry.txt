@@ -84,7 +84,7 @@ CodWalletMirror:PageSize                             setting - # W2-05 bounded s
 CodWalletMirror:ReplayFromUtc                        setting - # W2-05 sweep watermark on settled_at; REQUIRED once CodSettlementMode leaves local; an early instant IS the owner-run W2-06 backfill
 CodWalletMirror:SweepIntervalSeconds                 setting - # W2-05 reconciler tick interval
 ConfigImportRun:DryRun                               setting - # W3-07 prep rehearsal: read-only parity check, no upstream write (default true)
-ConfigImportRun:Enabled                              setting - # W3-07 prep one-shot config freeze-import + parity runner; NOT a cutover flag (ProhibitedItemsMode owns the ladder); ships OFF, armed only for the run and disarmed after; covers lexicon/acks/flagged only since ADR-0008 deleted the CMS leg, and its worker is retirable (owner-gated, ratchet 19->18)
+ConfigImportRun:Enabled                              setting - # W3-07 prep one-shot config freeze-import + parity runner; NOT a cutover flag (ProhibitedItemsMode owns the ladder); ships OFF, armed only for the run and disarmed after; covers lexicon/acks/flagged only since ADR-0008 deleted the CMS leg; its worker was DELETED at ADR-0010 (ratchet 19->18), so this key is now unbound and the row survives only to keep the live drop-in spelling approved
 ConfigImportRun:Force                                setting - # W3-07 prep: re-import even when a mode already serves upstream reads (importer refuses otherwise)
 Admin:Zones:Boundaries                               setting -
 Admin:Zones:RefreshInterval                          setting -
