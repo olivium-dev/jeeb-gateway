@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="JeebGateway.IntegrationTests" />
+    <InternalsVisibleTo Include="JeebGateway.UnitTests" />
   </ItemGroup>
 
   <ItemGroup>
