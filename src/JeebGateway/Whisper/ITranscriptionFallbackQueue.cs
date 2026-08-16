@@ -11,8 +11,8 @@ public interface ITranscriptionFallbackQueue
 }
 
 /// <summary>
-/// MVP in-memory queue for audio that needs to be retried once Whisper recovers.
-/// Production wiring replaces this with a durable queue (SQS, Oban, etc.).
+/// In-memory queue of audio to retry once Whisper recovers, wiped on every bounce. Nothing DRAINS it —
+/// the only reader is WhisperHealthCheck's depth gauge — and no durable queue is wired in any environment.
 /// </summary>
 public sealed class InMemoryTranscriptionFallbackQueue : ITranscriptionFallbackQueue
 {

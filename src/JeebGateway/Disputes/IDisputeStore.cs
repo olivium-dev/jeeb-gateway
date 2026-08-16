@@ -1,9 +1,8 @@
 namespace JeebGateway.Disputes;
 
 /// <summary>
-/// Persistence seam for disputes (T-backend-025). MVP backs this with an
-/// in-memory ConcurrentDictionary; production swaps in a Postgres-backed
-/// implementation colocated with admin moderation tables.
+/// Persistence seam for disputes (T-backend-025), registered ONLY in Development/Testing.
+/// Production has no gateway dispute store at all: the case engine is jeeb-state-service /v1/cases.
 /// </summary>
 public interface IDisputeStore
 {

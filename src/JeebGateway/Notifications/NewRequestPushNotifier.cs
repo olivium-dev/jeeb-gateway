@@ -23,7 +23,7 @@ namespace JeebGateway.Notifications;
 /// <see cref="INewRequestFanoutQueue"/> and returns 201 immediately.
 /// <see cref="NewRequestFanoutProcessor"/> drains the queue on a background loop and
 /// calls <see cref="FanOutAsync"/> from a fresh DI scope, which resolves the recipient
-/// set from the gateway-owned <c>jeeber_availability</c> table and sends ONE per-user
+/// set from the in-process <see cref="IAvailabilityStore"/> (there is no table) and sends ONE per-user
 /// push per recipient over the same <c>Send_notification_to_userAsync</c> rail
 /// <see cref="OfferPushNotifier"/> already uses. Zero topic sends on the default path.</para>
 ///
@@ -42,12 +42,15 @@ namespace JeebGateway.Notifications;
 ///     <c>newreq-fanout</c> log line carries the whole decision.</description></item>
 /// </list></para>
 ///
-/// <para>WHY <c>jeeber_availability</c> IS A SAFE AUDIENCE SOURCE:
+/// <para>WHY THE AVAILABILITY STORE IS A SAFE AUDIENCE SOURCE:
 /// <c>AvailabilityController</c> is annotated class-level
 /// <c>[RequireCapability(Capabilities.AvailabilityToggle)]</c> and is the only writer into
-/// <see cref="IAvailabilityStore"/> on a user path, so every row in the table was created by
-/// a caller holding the jeeber capability. The table IS a jeeber roster — a customer-only
+/// <see cref="IAvailabilityStore"/> on a user path, so every row in the store was created by
+/// a caller holding the jeeber capability. The store IS a jeeber roster — a customer-only
 /// account can never appear in it, with no per-recipient role lookup needed.</para>
+///
+/// <para>AUDIENCE DIES ON A BOUNCE (register #9): in-memory, so after a restart online AND known are both empty → recipients=0, no push.
+/// No self-heal — each jeeber's screen reads delivery-service and still shows online, so nobody re-toggles; only an explicit toggle restores rows. Silent: nothing errors.</para>
 ///
 /// <para>ROLLBACK: <c>Notifications:NewRequestFanout:Enabled=false</c> restores the legacy
 /// <c>jeeb_jeebers</c> topic blast byte-identically, with no redeploy. See

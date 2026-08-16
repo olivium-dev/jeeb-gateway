@@ -1531,8 +1531,8 @@ builder.Services.Configure<PushOptions>(builder.Configuration.GetSection(PushOpt
 // Durability register #10 — device tokens. No durable store since W5-11: the line below binds
 // UNCONDITIONALLY to InMemoryDeviceTokenStore, so every push fan-out target is lost on a bounce.
 builder.Services.AddSingleton<IDeviceTokenStore, InMemoryDeviceTokenStore>();
-// Durability register #12 — push-reliability pair (JEBV4-136 delivery tracker,
-// JEBV4-144 dispatch outbox below); the JEBV4-137 retry rail was deleted (W5 retire-4).
+// Durability register #12 [push] — push-reliability pair (JEBV4-136 delivery tracker, JEBV4-144 dispatch
+// outbox below); JEBV4-137 rail deleted (W5 retire-4). NOTE: #12 is used twice — see #12 [prohibited-items].
 builder.Services.AddSingleton<InMemoryPushDeliveryTracker>();
 builder.Services.AddSingleton<IPushDeliveryTracker>(sp => sp.GetRequiredService<InMemoryPushDeliveryTracker>());
 
@@ -1686,10 +1686,8 @@ if (durableRequests.Enabled)
         sp.GetRequiredService<JeebGateway.StateService.Durable.IBroadcastEventRecorder>(),
         sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DurableRequestsOptions>>(),
         sp.GetRequiredService<ILogger<DurableRequestsStore>>(),
-        // requests-durable [B] — supply the OPTIONAL 8th ctor arg so DurableRequestsStore's
-        // _mirror is non-null in prod (registered inside the GatewayPostgres block, [A]).
-        // GetService (not GetRequiredService): null when Postgres is not configured, which
-        // degrades the durable owner-list to the in-memory snapshot (today's behaviour).
+        // IDurableRequestsMirror has NO registration anywhere since W5-11, so _mirror is ALWAYS null.
+        // Harmless only because RequestsOwnerListMode=upstream-authority serves owner lists upstream.
         sp.GetService<JeebGateway.Requests.IDurableRequestsMirror>(),
         sp.GetRequiredService<JeebGateway.Requests.ITiersStore>()));
 }
@@ -1841,8 +1839,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<OtpHandoverSweeper
 
 // gwdbx W3-02 — fire-and-forget escalation dual-write to delivery-service, behind
 // FeatureFlags:OtpEscalationsMode. NOT a durable store: the local admin_escalations row
-// stays authoritative and the 423 path never waits on this (G-11), so it is deliberately
-// absent from the StoreDurabilityGuard Critical roster. Unwired base URL => no-op mirror.
+// stays authoritative and the 423 path never waits on this (G-11); that row's own durability is
+// register #5 (process memory). StoreDurabilityGuard is gone (W5-11). Unwired base URL => no-op mirror.
 if (Uri.TryCreate(builder.Configuration["Services:Delivery:BaseUrl"], UriKind.Absolute, out var escalationMirrorUri))
 {
     ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
@@ -1867,9 +1865,9 @@ builder.Services.AddSingleton<FailOpenEscalationMirror>();
 
 // gwdbx W3-04 — fire-and-forget availability write-through to delivery-service, behind
 // FeatureFlags:AvailabilityMode. Carries ONLY the two signals the controllers do not already
-// forward (activity watermark + the sweeper's idle flip). NOT a durable store: the gateway
-// availability row stays authoritative and remains the single presence authority (G-10), so it
-// is deliberately absent from the StoreDurabilityGuard Critical roster. Unwired base URL => no-op.
+// forward (activity watermark + the sweeper's idle flip). NOT a durable store: the gateway row is
+// in-memory and NOT the presence authority any more (S06 wired GET/PATCH through to delivery-service;
+// register #9). StoreDurabilityGuard is gone (W5-11). Unwired base URL => no-op.
 if (Uri.TryCreate(builder.Configuration["Services:Delivery:BaseUrl"], UriKind.Absolute, out var availabilityMirrorUri))
 {
     ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(
@@ -1935,16 +1933,10 @@ builder.Services.AddSingleton<JeebGateway.Requests.OtpHandover.IHandoverCodeStor
 // Delivery tier catalog (T-backend-009).
 // Admins CRUD via /admin/tiers and changes take effect on the next request
 // (each List/Get reads fresh). Three default tiers (Urgent, Same-Day,
-// Scheduled) are seeded either by migration 0029 + 0036 (Postgres path) or the
-// in-memory store's constructor (dev/CI fallback).
+// Scheduled) are seeded by the in-memory store's constructor; the migration-0029/0036 seed path is gone.
 //
-// Durability register (JEBV4-125, AUDIT-A IN-MEM-LIVE) — the admin tier catalog
-// used to live ONLY in gateway process memory, so an admin's tier edits reverted
-// to the seeded defaults on every restart/replica move. PostgresTiersStore
-// (tiers table, migration 0029) is the durable system of record whenever
-// GatewayPostgres:ConnectionString is configured; the in-memory store stays the
-// dev/CI/test fallback when it is absent — the established FAIL-OPEN-then-gate
-// pattern (StoreDurabilityGuard now enforces the Postgres store in prod-like envs).
+// Durability register (JEBV4-125, AUDIT-A IN-MEM-LIVE) — PostgresTiersStore and StoreDurabilityGuard were
+// BOTH deleted in W5-11: tier edits sit in process memory and revert to the seed on every bounce.
 // gwdbx W4-09 — at TiersMode=upstream-authority the catalog is served by
 // delivery-service's durable tier catalog (W4-08) through a 60s-cached,
 // fail-open-to-last-known store; below it the local registrations are
@@ -2008,8 +2000,8 @@ builder.Services.AddSingleton<ScheduledDeliveryActivator>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ScheduledDeliveryActivator>());
 
 // Prohibited items catalog + per-user acknowledgment ledger (T-backend-027).
-// Durability register #12 — prohibited items + acks. No durable gateway store since W5-11: admin
-// edits and acks sit in process memory at ProhibitedItemsMode=local (default) and die on a bounce.
+// Durability register #12 [prohibited-items] — the SECOND holder of #12 (the other is #12 [push]). Local
+// edits/acks are process memory, but MSI runs ProhibitedItemsMode=upstream-authority, so state-service serves.
 builder.Services.AddSingleton<InMemoryProhibitedItemsStore>();
 
 // The LOCAL catalog root, reachable past the decorator below. A local-vs-upstream tool resolves
@@ -2197,16 +2189,8 @@ builder.Services.AddSingleton<IDualRoleService, DualRoleService>();
 // anonymization step to unified_payment_gateway (locked-in payments
 // policy). The 30-day SLA lives in InMemoryAccountDeletionStore.PurgeDelay.
 // Financial-ledger anonymization bookkeeping (GDPR account-deletion seam).
-// Durability register (JEBV4-154, AUDIT-A IN-MEM-LIVE) — the gateway's own
-// per-owner retained-row anonymization counters used to live ONLY in process
-// memory, so the record of which financial rows had already been pseudonymized
-// for a deleted user was LOST on every restart/replica move (money + GDPR — the
-// highest-risk remaining in-memory store). PostgresFinancialLedger
-// (financial_ledger_anonymization table, migration 0030) is the durable system
-// of record whenever GatewayPostgres:ConnectionString is configured; the
-// in-memory store stays the dev/CI/test fallback when it is absent — the
-// established FAIL-OPEN-then-gate pattern (StoreDurabilityGuard now enforces the
-// Postgres store in prod-like envs).
+// Durability register (JEBV4-154, AUDIT-A IN-MEM-LIVE) — PostgresFinancialLedger died with W5-11 and the
+// binding below is UNCONDITIONAL, so the GDPR record of which rows were pseudonymized is lost on a bounce.
 builder.Services.AddSingleton<InMemoryFinancialLedger>();
 builder.Services.AddSingleton<IFinancialLedgerAnonymizer>(sp => sp.GetRequiredService<InMemoryFinancialLedger>());
 builder.Services.AddSingleton<InMemoryAccountDeletionStore>();
@@ -2428,17 +2412,8 @@ builder.Services.Configure<AutoOfflineOptions>(builder.Configuration.GetSection(
 // reloaded on config change via IOptionsMonitor so operators can
 // re-shape coverage without redeploying the gateway.
 builder.Services.Configure<ZoneOptions>(builder.Configuration.GetSection(ZoneOptions.SectionName));
-// IGeoIndex is INTENTIONALLY in-memory (JEBV4-156) — it is a DERIVED, rebuildable
-// hot-path spatial index, NOT a store of record, so it must NOT be migrated to
-// Postgres. The Jeeber online-presence system of record is the durable Postgres
-// `jeeber_availability` table (is_online / vehicle_type / last_location / last_seen_at),
-// owned by IAvailabilityStore → PostgresAvailabilityStore (already a Critical durable
-// store). This geo index is only the spatial ACCELERATION layer over that truth; its
-// production target is a Redis GEO sorted set (jeeber:online:geo, GEOADD/GEOSEARCH —
-// see db/JEEBER_LOCATION_DESIGN.md), an explicit hot-path cache. PostgresAvailabilityStore
-// writes the durable row and then updates this index, so it is fully rebuildable from
-// Postgres and its loss on restart costs only a warm-up, never authoritative data.
-// Tracked as IntentionalInMemory (not the migration backlog) in StoreDurabilityGuard.
+// IGeoIndex is INTENTIONALLY in-memory (JEBV4-156) — a derived hot-path spatial index whose target is a
+// Redis GEO set (db/JEEBER_LOCATION_DESIGN.md). NOT rebuildable: PostgresAvailabilityStore is gone, see #9.
 builder.Services.AddSingleton<IGeoIndex, InMemoryGeoIndex>();
 
 // Offer record-of-truth (T-backend-010). thin-BFF wire: the offer ledger is the
@@ -2523,8 +2498,8 @@ builder.Services.AddSingleton<IOfferRequestIndex>(
 // (T-backend-022, T-backend-023) so they obey the same transport and retry
 // rules as any other trigger.
 builder.Services.AddSingleton<IAutoOfflineNotifier, PushAutoOfflineNotifier>();
-// Durability register #9 — availability (admin ops-map + auto-offline). No durable store since W5-11 and
-// AvailabilityMode is capped below the read rung (G-10): in-memory only, so every Jeeber reads offline after a bounce.
+// Durability register #9 — availability. Presence itself SURVIVES a bounce (jeeber GET/PATCH are wired through
+// to delivery-service, S06); what this wiped store kills is NewRequestPushNotifier's push audience — see its doc.
 builder.Services.AddSingleton<IAvailabilityStore, InMemoryAvailabilityStore>();
 builder.Services.AddHostedService<AutoOfflineSweeper>();
 
@@ -2725,8 +2700,8 @@ builder.Services.AddSingleton<IWhisperCircuitBreaker, WhisperCircuitBreaker>();
 // gateway it is only a TRANSIENT in-process buffer holding the bytes already in-hand
 // at the moment of fallback (SaveAsync is the ONLY method ever called — there is no
 // GetAsync / drain-back path in the gateway today), NOT a store of record. It is left
-// in-memory ON PURPOSE and is documented as an intentional transient on the AUDIT-A
-// backlog (StoreDurabilityGuard.KnownInMemoryBacklog) — not a pending migration.
+// in-memory ON PURPOSE — an intentional transient, not a pending migration. (The AUDIT-A
+// roster that recorded it, StoreDurabilityGuard.KnownInMemoryBacklog, was deleted in W5-11.)
 builder.Services.AddSingleton<IAudioStore, InMemoryAudioStore>();
 // Durability follow-up — transcription fallback queue (JEBV4-126): small re-drive rows (audio_id,
 // reason, queued_at). No durable store since W5-11 — the backlog and PendingQueueDepth reset on a bounce.

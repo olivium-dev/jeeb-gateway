@@ -9,10 +9,8 @@ namespace JeebGateway.Services.Dispatch;
 /// <summary>
 /// Concrete implementation of <see cref="IJeebNotificationDispatcher"/>.
 ///
-/// <para><b>Durability model (MVP).</b>  The outbox is backed by an
-/// <see cref="InMemoryNotificationDispatchOutbox"/>; swap the DI binding for a
-/// Postgres-backed store to get crash-safe persistence. The rest of this class
-/// is storage-agnostic.</para>
+/// <para><b>Durability model.</b>  The outbox binding is mode-gated, never Postgres: in-memory today (MSI
+/// sets no override) or StateServiceNotificationDispatchOutbox at NotificationOutboxMode=upstream-authority.</para>
 ///
 /// <para><b>Push transport.</b>  Uses the existing
 /// <see cref="IPushNotificationService"/> pipeline so preference filtering,
