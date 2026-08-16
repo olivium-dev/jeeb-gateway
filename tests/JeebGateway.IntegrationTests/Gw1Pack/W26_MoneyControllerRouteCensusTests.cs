@@ -333,9 +333,9 @@ public class W26_MoneyControllerRouteCensusTests
         (await resp.Content.ReadAsStringAsync())
             .Should().Contain(SettlementAdminScopeException.ProblemType);
 
-        // POSITIVE CONTROL — the durability guard still sees the stores it is meant to see, so
-        // the money-path claims above are not being made by an empty guard.
-        StoreDurabilityGuard.Critical.Select(c => c.Iface)
-            .Should().Contain(typeof(JeebGateway.Requests.IRequestsStore));
+        // POSITIVE CONTROL — the same host still routes normally, so the 503 above is this
+        // action's typed scope refusal and not a blanket failure of the booted app.
+        (await client.GetAsync("/w26-no-such-route")).StatusCode
+            .Should().Be(HttpStatusCode.NotFound);
     }
 }

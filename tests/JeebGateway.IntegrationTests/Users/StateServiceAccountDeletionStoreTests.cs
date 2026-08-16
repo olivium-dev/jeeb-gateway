@@ -126,19 +126,19 @@ public class StateServiceAccountDeletionStoreTests
         inner.Advances.Should().Be(1, "the purge state machine is driven on the inner store");
     }
 
-    // ----- guard roster ------------------------------------------------------
+    // ----- live composition --------------------------------------------------
 
+    // W5-11 deleted StoreDurabilityGuard's catalog; the surviving owner of "which store a boot
+    // resolves" is the Program.cs registration, so the claim is made against the container.
     [Fact]
-    public void Decorator_Is_An_Approved_Durable_Implementation_Of_IAccountDeletionStore()
+    public void A_Booted_Host_Resolves_IAccountDeletionStore_To_The_StateService_Decorator()
     {
-        var entry = StoreDurabilityGuard.Critical.Single(c => c.Iface == typeof(IAccountDeletionStore));
+        // The FRAMEWORK factory, not this suite's shadowing one, which swaps in test owners.
+        using var host = new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>();
 
-        entry.DurableImpls.Should().BeEquivalentTo(new[]
-        {
-            typeof(PostgresAccountDeletionStore),
-            typeof(RemoteUserPreferencesAccountDeletionStore),
-            typeof(StateServiceAccountDeletionStore)
-        }, "G-08 — the decorator wraps the durable inner chain, so every resolution passes the boot gate");
+        host.Services.GetRequiredService<IAccountDeletionStore>()
+            .Should().BeOfType<StateServiceAccountDeletionStore>(
+                "the dual-write cases above only describe production if the decorator is what a boot gets");
     }
 
     // ----- helpers -----------------------------------------------------------
