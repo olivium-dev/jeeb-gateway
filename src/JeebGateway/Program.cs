@@ -2201,8 +2201,8 @@ builder.Services.AddSingleton<IDualRoleService, DualRoleService>();
 builder.Services.AddSingleton<InMemoryFinancialLedger>();
 builder.Services.AddSingleton<IFinancialLedgerAnonymizer>(sp => sp.GetRequiredService<InMemoryFinancialLedger>());
 builder.Services.AddSingleton<InMemoryAccountDeletionStore>();
-// Durability register #15 — account-deletion (GDPR 30-day purge SLA). No durable gateway store since
-// W5-11: InMemoryAccountDeletionStore is the root, so a pending purge and its SLA clock die on a bounce.
+// Durability register #15 — account-deletion (GDPR 30-day purge SLA) is CLOSED: the erasure and its
+// deadline are state-service work items (IAccountDeletionWorkflow). This chain is now unreachable.
 
 // JEBV4-215 (E20) — route the account-deletion soft status-flip THROUGH remote-user-preferences
 // (Q-079 / GR-2 DoD: the flip persists via remote-user-preferences, NOT user-management),
@@ -2233,14 +2233,8 @@ builder.Services.AddSingleton<IAccountDeletionStore>(sp =>
         sp.GetRequiredService<ILogger<JeebGateway.Users.StateServiceAccountDeletionStore>>());
 });
 
-// The scheduled purge worker sweeps every open deletion (pending_active_delivery → scheduled →
-// completed hard-delete once the 30-day SLA is due). It is now ALWAYS scheduled — the soft-delete
-// flip (UserController.DeleteProfile) writes to the store in every environment, so its purge must
-// run everywhere, not only when Postgres is configured. It resolves IAccountDeletionStore per tick
-// and drives AdvanceAsync on the inner state machine through the decorator (additive).
-builder.Services.AddSingleton<JeebGateway.Users.AccountDeletionPurgeWorker>();
-builder.Services.AddHostedService(sp =>
-    sp.GetRequiredService<JeebGateway.Users.AccountDeletionPurgeWorker>());
+// AccountDeletionPurgeWorker is RETIRED: it swept the in-memory store, which no request path
+// writes to any more. The purge now runs off the durable work item (DurableWorkSweepWorker).
 
 // Data-export pipeline (T-backend-042, GDPR-like right of access).
 // POST /users/me/data-export queues a full export (profile, orders,
@@ -2249,8 +2243,8 @@ builder.Services.AddHostedService(sp =>
 // SLA lives in DataExportOptions.Sla. The promised Postgres worker is DEAD (W5-11 deleted the
 // schema and the worker); the lifecycle moves to state-service work items — see register #16.
 builder.Services.Configure<DataExportOptions>(builder.Configuration.GetSection(DataExportOptions.SectionName));
-// Durability register #16 — data-export (GDPR 72-hr SLA + single-use download tokens). No durable
-// store since W5-11: queued exports, download tokens and SLA deadlines die on a bounce at DataExportMode=local.
+// Durability register #16 — data-export (GDPR 72-hr SLA + single-use download tokens) is CLOSED:
+// the queue, the deadline and the capability hash are state-service work items. Chain unreachable.
 builder.Services.AddSingleton<InMemoryDataExportStore>();
 
 // gwdbx W1-06 (G-20) — the encrypt-then-upload artifact pipeline. Dormant while
@@ -2854,6 +2848,66 @@ else
     builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,
         JeebGateway.StateService.Idempotency.InMemoryIdempotencyStore>();
 }
+
+// ---------------------------------------------------------------------------
+// Durable GDPR work (registers #15 + #16) — state-service owns both legal clocks
+// ---------------------------------------------------------------------------
+// The erasure purge deadline and the export SLA/download capability were held in process memory,
+// so a restart silently dropped a pending purge and every queued export. Both now live in
+// state-service work items: due_at carries the deadline, attempts/max_attempts the retry budget,
+// and the claim/lease rail executes them. The gateway keeps no record of either.
+builder.Services.Configure<JeebGateway.Jobs.DurableWorkExecutionOptions>(
+    builder.Configuration.GetSection(JeebGateway.Jobs.DurableWorkExecutionOptions.SectionName));
+builder.Services.Configure<JeebGateway.Jobs.AccountDeletionExecutionOptions>(
+    builder.Configuration.GetSection(JeebGateway.Jobs.AccountDeletionExecutionOptions.SectionName));
+builder.Services.Configure<JeebGateway.Jobs.DurableWorkSweepOptions>(
+    builder.Configuration.GetSection(JeebGateway.Jobs.DurableWorkSweepOptions.SectionName));
+builder.Services.AddSingleton(new JeebGateway.Artifacts.PrivateArtifactStoreOptions());
+
+if (stateServiceWired)
+{
+    var durableWorkBaseUrl = stateOptions.BaseUrl.TrimEnd('/') + "/";
+    var durableWorkClient = builder.Services
+        .AddHttpClient<JeebGateway.StateService.Work.IStateWorkItemClient,
+            JeebGateway.StateService.Work.StateWorkItemClient>(http =>
+        {
+            http.BaseAddress = new Uri(durableWorkBaseUrl);
+            http.Timeout = TimeSpan.FromSeconds(stateOptions.TimeoutSeconds);
+        });
+    if (stateOptions.HasServiceCredential)
+    {
+        durableWorkClient.AddHttpMessageHandler<JeebGateway.StateService.StateServiceCredentialHandler>();
+    }
+}
+else
+{
+    // Fails every call loudly rather than degrading to a store that forgets the legal deadline.
+    builder.Services.AddSingleton<JeebGateway.StateService.Work.IStateWorkItemClient,
+        JeebGateway.StateService.Work.UnavailableStateWorkItemClient>();
+}
+
+// Export bytes never live in the gateway; the private artifact owner holds them and fails
+// closed when PRIVATE_ARTIFACT_STORE_BASE_URL is unset, so no in-memory payload can reappear.
+builder.Services.AddHttpClient<JeebGateway.Artifacts.IPrivateArtifactStore,
+    JeebGateway.Artifacts.PrivateArtifactStoreHttpClient>();
+
+builder.Services.AddSingleton<JeebGateway.Users.DataExport.IDataExportTokenProtector,
+    JeebGateway.Users.DataExport.DataExportTokenProtector>();
+
+// The two facades the controllers talk to. Registering IDataExportWorkflow also repairs
+// DataExportController, which 500s on activation while the interface is unregistered.
+builder.Services.AddScoped<JeebGateway.Users.DataExport.IDataExportWorkflow,
+    JeebGateway.Users.DataExport.StateDataExportWorkflow>();
+builder.Services.AddScoped<JeebGateway.Users.IAccountDeletionWorkflow,
+    JeebGateway.Users.StateAccountDeletionWorkflow>();
+
+// Handlers are resolved per sweep item; the executor fans them out by Kind.
+builder.Services.AddScoped<JeebGateway.Jobs.IDurableWorkItemHandler,
+    JeebGateway.Jobs.AccountDeletionWorkHandler>();
+builder.Services.AddScoped<JeebGateway.Jobs.IDurableWorkItemHandler,
+    JeebGateway.Jobs.DataExportWorkHandler>();
+builder.Services.AddScoped<JeebGateway.Jobs.DurableWorkSweepExecutor>();
+builder.Services.AddHostedService<JeebGateway.Jobs.DurableWorkSweepWorker>();
 
 // Global RFC 7807 ProblemDetails + last-line exception handler. Guarantees an
 // unhandled exception (notably an upstream non-2xx that bubbles up as an

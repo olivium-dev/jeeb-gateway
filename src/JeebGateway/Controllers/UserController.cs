@@ -32,7 +32,7 @@ namespace JeebGateway.Controllers
         private readonly GwDualRoleClient _userManagement;
         private readonly IOptions<DemoUsersOptions> _demoUsers;
         private readonly IOptions<SuperLoginOptions> _superLogin;
-        private readonly JeebGateway.Users.IAccountDeletionStore _accountDeletion;
+        private readonly JeebGateway.Users.IAccountDeletionWorkflow _accountDeletionWorkflow;
         private readonly JeebGateway.Requests.IRequestsStore _requests;
         private readonly IMemoryCache _cache;
         private readonly ILogger<UserController> _logger;
@@ -43,7 +43,7 @@ namespace JeebGateway.Controllers
             GwDualRoleClient userManagement,
             IOptions<DemoUsersOptions> demoUsers,
             IOptions<SuperLoginOptions> superLogin,
-            JeebGateway.Users.IAccountDeletionStore accountDeletion,
+            JeebGateway.Users.IAccountDeletionWorkflow accountDeletionWorkflow,
             JeebGateway.Requests.IRequestsStore requests,
             IMemoryCache cache,
             ILogger<UserController> logger)
@@ -53,7 +53,7 @@ namespace JeebGateway.Controllers
             _userManagement = userManagement;
             _demoUsers = demoUsers;
             _superLogin = superLogin;
-            _accountDeletion = accountDeletion;
+            _accountDeletionWorkflow = accountDeletionWorkflow;
             _requests = requests;
             _cache = cache;
             _logger = logger;
@@ -1075,7 +1075,9 @@ namespace JeebGateway.Controllers
                     targetUserId);
             }
 
-            return await _accountDeletion.RequestAsync(targetUserId, hasActiveDelivery, ct);
+            // The erasure request and its 30-day purge deadline are recorded in state-service, so
+            // they survive a gateway restart; the in-memory store no longer owns the legal clock.
+            return await _accountDeletionWorkflow.RequestAsync(targetUserId, hasActiveDelivery, ct);
         }
 
         private static JeebGateway.Users.AccountDeletionResponse ToDeletionResponse(JeebGateway.Users.AccountDeletionRequest record)
