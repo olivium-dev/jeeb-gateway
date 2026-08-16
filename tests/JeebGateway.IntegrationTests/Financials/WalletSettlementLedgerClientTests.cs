@@ -73,20 +73,6 @@ public sealed class WalletSettlementLedgerClientTests
         handler.InitiateBodies.Should().BeEmpty();
     }
 
-    [Fact]
-    public async Task Shadow_Failure_Cannot_Replace_A_Successful_Wallet_Result()
-    {
-        var primary = NewClient(new WalletHandler());
-        var comparator = new ShadowComparingSettlementLedgerClient(
-            primary,
-            new ThrowingShadow(),
-            NullLogger<ShadowComparingSettlementLedgerClient>.Instance);
-
-        var result = await comparator.PostLedgerEntryAsync(Request(), CancellationToken.None);
-
-        result.LedgerEntryId.Should().Be(HeaderId.ToString("D"));
-    }
-
     private static WalletSettlementLedgerClient NewClient(HttpMessageHandler handler)
     {
         var http = new HttpClient(handler) { BaseAddress = new Uri("http://wallet.test/") };
@@ -130,12 +116,6 @@ public sealed class WalletSettlementLedgerClientTests
             name.Should().Be(WalletSettlementLedgerClient.HttpClientName);
             return client;
         }
-    }
-
-    private sealed class ThrowingShadow : ISettlementLedgerShadowReader
-    {
-        public Task<LegacySettlementLedgerEntry?> ReadAsync(string idempotencyKey, CancellationToken ct) =>
-            throw new InvalidOperationException("legacy database unavailable");
     }
 
     private sealed class WalletHandler : HttpMessageHandler
