@@ -19,9 +19,10 @@
 // drop-in replacement with no call-site churn.
 //
 // Routes covered (the gateway's tracking surface only — NOT the whole spec):
-//   * POST /location/update            -> LocationUpdateResponse
-//   * GET  /locations/user/{user_id}   -> UserLocationResponse (404 => null)
-//   * GET  /locations/nearest          -> LocationWithDistance[]
+//   * POST /location/update                        -> LocationUpdateResponse
+//   * GET  /v1/geo/agents/{actor_id}/availability  -> AgentPresenceResponse (404 => null)
+//   * GET  /locations/user/{user_id}               -> UserLocationResponse (404 => null)
+//   * GET  /locations/nearest                      -> LocationWithDistance[]
 //----------------------
 
 #nullable enable
@@ -55,8 +56,14 @@ namespace JeebGateway.Services.Generated.GeolocationService
         /// derived upstream from the forwarded bearer; the body carries only points.</summary>
         Task<LocationUpdateResponse> UpdateLocationAsync(LocationUpdateRequest body, CancellationToken cancellationToken = default);
 
-        /// <summary>GET /locations/user/{user_id} — the latest stored fix for a user.
-        /// Returns <c>null</c> on a 404 (no fix on record), not an exception.</summary>
+        /// <summary>GET /v1/geo/agents/{actor_id}/availability — the presence row that
+        /// <c>POST /location/update</c> writes (last_seen_at + latitude/longitude).
+        /// Returns <c>null</c> on a 404 (no presence row), not an exception.</summary>
+        Task<AgentPresenceResponse?> GetAgentPresenceAsync(string actorId, CancellationToken cancellationToken = default);
+
+        /// <summary>GET /locations/user/{user_id} — the latest row in the generic
+        /// <c>locations</c> table, written ONLY by <c>POST /locations</c>. The GPS
+        /// ingest never writes it; do not read live positions from here (see D11).</summary>
         Task<UserLocationResponse?> GetUserLocationAsync(string userId, CancellationToken cancellationToken = default);
 
         /// <summary>GET /locations/nearest — nearest stored fixes to a point, ordered
@@ -102,6 +109,27 @@ namespace JeebGateway.Services.Generated.GeolocationService
             return payload ?? throw new ApiException(
                 "geolocation-service returned an empty body for POST /location/update.",
                 (int)response.StatusCode, null, null);
+        }
+
+        public async Task<AgentPresenceResponse?> GetAgentPresenceAsync(string actorId, CancellationToken cancellationToken = default)
+        {
+            if (actorId is null) throw new ArgumentNullException(nameof(actorId));
+
+            // Operation Path: "v1/geo/agents/{actor_id}/availability"
+            var url = "v1/geo/agents/" + Uri.EscapeDataString(actorId) + "/availability";
+            using var response = await _httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
+
+            // 404 == "no presence row for this agent", which the store maps to null.
+            if (response.StatusCode == HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+
+            await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+
+            return await response.Content
+                .ReadFromJsonAsync<AgentPresenceResponse>(JsonOptions, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         public async Task<UserLocationResponse?> GetUserLocationAsync(string userId, CancellationToken cancellationToken = default)
@@ -234,6 +262,35 @@ namespace JeebGateway.Services.Generated.GeolocationService
 
         [JsonPropertyName("timestamp")]
         public DateTimeOffset? Timestamp { get; set; }
+    }
+
+    /// <summary>GET /v1/geo/agents/{actor_id}/availability response — the presence row
+    /// (<c>user_status</c>) that the GPS ingest bumps. <c>latitude</c>/<c>longitude</c> are
+    /// null until the first fix lands, and <c>last_seen_at</c> is when it landed.
+    /// <c>location_geohash5</c> / <c>reason</c> are deliberately not mapped: unread here,
+    /// and a digit-suffixed name is exactly where a naming policy would silently diverge.</summary>
+    public partial class AgentPresenceResponse
+    {
+        [JsonPropertyName("user_id")]
+        public string UserId { get; set; } = string.Empty;
+
+        [JsonPropertyName("available")]
+        public bool Available { get; set; }
+
+        [JsonPropertyName("last_seen_at")]
+        public DateTimeOffset? LastSeenAt { get; set; }
+
+        [JsonPropertyName("updated_at")]
+        public DateTimeOffset? UpdatedAt { get; set; }
+
+        [JsonPropertyName("latitude")]
+        public double? Latitude { get; set; }
+
+        [JsonPropertyName("longitude")]
+        public double? Longitude { get; set; }
+
+        [JsonPropertyName("role")]
+        public string? Role { get; set; }
     }
 
     /// <summary>GET /locations/user/{user_id} response.</summary>
