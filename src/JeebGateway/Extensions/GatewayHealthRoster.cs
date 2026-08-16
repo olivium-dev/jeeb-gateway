@@ -25,10 +25,9 @@ public static class GatewayHealthRoster
         ("contract-signing-service", "Services:ContractSigning:BaseUrl"),
         ("cdn-service", "Services:Cdn:BaseUrl"),
         ("form-builder-service", "Services:FormBuilder:BaseUrl"),
-        // Registered by HealthCheckExtensions but never declared here, so the
-        // asserted count sat one below production. Keyed off the store's own
-        // constant so the declaration and the registration cannot drift again.
-        ("bundler-service", JeebGateway.Cms.BundlerCmsSurfaceStore.BaseUrlConfigurationKey),
+        // Registered by HealthCheckExtensions as BundlerServiceHealthCheck (not a URL group),
+        // still gated on the same BaseUrl key, so name and registration cannot drift.
+        (JeebGateway.Cms.BundlerServiceHealthCheck.Name, JeebGateway.Cms.BundlerCmsSurfaceStore.BaseUrlConfigurationKey),
     };
 
     /// <summary>Ready-tagged checks registered in <c>Program.cs</c> rather than the extension.</summary>

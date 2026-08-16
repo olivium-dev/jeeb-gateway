@@ -3,8 +3,9 @@ namespace JeebGateway.ProhibitedItems.FlaggedRequests;
 /// <summary>
 /// gwdbx W3 — the gateway-LOCAL moderation queue root, resolvable past whatever the mode binds to
 /// <see cref="IFlaggedRequestStore"/>. Same reason as
-/// <see cref="JeebGateway.ProhibitedItems.ILocalProhibitedItemsStore"/>: import and parity must
-/// read the local side explicitly, never the serving side.
+/// <see cref="JeebGateway.ProhibitedItems.ILocalProhibitedItemsStore"/>: a local-vs-upstream tool
+/// must read the local side explicitly, never the serving side. VESTIGIAL since ADR-0010 retired
+/// its last two consumers; it dies with the program section at W5-14.
 /// </summary>
 public interface ILocalFlaggedRequestStore : IFlaggedRequestStore
 {

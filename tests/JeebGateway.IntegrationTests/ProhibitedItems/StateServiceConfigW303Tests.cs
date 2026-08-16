@@ -15,9 +15,9 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests.ProhibitedItems;
 
-// gwdbx W3-03 — the prohibited-items trio on ONE state-service config primitive (G-27). Charter
-// cases: import path, the mode defaults to "local", and an upstream failure never fails the
-// user-facing lexicon read at the "local" rung. The cms-config pair left at ADR-0008.
+// gwdbx W3-03 — the prohibited-items read seam on ONE state-service config primitive (G-27).
+// The freeze-import cases left with the importer at ADR-0010; what remains is the ladder default,
+// the "local" rung taking no state-service dependency, and the fail-open contract above it.
 public class StateServiceConfigW303Tests
 {
     // ----- ladder defaults ----------------------------------------------------
@@ -125,101 +125,6 @@ public class StateServiceConfigW303Tests
                 "the ack version token is derived from UpdatedAt — a lossy round trip un-acks everyone");
     }
 
-    // ----- import path --------------------------------------------------------
-
-    [Fact]
-    public async Task Import_Publishes_The_Whole_Catalog_Under_The_Gateway_Lexicon_Version()
-    {
-        var config = new RecordingConfigClient();
-        var lexicon = new InMemoryProhibitedItemsStore();
-        await Seed(lexicon, ("knife", "weapons", true), ("retired", "weapons", false));
-        var importer = NewImporter(config, lexicon: lexicon);
-
-        var report = await importer.ImportAsync(force: false, default);
-
-        var active = await lexicon.ListActiveAsync(default);
-        var expected = ModerationGate.ComputeLexiconVersion(active);
-        report.LexiconItems.Should().Be(2, "inactive rows travel too — the import is a full replay");
-        report.LexiconVersionTag.Should().Be(expected);
-        config.Drafts.Should().Contain(d => d.SurfaceKey == "moderation-lexicon");
-        var publish = config.Publishes.Single(p => p.SurfaceKey == "moderation-lexicon");
-        publish.IdempotencyKey.Should().Be("config-import:moderation-lexicon:" + expected,
-            "G-15 — replaying one lexicon version must never mint a second upstream version");
-        publish.Body.VersionTag.Should().Be(expected);
-    }
-
-    [Fact]
-    public async Task Import_Replays_The_Ack_Ledger_Onto_The_Same_Surface()
-    {
-        var config = new RecordingConfigClient();
-        var lexicon = new InMemoryProhibitedItemsStore();
-        await Seed(lexicon, ("knife", "weapons", true));
-        await lexicon.AcknowledgeAsync("u-1", "v-old", default);
-        await lexicon.AcknowledgeAsync("u-2", "v-new", default);
-        var importer = NewImporter(config, lexicon: lexicon);
-
-        var report = await importer.ImportAsync(force: false, default);
-
-        report.Acks.Should().Be(2);
-        config.Acks.Select(a => (a.SubjectRef, a.Body.Version))
-            .Should().BeEquivalentTo(new[] { ("u-1", "v-old"), ("u-2", "v-new") });
-        config.Acks.Should().OnlyContain(a => a.SurfaceKey == "moderation-lexicon",
-            "acks key to a surface version — that is why one primitive covers both legs");
-    }
-
-    [Fact]
-    public async Task Import_Replays_Flagged_Requests_Onto_The_Surface_The_Read_Rung_Serves()
-    {
-        var config = new RecordingConfigClient();
-        var upstream = new RecordingUpstreamFlaggedStore();
-        var flagged = new FakeFlaggedRequestStore(NewFlag("f-1", "u-1"), NewFlag("f-2", "u-2"));
-        var importer = NewImporter(config, flagged: flagged, flaggedUpstream: upstream);
-
-        var report = await importer.ImportAsync(force: false, default);
-
-        report.FlaggedRequests.Should().Be(2);
-        upstream.Created.Select(c => c.UserId).Should().Equal("u-1", "u-2",
-            "ADR-0009 — the import writes the CASE surface StateServiceFlaggedRequestStore reads, "
-            + "not the work-item kind nothing ever consumed");
-        upstream.Decisions.Should().BeEmpty("both replayed rows are still pending");
-
-        await importer.ImportAsync(force: false, default);
-        upstream.Created.Should().HaveCount(2, "G-21 — a re-run replays the same content key");
-    }
-
-    [Fact]
-    public async Task Import_Is_Idempotent_By_Key_Across_Re_Runs()
-    {
-        var config = new RecordingConfigClient();
-        var lexicon = new InMemoryProhibitedItemsStore();
-        await Seed(lexicon, ("knife", "weapons", true));
-        var importer = NewImporter(config, lexicon: lexicon);
-
-        await importer.ImportAsync(force: false, default);
-        var first = config.Publishes.Select(p => p.IdempotencyKey).ToList();
-        await importer.ImportAsync(force: false, default);
-
-        config.Publishes.Select(p => p.IdempotencyKey).Skip(first.Count).Should().Equal(first,
-            "G-21 — a re-run replays the same keys, so upstream no-ops instead of duplicating");
-    }
-
-    [Fact]
-    public async Task Import_Refuses_A_Leg_That_Is_Already_Serving_Upstream_Reads_Unless_Forced()
-    {
-        var config = new RecordingConfigClient();
-        var lexicon = new InMemoryProhibitedItemsStore();
-        await Seed(lexicon, ("knife", "weapons", true));
-        var importer = NewImporter(config, lexicon: lexicon, prohibitedMode: "upstream-authority");
-
-        var guarded = await importer.ImportAsync(force: false, default);
-        config.Publishes.Should().BeEmpty("re-publishing would swap the LIVE lexicon under the gate");
-        guarded.SkippedLegs.Should().ContainSingle().Which.Should().StartWith("prohibited-items:");
-
-        var forced = await importer.ImportAsync(force: true, default);
-        forced.SkippedLegs.Should().BeEmpty();
-        config.Publishes.Should().ContainSingle(p => p.SurfaceKey == "moderation-lexicon");
-    }
-
     // ----- guard roster (G-08) ------------------------------------------------
 
     [Fact]
@@ -255,23 +160,6 @@ public class StateServiceConfigW303Tests
             NullLogger<StateServiceProhibitedItemsStore>.Instance);
     }
 
-    private static StateServiceConfigImporter NewImporter(
-        IStateConfigClient config,
-        ILocalProhibitedItemsStore? lexicon = null,
-        ILocalFlaggedRequestStore? flagged = null,
-        IUpstreamFlaggedRequestStore? flaggedUpstream = null,
-        string prohibitedMode = "local") =>
-        new(
-            lexicon ?? new InMemoryProhibitedItemsStore(),
-            flagged ?? new FakeFlaggedRequestStore(),
-            flaggedUpstream ?? new RecordingUpstreamFlaggedStore(),
-            config,
-            new StaticOptionsMonitor<GwdbxMigrationOptions>(new GwdbxMigrationOptions
-            {
-                ProhibitedItemsMode = prohibitedMode,
-            }),
-            NullLogger<StateServiceConfigImporter>.Instance);
-
     private static async Task Seed(
         IProhibitedItemsStore store, params (string Name, string Category, bool Active)[] items)
     {
@@ -294,17 +182,6 @@ public class StateServiceConfigW303Tests
         Active = active,
         CreatedAt = DateTimeOffset.UnixEpoch,
         UpdatedAt = DateTimeOffset.UnixEpoch,
-    };
-
-    private static FlaggedRequest NewFlag(string id, string userId) => new()
-    {
-        Id = id,
-        RequestId = "r-" + id,
-        UserId = userId,
-        Description = "flagged text",
-        Matches = Array.Empty<ProhibitedItemMatch>(),
-        Status = FlaggedRequestStatus.Pending,
-        CreatedAt = DateTimeOffset.UnixEpoch,
     };
 
     private sealed class StaticOptionsMonitor<T> : IOptionsMonitor<T>
@@ -436,83 +313,6 @@ public class StateServiceConfigW303Tests
 
         public Task<WorkItemRecordV1> ConsumeWorkItemAsync(
             Guid workItemId, WorkConsumeRequestV1 body, CancellationToken ct) =>
-            throw new NotSupportedException();
-    }
-
-
-    // Stands in for the state-service case engine the import now replays onto. Create is keyed on
-    // the replayed content, exactly like the real store's digest key, so a re-run no-ops.
-    private sealed class RecordingUpstreamFlaggedStore : IUpstreamFlaggedRequestStore
-    {
-        private readonly List<FlaggedRequest> _rows = new();
-
-        public List<FlaggedRequestCreate> Created { get; } = new();
-
-        public List<(string Id, FlaggedRequestStatus Status)> Decisions { get; } = new();
-
-        public Task<FlaggedRequest> CreateAsync(FlaggedRequestCreate input, CancellationToken ct)
-        {
-            var existing = _rows.FirstOrDefault(r =>
-                r.UserId == input.UserId && r.RequestId == input.RequestId
-                && r.Description == input.Description);
-            if (existing is not null) return Task.FromResult(existing);
-
-            Created.Add(input);
-            var row = new FlaggedRequest
-            {
-                Id = "case-" + (_rows.Count + 1),
-                RequestId = input.RequestId,
-                UserId = input.UserId,
-                Description = input.Description,
-                Matches = input.Matches,
-                Status = FlaggedRequestStatus.Pending,
-                CreatedAt = DateTimeOffset.UnixEpoch,
-            };
-            _rows.Add(row);
-            return Task.FromResult(row);
-        }
-
-        public Task<FlaggedRequest?> GetAsync(string id, CancellationToken ct) =>
-            Task.FromResult(_rows.FirstOrDefault(r => r.Id == id));
-
-        public Task<FlaggedRequestPage> ListAsync(
-            FlaggedRequestStatus? status, int page, int pageSize, CancellationToken ct) =>
-            Task.FromResult(new FlaggedRequestPage
-            {
-                Items = _rows.Skip((page - 1) * pageSize).Take(pageSize).ToList(),
-                Total = _rows.Count,
-            });
-
-        public Task<FlaggedRequest?> DecideAsync(
-            string id, FlaggedRequestStatus status, string adminUserId, string? note, CancellationToken ct)
-        {
-            Decisions.Add((id, status));
-            return Task.FromResult(_rows.FirstOrDefault(r => r.Id == id));
-        }
-    }
-
-    private sealed class FakeFlaggedRequestStore : ILocalFlaggedRequestStore
-    {
-        private readonly List<FlaggedRequest> _rows;
-
-        public FakeFlaggedRequestStore(params FlaggedRequest[] rows) => _rows = rows.ToList();
-
-        public Task<FlaggedRequestPage> ListAsync(
-            FlaggedRequestStatus? status, int page, int pageSize, CancellationToken ct) =>
-            Task.FromResult(new FlaggedRequestPage
-            {
-                Items = _rows.Skip((page - 1) * pageSize).Take(pageSize).ToList(),
-                Total = _rows.Count,
-            });
-
-        public Task<FlaggedRequest> CreateAsync(FlaggedRequestCreate input, CancellationToken ct) =>
-            throw new NotSupportedException();
-
-        public Task<FlaggedRequest?> GetAsync(string id, CancellationToken ct) =>
-            throw new NotSupportedException();
-
-        public Task<FlaggedRequest?> DecideAsync(
-            string id, FlaggedRequestStatus status, string adminUserId, string? note, CancellationToken ct) =>
             throw new NotSupportedException();
     }
 }

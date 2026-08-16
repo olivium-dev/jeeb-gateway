@@ -13,11 +13,10 @@ namespace JeebGateway.ProhibitedItems;
 /// gwdbx W3-03 — freeze-import-flip read seam for the lexicon AND its ack ledger, behind
 /// <c>FeatureFlags:ProhibitedItemsMode</c>.
 ///
-/// <para><b>No catalog dual-write.</b> The upstream copy is produced by the one-shot
-/// <see cref="JeebGateway.StateService.Config.StateServiceConfigImporter"/>; two independently
-/// writable catalogs with no reconciler diverge silently. From the read rung up the catalog is
-/// therefore UPSTREAM-OWNED and local authoring FAILS CLOSED rather than writing rows the gate
-/// will never read.</para>
+/// <para><b>No catalog dual-write.</b> The upstream copy was produced once by the W3-07
+/// freeze-import (retired at ADR-0010); two independently writable catalogs with no reconciler
+/// diverge silently. From the read rung up the catalog is therefore UPSTREAM-OWNED and local
+/// authoring FAILS CLOSED rather than writing rows the gate will never read.</para>
 ///
 /// <para><b>Reads.</b> At "local" the upstream is never called. From
 /// <c>dual-write-upstream-read</c> up the published config surface serves the active catalog, the
@@ -258,6 +257,15 @@ public sealed class StateServiceProhibitedItemsStore : IProhibitedItemsStore
             throw new OwnerCapabilityUnavailableException(
                 "jeeb-state-service published moderation lexicon");
         }
+
+        // ADR-0010: any successful published read warms the create-time gate's cache, so an admin
+        // opening the catalog no longer leaves ListActiveAsync cold across a later blip.
+        var active = ProhibitedItemsEnvelope.ReadActive(published.Value);
+        if (active.Count > 0)
+        {
+            _lastKnownGood = active;
+        }
+
         return ProhibitedItemsEnvelope.ReadAll(published.Value);
     }
 

@@ -2020,8 +2020,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ScheduledDeliveryA
 // admin edits and per-user acknowledgements survive a restart; in-memory fallback otherwise.
 builder.Services.AddSingleton<InMemoryProhibitedItemsStore>();
 
-// The LOCAL catalog root, reachable past the decorator below. The freeze-import and the parity
-// check resolve this, never the serving interface, which IS upstream once the rung is live.
+// The LOCAL catalog root, reachable past the decorator below. A local-vs-upstream tool resolves
+// this, never the serving interface, which IS upstream once the rung is live.
 builder.Services.AddSingleton<JeebGateway.ProhibitedItems.ILocalProhibitedItemsStore>(
     sp => sp.GetRequiredService<InMemoryProhibitedItemsStore>());
 
@@ -2124,12 +2124,9 @@ builder.Services.AddSingleton<IAdminAuditLog>(sp =>
         sp.GetRequiredService<ILogger<JeebGateway.Admin.MirroringAdminAuditLog>>());
 });
 
-// gwdbx W3-07 prep — one-shot config freeze-import + read-only parity check. Ships INERT
-// (Enabled=false; armed it dry-runs = parity only). Unwired state-service fails soft in-worker.
-builder.Services.Configure<JeebGateway.StateService.Config.ConfigImportRunOptions>(
-    builder.Configuration.GetSection(JeebGateway.StateService.Config.ConfigImportRunOptions.SectionName));
-builder.Services.AddTransient<JeebGateway.StateService.Config.ConfigParityChecker>();
-builder.Services.AddHostedService<JeebGateway.StateService.Config.ConfigImportWorker>();
+// gwdbx (ADR-0010) — the W3-07 freeze-import worker, importer and parity checker are RETIRED.
+// Their source stores are process memory that local authoring can no longer refill, so both could
+// only ever replay zero rows. Hosted-service ratchet 19 -> 18.
 
 // Disputes and support are stateless gateway projections over the generic
 // jeeb-state-service /v1/cases engine. Evidence is gathered synchronously with
@@ -2840,7 +2837,6 @@ if (stateServiceWired)
     // CmsConfigMode is pinned "local" (ADR-0008) and no longer rides this rail.
     builder.Services.AddTransient<IStateConfigClient>(services =>
         (IStateConfigClient)services.GetRequiredService<IJeebStateServiceClient>());
-    builder.Services.AddTransient<JeebGateway.StateService.Config.StateServiceConfigImporter>();
 
     // R1 — idempotency (full 1:1; GET-by-key ⇒ bounce-survivable).
     builder.Services.AddSingleton<JeebGateway.StateService.Idempotency.IIdempotencyStore,

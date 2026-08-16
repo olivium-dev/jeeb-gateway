@@ -15,7 +15,8 @@ live), and delivery-service is the system of record for requests, which the gate
 HTTP (`FeatureFlags:RequestsOwnerListMode=upstream-authority`, live 2026-08-16). The gateway owns no table.
 
 What is NOT finished, so nobody reads this stamp as "done": `Program.cs` and
-`Extensions/BffServiceCollectionExtensions.cs` register **19** hosted services against the
+`Extensions/BffServiceCollectionExtensions.cs` register **18** hosted services (19 before
+ADR-0010 retired `ConfigImportWorker`) against the
 `check-stateless-gateway.sh` allowance of **2**, and 37 local-store singletons remain — the gateway is not
 yet stateless. `jeeb_gateway` the database is **never being dropped** (owner directive 2026-08-16); it is
 retained with roughly 64 orphaned rows by decision.
@@ -32,7 +33,8 @@ and this document is their only definition in the repo:
 - **G-21 backfill standard** — §2 items 1–3 below, verbatim and unchanged: an idempotent HTTP
   ingest/import endpoint in the OWNING service; **no cross-service DSN reads, ever**; dryRun-capable and
   re-runnable so a double run is a no-op. Cited from `src/JeebGateway/Requests/UpstreamRequestsStore.cs`,
-  `src/JeebGateway/StateService/Config/StateServiceConfigImporter.cs`,
+  `src/JeebGateway/StateService/Config/StateServiceConfigImporter.cs` (deleted at ADR-0010 — the
+  shape rule outlives the file),
   `tests/JeebGateway.IntegrationTests/ProhibitedItems/StateServiceConfigW303Tests.cs` and
   `scripts/gwdbx/*.sh`. Item 4 (who runs it) is history; the shape rules are not.
 - **The never-do list** — §1 in full: never re-add `UseUpstream:Payments` (G-05), never revert PR #385
@@ -69,9 +71,15 @@ and this document is their only definition in the repo:
 - **Never re-add the CMS -> state-service config leg.** ADR-0008 (2026-08-16) ruled it SUPERSEDED:
   bundler-service owns every surface/draft/publication row, the gateway owns none, and the leg's
   dependency (`192.168.2.20`) and source rows are both permanently gone. `FeatureFlags:CmsConfigMode` is
-  PINNED to `local` at boot, and neither `StateServiceConfigImporter` nor `ConfigParityChecker` may grow
-  a CMS leg again — replaying bundler documents into state-service forks the catalog into two writable
-  owners with no reconciler.
+  PINNED to `local` at boot. ADR-0010 then DELETED `StateServiceConfigImporter` and
+  `ConfigParityChecker` outright, so the leg cannot regrow — replaying bundler documents into
+  state-service forks the catalog into two writable owners with no reconciler.
+
+- **Never seed a moderation floor to dodge a cold-start 503.** ADR-0010: the create-time lexicon
+  gate fails CLOSED when state-service is unreachable before the first successful read and the
+  last-known-good cache is still empty. Seeding hardcoded terms makes the gate enforce a silent
+  subset of the published lexicon — this programme already recorded exactly that (4 terms against a
+  published 15) as a LIVE REGRESSION. Explicit unavailability beats silent partial enforcement.
 
 - **Never let a W3 mode key reach a read rung without a read path.** ADR-0009 (2026-08-16): every
   mode key is in exactly one of three states, and each is enforced in code — REAL (the serving

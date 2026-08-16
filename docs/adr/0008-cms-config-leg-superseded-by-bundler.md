@@ -59,8 +59,8 @@ domain was extracted before the ladder was written, by the bundler route.
 - **`ConfigImportWorker` becomes retirable.** It was spared the hosted-service purge SOLELY because it
   armed this leg. With the CMS leg void, the lexicon leg imported and flipped, and parity structurally
   unable to report clean (the local stores are empty by design post-flip), nothing is left that only this
-  worker can do. Retiring it takes the hosted-service ratchet **19 -> 18**. **NOT done in this PR** — it
-  is an owner-gated deletion, and the worker ships disarmed (`ConfigImportRun__Enabled=false`) meanwhile.
+  worker can do. Retiring it takes the hosted-service ratchet **19 -> 18**. ~~NOT done in this PR~~ —
+  **DONE at ADR-0010**, which deleted the worker, the importer and the parity checker together.
 
 ## What this ADR does NOT say
 
@@ -73,7 +73,9 @@ ruling and are NOT fixed here (config edits are out of scope for this PR):
   `/health/ready` reports `"bundler-service":"Healthy"` while bundler is down. Verified 2026-08-16.
 - Consequently the CMS routes read a dead upstream that looks alive. `BUNDLER_CMS_NAMESPACE` is **not** a
   defect: it is committed as `jeeb.cms` in `appsettings.json` and `appsettings.Production.json`, so the
-  adapter constructs fine even though the env file does not set it.
+  adapter constructs fine even though the env file does not set it. Re-verified 2026-08-16 against the
+  DEPLOYED `/home/ec2-user/iter5-native/publish/gateway/appsettings*.json`: both carry `jeeb.cms`.
+  The base-URL half is half-fixed at ADR-0010 — the probe can now fail, but the env-file line still wins.
 
 ## Guardrails checked
 

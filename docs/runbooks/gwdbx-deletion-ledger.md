@@ -136,7 +136,8 @@ step-6 release; `forbidden` rows (incl. `UseUpstream:Payments`, G-05) stay forev
 | `AutoOfflineSweeper` | **RETAINED** (business logic); its Postgres store leg dies at W5-11, upstream mirror becomes the only leg |
 | GDPR export/deletion sweeps (`Users:DataExport:*`) | claim-worker (#417) takes dispatch when armed (OWNER-ACTIONS A3); legacy sweep deleted **W5-11** |
 | `StateWorkItemClaimWorker` (#417), fan-out drain, `CourierPositionQueue` | **RETAINED** (named transients / new mechanism, hold no authoritative state) |
-| `ConfigImportWorker` (W3-07 one-shot, ships disarmed) | **RETIRABLE** from ADR-0008 — it was spared the hosted-service purge solely because it armed the CMS leg; that leg is void, the lexicon leg is imported + flipped. Deleting it is owner-gated and moves the hosted-service ratchet **19 -> 18**; until then it stays disarmed |
+| `ConfigImportWorker` + `StateServiceConfigImporter` + `ConfigParityChecker` (W3-07 one-shot) | **DELETED (ADR-0010, round 2).** Their source stores are `InMemoryProhibitedItemsStore` / `InMemoryFlaggedRequestStore` — process memory that local authoring can no longer refill at `upstream-authority` — so the importer could only replay ZERO rows and parity could only compare 0 against 15. Hosted-service ratchet **19 -> 18**. `ConfigImportRun__Enabled=false` in the live drop-in becomes an unbound key; **do not delete `configimport.conf`**, it also carries the load-bearing `BUNDLER_CMS_BEARER_TOKEN_FILE`. `ILocalFlaggedRequestStore` is left vestigial and dies at W5-14 |
+| bundler-service URL-group health probe | **REPLACED (ADR-0010)** by `BundlerServiceHealthCheck`: same named `HttpClient` as the data calls, bundler's own `health/ready`, non-empty body required, registered `Degraded` not `Unhealthy`. The old probe read a Host-unmatched proxy's empty 200 as `Healthy` in 2.38 ms |
 
 ## 6. Guard entries (StoreDurabilityGuard / `scripts/guard-roster.txt`) — CLOSED
 

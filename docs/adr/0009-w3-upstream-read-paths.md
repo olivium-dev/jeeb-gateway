@@ -62,6 +62,7 @@ Two corollaries, both applied here:
   admin ops-map and `AutoOfflineSweeper` both need. That is a missing delivery-service capability,
   not gateway wiring, so the rung is refused at boot until delivery-service ships it.
 - **Backfills are still owed** for OTP-escalations and account-deletion. `StateServiceConfigImporter`
-  covers lexicon, acks and flagged only; there is no replay job for the other two. Per G-21 each must
+  covered lexicon, acks and flagged only and was deleted at ADR-0010 (its local source stores are
+  process memory that authoring can no longer refill); there is no replay job for the other two. Per G-21 each must
   be a gateway-resident replay job POSTing to the owning service, never a cross-service DSN read —
   and each is a prerequisite for its leg's flip, not for this ADR.
