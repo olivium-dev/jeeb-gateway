@@ -120,10 +120,8 @@ public class WebApplicationFactory<TEntryPoint>
         ReplaceSingleton<IAdminAuditLog, InMemoryAdminAuditLog>(services);
         ReplaceSingleton<IFlaggedRequestStore, InMemoryFlaggedRequestStore>(services);
 
-        // gwdbx W2-R11: the local settlement store, ledger client, enqueue store and batch
-        // store are all deleted; settlement-service owns them behind ISettlementServiceClient.
-        ReplaceSingleton<JeebGateway.Financials.Cod.ICodSettlementLedger,
-            TestCodSettlementLedger>(services);
+        // gwdbx W2-R11: the local settlement store, ledger client, enqueue store, batch store
+        // and COD ledger are all deleted; settlement-service owns them behind ISettlementServiceClient.
         ReplaceSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>(services);
         ReplaceSingleton<IFinancialLedgerAnonymizer,
             InMemoryFinancialLedger>(services);
