@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 namespace JeebGateway.Cms;
@@ -18,9 +19,37 @@ public sealed class BundlerServiceHealthCheck : IHealthCheck
     private static readonly TimeSpan Budget = TimeSpan.FromSeconds(3);
 
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IConfiguration? _configuration;
 
-    public BundlerServiceHealthCheck(IHttpClientFactory httpClientFactory) =>
+    public BundlerServiceHealthCheck(
+        IHttpClientFactory httpClientFactory, IConfiguration? configuration = null)
+    {
         _httpClientFactory = httpClientFactory;
+        _configuration = configuration;
+    }
+
+    /// <summary>
+    /// Names the configuration provider whose value actually won for <paramref name="key"/>.
+    /// Later providers override earlier ones, so the LAST match is the effective one.
+    /// </summary>
+    internal static string DescribeSource(IConfiguration? configuration, string key)
+    {
+        if (configuration is not IConfigurationRoot root)
+        {
+            return "unknown";
+        }
+
+        string? winner = null;
+        foreach (var provider in root.Providers)
+        {
+            if (provider.TryGet(key, out _))
+            {
+                winner = provider.GetType().Name;
+            }
+        }
+
+        return winner ?? "unset";
+    }
 
     public async Task<HealthCheckResult> CheckHealthAsync(
         HealthCheckContext context, CancellationToken ct = default)
@@ -42,7 +71,16 @@ public sealed class BundlerServiceHealthCheck : IHealthCheck
         var probed = client.BaseAddress is null
             ? ReadyPath
             : new Uri(client.BaseAddress, ReadyPath).ToString();
-        var data = new Dictionary<string, object> { ["probedUrl"] = probed };
+        // Two config layers can set this key and the loser is invisible from outside.
+        var source = DescribeSource(
+            _configuration, BundlerCmsSurfaceStore.BaseUrlConfigurationKey);
+        var origin = $"{probed} (from {BundlerCmsSurfaceStore.BaseUrlConfigurationKey}"
+                     + $" via {source})";
+        var data = new Dictionary<string, object>
+        {
+            ["probedUrl"] = probed,
+            ["baseUrlSource"] = source,
+        };
 
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         budget.CancelAfter(Budget);
@@ -58,7 +96,7 @@ public sealed class BundlerServiceHealthCheck : IHealthCheck
             {
                 return new HealthCheckResult(
                     failure,
-                    $"bundler-service answered {(int)response.StatusCode} at {probed}",
+                    $"bundler-service answered {(int)response.StatusCode} at {origin}",
                     data: data);
             }
 
@@ -66,12 +104,12 @@ public sealed class BundlerServiceHealthCheck : IHealthCheck
             {
                 return new HealthCheckResult(
                     failure,
-                    $"bundler-service answered 200 with an EMPTY body at {probed}: no bundler site "
+                    $"bundler-service answered 200 with an EMPTY body at {origin}: no bundler site "
                     + "block matched this host, so the CMS routes reach a proxy default",
                     data: data);
             }
 
-            return HealthCheckResult.Healthy($"bundler-service is ready at {probed}", data);
+            return HealthCheckResult.Healthy($"bundler-service is ready at {origin}", data);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -80,7 +118,7 @@ public sealed class BundlerServiceHealthCheck : IHealthCheck
         catch (Exception ex)
         {
             return new HealthCheckResult(
-                failure, $"bundler-service is unreachable at {probed}", ex, data);
+                failure, $"bundler-service is unreachable at {origin}", ex, data);
         }
     }
 }
