@@ -439,6 +439,11 @@ public class RequestsController : ControllerBase
             });
         }
 
+        // O1: this legacy route bypasses CancellationService entirely, so the retained accept-time
+        // fee would otherwise be invisible on exactly the path with the fewest guards.
+        JeebGateway.Financials.CommissionRetention.Observe(
+            _logger, requestId, existing.JeeberId, existing.AcceptedFee, "legacy-delete");
+
         return NoContent();
     }
 

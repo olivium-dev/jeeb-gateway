@@ -16,14 +16,37 @@ namespace JeebGateway.Financials;
 /// is null for a transport/timeout fault, which the collector must treat as AMBIGUOUS.</summary>
 public sealed class WalletCommissionDebitException : Exception
 {
-    public WalletCommissionDebitException(string message, HttpStatusCode? statusCode, Exception? inner = null)
-        : base(message, inner) => StatusCode = statusCode;
+    /// <summary>wallet-service's own ProblemDetails type for a refused debit.</summary>
+    public const string InsufficientBalanceType = "https://wallet.olivium.dev/errors/insufficient-balance";
+
+    /// <summary>wallet-service's own ProblemDetails type for the same key with a different body.</summary>
+    public const string IdempotencyConflictType = "https://wallet.olivium.dev/errors/idempotency-conflict";
+
+    public WalletCommissionDebitException(
+        string message, HttpStatusCode? statusCode, string? problemType = null, Exception? inner = null)
+        : base(message, inner)
+    {
+        StatusCode = statusCode;
+        ProblemType = problemType;
+    }
 
     public HttpStatusCode? StatusCode { get; }
+
+    /// <summary>The upstream ProblemDetails `type`, when the body carried one.</summary>
+    public string? ProblemType { get; }
 
     /// <summary>A deterministic upstream rejection: the money did NOT move on this call.</summary>
     public bool IsDeterministicRejection =>
         StatusCode is { } s && (int)s >= 400 && (int)s < 500;
+
+    /// <summary>Read off wallet-service's own problem type, not guessed from the status code —
+    /// 409 is also how an idempotency conflict and other refusals surface.</summary>
+    public bool IsInsufficientBalance =>
+        string.Equals(ProblemType, InsufficientBalanceType, StringComparison.Ordinal);
+
+    /// <summary>Same key, different body: a real accounting divergence, never a retryable blip.</summary>
+    public bool IsIdempotencyConflict =>
+        string.Equals(ProblemType, IdempotencyConflictType, StringComparison.Ordinal);
 }
 
 /// <summary>
@@ -43,7 +66,11 @@ public interface IWalletCommissionDebitClient
     /// <summary>POST Transaction/initiate. Writes a Pending header; moves no money.</summary>
     Task<Guid> InitiateAsync(
         Guid sourceWalletId, Guid destinationWalletId, decimal amount,
-        string tag, string notes, string idempotencyKey, CancellationToken ct);
+        string tag, string notes, string idempotencyKey, string externalReference, CancellationToken ct);
+
+    /// <summary>GET Transaction/by-external-reference/{ref} — a pure READ that links a settlement row
+    /// back to the accept-time debit. Null when no debit carries the reference.</summary>
+    Task<Guid?> FindByExternalReferenceAsync(string externalReference, CancellationToken ct);
 
     /// <summary>POST Transaction/{id}/execute. Idempotent upstream on the transaction id.</summary>
     Task ExecuteAsync(Guid transactionId, CancellationToken ct);
@@ -82,12 +109,13 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
 
     public async Task<Guid> InitiateAsync(
         Guid sourceWalletId, Guid destinationWalletId, decimal amount,
-        string tag, string notes, string idempotencyKey, CancellationToken ct)
+        string tag, string notes, string idempotencyKey, string externalReference, CancellationToken ct)
     {
         var body = new InitiateWire(
             ServiceName: "jeeb-gateway",
             Tag: tag,
             Notes: notes,
+            ExternalReference: externalReference,
             // The caller supplies the complete accounting entry; wallet-service must not append
             // its own configured fee leg on top of a fee.
             ApplyConfiguredFees: false,
@@ -111,6 +139,14 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
         }
 
         return txId;
+    }
+
+    public async Task<Guid?> FindByExternalReferenceAsync(string externalReference, CancellationToken ct)
+    {
+        var found = await GetAsync<List<TransactionWire>>(
+            $"Transaction/by-external-reference/{Uri.EscapeDataString(externalReference)}", ct);
+        var txId = found?.FirstOrDefault()?.TransactionHeader?.TxId;
+        return txId is null || txId == Guid.Empty ? null : txId;
     }
 
     public async Task ExecuteAsync(Guid transactionId, CancellationToken ct)
@@ -170,7 +206,7 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
         {
             // No status code => ambiguous. The collector must never abort on this.
             throw new WalletCommissionDebitException(
-                $"wallet-service transport fault while trying to {operation}.", null, ex);
+                $"wallet-service transport fault while trying to {operation}.", null, null, ex);
         }
     }
 
@@ -181,7 +217,22 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
         var body = await response.Content.ReadAsStringAsync(ct);
         throw new WalletCommissionDebitException(
             $"wallet-service could not {operation} (HTTP {(int)response.StatusCode}): {Truncate(body)}",
-            response.StatusCode);
+            response.StatusCode, ReadProblemType(body));
+    }
+
+    /// <summary>wallet-service answers refusals with ProblemDetails; the `type` is the only
+    /// non-guessing way to tell insufficient balance from an idempotency conflict (both are 409).</summary>
+    private static string? ReadProblemType(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            return doc.RootElement.TryGetProperty("type", out var type) ? type.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static async Task<T?> ReadAsync<T>(
@@ -195,7 +246,7 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
         {
             throw new WalletCommissionDebitException(
                 $"wallet-service returned an unreadable body while trying to {operation}.",
-                response.StatusCode, ex);
+                response.StatusCode, null, ex);
         }
     }
 
@@ -207,6 +258,7 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
         string ServiceName,
         string Tag,
         string Notes,
+        string ExternalReference,
         bool ApplyConfiguredFees,
         IReadOnlyList<LegWire> Transactions);
 

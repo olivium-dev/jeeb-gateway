@@ -208,12 +208,15 @@ public class SettlementDurabilityOnCompleteTests
         => new(settlements, requests, delivery, new EarningsCacheInvalidator(),
             new NoOpCommissionCollector(), NullLogger<SettlementService>.Instance);
 
-    /// <summary>Durability is about the settle, not the fee debit — O1 collection is a no-op here.</summary>
+    /// <summary>Durability is about the settle, not the fee — O1 collection is a no-op here.</summary>
     private sealed class NoOpCommissionCollector : ICommissionCollector
     {
-        public Task<CommissionCollectionResult> CollectAsync(Settlement settlement, CancellationToken ct)
+        public Task<CommissionCollectionResult> CollectOnAcceptAsync(
+            CommissionCollectionCommand command, CancellationToken ct)
             => Task.FromResult(new CommissionCollectionResult(
-                CommissionCollectionOutcome.Disabled, settlement.Total, Guid.Empty));
+                CommissionCollectionOutcome.Disabled, command.AcceptedFee, Guid.Empty));
+
+        public Task LinkSettlementAsync(Settlement settlement, CancellationToken ct) => Task.CompletedTask;
     }
 
     private static StubDeliveryClient Canonical(string deliveryId, string clientId, string jeeberId)
