@@ -182,14 +182,17 @@ public sealed class DurableRequestsStore : IRequestsStore
         // only — the provisioner composes the chat-service typed client and owns
         // no conversation state. SECONDARY side-effect of create: the provisioner
         // degrades to null on a chat blip (or when the flag is OFF) so a chat
-        // outage never fails the order create. Stamping a mutable property on the
-        // row reference already held in the inner store needs no re-insert and
-        // does not affect the BR-9 cap (the row is already counted).
+        // outage never fails the order create. The stamp goes through the store
+        // (StampInnerAsync) and does not affect the BR-9 cap (the row is already counted).
         var conversationId = await _conversations.CreateBroadcastingConversationAsync(
             created.Id, created.ClientId, ct);
         if (!string.IsNullOrWhiteSpace(conversationId))
         {
             created.ConversationId = conversationId;
+
+            // D9: the assignment above only mutates the returned row, which a stateless
+            // inner store discards. StampInnerAsync is what actually persists it.
+            await StampInnerAsync(created.Id, conversationId!, ct);
 
             // (b.1) JEB-50 (S05 H9b): the order has entered the broadcasting
             // phase (a broadcasting-tagged conversation now exists in chat). Per
@@ -512,6 +515,8 @@ public sealed class DurableRequestsStore : IRequestsStore
             local.ConversationId = conversationId;
         }
 
+        await StampInnerAsync(requestId, conversationId, ct);
+
         if (_mirror is null) return;
         try
         {
@@ -528,6 +533,29 @@ public sealed class DurableRequestsStore : IRequestsStore
             _logger.LogWarning(ex,
                 "requests-durable: conversation-id mirror write failed for {RequestId}; " +
                 "chat push for conversation {ConversationId} will stop working after a bounce.",
+                requestId, conversationId);
+        }
+    }
+
+    // D9: a stateless inner store discards the in-place stamp and the mirror is unregistered,
+    // so this is the only durable home left. Best-effort — the saga already committed.
+    private async Task StampInnerAsync(string requestId, string conversationId, CancellationToken ct)
+    {
+        try
+        {
+            await _inner.SetConversationIdAsync(requestId, conversationId, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            BusinessOutcomeTelemetry.DurableWriteFailures.Add(1,
+                new KeyValuePair<string, object?>("store", "inner-requests-conversation-id"));
+            _logger.LogWarning(ex,
+                "requests-durable: inner-store conversation stamp failed for {RequestId}; " +
+                "chat push for conversation {ConversationId} cannot resolve its recipients.",
                 requestId, conversationId);
         }
     }
