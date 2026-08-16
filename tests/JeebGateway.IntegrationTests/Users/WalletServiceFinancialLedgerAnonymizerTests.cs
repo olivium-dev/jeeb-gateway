@@ -69,6 +69,9 @@ public sealed class WalletServiceFinancialLedgerAnonymizerTests
             {
                 builder.UseEnvironment("Testing");
                 builder.UseSetting("DELIVERY_SERVICE_TOKEN", new string('t', 48));
+                // O4: the deployed overlay sets this true; base appsettings.json pins it false, so
+                // without it the Testing host composes the local store and the claim is untested.
+                builder.UseSetting("FeatureFlags:UseUpstream:RemoteUserPreferences", "true");
             });
 
         using var scope = factory.Services.CreateScope();

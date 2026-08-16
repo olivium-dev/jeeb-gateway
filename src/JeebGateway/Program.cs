@@ -2172,8 +2172,10 @@ builder.Services.AddSingleton<IDualRoleService, DualRoleService>();
 // Financial-ledger anonymization bookkeeping (GDPR account-deletion seam).
 // Durability register (JEBV4-154, AUDIT-A IN-MEM-LIVE) — PostgresFinancialLedger died with W5-11 and the
 // binding below is UNCONDITIONAL, so the GDPR record of which rows were pseudonymized is lost on a bounce.
-builder.Services.AddSingleton<InMemoryFinancialLedger>();
-builder.Services.AddSingleton<IFinancialLedgerAnonymizer>(sp => sp.GetRequiredService<InMemoryFinancialLedger>());
+// O4/OA-32 — WalletServiceFinancialLedgerAnonymizer shipped unregistered, so the GDPR
+// erasure step wrote to process memory instead of closing the wallet-service holder.
+builder.Services.AddSingleton<IFinancialLedgerAnonymizer,
+    WalletServiceFinancialLedgerAnonymizer>();
 builder.Services.AddSingleton<InMemoryAccountDeletionStore>();
 // Durability register #15 — account-deletion (GDPR 30-day purge SLA) is CLOSED: the erasure and its
 // deadline are state-service work items (IAccountDeletionWorkflow). This chain is now unreachable.
@@ -2727,6 +2729,19 @@ builder.Services
         + "delivery-service exposes no online-list and no known-since-list endpoint, so the read rung "
         + "would break the admin ops-map and the auto-offline sweeper. Valid rungs today: \"local\", "
         + "\"dual-write-local-read\".")
+    // O4/OA-32 — at the default rung a prod-like env with state-service unwired registers NEITHER
+    // refresh store, so the boot survived and every refresh faulted behind a green readiness check.
+    .Validate(
+        _ => stateServiceWired
+             || builder.Environment.IsDevelopment()
+             || string.Equals(
+                 builder.Environment.EnvironmentName, "Testing", StringComparison.OrdinalIgnoreCase),
+        "No IRefreshTokenStore can be registered: jeeb-state-service is not wired ("
+        + JeebGateway.StateService.StateServiceOptionsFactory.EnabledKey + " / "
+        + JeebGateway.StateService.StateServiceOptionsFactory.BaseUrlKey
+        + ") and the process-memory fallback is Development/Testing-only. Refusing to start rather "
+        + "than booting a gateway whose refresh, rotation and revocation paths all fault at runtime "
+        + "behind a green readiness check.")
     // ADR-0008 — CmsConfig needs no upstream guard here: it is pinned to "local", so it can never
     // reach a rung that would make state-service the CMS read authority.
     .ValidateOnStart();
@@ -2823,6 +2838,11 @@ builder.Services.Configure<JeebGateway.Jobs.AccountDeletionExecutionOptions>(
     builder.Configuration.GetSection(JeebGateway.Jobs.AccountDeletionExecutionOptions.SectionName));
 builder.Services.Configure<JeebGateway.Jobs.DurableWorkSweepOptions>(
     builder.Configuration.GetSection(JeebGateway.Jobs.DurableWorkSweepOptions.SectionName));
+// O4/OA-32 — InternalDurableJobsController carries [ServiceFilter(InternalJobTokenAuthorizationFilter)]
+// but neither the filter nor its options were registered, so BOTH sweep routes answered 500.
+builder.Services.Configure<JeebGateway.Jobs.InternalJobAuthOptions>(
+    builder.Configuration.GetSection(JeebGateway.Jobs.InternalJobAuthOptions.SectionName));
+builder.Services.AddScoped<JeebGateway.Jobs.InternalJobTokenAuthorizationFilter>();
 builder.Services.AddSingleton(new JeebGateway.Artifacts.PrivateArtifactStoreOptions());
 
 if (stateServiceWired)

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
@@ -117,6 +118,7 @@ public class RequestNotOpen409FidelityTests
                     services.AddSingleton<IOfferServiceClient>(fake);
                     // D2: presence with coordinates, so the range guard is not the subject here.
                     Fakes.InRangeGeoFixture.UseInRangePresence(services);
+                    UseRealUpstreamOfferStore(services);
                 });
             });
 
@@ -177,6 +179,7 @@ public class RequestNotOpen409FidelityTests
                     services.AddSingleton<IOfferServiceClient>(fake);
                     // D2: presence with coordinates, so the range guard is not the subject here.
                     Fakes.InRangeGeoFixture.UseInRangePresence(services);
+                    UseRealUpstreamOfferStore(services);
                 });
             });
 
@@ -237,6 +240,7 @@ public class RequestNotOpen409FidelityTests
                     services.AddSingleton<IOfferServiceClient>(fake);
                     // D2: presence with coordinates, so the range guard is not the subject here.
                     Fakes.InRangeGeoFixture.UseInRangePresence(services);
+                    UseRealUpstreamOfferStore(services);
                 });
             });
 
@@ -286,6 +290,18 @@ public class RequestNotOpen409FidelityTests
     // -----------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------
+
+    // O4: the shadowing WebApplicationFactory<T> (TestWebApplicationFactory.cs) swaps in
+    // FakePendingOffersStore, which never calls IOfferServiceClient — these cases got 201, not 409.
+    private static void UseRealUpstreamOfferStore(IServiceCollection services)
+    {
+        services.RemoveAll<IPendingOffersStore>();
+        services.AddSingleton<IPendingOffersStore>(sp => new UpstreamPendingOffersStore(
+            sp.GetRequiredService<IOfferServiceClient>(),
+            sp.GetRequiredService<Microsoft.AspNetCore.Http.IHttpContextAccessor>(),
+            sp.GetRequiredService<IOfferRequestIndex>(),
+            sp.GetRequiredService<IRequestsStore>()));
+    }
 
     /// <summary>
     /// Minimal offer-service client whose <see cref="SubmitAsync"/> always throws a

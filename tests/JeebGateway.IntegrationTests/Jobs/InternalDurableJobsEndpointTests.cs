@@ -94,6 +94,9 @@ public sealed class InternalDurableJobsEndpointTests
             builder.UseSetting("InternalJobAuth:HeaderName", "X-Jeeb-Job-Token");
             builder.UseSetting("InternalJobAuth:TokenFile", _tokenFile);
             builder.UseSetting("Security:ApiKey:Enabled", "false");
+            // O4: DurableWorkSweepWorker claims both kinds on start, so "without running a sweep"
+            // could never be measured from the endpoint. Off => the endpoint is the only claimer.
+            builder.UseSetting("DurableWorkSweep:Enabled", "false");
             builder.ConfigureTestServices(services =>
             {
                 services.RemoveAll<IStateWorkItemClient>();

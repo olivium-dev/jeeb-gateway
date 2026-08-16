@@ -213,7 +213,9 @@ public class P6JeeberPatchDoneOtpRequiredTests
     [Fact]
     public void GW5_Frozen_Edge_Count_Is_Unchanged_By_The_New_Reason_Constant()
     {
-        DeliverySm.AllValidTransitions().Should().HaveCount(14);
+        // O4: the frozen table is 20 rows since the additive cancel_requested / tier_ttl_elapsed
+        // edges landed. The subject here is unchanged: the reason constant adds no edge.
+        DeliverySm.AllValidTransitions().Should().HaveCount(20);
         DeliverySm.ReasonOtpRequired.Should().Be("otp_required");
         DeliverySm.ReasonOtpRequired.Should().NotBe(DeliverySm.ReasonTransitionNotAllowed);
         // The reason token is NOT a trigger — it must never leak into the trigger lexicon.

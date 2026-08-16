@@ -115,14 +115,14 @@ public class DeliverySmTests
             .IsValid.Should().BeTrue();
     }
 
-    // ----- AllValidTransitions enumerates exactly 14 in-table rows -----------
-    // (13 canonical edges + the AtDoor escalate_either alias = 14 table rows;
-    //  the entry edge [*]→Ordered lives outside the table.)
+    // ----- AllValidTransitions enumerates exactly 20 in-table rows -----------
+    // O4: was 14; the additive cancel_requested + tier_ttl_elapsed edges took it to 20, which
+    // DeliverySmParityTests.Gateway_Table_Matches_Frozen_ADR002_Edge_Set already pins edge-by-edge.
 
     [Fact]
-    public void AllValidTransitions_Enumerates_The_Fourteen_Table_Rows()
+    public void AllValidTransitions_Enumerates_The_Twenty_Table_Rows()
     {
-        DeliverySm.AllValidTransitions().Should().HaveCount(14);
+        DeliverySm.AllValidTransitions().Should().HaveCount(20);
     }
 
     // ----- Trigger derivation (ADR-002 §3) -----------------------------------
