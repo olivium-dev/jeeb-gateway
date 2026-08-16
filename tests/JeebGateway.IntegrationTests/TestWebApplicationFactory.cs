@@ -120,11 +120,8 @@ public class WebApplicationFactory<TEntryPoint>
         ReplaceSingleton<IAdminAuditLog, InMemoryAdminAuditLog>(services);
         ReplaceSingleton<IFlaggedRequestStore, InMemoryFlaggedRequestStore>(services);
 
-        ReplaceSingleton<ISettlementStore, InMemorySettlementStore>(services);
-        ReplaceSingleton<ISettlementLedgerClient,
-            InMemorySettlementLedgerClient>(services);
-        // W2-R11 deleted ISettlementEnqueueStore and ISettlementBatchStore from the
-        // gateway; the surviving batch surface is IAdminSettlementPortalService.
+        // gwdbx W2-R11: the local settlement store, ledger client, enqueue store and batch
+        // store are all deleted; settlement-service owns them behind ISettlementServiceClient.
         ReplaceSingleton<JeebGateway.Financials.Cod.ICodSettlementLedger,
             TestCodSettlementLedger>(services);
         ReplaceSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>(services);
