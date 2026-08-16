@@ -1400,6 +1400,24 @@ ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient(Jeeb
     client.Timeout = TimeSpan.FromSeconds(30);
 }));
 
+// D8 — fail-safe Jeeber role activation guard, restored after merge 84002ac silently dropped it.
+// Transport retry is withheld on purpose: an ambiguous PUT leaves the role ungranted and the next
+// approval replays the same idempotent ensure. No bearer/service-auth header; the private overlay
+// protects wallet-service.
+ServiceClientExtensions.AttachBreakerAndTimeoutOnly(builder.Services.AddHttpClient(
+    JeebGateway.JeebWallet.WalletServiceJeeberWalletProvisioner.HttpClientName,
+    client =>
+    {
+        var apiUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
+        if (!string.IsNullOrWhiteSpace(apiUrl))
+        {
+            client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
+        }
+        client.Timeout = TimeSpan.FromSeconds(30);
+    }));
+builder.Services.AddScoped<JeebGateway.JeebWallet.IJeeberWalletProvisioner,
+    JeebGateway.JeebWallet.WalletServiceJeeberWalletProvisioner>();
+
 builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -2340,12 +2358,19 @@ builder.Services
 // Flag off (FeatureFlags:UseUpstream:RoleService): byte-identical to the prior direct registration.
 builder.Services.Configure<JeebGateway.Services.Clients.RoleServiceOptions>(
     builder.Configuration.GetSection(JeebGateway.Services.Clients.RoleServiceOptions.SectionName));
+// D8 — the wallet guard wraps the role authority so a `driver` grant cannot land without a wallet.
 builder.Services.AddScoped<JeebGateway.Users.IUserManagementDualRoleClient>(sp =>
-    new JeebGateway.Users.RoleServiceBackedDualRoleClient(
+{
+    var authority = new JeebGateway.Users.RoleServiceBackedDualRoleClient(
         sp.GetRequiredService<JeebGateway.Users.HttpUserManagementDualRoleClient>(),
         sp.GetRequiredService<JeebGateway.Services.Clients.IRoleServiceClient>(),
         sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<JeebGateway.Services.UpstreamFeatureFlags>>(),
-        sp.GetRequiredService<ILogger<JeebGateway.Users.RoleServiceBackedDualRoleClient>>()));
+        sp.GetRequiredService<ILogger<JeebGateway.Users.RoleServiceBackedDualRoleClient>>());
+    return new JeebGateway.Users.WalletProvisioningDualRoleClient(
+        authority,
+        sp.GetRequiredService<JeebGateway.JeebWallet.IJeeberWalletProvisioner>(),
+        sp.GetRequiredService<ILogger<JeebGateway.Users.WalletProvisioningDualRoleClient>>());
+});
 
 // Jeeber availability toggle + auto-offline sweeper (T-backend-023).
 // In-memory implementations stand in for the durable Postgres row, the
