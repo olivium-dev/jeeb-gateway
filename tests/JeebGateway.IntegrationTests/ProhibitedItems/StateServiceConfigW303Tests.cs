@@ -17,7 +17,9 @@ namespace JeebGateway.IntegrationTests.ProhibitedItems;
 
 // gwdbx W3-03 — the prohibited-items read seam on ONE state-service config primitive (G-27).
 // The freeze-import cases left with the importer at ADR-0010; what remains is the ladder default,
-// the "local" rung taking no state-service dependency, and the fail-open contract above it.
+// the "local" rung taking no state-service dependency, the fail-open contract above it, and the
+// ADR-0010 cold-start pair. The StoreDurabilityGuard case is gone: W5-11 (8cba63b) deleted both
+// StoreDurabilityGuard and PostgresProhibitedItemsStore, so it referenced two absent types.
 public class StateServiceConfigW303Tests
 {
     // ----- ladder defaults ----------------------------------------------------
@@ -125,22 +127,39 @@ public class StateServiceConfigW303Tests
                 "the ack version token is derived from UpdatedAt — a lossy round trip un-acks everyone");
     }
 
-    // ----- guard roster (G-08) ------------------------------------------------
+    // ----- cold start (ADR-0010 section 2) ------------------------------------
 
     [Fact]
-    public void Read_Seam_Is_An_Approved_Durable_Implementation_Of_IProhibitedItemsStore()
+    public async Task Admin_Catalog_Read_Warms_The_Create_Time_Gate_Against_A_Later_Blip()
     {
-        var entry = StoreDurabilityGuard.Critical
-            .Single(c => c.Iface == typeof(IProhibitedItemsStore));
-
-        entry.DurableImpls.Should().BeEquivalentTo(new[]
+        var upstream = new RecordingConfigClient
         {
-            typeof(PostgresProhibitedItemsStore),
-            typeof(StateServiceProhibitedItemsStore)
-        }, "G-08 — the seam wraps the durable inner catalog, so both resolutions pass the boot gate");
-        // RE-SEALED 34 -> 30 at W2-R02 (G-08): the four settlement entries left the roster.
-        StoreDurabilityGuard.Critical.Should().HaveCount(30,
-            "W3-03 adds an implementation to an existing entry; the roster COUNT is unchanged");
+            Published = ProhibitedItemsEnvelope.Serialize(new[] { Item("knife", "weapons", true) }),
+        };
+        var store = NewStore(upstream, "upstream-authority", out _);
+
+        await store.ListAllAsync(1, 50, default);
+        upstream.Fail = true;
+        var items = await store.ListActiveAsync(default);
+
+        items.Should().ContainSingle().Which.Name.Should().Be("knife",
+            "ADR-0010 narrows the cold window: any successful published read warms the last-known-good "
+            + "snapshot, so an admin opening the catalog no longer leaves the create-time gate cold");
+    }
+
+    [Fact]
+    public async Task Cold_Start_With_No_Snapshot_Fails_CLOSED_And_Names_State_Service()
+    {
+        var upstream = new ThrowingConfigClient();
+        var store = NewStore(upstream, "upstream-authority", out _);
+
+        var act = async () => await store.ListActiveAsync(default);
+
+        var thrown = await act.Should().ThrowAsync<OwnerCapabilityUnavailableException>(
+            "ADR-0010 accepts this 503 deliberately — a seeded local floor would enforce a silent "
+            + "SUBSET of the published lexicon, which this programme already hit as a live regression");
+        thrown.Which.Capability.Should().Contain("no cached snapshot",
+            "the failure must name the real cause, not read as an empty catalog");
     }
 
     // ----- helpers -----------------------------------------------------------
@@ -207,6 +226,9 @@ public class StateServiceConfigW303Tests
 
         public JsonElement? Published { get; set; }
 
+        // Lets one test warm the cache from a good read and then fail the next one.
+        public bool Fail { get; set; }
+
         public Task<ConfigSurfaceRecordV1> UpsertDraftAsync(
             string surfaceKey, ConfigDraftUpsertRequestV1 body, CancellationToken ct)
         {
@@ -225,6 +247,12 @@ public class StateServiceConfigW303Tests
             string application, string surfaceKey, CancellationToken ct)
         {
             SurfaceReads++;
+            if (Fail)
+            {
+                return Task.FromException<ConfigSurfaceRecordV1?>(
+                    new InvalidOperationException("state-service is down"));
+            }
+
             return Task.FromResult<ConfigSurfaceRecordV1?>(new ConfigSurfaceRecordV1
             {
                 SurfaceKey = surfaceKey,
