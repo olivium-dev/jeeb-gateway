@@ -282,11 +282,8 @@ public sealed class UpstreamFeatureFlags
     /// </summary>
     public bool Compliment { get; set; }
 
-    /// <summary>
-    /// When true, the KYC-approve role grant/read/switch seam routes through the
-    /// dedicated role-service instead of user-management. Default false everywhere.
-    /// </summary>
-    public bool RoleService { get; set; }
+    // RoleService REMOVED 2026-08-16 (owner O8). It was false in every environment and
+    // role-service is retired; user-management is the only role authority. Do NOT re-add.
 
     /// <summary>
     /// gwdbx W1-11 — created here, DEFAULT OFF, and deliberately with NO read site yet

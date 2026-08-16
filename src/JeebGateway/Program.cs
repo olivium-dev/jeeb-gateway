@@ -2361,23 +2361,13 @@ builder.Services
     .AddHttpMessageHandler<JeebGateway.Services.Bff.BearerForwardingHandler>()
     .AddStandardResilienceHandler();
 
-// role-service adapter (net-new, flagged) — single swap point for IUserManagementDualRoleClient.
-// Flag off (FeatureFlags:UseUpstream:RoleService): byte-identical to the prior direct registration.
-builder.Services.Configure<JeebGateway.Services.Clients.RoleServiceOptions>(
-    builder.Configuration.GetSection(JeebGateway.Services.Clients.RoleServiceOptions.SectionName));
-// D8 — the wallet guard wraps the role authority so a `driver` grant cannot land without a wallet.
+// Role authority is user-management, full stop (owner O8, 2026-08-16 — the role-service
+// decorator that used to sit here is retired). D8 wallet guard: no `driver` grant without a wallet.
 builder.Services.AddScoped<JeebGateway.Users.IUserManagementDualRoleClient>(sp =>
-{
-    var authority = new JeebGateway.Users.RoleServiceBackedDualRoleClient(
+    new JeebGateway.Users.WalletProvisioningDualRoleClient(
         sp.GetRequiredService<JeebGateway.Users.HttpUserManagementDualRoleClient>(),
-        sp.GetRequiredService<JeebGateway.Services.Clients.IRoleServiceClient>(),
-        sp.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<JeebGateway.Services.UpstreamFeatureFlags>>(),
-        sp.GetRequiredService<ILogger<JeebGateway.Users.RoleServiceBackedDualRoleClient>>());
-    return new JeebGateway.Users.WalletProvisioningDualRoleClient(
-        authority,
         sp.GetRequiredService<JeebGateway.JeebWallet.IJeeberWalletProvisioner>(),
-        sp.GetRequiredService<ILogger<JeebGateway.Users.WalletProvisioningDualRoleClient>>());
-});
+        sp.GetRequiredService<ILogger<JeebGateway.Users.WalletProvisioningDualRoleClient>>()));
 
 // Jeeber availability toggle + auto-offline sweeper (T-backend-023).
 // In-memory implementations stand in for the durable Postgres row, the

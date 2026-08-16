@@ -28,9 +28,6 @@ public static class GatewayHealthRoster
         // Registered by HealthCheckExtensions as BundlerServiceHealthCheck (not a URL group),
         // still gated on the same BaseUrl key, so name and registration cannot drift.
         (JeebGateway.Cms.BundlerServiceHealthCheck.Name, JeebGateway.Cms.BundlerCmsSurfaceStore.BaseUrlConfigurationKey),
-        // Also a bespoke check (body-requiring), gated on the same BaseUrl key.
-        (JeebGateway.Services.Clients.RoleServiceHealthCheck.Name,
-         JeebGateway.Services.Clients.RoleServiceHealthCheck.BaseUrlConfigurationKey),
     };
 
     /// <summary>Ready-tagged checks registered in <c>Program.cs</c> rather than the extension.</summary>
@@ -50,6 +47,8 @@ public static class GatewayHealthRoster
     /// 18 from W5-11, which deleted the GatewayPostgres seam and with it both the
     /// gateway-postgres probe and the store-durability guard. (The pre-W5-10 figure of 20
     /// undercounted: bundler-service was registered but undeclared.) 19 from the D1 fix,
-    /// which added the role-service probe that outage proved was missing.</summary>
-    public const int ExpectedReadyCount = 19;
+    /// which added a role-service probe; back to 18 on 2026-08-16 when owner decision O8
+    /// retired role-service outright — that probe was the aggregate's only Degraded entry,
+    /// verified against a real /health/ready read before and after.</summary>
+    public const int ExpectedReadyCount = 18;
 }
