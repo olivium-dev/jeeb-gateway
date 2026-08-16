@@ -625,6 +625,26 @@ builder.Services.AddScoped<JeebGateway.service.ServiceNotification.ServiceNotifi
     return new JeebGateway.service.ServiceNotification.ServiceNotificationClient(baseUrl, client);
 });
 
+// Notification OWNERSHIP boundary (POST /api/notifications -> JeebNotificationsController).
+// Restored verbatim from 94c2b63; merge 262a682 (merge-all sweep 2026-08-15) took the
+// mainline side of Program.cs and dropped these three lines, so INotificationOwnerClient
+// shipped registered nowhere and the controller threw at activation (500).
+builder.Services.AddTransient<JeebGateway.Notifications.NotificationServiceCredentialHandler>();
+builder.Services.AddHttpClient(
+    JeebGateway.Notifications.NotificationOwnerClient.HttpClientName,
+    client =>
+    {
+        var apiUrl = builder.Configuration["ServiceNotificationClient:BaseUrl"];
+        if (!string.IsNullOrWhiteSpace(apiUrl))
+        {
+            client.BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/");
+        }
+        client.Timeout = TimeSpan.FromSeconds(30);
+    })
+    .AddHttpMessageHandler<JeebGateway.Notifications.NotificationServiceCredentialHandler>();
+builder.Services.AddSingleton<JeebGateway.Notifications.INotificationOwnerClient,
+    JeebGateway.Notifications.NotificationOwnerClient>();
+
 // JEB-1486 cutover step (2) — keep the deprecated jeeb.* localization ALIVE.
 // The de-leak relocated the Jeeb notification taxonomy into the gateway
 // (JeebNotificationCatalog) and emptied notification-service's locale catalog, so
