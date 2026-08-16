@@ -119,3 +119,28 @@ Gateway stays stateless (three types deleted, no store added); **no hosted servi
 retired** (19 -> 18); no cross-service DSN read (the probe is HTTP to the service's own health route);
 no breaking change to a reusable service (bundler-service and state-service are untouched — only the
 gateway's opinion of them changed); no live config, systemd unit or workflow touched.
+
+---
+
+## 4. Regression cover (round 2, branch `gwdbx/r2-config-legs`)
+
+The three decisions above landed without tests. Both behavioural claims are now pinned, because each
+one is invisible to the obvious check:
+
+- `tests/.../Cms/BundlerServiceHealthCheckTests.cs` — an empty `200` is **not** Healthy (with a
+  negative control asserting the status line alone reads as success, which is exactly why the old
+  URL-group probe passed), `503` is not Healthy, a non-empty `200` is Healthy, the probe dials
+  `health/ready` and not `health/live`, and the registration resolves to `BundlerServiceHealthCheck`
+  at `Degraded` with the roster declaring the same name.
+- `tests/.../ProhibitedItems/StateServiceConfigW303Tests.cs` — an admin catalog read warms the
+  last-known-good snapshot so a later state-service blip serves it instead of 503-ing (the narrowing
+  in §2), and a genuinely cold start with an empty local lexicon throws
+  `OwnerCapabilityUnavailableException` naming `no cached snapshot` (the accepted 503 in §2).
+
+### Also removed here
+
+The `StoreDurabilityGuard` case in `StateServiceConfigW303Tests.cs` referenced
+`StoreDurabilityGuard` and `PostgresProhibitedItemsStore`, **both deleted at W5-11 (`8cba63b`)**. It
+could not compile. See the note in `docs/runbooks/gwdbx-program-rules.md` §0 — six other compiled
+test files still carry the same dangling reference, and fixing those is a separate decision because
+it removes durability-guard coverage.

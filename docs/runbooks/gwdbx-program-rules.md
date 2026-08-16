@@ -21,6 +21,17 @@ ADR-0010 retired `ConfigImportWorker`) against the
 yet stateless. `jeeb_gateway` the database is **never being dropped** (owner directive 2026-08-16); it is
 retained with roughly 64 orphaned rows by decision.
 
+**The `JeebGateway.IntegrationTests` assembly does not compile, and has not since W5-11 (`8cba63b`).**
+That PR deleted `StoreDurabilityGuard` and every `Postgres*` store but removed only two of the test
+files that name them from the build. Still-compiled files with a dangling reference:
+`Gw1Pack/W26_MoneyControllerRouteCensusTests.cs`, `Infrastructure/RedisFailClosedBootGuardTests.cs`
+(`StoreDurabilityGuard.FailClosedDisabledKey`), `Infrastructure/StatelessGatewayGuardTests.cs`,
+`StateService/StateServiceNotificationDispatchOutboxTests.cs`,
+`Users/DataExport/MirroringDataExportStoreTests.cs`, `Users/StateServiceAccountDeletionStoreTests.cs`.
+Until they are settled, **no "the tests pass" claim about this repository is meaningful** — the suite
+cannot build. Settling them deletes durability-guard coverage, so it is an owner/assessor call, not a
+side effect of an unrelated PR.
+
 Read everything below §0 as history. Do not cite a wave number, a gate outcome, an enforcement claim or an
 "arm it like this" recipe from it as current fact — several are already false, and each section says so
 where it is wrong.
