@@ -24,14 +24,33 @@ namespace JeebGateway.Tracking;
 ///   <c>LocationUpdateResponse</c> (accepted / rejected / latest) back onto
 ///   <see cref="LocationStoreUpdateResult"/>. The upstream <c>latest</c> fix becomes
 ///   the result's <see cref="StoredPosition"/>.</item>
-///   <item><b>GetLatest</b> (read): reads <c>GET /locations/user/{id}</c>. A 404 maps
-///   to <c>null</c> (no fix on record), NOT an exception. An old fix is returned AS
-///   IS with its <c>created_at</c> as <see cref="StoredPosition.ReceivedAt"/> —
-///   age is reported, never swallowed — and only a fix past
-///   <see cref="TrackingOptions.PositionRetention"/> maps to <c>null</c>, mirroring
-///   the in-memory store's retention bound so callers see identical behaviour
-///   regardless of the flag.</item>
+///   <item><b>GetLatest</b> (read): reads <c>GET /v1/geo/agents/{id}/availability</c> —
+///   the SAME presence row the write bumps. A 404 (no presence row) or a row with no
+///   coordinates yet maps to <c>null</c> (no fix on record), NOT an exception. An old
+///   fix is returned AS IS with its <c>last_seen_at</c> as
+///   <see cref="StoredPosition.ReceivedAt"/> — age is reported, never swallowed — and
+///   only a fix past <see cref="TrackingOptions.PositionRetention"/> maps to
+///   <c>null</c>, mirroring the deleted in-memory store's retention bound.</item>
 /// </list>
+///
+/// <para><b>D11 — the read must stay on the write's rung.</b> This read used to call
+/// <c>GET /locations/user/{id}</c>. That endpoint serves the generic <c>locations</c>
+/// table, which is written ONLY by <c>POST /locations</c> (a tagged saved-place
+/// create/update) — the GPS ingest never touches it. So every accepted fix landed in
+/// <c>user_status</c> while every tracking read asked <c>locations</c>, and the customer
+/// map got <c>position:null / awaitingFirstFix</c> forever with a frozen etag. On live
+/// the <c>locations</c> table was provably EMPTY. The write half was never wrong; the
+/// read half was pointed at a table nothing in the product populates. Do not repoint it
+/// back, and do not add <c>/locations/user/{id}</c> as a fallback: a fallback that can
+/// never contribute a row is indistinguishable from a working one.</para>
+///
+/// <para>The presence row is the correct rung and not merely a convenient one:
+/// <c>POST /location/update</c> writes it via <c>bump_presence</c> and echoes its
+/// persisted <c>online</c> flag back on the same response, so writer and reader are
+/// provably one row. The per-delivery <c>gps_pings</c> track
+/// (<c>GET /v1/geo/tracks/{deliveryId}/tracking</c>) carries a richer fix and is the
+/// natural home if <see cref="ILocationStore"/> ever becomes delivery-keyed; it is not
+/// used here because this contract is per-jeeber and shared with dispute evidence.</para>
 ///
 /// <para><b>Do not re-add a <see cref="TrackingOptions.PositionTtl"/> filter here.</b>
 /// This wrapper used to map any fix older than the 5-minute TTL to <c>null</c> to
@@ -104,14 +123,21 @@ public sealed class GeoServiceLocationStore : ILocationStore
         if (string.IsNullOrEmpty(jeeberId)) return null;
 
         var upstream = await GuardAsync(
-            () => _client.GetUserLocationAsync(jeeberId, ct), nameof(GetLatestAsync), jeeberId).ConfigureAwait(false);
+            () => _client.GetAgentPresenceAsync(jeeberId, ct), nameof(GetLatestAsync), jeeberId).ConfigureAwait(false);
         if (upstream is null)
         {
-            // 404 from /locations/user/{id} == no fix, not an error.
+            // 404 from /v1/geo/agents/{id}/availability == no presence row, not an error.
             return null;
         }
 
-        var receivedAt = upstream.CreatedAt ?? _clock.GetUtcNow();
+        if (upstream.Latitude is not { } latitude || upstream.Longitude is not { } longitude)
+        {
+            // The row exists (the jeeber toggled availability) but no fix has ever
+            // been co-bumped onto it — genuinely "awaiting first fix".
+            return null;
+        }
+
+        var receivedAt = upstream.LastSeenAt ?? _clock.GetUtcNow();
         if (_clock.GetUtcNow() - receivedAt > _options.CurrentValue.PositionRetention)
         {
             // Past RETENTION (not the freshness TTL) the fix is forgotten entirely,
@@ -123,8 +149,8 @@ public sealed class GeoServiceLocationStore : ILocationStore
         }
 
         return new StoredPosition(
-            upstream.Latitude,
-            upstream.Longitude,
+            latitude,
+            longitude,
             Accuracy: null,
             DeviceTimestamp: receivedAt,
             ReceivedAt: receivedAt);

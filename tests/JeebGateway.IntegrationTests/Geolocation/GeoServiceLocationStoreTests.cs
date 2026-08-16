@@ -18,12 +18,18 @@ namespace JeebGateway.IntegrationTests.Geolocation;
 /// These drive the REAL generated client over a stubbed
 /// <see cref="HttpMessageHandler"/> so the on-the-wire contract (snake_case body,
 /// route shape, 404-as-null) is asserted, not just the C# seam:
-///   * write -> read-by-user round trip (POST /location/update, then
-///     GET /locations/user/{id});
+///   * write (POST /location/update) and read (GET /v1/geo/agents/{id}/availability)
+///     mapping, each against a canned upstream body;
 ///   * snake_case wire assertion on the outbound /location/update body (user_id /
 ///     lat / lng / accuracy / timestamp);
 ///   * nearest mapping (GET /locations/nearest -> LocationWithDistance);
 ///   * upstream 404 on read -> null (no fix), not an exception.
+///
+/// <para><b>These stubs answer any path with a canned body.</b> Fine for mapping, and
+/// useless for "does the reader read what the writer wrote" — which is exactly how D11
+/// shipped under a green suite: this file used to assert a read of
+/// <c>/locations/user/{id}</c>, a table no writer in the product populates. That question
+/// belongs to <see cref="GeoStoreWriteReadSameRungTests"/> and its stateful upstream.</para>
 /// </summary>
 public sealed class GeoServiceLocationStoreTests
 {
@@ -91,19 +97,24 @@ public sealed class GeoServiceLocationStoreTests
     }
 
     [Fact]
-    public async Task GetLatest_Reads_UserLocation_And_Maps_Position()
+    public async Task GetLatest_Reads_AgentPresence_And_Maps_Position()
     {
         string? capturedPath = null;
         var handler = new StubHandler((req, _) =>
         {
             capturedPath = req.RequestUri!.AbsolutePath;
-            // Upstream UserLocationResponse: user_id/latitude/longitude/created_at.
+            // Upstream UserStatusResponse: the presence row POST /location/update bumps.
             var json = $$"""
             {
               "user_id": "jeeber-1",
+              "available": false,
+              "last_seen_at": "{{DateTimeOffset.UtcNow:O}}",
+              "updated_at": "{{DateTimeOffset.UtcNow:O}}",
               "latitude": 24.72,
               "longitude": 46.68,
-              "created_at": "{{DateTimeOffset.UtcNow:O}}"
+              "location_geohash5": "thq5s",
+              "role": "agent",
+              "reason": null
             }
             """;
             return new HttpResponseMessage(HttpStatusCode.OK)
@@ -115,7 +126,7 @@ public sealed class GeoServiceLocationStoreTests
         var store = BuildStore(handler);
         var latest = await store.GetLatestAsync("jeeber-1");
 
-        capturedPath.Should().Be("/locations/user/jeeber-1");
+        capturedPath.Should().Be("/v1/geo/agents/jeeber-1/availability");
         latest.Should().NotBeNull();
         latest!.Lat.Should().Be(24.72);
         latest.Lng.Should().Be(46.68);
@@ -129,7 +140,7 @@ public sealed class GeoServiceLocationStoreTests
 
         var latest = await store.GetLatestAsync("jeeber-unknown");
 
-        latest.Should().BeNull("a 404 from /locations/user/{id} means no fix, not an error");
+        latest.Should().BeNull("a 404 from /v1/geo/agents/{id}/availability means no fix, not an error");
     }
 
     /// <summary>
@@ -149,14 +160,15 @@ public sealed class GeoServiceLocationStoreTests
         var createdAt = DateTimeOffset.UtcNow.AddMinutes(-30);
         var handler = new StubHandler((_, _) =>
         {
-            // created_at well beyond the 5-minute PositionTtl, but well inside the
+            // last_seen_at well beyond the 5-minute PositionTtl, but well inside the
             // 12-hour retention window.
             var json = $$"""
             {
               "user_id": "jeeber-1",
+              "available": false,
+              "last_seen_at": "{{createdAt:O}}",
               "latitude": 24.72,
-              "longitude": 46.68,
-              "created_at": "{{createdAt:O}}"
+              "longitude": 46.68
             }
             """;
             return new HttpResponseMessage(HttpStatusCode.OK)
@@ -192,9 +204,10 @@ public sealed class GeoServiceLocationStoreTests
             var json = $$"""
             {
               "user_id": "jeeber-1",
+              "available": false,
+              "last_seen_at": "{{DateTimeOffset.UtcNow.AddDays(-3):O}}",
               "latitude": 24.72,
-              "longitude": 46.68,
-              "created_at": "{{DateTimeOffset.UtcNow.AddDays(-3):O}}"
+              "longitude": 46.68
             }
             """;
             return new HttpResponseMessage(HttpStatusCode.OK)
