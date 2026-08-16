@@ -145,7 +145,7 @@ public sealed class KycBffController : ControllerBase
         if (!UserIdentity.TryGetUserId(HttpContext, out _, out var unauthorized)) return unauthorized;
         if (!_flags.CurrentValue.ContractSigning) return ContractSigningDisabled();
 
-        var catalog = await _contractSigning.ListTemplatesAsync(ct);
+        var catalog = await _contractSigning.ListTemplatesAsync(JeebTosTemplateName, ct);
 
         if (!TryResolveTosTemplate(catalog, out var template))
         {
@@ -246,8 +246,9 @@ public sealed class KycBffController : ControllerBase
         // Contract-signing templates are create-once/disable-only (a new version is
         // a new row + the old one disabled), so a disabled same-named row earlier in
         // enumeration order must not shadow the ACTIVE one (JEBV4-257). Pass 1 prefers
-        // the ACTIVE name-match; pass 2 falls back to the first name-match so we stay
-        // fail-open when upstream leaves status unpopulated.
+        // the ACTIVE name-match; pass 2 falls back ONLY when the row carries no status
+        // at all (D17: an explicitly DISABLED ToS is a retired legal document and must
+        // never be served for signature).
         foreach (var item in items.EnumerateArray())
         {
             var name = ReadString(item, "name");
@@ -263,7 +264,9 @@ public sealed class KycBffController : ControllerBase
         foreach (var item in items.EnumerateArray())
         {
             var name = ReadString(item, "name");
-            if (string.Equals(name, JeebTosTemplateName, StringComparison.OrdinalIgnoreCase))
+            var status = ReadString(item, "status");
+            if (string.Equals(name, JeebTosTemplateName, StringComparison.OrdinalIgnoreCase)
+                && string.IsNullOrWhiteSpace(status))
             {
                 template = item;
                 return true;

@@ -50,14 +50,24 @@ public sealed class ContractSigningServiceClient : IContractSigningServiceClient
         return ToTemplate(document);
     }
 
-    public async Task<JsonElement> ListTemplatesAsync(CancellationToken ct)
+    public Task<JsonElement> ListTemplatesAsync(CancellationToken ct) =>
+        ListTemplatesAsync(null, ct);
+
+    public async Task<JsonElement> ListTemplatesAsync(string? name, CancellationToken ct)
     {
         // GET /v1/templates — the PostgreSQL-backed template catalog (paginated
         // { "items": [...], "total", "limit", "offset" } envelope). NOTE: this is
         // the COLLECTION route, distinct from GET /v1/templates/{template_id};
         // the upstream resolves "/v1/templates/list" to the {id} route (id="list"
         // -> 404), so the list MUST hit the bare "/v1/templates" path.
-        using var response = await _http.GetAsync("v1/templates", ct);
+        //
+        // D17: an unfiltered read is capped by the upstream's default limit (50),
+        // so a registered template past the first page reads as "not registered".
+        // ?name= is the upstream's documented byte-exact resolution filter.
+        var path = string.IsNullOrWhiteSpace(name)
+            ? "v1/templates"
+            : $"v1/templates?name={Uri.EscapeDataString(name)}";
+        using var response = await _http.GetAsync(path, ct);
         response.EnsureSuccessStatusCode();
 
         var document = await response.Content.ReadFromJsonAsync<JsonElement>(JsonOptions, ct);

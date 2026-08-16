@@ -86,6 +86,15 @@ public interface IContractSigningServiceClient
     Task<System.Text.Json.JsonElement> ListTemplatesAsync(CancellationToken ct);
 
     /// <summary>
+    /// Same catalog read, filtered server-side by exact template name
+    /// (<c>GET /v1/templates?name=...</c>) — the resolution path the upstream
+    /// documents for slug-to-id lookups. Without it the answer depends on the
+    /// upstream's default page size (D17).
+    /// </summary>
+    Task<System.Text.Json.JsonElement> ListTemplatesAsync(string? name, CancellationToken ct)
+        => ListTemplatesAsync(ct);
+
+    /// <summary>
     /// Reads a single template by id via <c>GET /v1/templates/{templateId}</c>.
     /// </summary>
     Task<ContractTemplate> GetTemplateAsync(
