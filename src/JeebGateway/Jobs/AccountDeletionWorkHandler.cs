@@ -104,7 +104,8 @@ public sealed class AccountDeletionWorkHandler(
         return DurableWorkExecutionResult.Completed(result);
     }
 
-    private static AccountDeletionWorkPayload? DeserializePayload(StateWorkItem item)
+    // internal, not private: the legacy-hash tolerance is asserted against the LIVE handler.
+    internal static AccountDeletionWorkPayload? DeserializePayload(StateWorkItem item)
     {
         try
         {

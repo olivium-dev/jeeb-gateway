@@ -31,7 +31,7 @@ public sealed class DurableWorkHandlerIdempotencyTests
             }),
             DateTimeOffset.Parse("2026-08-10T12:00:00Z"));
 
-        var parsed = StateServiceAccountDeletionStore.DeserializePayload(legacy);
+        var parsed = AccountDeletionWorkHandler.DeserializePayload(legacy);
 
         parsed.Should().NotBeNull();
         parsed!.EffectiveDeliveryAnonymizedUserHash.Should().Be("legacy-delivery-hash");
