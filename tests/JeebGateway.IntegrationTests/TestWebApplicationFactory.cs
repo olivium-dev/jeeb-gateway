@@ -127,8 +127,6 @@ public class WebApplicationFactory<TEntryPoint>
             TestSettlementEnqueueStore>(services);
         ReplaceSingleton<ISettlementBatchStore,
             TestSettlementBatchStore>(services);
-        ReplaceSingleton<JeebGateway.Financials.Cod.ICodSettlementLedger,
-            TestCodSettlementLedger>(services);
         ReplaceSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>(services);
         ReplaceSingleton<IFinancialLedgerAnonymizer,
             InMemoryFinancialLedger>(services);
