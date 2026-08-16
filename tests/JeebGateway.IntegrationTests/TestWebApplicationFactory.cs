@@ -120,9 +120,8 @@ public class WebApplicationFactory<TEntryPoint>
         ReplaceSingleton<IAdminAuditLog, InMemoryAdminAuditLog>(services);
         ReplaceSingleton<IFlaggedRequestStore, InMemoryFlaggedRequestStore>(services);
 
-        ReplaceSingleton<ISettlementStore, InMemorySettlementStore>(services);
-        ReplaceSingleton<ISettlementLedgerClient,
-            InMemorySettlementLedgerClient>(services);
+        // gwdbx W2-R11: the local settlement store and ledger client are deleted; settlement-service
+        // owns them behind ISettlementServiceClient, which the default host keeps as the real client.
         ReplaceSingleton<ISettlementEnqueueStore,
             TestSettlementEnqueueStore>(services);
         ReplaceSingleton<ISettlementBatchStore,
