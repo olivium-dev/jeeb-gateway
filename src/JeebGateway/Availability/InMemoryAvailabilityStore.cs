@@ -79,7 +79,7 @@ public class InMemoryAvailabilityStore : IAvailabilityStore
             });
 
         await _geo.RemoveAsync(userId, ct);
-        // Best-effort in lockstep with PostgresAvailabilityStore: the offline flip is
+        // Best-effort (there is no Postgres twin any more — W5-11): the offline flip is
         // already applied, so a withdraw with no upstream route must not abort the caller.
         int withdrawn;
         try
@@ -101,8 +101,8 @@ public class InMemoryAvailabilityStore : IAvailabilityStore
 
     public Task RecordInteractionAsync(string userId, DateTimeOffset at, CancellationToken ct)
     {
-        // Touch-existing-only, in lockstep with PostgresAvailabilityStore: a plain GET must
-        // never seed the roster — row creation is GoOnlineAsync's alone.
+        // Touch-existing-only (no Postgres twin since W5-11): a GET never seeds the roster, which is
+        // exactly why the wiped push audience does not self-heal after a bounce — durability register #9.
         if (_records.TryGetValue(userId, out var existing))
         {
             existing.LastInteractionAt = at;

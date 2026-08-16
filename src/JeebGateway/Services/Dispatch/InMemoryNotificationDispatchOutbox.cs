@@ -1,9 +1,8 @@
 namespace JeebGateway.Services.Dispatch;
 
 /// <summary>
-/// In-memory implementation of the notification dispatch outbox (MVP).
-/// Swap for a Postgres-backed implementation backed by the
-/// <c>notification_dispatch_outbox</c> table when persistence is needed.
+/// In-memory notification dispatch outbox: a queued-but-undelivered dispatch dies on a bounce.
+/// The durable alternative is StateServiceNotificationDispatchOutbox (NotificationOutboxMode), not Postgres.
 /// </summary>
 public sealed class InMemoryNotificationDispatchOutbox : INotificationDispatchOutbox
 {

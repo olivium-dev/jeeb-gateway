@@ -25,9 +25,8 @@ public static class EscalationStatus
 
 /// <summary>
 /// One admin escalation row produced by the OTP handover flow
-/// (T-backend-015 / JEEB-33). Stored in <c>IAdminEscalationStore</c>;
-/// production wiring lands a Postgres-backed table colocated with
-/// <c>admin_actions</c> in db/migrations/0005.
+/// (T-backend-015 / JEEB-33). Stored in <c>IAdminEscalationStore</c> — process memory at
+/// OtpEscalationsMode=local (MSI's value today); delivery-service serves it from the read rung up.
 /// </summary>
 public sealed class AdminEscalation
 {

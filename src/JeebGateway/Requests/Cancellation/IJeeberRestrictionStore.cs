@@ -7,10 +7,8 @@ namespace JeebGateway.Requests.Cancellation;
 /// <see cref="IsRestrictedAsync"/> before fanning out new offers to a
 /// candidate Jeeber.
 ///
-/// Production swap: a Postgres-backed implementation reading from a
-/// <c>jeeber_restrictions</c> table whose rows expire when
-/// <c>expires_at &lt; now()</c>; the rolling-7d count is derived from
-/// <c>delivery_requests WHERE cancelled_by = 'jeeber' AND cancellation_requested_at &gt; now() - interval '7 days'</c>.
+/// The production swap ALREADY HAPPENED, and not to Postgres: FeatureFlags:UseUpstream:Ban=true
+/// (appsettings.Production.json) binds BanServiceJeeberRestrictionStore → ban-service :10065.
 /// </summary>
 public interface IJeeberRestrictionStore
 {
