@@ -18,6 +18,7 @@ public sealed class SettlementService : ISettlementService
     private readonly IRequestsStore _requests;
     private readonly IDeliveryServiceClient _deliveryClient;
     private readonly IEarningsCacheInvalidator _earningsCache;
+    private readonly ICommissionCollector _commission;
     private readonly ILogger<SettlementService> _log;
 
     public SettlementService(
@@ -25,12 +26,14 @@ public sealed class SettlementService : ISettlementService
         IRequestsStore requests,
         IDeliveryServiceClient deliveryClient,
         IEarningsCacheInvalidator earningsCache,
+        ICommissionCollector commission,
         ILogger<SettlementService> log)
     {
         _settlements = settlements;
         _requests = requests;
         _deliveryClient = deliveryClient;
         _earningsCache = earningsCache;
+        _commission = commission;
         _log = log;
     }
     public async Task<SettlementResult> SettleAsync(
@@ -303,6 +306,11 @@ public sealed class SettlementService : ISettlementService
         if (result.Created)
         {
             _earningsCache.Invalidate(result.Row.JeeberId);
+
+            // O1 (ADR-0011): take the fee at the settle that freshly booked it. Never throws —
+            // an uncollectable fee leaves a settled delivery and a counter, never an unwound settle.
+            await _commission.CollectAsync(result.Row, ct);
+
             return new SettlementResult(SettlementOutcome.Settled, result.Row, null);
         }
 

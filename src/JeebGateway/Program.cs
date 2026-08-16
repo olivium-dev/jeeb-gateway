@@ -1447,6 +1447,30 @@ builder.Services.Configure<JeebGateway.Financials.WalletGuardOptions>(
 builder.Services.AddScoped<JeebGateway.Financials.IWalletSufficiencyGuard,
     JeebGateway.Financials.WalletSufficiencyGuard>();
 
+// O1 (ADR-0011) — platform-fee collection, owner-gated OFF by default. Own HttpClient: the
+// generated ServiceWalletClient carries no Idempotency-Key, and that header is the exactly-once story.
+builder.Services.Configure<JeebGateway.Financials.CommissionCollectionOptions>(
+    builder.Configuration.GetSection(JeebGateway.Financials.CommissionCollectionOptions.SectionName));
+ServiceClientExtensions.AttachBreakerAndTimeoutOnly(
+    builder.Services.AddHttpClient(
+        JeebGateway.Financials.WalletCommissionDebitClient.HttpClientName,
+        client =>
+        {
+            var walletUrl = builder.Configuration["WalletServiceApi:BaseUrl"];
+            if (!string.IsNullOrWhiteSpace(walletUrl))
+            {
+                client.BaseAddress = new Uri(walletUrl.TrimEnd('/') + "/");
+            }
+            client.Timeout = TimeSpan.FromSeconds(30);
+        })
+        .AddTypedClient<JeebGateway.Financials.IWalletCommissionDebitClient>((http, sp) =>
+            new JeebGateway.Financials.WalletCommissionDebitClient(
+                http,
+                sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<
+                    JeebGateway.Financials.CommissionCollectionOptions>>().Value.CurrencyId)));
+builder.Services.AddSingleton<JeebGateway.Financials.ICommissionCollector,
+    JeebGateway.Financials.WalletCommissionCollector>();
+
 // Jeeb Partner Portal wallet BFF (partner-wallet-bff) — validated options + the thin
 // saga-orchestration service. Reuses the scoped ServiceWalletClient registered above and the
 // IJeebWalletLedgerReader wired below; adds no new HttpClient (all partner money moves flow through

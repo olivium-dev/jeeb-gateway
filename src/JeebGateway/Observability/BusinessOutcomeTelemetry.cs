@@ -69,4 +69,30 @@ public static class BusinessOutcomeTelemetry
     public static readonly Counter<long> SettlementLedgerPostFailures =
         Meter.CreateCounter<long>("settlement.ledger.post_failures",
             description: "Number of settle calls (completion credit + AtDoor pending intent) that did not reach settlement-service and were swallowed so the delivery flow could continue. Recovery is the other completion leg, the receipt-read self-heal, or a manual settle — nothing replays them automatically.");
+
+    // O1 (owner ruling 2026-08-16). Booked-and-never-collected went unnoticed for 81 deliveries
+    // because nothing counted it; every outcome below is emitted, including the disabled one.
+    public static readonly Counter<long> CommissionCollected =
+        Meter.CreateCounter<long>("settlement.commission.collected",
+            description: "Platform fees actually debited from a jeeber fee wallet into the platform wallet.");
+
+    public static readonly Counter<long> CommissionCollectionSkipped =
+        Meter.CreateCounter<long>("settlement.commission.skipped",
+            description: "Settled deliveries whose fee was BOOKED but deliberately not collected because CommissionCollection:Enabled is false. A non-zero steady state means the owner gate is still shut.");
+
+    public static readonly Counter<long> CommissionCollectionInsufficient =
+        Meter.CreateCounter<long>("settlement.commission.insufficient",
+            description: "Settled deliveries whose fee could not be taken because the jeeber's fee wallet did not cover it. The delivery stays settled; the fee is a debt.");
+
+    public static readonly Counter<long> CommissionCollectionUncertain =
+        Meter.CreateCounter<long>("settlement.commission.uncertain",
+            description: "Commission debits whose execute was ambiguous. Deliberately not aborted and not stamped; re-driving replays the same idempotency key.");
+
+    public static readonly Counter<long> CommissionCollectionFailures =
+        Meter.CreateCounter<long>("settlement.commission.failures",
+            description: "Commission debits that deterministically failed before any money moved (no fee wallet, no platform wallet, initiate rejected).");
+
+    public static readonly Counter<long> CommissionStampFailures =
+        Meter.CreateCounter<long>("settlement.commission.stamp_failures",
+            description: "Fees that WERE collected but whose wallet transaction id could not be stamped onto the settlement row. Reconcile from the wallet ledger.");
 }
