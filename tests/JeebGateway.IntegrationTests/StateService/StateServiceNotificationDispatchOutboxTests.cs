@@ -225,7 +225,8 @@ public class StateServiceNotificationDispatchOutboxTests
 
         durable.Should().Contain(typeof(StateServiceNotificationDispatchOutbox),
             "a NotificationOutboxMode=upstream-authority boot must not be fail-closed (G-08)");
-        durable.Should().Contain(typeof(PostgresNotificationDispatchOutbox));
+        // W5-11 deleted PostgresNotificationDispatchOutbox, so the second durable impl
+        // it used to approve is gone; state-service is now the only durable resolution.
         durable.Should().NotContain(typeof(InMemoryNotificationDispatchOutbox));
     }
 
