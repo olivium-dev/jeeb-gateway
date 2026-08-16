@@ -1,6 +1,15 @@
 # ADR-0011 — O1: collecting the platform commission
 
-Status: accepted (O1, owner ruling 2026-08-16) · Supersedes nothing · Raised from OA-30
+Status: accepted, **AMENDED 2026-08-16 by the owner** · Supersedes nothing · Raised from OA-30
+
+> **AMENDMENT — the debit moved from completion to ACCEPT.** The owner reversed the implementer's
+> timing ruling the same day:
+> *"Once the user become a jeeber he should have a wallet, the wallet only drain when he make an
+> offer and it is accepted"*.
+> The original reasoning is kept below, struck through where it no longer governs, because the
+> evidence behind it did not evaporate — it turned into the open refund question. Everything else in
+> this ADR (the ownership shape, exactly-once with no gateway state, the off-by-default gate, the
+> COD source-side deny) is unchanged.
 
 ## Context
 
@@ -69,26 +78,60 @@ happened, so an uncollectable fee is a debt, not a reason to fail the delivery.
 
 ## Two things the ruling did not settle
 
-### 1. When is the fee debited? — **at completion (settlement). My call, not the owner's.**
+### 1. When is the fee debited? — **at ACCEPT. The owner's call, not mine.**
 
-The ruling says *check* at offer time. A check is not a debit, and the owner did not pick
-reserve-at-offer (it was on the menu and left unselected). Completion wins on three grounds:
+~~My ruling was charge-at-completion.~~ **Overridden.** The debit fires in
+`JeebOffersController.BuildAcceptedResponseAsync`, the single post-commit convergence point of the
+one accept action (two route templates, one method — verified: the legacy `OffersController` accept
+was deleted 2026-08-01 and is pinned dead by `LegacyOfferAcceptRouteRetiredTests`).
 
-- **Terminal.** `Done` does not un-happen, so no reversal machinery is needed. Accept-time would
-  need refunds for the ~47% of deliveries that cancel (188 of 397 live rows are `Cancelled`), and no
-  reversal primitive is ratified — wallet-service rejects zero/negative legs outright.
-- **Uniquely keyed.** The settlement id is a durable, system-generated id to key idempotency on.
-  There is no equivalent at accept.
-- **Already stamp-backable.** The `external-ref` hook exists and was built for this.
+The fee is knowable there: 10% of the accepted price under Q-001, computed with
+`WalletGuardContract.RequiredCommission` — literally the same expression the pre-commit accept guard
+just checked the balance against, so what is checked and what is charged cannot drift.
 
-Reserve-at-offer was rejected on evidence, not preference: wallet-service has **no hold/authorization
-API**, and its de-facto hold (a `Pending` transaction header) **never expires** — no TTL, no sweeper.
-A reserve on every losing bid would strand funds permanently and block wallet deactivation, and the
-expiry sweeper would have to live somewhere the gateway is not allowed to keep state.
+**Exactly-once at accept, still with no gateway state.** The idempotency key is
+`accept:{requestId}`, not `accept:{offerId}`:
 
-**Honest consequence:** the offer-time check is therefore advisory. A jeeber can pass it, spend the
-balance elsewhere, and be short at settlement. The accept-time guard narrows the window; it does not
-close it. `settlement.commission.insufficient` is how that gap is measured rather than assumed away.
+- A replayed accept is a live risk, not a theoretical one. A retry **without** an `Idempotency-Key`
+  header — the common mobile case — skips the gateway's idempotency middleware entirely and re-runs
+  the whole post-commit block. Every pre-existing side effect there is convergent or merely noisy; a
+  debit is the first that is neither. The wallet key is what stands between a jeeber and a double
+  charge, and `A_Replayed_Accept_Charges_Exactly_Once` pins it with a control showing the same double
+  creating two transactions when the key is not honoured.
+- Keying on the **request** rather than the offer is deliberate. One request has exactly one winner,
+  so a second accept carrying a *different* amount hits the same key with a different body and
+  wallet-service answers **409 idempotency-conflict** — refused, not charged twice. An offer-scoped
+  key would happily charge twice.
+- The key is **derivable from any durable row that knows the delivery id**, so nothing has to be
+  remembered anywhere to find the debit again.
+
+I deliberately did **not** gate on `OfferAcceptWire.Replayed` (decoded upstream, currently unread).
+It is true only when offer-service's own dedupe fires and says nothing about a gateway crash between
+the debit and the response; using it would risk *never* charging a delivery whose first attempt died
+early. The wallet key is the whole guarantee.
+
+**Reserve-at-offer remains rejected** — and it is not what was asked for. The owner said drained on
+*acceptance*, not held at *offer*. The evidence stands: wallet-service has **no hold API**, and its
+de-facto hold (a `Pending` transaction header) **never expires** — no TTL, no sweeper — so reserving
+on every losing bid would strand funds permanently and block wallet deactivation.
+
+**What my rejected reasoning turned into.** I rejected accept-time because ~47% of deliveries cancel
+(188 of 397 live rows) and a charge before completion needs a refund story. That did not evaporate;
+it became the open question below. What *did* dissolve is the "no durable id at accept" objection —
+the request id is durable and system-generated, and wallet-service's own idempotency index supplies
+the uniqueness the settlement id was wanted for.
+
+### The settle-time link replaces the settle-time debit
+
+`settlement-service`'s `external_ref` hook keeps a real producer rather than reverting to the
+"built, never called" state OA-30 criticised. The debit stamps wallet-service's generic
+`ExternalReference` with `delivery:{requestId}`; at settle the gateway does a **pure read**
+(`GET Transaction/by-external-reference/{ref}`) and stamps the transaction id onto the settlement
+row. No money moves at settle.
+
+A row that ends up **unstamped is exactly a delivery that settled with its fee never collected** —
+`settlement.commission.unlinked`. That is the per-row, automatic version of the finding OA-30 had to
+excavate by hand across 275 wallet holders.
 
 ### 2. How is the fee computed? — **not my call; already an owner ruling.**
 
@@ -114,11 +157,37 @@ set in **no config file at all** and nothing counted the skips. Here the disable
 `settlement.commission.skipped` on every settle, so "the fee is still not being collected" is a
 number on the board rather than an absence nobody can see.
 
+## The open question this creates: cancellation
+
+An accepted delivery that is later **cancelled keeps its fee taken. No refund is implemented and none
+was invented** — the owner has not ruled on refunds, and inventing one would be exactly the silent
+policy this programme exists to stop.
+
+What *was* done is make the retention measurable rather than accidental.
+`settlement.commission.retained_on_cancel` fires with a structured line naming the delivery, jeeber,
+who cancelled and the retained amount. Cancellation never converged on a single seam the way accept
+did, so all four gateway seams are instrumented: `CancellationService.CancelAsync` (client + jeeber),
+`CancellationService.DecideAsync` (admin approval of a post-pickup cancel), the bare
+`PATCH /deliveries/{id}/status` to `Cancelled`, and the legacy `DELETE /requests/{id}`. The fifth
+route, `POST /admin/deliveries/{id}/transition`, is a pure relay with no gateway state write and is
+**not** instrumentable from here — stated, not papered over. Before this change the gateway emitted
+**no cancellation counter at all**.
+
+**A refund is mechanically possible today, with no new primitive.** `PartnerWalletService`
+already executes system→holder credits through the same sanctioned `Transaction/initiate` +
+`execute` calls this debit uses, just with source and destination swapped, and a $5.00 credit
+executed through wallet-service's public API during Phase V. So the owner is choosing a *policy*,
+not funding an engineering project. It is **not enabled**, and no refund code was written.
+
+Worth the owner knowing when deciding: the frozen delivery state machine already names its
+`Ordered → Cancelled` client edge **`client_cancel_no_fee`**.
+
 ## What this does NOT do
 
 - It does not backfill the 81 uncharged deliveries. 80 of them have no settlement row at all. That is
   owner-gated and untouched.
 - It does not move any real money: nothing was deployed and the gate is off.
+- It does not refund anything, ever. See the open question above.
 - It does not make the mobile offer-composer copy true. *"$X is reserved from your wallet now ·
   charged only if you win · released if you're not picked"* and `fundingReserveBody` describe
   reserve-at-offer, which this ADR rejects. `JeebWalletProjection.ReservedNow` stays hard-coded `0`

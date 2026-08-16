@@ -2,6 +2,7 @@ using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations;
 using JeebGateway.Financials;
+using JeebGateway.Observability;
 using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Requests.OtpHandover;
@@ -50,6 +51,7 @@ public sealed class JeebOffersController : ControllerBase
     private readonly IOfferPushNotifier _offerPush;
     private readonly IDetachedPushDispatcher _detachedPush;
     private readonly IWalletSufficiencyGuard _walletGuard;
+    private readonly ICommissionCollector _commission;
     private readonly IHandoverCodeStore _handoverCodes;
     private readonly UpstreamFeatureFlags _flags;
     private readonly DeliveryClientOptions _deliveryOptions;
@@ -68,6 +70,7 @@ public sealed class JeebOffersController : ControllerBase
         IOfferPushNotifier offerPush,
         IDetachedPushDispatcher detachedPush,
         IWalletSufficiencyGuard walletGuard,
+        ICommissionCollector commission,
         IHandoverCodeStore handoverCodes,
         IOptions<UpstreamFeatureFlags> flags,
         IOptions<DeliveryClientOptions> deliveryOptions,
@@ -84,6 +87,7 @@ public sealed class JeebOffersController : ControllerBase
         _offerPush = offerPush;
         _detachedPush = detachedPush;
         _walletGuard = walletGuard;
+        _commission = commission;
         _handoverCodes = handoverCodes;
         _flags = flags.Value;
         _deliveryOptions = deliveryOptions.Value;
@@ -442,9 +446,10 @@ public sealed class JeebOffersController : ControllerBase
         // completion — producing the $0.00 receipt. The acceptor here IS the request
         // owner, so this list read is authorized; the receipt later reads the snapshot.
         // DEGRADE-DON'T-FAIL: a fee-resolution miss is logged, never a 5xx.
+        decimal? acceptedFee = null;
         try
         {
-            var acceptedFee = await ResolveAcceptedFeeAsync(requestId, offerId, ct);
+            acceptedFee = await ResolveAcceptedFeeAsync(requestId, offerId, ct);
             if (acceptedFee is > 0m
                 && await _requests.TrySetAcceptedFeeAsync(requestId, acceptedFee.Value, ct))
             {
@@ -482,6 +487,39 @@ public sealed class JeebOffersController : ControllerBase
                     + "failed; accept stays 200 — the jeeber's Jobs list may lag until reconciled.",
                     requestId, winningJeeberId);
             }
+        }
+
+        // O1 (owner amendment 2026-08-16): "the wallet only drain when he make an offer and it is
+        // accepted". This is that drain — the single accept convergence point, post-commit.
+        //
+        // DEGRADE-DON'T-FAIL, like every other step in this block: the saga has already committed a
+        // winner, so an uncollectable fee can never turn a closed auction into a 5xx. The collector
+        // never throws; its outcome is counted and logged. Awaited, not detached, because money must
+        // resolve inside the request that caused it rather than after the response.
+        var billableFee = acceptedFee ?? req?.AcceptedFee;
+        if (!string.IsNullOrWhiteSpace(winningJeeberId) && billableFee is > 0m)
+        {
+            try
+            {
+                await _commission.CollectOnAcceptAsync(
+                    new CommissionCollectionCommand(requestId, winningJeeberId, billableFee.Value), ct);
+            }
+            catch (Exception ex)
+            {
+                // The collector is contracted never to throw; this is the belt for the day that
+                // contract breaks, because a closed auction must never surface as a 5xx.
+                BusinessOutcomeTelemetry.CommissionCollectionFailures.Add(1);
+                _logger.LogError(ex,
+                    "commission.accept.threw requestId={RequestId} jeeberId={JeeberId}; accept stays "
+                    + "200 and the fee is UNCOLLECTED.", requestId, winningJeeberId);
+            }
+        }
+        else
+        {
+            _logger.LogWarning(
+                "commission.accept.no_basis requestId={RequestId} offerId={OfferId} jeeberId={JeeberId} "
+                + "fee={Fee}; the accept stands but there is nothing to bill against.",
+                requestId, offerId, winningJeeberId, billableFee);
         }
 
         // S03 P1 — ensure the chat conversation EXISTS, then seat the winning jeeber.

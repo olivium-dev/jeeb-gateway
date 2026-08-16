@@ -92,6 +92,13 @@ public static class BusinessOutcomeTelemetry
         Meter.CreateCounter<long>("settlement.commission.failures",
             description: "Commission debits that deterministically failed before any money moved (no fee wallet, no platform wallet, initiate rejected).");
 
+    public static readonly Counter<long> CommissionUnlinkedSettlements =
+        Meter.CreateCounter<long>("settlement.commission.unlinked",
+            description: "Settlements that reached settled with NO accept-time wallet debit carrying their delivery reference. This is the direct, per-row measure of 'booked but never collected' that OA-30 had to be excavated by hand.");
+
+    public static readonly Counter<long> CommissionRetainedOnCancel =
+        Meter.CreateCounter<long>("settlement.commission.retained_on_cancel", description: "Accepted deliveries later cancelled while the accept-time platform fee stays taken. NO refund policy is implemented; this counter exists so the retained amount is measurable rather than accidental, and is the input to the owner's refund decision.");
+
     public static readonly Counter<long> CommissionStampFailures =
         Meter.CreateCounter<long>("settlement.commission.stamp_failures",
             description: "Fees that WERE collected but whose wallet transaction id could not be stamped onto the settlement row. Reconcile from the wallet ledger.");

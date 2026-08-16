@@ -8,7 +8,7 @@ using Microsoft.Extensions.Options;
 namespace JeebGateway.Financials;
 
 /// <summary>
-/// O1 (owner ruling 2026-08-16) — the platform-fee collection gate.
+/// O1 (owner ruling 2026-08-16, amended same day) — the platform-fee collection gate.
 ///
 /// <para><b>OFF by default, on purpose.</b> Merging this must not start moving money. The flag has an
 /// explicit value in <c>appsettings.json</c> (not merely a missing key, which is how
@@ -30,21 +30,24 @@ public sealed class CommissionCollectionOptions
     public int CurrencyId { get; set; } = 1;
 }
 
+/// <summary>Everything the accept transition already knows. No settlement row exists yet.</summary>
+public sealed record CommissionCollectionCommand(
+    string RequestId,
+    string JeeberId,
+    decimal AcceptedFee);
+
 public enum CommissionCollectionOutcome
 {
     /// <summary>The owner gate is off. Nothing was read, nothing was moved.</summary>
     Disabled,
 
-    /// <summary>No fee to take (pending intent, zero commission, or an unusable holder id).</summary>
+    /// <summary>No fee to take (non-positive accepted price, or an unusable holder id).</summary>
     NotCollectable,
-
-    /// <summary>The settlement already carries a wallet transaction reference.</summary>
-    AlreadyCollected,
 
     /// <summary>The fee moved from the jeeber's fee wallet to the platform wallet.</summary>
     Collected,
 
-    /// <summary>Wallet-service refused the execute: the jeeber cannot cover the fee.</summary>
+    /// <summary>wallet-service refused: the jeeber cannot cover the fee.</summary>
     InsufficientFunds,
 
     /// <summary>The jeeber has no active, non-COD wallet in the configured currency.</summary>
@@ -52,6 +55,9 @@ public enum CommissionCollectionOutcome
 
     /// <summary>The platform counterparty wallet is not provisioned.</summary>
     NoSystemWallet,
+
+    /// <summary>Same accept key, different money. Refused rather than charged a second time.</summary>
+    IdempotencyConflict,
 
     /// <summary>The execute may or may not have committed. Deliberately NOT aborted.</summary>
     Uncertain,
@@ -68,23 +74,27 @@ public sealed record CommissionCollectionResult(
 
 public interface ICommissionCollector
 {
-    /// <summary>Never throws. A settled delivery whose fee cannot be taken STAYS settled — the
-    /// customer already paid cash and the handover already happened.</summary>
-    Task<CommissionCollectionResult> CollectAsync(Settlement settlement, CancellationToken ct);
+    /// <summary>Never throws. An accept whose fee cannot be taken still ACCEPTS — the auction has
+    /// already committed a winner and there is nothing left to abort.</summary>
+    Task<CommissionCollectionResult> CollectOnAcceptAsync(
+        CommissionCollectionCommand command, CancellationToken ct);
+
+    /// <summary>Pure read plus a first-stamp-wins stamp. Moves no money; links a settlement row to
+    /// the accept-time debit so the books join up. Never throws.</summary>
+    Task LinkSettlementAsync(Settlement settlement, CancellationToken ct);
 }
 
 /// <summary>
 /// Debits the platform commission from the jeeber's fee wallet into the platform (<c>__SYSTEM__</c>)
-/// wallet, then stamps the wallet transaction id back onto the settlement row.
+/// wallet at the moment an offer is ACCEPTED, then links the later settlement row to that debit.
 ///
-/// <para><b>Exactly-once with zero gateway state.</b> The idempotency key is derived from the
-/// settlement id and sent to wallet-service, whose unique index on it is the durable dedupe. The
-/// settlement's <c>external_ref</c> (first-stamp-wins) is the durable "already collected" marker.
-/// The gateway stores nothing, which is the standing no-state-on-the-gateway rule.</para>
+/// <para><b>Exactly-once with zero gateway state.</b> The idempotency key is derived from the request
+/// id, so a replayed accept sends the identical key and wallet-service's unique index returns the
+/// original transaction instead of creating a second one. The gateway persists nothing.</para>
 ///
-/// <para><b>Amount.</b> Taken verbatim from the settlement row, never recomputed. settlement-service
-/// owns the arithmetic (owner ruling Q-001, flat 10%), so the booked fee and the collected fee
-/// cannot drift.</para>
+/// <para><b>Amount.</b> <see cref="WalletGuardContract.RequiredCommission"/> — literally the same
+/// expression the offer-time and accept-time sufficiency guards check against, so what is checked and
+/// what is charged cannot drift, and both match settlement-service's later booking (Q-001, flat 10%).</para>
 /// </summary>
 public sealed class WalletCommissionCollector : ICommissionCollector
 {
@@ -108,37 +118,37 @@ public sealed class WalletCommissionCollector : ICommissionCollector
         _log = log;
     }
 
-    /// <summary>Stable across re-drives, unique per settlement — wallet-service's durable dedupe key.</summary>
-    public static string IdempotencyKeyFor(string settlementId) => $"settlement:{settlementId}";
+    /// <summary>Stable and unique for the accept EVENT: one request has exactly one winner, so a
+    /// replay reuses the key and a second, different accept is refused rather than charged.</summary>
+    public static string IdempotencyKeyFor(string requestId) => $"accept:{requestId}";
 
-    public async Task<CommissionCollectionResult> CollectAsync(Settlement settlement, CancellationToken ct)
+    /// <summary>Derivable from any durable row that knows the delivery id — no gateway state needed
+    /// to find the debit again later (the settlement link and any future reconciler both use it).</summary>
+    public static string ExternalReferenceFor(string requestId) => $"delivery:{requestId}";
+
+    public async Task<CommissionCollectionResult> CollectOnAcceptAsync(
+        CommissionCollectionCommand command, CancellationToken ct)
     {
-        var amount = settlement.Total;
+        var amount = WalletGuardContract.RequiredCommission(command.AcceptedFee);
 
         if (!_options.Enabled)
         {
             BusinessOutcomeTelemetry.CommissionCollectionSkipped.Add(1);
             _log.LogInformation(
-                "settlement.commission.skipped settlementId={SettlementId} deliveryId={DeliveryId} "
+                "commission.accept.skipped requestId={RequestId} jeeberId={JeeberId} acceptedFee={Fee} "
                 + "amount={Amount} reason=disabled — CommissionCollection:Enabled is false, so the fee "
-                + "is BOOKED and NOT COLLECTED (O1, owner-gated).",
-                settlement.Id, settlement.DeliveryId, amount);
+                + "is OWED and NOT COLLECTED (O1, owner-gated).",
+                command.RequestId, command.JeeberId, command.AcceptedFee, amount);
             return new CommissionCollectionResult(CommissionCollectionOutcome.Disabled, amount, Guid.Empty);
         }
 
         if (amount <= 0m)
         {
             return new CommissionCollectionResult(
-                CommissionCollectionOutcome.NotCollectable, amount, Guid.Empty, "no commission booked");
+                CommissionCollectionOutcome.NotCollectable, amount, Guid.Empty, "no positive accepted fee");
         }
 
-        if (!string.IsNullOrWhiteSpace(settlement.WalletTxId))
-        {
-            return new CommissionCollectionResult(
-                CommissionCollectionOutcome.AlreadyCollected, amount, Guid.Empty, settlement.WalletTxId);
-        }
-
-        if (!Guid.TryParse(settlement.JeeberId, out var holderId) || holderId == Guid.Empty)
+        if (!Guid.TryParse(command.JeeberId, out var holderId) || holderId == Guid.Empty)
         {
             return new CommissionCollectionResult(
                 CommissionCollectionOutcome.NotCollectable, amount, Guid.Empty, "holder id is not a wallet holder");
@@ -146,7 +156,7 @@ public sealed class WalletCommissionCollector : ICommissionCollector
 
         try
         {
-            return await RunAsync(settlement, holderId, amount, ct);
+            return await RunAsync(command, holderId, amount, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -154,19 +164,18 @@ public sealed class WalletCommissionCollector : ICommissionCollector
         }
         catch (Exception ex)
         {
-            // The settle already committed upstream; a collection fault must never unwind it.
+            // The accept saga already committed a winner; a collection fault must never unwind it.
             BusinessOutcomeTelemetry.CommissionCollectionFailures.Add(1);
             _log.LogError(ex,
-                "settlement.commission.failed settlementId={SettlementId} deliveryId={DeliveryId} "
-                + "amount={Amount}; the delivery stays settled and the fee was NOT collected.",
-                settlement.Id, settlement.DeliveryId, amount);
+                "commission.accept.failed requestId={RequestId} amount={Amount}; the accept stands and "
+                + "the fee was NOT collected.", command.RequestId, amount);
             return new CommissionCollectionResult(
                 CommissionCollectionOutcome.Failed, amount, Guid.Empty, ex.Message);
         }
     }
 
     private async Task<CommissionCollectionResult> RunAsync(
-        Settlement settlement, Guid holderId, decimal amount, CancellationToken ct)
+        CommissionCollectionCommand command, Guid holderId, decimal amount, CancellationToken ct)
     {
         // Rung 3 of the owner ruling: the fee wallet is a fee account. A COD leg can never be the
         // source, so cash-on-delivery float cannot pay the platform fee.
@@ -175,9 +184,9 @@ public sealed class WalletCommissionCollector : ICommissionCollector
         {
             BusinessOutcomeTelemetry.CommissionCollectionFailures.Add(1);
             _log.LogWarning(
-                "settlement.commission.no_fee_wallet settlementId={SettlementId} holderId={HolderId} "
+                "commission.accept.no_fee_wallet requestId={RequestId} holderId={HolderId} "
                 + "currencyId={CurrencyId}; no active non-COD wallet to debit.",
-                settlement.Id, holderId, _options.CurrencyId);
+                command.RequestId, holderId, _options.CurrencyId);
             return new CommissionCollectionResult(
                 CommissionCollectionOutcome.NoFeeWallet, amount, Guid.Empty);
         }
@@ -187,29 +196,46 @@ public sealed class WalletCommissionCollector : ICommissionCollector
         {
             BusinessOutcomeTelemetry.CommissionCollectionFailures.Add(1);
             _log.LogError(
-                "settlement.commission.no_system_wallet settlementId={SettlementId} currencyId={CurrencyId}; "
+                "commission.accept.no_system_wallet requestId={RequestId} currencyId={CurrencyId}; "
                 + "the platform counterparty wallet is not provisioned.",
-                settlement.Id, _options.CurrencyId);
+                command.RequestId, _options.CurrencyId);
             return new CommissionCollectionResult(
                 CommissionCollectionOutcome.NoSystemWallet, amount, Guid.Empty);
         }
 
-        var idempotencyKey = IdempotencyKeyFor(settlement.Id);
-        var notes = $"{idempotencyKey};delivery:{settlement.DeliveryId}";
+        var idempotencyKey = IdempotencyKeyFor(command.RequestId);
+        var externalReference = ExternalReferenceFor(command.RequestId);
 
         Guid transactionId;
         try
         {
             transactionId = await _wallet.InitiateAsync(
-                sourceWalletId, systemWalletId, amount, _options.Tag, notes, idempotencyKey, ct);
+                sourceWalletId, systemWalletId, amount, _options.Tag,
+                notes: idempotencyKey, idempotencyKey, externalReference, ct);
+        }
+        catch (WalletCommissionDebitException ex) when (ex.IsInsufficientBalance)
+        {
+            // wallet-service refuses an unaffordable debit at INITIATE, not only at execute.
+            return Insufficient(command, holderId, amount, Guid.Empty, ex);
+        }
+        catch (WalletCommissionDebitException ex) when (ex.IsIdempotencyConflict)
+        {
+            // Same accept key, different money: an accounting divergence, never a retry. Refuse.
+            BusinessOutcomeTelemetry.CommissionCollectionFailures.Add(1);
+            _log.LogError(ex,
+                "commission.accept.idempotency_conflict requestId={RequestId} amount={Amount}; this "
+                + "accept key already carries a DIFFERENT amount. Nothing charged — reconcile by hand.",
+                command.RequestId, amount);
+            return new CommissionCollectionResult(
+                CommissionCollectionOutcome.IdempotencyConflict, amount, Guid.Empty, ex.Message);
         }
         catch (WalletCommissionDebitException ex)
         {
             // Initiate failed => nothing committed. Nothing to abort, nothing to reverse.
             BusinessOutcomeTelemetry.CommissionCollectionFailures.Add(1);
             _log.LogError(ex,
-                "settlement.commission.initiate_failed settlementId={SettlementId} amount={Amount}; "
-                + "no money moved.", settlement.Id, amount);
+                "commission.accept.initiate_failed requestId={RequestId} amount={Amount}; no money moved.",
+                command.RequestId, amount);
             return new CommissionCollectionResult(
                 CommissionCollectionOutcome.Failed, amount, Guid.Empty, ex.Message);
         }
@@ -220,63 +246,97 @@ public sealed class WalletCommissionCollector : ICommissionCollector
         }
         catch (WalletCommissionDebitException ex) when (ex.IsDeterministicRejection)
         {
-            // Deterministic refusal (insufficient balance is the expected one): the money did NOT
-            // move, so releasing the pending header is safe — and required, or the hold never expires.
-            await SafeAbortAsync(transactionId, settlement.Id, ct);
-            BusinessOutcomeTelemetry.CommissionCollectionInsufficient.Add(1);
-            _log.LogWarning(ex,
-                "settlement.commission.insufficient settlementId={SettlementId} holderId={HolderId} "
-                + "amount={Amount}; the delivery stays settled and the platform fee is UNCOLLECTED.",
-                settlement.Id, holderId, amount);
+            // Deterministic refusal: the money did NOT move, so releasing the pending header is safe
+            // — and required, because wallet-service never expires one.
+            await SafeAbortAsync(transactionId, command.RequestId, ct);
+            if (ex.IsInsufficientBalance) return Insufficient(command, holderId, amount, transactionId, ex);
+
+            BusinessOutcomeTelemetry.CommissionCollectionFailures.Add(1);
+            _log.LogError(ex,
+                "commission.accept.execute_rejected requestId={RequestId} txId={TxId} amount={Amount}.",
+                command.RequestId, transactionId, amount);
             return new CommissionCollectionResult(
-                CommissionCollectionOutcome.InsufficientFunds, amount, transactionId, ex.Message);
+                CommissionCollectionOutcome.Failed, amount, transactionId, ex.Message);
         }
         catch (WalletCommissionDebitException ex)
         {
-            // Ambiguous: the execute MAY have committed, so it is deliberately NOT aborted and
-            // NOT stamped — aborting a possibly-committed move is the double-move bug (ADR-0011).
+            // Ambiguous: the execute MAY have committed, so it is deliberately NOT aborted —
+            // aborting a possibly-committed move is the double-move bug (ADR-0011).
             BusinessOutcomeTelemetry.CommissionCollectionUncertain.Add(1);
             _log.LogError(ex,
-                "settlement.commission.uncertain settlementId={SettlementId} txId={TxId} amount={Amount}; "
-                + "NOT aborted and NOT stamped — reconcile before re-driving.",
-                settlement.Id, transactionId, amount);
+                "commission.accept.uncertain requestId={RequestId} txId={TxId} amount={Amount}; NOT "
+                + "aborted — a re-drive replays the same idempotency key safely.",
+                command.RequestId, transactionId, amount);
             return new CommissionCollectionResult(
                 CommissionCollectionOutcome.Uncertain, amount, transactionId, ex.Message);
         }
 
-        await StampAsync(settlement, transactionId, ct);
-
         BusinessOutcomeTelemetry.CommissionCollected.Add(1);
         _log.LogInformation(
-            "settlement.commission.collected settlementId={SettlementId} deliveryId={DeliveryId} "
-            + "holderId={HolderId} amount={Amount} txId={TxId}",
-            settlement.Id, settlement.DeliveryId, holderId, amount, transactionId);
+            "commission.accept.collected requestId={RequestId} holderId={HolderId} acceptedFee={Fee} "
+            + "amount={Amount} txId={TxId} externalRef={ExternalRef}",
+            command.RequestId, holderId, command.AcceptedFee, amount, transactionId, externalReference);
 
         return new CommissionCollectionResult(
             CommissionCollectionOutcome.Collected, amount, transactionId);
     }
 
-    /// <summary>The durable "already collected" marker. Money has already moved, so a stamp fault is
-    /// logged and counted, never rethrown — it degrades to a reconcilable row, not a lost debit.</summary>
-    private async Task StampAsync(Settlement settlement, Guid transactionId, CancellationToken ct)
+    /// <summary>
+    /// Joins the settlement row to the accept-time debit by wallet-service's opaque external
+    /// reference — a READ plus a first-stamp-wins stamp, never a money move. A row that ends up
+    /// unstamped is precisely a delivery that settled without its fee ever being collected.
+    /// </summary>
+    public async Task LinkSettlementAsync(Settlement settlement, CancellationToken ct)
     {
+        if (!string.IsNullOrWhiteSpace(settlement.WalletTxId)) return;
+
         try
         {
+            var txId = await _wallet.FindByExternalReferenceAsync(
+                ExternalReferenceFor(settlement.DeliveryId), ct);
+            if (txId is null)
+            {
+                BusinessOutcomeTelemetry.CommissionUnlinkedSettlements.Add(1);
+                _log.LogWarning(
+                    "commission.settle.unlinked settlementId={SettlementId} deliveryId={DeliveryId} "
+                    + "commission={Commission}; no accept-time debit carries this delivery's reference, "
+                    + "so this delivery settled with its fee UNCOLLECTED.",
+                    settlement.Id, settlement.DeliveryId, settlement.Total);
+                return;
+            }
+
             var stamped = await _settlements.StampExternalRefAsync(
-                settlement.Id, ExternalRefPrefix + transactionId.ToString("D"), ct);
+                settlement.Id, ExternalRefPrefix + txId.Value.ToString("D"), ct);
             settlement.WalletTxId = stamped?.WalletTxId;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             BusinessOutcomeTelemetry.CommissionStampFailures.Add(1);
             _log.LogError(ex,
-                "settlement.commission.stamp_failed settlementId={SettlementId} txId={TxId}; the fee WAS "
-                + "collected but the settlement row does not record it — reconcile from the wallet ledger.",
-                settlement.Id, transactionId);
+                "commission.settle.link_failed settlementId={SettlementId} deliveryId={DeliveryId}; the "
+                + "settle stands and no money was touched — the audit link can be rebuilt from the ledger.",
+                settlement.Id, settlement.DeliveryId);
         }
     }
 
-    private async Task SafeAbortAsync(Guid transactionId, string settlementId, CancellationToken ct)
+    private CommissionCollectionResult Insufficient(
+        CommissionCollectionCommand command, Guid holderId, decimal amount, Guid transactionId,
+        WalletCommissionDebitException ex)
+    {
+        BusinessOutcomeTelemetry.CommissionCollectionInsufficient.Add(1);
+        _log.LogWarning(ex,
+            "commission.accept.insufficient requestId={RequestId} holderId={HolderId} amount={Amount}; "
+            + "the accept STANDS and the platform fee is UNCOLLECTED.",
+            command.RequestId, holderId, amount);
+        return new CommissionCollectionResult(
+            CommissionCollectionOutcome.InsufficientFunds, amount, transactionId, ex.Message);
+    }
+
+    private async Task SafeAbortAsync(Guid transactionId, string requestId, CancellationToken ct)
     {
         try
         {
@@ -285,9 +345,8 @@ public sealed class WalletCommissionCollector : ICommissionCollector
         catch (Exception ex)
         {
             _log.LogError(ex,
-                "settlement.commission.abort_failed settlementId={SettlementId} txId={TxId}; the pending "
-                + "hold was not released and wallet-service never expires one.",
-                settlementId, transactionId);
+                "commission.accept.abort_failed requestId={RequestId} txId={TxId}; the pending hold was "
+                + "not released and wallet-service never expires one.", requestId, transactionId);
         }
     }
 }

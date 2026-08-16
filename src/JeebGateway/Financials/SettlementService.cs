@@ -307,9 +307,9 @@ public sealed class SettlementService : ISettlementService
         {
             _earningsCache.Invalidate(result.Row.JeeberId);
 
-            // O1 (ADR-0011): take the fee at the settle that freshly booked it. Never throws —
-            // an uncollectable fee leaves a settled delivery and a counter, never an unwound settle.
-            await _commission.CollectAsync(result.Row, ct);
+            // O1 (ADR-0011 + the accept amendment): the fee was taken at ACCEPT, so this moves no
+            // money — it only links the row to that debit, and counts the rows that have none.
+            await _commission.LinkSettlementAsync(result.Row, ct);
 
             return new SettlementResult(SettlementOutcome.Settled, result.Row, null);
         }

@@ -867,6 +867,15 @@ public class DeliveriesController : ControllerBase
                 "AtDoor→Done is reachable only through the handover OTP verify endpoint.");
         }
 
+        // O1: a bare status PATCH to Cancelled bypasses CancellationService, so without this the
+        // retained accept-time fee would be invisible on the least-guarded cancel route of the four.
+        if (string.Equals(canonicalTo, CanonicalDeliveryStatus.Cancelled, StringComparison.Ordinal))
+        {
+            JeebGateway.Financials.CommissionRetention.Observe(
+                _log, deliveryId, preTransitionRow?.JeeberId, preTransitionRow?.AcceptedFee,
+                $"status-patch:{partySource}");
+        }
+
         try
         {
             DeliveryTransitionUpstream upstream;

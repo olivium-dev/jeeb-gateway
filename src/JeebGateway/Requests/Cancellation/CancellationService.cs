@@ -1,3 +1,6 @@
+using JeebGateway.Financials;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Requests.Cancellation;
@@ -160,18 +163,25 @@ public sealed class CancellationService : ICancellationService
     private readonly IJeeberRestrictionStore _restrictions;
     private readonly TimeProvider _clock;
     private readonly CancellationPolicyOptions _policy;
+    private readonly ILogger<CancellationService> _log;
 
     public CancellationService(
         IRequestsStore store,
         IJeeberRestrictionStore restrictions,
         TimeProvider clock,
-        IOptions<CancellationPolicyOptions> policy)
+        IOptions<CancellationPolicyOptions> policy,
+        ILogger<CancellationService>? logger = null)
     {
         _store = store;
         _restrictions = restrictions;
         _clock = clock;
         _policy = policy.Value;
+        _log = logger ?? NullLogger<CancellationService>.Instance;
     }
+
+    /// <summary>O1: cancelling never refunds the accept-time fee. Counted, not reversed.</summary>
+    private void ObserveRetainedCommission(DeliveryRequest? row, string cancelledBy) =>
+        CommissionRetention.Observe(_log, row?.Id, row?.JeeberId, row?.AcceptedFee, cancelledBy);
 
     public async Task<CancellationResult> CancelAsync(
         string deliveryId,
@@ -255,6 +265,8 @@ public sealed class CancellationService : ICancellationService
                 triggered = true;
             }
 
+            ObserveRetainedCommission(storeResult.Request, "jeeber");
+
             return new CancellationResult(
                 CancellationOutcome.CancelledByJeeber,
                 storeResult.Request,
@@ -290,6 +302,8 @@ public sealed class CancellationService : ICancellationService
                         CancellationOutcome.NotCancellable, storeResult.Request, storeResult.PreviousStatus,
                         null, false, null, null);
                 }
+
+                ObserveRetainedCommission(storeResult.Request, "client");
 
                 return new CancellationResult(
                     CancellationOutcome.CancelledImmediately,
@@ -383,6 +397,8 @@ public sealed class CancellationService : ICancellationService
             return new AdminCancellationDecisionResult(
                 AdminCancellationDecisionOutcome.NotPending, existing, existing.Status);
         }
+
+        if (approve) ObserveRetainedCommission(result.Request, "admin");
 
         return new AdminCancellationDecisionResult(
             approve ? AdminCancellationDecisionOutcome.Approved : AdminCancellationDecisionOutcome.Rejected,
