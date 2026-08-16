@@ -124,8 +124,11 @@ gateway's opinion of them changed); no live config, systemd unit or workflow tou
 
 ## 4. Regression cover (round 2, branch `gwdbx/r2-config-legs`)
 
-The three decisions above landed without tests. Both behavioural claims are now pinned, because each
-one is invisible to the obvious check:
+The three decisions above landed without tests. Round 2 wrote cover for both behavioural claims --
+but wrote it into `tests/JeebGateway.IntegrationTests`, **which has not compiled since W5-11**
+(74 errors, byte-identical at the pre-round-2 SHA). See section 5: the claims below were pinned in
+text and dead in practice until round 3 ported the standalone ones. Each is invisible to the
+obvious check:
 
 - `tests/.../Cms/BundlerServiceHealthCheckTests.cs` — an empty `200` is **not** Healthy (with a
   negative control asserting the status line alone reads as success, which is exactly why the old
@@ -144,3 +147,32 @@ The `StoreDurabilityGuard` case in `StateServiceConfigW303Tests.cs` referenced
 could not compile. See the note in `docs/runbooks/gwdbx-program-rules.md` §0 — six other compiled
 test files still carry the same dangling reference, and fixing those is a separate decision because
 it removes durability-guard coverage.
+
+---
+
+## 5. Correction (round 3, branch `gwdbx/r3-executable-guards`)
+
+Section 4 overstated the position. `tests/JeebGateway.IntegrationTests` fails to compile (2x CS0234,
+68x CS0246, 4x CS0535) and has since W5-11, so every guard section 4 lists was written but never
+executed; `tests/JeebGateway.UnitTests` compiles and runs, and held 3 tests. R3-3 ported the guards
+that stand without a host into `tests/JeebGateway.UnitTests`:
+
+- `HostedServiceRetirementGuardTests.cs` -- the freeze-import trio is absent from the gateway
+  assembly by FQN, absent by simple name in **any** namespace (catches a resurrection under a
+  rename), and no `IHostedService` implementation remains in `JeebGateway.StateService.Config`.
+  Each assertion carries an anti-vacuity control, so an emptied or renamed namespace fails rather
+  than passes.
+- `BundlerServiceHealthCheckFailClosedTests.cs` -- empty `200`, non-2xx and transport failure each
+  report the **registered** `FailureStatus` (theory over `Degraded` and `Unhealthy`, so a hardcoded
+  status fails), a non-empty `200` is Healthy whatever the registration says, and the probe dials
+  the store's named client on `health/ready`.
+
+Not ported: the hosted-service ratchet. Its real gate counts `AddHostedService` **source text** in
+`scripts/check-stateless-gateway.sh`; a reflection count of `IHostedService` implementations is a
+different measurement and would stay green while a new registration of an existing type slipped
+through. The `19 -> 18` claim under "Guardrails checked" above remains script-enforced only.
+
+Still not ported (needs a host): the `Every_Rung_Above_Local_Refuses_To_Boot` options-validation
+cases, the `ICmsSurfaceStore` -> `BundlerCmsSurfaceStore` composition case, the health-check
+registration/roster case, and the whole W303 cold-start suite. Those stay dead until the
+integration project compiles.
