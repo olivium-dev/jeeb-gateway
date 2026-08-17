@@ -84,6 +84,38 @@ public class KycQueueItem
 }
 
 /// <summary>
+/// GET /admin/kyc/{id} response — the full admin review surface for one submission.
+/// Composes the kyc-service submission with the gateway user projection (userName)
+/// and self-authorizing tokenized image URLs the CMS renders in an <c>&lt;img&gt;</c>.
+/// </summary>
+public class KycSubmissionDetailResponse
+{
+    public required string Id { get; init; }
+    public required string UserId { get; init; }
+    public string? UserName { get; init; }
+    public required string Status { get; init; }
+    public string? VehicleType { get; init; }
+    public string? VehicleRegistration { get; init; }
+    public string? IdType { get; init; }
+    public string? IdNumber { get; init; }
+    public string? GrantsRole { get; init; }
+    public DateTimeOffset SubmittedAt { get; init; }
+    public required KycEvidenceImageUrls Images { get; init; }
+}
+
+/// <summary>
+/// The three admin-viewable evidence image URLs. Each is either a tokenized
+/// gateway URL (<c>/admin/kyc/{id}/evidence/{slot}?token=</c>) or null when the
+/// submission carries no ref for that slot.
+/// </summary>
+public class KycEvidenceImageUrls
+{
+    public string? IdFront { get; init; }
+    public string? IdBack { get; init; }
+    public string? Selfie { get; init; }
+}
+
+/// <summary>
 /// GET /kyc/status response. Wraps the latest <see cref="KycSubmissionResponse"/>
 /// in an envelope so the contract can grow (history, attempt count) without
 /// breaking the existing mobile client.

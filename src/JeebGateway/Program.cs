@@ -2179,6 +2179,10 @@ builder.Services.AddSingleton<IKycBffSeam, KycBffSeam>();
 builder.Services.AddScoped<JeebGateway.Admin.KycQueueSearch>();
 builder.Services.AddScoped<JeebGateway.Admin.KycAdminReviewComposer>();
 
+// Mints/validates the short-lived HMAC token that self-authorizes an admin KYC
+// evidence image <img> load (GET /admin/kyc/{id}/evidence/{slot}?token=).
+builder.Services.AddSingleton<JeebGateway.Kyc.KycEvidenceTokenService>();
+
 // Users / profile / saved addresses / admin search (T-backend-029).
 // In-memory store for the MVP; production wiring will proxy to auth-service
 // via an NSwag-generated client, backed by the schema in 0001 + 0006.
