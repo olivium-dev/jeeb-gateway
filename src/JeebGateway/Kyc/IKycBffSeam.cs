@@ -129,6 +129,17 @@ public sealed class KycBffSubmissionView
     public DateTimeOffset? TosSignedAt { get; init; }
     public string? TosAcceptedVersion { get; init; }
     public IReadOnlyList<string> ResubmitSteps { get; init; } = Array.Empty<string>();
+
+    // Admin-detail fields (H8 review surface). Sourced from the kyc-service
+    // submission; the image refs are opaque CDN objectRefs, never viewable URLs.
+    public string? VehicleType { get; init; }
+    public string? VehicleRegistration { get; init; }
+    public string? IdType { get; init; }
+    public string? IdNumber { get; init; }
+    public string? GrantsRole { get; init; }
+    public string? IdFrontRef { get; init; }
+    public string? IdBackRef { get; init; }
+    public string? SelfieRef { get; init; }
 }
 
 /// <summary>One pending-review queue item projected for the admin surface.</summary>
@@ -138,6 +149,10 @@ public sealed class KycBffQueueItem
     public required string UserId { get; init; }
     public required string Status { get; init; }
     public DateTimeOffset SubmittedAt { get; init; }
+
+    // Cheap admin-list decoration carried straight off the queue row (kyc-service
+    // returns vehicleType on the list projection); null/empty when absent.
+    public string? VehicleType { get; init; }
 }
 
 public sealed class KycBffQueuePage

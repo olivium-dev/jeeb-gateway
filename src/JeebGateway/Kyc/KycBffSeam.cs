@@ -1,3 +1,4 @@
+using System.Text.Json;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Options;
@@ -148,6 +149,7 @@ public sealed class KycBffSeam : IKycBffSeam
         var view = await _upstream.GetByIdAsync(submissionId, ct);
         if (view is null) return null;
 
+        var doc = view.Document;
         return new KycBffSubmissionView
         {
             SubmissionId = view.SubmissionId,
@@ -159,7 +161,40 @@ public sealed class KycBffSeam : IKycBffSeam
             TosSignedAt = view.TosSignedAt,
             TosAcceptedVersion = view.TosAcceptedVersion,
             ResubmitSteps = view.ResubmitSteps,
+            VehicleType = ReadDocString(doc, "vehicleType"),
+            VehicleRegistration = ReadDocString(doc, "vehicleRegistration"),
+            GrantsRole = ReadDocString(doc, "grantsRole"),
+            IdFrontRef = ReadDocString(doc, "idFrontRef"),
+            IdBackRef = ReadDocString(doc, "idBackRef"),
+            SelfieRef = ReadDocString(doc, "selfieRef"),
+            IdType = ReadMetaString(doc, "id_type", "idType"),
+            IdNumber = ReadMetaString(doc, "id_number", "idNumber"),
         };
+    }
+
+    // The submission's opaque `metadata` bag is where the gateway parks id_type /
+    // id_number (kyc-service has no first-class slot); absent on rows that predate it.
+    private static string? ReadMetaString(JsonElement doc, params string[] names)
+    {
+        if (doc.ValueKind != JsonValueKind.Object
+            || !doc.TryGetProperty("metadata", out var meta)
+            || meta.ValueKind != JsonValueKind.Object)
+            return null;
+        return ReadDocString(meta, names);
+    }
+
+    private static string? ReadDocString(JsonElement element, params string[] names)
+    {
+        if (element.ValueKind != JsonValueKind.Object) return null;
+        foreach (var name in names)
+        {
+            if (element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String)
+            {
+                var s = value.GetString();
+                if (!string.IsNullOrWhiteSpace(s)) return s;
+            }
+        }
+        return null;
     }
 
     public async Task<KycBffQueuePage> GetPendingQueueAsync(int page, int pageSize, CancellationToken ct)
@@ -175,6 +210,7 @@ public sealed class KycBffSeam : IKycBffSeam
                 UserId = i.UserId,
                 Status = i.Status,
                 SubmittedAt = i.SubmittedAt,
+                VehicleType = ReadDocString(i.Document, "vehicleType"),
             }).ToList(),
             Page = queue.Page,
             PageSize = queue.PageSize,
