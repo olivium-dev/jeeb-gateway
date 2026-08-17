@@ -119,12 +119,17 @@ public sealed class AuthEmailFacadeController : ControllerBase
 
         try
         {
+            // ReferralCode is REQUIRED by live user-management (non-null column);
+            // omitting it 400s every signup. Mirrors DevController's working path.
             var res = await _um.RegisterAsync(new RegisterUserRequest
             {
                 Email = body.Email,
                 Password = body.Password,
                 ConfirmPassword = body.Password,
                 Username = string.IsNullOrWhiteSpace(body.Name) ? body.Email : body.Name,
+                ReferralCode = string.IsNullOrWhiteSpace(body.ReferralCode)
+                    ? string.Empty
+                    : body.ReferralCode!.Trim(),
             }, ct);
             return await MintSessionAsync(res?.UserId, res?.Email ?? body.Email, res?.Status, ct);
         }
@@ -357,7 +362,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
 
     // ---- DTOs (mobile DioAuthRepository / social contract) ----
     public sealed class EmailLoginDto { public string? Email { get; set; } public string? Password { get; set; } }
-    public sealed class EmailSignupDto { public string? Email { get; set; } public string? Password { get; set; } public string? Name { get; set; } }
+    public sealed class EmailSignupDto { public string? Email { get; set; } public string? Password { get; set; } public string? Name { get; set; } public string? ReferralCode { get; set; } }
     public sealed class SetPasswordDto { public string? Email { get; set; } public string? Password { get; set; } public string? ResetToken { get; set; } }
     public sealed class RecoveryDto { public string? Email { get; set; } }
     public sealed class RecoveryVerifyDto { public string? Email { get; set; } public string? Code { get; set; } }
