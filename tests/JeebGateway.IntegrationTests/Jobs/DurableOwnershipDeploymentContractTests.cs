@@ -167,6 +167,23 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().NotContain("curl -H \"X-Jeeb-Job-Token: $GATEWAY_JOB_TOKEN");
     }
 
+    [Fact]
+    public void Staging_state_auth_smoke_requires_denied_anonymous_and_successful_authenticated_probes()
+    {
+        var workflow = Workflow("jeeb-staging-state-auth-smoke.yml");
+
+        workflow.Should().Contain("case \"$anonymous\" in 401|403)");
+        workflow.Should().Contain("case \"$authenticated\" in 2??) ;; *)");
+        workflow.Should().NotContain("case \"$authenticated\" in 0|401|403)");
+
+        // Keep the evidence status-only and prove both sides of the authorized restart.
+        workflow.Should().Contain("awk '/  HTTP\\// { code=$2 } END { print code+0 }'");
+        workflow.Should().Contain("remote_probe before_restart");
+        workflow.Should().Contain("remote_probe after_restart");
+        workflow.Should().Contain("[ \"$before_task\" != \"$after_task\" ]");
+        workflow.Should().Contain("service_replicas=1/1");
+    }
+
     private static string Workflow(string name) => File.ReadAllText(Path.Combine(
         FindRepositoryRoot(), ".github", "workflows", name));
 
