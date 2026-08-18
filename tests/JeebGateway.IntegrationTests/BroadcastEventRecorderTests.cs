@@ -11,7 +11,7 @@ namespace JeebGateway.IntegrationTests;
 /// JEB-50 (S05 H9b): unit coverage for the broadcast-event recorder — the
 /// gateway side of the OWNER-DIRECTIVE "broadcast event MUST be LOGGED to the
 /// bundler". Proves it (a) POSTs to the documented route
-/// <c>state/broadcasts</c> with the <c>{contextId, phase, source}</c> body,
+/// <c>v1/state/broadcasts</c> with the <c>{contextId, phase, source}</c> body,
 /// (b) reports <c>Recorded</c> on 2xx, and (c) DEGRADES to <c>Unavailable</c> on
 /// a 5xx / transport failure rather than throwing onto the order create.
 /// </summary>
@@ -26,7 +26,7 @@ public sealed class BroadcastEventRecorderTests
         var outcome = await recorder.RecordBroadcastingAsync("conv-123", "broadcasting", CancellationToken.None);
 
         outcome.Should().Be(BroadcastEventRecordOutcome.Recorded);
-        handler.LastRequestUri!.AbsolutePath.Should().EndWith("/state/broadcasts");
+        handler.LastRequestUri!.AbsolutePath.Should().EndWith("/v1/state/broadcasts");
         handler.LastMethod.Should().Be(HttpMethod.Post);
 
         using var doc = JsonDocument.Parse(handler.LastBody!);

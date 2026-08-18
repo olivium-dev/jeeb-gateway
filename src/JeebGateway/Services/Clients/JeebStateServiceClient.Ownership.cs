@@ -41,12 +41,12 @@ public partial class JeebStateServiceClient : IStateOwnershipClient
 {
     public Task<AuditEventRecordV1> AppendAuditEventAsync(
         AuditEventAppendRequestV1 body, string idempotencyKey, CancellationToken ct) =>
-        PostOwnershipAsync<AuditEventRecordV1>("audit-events", body, idempotencyKey, ct);
+        PostOwnershipAsync<AuditEventRecordV1>("v1/audit-events", body, idempotencyKey, ct);
 
     public Task<AuditEventPageV1> FindAuditEventsAsync(AuditEventQueryV1 query, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query.Application);
-        var path = "audit-events?application=" + Uri.EscapeDataString(query.Application)
+        var path = "v1/audit-events?application=" + Uri.EscapeDataString(query.Application)
             + "&limit=" + Math.Clamp(query.Limit, 1, 200).ToString(CultureInfo.InvariantCulture);
         Add("actorRef", query.ActorRef);
         Add("action", query.Action);
@@ -64,12 +64,12 @@ public partial class JeebStateServiceClient : IStateOwnershipClient
 
     public Task<WorkItemRecordV1> CreateWorkItemAsync(
         WorkItemCreateRequestV1 body, string idempotencyKey, CancellationToken ct) =>
-        PostOwnershipAsync<WorkItemRecordV1>("work-items", body, idempotencyKey, ct);
+        PostOwnershipAsync<WorkItemRecordV1>("v1/work-items", body, idempotencyKey, ct);
 
     public async Task<WorkItemRecordV1?> GetLatestWorkItemAsync(
         string application, string kind, string subjectRef, CancellationToken ct)
     {
-        var path = "work-items/latest?application=" + Uri.EscapeDataString(application)
+        var path = "v1/work-items/latest?application=" + Uri.EscapeDataString(application)
             + "&kind=" + Uri.EscapeDataString(kind)
             + "&subjectRef=" + Uri.EscapeDataString(subjectRef);
         try
@@ -84,19 +84,19 @@ public partial class JeebStateServiceClient : IStateOwnershipClient
 
     public async Task<IReadOnlyList<WorkItemRecordV1>> ClaimWorkItemsAsync(
         WorkClaimRequestV1 body, CancellationToken ct) =>
-        await PostWorkAsync<List<WorkItemRecordV1>>("work-items/claim", body, ct);
+        await PostWorkAsync<List<WorkItemRecordV1>>("v1/work-items/claim", body, ct);
 
     public Task<WorkItemRecordV1> CompleteWorkItemAsync(
         Guid workItemId, WorkCompleteRequestV1 body, CancellationToken ct) =>
-        PostWorkAsync<WorkItemRecordV1>($"work-items/{workItemId:D}/complete", body, ct);
+        PostWorkAsync<WorkItemRecordV1>($"v1/work-items/{workItemId:D}/complete", body, ct);
 
     public Task<WorkItemRecordV1> FailWorkItemAsync(
         Guid workItemId, WorkFailRequestV1 body, CancellationToken ct) =>
-        PostWorkAsync<WorkItemRecordV1>($"work-items/{workItemId:D}/fail", body, ct);
+        PostWorkAsync<WorkItemRecordV1>($"v1/work-items/{workItemId:D}/fail", body, ct);
 
     public Task<WorkItemRecordV1> ConsumeWorkItemAsync(
         Guid workItemId, WorkConsumeRequestV1 body, CancellationToken ct) =>
-        PostWorkAsync<WorkItemRecordV1>($"work-items/{workItemId:D}/consume", body, ct);
+        PostWorkAsync<WorkItemRecordV1>($"v1/work-items/{workItemId:D}/consume", body, ct);
 
     private Task<T> PostWorkAsync<T>(string path, object body, CancellationToken ct)
         where T : class

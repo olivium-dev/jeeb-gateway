@@ -31,8 +31,8 @@ public sealed class StateServiceCredentialHandlerTests : IDisposable
         var capture = new CapturingHandler();
         using var http = Client(path, capture);
 
-        await http.GetAsync("/state/bundles");
-        await http.GetAsync("/state/bundles");
+        await http.GetAsync("/v1/state/bundles");
+        await http.GetAsync("/v1/state/bundles");
 
         capture.AuthorizationHeaders.Should().HaveCount(2);
         capture.AuthorizationHeaders.Should().OnlyContain(h =>
@@ -46,9 +46,9 @@ public sealed class StateServiceCredentialHandlerTests : IDisposable
         var capture = new CapturingHandler();
         using var http = Client(path, capture);
 
-        await http.GetAsync("/state/bundles");
+        await http.GetAsync("/v1/state/bundles");
         File.WriteAllText(path, ValidToken('b'));
-        await http.GetAsync("/state/bundles");
+        await http.GetAsync("/v1/state/bundles");
 
         capture.AuthorizationHeaders[0].Should().NotBe(capture.AuthorizationHeaders[1],
             "the handler must not cache token material, or a rotation needs a restart");
@@ -61,7 +61,7 @@ public sealed class StateServiceCredentialHandlerTests : IDisposable
         var capture = new CapturingHandler();
         using var http = Client(path, capture);
 
-        await http.GetAsync("/state/bundles");
+        await http.GetAsync("/v1/state/bundles");
 
         capture.AuthorizationHeaders.Single().Should().Be("Bearer " + ValidToken());
     }
@@ -74,7 +74,7 @@ public sealed class StateServiceCredentialHandlerTests : IDisposable
         var path = WriteToken(content);
         using var http = Client(path, new CapturingHandler());
 
-        await FluentActions.Awaiting(() => http.GetAsync("/state/bundles"))
+        await FluentActions.Awaiting(() => http.GetAsync("/v1/state/bundles"))
             .Should().ThrowAsync<Exception>();
     }
 
@@ -83,7 +83,7 @@ public sealed class StateServiceCredentialHandlerTests : IDisposable
     {
         using var http = Client(Path.Combine(_dir, "does-not-exist"), new CapturingHandler());
 
-        await FluentActions.Awaiting(() => http.GetAsync("/state/bundles"))
+        await FluentActions.Awaiting(() => http.GetAsync("/v1/state/bundles"))
             .Should().ThrowAsync<Exception>();
     }
 
@@ -93,7 +93,7 @@ public sealed class StateServiceCredentialHandlerTests : IDisposable
         var path = WriteToken(new string('a', 20) + " " + new string('b', 20));
         using var http = Client(path, new CapturingHandler());
 
-        await FluentActions.Awaiting(() => http.GetAsync("/state/bundles"))
+        await FluentActions.Awaiting(() => http.GetAsync("/v1/state/bundles"))
             .Should().ThrowAsync<Exception>();
     }
 
@@ -102,7 +102,7 @@ public sealed class StateServiceCredentialHandlerTests : IDisposable
     {
         using var http = Client("relative/token", new CapturingHandler());
 
-        var act = () => http.GetAsync("/state/bundles");
+        var act = () => http.GetAsync("/v1/state/bundles");
         (await act.Should().ThrowAsync<Exception>()).And.Should().NotBeNull();
     }
 
@@ -123,7 +123,7 @@ public sealed class StateServiceCredentialHandlerTests : IDisposable
         var path = WriteToken(secret);
         using var http = Client(path, new CapturingHandler());
 
-        var thrown = await FluentActions.Awaiting(() => http.GetAsync("/state/bundles"))
+        var thrown = await FluentActions.Awaiting(() => http.GetAsync("/v1/state/bundles"))
             .Should().ThrowAsync<Exception>();
 
         thrown.Which.ToString().Should().NotContain(secret);

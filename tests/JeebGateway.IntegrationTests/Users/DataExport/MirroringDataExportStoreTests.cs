@@ -486,7 +486,7 @@ public class MirroringDataExportStoreTests
         }
     }
 
-    // CAS-faithful stand-in for /work-items: complete needs lease + version, consume needs
+    // CAS-faithful stand-in for /v1/work-items: complete needs lease + version, consume needs
     // application + token hash + version, both bump the version (state-service OwnershipStore).
     private sealed class CasOwnershipClient : IStateOwnershipClient
     {

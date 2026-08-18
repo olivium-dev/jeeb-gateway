@@ -70,7 +70,7 @@ public sealed class StateServiceIdempotencyStore : IExternalIdempotencyStore
         // keep that answer; a bodyless 204 leaves it genuinely unknown, and unknown must
         // fail towards "not inserted" so a reserve-before-act caller does not act twice.
         _log.LogWarning(
-            "state-service PUT /state/idempotency returned {Status} with no usable record "
+            "state-service PUT /v1/state/idempotency returned {Status} with no usable record "
             + "for key {Key}; falling back to read-back (inserted={Inserted})",
             upsert.HttpStatusCode, key, inserted);
 

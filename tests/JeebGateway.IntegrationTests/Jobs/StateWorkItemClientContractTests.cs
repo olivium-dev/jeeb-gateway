@@ -33,7 +33,7 @@ public sealed class StateWorkItemClientContractTests
         handler.Requests.Should().ContainSingle();
         var request = handler.Requests[0];
         request.Method.Should().Be(HttpMethod.Post);
-        request.PathAndQuery.Should().Be("/work-items");
+        request.PathAndQuery.Should().Be("/v1/work-items");
         request.IdempotencyKey.Should().Be("data-export:stable-key");
         using var body = JsonDocument.Parse(request.Body!);
         body.RootElement.GetProperty("application").GetString().Should().Be("jeeb-gateway");
@@ -64,9 +64,9 @@ public sealed class StateWorkItemClientContractTests
         latest.Should().NotBeNull();
         missing.Should().BeNull();
         handler.Requests[0].PathAndQuery.Should().Be(
-            "/work-items/latest?application=jeeb%20gateway&kind=data%2Fexport&subjectRef=sha256%3Asubject%2Fwith%20space");
+            "/v1/work-items/latest?application=jeeb%20gateway&kind=data%2Fexport&subjectRef=sha256%3Asubject%2Fwith%20space");
         handler.Requests[1].PathAndQuery.Should().MatchRegex(
-            "^/work-items/[0-9a-f-]{36}$");
+            "^/v1/work-items/[0-9a-f-]{36}$");
     }
 
     [Fact]
@@ -115,12 +115,12 @@ public sealed class StateWorkItemClientContractTests
         await conflict.Should().ThrowAsync<StateWorkConflictException>();
 
         handler.Requests.Select(request => request.PathAndQuery).Should().Equal(
-            $"/work-items/{item.WorkItemId:D}/lease",
-            $"/work-items/{item.WorkItemId:D}/complete",
-            $"/work-items/{item.WorkItemId:D}/defer",
-            $"/work-items/{item.WorkItemId:D}/fail",
-            $"/work-items/{item.WorkItemId:D}/consume",
-            $"/work-items/{item.WorkItemId:D}/consume");
+            $"/v1/work-items/{item.WorkItemId:D}/lease",
+            $"/v1/work-items/{item.WorkItemId:D}/complete",
+            $"/v1/work-items/{item.WorkItemId:D}/defer",
+            $"/v1/work-items/{item.WorkItemId:D}/fail",
+            $"/v1/work-items/{item.WorkItemId:D}/consume",
+            $"/v1/work-items/{item.WorkItemId:D}/consume");
 
         using var renew = JsonDocument.Parse(handler.Requests[0].Body!);
         renew.RootElement.GetProperty("leaseToken").GetGuid().Should().Be(lease);

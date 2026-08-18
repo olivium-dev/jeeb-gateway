@@ -31,7 +31,7 @@ public partial class JeebStateServiceClient : IStateConfigClient
     public Task<ConfigSurfaceRecordV1> UpsertDraftAsync(
         string surfaceKey, ConfigDraftUpsertRequestV1 body, CancellationToken ct) =>
         SendConfigAsync<ConfigSurfaceRecordV1>(
-            HttpMethod.Put, $"config-surfaces/{Esc(surfaceKey)}/draft", body, null, ct);
+            HttpMethod.Put, $"v1/config-surfaces/{Esc(surfaceKey)}/draft", body, null, ct);
 
     // G-15 — the publish leg is the only mutation that mints a version, so it carries the key.
     public Task<ConfigVersionRecordV1> PublishAsync(
@@ -39,23 +39,23 @@ public partial class JeebStateServiceClient : IStateConfigClient
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKey);
         return SendConfigAsync<ConfigVersionRecordV1>(
-            HttpMethod.Post, $"config-surfaces/{Esc(surfaceKey)}/publish", body, idempotencyKey, ct);
+            HttpMethod.Post, $"v1/config-surfaces/{Esc(surfaceKey)}/publish", body, idempotencyKey, ct);
     }
 
     public Task<ConfigSurfaceRecordV1?> GetSurfaceAsync(
         string application, string surfaceKey, CancellationToken ct) =>
         GetOrNullAsync<ConfigSurfaceRecordV1>(
-            $"config-surfaces/{Esc(surfaceKey)}?application={Esc(application)}", ct);
+            $"v1/config-surfaces/{Esc(surfaceKey)}?application={Esc(application)}", ct);
 
     public Task<ConfigAckRecordV1> UpsertAckAsync(
         string subjectRef, string surfaceKey, ConfigAckUpsertRequestV1 body, CancellationToken ct) =>
         SendConfigAsync<ConfigAckRecordV1>(
-            HttpMethod.Put, $"acks/{Esc(subjectRef)}/{Esc(surfaceKey)}", body, null, ct);
+            HttpMethod.Put, $"v1/acks/{Esc(subjectRef)}/{Esc(surfaceKey)}", body, null, ct);
 
     public Task<ConfigAckRecordV1?> GetAckAsync(
         string application, string subjectRef, string surfaceKey, CancellationToken ct) =>
         GetOrNullAsync<ConfigAckRecordV1>(
-            $"acks/{Esc(subjectRef)}/{Esc(surfaceKey)}?application={Esc(application)}", ct);
+            $"v1/acks/{Esc(subjectRef)}/{Esc(surfaceKey)}?application={Esc(application)}", ct);
 
     private static string Esc(string value) => Uri.EscapeDataString(value);
 

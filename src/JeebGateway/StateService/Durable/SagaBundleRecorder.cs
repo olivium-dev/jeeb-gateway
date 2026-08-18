@@ -99,7 +99,7 @@ public sealed class StateServiceSagaBundleRecorder : ISagaBundleRecorder
 
         try
         {
-            using var response = await _http.PostAsJsonAsync("state/bundles", body, JsonOptions, ct);
+            using var response = await _http.PostAsJsonAsync("v1/state/bundles", body, JsonOptions, ct);
 
             if (response.StatusCode == HttpStatusCode.Conflict)
             {
