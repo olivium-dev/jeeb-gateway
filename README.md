@@ -50,11 +50,11 @@ DB there); it would be a silent financial-read outage anywhere else.
 finished state.** The process still carries in-process state and background work,
 verified on `main` at the time of writing:
 
-- **18** `AddHostedService` registrations across `src/` (19 before ADR-0010 retired
-  `ConfigImportWorker`) against an allowance of
-  **2** in `scripts/check-stateless-gateway.sh`;
-- **37** `AddSingleton` registrations in `Program.cs` that the same gate counts as
-  a local owner/state implementation (24 `InMemory*` store files under `src/`).
+- **18** exact hosted-service types and **28** transitional local-owner/queue types
+  are named in `scripts/stateless-gateway-ownership-roster.txt`;
+- the roster is not an exception budget: `scripts/check-stateless-gateway.sh`
+  rejects any new identity and requires stale rows to be removed when ownership
+  is retired, while its database/UPG arms retain zero allowance.
   Several are still the authoritative leg — `IDataExportStore`,
   `IAccountDeletionStore`, `ITiersStore` (at `TiersMode=local`),
   `IAvailabilityStore` and `IUsersStore` all resolve to a local implementation
@@ -65,9 +65,9 @@ verified on `main` at the time of writing:
   once the flag requires upstream (which is the live MSI value, see the flag
   table above). The in-memory leg is the fallback, not the destination.
 
-`scripts/check-stateless-gateway.sh` is therefore **red by design** on the
-hosted-service and local-store arms. Do not describe this service as fully
-stateless, and do not describe the gwdbx extraction programme as complete. The
+`scripts/check-stateless-gateway.sh` is green only when that exact transitional
+inventory and the zero-database boundary both hold. Do not describe this service
+as fully stateless, and do not describe the gwdbx extraction programme as complete. The
 `jeeb_gateway` database is **not** being dropped (owner directive 2026-08-16); it
 is retained, unread by this service, with a small number of orphaned rows.
 

@@ -12,6 +12,7 @@ fail=0
 # Type names verified NOT to be configuration (BCL/ASP.NET types + one local enum);
 # every addition to this list is re-verified against the binding sites (D1).
 FRAMEWORK_MODE_TYPES="BoundedChannelFullMode
+FileMode
 FullMode
 PushDeliveryMode
 SameSiteMode"

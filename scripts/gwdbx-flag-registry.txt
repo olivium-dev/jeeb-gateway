@@ -75,6 +75,50 @@ SuperLogin:OpenMode                                  setting - # SECURITY: true 
 FailMode                                             setting - # bare *Mode-arm form of WalletGuard:FailMode; the key itself lives in appsettings.json + appsettings.Production.json
 WalletGuard:FailMode                                 setting - # fail-open vs fail-closed when wallet-service is down (was baseline; D1 restates it as a reviewed setting)
 
+# ---- setting: post-program configuration reconciliation (2026-08-18) -------
+# These are current bound options or direct IConfiguration keys, not cutover
+# flags. Secret-bearing names are registered as names only; no value belongs in
+# this file. Users:DataExport:Enabled is approved for the pending staging
+# fail-closed switch in PR #503 so rebasing that PR does not reopen baseline drift.
+AccountDeletionExecution:ActiveDeliveryRetryInterval setting -
+BUNDLER_CMS_BASE_URL                                  setting -
+BUNDLER_CMS_BEARER_TOKEN_FILE                         setting -
+BUNDLER_CMS_NAMESPACE                                 setting -
+CommissionCollection:CurrencyId                       setting -
+CommissionCollection:Enabled                          setting -
+CommissionCollection:Tag                              setting -
+DATA_EXPORT_TOKEN_SIGNING_KEY_FILE                    setting -
+DELIVERY_IMPORT_TOKEN                                 setting -
+DELIVERY_IMPORT_TOKEN_FILE                            setting -
+DELIVERY_SERVICE_TOKEN                                setting -
+DELIVERY_SERVICE_TOKEN_FILE                           setting -
+DurableWorkExecution:LeaseRenewInterval               setting -
+DurableWorkExecution:LeaseSeconds                     setting -
+DurableWorkExecution:MaxBatchSize                     setting -
+DurableWorkExecution:MaxConcurrency                   setting -
+DurableWorkExecution:UnhandledRetryDelay              setting -
+DurableWorkExecution:WorkerId                         setting -
+DurableWorkSweep:Enabled                              setting -
+DurableWorkSweep:Interval                             setting -
+DurableWorkSweep:Kinds                                setting -
+InternalJobAuth:HeaderName                            setting -
+InternalJobAuth:TokenFile                             setting -
+JeebStateService:ServiceTokenFile                     setting -
+KycEvidence:TokenKey                                  setting -
+NOTIFICATION_SERVICE_TOKEN                            setting -
+PRIVATE_ARTIFACT_STORE_BASE_URL                       setting -
+PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE              setting -
+ServiceNotificationClient:DlqAdminToken               setting -
+ServiceNotificationClient:ServiceToken                setting -
+ServiceNotificationClient:ServiceTokenFile            setting -
+Services:Ban:AdminPolicyKey                           setting -
+Services:Delivery:ImportToken                         setting -
+Services:Delivery:ImportTokenFile                     setting -
+Services:Delivery:ServiceToken                        setting -
+Services:Delivery:ServiceTokenFile                    setting -
+Users:DataExport:Enabled                              setting -
+Users:DataExport:SourceUnavailableRetryDelay          setting -
+
 # ---- setting: bound options knobs inventoried by the D1 Configure<T> arm -----
 AdminAuditBackfill:BatchSize                         setting - # W1-04 keyset page size for the admin_actions scan
 AdminAuditBackfill:DryRun                            setting - # W1-04 rehearsal: enumerate + log the plan, POST nothing (default true)
