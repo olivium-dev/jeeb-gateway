@@ -50,8 +50,15 @@ public class DataExportController : ControllerBase
             });
         }
 
-        var record = await _workflow.RequestAsync(userId, format, ct);
-        return StatusCode(StatusCodes.Status202Accepted, ToResponse(record));
+        try
+        {
+            var record = await _workflow.RequestAsync(userId, format, ct);
+            return StatusCode(StatusCodes.Status202Accepted, ToResponse(record));
+        }
+        catch (DataExportDisabledException)
+        {
+            return Disabled();
+        }
     }
 
     [HttpGet]
@@ -64,9 +71,16 @@ public class DataExportController : ControllerBase
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var problem)) return problem;
 
-        var record = await _workflow.GetLatestForUserAsync(userId, ct);
-        if (record is null) return NotFound();
-        return Ok(ToResponse(record));
+        try
+        {
+            var record = await _workflow.GetLatestForUserAsync(userId, ct);
+            if (record is null) return NotFound();
+            return Ok(ToResponse(record));
+        }
+        catch (DataExportDisabledException)
+        {
+            return Disabled();
+        }
     }
 
     // ADR-004 D1: public by design — the unguessable single-use download token IS the
@@ -82,15 +96,22 @@ public class DataExportController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Download(string token, CancellationToken ct)
     {
-        var download = await _workflow.RedeemDownloadAsync(token, ct);
-        if (download is null)
+        try
         {
-            return NotFound();
+            var download = await _workflow.RedeemDownloadAsync(token, ct);
+            if (download is null)
+            {
+                return NotFound();
+            }
+            // The gateway never re-streams export bytes. The capability was
+            // atomically consumed in state-service before this redirect; the
+            // artifact owner minted a short-lived, private, single-use GET URL.
+            return Redirect(download.AbsoluteUri);
         }
-        // The gateway never re-streams export bytes. The capability was
-        // atomically consumed in state-service before this redirect; the
-        // artifact owner minted a short-lived, private, single-use GET URL.
-        return Redirect(download.AbsoluteUri);
+        catch (DataExportDisabledException)
+        {
+            return Disabled();
+        }
     }
 
     private DataExportResponse ToResponse(DataExportRequest r) => new()
@@ -108,4 +129,9 @@ public class DataExportController : ControllerBase
             : null,
         PayloadSizeBytes = r.PayloadSizeBytes
     };
+
+    private ObjectResult Disabled() => Problem(
+        statusCode: StatusCodes.Status503ServiceUnavailable,
+        title: "Data export unavailable",
+        detail: "Data export is disabled in this environment until a compatible private artifact owner is configured.");
 }

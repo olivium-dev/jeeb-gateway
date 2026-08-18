@@ -5,7 +5,7 @@ namespace JeebGateway.IntegrationTests.Jobs;
 
 public sealed class DurableOwnershipDeploymentContractTests
 {
-    private static readonly string[] MountedCredentialTargets =
+    private static readonly string[] ProductionMountedCredentialTargets =
     [
         "jeeb_state_service_token",
         "bundler_cms_bearer_token",
@@ -22,23 +22,55 @@ public sealed class DurableOwnershipDeploymentContractTests
     {
         var workflow = Workflow(workflowName);
 
-        foreach (var target in MountedCredentialTargets)
+        var targets = workflowName == "jeeb-staging-deploy.yml"
+            ? new[]
+            {
+                "jeeb_state_service_token",
+                "bundler_cms_bearer_token",
+                "jeeb_gateway_job_token"
+            }
+            : ProductionMountedCredentialTargets;
+
+        foreach (var target in targets)
             workflow.Should().Contain(target);
 
-        if (workflowName == "jeeb-staging-deploy.yml")
-            workflow.Should().Contain("target=$target_name,mode=0444");
-        else
-            foreach (var target in MountedCredentialTargets)
+        if (workflowName != "jeeb-staging-deploy.yml")
+            foreach (var target in targets)
                 workflow.Should().Contain($"target={target},mode=0444");
 
         workflow.Should().Contain("JeebStateService__ServiceTokenFile");
         workflow.Should().Contain("/run/secrets/jeeb_state_service_token");
         workflow.Should().Contain("BUNDLER_CMS_BEARER_TOKEN_FILE");
-        workflow.Should().Contain("PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE");
-        workflow.Should().Contain("DATA_EXPORT_TOKEN_SIGNING_KEY_FILE");
         workflow.Should().Contain("InternalJobAuth__TokenFile");
         workflow.Should().NotContain("JeebStateService__ServiceToken=");
         workflow.Should().NotContain("InternalJobAuth__Token=");
+
+        if (workflowName == "jeeb-staging-deploy.yml")
+        {
+            workflow.Should().Contain("Users__DataExport__Enabled false");
+            workflow.Should().Contain("remove_secret_target private_artifact_store_bearer_token");
+            workflow.Should().Contain("remove_secret_target data_export_token_signing_key");
+            workflow.Should().NotContain("secrets.PRIVATE_ARTIFACT_STORE_BEARER_TOKEN");
+            workflow.Should().NotContain("secrets.DATA_EXPORT_TOKEN_SIGNING_KEY");
+        }
+        else
+        {
+            workflow.Should().Contain("PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE");
+            workflow.Should().Contain("DATA_EXPORT_TOKEN_SIGNING_KEY_FILE");
+        }
+    }
+
+    [Fact]
+    public void Jeeb_staging_uses_private_state_dns_and_does_not_require_dead_delivery_auth()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+
+        workflow.Should().Contain(
+            "JeebStateService__BaseUrl http://jeeb-staging-jeeb-state-service:8080");
+        workflow.Should().NotContain("JeebStateService__BaseUrl http://192.168.2.20:10073");
+        workflow.Should().NotContain("secrets.DELIVERY_SERVICE_TOKEN");
+        workflow.Should().NotContain("add_rotated_secret \"$delivery_secret_name\"");
+        workflow.Should().Contain("remove_secret_target delivery_service_token");
     }
 
     [Fact]

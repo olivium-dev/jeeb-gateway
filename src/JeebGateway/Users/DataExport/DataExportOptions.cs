@@ -10,6 +10,14 @@ public class DataExportOptions
     public const string SectionName = "Users:DataExport";
 
     /// <summary>
+    /// Environment kill switch for the complete export surface. It defaults on so
+    /// production behaviour is unchanged. Environments without a compatible private
+    /// artifact owner set it false; request, redemption, legacy processing, and durable
+    /// execution then stop before any state or artifact owner call.
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
     /// Maximum time between queueing a request and delivering the
     /// download link. AC: "Secure download link sent via email/push
     /// within 72 hours."

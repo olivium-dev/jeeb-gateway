@@ -175,6 +175,7 @@ public class GatewayDbProbeEndpointTests
         var probeConfig = new Dictionary<string, string?>
         {
             ["ServiceNotificationClient:BaseUrl"] = "http://notif.test/",
+            ["ServiceNotificationClient:ServiceToken"] = "notification-probe-token-not-secret",
             ["Services:Geolocation:BaseUrl"] = "http://geo.test/",
             ["Services:UnifiedPayment:BaseUrl"] = "http://pay.test/",
             ["Services:Realtime:BaseUrl"] = "http://realtime.test/",
