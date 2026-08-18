@@ -40,17 +40,17 @@ public class RedisFailClosedBootGuardTests
     private const string ProdJwtKey = "w3-01-production-boot-signing-key-32+chars";
 
     /// <summary>A25 — the shipped Production config must carry NO Redis endpoint: a baked-in value
-    /// satisfies EnsureWired's set/non-placeholder check wherever it points, so the decommissioned
-    /// host that sat here armed the guard against a black hole.</summary>
+    /// satisfies EnsureWired's set/non-placeholder check wherever it points, so an environment-specific
+    /// LAN host would arm the guard against a future black hole.</summary>
     [Fact]
-    public void Production_Config_Commits_No_Redis_Endpoint_And_No_Decommissioned_Host()
+    public void Production_Config_Commits_No_Redis_Endpoint_And_No_Lan_Host()
     {
         var path = Path.Combine(
             FindRepoRoot(), "src", "JeebGateway", "appsettings.Production.json");
         var raw = File.ReadAllText(path);
 
         raw.Should().NotContain("192.168.2.20",
-            "the .20 box is decommissioned (A25); no committed config may reference it");
+            "the active staging address is environment-specific (A25); no committed production config may reference it");
 
         using var doc = JsonDocument.Parse(raw);
         if (doc.RootElement.TryGetProperty("Redis", out var redis)

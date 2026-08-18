@@ -12,10 +12,10 @@
 # restart the unit — a restart mid-delivery strands settlement, and the restart leg is
 # V-2's to schedule against the freeze calendar, not the test author's to fire.
 #
-# IT ALSO NEVER TOUCHES 192.168.2.20. Owner rule 2026-07-23: "Never use .20" — no
-# direct psql, no direct DB query, from anywhere. That rule is why the row-level half
-# of W1.8's claim is reported below as NOT PROVEN rather than quietly checked with a
-# SELECT. See the NOT-PROVEN block at the end for the sanctioned substitute.
+# IT ALSO NEVER TOUCHES 192.168.2.20. The host is active Jeeb staging as of 2026-08-18,
+# but this read-only MSI probe is not an approved staging deployment or database tool.
+# That scope is why the row-level half of W1.8's claim is reported below as NOT PROVEN
+# rather than quietly checked with a SELECT. See the NOT-PROVEN block at the end.
 #
 # AND IT NEVER TOUCHES 192.168.2.50. Nothing here resolves, dials or names it as a
 # target; P5 asserts the live env file is clean of it.
@@ -258,8 +258,8 @@ cat <<'NOTPROVEN'
   RESOLVED ISettlementLedgerClient to PostgresSettlementLedgerClient (P2 — a live
   concrete-type read, not an array length). It does NOT prove a row was written and
   read back. Executing SQL would require either Testcontainers (needs Docker, banned)
-  or psql against 192.168.2.20 (owner rule 2026-07-23: "Never use .20" — forbidden
-  from anywhere, including from MSI). No SELECT is run and none should be.
+  or psql against the active staging datastore at 192.168.2.20, which is outside
+  this read-only MSI probe's scope. No SELECT is run and none should be.
 
   THE SANCTIONED SUBSTITUTE, for whoever schedules the live round:
     1. drive ONE COD delivery to settled (real flow, no API-driving);

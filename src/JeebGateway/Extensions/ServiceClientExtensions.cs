@@ -522,7 +522,8 @@ public static class ServiceClientExtensions
         heartBeatBuilder.AddResilienceHandler("standard", ConfigureStandardResilience);
 
         // role-service RETIRED 2026-08-16 (owner O8). It WAS live (flag true 2026-08-09..08-16)
-        // until its DB died with 192.168.2.20 and 500'd /v1/users/me (D1). Roles are UM's. Do NOT re-add.
+        // until its DB became unavailable when 192.168.2.20 was decommissioned and 500'd /v1/users/me (D1).
+        // The host was reactivated for staging on 2026-08-18; role-service remains retired. Roles are UM's. Do NOT re-add.
 
         // settlement-service — gwdbx W2-R11. Unversioned routes (A21 §4). Breaker + timeout, NO
         // transport retry on a money POST (ServiceWalletClient precedent); completion legs re-drive.

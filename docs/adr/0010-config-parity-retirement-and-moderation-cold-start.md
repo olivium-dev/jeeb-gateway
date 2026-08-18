@@ -110,8 +110,9 @@ form-builder-service already get.
 
 **Consequence to expect at the next deploy:** once the owner points `BUNDLER_CMS_BASE_URL` at
 `127.0.0.1`, `/health/aggregate` will report `"status":"Degraded"` with `bundler-service` in
-`failing[]`. That is the probe working. bundler's database still points at the decommissioned
-`192.168.2.20`; rehoming it is an owner action outside this programme.
+`failing[]`. That is the probe working. `192.168.2.20` was reactivated as the Jeeb staging host on
+2026-08-18, but the retired bundler database was not restored; rehoming it remains a separate owner
+action outside this programme.
 
 ## Guardrails checked
 

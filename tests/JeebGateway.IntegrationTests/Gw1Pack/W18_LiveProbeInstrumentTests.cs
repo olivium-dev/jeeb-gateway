@@ -53,8 +53,8 @@ namespace JeebGateway.IntegrationTests.Gw1Pack;
 ///
 /// <para><b>Still NOT PROVEN by anything here, and no green below is evidence of it:</b>
 /// that a ledger ROW is written to and read back from Postgres. That needs SQL execution.
-/// Testcontainers needs Docker (banned) and direct <c>psql</c> to the datastore box
-/// <c>192.168.2.20</c> is forbidden by owner rule. S5 identifies the one
+/// Testcontainers needs Docker (banned) and direct <c>psql</c> to the active staging datastore
+/// <c>192.168.2.20</c> is outside this test's scope. S5 identifies the one
 /// <b>sanctioned</b> signal that does prove it — a journal line only the durable client
 /// can emit — and makes that grep attributable.</para>
 /// </summary>
