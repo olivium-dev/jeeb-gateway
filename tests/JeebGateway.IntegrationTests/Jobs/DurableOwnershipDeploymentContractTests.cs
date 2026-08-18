@@ -74,6 +74,38 @@ public sealed class DurableOwnershipDeploymentContractTests
     }
 
     [Fact]
+    public void Jeeb_staging_uses_verified_owner_dns_on_the_shared_overlay()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+
+        workflow.Should().Contain("network=jeeb-staging-net");
+        workflow.Should().Contain(
+            "WalletServiceApi__BaseUrl http://jeeb-staging-wallet-service:8080/");
+        workflow.Should().Contain(
+            "ServiceNotificationClient__BaseUrl http://jeeb-staging-notification:8000/");
+        workflow.Should().Contain("stale_gateway_network=jeeb-net");
+        workflow.Should().Contain(
+            "network_update_args+=(--network-rm \"$stale_gateway_network\")");
+
+        workflow.Should().NotContain("wallet_network");
+        workflow.Should().NotContain("http://wallet-service:8080");
+        workflow.Should().NotContain("jeeb-staging-notification-service");
+        workflow.Should().NotContain("WalletServiceApi__BaseUrl http://192.168.2.20");
+        workflow.Should().NotContain("ServiceNotificationClient__BaseUrl http://192.168.2.20");
+        workflow.Should().NotContain("11026");
+    }
+
+    [Fact]
+    public void Jeeb_staging_removes_the_retired_payment_gateway_destination()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+
+        workflow.Should().Contain("retired_gateway_env=(UnifiedPaymentGateway__BaseUrl)");
+        workflow.Should().Contain("\"${retired_gateway_env[@]}\"");
+        workflow.Should().Contain("env_remove_args+=(--env-rm \"$stale_env\")");
+    }
+
+    [Fact]
     public void Scheduled_executor_uses_loopback_exact_contract_and_never_places_token_in_ssh_argv()
     {
         var workflow = Workflow("durable-work-sweep.yml");
