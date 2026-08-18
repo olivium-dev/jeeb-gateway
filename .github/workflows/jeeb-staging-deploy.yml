@@ -171,8 +171,8 @@ jobs:
           export DOCKER_CONFIG="$REMOTE_DOCKER_CONFIG"
           trap 'rm -rf "$DOCKER_CONFIG"' EXIT
           network=jeeb-staging-net
-          wallet_network=''
           mount_args=()
+          network_update_args=()
           secret_update_args=()
           secret_create_args=()
           update_env=()
@@ -182,7 +182,6 @@ jobs:
           case "$REPOSITORY" in
             jeeb-gateway)
               service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
-              wallet_network=jeeb-net
               : "${JWT_SIGNING_KEY:?JEEB_JWT_SIGNING_KEY is required}"
               add_env ASPNETCORE_ENVIRONMENT Staging
               add_env ASPNETCORE_URLS http://+:8080
@@ -272,12 +271,13 @@ jobs:
               add_env RemoteUserPreferencesServiceApi__BaseUrl http://192.168.2.20:10067/
               add_env FeedbackServiceApi__BaseUrl http://192.168.2.20:10064
               add_env UserManagementServiceApi__BaseUrl http://192.168.2.20:10001/
-              # Wallet is internal-only. The gateway joins wallet's private overlay below and
-              # resolves it by Swarm DNS; no LAN-published wallet port or service-auth header.
-              add_env WalletServiceApi__BaseUrl http://wallet-service:8080/
+              # Wallet and notification are internal-only. Both owners share the staging overlay
+              # with the gateway and are addressed by their verified Swarm service names and
+              # target ports; no LAN-published owner port is part of this contract.
+              add_env WalletServiceApi__BaseUrl http://jeeb-staging-wallet-service:8080/
               add_env ServiceOTPApi__BaseUrl http://192.168.2.20:10037
               add_env ChatServiceApi__BaseUrl http://192.168.2.20:10028
-              add_env ServiceNotificationClient__BaseUrl http://192.168.2.20:11026
+              add_env ServiceNotificationClient__BaseUrl http://jeeb-staging-notification:8000/
               add_env PushNotificationServiceApi__BaseUrl http://192.168.2.20:10040
               ;;
             delivery-service)
@@ -368,27 +368,33 @@ jobs:
           docker pull "$IMAGE"
           docker network create --driver overlay --attachable "$network" 2>/dev/null || true
           [ "$(docker network inspect -f '{{.Driver}}' "$network")" = overlay ]
-          if [ -n "$wallet_network" ]; then
-            docker network create --driver overlay --attachable "$wallet_network" 2>/dev/null || true
-            [ "$(docker network inspect -f '{{.Driver}}' "$wallet_network")" = overlay ]
-          fi
+          network_id=$(docker network inspect --format '{{.Id}}' "$network")
           common=(--limit-cpu 0.75 --limit-memory 768M --reserve-cpu 0.10 --reserve-memory 64M
             --log-driver json-file --log-opt max-size=10m --log-opt max-file=3
             --update-order stop-first --update-failure-action rollback
             --rollback-order stop-first --update-monitor 20s)
           if docker service inspect "$service" >/dev/null 2>&1; then
-            if [ -n "$wallet_network" ] && ! docker service inspect "$service" \
+            if ! docker service inspect "$service" \
               --format '{{range .Spec.TaskTemplate.Networks}}{{.Target}} {{end}}' | \
-              grep -q "$(docker network inspect --format '{{.Id}}' "$wallet_network")"; then
-              docker service update --network-add "$wallet_network" "$service"
+              grep -Fq "$network_id"; then
+              network_update_args+=(--network-add "$network")
+            fi
+            if [ "$REPOSITORY" = jeeb-gateway ]; then
+              stale_gateway_network=jeeb-net
+              stale_gateway_network_id=$(docker network inspect \
+                --format '{{.Id}}' "$stale_gateway_network" 2>/dev/null || true)
+              if [ -n "$stale_gateway_network_id" ] && docker service inspect "$service" \
+                --format '{{range .Spec.TaskTemplate.Networks}}{{.Target}} {{end}}' | \
+                grep -Fq "$stale_gateway_network_id"; then
+                network_update_args+=(--network-rm "$stale_gateway_network")
+              fi
             fi
             docker service update --image "$IMAGE" --with-registry-auth \
+              "${network_update_args[@]}" \
               "${secret_update_args[@]}" "${env_remove_args[@]}" \
               "${update_env[@]}" "${common[@]}" "$service"
           else
-            network_args=(--network "$network")
-            [ -z "$wallet_network" ] || network_args+=(--network "$wallet_network")
-            docker service create --name "$service" --replicas 1 "${network_args[@]}" \
+            docker service create --name "$service" --replicas 1 --network "$network" \
               --publish "published=$published,target=$target,mode=host" \
               --with-registry-auth "${mount_args[@]}" "${secret_create_args[@]}" "${create_env[@]}" \
               "${common[@]}" "$IMAGE"
