@@ -58,6 +58,20 @@ namespace JeebGateway.Services
             if (string.IsNullOrEmpty(tag) || !Guid.TryParse(tag, out var tagGuid))
                 return null;
 
+            // Catalog enrichment is optional. Some fleets intentionally do not deploy a
+            // catalog owner, so the generated client has no absolute destination. Calling
+            // ItemGETAsync in that state constructs a relative URI and HttpClient throws
+            // before an ApiException exists for the catch below to handle.
+            // NSwag appends '/' to every non-empty constructor value, including a
+            // whitespace-only value, so trim that generated suffix before testing.
+            if (string.IsNullOrWhiteSpace(_catalogClient.BaseUrl?.TrimEnd('/')))
+            {
+                _logger.LogDebug(
+                    "Catalog enrichment skipped for tag {Tag}: CatalogServiceApi:BaseUrl is not configured",
+                    tag);
+                return null;
+            }
+
             try
             {
                 return await _catalogClient.ItemGETAsync(tagGuid, cancellationToken);

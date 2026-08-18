@@ -171,7 +171,11 @@ jobs:
           export DOCKER_CONFIG="$REMOTE_DOCKER_CONFIG"
           trap 'rm -rf "$DOCKER_CONFIG"' EXIT
           network=jeeb-staging-net
-          retired_gateway_env=(UnifiedPaymentGateway__BaseUrl)
+          retired_gateway_env=(
+            UnifiedPaymentGateway__BaseUrl
+            Services__Compliment__BaseUrl
+            ServiceOTPApi__BaseUrl
+          )
           mount_args=()
           network_update_args=()
           secret_update_args=()
@@ -256,6 +260,12 @@ jobs:
               add_env FeatureFlags__UseUpstream__RemoteUserPreferences true
               add_env FeatureFlags__UseUpstream__Ratings true
               add_env FeatureFlags__UseUpstream__Ban true
+              # These upstreams are reachable, but their dormant gateway surfaces are not
+              # part of this staging cutover. Keep the kill switches explicitly off while
+              # wiring the real typed clients so a future enablement cannot inherit a stale
+              # alias or localhost fallback.
+              add_env FeatureFlags__UseUpstream__Otp false
+              add_env FeatureFlags__UseUpstream__Compliment false
               # The existing gateway deploy is native and uses host loopback.
               # This staging gateway is containerized, so retain the same fleet
               # endpoints through the staging host's LAN address instead.
@@ -264,7 +274,7 @@ jobs:
               add_env Services__VoiceTranscription__BaseUrl http://192.168.2.20:10062
               add_env Services__Offer__BaseUrl http://192.168.2.20:10063
               add_env Services__Cdn__BaseUrl http://192.168.2.20:10072
-              add_env Services__Compliment__BaseUrl http://192.168.2.20:10036
+              add_env ComplimentServiceApi__BaseUrl http://192.168.2.20:10036
               add_env Services__Realtime__BaseUrl http://192.168.2.20:10069
               add_env Services__ContractSigning__BaseUrl http://192.168.2.20:10071
               add_env Services__FormBuilder__BaseUrl http://192.168.2.20:10070
@@ -272,12 +282,15 @@ jobs:
               add_env Services__Ban__BaseUrl http://192.168.2.20:10065
               add_env RemoteUserPreferencesServiceApi__BaseUrl http://192.168.2.20:10067/
               add_env FeedbackServiceApi__BaseUrl http://192.168.2.20:10064
+              # No catalog service is deployed in this fleet. Override the base-file
+              # localhost development default so optional technician enrichment is skipped.
+              add_env CatalogServiceApi__BaseUrl ''
               add_env UserManagementServiceApi__BaseUrl http://192.168.2.20:10001/
               # Wallet and notification are internal-only. Both owners share the staging overlay
               # with the gateway and are addressed by their verified Swarm service names and
               # target ports; no LAN-published owner port is part of this contract.
               add_env WalletServiceApi__BaseUrl http://jeeb-staging-wallet-service:8080/
-              add_env ServiceOTPApi__BaseUrl http://192.168.2.20:10037
+              add_env Services__ServiceOTP__BaseUrl http://192.168.2.20:10037
               add_env ChatServiceApi__BaseUrl http://192.168.2.20:10028
               add_env ServiceNotificationClient__BaseUrl http://jeeb-staging-notification:8000/
               add_env PushNotificationServiceApi__BaseUrl http://192.168.2.20:10040
