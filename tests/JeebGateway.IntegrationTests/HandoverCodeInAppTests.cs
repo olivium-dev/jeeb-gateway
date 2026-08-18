@@ -45,6 +45,12 @@ public class HandoverCodeInAppTests
     private const double PickupLat = 33.5138;
     private const double PickupLng = 36.2765;
     private const string TenantApplicationId = "17f6f47f-4047-4f1e-bac2-632a5eaa9a46";
+    private static readonly Regex W3CTraceParent = new(
+        @"\b[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\b",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex CanonicalGuid = new(
+        @"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     // ----- 1) Owner's accept response carries a 4-digit handoverCode -----------
 
@@ -134,8 +140,23 @@ public class HandoverCodeInAppTests
         //     the capture is provably non-empty — yet the code appears in NONE of it.
         logs.Records.Should().Contain(r => r.Message.Contains("handover.verified"),
             "sanity: the log capture must actually be recording controller logs");
-        logs.Records.Should().NotContain(r => r.Message.Contains(handoverCode!),
+        logs.Records.Should().NotContain(
+            r => ContainsOutsideOpaqueIdentifiers(r.Message, handoverCode!),
             "the handover code must never appear in a log line");
+    }
+
+    [Fact]
+    public void LogLeakCheck_IgnoresOpaqueIdentifiers_ButStillDetectsTheRawCode()
+    {
+        const string code = "8697";
+        const string opaqueIdentifiers =
+            "correlationId=00-5ee88f1616a22ea01e983b4edb4d8a5e-12e8486975fc14af-01 "
+            + "deliveryId=a1b63717-f8ef-4eca-8697-9cf371a3c113";
+
+        ContainsOutsideOpaqueIdentifiers(opaqueIdentifiers, code).Should().BeFalse(
+            "random trace and entity identifiers are not the handover secret");
+        ContainsOutsideOpaqueIdentifiers($"handoverCode={code}", code).Should().BeTrue(
+            "a genuinely logged handover code must still fail the leak guard");
     }
 
     // ----- 2b) Phone-present + SMS/jeeb-otp 502 -> trigger 200 + in-app code ----
@@ -479,5 +500,12 @@ public class HandoverCodeInAppTests
                 }
             }
         }
+    }
+
+    private static bool ContainsOutsideOpaqueIdentifiers(string message, string value)
+    {
+        var withoutTraceIds = W3CTraceParent.Replace(message, string.Empty);
+        var withoutOpaqueIds = CanonicalGuid.Replace(withoutTraceIds, string.Empty);
+        return withoutOpaqueIds.Contains(value, StringComparison.Ordinal);
     }
 }
