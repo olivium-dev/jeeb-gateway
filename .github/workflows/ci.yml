@@ -80,6 +80,9 @@ jobs:
 
   build-and-test:
     runs-on: ubuntu-latest
+    env:
+      TEST_SHARD_A_M: '(FullyQualifiedName~JeebGateway.IntegrationTests.A|FullyQualifiedName~JeebGateway.IntegrationTests.B|FullyQualifiedName~JeebGateway.IntegrationTests.C|FullyQualifiedName~JeebGateway.IntegrationTests.D|FullyQualifiedName~JeebGateway.IntegrationTests.E|FullyQualifiedName~JeebGateway.IntegrationTests.F|FullyQualifiedName~JeebGateway.IntegrationTests.G|FullyQualifiedName~JeebGateway.IntegrationTests.H|FullyQualifiedName~JeebGateway.IntegrationTests.I|FullyQualifiedName~JeebGateway.IntegrationTests.J|FullyQualifiedName~JeebGateway.IntegrationTests.K|FullyQualifiedName~JeebGateway.IntegrationTests.L|FullyQualifiedName~JeebGateway.IntegrationTests.M)'
+      TEST_SHARD_REMAINDER: '(FullyQualifiedName!~JeebGateway.IntegrationTests.A&FullyQualifiedName!~JeebGateway.IntegrationTests.B&FullyQualifiedName!~JeebGateway.IntegrationTests.C&FullyQualifiedName!~JeebGateway.IntegrationTests.D&FullyQualifiedName!~JeebGateway.IntegrationTests.E&FullyQualifiedName!~JeebGateway.IntegrationTests.F&FullyQualifiedName!~JeebGateway.IntegrationTests.G&FullyQualifiedName!~JeebGateway.IntegrationTests.H&FullyQualifiedName!~JeebGateway.IntegrationTests.I&FullyQualifiedName!~JeebGateway.IntegrationTests.J&FullyQualifiedName!~JeebGateway.IntegrationTests.K&FullyQualifiedName!~JeebGateway.IntegrationTests.L&FullyQualifiedName!~JeebGateway.IntegrationTests.M)'
 
     steps:
       - uses: actions/checkout@v4
@@ -108,8 +111,37 @@ jobs:
       - name: Restore test project (locked)
         run: dotnet restore tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj --locked-mode
 
-      - name: Test
-        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal --logger "trx;LogFileName=tests.trx" --filter "Quarantine!=timeout-flake"
+      - name: Build test project
+        run: dotnet build tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore
+
+      - name: Verify test shards are disjoint and exhaustive
+        run: |
+          set -euo pipefail
+          count_tests() {
+            dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj \
+              -c Release --no-build --no-restore --list-tests --verbosity quiet "$@" \
+              | awk 'seen && /^    / { count++ } /The following Tests are available:/ { seen=1 } END { print count+0 }'
+          }
+
+          all_count=$(count_tests)
+          a_m_count=$(count_tests --filter "$TEST_SHARD_A_M")
+          remainder_count=$(count_tests --filter "$TEST_SHARD_REMAINDER")
+          shard_sum=$((a_m_count + remainder_count))
+
+          if (( all_count == 0 || a_m_count == 0 || remainder_count == 0 || shard_sum != all_count )); then
+            echo "::error::Test shard coverage failed: all=$all_count A-M=$a_m_count remainder=$remainder_count sum=$shard_sum"
+            exit 1
+          fi
+          echo "OK: test shards are disjoint and exhaustive (all=$all_count A-M=$a_m_count remainder=$remainder_count)."
+
+      # Separate VSTest processes bound each shard's host/resource lifetime. A
+      # single process previously received runner shutdown after thousands of
+      # WebApplicationFactory cases even though no assertion had failed.
+      - name: Test shard A-M
+        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-build --no-restore --verbosity normal --logger "trx;LogFileName=tests-a-m.trx" --filter "(Quarantine!=timeout-flake)&$TEST_SHARD_A_M"
+
+      - name: Test shard remainder
+        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-build --no-restore --verbosity normal --logger "trx;LogFileName=tests-remainder.trx" --filter "(Quarantine!=timeout-flake)&$TEST_SHARD_REMAINDER"
 
       # Quarantined repeat timeout-flake victims still run, but cannot poison the merge baseline.
       - name: Quarantined timeout flakes (non-gating)
