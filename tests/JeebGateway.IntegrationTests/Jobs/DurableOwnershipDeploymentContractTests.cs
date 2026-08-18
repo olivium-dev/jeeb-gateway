@@ -100,9 +100,30 @@ public sealed class DurableOwnershipDeploymentContractTests
     {
         var workflow = Workflow("jeeb-staging-deploy.yml");
 
-        workflow.Should().Contain("retired_gateway_env=(UnifiedPaymentGateway__BaseUrl)");
+        workflow.Should().Contain("UnifiedPaymentGateway__BaseUrl");
         workflow.Should().Contain("\"${retired_gateway_env[@]}\"");
         workflow.Should().Contain("env_remove_args+=(--env-rm \"$stale_env\")");
+    }
+
+    [Fact]
+    public void Jeeb_staging_wires_dormant_typed_clients_without_enabling_them()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+
+        workflow.Should().Contain(
+            "add_env Services__ServiceOTP__BaseUrl http://192.168.2.20:10037");
+        workflow.Should().Contain(
+            "add_env ComplimentServiceApi__BaseUrl http://192.168.2.20:10036");
+        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Otp false");
+        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Compliment false");
+        workflow.Should().Contain("add_env CatalogServiceApi__BaseUrl ''");
+
+        workflow.Should().NotContain(
+            "add_env ServiceOTPApi__BaseUrl http://192.168.2.20:10037");
+        workflow.Should().NotContain(
+            "add_env Services__Compliment__BaseUrl http://192.168.2.20:10036");
+        workflow.Should().Contain("ServiceOTPApi__BaseUrl");
+        workflow.Should().Contain("Services__Compliment__BaseUrl");
     }
 
     [Fact]
