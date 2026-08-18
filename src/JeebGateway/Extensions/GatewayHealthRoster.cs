@@ -8,7 +8,8 @@ namespace JeebGateway.Extensions;
 public static class GatewayHealthRoster
 {
     /// <summary>Probes registered by <see cref="HealthCheckExtensions"/> (skipped in Dev/Testing
-    /// and when the BaseUrl key is unset), with the config key each one keys off.</summary>
+    /// and when the BaseUrl key is unset), with the config key each one keys off. The
+    /// settlement-service entry is unconditional in Staging.</summary>
     public static readonly (string Name, string BaseUrlKey)[] DownstreamProbes =
     {
         ("wallet-service", "WalletServiceApi:BaseUrl"),

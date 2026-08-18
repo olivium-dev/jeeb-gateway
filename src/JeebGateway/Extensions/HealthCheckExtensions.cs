@@ -39,8 +39,9 @@ public static class HealthCheckExtensions
     /// <summary>
     /// Adds a URL-group readiness probe per deployed upstream service. The BaseUrl
     /// keys match <see cref="ServiceClientExtensions.AddDownstreamClients"/>. An
-    /// unset BaseUrl skips the probe entirely (the service is not aggregated in
-    /// this environment).
+    /// unset BaseUrl skips the generic probe (the service is not aggregated in
+    /// that environment). Staging is the deliberate exception: its mandatory
+    /// settlement-owner gate is always registered and fails closed on missing config.
     ///
     /// In the Development and Testing environments the hard-fail downstream probes
     /// are NOT registered: those environments carry localhost dev-default BaseUrls
@@ -83,9 +84,26 @@ public static class HealthCheckExtensions
         AddDownstreamProbe(checks, config, "geolocation-service",     "Services:Geolocation:BaseUrl",     healthPath: "health");
         AddDownstreamProbe(checks, config, "offer-service",           "Services:Offer:BaseUrl",           healthPath: "health");
         AddDownstreamProbe(checks, config, "ban-service",             "Services:Ban:BaseUrl",             healthPath: "health");
-        // gwdbx W2-R11: settlement-service owns the money rows the gateway used to hold. Unhealthy
-        // (not Degraded) — there is no local fallback left, so an unreachable one is not ready.
-        AddDownstreamProbe(checks, config, "settlement-service",      "Services:Settlement:BaseUrl",      healthPath: "health/ready");
+        // gwdbx W2-R11: settlement-service owns the money rows the gateway used to hold. In
+        // Staging this gate is registered unconditionally and validates BOTH the mounted SERVICE
+        // credential and the exact upstream readiness route, so omitted config cannot disappear
+        // from the roster and false-green the gateway. Other environments retain the URL probe.
+        if (environment.IsStaging())
+        {
+            services.Configure<JeebGateway.Financials.SettlementServiceOptions>(
+                config.GetSection(JeebGateway.Financials.SettlementServiceOptions.SectionName));
+            services.AddHttpClient(
+                JeebGateway.Financials.SettlementServiceReadinessHealthCheck.HttpClientName,
+                http => http.Timeout = TimeSpan.FromSeconds(5));
+            checks.AddCheck<JeebGateway.Financials.SettlementServiceReadinessHealthCheck>(
+                "settlement-service",
+                failureStatus: HealthStatus.Unhealthy,
+                tags: new[] { "ready", "downstream" });
+        }
+        else
+        {
+            AddDownstreamProbe(checks, config, "settlement-service", "Services:Settlement:BaseUrl", healthPath: "health/ready");
+        }
 
         // bundler-service is NOT a URL-group probe. A Host-matching reverse proxy answers 200 with an
         // empty body on every path when no site block matches, so a status code alone cannot fail.

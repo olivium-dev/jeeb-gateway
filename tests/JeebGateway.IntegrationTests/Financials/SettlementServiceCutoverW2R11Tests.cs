@@ -177,6 +177,77 @@ public class SettlementServiceCutoverW2R11Tests
         registered.Should().BeEquivalentTo(GatewayHealthRoster.DownstreamProbes.Select(p => p.Name));
     }
 
+    [Fact]
+    public async Task C5_Staging_Registers_An_Unhealthy_Settlement_Check_When_Config_Is_Missing()
+    {
+        var report = await ProbeStagingSettlementServiceAsync(
+            new Dictionary<string, string?>());
+
+        report.Status.Should().Be(HealthStatus.Unhealthy,
+            "the mandatory owner must not disappear from staging readiness when config is omitted");
+    }
+
+    [Fact]
+    public async Task C6_Staging_Readiness_Requires_The_Mounted_Service_Credential()
+    {
+        await using var upstream = await StubSettlementServiceAsync();
+        var report = await ProbeStagingSettlementServiceAsync(new Dictionary<string, string?>
+        {
+            [SettlementServiceOptions.BaseUrlKey] = upstream.Urls.Single(),
+        });
+
+        report.Status.Should().Be(HealthStatus.Unhealthy);
+        upstream.Hits.Should().BeEmpty(
+            "credential validation happens before the gateway calls the owner");
+    }
+
+    [Fact]
+    public async Task C7_Staging_Readiness_Authenticates_The_Exact_Owner_Probe()
+    {
+        await using var upstream = await StubSettlementServiceAsync();
+        var directory = Directory.CreateTempSubdirectory("settlement-readiness-token");
+        try
+        {
+            var token = new string('s', 40);
+            var path = Path.Combine(directory.FullName, "token");
+            await File.WriteAllTextAsync(path, token + "\n");
+            var report = await ProbeStagingSettlementServiceAsync(new Dictionary<string, string?>
+            {
+                [SettlementServiceOptions.BaseUrlKey] = upstream.Urls.Single(),
+                [SettlementServiceOptions.ApiTokenFileKey] = path,
+            });
+
+            report.Status.Should().Be(HealthStatus.Healthy);
+            upstream.Hits.Should().Contain("/health/ready");
+            upstream.Authorizations.Should().Contain("Bearer " + token);
+        }
+        finally
+        {
+            Directory.Delete(directory.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void C8_Staging_Options_Reject_Plaintext_Or_Missing_Settlement_Wiring()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddDownstreamClients(
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [SettlementServiceOptions.BaseUrlKey] = "http://settlement.test/",
+                [$"{SettlementServiceOptions.SectionName}:ApiToken"] = new string('p', 40),
+            }).Build(),
+            new StubEnvironment("Staging"));
+
+        using var provider = services.BuildServiceProvider();
+        var act = () => provider.GetRequiredService<
+            Microsoft.Extensions.Options.IOptions<SettlementServiceOptions>>().Value;
+
+        act.Should().Throw<Microsoft.Extensions.Options.OptionsValidationException>()
+            .WithMessage("*ApiTokenFile*");
+    }
+
     // ── D. The local implementation is gone, and nothing references it ──────
 
     [Fact]
@@ -221,7 +292,7 @@ public class SettlementServiceCutoverW2R11Tests
         // A leaked gateway token must not be able to pay anyone: the admin scope is not a
         // configurable gateway key, so there is nothing to accidentally populate at deploy.
         typeof(SettlementServiceOptions).GetProperties().Select(p => p.Name)
-            .Should().BeEquivalentTo(new[] { "BaseUrl", "ApiToken" });
+            .Should().BeEquivalentTo(new[] { "BaseUrl", "ApiToken", "ApiTokenFile", "HasServiceCredential" });
     }
 
     // ── E. Review hardening: the money surfaces the cutover narrowed ────────
@@ -416,9 +487,24 @@ public class SettlementServiceCutoverW2R11Tests
             .CheckHealthAsync(r => r.Name == "settlement-service", default);
     }
 
+    private static async Task<HealthReport> ProbeStagingSettlementServiceAsync(
+        IReadOnlyDictionary<string, string?> settings)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddDownstreamHealthChecks(
+            new ConfigurationBuilder().AddInMemoryCollection(settings).Build(),
+            new StubEnvironment("Staging"));
+
+        await using var provider = services.BuildServiceProvider();
+        return await provider.GetRequiredService<HealthCheckService>()
+            .CheckHealthAsync(registration => registration.Name == "settlement-service", default);
+    }
+
     private static async Task<StubUpstream> StubSettlementServiceAsync()
     {
         var hits = new ConcurrentBag<string>();
+        var authorizations = new ConcurrentBag<string?>();
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Logging.ClearProviders();
@@ -426,23 +512,29 @@ public class SettlementServiceCutoverW2R11Tests
         app.MapGet("/health/ready", (HttpContext ctx) =>
         {
             hits.Add(ctx.Request.Path.Value!);
+            authorizations.Add(ctx.Request.Headers.Authorization.ToString());
             return Results.Ok(new { status = "Healthy" });
         });
         await app.StartAsync();
-        return new StubUpstream(app, hits);
+        return new StubUpstream(app, hits, authorizations);
     }
 
     private sealed class StubUpstream : IAsyncDisposable
     {
         private readonly WebApplication _app;
-        public StubUpstream(WebApplication app, ConcurrentBag<string> hits)
+        public StubUpstream(
+            WebApplication app,
+            ConcurrentBag<string> hits,
+            ConcurrentBag<string?> authorizations)
         {
             _app = app;
             Hits = hits;
+            Authorizations = authorizations;
             Urls = app.Urls.ToArray();
         }
 
         public ConcurrentBag<string> Hits { get; }
+        public ConcurrentBag<string?> Authorizations { get; }
         public IReadOnlyList<string> Urls { get; }
 
         public async ValueTask DisposeAsync()

@@ -41,7 +41,8 @@ public static class ServiceClientExtensions
     /// </summary>
     public static IServiceCollection AddDownstreamClients(
         this IServiceCollection services,
-        IConfiguration config)
+        IConfiguration config,
+        IHostEnvironment? environment = null)
     {
         // JEB-67 / T-BE-031 — DelegatingHandlers attached to every named
         // downstream client below. BearerForwardingHandler propagates the
@@ -527,8 +528,25 @@ public static class ServiceClientExtensions
 
         // settlement-service — gwdbx W2-R11. Unversioned routes (A21 §4). Breaker + timeout, NO
         // transport retry on a money POST (ServiceWalletClient precedent); completion legs re-drive.
-        services.Configure<Financials.SettlementServiceOptions>(
-            config.GetSection(Financials.SettlementServiceOptions.SectionName));
+        var settlementOptions = services
+            .AddOptions<Financials.SettlementServiceOptions>()
+            .Bind(config.GetSection(Financials.SettlementServiceOptions.SectionName));
+        if (environment?.IsStaging() == true)
+        {
+            settlementOptions
+                .Validate(
+                    options => Uri.TryCreate(options.BaseUrl, UriKind.Absolute, out var uri)
+                               && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps),
+                    $"{Financials.SettlementServiceOptions.BaseUrlKey} must be an absolute HTTP(S) URL in Staging.")
+                .Validate(
+                    options => !string.IsNullOrWhiteSpace(options.ApiTokenFile)
+                               && Path.IsPathFullyQualified(options.ApiTokenFile),
+                    $"{Financials.SettlementServiceOptions.ApiTokenFileKey} must be an absolute mounted-secret path in Staging.")
+                .Validate(
+                    options => string.IsNullOrWhiteSpace(options.ApiToken),
+                    "Services:Settlement:ApiToken plaintext configuration is forbidden in Staging; use ApiTokenFile.")
+                .ValidateOnStart();
+        }
         var settlementBuilder = services.AddHttpClient<
             Financials.ISettlementServiceClient, Financials.SettlementServiceClient>(http =>
         {

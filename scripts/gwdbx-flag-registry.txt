@@ -274,7 +274,8 @@ Services:Realtime:TokenTtlSeconds                    setting -
 # Services:RoleService:ApiKey   DELETED 2026-08-16 (owner O8) — RoleServiceOptions is gone; the key is unbindable.
 # Services:RoleService:BaseUrl  DELETED 2026-08-16 (owner O8) — it also gated the readiness probe, which is gone.
 Services:Settlement:ApiToken                         setting - # W2-R11 settlement-service SERVICE scope (>=32 chars), committed blank; the ADMIN scope is NEVER bound in the gateway
-Services:Settlement:BaseUrl                          setting - # W2-R11 settlement-service; unset SKIPS the readiness probe and lands the A9 roster at 19 instead of 20
+Services:Settlement:ApiTokenFile                     setting - # Staging-only mounted SERVICE credential; absolute path, preferred over plaintext and re-read per request for rotation
+Services:Settlement:BaseUrl                          setting - # W2-R11 settlement-service; Staging validates this and registers its readiness gate even when the value is missing
 TestControlPlane:Enabled                             setting - # prod-off test control plane, shares TestControlPlane:SharedSecret
 TestControlPlane:SharedSecret                        setting -
 TierCatalogCache:StaleGrace                          setting -

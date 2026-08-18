@@ -437,7 +437,7 @@ builder.Services.AddCmsAuthoringPlane(builder.Configuration);
 // gated by FeatureFlags:UseUpstream:FormBuilder which defaults OFF — the
 // service is not yet deployed, BaseUrl is a placeholder). See the form-builder
 // block in Extensions/ServiceClientExtensions.cs.
-builder.Services.AddDownstreamClients(builder.Configuration);
+builder.Services.AddDownstreamClients(builder.Configuration, builder.Environment);
 builder.Services.AddDownstreamHealthChecks(builder.Configuration, builder.Environment);
 
 // EXACT-SALEHLY MIRROR (RemoteUserPreferences): UserPreferencesController consumes
