@@ -26,6 +26,7 @@ public sealed class DurableOwnershipDeploymentContractTests
             ? new[]
             {
                 "jeeb_state_service_token",
+                "settlement_service_token",
                 "bundler_cms_bearer_token",
                 "jeeb_gateway_job_token"
             }
@@ -103,6 +104,30 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("UnifiedPaymentGateway__BaseUrl");
         workflow.Should().Contain("\"${retired_gateway_env[@]}\"");
         workflow.Should().Contain("env_remove_args+=(--env-rm \"$stale_env\")");
+    }
+
+    [Fact]
+    public void Jeeb_staging_mounts_the_settlement_service_scope_and_uses_private_dns()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+
+        workflow.Should().Contain("SETTLEMENT_SERVICE_TOKEN: ${{ secrets.SETTLEMENT_SERVICE_TOKEN }}");
+        workflow.Should().Contain(
+            "settlement_secret_name=\"jeeb_staging_gateway_settlement_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}\"");
+        workflow.Should().Contain(
+            "add_rotated_secret \"$settlement_secret_name\" settlement_service_token");
+        workflow.Should().Contain(
+            "Services__Settlement__BaseUrl http://jeeb-staging-settlement-service:8080");
+        workflow.Should().Contain(
+            "Services__Settlement__ApiTokenFile /run/secrets/settlement_service_token");
+        workflow.Should().Contain("Services__Settlement__ApiToken");
+
+        workflow.Should().NotContain(
+            "add_env Services__Settlement__ApiToken ");
+        workflow.Should().NotContain(
+            "Services__Settlement__BaseUrl http://192.168.2.20");
+        workflow.Should().NotContain(
+            "Services__Settlement__BaseUrl http://127.0.0.1");
     }
 
     [Fact]

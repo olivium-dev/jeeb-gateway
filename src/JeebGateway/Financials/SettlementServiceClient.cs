@@ -10,10 +10,21 @@ namespace JeebGateway.Financials;
 public sealed class SettlementServiceOptions
 {
     public const string SectionName = "Services:Settlement";
+    public const string BaseUrlKey = SectionName + ":BaseUrl";
+    public const string ApiTokenFileKey = SectionName + ":ApiTokenFile";
 
     public string? BaseUrl { get; set; }
 
+    /// <summary>Non-container fallback. Staging uses <see cref="ApiTokenFile"/> so the
+    /// credential is never present in the Swarm service environment.</summary>
     public string? ApiToken { get; set; }
+
+    /// <summary>Absolute path to the mounted SERVICE-scope token. The ADMIN credential is
+    /// deliberately not represented by this options type.</summary>
+    public string? ApiTokenFile { get; set; }
+
+    public bool HasServiceCredential =>
+        !string.IsNullOrWhiteSpace(ApiTokenFile) || !string.IsNullOrWhiteSpace(ApiToken);
 }
 
 /// <summary>gwdbx W2-R11: settlement-service is unreachable or refused the call. Mapped to a

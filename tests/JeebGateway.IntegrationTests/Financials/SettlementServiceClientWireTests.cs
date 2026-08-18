@@ -14,7 +14,7 @@ namespace JeebGateway.IntegrationTests.Financials;
 /// of the gateway, so the wire behaviour pinned here is settlement-service's, not wallet-service's.</summary>
 public sealed class SettlementServiceClientWireTests
 {
-    private const string ServiceToken = "service-scope-token";
+    private const string ServiceToken = "settlement-service-scope-token-00000001";
     private const string DeliveryId = "delivery-7";
     private const string HolderId = "11111111-1111-1111-1111-111111111111";
     private const string ClientId = "22222222-2222-2222-2222-222222222222";
@@ -125,23 +125,76 @@ public sealed class SettlementServiceClientWireTests
     }
 
     [Fact]
-    public async Task An_Unconfigured_Service_Token_Sends_No_Authorization_Header()
+    public async Task An_Unconfigured_Service_Token_Fails_Closed_Before_The_Network_Call()
     {
         var handler = new SettlementHandler();
         var client = NewClient(handler, token: null);
 
-        await client.SettleAsync(Command(), CancellationToken.None);
+        var act = () => client.SettleAsync(Command(), CancellationToken.None);
 
-        handler.Requests.Should().OnlyContain(request => request.Authorization == null,
-            "a missing token must fail loudly upstream, not ship an empty bearer");
+        var thrown = await act.Should().ThrowAsync<SettlementServiceUnavailableException>();
+        thrown.Which.InnerException.Should().BeOfType<InvalidOperationException>()
+            .Which.Message.Should().Contain("SERVICE credential is not configured or is invalid");
+        handler.Requests.Should().BeEmpty(
+            "a missing credential must fail before an unauthenticated money request reaches the owner");
+    }
+
+    [Fact]
+    public async Task A_Mounted_Service_Token_Rotates_Without_A_Gateway_Restart()
+    {
+        var directory = Directory.CreateTempSubdirectory("settlement-service-token");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "token");
+            var before = new string('a', 40);
+            var after = new string('b', 40);
+            await File.WriteAllTextAsync(path, before);
+            var handler = new SettlementHandler();
+            var client = NewClient(handler, token: null, tokenFile: path);
+
+            await client.GetByDeliveryAsync(DeliveryId, CancellationToken.None);
+            await File.WriteAllTextAsync(path, after + "\n");
+            await client.GetByDeliveryAsync(DeliveryId, CancellationToken.None);
+
+            handler.Requests.Select(request => request.Authorization)
+                .Should().Equal("Bearer " + before, "Bearer " + after);
+        }
+        finally
+        {
+            Directory.Delete(directory.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task A_Missing_Mounted_Service_Token_Fails_Closed_Before_The_Network_Call()
+    {
+        var handler = new SettlementHandler();
+        var client = NewClient(
+            handler,
+            token: null,
+            tokenFile: Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
+
+        var act = () => client.GetByDeliveryAsync(DeliveryId, CancellationToken.None);
+
+        var thrown = await act.Should().ThrowAsync<SettlementServiceUnavailableException>();
+        thrown.Which.InnerException.Should().BeOfType<InvalidOperationException>()
+            .Which.Message.Should().Contain("credential file is missing or outside the allowed size");
+        handler.Requests.Should().BeEmpty();
     }
 
     private static ISettlementServiceClient NewClient(
-        HttpMessageHandler inner, string? token = ServiceToken)
+        HttpMessageHandler inner,
+        string? token = ServiceToken,
+        string? tokenFile = null)
     {
         var authenticated = new SettlementServiceTokenHandler(
             new StaticOptionsMonitor<SettlementServiceOptions>(
-                new SettlementServiceOptions { BaseUrl = "http://settlement.test/", ApiToken = token }))
+                new SettlementServiceOptions
+                {
+                    BaseUrl = "http://settlement.test/",
+                    ApiToken = token,
+                    ApiTokenFile = tokenFile,
+                }))
         {
             InnerHandler = inner,
         };
