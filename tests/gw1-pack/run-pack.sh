@@ -263,8 +263,9 @@ class for a host suite, and per §4 an honest NOT-PROVEN never counts as a pass.
 
   service  W1.8's actual claim — a ledger ROW survives a restart.
            Nothing here executes SQL: Testcontainers needs Docker (banned), and
-           psql against the datastore box 192.168.2.20 is forbidden outright by
-           owner rule 2026-07-23 ("Never use .20"), from anywhere including MSI.
+           this host-only pack deliberately performs no direct psql against the
+           active staging datastore at 192.168.2.20. Approved staging operations
+           use the staging deployment pipeline instead.
            This pack proves the SELECTOR, the GUARD, the SCHEMA/CODE agreement and
            the HAZARD. It cannot prove the round trip.
 

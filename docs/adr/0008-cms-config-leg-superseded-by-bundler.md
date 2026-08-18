@@ -30,9 +30,10 @@ and records the second as deliberately not pursued.
    `ICmsSurfaceStore` — i.e. **bundler over HTTP** — and republished it into state-service. That produces
    two independently writable CMS catalogs with no reconciler, which the importer's own doc comment
    forbids for catalog legs.
-4. **Its dependency is permanently gone.** bundler-service's database lived on `192.168.2.20`, which is
-   decommissioned (directive A25) and on the never-touch list. Live probe 2026-08-16: `127.0.0.1:10056`
-   refuses connections.
+4. **Its dependency data remains retired.** bundler-service's database lived on `192.168.2.20`.
+   The host was decommissioned under directive A25 and reactivated as Jeeb staging on 2026-08-18;
+   that reactivation did not restore the retired bundler database or service. Historical live probe
+   2026-08-16: `127.0.0.1:10056` refused connections.
 5. **Its source rows are gone.** The 5 `cms_surfaces` rows were destroyed by an owner-instructed truncate;
    see (1) — the tables are empty.
 

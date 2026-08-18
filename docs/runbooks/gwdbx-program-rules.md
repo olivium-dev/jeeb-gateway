@@ -94,7 +94,8 @@ and this document is their only definition in the repo:
 - **No new repos and no new deployables** — every domain lands on an already-existing fleet service. — G-26
 - **Never re-add the CMS -> state-service config leg.** ADR-0008 (2026-08-16) ruled it SUPERSEDED:
   bundler-service owns every surface/draft/publication row, the gateway owns none, and the leg's
-  dependency (`192.168.2.20`) and source rows are both permanently gone. `FeatureFlags:CmsConfigMode` is
+  bundler database and source rows are both permanently gone. The `192.168.2.20` host was reactivated
+  for Jeeb staging on 2026-08-18, but that does not restore the retired bundler data. `FeatureFlags:CmsConfigMode` is
   PINNED to `local` at boot. ADR-0010 then DELETED `StateServiceConfigImporter` and
   `ConfigParityChecker` outright, so the leg cannot regrow — replaying bundler documents into
   state-service forks the catalog into two writable owners with no reconciler.
