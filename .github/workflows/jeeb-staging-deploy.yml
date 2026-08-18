@@ -171,6 +171,7 @@ jobs:
           export DOCKER_CONFIG="$REMOTE_DOCKER_CONFIG"
           trap 'rm -rf "$DOCKER_CONFIG"' EXIT
           network=jeeb-staging-net
+          retired_gateway_env=(UnifiedPaymentGateway__BaseUrl)
           mount_args=()
           network_update_args=()
           secret_update_args=()
@@ -243,7 +244,8 @@ jobs:
               remove_secret_target private_artifact_store_bearer_token
               remove_secret_target data_export_token_signing_key
               for stale_env in DELIVERY_SERVICE_TOKEN_FILE PRIVATE_ARTIFACT_STORE_BASE_URL \
-                PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE DATA_EXPORT_TOKEN_SIGNING_KEY_FILE; do
+                PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE DATA_EXPORT_TOKEN_SIGNING_KEY_FILE \
+                "${retired_gateway_env[@]}"; do
                 if docker service inspect "$service" \
                   --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
                   2>/dev/null | grep -q "^${stale_env}="; then

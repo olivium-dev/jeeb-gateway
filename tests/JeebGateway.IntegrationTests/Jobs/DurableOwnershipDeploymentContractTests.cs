@@ -96,6 +96,16 @@ public sealed class DurableOwnershipDeploymentContractTests
     }
 
     [Fact]
+    public void Jeeb_staging_removes_the_retired_payment_gateway_destination()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+
+        workflow.Should().Contain("retired_gateway_env=(UnifiedPaymentGateway__BaseUrl)");
+        workflow.Should().Contain("\"${retired_gateway_env[@]}\"");
+        workflow.Should().Contain("env_remove_args+=(--env-rm \"$stale_env\")");
+    }
+
+    [Fact]
     public void Scheduled_executor_uses_loopback_exact_contract_and_never_places_token_in_ssh_argv()
     {
         var workflow = Workflow("durable-work-sweep.yml");
