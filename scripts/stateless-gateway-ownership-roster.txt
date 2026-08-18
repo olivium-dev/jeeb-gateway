@@ -1,0 +1,60 @@
+# R9 transitional ownership roster.
+#
+# Format: <category> <exact C# type name>
+#
+# This is not a budget and does not make these components stateless. It records
+# the exact local-owner and hosted-service types intentionally present while
+# extraction continues. A new type requires explicit ownership review; deleting
+# one must delete its row in the same PR so the ratchet only shrinks.
+
+# Hosted execution currently registered by the gateway.
+hosted-service AcceptChatSettleReconciler
+hosted-service AutoOfflineSweeper
+hosted-service AvailabilityMirrorDrainer
+hosted-service BffStartupValidator
+hosted-service CapabilityCoverageGuard
+hosted-service CourierPositionPublisher
+hosted-service DataExportProcessor
+hosted-service DefaultLexiconSeeder
+hosted-service DurableWorkSweepWorker
+hosted-service EscalationMirrorDrainer
+hosted-service JeebNotificationCatalogSeeder
+hosted-service NewRequestFanoutProcessor
+hosted-service NotificationDurableWriteStartupAlarm
+hosted-service OtpHandoverSweeper
+hosted-service RequestExpiryObserver
+hosted-service RequestNudgeSweeper
+hosted-service ScheduledDeliveryActivator
+hosted-service WorkItemClaimWorker
+
+# Transitional local owners, fallbacks, notifiers and bounded queues selected
+# by production DI. InMemorySynonymRegistry and InMemoryGeoIndex are deliberate
+# immutable/read-through indexes and remain outside the owner-state detector.
+local-owner CourierPositionQueue
+local-owner DurableRequestsStore
+local-owner InMemoryAccountDeletionStore
+local-owner InMemoryAdminAuditLog
+local-owner InMemoryAdminEscalationStore
+local-owner InMemoryAudioStore
+local-owner InMemoryAvailabilityStore
+local-owner InMemoryDataExportNotifier
+local-owner InMemoryDataExportRatingsProvider
+local-owner InMemoryDataExportStore
+local-owner InMemoryDisputeCaseStore
+local-owner InMemoryDisputeStore
+local-owner InMemoryFlaggedRequestStore
+local-owner InMemoryIdempotencyStore
+local-owner InMemoryJeeberRestrictionStore
+local-owner InMemoryNotificationPreferencesStore
+local-owner InMemoryOfferRequestIndex
+local-owner InMemoryOtpRequestRateLimiter
+local-owner InMemoryProhibitedItemsStore
+local-owner InMemoryRatingStore
+local-owner InMemoryRefreshTokenStore
+local-owner InMemoryRequestExpiryNotifier
+local-owner InMemoryRequestsStore
+local-owner InMemoryScheduledDeliveryNotifier
+local-owner InMemoryTiersStore
+local-owner InMemoryTranscriptionFallbackQueue
+local-owner InMemoryUsersStore
+local-owner NewRequestFanoutQueue

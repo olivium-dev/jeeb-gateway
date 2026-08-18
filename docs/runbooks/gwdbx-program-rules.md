@@ -56,9 +56,11 @@ and this document is their only definition in the repo:
   file is history.
 - **`CourierPositionQueue` disposition** — §3: a transient in-proc buffer, never a durable store. Cited
   from `src/JeebGateway/Realtime/CourierPositionQueue.cs:43-44`.
-- **Two ratchets** — `scripts/gateway-db-seam-allowlist.txt` is empty and may never gain a line; the 18
-  hosted registrations may never increase. The count was 19 until ADR-0010 (round 2) deleted
-  `ConfigImportWorker`; retiring one does not buy back headroom — the ceiling ratchets down to 18.
+- **Two ratchets** — `scripts/gateway-db-seam-allowlist.txt` is empty and may never gain a line;
+  `scripts/stateless-gateway-ownership-roster.txt` names the exact 18 hosted services and 28
+  transitional local-owner/queue types reviewed on 2026-08-18. It is an identity roster, not
+  count-only headroom: a new type requires ownership review, and a deletion removes its exact row
+  in the same PR so the ceiling ratchets down.
 - **The forbidden flag names** — §4.1 plus `scripts/gwdbx-flag-registry.txt`: the SUPERSEDED/retired keys
   stay inactive permanently, including after the registry gate itself retires (deletion ledger §8).
 - **Redis STAYS — "the gateway owns no database" does NOT include Redis.** Owner ruling
@@ -199,18 +201,19 @@ Do not confuse it with `NewRequestFanoutQueue` (made durable against state-servi
 ## 4. How a program PR is reviewed
 
 A `gwdbx(...)` PR is read against the plan clause and guardrail IDs named in its commit body, plus the guard
-scripts — which are run **by hand**. Every workflow in this repository is disabled at the GitHub level, so no
-gate here is enforced automatically and nothing in this section may be read as a CI promise:
+scripts. The live gates below run in `.github/workflows/ci.yml`; historical statements elsewhere in this
+archived document that workflows are disabled no longer describe the current repository:
 
 - `scripts/check-stateless-gateway.sh` — the R9 no-DB/no-volatile-store gate. Its seam allowlist
   (`scripts/gateway-db-seam-allowlist.txt`) is now **empty**, so the ratchet is absolute: a line added back is a
-  GR-3 violation, not a rollback. The script also pins `AddHostedService` at 2 while the source registers 18, so
-  it reports FAIL on main **by design** — that gap is the remaining stateless work, not a flake.
-- **G-08 guard-roster manifest gate** — RETIRED. Its source of truth,
+  GR-3 violation, not a rollback. The exact transitional owner/worker types are recorded in
+  `scripts/stateless-gateway-ownership-roster.txt`; the gate rejects both unreviewed additions and stale
+  rows rather than treating the existing 18 hosted registrations as reusable count headroom.
+- **G-08 guard-roster manifest gate** — RETIRED and removed from CI on 2026-08-18. Its source of truth,
   `src/JeebGateway/Infrastructure/StoreDurabilityGuard.cs`, was deleted at W5-11, so
   `scripts/check-guard-roster.sh` exits non-zero before it reads anything and cannot be regenerated.
-- **G-22 flag-containment gate** (`scripts/check-gwdbx-flag-registry.sh`) — merged and still meaningful when run
-  by hand: repo flag keys must be a subset of the approved registry.
+- **G-22 flag-containment gate** (`scripts/check-gwdbx-flag-registry.sh`) — repo flag keys must be a subset
+  of the approved registry.
 
 Reviewer checklist: smallest diff that satisfies the item; no runtime-behaviour change unless the item says so;
 no flag key outside the registry; and none of §1 violated. (The old "StoreDurabilityGuard roster edited in the
@@ -248,9 +251,17 @@ Both are now **registered rather than ignored**, under a fourth status **`settin
 cutover flag, so it always carries owning-wave `-` and never a `create=`/`delete=` pair. Each appears twice, once as the
 bare `*Mode`-arm token and once as the full key, because those are the two forms the arms actually emit.
 
+**2026-08-18 reconciliation.** The machine registry was brought current with 38 real configuration
+tokens introduced after its last refresh: durable-work/account-deletion execution options, commission
+collection, mounted inter-service credentials, notification/state/delivery keys, moderation evidence,
+and data-export controls. `System.IO.FileMode` was the one non-configuration match; it is now in
+`FRAMEWORK_MODE_TYPES` rather than being falsely approved as a setting. The machine-readable rows in
+`scripts/gwdbx-flag-registry.txt` are the exhaustive source of truth.
+
 `FRAMEWORK_MODE_TYPES` is now only `BoundedChannelFullMode`, `FullMode` (both `System.Threading.Channels`),
-`SameSiteMode` (ASP.NET cookie enum) and `PushDeliveryMode` (a local enum in `Notifications/PushSilencePolicy.cs`, never
-bound to configuration). **Re-verify against the binding sites before adding a fifth** — an entry here is a hole in the
+`FileMode` (`System.IO`), `SameSiteMode` (ASP.NET cookie enum) and `PushDeliveryMode` (a local enum in
+`Notifications/PushSilencePolicy.cs`, never bound to configuration). **Re-verify against the binding sites before
+adding another** — an entry here is a hole in the
 registry.
 
 **What D2 fixed.** D1 claimed the widened `CODE_FLAGS` meant an environment-only switch could never hide again. That was

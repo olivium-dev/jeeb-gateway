@@ -8,11 +8,15 @@ on:
 
 jobs:
   stateless-gate:
-    # R9 — assert the gateway stays stateless (no DB) and inventory the
-    # durable-domain rewire debt (ADR-001-rev2).
+    # R9 — reject database ownership and ratchet the reviewed transitional
+    # owner/worker inventory (ADR-001-rev2).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install stateless-gate tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
       - name: R9 stateless-gateway gate
         run: bash scripts/check-stateless-gateway.sh
 
@@ -24,15 +28,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: G-22 gwdbx flag-registry gate
         run: bash scripts/check-gwdbx-flag-registry.sh
-
-  guard-roster-gate:
-    # G-08 — StoreDurabilityGuard roster manifest stays in sync with the C#
-    # rosters (R1 same-PR rule) and names no deleted type; keeps the G-18 gate.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: G-08 guard-roster gate
-        run: bash scripts/check-guard-roster.sh
 
   nswag-freshness:
     # Regenerate the jeeb-state-service NSwag client from the committed spec and

@@ -161,9 +161,9 @@ step-6 release; `forbidden` rows (incl. `UseUpstream:Payments`, G-05) stay forev
   `StoreDurabilityGuard.cs` existence check before reading anything, so it can neither verify nor
   regenerate. It also still requires `./db/apply.sh` / `./db/seed.sh` in `build.yml` (invariant 3,
   G-18) — `db/` went in the same commit, so that invariant can never pass either.
-- The `guard-roster-gate` job in `.github/workflows/ci.yml` survives because `.github/workflows/**` is
-  out of programme scope: nothing under it may be added, edited or re-enabled. Every workflow in this
-  repo is disabled at the GitHub level, so the job does not run.
+- The obsolete `guard-roster-gate` job was removed from `.github/workflows/ci.yml` on 2026-08-18 when
+  repository CI was active again. The tombstone script and manifest remain historical evidence, but
+  neither is represented as an executable invariant.
 
 ## 7. Health checks — the A9 roster contract
 
