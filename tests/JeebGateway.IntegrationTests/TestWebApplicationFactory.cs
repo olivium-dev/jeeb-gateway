@@ -27,6 +27,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace JeebGateway.IntegrationTests;
 
@@ -60,6 +61,11 @@ public class WebApplicationFactory<TEntryPoint>
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("DELIVERY_SERVICE_TOKEN", new string('t', 48));
+        // A full gateway host is created by thousands of integration cases. Its
+        // production console providers otherwise stream every background-worker
+        // retry into VSTest, overwhelming the CI runner before the suite finishes.
+        // Tests that assert logs add their own capturing provider afterward.
+        builder.ConfigureLogging(logging => logging.ClearProviders());
         builder.ConfigureServices((context, services) =>
         {
             if (context.HostingEnvironment.IsEnvironment("Testing")
