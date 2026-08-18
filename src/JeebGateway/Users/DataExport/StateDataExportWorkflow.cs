@@ -31,6 +31,7 @@ public sealed class StateDataExportWorkflow(
         string format,
         CancellationToken ct)
     {
+        EnsureEnabled();
         var subject = DurableWorkContract.SubjectForUser(userId);
         var latest = await work.GetLatestAsync(
             DurableWorkContract.Application,
@@ -80,6 +81,7 @@ public sealed class StateDataExportWorkflow(
         string userId,
         CancellationToken ct)
     {
+        EnsureEnabled();
         var latest = await work.GetLatestAsync(
             DurableWorkContract.Application,
             DurableWorkContract.DataExportKind,
@@ -90,6 +92,7 @@ public sealed class StateDataExportWorkflow(
 
     public async Task<Uri?> RedeemDownloadAsync(string token, CancellationToken ct)
     {
+        EnsureEnabled();
         if (!tokens.TryValidate(token, out var capability))
             return null;
 
@@ -204,6 +207,20 @@ public sealed class StateDataExportWorkflow(
             ? parsed
             : null;
 
+    private void EnsureEnabled()
+    {
+        if (!options.Value.Enabled)
+            throw new DataExportDisabledException();
+    }
+
 }
 
 public sealed record DataExportWorkPayload(string UserId, string Format);
+
+public sealed class DataExportDisabledException : InvalidOperationException
+{
+    public DataExportDisabledException()
+        : base("Data export is disabled in this environment because no compatible private artifact owner is configured.")
+    {
+    }
+}

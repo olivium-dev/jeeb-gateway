@@ -23,6 +23,15 @@ public sealed class DataExportWorkHandler(
         StateWorkItem item,
         CancellationToken ct)
     {
+        if (!options.Value.Enabled)
+        {
+            return DurableWorkExecutionResult.Deferred(
+                "data export is disabled in this environment because no compatible private artifact owner is configured",
+                clock.GetUtcNow() + PositiveOrDefault(
+                    options.Value.SourceUnavailableRetryDelay,
+                    TimeSpan.FromMinutes(15)));
+        }
+
         DataExportWorkPayload? request;
         try
         {

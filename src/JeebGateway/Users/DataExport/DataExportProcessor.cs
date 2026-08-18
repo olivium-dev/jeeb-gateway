@@ -34,6 +34,13 @@ public class DataExportProcessor : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!_options.Value.Enabled)
+        {
+            _logger.LogWarning(
+                "Data export processing is DISABLED; no export owner calls will be made.");
+            return;
+        }
+
         // DataExportOptions no longer exposes SweepInterval; 30s was its live default.
         var interval = TimeSpan.FromSeconds(30);
         while (!stoppingToken.IsCancellationRequested)
@@ -64,6 +71,9 @@ public class DataExportProcessor : BackgroundService
 
     public async Task<int> ProcessOnceAsync(CancellationToken ct)
     {
+        if (!_options.Value.Enabled)
+            return 0;
+
         using var scope = _services.CreateScope();
         var store = scope.ServiceProvider.GetRequiredService<IDataExportStore>();
         var packager = scope.ServiceProvider.GetRequiredService<IDataExportPackager>();

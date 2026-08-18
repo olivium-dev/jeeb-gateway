@@ -9,6 +9,10 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
+using JeebGateway.Cases;
+using JeebGateway.StateService.Durable;
+using JeebGateway.StateService.Ownership;
+using JeebGateway.StateService.Work;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -97,15 +101,71 @@ public sealed class StateServiceCredentialProductionWiringTests : IDisposable
     {
         var secret = new string('c', 48);
         var upstream = new OwnershipAuthStateService();
-        using var factory = Factory(upstream, serviceTokenFile: WriteToken(secret));
+        using var factory = Factory(
+            upstream,
+            serviceTokenFile: WriteToken(secret),
+            durableRequests: true);
 
         foreach (var name in new[] { "ISagaBundleRecorder", "IBroadcastEventRecorder" })
         {
             var http = factory.Services.GetRequiredService<IHttpClientFactory>().CreateClient(name);
-            if (http.BaseAddress is null) continue;
+            http.BaseAddress.Should().NotBeNull($"{name} must be registered when DurableRequests is enabled");
             await http.GetAsync("/state/bundles");
         }
 
+        upstream.Unauthenticated.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Every_state_case_outbox_audit_work_and_recorder_pipeline_carries_bearer_auth()
+    {
+        var secret = new string('g', 48);
+        var upstream = new OwnershipAuthStateService();
+        using var factory = Factory(
+            upstream,
+            serviceTokenFile: WriteToken(secret),
+            durableRequests: true);
+        var state = factory.Services.GetRequiredService<IJeebStateServiceClient>();
+        var cases = (IGenericCaseStateClient)state;
+        var ownership = (IStateOwnershipClient)state;
+
+        await state.UpsertIdempotencyKeyWithResultAsync(
+            new IdempotencyPutRequest { Key = "all-pipelines", StatusCode = 201, TtlSeconds = 60 },
+            CancellationToken.None);
+        await IgnoreNotFound(() => cases.GetCaseAsync(Guid.NewGuid(), CancellationToken.None));
+        await IgnoreNotFound(() => cases.GetCaseDeadLettersAsync(1, null, CancellationToken.None));
+        await IgnoreNotFound(() => ownership.FindAuditEventsAsync(
+            new AuditEventQueryV1 { Application = "jeeb-gateway", Limit = 1 },
+            CancellationToken.None));
+        await ownership.GetLatestWorkItemAsync(
+            "jeeb-gateway", "auth-smoke", "sha256:auth-smoke", CancellationToken.None);
+
+        var work = factory.Services.GetRequiredService<IStateWorkItemClient>();
+        await work.GetAsync(Guid.NewGuid(), CancellationToken.None);
+
+        var saga = factory.Services.GetRequiredService<ISagaBundleRecorder>();
+        await saga.RecordCreatedAsync("auth-smoke", "auth-smoke", new { probe = true }, CancellationToken.None);
+        var broadcast = factory.Services.GetRequiredService<IBroadcastEventRecorder>();
+        await broadcast.RecordBroadcastingAsync("auth-smoke", "broadcasting", CancellationToken.None);
+
+        var expectedPaths = new[]
+        {
+            "/state/idempotency",
+            "/cases/",
+            "/case-outbox/dead-letters",
+            "/audit-events",
+            "/work-items/latest",
+            "/work-items/",
+            "/state/bundles",
+            "/state/broadcasts",
+        };
+        foreach (var prefix in expectedPaths)
+        {
+            upstream.Calls.Should().Contain(
+                call => call.Path.StartsWith(prefix, StringComparison.Ordinal)
+                        && call.Authorization == "Bearer " + secret,
+                $"{prefix} must execute through a file-backed credential handler");
+        }
         upstream.Unauthenticated.Should().BeEmpty();
     }
 
@@ -127,8 +187,10 @@ public sealed class StateServiceCredentialProductionWiringTests : IDisposable
             new IdempotencyPutRequest { Key = "rotate-2", StatusCode = 201, TtlSeconds = 60 },
             CancellationToken.None);
 
-        upstream.Calls[0].Authorization.Should().NotBe(upstream.Calls[1].Authorization);
-        upstream.Calls[1].Authorization.Should().Be("Bearer " + new string('e', 48));
+        var writes = upstream.Calls.Where(call => call.Path == IdempotencyPath).ToArray();
+        writes.Should().HaveCount(2);
+        writes[0].Authorization.Should().Be("Bearer " + new string('d', 48));
+        writes[1].Authorization.Should().Be("Bearer " + new string('e', 48));
     }
 
     /// <summary>
@@ -147,7 +209,7 @@ public sealed class StateServiceCredentialProductionWiringTests : IDisposable
             new IdempotencyPutRequest { Key = "trim-probe", StatusCode = 201, TtlSeconds = 60 },
             CancellationToken.None);
 
-        upstream.Calls.Single().Authorization.Should().Be("Bearer " + secret,
+        upstream.Calls.Single(call => call.Path == IdempotencyPath).Authorization.Should().Be("Bearer " + secret,
             "a newline written into the secret file would be sent by state but not by the gateway");
     }
 
@@ -194,11 +256,16 @@ public sealed class StateServiceCredentialProductionWiringTests : IDisposable
     }
 
     private static WebApplicationFactory<Program> Factory(
-        OwnershipAuthStateService upstream, string? serviceTokenFile) =>
+        OwnershipAuthStateService upstream,
+        string? serviceTokenFile,
+        bool durableRequests = false) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("JeebStateService:BaseUrl", StateBaseUrl);
             builder.UseSetting("JeebStateService:Enabled", "true");
+            builder.UseSetting(
+                "FeatureFlags:DurableRequests:Enabled",
+                durableRequests.ToString());
             if (serviceTokenFile is not null)
             {
                 builder.UseSetting("JeebStateService:ServiceTokenFile", serviceTokenFile);
@@ -218,13 +285,31 @@ public sealed class StateServiceCredentialProductionWiringTests : IDisposable
                 // Terminate every state HttpClient at the stub, leaving the real handler chain
                 // (this is the seam under test) intact.
                 foreach (var name in new[]
-                         { "IJeebStateServiceClient", "ISagaBundleRecorder", "IBroadcastEventRecorder" })
+                         {
+                             "IJeebStateServiceClient",
+                             "IStateWorkItemClient",
+                             "ISagaBundleRecorder",
+                             "IBroadcastEventRecorder"
+                         })
                 {
                     services.Configure<HttpClientFactoryOptions>(name, o =>
                         o.HttpMessageHandlerBuilderActions.Add(b => b.PrimaryHandler = upstream));
                 }
             });
         });
+
+    private static async Task IgnoreNotFound(Func<Task> probe)
+    {
+        try
+        {
+            await probe();
+        }
+        catch (Exception)
+        {
+            // The recording owner intentionally returns 404. The assertion is the
+            // outbound path and Authorization header captured before deserialization.
+        }
+    }
 
     private static StringContent Json(string json) => new(json, Encoding.UTF8, "application/json");
 
@@ -246,7 +331,7 @@ public sealed class StateServiceCredentialProductionWiringTests : IDisposable
         }
 
         public IReadOnlyList<RecordedCall> Unauthenticated =>
-            Calls.Where(c => c.Path.StartsWith("/v1", StringComparison.Ordinal)
+            Calls.Where(c => IsOwnershipPath(c.Path)
                              && string.IsNullOrEmpty(c.Authorization)).ToList();
 
         protected override Task<HttpResponseMessage> SendAsync(
@@ -256,7 +341,7 @@ public sealed class StateServiceCredentialProductionWiringTests : IDisposable
             var auth = request.Headers.Authorization?.ToString();
             lock (_calls) _calls.Add(new RecordedCall(request.Method.Method, path, auth));
 
-            if (path.StartsWith("/v1", StringComparison.Ordinal) && string.IsNullOrEmpty(auth))
+            if (IsOwnershipPath(path) && string.IsNullOrEmpty(auth))
             {
                 return Task.FromResult(Problem(HttpStatusCode.Unauthorized,
                     "urn:problem:ownership_auth.required"));
@@ -285,6 +370,16 @@ public sealed class StateServiceCredentialProductionWiringTests : IDisposable
                     $$"""{"type":"{{type}}","status":{{(int)code}}}""",
                     Encoding.UTF8, "application/problem+json")
             };
+
+        private static bool IsOwnershipPath(string path) =>
+            path.StartsWith("/v1/", StringComparison.Ordinal)
+            || path.StartsWith("/state/", StringComparison.Ordinal)
+            || path.StartsWith("/cases", StringComparison.Ordinal)
+            || path.StartsWith("/case-outbox", StringComparison.Ordinal)
+            || path.StartsWith("/audit-events", StringComparison.Ordinal)
+            || path.StartsWith("/work-items", StringComparison.Ordinal)
+            || path.StartsWith("/config-surfaces", StringComparison.Ordinal)
+            || path.StartsWith("/acks", StringComparison.Ordinal);
     }
 
     private sealed class PassingOtpClient : IServiceOTPClient
