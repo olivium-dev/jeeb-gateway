@@ -165,7 +165,7 @@ jobs:
               echo "$phase $label anonymous=$anonymous authenticated=$authenticated result=FAIL"
               exit 12;;
             esac
-            case "$authenticated" in 0|401|403)
+            case "$authenticated" in 2??) ;; *)
               echo "$phase $label anonymous=$anonymous authenticated=$authenticated result=FAIL"
               exit 13;;
             esac
