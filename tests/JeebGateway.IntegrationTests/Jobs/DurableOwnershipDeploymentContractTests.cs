@@ -180,8 +180,37 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("awk '/  HTTP\\// { code=$2 } END { print code+0 }'");
         workflow.Should().Contain("remote_probe before_restart");
         workflow.Should().Contain("remote_probe after_restart");
+        workflow.Should().Contain("docker service update --force --update-failure-action pause --detach=false");
+        workflow.Should().Contain("[ \"$before_image\" = \"$after_image\" ]");
+        workflow.Should().Contain("[ \"$before_task_image\" = \"$before_image\" ]");
+        workflow.Should().Contain("[ \"$after_task_image\" = \"$after_image\" ]");
+        workflow.Should().Contain("[ \"$after_task_image_id\" = \"$before_task_image_id\" ]");
         workflow.Should().Contain("[ \"$before_task\" != \"$after_task\" ]");
         workflow.Should().Contain("service_replicas=1/1");
+        workflow.Should().Contain("smoke_workflow_commit=%s");
+        workflow.Should().Contain("runtime_image=%s");
+        workflow.Should().NotContain("docker service rollback");
+    }
+
+    [Theory]
+    [InlineData("deploy-to-jeeb.yml")]
+    [InlineData("jeeb-staging-deploy.yml")]
+    public void Gateway_deploys_pause_without_rollback_and_verify_the_exact_running_image(
+        string workflowName)
+    {
+        var workflow = Workflow(workflowName);
+
+        workflow.Should().Contain("--update-failure-action pause");
+        workflow.Should().Contain("requested_image_id=");
+        workflow.Should().Contain("requested_digest_ref=");
+        workflow.Should().Contain("service_image=");
+        workflow.Should().Contain("task_image_ref=");
+        workflow.Should().Contain("task_image_id=");
+        workflow.Should().Contain("Running task image reference does not match the requested digest");
+        workflow.Should().Contain("Running task image ID does not match the requested image");
+        workflow.Should().NotContain("--update-failure-action rollback");
+        workflow.Should().NotContain("--rollback-order");
+        workflow.Should().NotContain("docker service rollback");
     }
 
     private static string Workflow(string name) => File.ReadAllText(Path.Combine(

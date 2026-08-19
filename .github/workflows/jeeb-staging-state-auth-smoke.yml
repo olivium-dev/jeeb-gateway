@@ -109,7 +109,7 @@ jobs:
           set -euo pipefail
           mkdir -p evidence
           {
-            printf 'commit=%s\n' "$GITHUB_SHA"
+            printf 'smoke_workflow_commit=%s\n' "$GITHUB_SHA"
             printf 'run=%s/%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
             printf 'state_route_mode=%s\n' "$STATE_ROUTE_MODE"
             printf 'source_auth_tests=passed\n'
@@ -182,17 +182,42 @@ jobs:
           }
 
           remote_probe before_restart
+          task_image_evidence() {
+            ssh jeeb-staging 'set -eu
+              container=$(docker ps -q \
+                --filter "label=com.docker.swarm.service.name=jeeb-staging-jeeb-gateway" | head -n 1)
+              [ -n "$container" ]
+              printf "%s|%s\n" \
+                "$(docker inspect --format "{{.Config.Image}}" "$container")" \
+                "$(docker inspect --format "{{.Image}}" "$container")"'
+          }
+          before_image=$(ssh jeeb-staging \
+            "docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' jeeb-staging-jeeb-gateway")
+          case "$before_image" in *@sha256:*) ;; *)
+            echo 'Gateway service image is not digest-pinned.' >&2
+            exit 14;;
+          esac
+          IFS='|' read -r before_task_image before_task_image_id <<< "$(task_image_evidence)"
+          [ "$before_task_image" = "$before_image" ]
+          [ -n "$before_task_image_id" ]
           before_task=$(ssh jeeb-staging \
             "docker service ps --filter desired-state=running --format '{{.ID}}' jeeb-staging-jeeb-gateway | head -n 1")
           ssh jeeb-staging \
-            'docker service update --force --detach=false jeeb-staging-jeeb-gateway >/dev/null'
+            'docker service update --force --update-failure-action pause --detach=false jeeb-staging-jeeb-gateway >/dev/null'
+          after_image=$(ssh jeeb-staging \
+            "docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' jeeb-staging-jeeb-gateway")
           after_task=$(ssh jeeb-staging \
             "docker service ps --filter desired-state=running --format '{{.ID}}' jeeb-staging-jeeb-gateway | head -n 1")
+          [ "$before_image" = "$after_image" ]
           [ -n "$before_task" ] && [ -n "$after_task" ] && [ "$before_task" != "$after_task" ]
           ssh jeeb-staging \
             '[ "$(docker service ls --filter name=jeeb-staging-jeeb-gateway --format "{{.Replicas}}")" = "1/1" ]'
+          IFS='|' read -r after_task_image after_task_image_id <<< "$(task_image_evidence)"
+          [ "$after_task_image" = "$after_image" ]
+          [ "$after_task_image_id" = "$before_task_image_id" ]
           remote_probe after_restart
-          printf 'restart_task_changed=yes\nservice_replicas=1/1\n' \
+          printf 'runtime_image=%s\nrestart_task_changed=yes\nservice_replicas=1/1\n' \
+            "$after_image" \
             >> evidence/state-auth-smoke.txt
 
       - name: Upload redacted evidence

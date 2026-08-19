@@ -21,6 +21,29 @@ current_image() {
   docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' "$1"
 }
 
+assert_exact_running_image() {
+  local service_name=$1
+  local expected_image=$2
+  local actual_image
+  local expected_image_id
+  local task_image
+  local task_image_id
+  local -a running_containers=()
+
+  [[ "$expected_image" == *@sha256:* ]] || fail "expected service image is not digest-pinned"
+  actual_image=$(current_image "$service_name")
+  [[ "$actual_image" == "$expected_image" ]] || fail "service image changed during restart"
+  expected_image_id=$(docker image inspect --format '{{.Id}}' "$expected_image")
+  mapfile -t running_containers < <(
+    docker ps -q --filter "label=com.docker.swarm.service.name=$service_name"
+  )
+  [[ ${#running_containers[@]} -eq 1 ]] || fail "expected exactly one running service container"
+  task_image=$(docker inspect --format '{{.Config.Image}}' "${running_containers[0]}")
+  task_image_id=$(docker inspect --format '{{.Image}}' "${running_containers[0]}")
+  [[ "$task_image" == "$expected_image" ]] || fail "running task image changed during restart"
+  [[ "$task_image_id" == "$expected_image_id" ]] || fail "running task image ID changed during restart"
+}
+
 current_secrets() {
   docker service inspect --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{println .SecretName}}{{end}}' "$1"
 }
@@ -99,8 +122,9 @@ wait_for_stable_update() {
   for ((attempt = 1; attempt <= MAX_WAIT_ATTEMPTS; attempt++)); do
     state=$(docker service inspect --format '{{if .UpdateStatus}}{{.UpdateStatus.State}}{{end}}' "$service_name")
     case "$state" in
-      ''|completed|rollback_completed) return 0 ;;
-      paused|rollback_paused) fail "service update paused" ;;
+      ''|completed) return 0 ;;
+      paused) fail "service update paused" ;;
+      rollback_*) fail "forbidden automatic rollback state detected" ;;
     esac
     sleep 2
   done
@@ -142,57 +166,17 @@ remove_inactive_managed_secret() {
 stabilize() {
   local service_name=$1
   local expected_secret=$2
+  local expected_image
   service_exists "$service_name" || fail "cannot stabilize a missing service"
   assert_safe_spec current "$service_name" "$expected_secret"
-  docker service update --force --with-registry-auth \
+  expected_image=$(current_image "$service_name")
+  docker service update --force --detach=false --with-registry-auth \
     --update-order start-first --update-failure-action pause \
-    --rollback-order start-first --update-monitor 20s "$service_name" >/dev/null
+    --update-monitor 20s "$service_name" >/dev/null
   wait_for_stable_update "$service_name"
   assert_safe_spec current "$service_name" "$expected_secret"
   assert_safe_spec previous "$service_name" "$expected_secret"
-}
-
-recover_existing() {
-  local service_name=$1
-  local new_secret=$2
-  local previous_image=$3
-  local old_secret
-  local image_uid
-  local image_gid
-  local -a secret_args=()
-  local -a env_args=()
-  local env_entry
-
-  service_exists "$service_name" || fail "existing service disappeared during recovery"
-  wait_for_stable_update "$service_name"
-  old_secret=$(target_secret current "$service_name")
-  image_uid=$(docker run --rm --entrypoint /bin/sh "$previous_image" -c 'id -u appuser')
-  image_gid=$(docker run --rm --entrypoint /bin/sh "$previous_image" -c 'id -g appuser')
-  [[ "$image_uid" =~ ^[0-9]+$ && "$image_gid" =~ ^[0-9]+$ ]] || fail "could not derive app identity"
-
-  if [[ -n "$old_secret" && "$old_secret" != "$new_secret" ]]; then
-    secret_args+=(--secret-rm "$old_secret")
-  fi
-  if [[ "$old_secret" != "$new_secret" ]]; then
-    secret_args+=(--secret-add "source=$new_secret,target=$SECRET_TARGET,uid=$image_uid,gid=$image_gid,mode=0400")
-  fi
-  while IFS= read -r env_entry; do
-    [[ -n "$env_entry" ]] || continue
-    if is_forbidden_env_key "${env_entry%%=*}"; then
-      env_args+=(--env-rm "${env_entry%%=*}")
-    fi
-  done < <(spec_env current "$service_name")
-
-  # This is deliberately an explicit update to the previously captured digest,
-  # not a best-effort `service rollback` to an unverified PreviousSpec.
-  docker service update --image "$previous_image" --with-registry-auth \
-    "${secret_args[@]}" "${env_args[@]}" \
-    --update-order start-first --update-failure-action pause \
-    --rollback-order start-first --update-monitor 20s "$service_name" >/dev/null
-  wait_for_stable_update "$service_name"
-  [[ "$(current_image "$service_name")" == "$previous_image" ]] \
-    || fail "explicit rollback did not restore the captured digest"
-  assert_safe_spec current "$service_name" "$new_secret"
+  assert_exact_running_image "$service_name" "$expected_image"
 }
 
 finalize() {
@@ -213,9 +197,11 @@ finalize() {
     return
   fi
 
-  [[ "$previous_image" != none ]] || fail "existing service has no rollback digest"
-  recover_existing "$service_name" "$new_secret" "$previous_image"
-  stabilize "$service_name" "$new_secret"
+  # Existing failed updates stay paused with their exact spec and secret references
+  # intact for deterministic inspection. Never mutate the service a second time here.
+  service_exists "$service_name" || fail "existing service disappeared after failed update"
+  [[ "$previous_image" != none ]] || fail "existing service has no captured prior image"
+  fail "existing service update failed; leaving paused state for inspection"
 }
 
 garbage_collect() {
