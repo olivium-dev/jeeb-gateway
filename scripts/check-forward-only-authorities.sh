@@ -34,7 +34,12 @@ forbidden = {
         r"(?:\bdocker\b|[\"']?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\"']?)\s+service\s+" + r"rm\b",
         re.I,
     ),
-    "service rollback": re.compile(r"docker\s+service\s+" + r"rollback\b", re.I),
+    "service rollback": re.compile(
+        r"(?:\bdocker\b|[\"']?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\"']?)\s+service\s+" + r"rollback\b", re.I
+    ),
+    "stack deletion": re.compile(
+        r"(?:\bdocker\b|[\"']?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\"']?)\s+stack\s+" + r"rm\b", re.I
+    ),
     "unsafe service scale": re.compile(
         r"(?:\bdocker\b|[\"']?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\"']?)\s+service\s+scale\b"
         r"[^\n]*=\s*(?:0|[2-9][0-9]*)\b", re.I
@@ -76,6 +81,8 @@ adversarial_canaries = {
         "docker service update --image ghcr.io/olivium-dev/app:" + "production app"
     ),
     "unsafe service scale": "docker service " + "scale app=0",
+    "variable Docker rollback": 'ENGINE=docker; "$ENGINE" service ' + "rollback app",
+    "variable Docker stack deletion": 'ENGINE=docker; "$ENGINE" stack ' + "rm app",
 }
 for description, canary in adversarial_canaries.items():
     if not any(pattern.search(canary) for pattern in forbidden.values()):
@@ -84,6 +91,38 @@ for description, canary in adversarial_canaries.items():
 violations = []
 utf8_count = 0
 tracked = list(tracked_utf8())
+for path, text in tracked:
+    if path.name == "Dockerfile" or path.name.startswith("Dockerfile."):
+        local_stages = set()
+        stage_count = 0
+        for line in text.splitlines():
+            match = re.match(
+                r"^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?\s*$",
+                line,
+                re.I,
+            )
+            if not match:
+                continue
+            stage_count += 1
+            image, alias = match.groups()
+            if image.lower() not in local_stages and not re.search(r"@sha256:[0-9a-f]{64}$", image, re.I):
+                raise SystemExit(f"FAIL: unpinned Dockerfile stage in {path}: {line.strip()}")
+            if alias:
+                local_stages.add(alias.lower())
+        if stage_count == 0:
+            raise SystemExit(f"FAIL: no Dockerfile stages audited in {path}")
+
+    if "cloudflared-linux-amd64.deb" in text and ("curl " in text or "wget " in text):
+        if "/releases/" + "latest/" in text:
+            raise SystemExit(f"FAIL: floating cloudflared download in {path}")
+        for marker in (
+            "/releases/download/2026.8.2/cloudflared-linux-amd64.deb",
+            "c805c7c8102190c04dfc16e3b4cc4acc9007d5b19b3afbcd608ea6fed7645a43",
+            "sha256sum --check --strict",
+        ):
+            if marker not in text:
+                raise SystemExit(f"FAIL: cloudflared download lacks exact artifact proof in {path}: {marker}")
+
 for path, text in tracked:
     utf8_count += 1
     for line_number, line in enumerate(text.splitlines(), 1):
@@ -117,13 +156,16 @@ if deploy_inventory != expected_inventory:
         f"actual={sorted(deploy_inventory)} expected={sorted(expected_inventory)}"
     )
 
+engine_pattern = r"(?:\bdocker\b|[\"']?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\"']?)"
 mutation_pattern = re.compile(
-    r"(?:\bdocker\b|[\"']?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\"']?)\s+service\s+"
-    r"(?:update|create|scale|" + "rm|rollback" + r")\b", re.I
+    engine_pattern + r"\s+(?:service\s+(?:update|create|scale|" + "rm|rollback" + r")"
+    r"|stack\s+(?:create|update|deploy|" + "rm" + r"))\b", re.I
 )
 for canary in (
     'ENGINE=docker\n"$ENGINE" service ' + 'update --image "$IMAGE" app',
     "docker service " + "scale app=0",
+    'ENGINE=docker\n"$ENGINE" service ' + "rollback app",
+    'ENGINE=docker\n"$ENGINE" stack ' + 'deploy -c stack.yml app',
 ):
     if not mutation_pattern.search(canary):
         raise SystemExit("FAIL: service mutation inventory misses an adversarial canary")
