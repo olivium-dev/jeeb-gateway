@@ -30,8 +30,15 @@ def tracked_utf8():
 
 
 forbidden = {
-    "service deletion": re.compile(r"docker\s+service\s+" + r"rm\b", re.I),
+    "service deletion": re.compile(
+        r"(?:\bdocker\b|[\"']?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\"']?)\s+service\s+" + r"rm\b",
+        re.I,
+    ),
     "service rollback": re.compile(r"docker\s+service\s+" + r"rollback\b", re.I),
+    "unsafe service scale": re.compile(
+        r"(?:\bdocker\b|[\"']?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\"']?)\s+service\s+scale\b"
+        r"[^\n]*=\s*(?:0|[2-9][0-9]*)\b", re.I
+    ),
     "automatic rollback": re.compile(r"--update-failure-action(?:=|\s+)" + r"rollback\b", re.I),
     "rollback option": re.compile(r"--" + r"rollback(?:-[a-z-]+)?\b", re.I),
     "schema downgrade command": re.compile(
@@ -43,15 +50,36 @@ forbidden = {
     "database snapshot or restore": re.compile(r"\b" + "pg_" + r"(?:dump|restore)\b", re.I),
     "Git prior-state recovery": re.compile(
         r"\bgit\s+(?:re" + "vert" + r"\b|reset\b[^\n]*--hard\b"
-        r"|checkout\b[^\n]*(?:HEAD[~^]|[0-9a-f]{7,})"
+        r"|check" + "out" + r"\b"
         r"|restore\b[^\n]*--source\b|switch\b[^\n]*--detach\b)", re.I
     ),
-    "mutable latest image": re.compile(r"\b[a-z0-9._/-]+:" + "latest" + r"\b", re.I),
+    "floating deployment image alias": re.compile(
+        r"\b[a-z0-9._/-]+:" + r"(?:latest|main|master|dev|staging|prod|production)\b",
+        re.I,
+    ),
+    "mutable literal Swarm image": re.compile(
+        r"(?:\bdocker\b|[\"']?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\"']?)\s+service\s+"
+        r"(?:update|create)\b[^\n]*--image(?:=|\s+)\s*[\"']?"
+        r"[a-z0-9._/-]+:[a-z0-9._-]+\b(?!@sha256:)",
+        re.I,
+    ),
     "historical deployment authority": re.compile(
         r"\b(?:previous|prior|predecessor)\s+(?:image|container|service|deployment|database|dump)\b",
         re.I,
     ),
 }
+
+adversarial_canaries = {
+    "variable Docker deletion": 'DOCKER=docker; "$DOCKER" service ' + "rm app",
+    "variable Git prior selector": "git check" + 'out "$PREVIOUS_SHA"',
+    "mutable Swarm image": (
+        "docker service update --image ghcr.io/olivium-dev/app:" + "production app"
+    ),
+    "unsafe service scale": "docker service " + "scale app=0",
+}
+for description, canary in adversarial_canaries.items():
+    if not any(pattern.search(canary) for pattern in forbidden.values()):
+        raise SystemExit(f"FAIL: scanner does not reject adversarial canary: {description}")
 
 violations = []
 utf8_count = 0
@@ -80,8 +108,6 @@ deploy_inventory = {
     path.name for path in workflow_dir.glob("*deploy*.yml")
 }
 expected_inventory = {
-    "deploy-production.yml",
-    "deploy-staging.yml",
     "deploy-to-jeeb.yml",
     "jeeb-staging-deploy.yml",
 }
@@ -91,23 +117,48 @@ if deploy_inventory != expected_inventory:
         f"actual={sorted(deploy_inventory)} expected={sorted(expected_inventory)}"
     )
 
+mutation_pattern = re.compile(
+    r"(?:\bdocker\b|[\"']?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\"']?)\s+service\s+"
+    r"(?:update|create|scale|" + "rm|rollback" + r")\b", re.I
+)
+for canary in (
+    'ENGINE=docker\n"$ENGINE" service ' + 'update --image "$IMAGE" app',
+    "docker service " + "scale app=0",
+):
+    if not mutation_pattern.search(canary):
+        raise SystemExit("FAIL: service mutation inventory misses an adversarial canary")
+mutation_inventory = {
+    path.relative_to(Path(".")).as_posix()
+    for root in (Path(".github/workflows"), Path(".github/scripts"))
+    for path in root.rglob("*")
+    if path.is_file() and path.suffix in {".yml", ".yaml", ".sh"}
+    and mutation_pattern.search(path.read_text())
+}
+expected_mutation_inventory = {
+    ".github/scripts/jeeb-gateway-secret-lifecycle.sh",
+    ".github/workflows/deploy-to-jeeb.yml",
+    ".github/workflows/jeeb-staging-deploy.yml",
+    ".github/workflows/jeeb-staging-state-auth-smoke.yml",
+}
+if mutation_inventory != expected_mutation_inventory:
+    raise SystemExit(
+        "FAIL: service mutation inventory drifted: "
+        f"actual={sorted(mutation_inventory)} expected={sorted(expected_mutation_inventory)}"
+    )
+
+lifecycle = Path(".github/scripts/jeeb-gateway-secret-lifecycle.sh").read_text()
+if ".Previous" + "Spec" in lifecycle:
+    raise SystemExit("FAIL: secret lifecycle reads retired service-spec metadata")
+smoke = Path(".github/workflows/jeeb-staging-state-auth-smoke.yml").read_text()
+if "scripts/verify-swarm-service-image.sh" not in smoke or "--image" in smoke:
+    raise SystemExit("FAIL: state-auth restart route lacks exact current-image verification")
+
 deploy_text = {name: (workflow_dir / name).read_text() for name in expected_inventory}
 for name, text in deploy_text.items():
     if ":" + "latest" in text.lower():
         raise SystemExit(f"FAIL: {name} references a mutable latest image tag")
     if "github.sha" not in text and "GITHUB_SHA" not in text:
         raise SystemExit(f"FAIL: {name} does not derive its artifact from the triggering commit")
-
-for name in ("deploy-production.yml", "deploy-staging.yml"):
-    text = deploy_text[name]
-    if "image_tag: ${{ github.sha }}" not in text:
-        raise SystemExit(f"FAIL: {name} does not pass the triggering commit to the trusted deployer")
-    if "olivium-dev/jeeb-gateway" not in text:
-        raise SystemExit(f"FAIL: {name} lacks the canonical-repository caller guard")
-
-staging_reusable = deploy_text["deploy-staging.yml"]
-if re.search(r"(?m)^\s+image_tag:\s*$", staging_reusable):
-    raise SystemExit("FAIL: reusable staging deploy accepts an arbitrary image input")
 
 direct = deploy_text["deploy-to-jeeb.yml"]
 for token in (
@@ -137,13 +188,12 @@ if "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" not in build:
     raise SystemExit("FAIL: build artifact is not tagged with the exact triggering commit")
 if re.search(r"(?m)^\s+image_tag:\s*", build):
     raise SystemExit("FAIL: build exposes an arbitrary artifact selector")
-if "uses: ./.github/workflows/deploy-staging.yml" not in build:
-    raise SystemExit("FAIL: explicit reusable staging caller inventory drifted")
+if "jeeb-infrastructure/.github/workflows/swarm-deploy.yml" in build:
+    raise SystemExit("FAIL: build workflow reintroduced the retired tag-resolving deployer")
 
 if (workflow_dir / "db-backup-verify.yml").exists():
     raise SystemExit("FAIL: retired gateway database restore workflow is active")
 
-lifecycle = Path(".github/scripts/jeeb-gateway-secret-lifecycle.sh").read_text()
 if "new service create failed; leaving the failed service in place for inspection" not in lifecycle:
     raise SystemExit("FAIL: failed-create lifecycle no longer fails closed in place")
 

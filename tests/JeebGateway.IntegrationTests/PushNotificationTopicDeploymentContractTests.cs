@@ -103,6 +103,7 @@ public sealed class PushNotificationTopicDeploymentContractTests
         script.Should().NotContain("docker service " + "rollback");
         script.Should().NotContain("recover_existing");
         script.Should().NotContain("previous_image");
+        script.Should().NotContain(".PreviousSpec");
     }
 
     private static string LocateRepoRoot()
