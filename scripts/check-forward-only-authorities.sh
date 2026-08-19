@@ -233,9 +233,18 @@ for token in (
     "GITHUB_OUTPUT",
     "sha256:",
     "scripts/verify-swarm-service-image.sh",
+    'add_env ForwardedHeaders__KnownProxies__0 "$published_port_proxy_ip"',
+    "add_env Gateway__PublicBaseUrl https://app.jeeb.fds-1.com",
+    "add_env AdminPortal__AllowedOrigins__0 https://app.jeeb.fds-1.com",
+    "add_env AdminPortal__AllowedOrigins__1 https://cms.jeeb.fds-1.com",
+    "Verify public HTTPS origin contract",
+    "https://jeeb.dev/errors/csrf_rejected",
+    "https://jeeb.dev/errors/origin_rejected",
 ):
     if token not in staging:
         raise SystemExit(f"FAIL: staging deploy lacks commit/image/runtime proof: {token}")
+if "ForwardedHeaders__KnownNetworks" in staging:
+    raise SystemExit("FAIL: staging deploy trusts a forwarded-header network range")
 
 build = (workflow_dir / "build.yml").read_text()
 if ":" + "latest" in build.lower() or "type=raw,value=" + "latest" in build:

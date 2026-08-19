@@ -201,6 +201,19 @@ jobs:
           create_env=()
           env_remove_args=()
           add_env() { update_env+=(--env-add "$1=$2"); create_env+=(--env "$1=$2"); }
+          docker network create --driver overlay --attachable "$network" 2>/dev/null || true
+          [ "$(docker network inspect -f '{{.Driver}}' "$network")" = overlay ]
+          network_id=$(docker network inspect --format '{{.Id}}' "$network")
+          published_port_proxy_ip=$(docker network inspect \
+            --format '{{(index .IPAM.Config 0).Gateway}}' docker_gwbridge)
+          printf '%s\n' "$published_port_proxy_ip" | awk -F. '
+            NF == 4 {
+              for (i = 1; i <= 4; i++)
+                if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1
+              exit 0
+            }
+            { exit 1 }
+          ' || { echo 'Invalid docker_gwbridge gateway address' >&2; exit 1; }
           case "$REPOSITORY" in
             jeeb-gateway)
               service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
@@ -210,10 +223,16 @@ jobs:
               add_env Jwt__SigningKey "$JWT_SIGNING_KEY"
               add_env Jwt__Issuer https://jeeb-staging.fds-1.com
               add_env Jwt__Audience jeeb-mobile
+              add_env Gateway__PublicBaseUrl https://app.jeeb.fds-1.com
               [ -z "$UMJWT_SIGNING_KEY" ] || add_env UmJwt__SigningKey "$UMJWT_SIGNING_KEY"
               add_env UmJwt__Issuer user-management
               add_env UmJwt__Audience user-management
               add_env AdminOidc__Enabled false
+              # Host-mode published ports traverse docker_gwbridge. Trust only
+              # its exact gateway address, never the whole bridge or app overlay.
+              add_env ForwardedHeaders__KnownProxies__0 "$published_port_proxy_ip"
+              add_env AdminPortal__AllowedOrigins__0 https://app.jeeb.fds-1.com
+              add_env AdminPortal__AllowedOrigins__1 https://cms.jeeb.fds-1.com
               add_env Settlements__CodOwnerVerified true
               add_env Redis__ConnectionString 192.168.2.20:6379
               add_env GatewayRateLimit__RedisConnectionString 192.168.2.20:6379
@@ -403,9 +422,6 @@ jobs:
           esac
           [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
           docker pull "$IMAGE"
-          docker network create --driver overlay --attachable "$network" 2>/dev/null || true
-          [ "$(docker network inspect -f '{{.Driver}}' "$network")" = overlay ]
-          network_id=$(docker network inspect --format '{{.Id}}' "$network")
           common=(--limit-cpu 0.75 --limit-memory 768M --reserve-cpu 0.10 --reserve-memory 64M
             --log-driver json-file --log-opt max-size=10m --log-opt max-file=3
             --update-order stop-first --update-failure-action pause --update-monitor 20s)
@@ -460,6 +476,29 @@ jobs:
           [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
           ssh jeeb-staging bash -s -- jeeb-staging-jeeb-gateway "$IMAGE" \
             < scripts/verify-swarm-service-image.sh
+
+      - name: Verify public HTTPS origin contract
+        run: |
+          set -euo pipefail
+          probe_origin() {
+            local host=$1 path=$2 supplied_scheme=$3 expected_type=$4
+            local response status body
+            response=$(curl --silent --show-error --connect-timeout 10 --max-time 20 \
+              --write-out $'\n%{http_code}' --request POST \
+              --header "Origin: ${supplied_scheme}://${host}" \
+              --header 'Sec-Fetch-Site: same-origin' \
+              "https://${host}${path}")
+            status=${response##*$'\n'}
+            body=${response%$'\n'*}
+            [ "$status" = 403 ]
+            jq -e --arg expected "$expected_type" '.type == $expected' <<< "$body" >/dev/null
+          }
+          csrf_type=https://jeeb.dev/errors/csrf_rejected
+          origin_type=https://jeeb.dev/errors/origin_rejected
+          probe_origin app.jeeb.fds-1.com /admin/v1/auth/refresh https "$csrf_type"
+          probe_origin app.jeeb.fds-1.com /admin/v1/auth/refresh http "$origin_type"
+          probe_origin cms.jeeb.fds-1.com /gateway/admin/v1/auth/refresh https "$csrf_type"
+          probe_origin cms.jeeb.fds-1.com /gateway/admin/v1/auth/refresh http "$origin_type"
 
       - name: Clean up isolated remote Docker credentials
         if: always()
