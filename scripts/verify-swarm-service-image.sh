@@ -20,7 +20,7 @@ service_image=$(docker service inspect "$service_id" --format '{{.Spec.TaskTempl
   || fail "service spec does not use the exact requested image"
 
 update_state=
-for attempt in $(seq 1 30); do
+for ((attempt = 1; attempt <= 30; attempt++)); do
   update_state=$(docker service inspect "$service_id" --format '{{if .UpdateStatus}}{{.UpdateStatus.State}}{{else}}initial{{end}}')
   case "$update_state" in
     initial|completed) break ;;
