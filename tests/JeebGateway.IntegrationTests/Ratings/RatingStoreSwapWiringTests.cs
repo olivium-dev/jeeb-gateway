@@ -12,7 +12,8 @@ namespace JeebGateway.IntegrationTests.Ratings;
 /// <c>FeatureFlags:UseUpstream:Ratings</c> is true the singleton
 /// <see cref="IRatingStore"/> resolves to <see cref="FeedbackServiceRatingStore"/>
 /// (feedback-service-backed durable record-of-truth); when false it stays
-/// <see cref="InMemoryRatingStore"/> (the instant-rollback fallback, KEPT). The
+/// <see cref="InMemoryRatingStore"/> in development/test only. Production startup rejects the
+/// backward authority setting. The
 /// blind/reveal state machine (<see cref="BlindRevealPolicy"/>) is unchanged in
 /// both cases; only the backing store swaps.
 /// </summary>
@@ -27,7 +28,7 @@ public class RatingStoreSwapWiringTests
         var store = factory.Services.GetRequiredService<IRatingStore>();
 
         store.Should().BeOfType<InMemoryRatingStore>(
-            "the legacy in-memory store is the flag-off record-of-truth and rollback target");
+            "the base development configuration remains host-free for tests");
     }
 
     [Fact]

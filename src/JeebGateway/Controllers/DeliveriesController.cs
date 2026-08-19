@@ -1790,8 +1790,8 @@ public class DeliveriesController : ControllerBase
         // at_door gate. The gateway calls /otp/issue FIRST so the gate is
         // enforced server-side and is multi-replica safe, THEN performs the
         // SMS round-trip via one-time-password. The raw code never leaves the
-        // gateway↔one-time-password hop (AC5). The in-memory path below stays
-        // intact as the documented rollback lever.
+        // gateway↔one-time-password hop (AC5). Production startup rejects the backward
+        // authority setting; the in-memory path below remains development/test support.
         if (_flags.CurrentValue.Delivery)
         {
             return await TriggerOtpViaDeliveryServiceAsync(deliveryId, delivery, callerId, correlationId, activity, ct);

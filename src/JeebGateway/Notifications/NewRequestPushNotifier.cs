@@ -59,10 +59,6 @@ namespace JeebGateway.Notifications;
 /// A read that FAILS is logged at Error with the <c>audience-unavailable</c> marker and sends
 /// to nobody; it is never allowed to look like an empty audience.</para>
 ///
-/// <para>ROLLBACK: <c>Notifications:NewRequestFanout:Enabled=false</c> restores the legacy
-/// <c>jeeb_jeebers</c> topic blast byte-identically, with no redeploy. See
-/// <see cref="NewRequestFanoutOptions"/>.</para>
-///
 /// <para>Reuses the EXISTING, deployed <see cref="ServicePushNotificationClient"/> (the same
 /// typed client + base URL :10040 that <see cref="ChatMessagePushNotifier"/> and
 /// <see cref="OfferPushNotifier"/> use) — no new push contract is invented, and the route
@@ -106,11 +102,6 @@ public interface INewRequestPushNotifier
 /// <inheritdoc />
 public sealed class NewRequestPushNotifier : INewRequestPushNotifier
 {
-    // Bounds the FCM round-trip on the legacy topic-blast path (rollback branch) so a
-    // slow/down relay cannot wedge the job. Per-recipient sends use
-    // NewRequestFanoutOptions.PerSendTimeout instead. Both now come from PushSendBudget.
-    private static readonly TimeSpan PushTimeout = PushSendBudget.PerRecipient;
-
     // FR: the request description is a preview, not the full order — cap it so a long
     // transcript/compose body does not blow up the FCM notification body.
     private const int BodyPreviewMaxLength = 80;
@@ -214,15 +205,7 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
             var tier = catalog.Resolve(n.TierId);
             var payload = BuildPayload(n, tier);
 
-            if (!_options.Enabled)
-            {
-                // Config-only rollback: byte-identical to the pre-P1 topic blast.
-                await SendTopicBlastAsync(payload, ct);
-                return;
-            }
-
-            // W1-11 pre-send status probe, placed AFTER the kill-switch branch so the legacy
-            // topic blast stays byte-identical. Unresolvable status = fail open, still send.
+            // W1-11 pre-send status probe. Unresolvable status = fail open, still send.
             var status = await _probe.ReadStatusAsync(n.RequestId, ct);
             if (status is not null
                 && (RequestStatus.IsTerminal(status) || RequestStatus.IsJeeberActive(status)))
@@ -243,10 +226,6 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                     + "initiatorExcluded={InitiatorExcluded} — NO PUSH SENT (no online or known jeeber)",
                     n.RequestId, resolved.Source, resolved.CandidateCount, resolved.InitiatorExcluded);
 
-                if (_options.TopicFallbackWhenEmpty)
-                {
-                    await SendTopicBlastAsync(payload, ct);
-                }
                 return;
             }
 
@@ -716,23 +695,6 @@ public sealed class NewRequestPushNotifier : INewRequestPushNotifier
                 gate.Release();
             }
         }
-    }
-
-    /// <summary>
-    /// The pre-P1 behaviour, verbatim: ONE push to the <c>jeeb_jeebers</c> FCM topic, which
-    /// reaches ALL subscribed jeebers regardless of geography, availability, or who created
-    /// the request. Reachable only via the <c>Enabled=false</c> rollback branch or the
-    /// <c>TopicFallbackWhenEmpty</c> escape hatch (both default to the safe setting).
-    /// </summary>
-    private async Task SendTopicBlastAsync(Dictionary<string, object?> payload, CancellationToken ct)
-    {
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(PushTimeout);
-
-        await _push.Send_notification_to_topicAsync(
-            JeebPushTopicMap.JeebersTopic,
-            new SentPayloadToTopicRequest { Payload = payload },
-            cts.Token);
     }
 
     // ── Payload ───────────────────────────────────────────────────────────────

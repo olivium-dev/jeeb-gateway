@@ -127,9 +127,7 @@ public class OfferPushNotifierTests
     /// </summary>
     private static ServicePushNotificationClient GuardedPushClient()
     {
-        var guard = new JeebGateway.Services.Clients.GatewayDirectPushDispatchGuardHandler(
-            Microsoft.Extensions.Options.Options.Create(
-                new JeebGateway.Services.Clients.GatewayDirectPushDispatchOptions { Enabled = false }))
+        var guard = new JeebGateway.Services.Clients.GatewayDirectPushDispatchGuardHandler
         {
             InnerHandler = new StaticResponseHandler(
                 () => new HttpResponseMessage(HttpStatusCode.OK)

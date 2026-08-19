@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 namespace JeebGateway.Notifications;
 
 /// <summary>
-/// Emits the operator-visible rollback alarm when durable notification writes
+/// Emits the operator-visible authority alarm when durable notification writes
 /// remain disabled in a prod-like environment.
 /// </summary>
 internal sealed class NotificationDurableWriteStartupAlarm : IHostedService
@@ -40,7 +40,7 @@ internal sealed class NotificationDurableWriteStartupAlarm : IHostedService
         _logger.LogCritical(
             "event={event} enabled={enabled} environment={environment} " +
             "DURABLE NOTIFICATION WRITES ARE DISABLED IN A PROD-LIKE ENVIRONMENT; " +
-            "JEBV4-333 missed-push durability is rolled back.",
+            "JEBV4-333 missed-push durability is unavailable; fix the owner path forward.",
             AlarmEvent,
             false,
             _environment.EnvironmentName);

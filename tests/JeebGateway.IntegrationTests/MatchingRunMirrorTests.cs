@@ -246,42 +246,6 @@ public class MatchingRunMirrorTests
         paths.Should().ContainInOrder("/deliveries", "/matching/run");
     }
 
-    [Fact]
-    public async Task Mirror_Disabled_Flag_Skips_The_Seed()
-    {
-        // Instant rollback lever: FeatureFlags:MatchingMirror:Enabled=false makes
-        // the controller forward-only (no pre-run seed), exactly the pre-S06 path.
-        var paths = new List<string>();
-        var stub = new StubHttpMessageHandler(req =>
-        {
-            // #451 boot-time RequestExpiryObserver sweeps this route on every host.
-            if (req.RequestUri!.AbsolutePath != "/deliveries/expired")
-                paths.Add(req.RequestUri!.AbsolutePath);
-            return JsonResponse(
-                """
-                {"request_id":"req-off","tier_id":"uuid-off","tier_code":"flash","radius_km":1,
-                 "notified_count":0,"candidate_count":0,"candidates":[],"elapsed_ms":1}
-                """);
-        });
-
-        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
-        {
-            builder.UseSetting("FeatureFlags:MatchingMirror:Enabled", "false");
-            builder.ConfigureTestServices(services =>
-                ReplaceDeliveryClient(services, stub, "http://upstream-delivery.test"));
-        });
-
-        await SeedRequestAsync(factory, id: "req-off", clientId: "client-off", tierId: "flash");
-
-        var client = ClientFor(factory, "client-off");
-        var resp = await client.PostAsJsonAsync("/matching/run", new { requestId = "req-off" });
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        // Flag off → no seed.
-        paths.Should().NotContain("/deliveries");
-        paths.Should().ContainSingle().Which.Should().Be("/matching/run");
-    }
-
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------

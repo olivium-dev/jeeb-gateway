@@ -56,7 +56,7 @@ on:
     inputs:
       # `registry` is a fixed constant (always ghcr.io); it is set as a job-level env
       # (REGISTRY) rather than a workflow_dispatch input so the dispatch input count
-      # stays at GitHub's hard limit of 25 after `durable_requests` was added (PR #105).
+      # stays below GitHub's hard limit of 25.
       # 26 inputs makes the workflow un-dispatchable (HTTP 422 at dispatch time).
       #
       # FeatureFlags spine flags are NOT added as one-input-per-flag (that path hit the cap).
@@ -124,28 +124,24 @@ on:
       #       UseUpstreamKyc=<bool>         -> FeatureFlags__UseUpstream__Kyc                   (S03 / ADR-0004)
       #       UseUpstreamCdn=<bool>         -> FeatureFlags__UseUpstream__Cdn                   (S03 / ADR-0004)
       #       UseUpstreamOffer=<bool>       -> FeatureFlags__UseUpstream__Offer                 (S07 — auction/accept)
-      #       UseUpstreamDelivery=<bool>    -> FeatureFlags__UseUpstream__Delivery              (S09/S13/S15 — canonical delivery SM-1)
       #     NOTE: FeatureFlags__UseUpstream__Offer AND FeatureFlags__UseUpstream__Delivery are
       #     ALSO injected UNCONDITIONALLY =true on every deploy (see the dedicated --env-add/--env
       #     lines in the update & create branches below), so S07 routes through
       #     UpstreamPendingOffersStore and S09/S13/S15 route through the canonical delivery
       #     state-machine (SM-1: Ordered/Picked/InTransit/AtDoor/Done, trigger-keyed PATCH,
       #     AtDoor OTP handover, settlement-on-Done) even when the map keys are omitted.
-      #     Passing UseUpstreamOffer / UseUpstreamDelivery here is redundant-but-harmless
-      #     (same value, idempotent).
+      #     Delivery is a settled authority and is not accepted as operator input;
+      #     Offer remains in the map until its separate retirement.
       #     Future spine flags are added to the map's case table below — NO new input, NO cap risk.
-      #   * `durable_requests`, `whisper_fake`, `dev_endpoints`, `swagger_ui` keep their OWN
-      #     dedicated inputs UNCHANGED (their 3-state / secret-coupled semantics are load-bearing
-      #     and out of scope here). In particular `durable_requests` is untouched, so a deploy
-      #     that passes durable_requests=true STILL arms the durable path exactly as before —
-      #     the durable flag, currently ON in production, STAYS ON.
+      #   * `whisper_fake`, `dev_endpoints`, and `swagger_ui` keep dedicated inputs because
+      #     their 3-state / secret-coupled semantics are load-bearing.
       #   * Unknown keys are IGNORED with a warning (fail-open on parse, never fail the deploy
       #     on a typo); a value other than true/false is rejected (guardrail: no silent garbage
       #     into an env var).
       # Example: feature_flags='ConversationAutoCreate=true' arms H7 broadcasting auto-create
       # while leaving Kyc/Cdn at their baked-true defaults.
       feature_flags:
-        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,Heartbeat=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamDelivery, UseUpstreamChat, Heartbeat. Empty = preserve running flags (baked appsettings defaults on fresh create). NOTE: UseUpstream.Offer AND UseUpstream.Delivery are forced =true unconditionally every deploy regardless of this input (S07 / S09-S13-S15). S08: pass UseUpstreamChat=true to arm the conversation BFF (default off -> 503).'
+        description: 'Generic FeatureFlags overlay: comma-separated Key=Value. Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamChat. Empty = preserve running flags (baked appsettings defaults on fresh create). Delivery/Ratings authority and Heartbeat/DurableRequests environment locks are not operator inputs.'
         required: false
         default: ''
       # S04 / Track C — REAL OpenAI Whisper STT seam. The gateway selects the real
@@ -163,31 +159,6 @@ on:
         options:
           - 'true'
           - 'false'
-      # S05 / ADR-006 — DURABLE request-create path (stateless gateway + jeeb-state-service
-      # saga_bundles ledger). The durable idempotent POST /requests path is already BUILT and
-      # deployed behind FeatureFlags:DurableRequests:Enabled, but DORMANT (flag OFF) because no
-      # workflow input could flip it and owner law forbids a hand `docker service update
-      # --env-add` from an operator shell. This input is the ONLY supported way to set
-      # FeatureFlags__DurableRequests__Enabled on the running gateway. It is injected via
-      # --env-add on EVERY deploy (update + create), mirroring whisper_fake, so the value is
-      # deterministic and operator-controllable rather than "whatever the container last had".
-      # Plain boolean (non-secret) => workflow input, NOT a GitHub secret.
-      #   'false' (DEFAULT) => FeatureFlags__DurableRequests__Enabled=false. PRESERVES the
-      #                        current behaviour: a no-arg deploy keeps the durable path DORMANT
-      #                        (gateway uses the legacy in-memory create path; A4 replay still
-      #                        returns a fresh UUID). Nothing changes unless explicitly armed.
-      #   'true'            => FeatureFlags__DurableRequests__Enabled=true. Arms the stateless
-      #                        durable create path (idempotent dedup via jeeb-state-service
-      #                        saga_bundles — A4 replay returns the SAME id). The gateway stays
-      #                        stateless: the ledger lives in jeeb-state-service, not the gateway.
-      durable_requests:
-        description: 'FeatureFlags__DurableRequests__Enabled. false (default) = legacy create path (current behaviour, flag OFF); true = stateless durable idempotent create via jeeb-state-service.'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
       # DEV-ONLY seed/inspect surface (/dev/*). This input is the ONLY supported way to
       # toggle Features__DevEndpoints__Enabled on the running gateway — never set it via a
       # manual `docker service update --env-add/--env-rm` from an operator shell, and never
@@ -410,9 +381,7 @@ jobs:
                 useupstreamkyc)         _envvar="FeatureFlags__UseUpstream__Kyc" ;;
                 useupstreamcdn)         _envvar="FeatureFlags__UseUpstream__Cdn" ;;
                 useupstreamoffer)       _envvar="FeatureFlags__UseUpstream__Offer" ;;
-                useupstreamdelivery)    _envvar="FeatureFlags__UseUpstream__Delivery" ;;
                 useupstreamchat)        _envvar="FeatureFlags__UseUpstream__Chat" ;;
-                heartbeat)              _envvar="FeatureFlags__Heartbeat__Enabled" ;;
                 *) echo "::warning::feature_flags: ignoring unknown key '$_key'"; continue ;;
               esac
               FEATURE_FLAG_ARGS="$FEATURE_FLAG_ARGS --env-add ${_envvar}=${_val}"
@@ -489,10 +458,12 @@ jobs:
               --env-add InternalJobAuth__TokenFile='/run/secrets/jeeb_gateway_job_token' \
               --env-add Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env-add Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
-              --env-add FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
+              --env-add FeatureFlags__DurableRequests__Enabled='false' \
+              --env-add FeatureFlags__Heartbeat__Enabled='false' \
               --env-add FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               --env-add FeatureFlags__UseUpstream__Offer='true' \
               --env-add FeatureFlags__UseUpstream__Delivery='true' \
+              --env-add FeatureFlags__UseUpstream__Ratings='true' \
               --env-add FeatureFlags__UseUpstream__Chat='true' \
               $FEATURE_FLAG_ARGS \
               $DEV_FLAG_ARG \
@@ -538,10 +509,12 @@ jobs:
               --env Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
               --env Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
-              --env FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
+              --env FeatureFlags__DurableRequests__Enabled='false' \
+              --env FeatureFlags__Heartbeat__Enabled='false' \
               --env FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               --env FeatureFlags__UseUpstream__Offer='true' \
               --env FeatureFlags__UseUpstream__Delivery='true' \
+              --env FeatureFlags__UseUpstream__Ratings='true' \
               --env FeatureFlags__UseUpstream__Chat='true' \
               --secret "source=\$STATE_SECRET,target=jeeb_state_service_token,mode=0444" \
               --secret "source=\$DELIVERY_SECRET,target=delivery_service_token,mode=0444" \

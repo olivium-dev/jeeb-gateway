@@ -1,45 +1,23 @@
 using System.Net;
 using System.Net.Http.Json;
-using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Services.Clients;
 
 /// <summary>
-/// Prevents the gateway from acting as a second push producer after durable
-/// notification dispatch moves to notification-service.
-/// </summary>
-public sealed class GatewayDirectPushDispatchOptions
-{
-    public const string SectionName = "PushNotificationServiceApi:GatewayDirectDispatch";
-
-    /// <summary>
-    /// Emergency rollback switch. The committed and missing-value default is
-    /// false so a new environment fails closed.
-    /// </summary>
-    public bool Enabled { get; init; }
-}
-
-/// <summary>
 /// Blocks only push send operations on the generated push client. Device-token
 /// registration/deletion, health, and idempotency recovery remain available.
+/// notification-service is the settled sole push producer, so no runtime
+/// setting can re-arm gateway direct dispatch.
 /// </summary>
 public sealed class GatewayDirectPushDispatchGuardHandler : DelegatingHandler
 {
     internal const string DisabledProblemCode = "gateway_direct_push_dispatch_disabled";
 
-    private readonly IOptions<GatewayDirectPushDispatchOptions> _options;
-
-    public GatewayDirectPushDispatchGuardHandler(
-        IOptions<GatewayDirectPushDispatchOptions> options)
-    {
-        _options = options;
-    }
-
     protected override Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request,
         CancellationToken cancellationToken)
     {
-        if (!_options.Value.Enabled && IsDirectDispatch(request))
+        if (IsDirectDispatch(request))
         {
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
             {

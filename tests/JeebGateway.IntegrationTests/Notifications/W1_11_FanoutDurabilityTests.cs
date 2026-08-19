@@ -174,12 +174,6 @@ public class W1_11_FanoutDurabilityTests
         offenders.Should().BeEmpty("a default deploy must behave exactly as main does today");
     }
 
-    [Fact]
-    public void The_topic_blast_kill_switch_keeps_its_own_semantics()
-        => new NewRequestFanoutOptions().Enabled.Should().BeTrue(
-            "Notifications:NewRequestFanout:Enabled is untouched by W1-11 — false still "
-            + "restores the byte-identical legacy topic blast");
-
     // ---------------------------------------------------------------------
     // helpers
     // ---------------------------------------------------------------------

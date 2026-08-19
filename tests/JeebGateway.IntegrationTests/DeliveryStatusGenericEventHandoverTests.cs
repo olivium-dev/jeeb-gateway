@@ -25,8 +25,7 @@ namespace JeebGateway.IntegrationTests;
 /// <para><b>What actually broke.</b> PR #374's D1 single-producer cut-over armed
 /// <c>GatewayDirectPushDispatchGuardHandler</c>, which synthesizes a 503
 /// <c>gateway_direct_push_dispatch_disabled</c> for every <c>POST /api/v1/sent-payload/*</c>
-/// while <c>PushNotificationServiceApi:GatewayDirectDispatch:Enabled</c> is false — the
-/// committed and live default. Chat, offer-lost, new-request and expiry were all migrated to
+/// under the permanent gateway direct-dispatch guard. Chat, offer-lost, new-request and expiry were all migrated to
 /// the <see cref="IGenericEventDispatcher"/> hand-over in the same change.
 /// <see cref="DeliveryStatusPushNotifier"/> was not, so the delivery-status category had NO
 /// producer at all: the live gateway journal shows all four transitions of delivery
@@ -51,7 +50,7 @@ public class DeliveryStatusGenericEventHandoverTests
     [Fact]
     public async Task Direct_dispatch_disabled_hands_the_transition_over_and_sends_nothing_directly()
     {
-        var (notifier, events, push) = Notifier(directDispatchEnabled: false);
+        var (notifier, events, push) = Notifier();
 
         await notifier.NotifyAsync(Transition("InTransit", "AtDoor"), CancellationToken.None);
 
@@ -81,7 +80,7 @@ public class DeliveryStatusGenericEventHandoverTests
         // THE DEDUP TRAP. The correlation id is a deterministic hash of
         // (eventType, receiver, entityId) and the centre upserts $setOnInsert on it, so an
         // entityId of DeliveryId alone would collapse Picked/InTransit/AtDoor/Done into ONE push.
-        var (notifier, events, _) = Notifier(directDispatchEnabled: false);
+        var (notifier, events, _) = Notifier();
 
         await notifier.NotifyAsync(Transition("accepted", "Picked"), CancellationToken.None);
         await notifier.NotifyAsync(Transition("Picked", "InTransit"), CancellationToken.None);
@@ -98,7 +97,7 @@ public class DeliveryStatusGenericEventHandoverTests
     [Fact]
     public async Task Each_recipient_of_one_transition_gets_its_own_notification_id()
     {
-        var (notifier, events, _) = Notifier(directDispatchEnabled: false);
+        var (notifier, events, _) = Notifier();
 
         await notifier.NotifyAsync(Transition("InTransit", "AtDoor"), CancellationToken.None);
 
@@ -108,23 +107,10 @@ public class DeliveryStatusGenericEventHandoverTests
     }
 
     [Fact]
-    public async Task Direct_dispatch_rearmed_falls_back_to_the_push_client_and_hands_nothing_over()
-    {
-        var (notifier, events, push) = Notifier(directDispatchEnabled: true);
-
-        await notifier.NotifyAsync(Transition("InTransit", "AtDoor"), CancellationToken.None);
-
-        events.Posts.Should().BeEmpty();
-        push.Sends.Select(s => s.UserId).Should().Equal(Client, Jeeber);
-        var payload = (IDictionary<string, object?>)push.Sends.First().Payload;
-        payload["delivery_id"].Should().Be(DeliveryId, "BuildPayload stays the direct wire contract");
-    }
-
-    [Fact]
     public async Task The_handed_over_event_carries_no_silent_key()
     {
         // delivery is ShadeAndStored (owner reversal 2026-07-27): the shade entry must post.
-        var (notifier, events, _) = Notifier(directDispatchEnabled: false);
+        var (notifier, events, _) = Notifier();
 
         await notifier.NotifyAsync(Transition("InTransit", "AtDoor"), CancellationToken.None);
 
@@ -134,7 +120,7 @@ public class DeliveryStatusGenericEventHandoverTests
     [Fact]
     public async Task A_dead_notification_centre_never_throws_and_never_double_sends()
     {
-        var (notifier, events, push) = Notifier(directDispatchEnabled: false, postStatus: HttpStatusCode.InternalServerError);
+        var (notifier, events, push) = Notifier(postStatus: HttpStatusCode.InternalServerError);
 
         var notify = async () => await notifier.NotifyAsync(Transition("InTransit", "AtDoor"), CancellationToken.None);
 
@@ -163,7 +149,6 @@ public class DeliveryStatusGenericEventHandoverTests
             .ToDictionary(p => p.Name, p => p.Value.GetString() ?? string.Empty, StringComparer.Ordinal);
 
     private static (DeliveryStatusPushNotifier, RecordingCentreHandler, RecordingPushClient) Notifier(
-        bool directDispatchEnabled,
         HttpStatusCode postStatus = HttpStatusCode.Created)
     {
         var centre = new RecordingCentreHandler(postStatus);
@@ -177,7 +162,6 @@ public class DeliveryStatusGenericEventHandoverTests
 
         var dispatcher = new GenericEventDispatcher(
             new JeebNotificationRecordClient(http),
-            Options.Create(new GatewayDirectPushDispatchOptions { Enabled = directDispatchEnabled }),
             configuration,
             NullLogger<GenericEventDispatcher>.Instance);
 

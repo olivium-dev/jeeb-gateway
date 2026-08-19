@@ -93,7 +93,7 @@ public sealed class MatchingController : ControllerBase
         // BEST-EFFORT and NEVER throws: the dry-run/preview shape (no requestId),
         // an unknown id, or a seed hiccup all fall through to delivery-service,
         // which stays the canonical authority for the run outcome (including a
-        // genuine 404). Skipped entirely when MatchingMirror.Enabled is false.
+        // genuine 404). The settled matching mirror has no operator disable switch.
         if (!string.IsNullOrWhiteSpace(body.RequestId))
         {
             await _rowMirror.EnsureSeededAsync(body.RequestId, ct);

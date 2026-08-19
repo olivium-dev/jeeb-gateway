@@ -36,9 +36,8 @@ namespace JeebGateway.Controllers;
 /// read+write route through the NEW reusable <c>heart-beat</c> presence service
 /// (<see cref="IHeartBeatServiceClient"/>) instead of delivery-service. The
 /// public response shape is byte-identical either way, so no S06 assertion shifts
-/// and S01–S04 are untouched. Default is OFF this round (heart-beat not yet
-/// deployed); the delivery-service path is the live path AND the instant rollback
-/// target. Deploy flips the flag after heart-beat is live and smoke-passed.
+/// and S01–S04 are untouched. Production is workflow-locked to delivery-service while
+/// heart-beat readiness remains pending; a later forward change requires smoke evidence.
 /// </para>
 /// </summary>
 [Obsolete("Migrating to BFF aggregation: see GATEWAY-REMEDIATION-PLAN.md. Do not add new endpoints; consume the NSwag-generated client from Services/Generated/ via the named HttpClient registered in Extensions/ServiceClientExtensions.cs.")]

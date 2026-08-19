@@ -139,7 +139,7 @@ public class MirroringAdminAuditLogTests
         var boot = () => factory.CreateClient();
 
         boot.Should().Throw<OptionsValidationException>()
-            .WithMessage("*AdminAuditMode cannot reach*",
+            .WithMessage("*AdminAuditMode*",
                 "the failure must name the flag an operator would have flipped");
     }
 
@@ -153,6 +153,13 @@ public class MirroringAdminAuditLogTests
         var boot = () => factory.CreateClient();
 
         boot.Should().NotThrow();
+    }
+
+    [Fact]
+    public void Production_Refuses_The_Backward_Local_Rung()
+    {
+        GwdbxMigrationOptions.AdminAuditMayStart("Production", "local").Should().BeFalse();
+        GwdbxMigrationOptions.AdminAuditMayStart("Production", "dual-write-local-read").Should().BeTrue();
     }
 
     /// <summary>Upstream cannot return admin_actions.id: AuditEventRecordV1 carries eventId and

@@ -15,16 +15,9 @@ namespace JeebGateway.Availability;
 /// </para>
 ///
 /// <para>
-/// Default <b>false</b> in EVERY environment this round — including
-/// <c>appsettings.Production.json</c> — because heart-beat is NOT yet deployed.
-/// While off, the availability surface keeps using the live delivery-service
-/// presence wire (zero behaviour change). Flip via
-/// <c>FeatureFlags__Heartbeat__Enabled=true</c> (a deploy
-/// <c>workflow_dispatch</c> input), staging-first, ONLY after heart-beat is live
-/// and its <c>/health/ready</c> + a real <c>PATCH /v1/presence</c> round-trip
-/// smoke-pass. This mirrors the cdn / contract-signing / kyc net-new
-/// kill-switch shape — a config-only cutover with the delivery path as the
-/// instant rollback target.
+/// Production is fixed at <b>false</b> because heart-beat service/auth readiness is pending.
+/// The deploy workflow owns that environment lock and exposes no operator source-selection
+/// input. A later forward change may select heart-beat only with service readiness evidence.
 /// </para>
 ///
 /// <para>
@@ -40,9 +33,8 @@ public sealed class HeartbeatFeatureOptions
     public const string SectionName = "FeatureFlags:Heartbeat";
 
     /// <summary>
-    /// Master switch. Default <c>false</c> = today's green delivery-service
-    /// presence path. When true the availability surface routes through
-    /// heart-beat.
+    /// Source selection used by development and staged forward validation. Production deploys
+    /// currently inject <c>false</c> and do not accept an operator override.
     /// </summary>
     public bool Enabled { get; init; }
 

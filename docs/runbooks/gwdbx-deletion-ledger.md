@@ -265,5 +265,5 @@ Edge Redis OTP rate-limiter (`RedisOtpRequestRateLimiter`); door-OTP Redis TTL k
 **CONFIRMED by owner ruling 2026-08-16**: *"No redis is not in the scope, you can keep redis"*, so
 "the gateway owns no database" does **not** include Redis; both keys are present in the live
 gateway environment today); `CourierPositionQueue` (transient back-pressure); bounded
-fan-out drain buffer; `Notifications:NewRequestFanout:Enabled` kill switch; dispute-refund 400/no-op
+fan-out drain buffer; bounded per-recipient new-request fan-out; dispute-refund 400/no-op
 (UPG retired, G-05).

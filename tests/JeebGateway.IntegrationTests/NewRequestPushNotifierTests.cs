@@ -184,25 +184,6 @@ public class NewRequestPushNotifierTests
             "an empty recipient set is the R1 regression signal and must reach journalctl");
     }
 
-    [Fact] // G-U5b — the leak cannot come back by accident.
-    public async Task TopicFallback_Is_Off_By_Default_And_Honoured_When_Enabled()
-    {
-        var offByDefault = new RecordingPushClient();
-        await NewNotifier(offByDefault, new FakeAvailabilityStore())
-            .FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
-        offByDefault.TopicSends.Should().BeEmpty("TopicFallbackWhenEmpty defaults to FALSE");
-
-        var enabled = new RecordingPushClient();
-        await NewNotifier(
-                enabled,
-                new FakeAvailabilityStore(),
-                new NewRequestFanoutOptions { TopicFallbackWhenEmpty = true })
-            .FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
-
-        enabled.TopicSends.Should().ContainSingle();
-        enabled.TopicSends.Single().Topic.Should().Be(JeebPushTopicMap.JeebersTopic);
-    }
-
     [Fact] // G-U6 — R8: a device-less recipient makes the relay 404; the batch must survive.
     public async Task One_Failing_Send_Does_Not_Abort_Fanout()
     {
@@ -340,23 +321,6 @@ public class NewRequestPushNotifierTests
             + "radius emptied it. That fallback is bug D2: it pushed every out-of-range request "
             + "to everyone online. An empty in-range set is the correct answer");
         log.Has(LogLevel.Information, "geo-filter-emptied").Should().BeTrue();
-    }
-
-    [Fact] // G-U11 — the config-only rollback path is PROVEN, not assumed.
-    public async Task Disabled_Restores_TopicBlast()
-    {
-        var push = new RecordingPushClient();
-        var store = new FakeAvailabilityStore
-        {
-            Online = new[] { P1Fanout.Jeeber("A"), P1Fanout.Jeeber("B") }
-        };
-        var notifier = NewNotifier(push, store, new NewRequestFanoutOptions { Enabled = false });
-
-        await notifier.FanOutAsync(Job(initiator: "customer-1"), CancellationToken.None);
-
-        push.TopicSends.Should().ContainSingle();
-        push.TopicSends.Single().Topic.Should().Be(JeebPushTopicMap.JeebersTopic);
-        push.UserSends.Should().BeEmpty();
     }
 
     [Fact] // G-U12
@@ -541,7 +505,7 @@ public class NewRequestPushNotifierTests
 
     // ── C-6 — options validated at startup: fail-to-start, never invert ──────
 
-    [Fact] // C-6(g) — MaxRecipients<=0 would empty the set into the TopicFallbackWhenEmpty hatch.
+    [Fact] // C-6(g) — a non-positive cap would silently empty the recipient set.
     public void Gateway_Refuses_To_Start_When_MaxRecipients_Is_NonPositive()
     {
         var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>

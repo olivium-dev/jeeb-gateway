@@ -1,31 +1,26 @@
 using System.Net;
-using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Notifications;
 
 /// <summary>
-/// Single-attempt generic-event dispatcher. Runs only while gateway direct push dispatch is
-/// DISABLED, so the gateway is never both the direct producer and the hand-over producer.
+/// Single-attempt generic-event dispatcher. notification-service is the settled
+/// push producer, so every generic event is handed over through this path.
 /// </summary>
 public sealed class GenericEventDispatcher : IGenericEventDispatcher
 {
     private static readonly TimeSpan AttemptBudget = TimeSpan.FromSeconds(2);
 
     private readonly JeebNotificationRecordClient _client;
-    private readonly IOptions<GatewayDirectPushDispatchOptions> _directDispatch;
     private readonly IConfiguration _configuration;
     private readonly ILogger<GenericEventDispatcher> _logger;
 
     public GenericEventDispatcher(
         JeebNotificationRecordClient client,
-        IOptions<GatewayDirectPushDispatchOptions> directDispatch,
         IConfiguration configuration,
         ILogger<GenericEventDispatcher> logger)
     {
         _client = client;
-        _directDispatch = directDispatch;
         _configuration = configuration;
         _logger = logger;
     }
@@ -45,11 +40,6 @@ public sealed class GenericEventDispatcher : IGenericEventDispatcher
             || string.IsNullOrWhiteSpace(entityId))
         {
             return new(GenericEventDispatchClassification.Unproven, null);
-        }
-
-        if (_directDispatch.Value.Enabled)
-        {
-            return new(GenericEventDispatchClassification.SkippedDirectDispatchArmed, null);
         }
 
         // Same gate as NotificationRecordWriter: the durable-write flag is what says the

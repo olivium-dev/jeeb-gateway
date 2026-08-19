@@ -112,6 +112,10 @@ public sealed class GwdbxMigrationOptions
     // pinned default here and ValidateOnStart then refuses the boot, so nothing is picked off it.
     public static GwdbxMigrationPhase PhaseOf(string? value) => Read(value);
 
+    public static bool AdminAuditMayStart(string? environmentName, string? value)
+        => !string.Equals(environmentName, "Production", StringComparison.OrdinalIgnoreCase)
+            || PhaseOf(value) >= GwdbxMigrationPhase.DualWriteLocalRead;
+
     private static GwdbxMigrationPhase Read(string? value) =>
         TryRead(value, out var phase) ? phase : GwdbxMigrationPhase.Local;
 
