@@ -183,8 +183,7 @@ finalize() {
   local service_existed=$1
   local service_name=$2
   local new_secret=$3
-  local previous_image=$4
-  local attempted_image=$5
+  local attempted_image=$4
 
   if [[ "$service_existed" == 0 ]]; then
     if service_exists "$service_name"; then
@@ -200,7 +199,6 @@ finalize() {
   # Existing failed updates stay paused with their exact spec and secret references
   # intact for deterministic inspection. Never mutate the service a second time here.
   service_exists "$service_name" || fail "existing service disappeared after failed update"
-  [[ "$previous_image" != none ]] || fail "existing service has no captured prior image"
   fail "existing service update failed; leaving paused state for inspection"
 }
 
@@ -238,11 +236,11 @@ case "$command" in
     assert_safe_spec previous "$2" "$3"
     ;;
   finalize)
-    [[ $# -eq 6 ]] || fail "finalize requires five arguments"
+    [[ $# -eq 5 ]] || fail "finalize requires four arguments"
     [[ "$2" == 0 || "$2" == 1 ]] || fail "invalid service existence flag"
     [[ "$3" == jeeb-gateway ]] || fail "invalid service name"
     is_managed_secret "$4" || fail "invalid secret name"
-    finalize "$2" "$3" "$4" "$5" "$6"
+    finalize "$2" "$3" "$4" "$5"
     ;;
   gc)
     [[ $# -eq 2 && "$2" == jeeb-gateway ]] || fail "gc requires jeeb-gateway"

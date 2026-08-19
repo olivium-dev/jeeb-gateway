@@ -59,7 +59,7 @@ public sealed class PushNotificationTopicDeploymentContractTests
         ["gc jeeb-gateway;docker-service-rm"],
         ["stabilize jeeb-gateway jeeb_gateway_appsettings_latest"],
         ["stabilize other-service jeeb_gateway_appsettings_12_1"],
-        ["finalize 2 jeeb-gateway jeeb_gateway_appsettings_12_1 none none"],
+        ["finalize 2 jeeb-gateway jeeb_gateway_appsettings_12_1 none"],
     ];
 
     [Theory]
@@ -100,6 +100,7 @@ public sealed class PushNotificationTopicDeploymentContractTests
         script.Should().NotContain("--rollback-order");
         script.Should().NotContain("docker service rollback");
         script.Should().NotContain("recover_existing");
+        script.Should().NotContain("previous_image");
     }
 
     private static string LocateRepoRoot()
