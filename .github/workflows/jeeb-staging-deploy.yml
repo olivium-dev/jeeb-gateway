@@ -228,6 +228,11 @@ jobs:
               add_env UmJwt__Issuer user-management
               add_env UmJwt__Audience user-management
               add_env AdminOidc__Enabled false
+              # Staging mirrors the MSI dev/demo environment. Super-Login+ needs both
+              # flags: the full roster is anonymous and /auth/tokens accepts act-as
+              # requests without the service key, exactly as it does in dev.
+              add_env SuperLogin__OpenMode true
+              add_env DemoUsers__Enabled true
               # Host-mode published ports traverse docker_gwbridge. Trust only
               # its exact gateway address, never the whole bridge or app overlay.
               add_env ForwardedHeaders__KnownProxies__0 "$published_port_proxy_ip"
