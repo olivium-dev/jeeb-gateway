@@ -54,8 +54,8 @@ Already dropped (13, W0 waves — history): `ratings`, `disputes`, `kyc_submissi
 | `transcription_fallback_queue` | **W5-09** `[OWNER-GO]` | A12: DELETED not migrated — drop table + enqueue write, log the fallback event |
 | `schema_migrations` | ~~**W5-12**~~ **RETAINED** | **Owner directive 2026-08-16: `jeeb_gateway` is NEVER dropped.** The DROP DATABASE step and the whole pipelines phase were removed from the programme; the database is kept, unread by the gateway, with roughly 64 orphaned rows by decision. This row does not authorise a drop. |
 
-Every DROP: G-07 archive (`pg_dump` + `sha256sum -c`) BEFORE; G-18 migration shape (table-scoped,
-row-count assert, self-registering tombstone, idempotent re-apply).
+Every DROP uses the G-18 forward migration shape: table-scoped, row-count asserted,
+self-registering tombstone, and idempotent re-apply. No database snapshot is deployment authority.
 
 **Exception, owner ruling A23 (2026-08-14), the four settlement tables only:** the G-07 archive is
 WAIVED and the data loss accepted, so `0052` cites no archive path. It also carries **no row-count
@@ -265,5 +265,5 @@ Edge Redis OTP rate-limiter (`RedisOtpRequestRateLimiter`); door-OTP Redis TTL k
 **CONFIRMED by owner ruling 2026-08-16**: *"No redis is not in the scope, you can keep redis"*, so
 "the gateway owns no database" does **not** include Redis; both keys are present in the live
 gateway environment today); `CourierPositionQueue` (transient back-pressure); bounded
-fan-out drain buffer; `Notifications:NewRequestFanout:Enabled` kill switch; dispute-refund 400/no-op
+fan-out drain buffer; bounded per-recipient new-request fan-out; dispute-refund 400/no-op
 (UPG retired, G-05).

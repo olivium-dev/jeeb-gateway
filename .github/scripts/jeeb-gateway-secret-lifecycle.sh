@@ -24,64 +24,60 @@ current_image() {
 assert_exact_running_image() {
   local service_name=$1
   local expected_image=$2
-  local actual_image
+  local service_id
+  local service_image
+  local desired
+  local task_ids
+  local task_id
+  local task_state
   local expected_image_id
   local task_image
-  local task_image_id
-  local -a running_containers=()
+  local container_id
+  local actual_image_id
 
-  [[ "$expected_image" == *@sha256:* ]] || fail "expected service image is not digest-pinned"
-  actual_image=$(current_image "$service_name")
-  [[ "$actual_image" == "$expected_image" ]] || fail "service image changed during restart"
-  expected_image_id=$(docker image inspect --format '{{.Id}}' "$expected_image")
-  mapfile -t running_containers < <(
-    docker ps -q --filter "label=com.docker.swarm.service.name=$service_name"
-  )
-  [[ ${#running_containers[@]} -eq 1 ]] || fail "expected exactly one running service container"
-  task_image=$(docker inspect --format '{{.Config.Image}}' "${running_containers[0]}")
-  task_image_id=$(docker inspect --format '{{.Image}}' "${running_containers[0]}")
+  [[ "$expected_image" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]] \
+    || fail "expected service image is not digest-pinned"
+  service_id=$(docker service inspect "$service_name" --format '{{.ID}}')
+  [[ "$service_id" =~ ^[A-Za-z0-9]+$ ]] || fail "service has no immutable ID"
+  service_image=$(docker service inspect "$service_id" \
+    --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+  [[ "$service_image" == "$expected_image" ]] || fail "service image changed during restart"
+  desired=$(docker service inspect "$service_id" --format '{{.Spec.Mode.Replicated.Replicas}}')
+  [[ "$desired" == 1 ]] || fail "service must have exactly one desired replica"
+  task_ids=$(docker service ps "$service_id" --filter desired-state=running --format '{{.ID}}')
+  [[ "$(printf '%s\n' "$task_ids" | sed '/^$/d' | wc -l | tr -d ' ')" == 1 ]] \
+    || fail "service must have exactly one desired running task"
+  task_id=$(printf '%s\n' "$task_ids" | sed -n '1p')
+  task_state=$(docker inspect "$task_id" --format '{{.Status.State}}|{{.DesiredState}}|{{.ServiceID}}')
+  [[ "$task_state" == "running|running|$service_id" ]] \
+    || fail "task is not running for the exact service ID"
+  task_image=$(docker inspect "$task_id" --format '{{.Spec.ContainerSpec.Image}}')
   [[ "$task_image" == "$expected_image" ]] || fail "running task image changed during restart"
-  [[ "$task_image_id" == "$expected_image_id" ]] || fail "running task image ID changed during restart"
+  container_id=$(docker inspect "$task_id" --format '{{.Status.ContainerStatus.ContainerID}}')
+  [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || fail "running task has no exact container ID"
+  expected_image_id=$(docker image inspect --format '{{.Id}}' "$expected_image")
+  [[ "$expected_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || fail "expected image has no exact local image ID"
+  actual_image_id=$(docker inspect "$container_id" --format '{{.Image}}')
+  [[ "$actual_image_id" == "$expected_image_id" ]] \
+    || fail "running task image ID changed during restart"
 }
 
 current_secrets() {
   docker service inspect --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{println .SecretName}}{{end}}' "$1"
 }
 
-previous_secrets() {
-  docker service inspect --format '{{with .PreviousSpec}}{{range .TaskTemplate.ContainerSpec.Secrets}}{{println .SecretName}}{{end}}{{end}}' "$1"
-}
-
 target_secret() {
-  local spec_kind=$1
-  local service_name=$2
-  local format
-  case "$spec_kind" in
-    current)
-      format='{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name "/app/appsettings.Production.json"}}{{println .SecretName}}{{end}}{{end}}'
-      ;;
-    previous)
-      format='{{with .PreviousSpec}}{{range .TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name "/app/appsettings.Production.json"}}{{println .SecretName}}{{end}}{{end}}{{end}}'
-      ;;
-    *) fail "unknown spec kind" ;;
-  esac
-  docker service inspect --format "$format" "$service_name" \
+  local service_name=$1
+  docker service inspect \
+    --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name "/app/appsettings.Production.json"}}{{println .SecretName}}{{end}}{{end}}' \
+    "$service_name" \
     | sed '/^[[:space:]]*$/d' \
     | head -n1
 }
 
 spec_env() {
-  local spec_kind=$1
-  local service_name=$2
-  case "$spec_kind" in
-    current)
-      docker service inspect --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' "$service_name"
-      ;;
-    previous)
-      docker service inspect --format '{{with .PreviousSpec}}{{range .TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}{{end}}' "$service_name"
-      ;;
-    *) fail "unknown spec kind" ;;
-  esac
+  docker service inspect --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' "$1"
 }
 
 is_forbidden_env_key() {
@@ -98,22 +94,21 @@ is_forbidden_env_key() {
 }
 
 assert_safe_spec() {
-  local spec_kind=$1
-  local service_name=$2
-  local expected_secret=$3
+  local service_name=$1
+  local expected_secret=$2
   local actual_secret
   local env_entry
 
-  actual_secret=$(target_secret "$spec_kind" "$service_name")
+  actual_secret=$(target_secret "$service_name")
   [[ "$actual_secret" == "$expected_secret" ]] \
-    || fail "$spec_kind spec does not use the expected appsettings secret"
+    || fail "service spec does not use the expected appsettings secret"
 
   while IFS= read -r env_entry; do
     [[ -n "$env_entry" ]] || continue
     if is_forbidden_env_key "${env_entry%%=*}"; then
-      fail "$spec_kind spec contains a legacy or sensitive environment key"
+      fail "service spec contains a legacy or sensitive environment key"
     fi
-  done < <(spec_env "$spec_kind" "$service_name")
+  done < <(spec_env "$service_name")
 }
 
 wait_for_stable_update() {
@@ -131,15 +126,6 @@ wait_for_stable_update() {
   fail "timed out waiting for service update"
 }
 
-wait_for_service_absent() {
-  local service_name=$1
-  for ((attempt = 1; attempt <= MAX_WAIT_ATTEMPTS; attempt++)); do
-    service_exists "$service_name" || return 0
-    sleep 1
-  done
-  fail "timed out waiting for failed create removal"
-}
-
 secret_is_referenced() {
   local candidate=$1
   local service_id
@@ -149,9 +135,6 @@ secret_is_referenced() {
     while IFS= read -r referenced; do
       [[ "$referenced" == "$candidate" ]] && return 0
     done < <(current_secrets "$service_id")
-    while IFS= read -r referenced; do
-      [[ "$referenced" == "$candidate" ]] && return 0
-    done < <(previous_secrets "$service_id")
   done < <(docker service ls -q)
   return 1
 }
@@ -168,14 +151,13 @@ stabilize() {
   local expected_secret=$2
   local expected_image
   service_exists "$service_name" || fail "cannot stabilize a missing service"
-  assert_safe_spec current "$service_name" "$expected_secret"
+  assert_safe_spec "$service_name" "$expected_secret"
   expected_image=$(current_image "$service_name")
   docker service update --force --detach=false --with-registry-auth \
     --update-order start-first --update-failure-action pause \
     --update-monitor 20s "$service_name" >/dev/null
   wait_for_stable_update "$service_name"
-  assert_safe_spec current "$service_name" "$expected_secret"
-  assert_safe_spec previous "$service_name" "$expected_secret"
+  assert_safe_spec "$service_name" "$expected_secret"
   assert_exact_running_image "$service_name" "$expected_image"
 }
 
@@ -188,9 +170,8 @@ finalize() {
   if [[ "$service_existed" == 0 ]]; then
     if service_exists "$service_name"; then
       [[ "$(current_image "$service_name")" == "$attempted_image" ]] \
-        || fail "refusing to remove an unrelated service"
-      docker service rm "$service_name" >/dev/null
-      wait_for_service_absent "$service_name"
+        || fail "failed create left a service with an unexpected image"
+      fail "new service create failed; leaving the failed service in place for inspection"
     fi
     remove_inactive_managed_secret "$new_secret"
     return
@@ -207,7 +188,7 @@ garbage_collect() {
   local active_secret
   local candidate
   service_exists "$service_name" || fail "cannot garbage-collect a missing service"
-  active_secret=$(target_secret current "$service_name")
+  active_secret=$(target_secret "$service_name")
   is_managed_secret "$active_secret" || fail "current service has no managed appsettings secret"
   while IFS= read -r candidate; do
     is_managed_secret "$candidate" || continue
@@ -232,8 +213,7 @@ case "$command" in
     [[ $# -eq 3 ]] || fail "verify-safe requires service and secret names"
     [[ "$2" == jeeb-gateway ]] || fail "invalid service name"
     is_managed_secret "$3" || fail "invalid secret name"
-    assert_safe_spec current "$2" "$3"
-    assert_safe_spec previous "$2" "$3"
+    assert_safe_spec "$2" "$3"
     ;;
   finalize)
     [[ $# -eq 5 ]] || fail "finalize requires four arguments"

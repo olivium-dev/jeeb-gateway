@@ -25,25 +25,10 @@ public sealed class GenericEventDispatcherTests
         };
 
     [Fact]
-    public async Task Nothing_is_handed_over_while_the_gateway_is_still_the_direct_producer()
-    {
-        var recorder = new RecordingHandler(HttpStatusCode.Created);
-        var dispatcher = Dispatcher(recorder, directDispatchEnabled: true);
-
-        var outcome = await Dispatch(dispatcher);
-
-        outcome.Classification.Should()
-            .Be(GenericEventDispatchClassification.SkippedDirectDispatchArmed);
-        recorder.Requests.Should().BeEmpty(
-            "handing over while direct dispatch is armed would make the gateway BOTH producers, "
-            + "which is the transient-double-push window this seam exists to avoid");
-    }
-
-    [Fact]
     public async Task A_created_event_posts_once_to_the_generic_route()
     {
         var recorder = new RecordingHandler(HttpStatusCode.Created);
-        var dispatcher = Dispatcher(recorder, directDispatchEnabled: false);
+        var dispatcher = Dispatcher(recorder);
 
         var outcome = await Dispatch(dispatcher);
 
@@ -58,7 +43,7 @@ public sealed class GenericEventDispatcherTests
         // notification-service answers 409 when the notification_id already belongs to another
         // command. That is the second producer losing the race, i.e. exactly the D1 fix working.
         var recorder = new RecordingHandler(HttpStatusCode.Conflict);
-        var dispatcher = Dispatcher(recorder, directDispatchEnabled: false);
+        var dispatcher = Dispatcher(recorder);
 
         var outcome = await Dispatch(dispatcher);
 
@@ -73,7 +58,7 @@ public sealed class GenericEventDispatcherTests
         {
             ReadBackCorrelationId = ExpectedCorrelationId(),
         };
-        var dispatcher = Dispatcher(recorder, directDispatchEnabled: false);
+        var dispatcher = Dispatcher(recorder);
 
         var outcome = await Dispatch(dispatcher);
 
@@ -87,7 +72,7 @@ public sealed class GenericEventDispatcherTests
     public async Task An_unrecoverable_upstream_is_reported_unproven()
     {
         var recorder = new RecordingHandler(HttpStatusCode.InternalServerError);
-        var dispatcher = Dispatcher(recorder, directDispatchEnabled: false);
+        var dispatcher = Dispatcher(recorder);
 
         (await Dispatch(dispatcher)).Classification
             .Should().Be(GenericEventDispatchClassification.Unproven);
@@ -179,7 +164,7 @@ public sealed class GenericEventDispatcherTests
     [Fact]
     public async Task The_dispatcher_never_throws_on_a_transport_fault()
     {
-        var dispatcher = Dispatcher(new ThrowingHandler(), directDispatchEnabled: false);
+        var dispatcher = Dispatcher(new ThrowingHandler());
 
         var outcome = await Dispatch(dispatcher);
 
@@ -190,7 +175,7 @@ public sealed class GenericEventDispatcherTests
     public async Task A_blank_receiver_or_entity_is_rejected_before_any_call()
     {
         var recorder = new RecordingHandler(HttpStatusCode.Created);
-        var dispatcher = Dispatcher(recorder, directDispatchEnabled: false);
+        var dispatcher = Dispatcher(recorder);
 
         var outcome = await dispatcher.DispatchAsync(
             JeebGenericEventTypes.ChatMessageEventType, receiver: " ", entityId: "msg-1",
@@ -206,7 +191,7 @@ public sealed class GenericEventDispatcherTests
         // Deploy footgun made explicit: direct dispatch off AND durable write off means the
         // event has no producer at all. The dispatcher logs that and does not pretend to send.
         var recorder = new RecordingHandler(HttpStatusCode.Created);
-        var dispatcher = Dispatcher(recorder, directDispatchEnabled: false, durableWriteEnabled: false);
+        var dispatcher = Dispatcher(recorder, durableWriteEnabled: false);
 
         var outcome = await Dispatch(dispatcher);
 
@@ -226,7 +211,7 @@ public sealed class GenericEventDispatcherTests
             "New message", "hello", Routing, PushSilencePolicy.CategoryChat, default);
 
     private static GenericEventDispatcher Dispatcher(
-        HttpMessageHandler handler, bool directDispatchEnabled, bool durableWriteEnabled = true)
+        HttpMessageHandler handler, bool durableWriteEnabled = true)
     {
         var http = new HttpClient(handler) { BaseAddress = new Uri("http://notifications.test/") };
         var configuration = new ConfigurationBuilder()
@@ -239,7 +224,6 @@ public sealed class GenericEventDispatcherTests
 
         return new GenericEventDispatcher(
             new JeebNotificationRecordClient(http),
-            Options.Create(new GatewayDirectPushDispatchOptions { Enabled = directDispatchEnabled }),
             configuration,
             NullLogger<GenericEventDispatcher>.Instance);
     }

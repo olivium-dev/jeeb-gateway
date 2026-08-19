@@ -66,9 +66,6 @@ jobs:
       contents: read
       packages: write
 
-    outputs:
-      image_tag: ${{ github.run_id }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -89,8 +86,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ github.run_id }}
-            type=raw,value=latest
+            type=raw,value=${{ github.sha }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -98,42 +94,25 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.run_id }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Verify image pushed
         run: |
-          echo "Image pushed: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.run_id }}"
+          echo "Image pushed: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
           
           # Verify image exists in registry
-          docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.run_id }} > /dev/null
+          docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} > /dev/null
           echo "✓ Image verified in GHCR"
 
-      - name: Output image tag
+      - name: Report immutable image
         run: |
-          echo "image_tag=${{ github.run_id }}" >> $GITHUB_OUTPUT
           echo ""
           echo "╔════════════════════════════════════════════════════════════════════════════╗"
           echo "║  Image Pushed to GHCR                                                      ║"
           echo "╚════════════════════════════════════════════════════════════════════════════╝"
           echo ""
-          echo "Image:    ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.run_id }}"
-          echo "Latest:   ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo "Image:    ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
           echo ""
-
-  deploy-staging:
-    name: Deploy to Staging
-    needs: push-image
-    # iter5 (2026-06-21): auto-deploy to the VPS swarm (jeeb.fds-1.com) DEFERRED to owner —
-    # deploy is owner-gated. This gate stops a merge to main from auto-deploying to staging.
-    # The image is still built+pushed to GHCR by the push-image job above (no VPS contact);
-    # only this swarm deploy is held. Re-enable by restoring the original condition below:
-    #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    if: ${{ false && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    uses: ./.github/workflows/deploy-staging.yml
-    with:
-      image_tag: ${{ needs.push-image.outputs.image_tag }}
-    secrets: inherit

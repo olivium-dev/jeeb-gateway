@@ -304,9 +304,8 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
     /// GW-OFFER-503 — true for the synthetic 503 <see cref="JeebGateway.Services.Clients.GatewayDirectPushDispatchGuardHandler"/>
     /// returns while the gateway is deliberately NOT a push producer. That is the expected steady
     /// state (notification-service owns these pushes off the durable record write), so it is logged
-    /// at Debug instead of WARN+stack per offer. If the emergency
-    /// <c>PushNotificationServiceApi:GatewayDirectDispatch:Enabled</c> rollback is ever flipped,
-    /// direct sends resume and every REAL failure still takes the WARN path unchanged.
+    /// at Debug instead of WARN+stack per offer. The guard is permanent; real failures still take
+    /// the WARN path unchanged.
     /// </summary>
     private static bool IsDirectDispatchDisabled(ApiException ex)
         => ex.StatusCode == (int)System.Net.HttpStatusCode.ServiceUnavailable

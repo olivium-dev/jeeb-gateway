@@ -217,7 +217,7 @@ gh workflow run deploy-to-jeeb.yml --repo olivium-dev/jeeb-gateway --ref main \
 gh workflow run deploy-to-jeeb.yml --repo olivium-dev/jeeb-gateway --ref main \
   -f service_name=jeeb-gateway -f dev_endpoints=true
 
-# Scrub it OFF (restores the 404 production surface — use only when intentionally disarming):
+# Scrub it OFF (forces the 404 production surface — use only when intentionally disarming):
 gh workflow run deploy-to-jeeb.yml --repo olivium-dev/jeeb-gateway --ref main \
   -f service_name=jeeb-gateway -f dev_endpoints=false
 ```

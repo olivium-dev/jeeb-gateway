@@ -3,19 +3,12 @@ namespace JeebGateway.Notifications;
 /// <summary>
 /// P1 — knobs for the new-request "finding jeebers" fan-out
 /// (<see cref="NewRequestPushNotifier"/>). Bound from configuration section
-/// <c>Notifications:NewRequestFanout</c>; every default lives HERE in code, so no
-/// appsettings change is needed to ship. MSI overrides, if ever needed, go via env
-/// vars (<c>Notifications__NewRequestFanout__Enabled=false</c>).
+/// <c>Notifications:NewRequestFanout</c>. The fan-out is permanently active; the remaining
+/// values only tune its bounded recipient selection and execution budgets.
 /// </summary>
 public class NewRequestFanoutOptions
 {
     public const string SectionName = "Notifications:NewRequestFanout";
-
-    /// <summary>
-    /// Master switch. FALSE restores the legacy <c>jeeb_jeebers</c> topic blast verbatim —
-    /// the config-only rollback path. Default TRUE.
-    /// </summary>
-    public bool Enabled { get; set; } = true;
 
     /// <summary>
     /// When no jeeber is currently online, fan out to the known-jeeber roster instead of
@@ -65,13 +58,6 @@ public class NewRequestFanoutOptions
     /// ceiling is bounded background time, not user-visible latency.</para>
     /// </summary>
     public TimeSpan TotalBudget { get; set; } = TimeSpan.FromSeconds(60);
-
-    /// <summary>
-    /// Escape hatch: blast the legacy topic when the resolved recipient set is EMPTY.
-    /// Default FALSE — ON re-opens the exact leak P1 closes (a topic send reaches every
-    /// subscriber, including the initiator) and must never be enabled on MSI.
-    /// </summary>
-    public bool TopicFallbackWhenEmpty { get; set; }
 
     /// <summary>Bounded-channel capacity for the off-hot-path dispatch buffer.</summary>
     public int QueueCapacity { get; set; } = 256;

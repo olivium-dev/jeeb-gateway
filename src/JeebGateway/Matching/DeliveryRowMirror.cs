@@ -1,6 +1,5 @@
 using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
-using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Matching;
 
@@ -9,17 +8,15 @@ namespace JeebGateway.Matching;
 /// <see cref="IRequestsStore"/> read with the idempotent delivery-service
 /// create-row call to seed the matching-resolve row just-in-time.
 ///
-/// See <see cref="MatchingMirrorOptions"/> for the full rationale (the S06
-/// "request lives only in the gateway store" root cause). This type is the
-/// single, unit-testable seam for that orchestration so the controller stays a
-/// thin BFF passthrough.
+/// The S06 seed is the settled path for the "request lives only in the gateway
+/// store" root cause. This type is the single, unit-testable seam for that
+/// orchestration so the controller stays a thin BFF passthrough.
 /// </summary>
 public sealed class DeliveryRowMirror : IDeliveryRowMirror
 {
     private readonly IRequestsStore _requests;
     private readonly IDeliveryServiceClient _delivery;
     private readonly ITiersStore _tiers;
-    private readonly MatchingMirrorOptions _options;
     private readonly string _tenantId;
     private readonly ILogger<DeliveryRowMirror> _logger;
 
@@ -27,14 +24,12 @@ public sealed class DeliveryRowMirror : IDeliveryRowMirror
         IRequestsStore requests,
         IDeliveryServiceClient delivery,
         ITiersStore tiers,
-        IOptions<MatchingMirrorOptions> options,
         IConfiguration config,
         ILogger<DeliveryRowMirror> logger)
     {
         _requests = requests;
         _delivery = delivery;
         _tiers = tiers;
-        _options = options.Value;
         // Mirror MatchingController's tenant resolution so the seeded row and the
         // matching run resolve under the SAME tenant (delivery-service scopes the
         // WHERE id=$1 AND tenant_id=$2 lookup). Defaults to "default".
@@ -45,12 +40,6 @@ public sealed class DeliveryRowMirror : IDeliveryRowMirror
     /// <inheritdoc />
     public async Task<MirrorOutcome> EnsureSeededAsync(string requestId, CancellationToken ct)
     {
-        // (0) Instant rollback lever: when the flag is off, forward-only behaviour.
-        if (!_options.Enabled)
-        {
-            return MirrorOutcome.Disabled;
-        }
-
         if (string.IsNullOrWhiteSpace(requestId))
         {
             return MirrorOutcome.Skipped;

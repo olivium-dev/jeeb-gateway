@@ -726,10 +726,8 @@ if (notificationUpstreamEnabled && notificationSeederEnabled)
 // 500 on api/v1/sent-payload/user/{id} from breaker accounting, so one poisoned
 // recipient can no longer pin the breaker open and deny pushes to everyone else.
 // Rationale + accepted residual risk: ServiceClientExtensions.ConfigurePushBreakerAndTimeout.
-// SINGLE-PRODUCER CUTOVER — direct sends fail closed by default; enable and verify
-// notification-service's durable dispatcher BEFORE deploying this gateway state.
-builder.Services.Configure<GatewayDirectPushDispatchOptions>(
-    builder.Configuration.GetSection(GatewayDirectPushDispatchOptions.SectionName));
+// SINGLE-PRODUCER SETTLEMENT — notification-service owns push production.
+// The gateway client permanently rejects direct-send routes.
 builder.Services.AddTransient<GatewayDirectPushDispatchGuardHandler>();
 ServiceClientExtensions.AttachPushBreakerAndTimeout(builder.Services.AddHttpClient("ServicePushNotificationClient", client =>
 {
@@ -827,7 +825,7 @@ builder.Services
     .Bind(builder.Configuration.GetSection(JeebGateway.Notifications.NewRequestFanoutOptions.SectionName))
     .Validate(
         o => o.MaxRecipients >= 1,
-        "Notifications:NewRequestFanout:MaxRecipients must be >= 1 — a non-positive cap empties the per-user set and hands control to the TopicFallbackWhenEmpty topic-blast hatch.")
+        "Notifications:NewRequestFanout:MaxRecipients must be >= 1.")
     .Validate(
         o => o.KnownJeeberWindow > TimeSpan.Zero,
         "Notifications:NewRequestFanout:KnownJeeberWindow must be greater than zero.")
@@ -956,8 +954,14 @@ builder.Services.Configure<JeebGateway.Users.GatewayPublicOptions>(
 // controller migrated in this PR checks the matching flag and falls
 // back to the in-memory store when false. PR-B flips defaults to true
 // and removes the in-memory stores.
-builder.Services.Configure<UpstreamFeatureFlags>(
-    builder.Configuration.GetSection(UpstreamFeatureFlags.SectionName));
+builder.Services
+    .AddOptions<UpstreamFeatureFlags>()
+    .Bind(builder.Configuration.GetSection(UpstreamFeatureFlags.SectionName))
+    .Validate(
+        flags => !builder.Environment.IsProduction() || (flags.Delivery && flags.Ratings),
+        "Production authority is settled: FeatureFlags:UseUpstream:Delivery and "
+            + "FeatureFlags:UseUpstream:Ratings must both remain true. Fix failures forward.")
+    .ValidateOnStart();
 
 // A10 — the gateway-DB-extraction mode ladder. Every domain key defaults to "local", so an
 // unset/default deploy behaves exactly as before; ValidateOnStart refuses unknown ladder values.
@@ -968,6 +972,11 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.AdminAuditMode),
         "FeatureFlags:AdminAuditMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.AdminAuditMayStart(
+            builder.Environment.EnvironmentName, o.AdminAuditMode),
+        "FeatureFlags:AdminAuditMode cannot move behind the settled production rung "
+            + "\"dual-write-local-read\". Use a forward fix for audit-mirror failures.")
     .Validate(
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.DataExportMode),
         "FeatureFlags:DataExportMode must be one of: "
@@ -1007,18 +1016,6 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.PushDispatchMode),
         "FeatureFlags:PushDispatchMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
-    // W3-14 — GatewayDirectPushDispatchGuardHandler 503s every POST /api/v1/sent-payload/*
-    // while direct dispatch is off, so a flip without it would dispatch nothing at all.
-    .Validate(
-        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.PushDispatchMode)
-                < JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthority
-            || string.Equals(
-                builder.Configuration[
-                    JeebGateway.Services.Clients.GatewayDirectPushDispatchOptions.SectionName
-                        + ":Enabled"],
-                "true", StringComparison.OrdinalIgnoreCase),
-        "PushNotificationServiceApi:GatewayDirectDispatch:Enabled must be true once "
-            + "FeatureFlags:PushDispatchMode reaches \"upstream-authority\".")
     // G-20 — from dual-write-local-read up the mirror uploads export artifacts, so boot
     // fails closed rather than reaching cdn without an encryption key.
     .Validate(
@@ -1606,8 +1603,8 @@ builder.Services.AddScoped<JeebGateway.Services.Dispatch.IJeebNotificationDispat
 // delivery row (so POST /matching/run resolves instead of 404-ing) and records
 // the saga in the state-service bundle ledger, while every non-create method
 // delegates to the in-memory model. The in-memory store stays registered as
-// the inner delegate AND as the flag-off path (the instant rollback lever — do
-// NOT delete in this PR; retirement is a separate PR gated on S05–S15 green).
+// the inner delegate and as the environment-locked production path until the
+// S05–S15 readiness work selects the forward destination in a later change.
 builder.Services.Configure<DurableRequestsOptions>(
     builder.Configuration.GetSection(DurableRequestsOptions.SectionName));
 
@@ -1716,15 +1713,11 @@ else
 // mirror for POST /matching/run. Registered AFTER IRequestsStore (it reads the
 // request from whichever store the durable flag selected) and depends on the
 // already-registered IDeliveryServiceClient (idempotent POST /api/v1/deliveries).
-// Default-ON (MatchingMirrorOptions.Enabled) so a request that lives only in the
-// gateway's in-memory store is seeded into delivery-service right before the run
-// — closing the matching/run 404 without arming the heavier DurableRequests
-// spine. Thin BFF orchestration only; instant rollback via
-// FeatureFlags__MatchingMirror__Enabled=false. Scoped to match the controller's
+// A request that lives only in the gateway's in-memory store is seeded into
+// delivery-service right before the run, closing the matching/run 404 without
+// arming the heavier DurableRequests spine. This is the settled path. Scoped to match the controller's
 // request lifetime; its deps (IRequestsStore, IDeliveryServiceClient) are
 // resolvable in request scope.
-builder.Services.Configure<JeebGateway.Matching.MatchingMirrorOptions>(
-    builder.Configuration.GetSection(JeebGateway.Matching.MatchingMirrorOptions.SectionName));
 builder.Services.AddScoped<JeebGateway.Matching.IDeliveryRowMirror,
                            JeebGateway.Matching.DeliveryRowMirror>();
 

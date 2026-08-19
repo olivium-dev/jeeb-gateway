@@ -56,7 +56,7 @@ on:
     inputs:
       # `registry` is a fixed constant (always ghcr.io); it is set as a job-level env
       # (REGISTRY) rather than a workflow_dispatch input so the dispatch input count
-      # stays at GitHub's hard limit of 25 after `durable_requests` was added (PR #105).
+      # stays below GitHub's hard limit of 25.
       # 26 inputs makes the workflow un-dispatchable (HTTP 422 at dispatch time).
       #
       # FeatureFlags spine flags are NOT added as one-input-per-flag (that path hit the cap).
@@ -124,28 +124,24 @@ on:
       #       UseUpstreamKyc=<bool>         -> FeatureFlags__UseUpstream__Kyc                   (S03 / ADR-0004)
       #       UseUpstreamCdn=<bool>         -> FeatureFlags__UseUpstream__Cdn                   (S03 / ADR-0004)
       #       UseUpstreamOffer=<bool>       -> FeatureFlags__UseUpstream__Offer                 (S07 — auction/accept)
-      #       UseUpstreamDelivery=<bool>    -> FeatureFlags__UseUpstream__Delivery              (S09/S13/S15 — canonical delivery SM-1)
       #     NOTE: FeatureFlags__UseUpstream__Offer AND FeatureFlags__UseUpstream__Delivery are
       #     ALSO injected UNCONDITIONALLY =true on every deploy (see the dedicated --env-add/--env
       #     lines in the update & create branches below), so S07 routes through
       #     UpstreamPendingOffersStore and S09/S13/S15 route through the canonical delivery
       #     state-machine (SM-1: Ordered/Picked/InTransit/AtDoor/Done, trigger-keyed PATCH,
       #     AtDoor OTP handover, settlement-on-Done) even when the map keys are omitted.
-      #     Passing UseUpstreamOffer / UseUpstreamDelivery here is redundant-but-harmless
-      #     (same value, idempotent).
+      #     Delivery is a settled authority and is not accepted as operator input;
+      #     Offer remains in the map until its separate retirement.
       #     Future spine flags are added to the map's case table below — NO new input, NO cap risk.
-      #   * `durable_requests`, `whisper_fake`, `dev_endpoints`, `swagger_ui` keep their OWN
-      #     dedicated inputs UNCHANGED (their 3-state / secret-coupled semantics are load-bearing
-      #     and out of scope here). In particular `durable_requests` is untouched, so a deploy
-      #     that passes durable_requests=true STILL arms the durable path exactly as before —
-      #     the durable flag, currently ON in production, STAYS ON.
+      #   * `whisper_fake`, `dev_endpoints`, and `swagger_ui` keep dedicated inputs because
+      #     their 3-state / secret-coupled semantics are load-bearing.
       #   * Unknown keys are IGNORED with a warning (fail-open on parse, never fail the deploy
       #     on a typo); a value other than true/false is rejected (guardrail: no silent garbage
       #     into an env var).
       # Example: feature_flags='ConversationAutoCreate=true' arms H7 broadcasting auto-create
       # while leaving Kyc/Cdn at their baked-true defaults.
       feature_flags:
-        description: 'Generic FeatureFlags overlay: comma-separated Key=Value (e.g. "ConversationAutoCreate=true,Heartbeat=true"). Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamDelivery, UseUpstreamChat, Heartbeat. Empty = preserve running flags (baked appsettings defaults on fresh create). NOTE: UseUpstream.Offer AND UseUpstream.Delivery are forced =true unconditionally every deploy regardless of this input (S07 / S09-S13-S15). S08: pass UseUpstreamChat=true to arm the conversation BFF (default off -> 503).'
+        description: 'Generic FeatureFlags overlay: comma-separated Key=Value. Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamChat. Empty = preserve running flags (baked appsettings defaults on fresh create). Delivery/Ratings authority and Heartbeat/DurableRequests environment locks are not operator inputs.'
         required: false
         default: ''
       # S04 / Track C — REAL OpenAI Whisper STT seam. The gateway selects the real
@@ -163,31 +159,6 @@ on:
         options:
           - 'true'
           - 'false'
-      # S05 / ADR-006 — DURABLE request-create path (stateless gateway + jeeb-state-service
-      # saga_bundles ledger). The durable idempotent POST /requests path is already BUILT and
-      # deployed behind FeatureFlags:DurableRequests:Enabled, but DORMANT (flag OFF) because no
-      # workflow input could flip it and owner law forbids a hand `docker service update
-      # --env-add` from an operator shell. This input is the ONLY supported way to set
-      # FeatureFlags__DurableRequests__Enabled on the running gateway. It is injected via
-      # --env-add on EVERY deploy (update + create), mirroring whisper_fake, so the value is
-      # deterministic and operator-controllable rather than "whatever the container last had".
-      # Plain boolean (non-secret) => workflow input, NOT a GitHub secret.
-      #   'false' (DEFAULT) => FeatureFlags__DurableRequests__Enabled=false. PRESERVES the
-      #                        current behaviour: a no-arg deploy keeps the durable path DORMANT
-      #                        (gateway uses the legacy in-memory create path; A4 replay still
-      #                        returns a fresh UUID). Nothing changes unless explicitly armed.
-      #   'true'            => FeatureFlags__DurableRequests__Enabled=true. Arms the stateless
-      #                        durable create path (idempotent dedup via jeeb-state-service
-      #                        saga_bundles — A4 replay returns the SAME id). The gateway stays
-      #                        stateless: the ledger lives in jeeb-state-service, not the gateway.
-      durable_requests:
-        description: 'FeatureFlags__DurableRequests__Enabled. false (default) = legacy create path (current behaviour, flag OFF); true = stateless durable idempotent create via jeeb-state-service.'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
       # DEV-ONLY seed/inspect surface (/dev/*). This input is the ONLY supported way to
       # toggle Features__DevEndpoints__Enabled on the running gateway — never set it via a
       # manual `docker service update --env-add/--env-rm` from an operator shell, and never
@@ -258,19 +229,25 @@ jobs:
       - name: Log in to GHCR (password via stdin)
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
 
-      - name: Build and push image (git-SHA tag)
-        id: build
+      - name: Build and push immutable image
+        id: immutable
         run: |
-          TAG="${IMAGE}:sha-${GITHUB_SHA::12}"
-          docker build -t "$TAG" -t "${IMAGE}:latest" .
-          docker push "$TAG"
-          docker push "${IMAGE}:latest"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          TAG="${IMAGE}:${GITHUB_SHA}"
+          docker build -t "$TAG" .
+          push_output="$(docker push "$TAG")"
+          printf '%s\n' "$push_output"
+          digest="$(printf '%s\n' "$push_output" | sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\).*$/\1/p' | tail -1)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "image=${IMAGE}@$digest" >> "$GITHUB_OUTPUT"
 
       - name: Install cloudflared + write deploy key
         run: |
           set -euo pipefail
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          wget -q https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-linux-amd64.deb
+          printf '%s  %s\n' \
+            'c805c7c8102190c04dfc16e3b4cc4acc9007d5b19b3afbcd608ea6fed7645a43' \
+            cloudflared-linux-amd64.deb | sha256sum --check --strict
           sudo dpkg -i cloudflared-linux-amd64.deb || sudo apt-get install -f -y
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           KEY_MATERIAL="${{ secrets.JEEB_SSH_PRIVATE_KEY }}"
@@ -295,6 +272,7 @@ jobs:
 
       - name: Zero-downtime deploy (update if exists, else create)
         env:
+          IMAGE_PATH: ${{ steps.immutable.outputs.image }}
           STATE_SERVICE_TOKEN: ${{ secrets.JEEB_STATE_SERVICE_TOKEN }}
           DELIVERY_OWNER_TOKEN: ${{ secrets.DELIVERY_SERVICE_TOKEN }}
           NOTIFICATION_OWNER_TOKEN: ${{ secrets.NOTIFICATION_SERVICE_TOKEN }}
@@ -311,7 +289,7 @@ jobs:
           : "${PRIVATE_ARTIFACT_TOKEN:?PRIVATE_ARTIFACT_STORE_BEARER_TOKEN secret is required}"
           : "${DATA_EXPORT_SIGNING_KEY:?DATA_EXPORT_TOKEN_SIGNING_KEY secret is required}"
           : "${GATEWAY_JOB_TOKEN:?JEEB_GATEWAY_JOB_TOKEN secret is required}"
-          TAG="${{ steps.build.outputs.tag }}"
+          [[ "$IMAGE_PATH" =~ @sha256:[0-9a-f]{64}$ ]]
           STATE_SECRET="jeeb_gateway_state_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           DELIVERY_SECRET="jeeb_gateway_delivery_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           NOTIFICATION_SECRET="jeeb_gateway_notification_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
@@ -410,9 +388,7 @@ jobs:
                 useupstreamkyc)         _envvar="FeatureFlags__UseUpstream__Kyc" ;;
                 useupstreamcdn)         _envvar="FeatureFlags__UseUpstream__Cdn" ;;
                 useupstreamoffer)       _envvar="FeatureFlags__UseUpstream__Offer" ;;
-                useupstreamdelivery)    _envvar="FeatureFlags__UseUpstream__Delivery" ;;
                 useupstreamchat)        _envvar="FeatureFlags__UseUpstream__Chat" ;;
-                heartbeat)              _envvar="FeatureFlags__Heartbeat__Enabled" ;;
                 *) echo "::warning::feature_flags: ignoring unknown key '$_key'"; continue ;;
               esac
               FEATURE_FLAG_ARGS="$FEATURE_FLAG_ARGS --env-add ${_envvar}=${_val}"
@@ -435,8 +411,7 @@ jobs:
           ARTIFACT_SECRET='$ARTIFACT_SECRET'
           EXPORT_SECRET='$EXPORT_SECRET'
           JOB_SECRET='$JOB_SECRET'
-          REQUESTED_TAG='$TAG'
-          REQUESTED_REPOSITORY='${TAG%:*}'
+          REQUESTED_IMAGE='$IMAGE_PATH'
           state_secret_args=()
           if docker service inspect "\$SVC" >/dev/null 2>&1; then
             add_rotated_secret() {
@@ -455,16 +430,10 @@ jobs:
             add_rotated_secret data_export_token_signing_key "\$EXPORT_SECRET"
             add_rotated_secret jeeb_gateway_job_token "\$JOB_SECRET"
           fi
-          docker pull "\$REQUESTED_TAG"
-          requested_image_id=\$(docker image inspect --format '{{.Id}}' "\$REQUESTED_TAG")
-          requested_digest_ref=\$(docker image inspect \
-            --format '{{range .RepoDigests}}{{println .}}{{end}}' "\$REQUESTED_TAG" \
-            | awk -v prefix="\${REQUESTED_REPOSITORY}@" 'index(\$0, prefix) == 1 { print; exit }')
-          [ -n "\$requested_image_id" ] || { echo "Requested image ID is missing" >&2; exit 1; }
-          [ -n "\$requested_digest_ref" ] || { echo "Requested image digest is missing" >&2; exit 1; }
-          requested_service_image="\${REQUESTED_TAG}@\${requested_digest_ref##*@}"
+          [[ "\$REQUESTED_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
+          docker pull "\$REQUESTED_IMAGE"
           if docker service ls --format '{{.Name}}' | grep -wq "\$SVC"; then
-            docker service update --detach=false --image "\$REQUESTED_TAG" --with-registry-auth \
+            docker service update --detach=false --replicas 1 --image "\$REQUESTED_IMAGE" --with-registry-auth \
               --update-order stop-first --update-failure-action pause --update-monitor 20s \
               --env-add Security__TokenMint__Enabled='true' \
               --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
@@ -489,10 +458,12 @@ jobs:
               --env-add InternalJobAuth__TokenFile='/run/secrets/jeeb_gateway_job_token' \
               --env-add Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env-add Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
-              --env-add FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
+              --env-add FeatureFlags__DurableRequests__Enabled='false' \
+              --env-add FeatureFlags__Heartbeat__Enabled='false' \
               --env-add FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               --env-add FeatureFlags__UseUpstream__Offer='true' \
               --env-add FeatureFlags__UseUpstream__Delivery='true' \
+              --env-add FeatureFlags__UseUpstream__Ratings='true' \
               --env-add FeatureFlags__UseUpstream__Chat='true' \
               $FEATURE_FLAG_ARGS \
               $DEV_FLAG_ARG \
@@ -538,10 +509,12 @@ jobs:
               --env Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
               --env Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
               --env Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
-              --env FeatureFlags__DurableRequests__Enabled='${{ inputs.durable_requests }}' \
+              --env FeatureFlags__DurableRequests__Enabled='false' \
+              --env FeatureFlags__Heartbeat__Enabled='false' \
               --env FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               --env FeatureFlags__UseUpstream__Offer='true' \
               --env FeatureFlags__UseUpstream__Delivery='true' \
+              --env FeatureFlags__UseUpstream__Ratings='true' \
               --env FeatureFlags__UseUpstream__Chat='true' \
               --secret "source=\$STATE_SECRET,target=jeeb_state_service_token,mode=0444" \
               --secret "source=\$DELIVERY_SECRET,target=delivery_service_token,mode=0444" \
@@ -552,36 +525,18 @@ jobs:
               --secret "source=\$JOB_SECRET,target=jeeb_gateway_job_token,mode=0444" \
               $FEATURE_FLAG_CREATE_ARGS \
               --reserve-memory 256M \
-              "\$REQUESTED_TAG"
+              "\$REQUESTED_IMAGE"
           fi
-          service_image=\$(docker service inspect \
-            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' "\$SVC")
-          [ "\$service_image" = "\$requested_service_image" ] || {
-            echo "Service image does not match the requested digest" >&2
-            exit 1
-          }
-          replicas=\$(docker service ls --filter "name=\$SVC" \
-            --format '{{.Name}} {{.Replicas}}' \
-            | awk -v expected="\$SVC" '\$1 == expected { print \$2 }')
-          [ "\$replicas" = 1/1 ] || { echo "Unexpected replicas: \$replicas" >&2; exit 1; }
-          mapfile -t running_containers < <(
-            docker ps -q --filter "label=com.docker.swarm.service.name=\$SVC"
-          )
-          [ "\${#running_containers[@]}" -eq 1 ] || {
-            echo "Expected exactly one running service container" >&2
-            exit 1
-          }
-          task_image_ref=\$(docker inspect --format '{{.Config.Image}}' "\${running_containers[0]}")
-          task_image_id=\$(docker inspect --format '{{.Image}}' "\${running_containers[0]}")
-          [ "\$task_image_ref" = "\$requested_service_image" ] || {
-            echo "Running task image reference does not match the requested digest" >&2
-            exit 1
-          }
-          [ "\$task_image_id" = "\$requested_image_id" ] || {
-            echo "Running task image ID does not match the requested image" >&2
-            exit 1
-          }
           EOF
+
+      - name: Verify exact deployed service image
+        env:
+          IMAGE_PATH: ${{ steps.immutable.outputs.image }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_PATH" =~ @sha256:[0-9a-f]{64}$ ]]
+          ssh jeeb bash -s -- '${{ inputs.service_name }}' "$IMAGE_PATH" \
+            < scripts/verify-swarm-service-image.sh
 
       - name: Health gate (poll; leave failures paused)
         run: |

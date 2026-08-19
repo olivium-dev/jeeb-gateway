@@ -45,8 +45,7 @@ namespace JeebGateway.Notifications;
 /// producer. PR #374's D1 single-producer cut-over armed
 /// <c>GatewayDirectPushDispatchGuardHandler</c>, which synthesizes a 503
 /// <c>gateway_direct_push_dispatch_disabled</c> for every <c>POST
-/// /api/v1/sent-payload/*</c> while <c>PushNotificationServiceApi:GatewayDirectDispatch:Enabled</c>
-/// is false — and false is the committed and live default. Every other push seat (chat,
+/// /api/v1/sent-payload/*</c>. Every other push seat (chat,
 /// offer-lost, new-request, expiry) was migrated to the hand-over path at the same time;
 /// this one was NOT, so the delivery-status category had NO producer at all and all four
 /// transitions of the 2026-08-11 00:32-00:35 proof journey (delivery <c>da210b2f</c>) failed

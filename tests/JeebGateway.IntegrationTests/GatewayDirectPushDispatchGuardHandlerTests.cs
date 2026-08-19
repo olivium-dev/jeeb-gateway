@@ -2,7 +2,6 @@ using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Services.Clients;
-using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -17,7 +16,7 @@ public sealed class GatewayDirectPushDispatchGuardHandlerTests
     public async Task Disabled_BlocksDirectDispatchWithoutCallingPushService(string path)
     {
         var downstream = new RecordingHandler();
-        using var client = Client(enabled: false, downstream);
+        using var client = Client(downstream);
 
         using var response = await client.PostAsJsonAsync(path, new { payload = new { title = "test" } });
 
@@ -36,7 +35,7 @@ public sealed class GatewayDirectPushDispatchGuardHandlerTests
     public async Task Disabled_AllowsNonDispatchPushOperations(string method, string path)
     {
         var downstream = new RecordingHandler();
-        using var client = Client(enabled: false, downstream);
+        using var client = Client(downstream);
         using var request = new HttpRequestMessage(new HttpMethod(method), path);
 
         using var response = await client.SendAsync(request);
@@ -46,23 +45,22 @@ public sealed class GatewayDirectPushDispatchGuardHandlerTests
     }
 
     [Fact]
-    public async Task Enabled_AllowsEmergencyRollbackToLegacyDirectDispatch()
+    public async Task DirectDispatchCannotBeReenabledByConfiguration()
     {
         var downstream = new RecordingHandler();
-        using var client = Client(enabled: true, downstream);
+        using var client = Client(downstream);
 
         using var response = await client.PostAsJsonAsync(
             "api/v1/sent-payload/user/user-1",
             new { payload = new { title = "test" } });
 
-        response.StatusCode.Should().Be(HttpStatusCode.OK);
-        downstream.RequestCount.Should().Be(1);
+        response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        downstream.RequestCount.Should().Be(0);
     }
 
-    private static HttpClient Client(bool enabled, HttpMessageHandler downstream)
+    private static HttpClient Client(HttpMessageHandler downstream)
     {
-        var guard = new GatewayDirectPushDispatchGuardHandler(
-            Options.Create(new GatewayDirectPushDispatchOptions { Enabled = enabled }))
+        var guard = new GatewayDirectPushDispatchGuardHandler
         {
             InnerHandler = downstream,
         };

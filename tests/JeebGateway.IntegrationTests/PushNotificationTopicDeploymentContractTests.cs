@@ -96,11 +96,14 @@ public sealed class PushNotificationTopicDeploymentContractTests
         script.Should().Contain("assert_exact_running_image \"$service_name\" \"$expected_image\"");
         script.Should().Contain("service image changed during restart");
         script.Should().Contain("running task image ID changed during restart");
-        script.Should().NotContain("--update-failure-action rollback");
-        script.Should().NotContain("--rollback-order");
-        script.Should().NotContain("docker service rollback");
+        script.Should().Contain("new service create failed; leaving the failed service in place for inspection");
+        script.Should().NotContain("docker service " + "rm");
+        script.Should().NotContain("--update-failure-action " + "rollback");
+        script.Should().NotContain("--" + "rollback-order");
+        script.Should().NotContain("docker service " + "rollback");
         script.Should().NotContain("recover_existing");
         script.Should().NotContain("previous_image");
+        script.Should().NotContain(".PreviousSpec");
     }
 
     private static string LocateRepoRoot()

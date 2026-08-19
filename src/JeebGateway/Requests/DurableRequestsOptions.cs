@@ -9,18 +9,15 @@ namespace JeebGateway.Requests;
 /// jeeb-state-service bundle ledger — the gateway holds NO order state of its
 /// own on that path.
 ///
-/// Default is <b>false</b> so the green in-memory path (today's S05 H3 →
-/// 201, S01–S04) is unchanged until the two upstreams (state-service
+/// Production is fixed at <b>false</b> until the two upstreams (state-service
 /// saga_bundles + delivery <c>POST /api/v1/deliveries</c>) are deployed and
-/// smoke-passed. Flip via <c>FeatureFlags__DurableRequests__Enabled=true</c>
-/// (a deploy <c>workflow_dispatch</c> input), staging-first.
+/// smoke-passed. The deploy workflow exposes no operator source-selection input.
 ///
 /// This is a STORE-SELECTION cutover flag, deliberately NOT folded into
 /// <see cref="JeebGateway.Services.UpstreamFeatureFlags"/> (which toggles
 /// individual upstream proxies). It selects which <see cref="IRequestsStore"/>
-/// implementation is registered — the durable decorator or the legacy
-/// in-memory store — so the in-memory store stays as the instant rollback
-/// lever until S05–S15 are green.
+/// implementation is registered — the durable decorator or the current
+/// in-memory store. A later forward change may select the durable path after S05–S15 are green.
 /// </summary>
 public sealed class DurableRequestsOptions
 {

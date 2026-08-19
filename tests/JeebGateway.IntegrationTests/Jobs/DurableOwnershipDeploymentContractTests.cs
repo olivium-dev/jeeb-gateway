@@ -181,6 +181,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("remote_probe before_restart");
         workflow.Should().Contain("remote_probe after_restart");
         workflow.Should().Contain("docker service update --force --update-failure-action pause --detach=false");
+        workflow.Should().Contain("scripts/verify-swarm-service-image.sh");
         workflow.Should().Contain("[ \"$before_image\" = \"$after_image\" ]");
         workflow.Should().Contain("[ \"$before_task_image\" = \"$before_image\" ]");
         workflow.Should().Contain("[ \"$after_task_image\" = \"$after_image\" ]");
@@ -189,7 +190,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("service_replicas=1/1");
         workflow.Should().Contain("smoke_workflow_commit=%s");
         workflow.Should().Contain("runtime_image=%s");
-        workflow.Should().NotContain("docker service rollback");
+        workflow.Should().NotContain("docker service " + "rollback");
     }
 
     [Theory]
@@ -199,18 +200,25 @@ public sealed class DurableOwnershipDeploymentContractTests
         string workflowName)
     {
         var workflow = Workflow(workflowName);
+        var verifier = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(), "scripts", "verify-swarm-service-image.sh"));
 
         workflow.Should().Contain("--update-failure-action pause");
-        workflow.Should().Contain("requested_image_id=");
-        workflow.Should().Contain("requested_digest_ref=");
-        workflow.Should().Contain("service_image=");
-        workflow.Should().Contain("task_image_ref=");
-        workflow.Should().Contain("task_image_id=");
-        workflow.Should().Contain("Running task image reference does not match the requested digest");
-        workflow.Should().Contain("Running task image ID does not match the requested image");
-        workflow.Should().NotContain("--update-failure-action rollback");
-        workflow.Should().NotContain("--rollback-order");
-        workflow.Should().NotContain("docker service rollback");
+        workflow.Should().Contain("steps.immutable.outputs.image");
+        workflow.Should().Contain("scripts/verify-swarm-service-image.sh");
+        verifier.Should().Contain(".Spec.TaskTemplate.ContainerSpec.Image");
+        verifier.Should().Contain(".UpdateStatus");
+        verifier.Should().Contain(".Spec.Mode.Replicated.Replicas");
+        verifier.Should().Contain("desired-state=running");
+        verifier.Should().Contain(".Status.State");
+        verifier.Should().Contain(".DesiredState");
+        verifier.Should().Contain(".ServiceID");
+        verifier.Should().Contain(".Status.ContainerStatus.ContainerID");
+        verifier.Should().Contain("docker image inspect");
+        verifier.Should().Contain("{{.Image}}");
+        workflow.Should().NotContain("--update-failure-action " + "rollback");
+        workflow.Should().NotContain("--" + "rollback-order");
+        workflow.Should().NotContain("docker service " + "rollback");
     }
 
     private static string Workflow(string name) => File.ReadAllText(Path.Combine(

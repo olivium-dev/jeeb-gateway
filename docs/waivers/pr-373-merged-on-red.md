@@ -111,9 +111,6 @@ The waiver ratifies the merge. It does **not** retire the underlying problems:
   suite to either provision its dependencies or be split from the unit tests.
 - The R9 stateless gate stays failing until `PostgresSettlementLedgerClient`
   moves to its owning service and the `InMemory*` durable stores are rewired.
-- **#373 is merged but its deploy gate is still live.** The committed default
-  disables gateway direct push sends. Deploying it before notification-service
-  is verified as the sole push producer would leave push with **no** producer.
-  Order: notification-service durable dispatcher verified first, gateway after.
-  Emergency rollback without a redeploy:
-  `PushNotificationServiceApi__GatewayDirectDispatch__Enabled=true`.
+- **#373 is merged and its temporary deploy gate is superseded.** Notification-service is the
+  settled sole producer. Gateway direct sends are rejected unconditionally; producer failures
+  pause the affected rollout and are fixed forward.

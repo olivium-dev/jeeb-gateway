@@ -12,7 +12,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}
+  IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+  IMAGE_TAG: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}
   REMOTE_DOCKER_CONFIG: /tmp/jeeb-ghcr-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
@@ -30,12 +31,22 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push immutable image
+        id: image_build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ${{ env.IMAGE }}
+          tags: ${{ env.IMAGE_TAG }}
+
+      - name: Capture build-produced immutable digest
+        id: immutable
+        env:
+          IMAGE_DIGEST: ${{ steps.image_build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "image=${IMAGE_REPOSITORY}@$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Install cloudflared and configure strict SSH
         env:
@@ -96,6 +107,7 @@ jobs:
 
       - name: Deploy Swarm service
         env:
+          IMAGE: ${{ steps.immutable.outputs.image }}
           REPOSITORY: ${{ github.event.repository.name }}
           JEEB_DATABASE_URL: ${{ secrets.JEEB_DATABASE_URL }}
           JEEB_DB_USERNAME: ${{ secrets.JEEB_DB_USERNAME }}
@@ -389,15 +401,8 @@ jobs:
               ;;
             *) echo "Unsupported repository: $REPOSITORY" >&2; exit 1 ;;
           esac
+          [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
           docker pull "$IMAGE"
-          image_repository=${IMAGE%:*}
-          requested_image_id=$(docker image inspect --format '{{.Id}}' "$IMAGE")
-          requested_digest_ref=$(docker image inspect \
-            --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE" \
-            | awk -v prefix="${image_repository}@" 'index($0, prefix) == 1 { print; exit }')
-          [ -n "$requested_image_id" ] || { echo "Requested image ID is missing" >&2; exit 1; }
-          [ -n "$requested_digest_ref" ] || { echo "Requested image digest is missing" >&2; exit 1; }
-          requested_service_image="${IMAGE}@${requested_digest_ref##*@}"
           docker network create --driver overlay --attachable "$network" 2>/dev/null || true
           [ "$(docker network inspect -f '{{.Driver}}' "$network")" = overlay ]
           network_id=$(docker network inspect --format '{{.Id}}' "$network")
@@ -420,7 +425,7 @@ jobs:
                 network_update_args+=(--network-rm "$stale_gateway_network")
               fi
             fi
-            docker service update --detach=false --image "$IMAGE" --with-registry-auth \
+            docker service update --detach=false --replicas 1 --image "$IMAGE" --with-registry-auth \
               "${network_update_args[@]}" \
               "${secret_update_args[@]}" "${env_remove_args[@]}" \
               "${update_env[@]}" "${common[@]}" "$service"
@@ -432,33 +437,6 @@ jobs:
           fi
           ports=$(docker service inspect -f '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}' "$service")
           [ "$ports" = "${published}:${target}:host" ] || { echo "Unexpected ports: $ports" >&2; exit 1; }
-          service_image=$(docker service inspect \
-            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' "$service")
-          [ "$service_image" = "$requested_service_image" ] || {
-            echo "Service image does not match the requested digest" >&2
-            exit 1
-          }
-          replicas=$(docker service ls --filter "name=$service" \
-            --format '{{.Name}} {{.Replicas}}' \
-            | awk -v expected="$service" '$1 == expected { print $2 }')
-          [ "$replicas" = 1/1 ] || { echo "Unexpected replicas: $replicas" >&2; exit 1; }
-          mapfile -t running_containers < <(
-            docker ps -q --filter "label=com.docker.swarm.service.name=$service"
-          )
-          [ "${#running_containers[@]}" -eq 1 ] || {
-            echo "Expected exactly one running service container" >&2
-            exit 1
-          }
-          task_image_ref=$(docker inspect --format '{{.Config.Image}}' "${running_containers[0]}")
-          task_image_id=$(docker inspect --format '{{.Image}}' "${running_containers[0]}")
-          [ "$task_image_ref" = "$requested_service_image" ] || {
-            echo "Running task image reference does not match the requested digest" >&2
-            exit 1
-          }
-          [ "$task_image_id" = "$requested_image_id" ] || {
-            echo "Running task image ID does not match the requested image" >&2
-            exit 1
-          }
           healthy=false
           for attempt in $(seq 1 40); do
             if curl -fsS --max-time 5 "http://127.0.0.1:${published}${health}" >/dev/null; then
@@ -473,6 +451,15 @@ jobs:
           fi
           REMOTE
           } | ssh jeeb-staging bash -se
+
+      - name: Verify exact deployed service image
+        env:
+          IMAGE: ${{ steps.immutable.outputs.image }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
+          ssh jeeb-staging bash -s -- jeeb-staging-jeeb-gateway "$IMAGE" \
+            < scripts/verify-swarm-service-image.sh
 
       - name: Clean up isolated remote Docker credentials
         if: always()

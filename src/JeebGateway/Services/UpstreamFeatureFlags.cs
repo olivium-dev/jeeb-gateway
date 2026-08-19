@@ -290,8 +290,8 @@ public sealed class UpstreamFeatureFlags
     /// (same shape as the W1-02 mode keys): W1-12 owns the flip that makes claim-based
     /// execution of the persisted <c>new-request-fanout</c> work items the only path.
     ///
-    /// <para>This flag is NOT the fan-out kill switch. <c>Notifications:NewRequestFanout:Enabled</c>
-    /// keeps that job unchanged — false still restores the byte-identical legacy topic blast.</para>
+    /// <para>This flag is not a fan-out kill switch. New-request recipient fan-out is permanently
+    /// active and has no topic-blast fallback.</para>
     /// </summary>
     public bool FanoutWorkQueue { get; set; }
 }

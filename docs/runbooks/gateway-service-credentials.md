@@ -44,7 +44,8 @@ whenever it is armed; state-service only starts requiring it after its own cutov
 5. **Login canary, mandatory.** `/health/ready` is not proof: the state health check probes
    `{BaseUrl}/health`, which is outside the authenticated `/v1` surface, so it stayed green through
    the 2026-08-11 outage. Run a real `POST /v1/auth/otp/request` + `/verify` and one authenticated
-   read before declaring success; roll back otherwise.
+   read before declaring success. If it fails, leave the candidate stopped or paused and repair
+   the credential path forward; do not reverse the deployed artifact or schema.
 
 ## feedback-ratings export credential
 

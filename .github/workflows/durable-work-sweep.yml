@@ -45,7 +45,8 @@ jobs:
           : "${SSH_PRIVATE_KEY:?JEEB_SSH_PRIVATE_KEY is required}"
           : "${SSH_KNOWN_HOSTS:?JEEB_SSH_KNOWN_HOSTS is required}"
           curl -fsSL --retry 3 -o cloudflared.deb \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+            https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-linux-amd64.deb
+          printf '%s  %s\n' 'c805c7c8102190c04dfc16e3b4cc4acc9007d5b19b3afbcd608ea6fed7645a43' cloudflared.deb | sha256sum --check --strict
           sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
           install -d -m 700 "$HOME/.ssh"
           if printf '%s' "$SSH_PRIVATE_KEY" | grep -q '^-----BEGIN'; then

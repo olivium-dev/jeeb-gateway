@@ -14,8 +14,8 @@ namespace JeebGateway.Ratings;
 /// <summary>
 /// Gap 8 (JEB-1489 / GR2) — feedback-service-backed implementation of
 /// <see cref="IRatingStore"/>. Becomes the delivery-ratings record-of-truth when
-/// <c>FeatureFlags:UseUpstream:Ratings</c> is ON; otherwise
-/// <see cref="InMemoryRatingStore"/> remains the flag-OFF rollback fallback
+/// <c>FeatureFlags:UseUpstream:Ratings</c> is ON; otherwise development/test may use
+/// <see cref="InMemoryRatingStore"/>. Production startup rejects that backward authority
 /// (the <see cref="JeebGateway.Requests.Cancellation.BanServiceJeeberRestrictionStore"/>
 /// store-swap precedent).
 ///
