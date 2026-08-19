@@ -297,6 +297,11 @@ jobs:
                 fi
               done
               add_env FeatureFlags__DurableRequests__Enabled true
+              # The authenticated mobile bootstrap always resolves /v1/users/me
+              # through user-management. Staging does not load
+              # appsettings.Production.json, so make the owning-service route
+              # explicit instead of inheriting the base-file false default.
+              add_env FeatureFlags__UseUpstream__UserManagement true
               add_env FeatureFlags__UseUpstream__RemoteUserPreferences true
               add_env FeatureFlags__UseUpstream__Ratings true
               add_env FeatureFlags__UseUpstream__Ban true
