@@ -224,7 +224,7 @@ gh workflow run deploy-to-jeeb.yml --repo olivium-dev/jeeb-gateway --ref main \
 
 How the input maps onto the running service (applied on the **same** zero-downtime
 `docker service update` that injects `Security__TokenMint__*`, with `stop-first` +
-`--update-failure-action rollback`):
+`--update-failure-action pause`; a failed task remains available for inspection):
 
 | `dev_endpoints` | env mutation | `/dev/*` behaviour |
 |---|---|---|

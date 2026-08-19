@@ -59,7 +59,7 @@ public sealed class PushNotificationTopicDeploymentContractTests
         ["gc jeeb-gateway;docker-service-rm"],
         ["stabilize jeeb-gateway jeeb_gateway_appsettings_latest"],
         ["stabilize other-service jeeb_gateway_appsettings_12_1"],
-        ["finalize 2 jeeb-gateway jeeb_gateway_appsettings_12_1 none none"],
+        ["finalize 2 jeeb-gateway jeeb_gateway_appsettings_12_1 none"],
     ];
 
     [Theory]
@@ -79,6 +79,28 @@ public sealed class PushNotificationTopicDeploymentContractTests
         await process.WaitForExitAsync();
 
         process.ExitCode.Should().NotBe(0);
+    }
+
+    [Fact]
+    public void SecretLifecycle_PausesFailedUpdatesAndHasNoExecutableRollbackPath()
+    {
+        var repoRoot = LocateRepoRoot();
+        var script = File.ReadAllText(Path.Combine(
+            repoRoot,
+            ".github",
+            "scripts",
+            "jeeb-gateway-secret-lifecycle.sh"));
+
+        script.Should().Contain("--update-failure-action pause");
+        script.Should().Contain("forbidden automatic rollback state detected");
+        script.Should().Contain("assert_exact_running_image \"$service_name\" \"$expected_image\"");
+        script.Should().Contain("service image changed during restart");
+        script.Should().Contain("running task image ID changed during restart");
+        script.Should().NotContain("--update-failure-action rollback");
+        script.Should().NotContain("--rollback-order");
+        script.Should().NotContain("docker service rollback");
+        script.Should().NotContain("recover_existing");
+        script.Should().NotContain("previous_image");
     }
 
     private static string LocateRepoRoot()
