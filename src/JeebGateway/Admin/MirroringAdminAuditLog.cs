@@ -118,7 +118,7 @@ public sealed class MirroringAdminAuditLog : IAdminAuditLog
                 }
 
                 _log.LogWarning(ex,
-                    "admin-audit mirror to state-service /audit-events gave up after {Attempts} attempt(s) " +
+                    "admin-audit mirror to state-service /v1/audit-events gave up after {Attempts} attempt(s) " +
                     "for admin_actions.id={Id} action={Action} entityType={EntityType}; the local row is durable " +
                     "and the W1-04 backfill relays the same idempotency key.",
                     attempt, idempotencyKey, row.Action, row.EntityType);
