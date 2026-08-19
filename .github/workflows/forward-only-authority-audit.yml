@@ -13,5 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test exact Swarm image verifier
+        run: scripts/test-verify-swarm-service-image.sh
       - name: Reject deployment and authority reversion paths
         run: bash scripts/check-forward-only-authorities.sh

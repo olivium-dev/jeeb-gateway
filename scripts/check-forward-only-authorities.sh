@@ -40,6 +40,17 @@ forbidden = {
     ),
     "retired undo pointer": re.compile("/" + "UNDO-"),
     "operator rollback instruction": re.compile(r"roll\s+" + r"back\s+otherwise", re.I),
+    "database snapshot or restore": re.compile(r"\b" + "pg_" + r"(?:dump|restore)\b", re.I),
+    "Git prior-state recovery": re.compile(
+        r"\bgit\s+(?:re" + "vert" + r"\b|reset\b[^\n]*--hard\b"
+        r"|checkout\b[^\n]*(?:HEAD[~^]|[0-9a-f]{7,})"
+        r"|restore\b[^\n]*--source\b|switch\b[^\n]*--detach\b)", re.I
+    ),
+    "mutable latest image": re.compile(r"\b[a-z0-9._/-]+:" + "latest" + r"\b", re.I),
+    "historical deployment authority": re.compile(
+        r"\b(?:previous|prior|predecessor)\s+(?:image|container|service|deployment|database|dump)\b",
+        re.I,
+    ),
 }
 
 violations = []
@@ -49,6 +60,12 @@ for path, text in tracked:
     utf8_count += 1
     for line_number, line in enumerate(text.splitlines(), 1):
         for label, pattern in forbidden.items():
+            if (
+                label == "Git prior-state recovery"
+                and path == Path("tests/gw3-pack/neg-controls.sh")
+                and line.strip().startswith("u_N17()")
+            ):
+                continue
             if pattern.search(line):
                 violations.append(f"{path}:{line_number}: {label}: {line.strip()}")
 
@@ -94,17 +111,22 @@ if re.search(r"(?m)^\s+image_tag:\s*$", staging_reusable):
 
 direct = deploy_text["deploy-to-jeeb.yml"]
 for token in (
-    'TAG="${IMAGE}:${GITHUB_SHA}"',
-    'requested_digest_ref=',
-    'requested_service_image=',
-    'task_image_ref=',
-    'task_image_id=',
+    'steps.immutable.outputs.image',
+    'GITHUB_OUTPUT',
+    'sha256:',
+    'scripts/verify-swarm-service-image.sh',
 ):
     if token not in direct:
         raise SystemExit(f"FAIL: direct production deploy lacks commit/image/runtime proof: {token}")
 
 staging = deploy_text["jeeb-staging-deploy.yml"]
-for token in ("${{ github.sha }}", "requested_digest_ref=", "task_image_ref=", "task_image_id="):
+for token in (
+    "${{ github.sha }}",
+    "steps.immutable.outputs.image",
+    "GITHUB_OUTPUT",
+    "sha256:",
+    "scripts/verify-swarm-service-image.sh",
+):
     if token not in staging:
         raise SystemExit(f"FAIL: staging deploy lacks commit/image/runtime proof: {token}")
 
