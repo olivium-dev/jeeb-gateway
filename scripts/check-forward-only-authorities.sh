@@ -74,6 +74,12 @@ forbidden = {
     ),
 }
 
+
+def normalized_shell_source(source):
+    """Collapse shell line continuations before inspecting commands."""
+    return re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", source)
+
+
 adversarial_canaries = {
     "variable Docker deletion": 'DOCKER=docker; "$DOCKER" service ' + "rm app",
     "variable Git prior selector": "git check" + 'out "$PREVIOUS_SHA"',
@@ -83,9 +89,14 @@ adversarial_canaries = {
     "unsafe service scale": "docker service " + "scale app=0",
     "variable Docker rollback": 'ENGINE=docker; "$ENGINE" service ' + "rollback app",
     "variable Docker stack deletion": 'ENGINE=docker; "$ENGINE" stack ' + "rm app",
+    "multiline Docker rollback": "docker service " + "\\\n" + "rollback app",
+    "multiline variable Docker deletion": (
+        'ENGINE=docker; "$ENGINE" service ' + "\\\n" + "rm app"
+    ),
 }
 for description, canary in adversarial_canaries.items():
-    if not any(pattern.search(canary) for pattern in forbidden.values()):
+    normalized_canary = normalized_shell_source(canary)
+    if not any(pattern.search(normalized_canary) for pattern in forbidden.values()):
         raise SystemExit(f"FAIL: scanner does not reject adversarial canary: {description}")
 
 violations = []
@@ -125,7 +136,8 @@ for path, text in tracked:
 
 for path, text in tracked:
     utf8_count += 1
-    for line_number, line in enumerate(text.splitlines(), 1):
+    normalized_text = normalized_shell_source(text)
+    for line_number, line in enumerate(normalized_text.splitlines(), 1):
         for label, pattern in forbidden.items():
             if (
                 label == "Git prior-state recovery"
@@ -166,15 +178,16 @@ for canary in (
     "docker service " + "scale app=0",
     'ENGINE=docker\n"$ENGINE" service ' + "rollback app",
     'ENGINE=docker\n"$ENGINE" stack ' + 'deploy -c stack.yml app',
+    'ENGINE=docker\n"$ENGINE" service ' + "\\\n" + "rollback app",
 ):
-    if not mutation_pattern.search(canary):
+    if not mutation_pattern.search(normalized_shell_source(canary)):
         raise SystemExit("FAIL: service mutation inventory misses an adversarial canary")
 mutation_inventory = {
     path.relative_to(Path(".")).as_posix()
     for root in (Path(".github/workflows"), Path(".github/scripts"))
     for path in root.rglob("*")
     if path.is_file() and path.suffix in {".yml", ".yaml", ".sh"}
-    and mutation_pattern.search(path.read_text())
+    and mutation_pattern.search(normalized_shell_source(path.read_text()))
 }
 expected_mutation_inventory = {
     ".github/scripts/jeeb-gateway-secret-lifecycle.sh",
