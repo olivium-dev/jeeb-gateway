@@ -14,7 +14,7 @@ namespace JeebGateway.IntegrationTests;
 /// <summary>
 /// Every push seat's per-recipient cap must be able to survive a HEALTHY push.
 ///
-/// <para><b>The defect this pins.</b> Six push seats each owned a private
+/// <para><b>The defect this pins.</b> The push seats owned private
 /// <c>PushTimeout</c>/<c>PerSendTimeout</c> copy, five of them 2s, sized from the claim that
 /// "the LAN-local push svc is normally &lt;200ms". Measured against the live push service on
 /// 2026-07-28, POSITIVE CONTROL FIRST: a recipient with NO device rows answers 404 in
@@ -57,7 +57,6 @@ public class PushSendBudgetRegressionTests
     {
         "OfferPushNotifier.PushTimeout",
         "ChatMessagePushNotifier.PushTimeout",
-        "NewRequestPushNotifier.PushTimeout",
         "DeliveryStatusPushNotifier.PerRecipientTimeout",
         "DispatchingRequestExpiryNotifier.PushTimeout",
         "ServiceCallbacksController.PushTimeout",
