@@ -234,8 +234,8 @@ jobs:
               add_env AdminPortal__AllowedOrigins__0 https://app.jeeb.fds-1.com
               add_env AdminPortal__AllowedOrigins__1 https://cms.jeeb.fds-1.com
               add_env Settlements__CodOwnerVerified true
-              add_env Redis__ConnectionString 192.168.2.20:6379
-              add_env GatewayRateLimit__RedisConnectionString 192.168.2.20:6379
+              add_env Redis__ConnectionString 192.168.2.20:6379,defaultDatabase=1
+              add_env GatewayRateLimit__RedisConnectionString 192.168.2.20:6379,defaultDatabase=2
               # state-service is internal-only in staging. Keep the gateway on the shared
               # overlay and use Swarm DNS so no host-published state port is required.
               add_env JeebStateService__BaseUrl http://jeeb-staging-jeeb-state-service:8080
