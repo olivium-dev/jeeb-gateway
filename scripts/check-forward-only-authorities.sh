@@ -89,9 +89,9 @@ adversarial_canaries = {
     "unsafe service scale": "docker service " + "scale app=0",
     "variable Docker rollback": 'ENGINE=docker; "$ENGINE" service ' + "rollback app",
     "variable Docker stack deletion": 'ENGINE=docker; "$ENGINE" stack ' + "rm app",
-    "multiline Docker rollback": "docker service " + "\\\n" + "rollback app",
+    "multiline Docker rollback": "docker service " + "\\  \n" + "rollback app",
     "multiline variable Docker deletion": (
-        'ENGINE=docker; "$ENGINE" service ' + "\\\n" + "rm app"
+        'ENGINE=docker; "$ENGINE" service ' + "\\  \n" + "rm app"
     ),
 }
 for description, canary in adversarial_canaries.items():
@@ -174,11 +174,12 @@ mutation_pattern = re.compile(
     r"|stack\s+(?:create|update|deploy|" + "rm" + r"))\b", re.I
 )
 for canary in (
+    "docker service " + "\\  \n" + 'update --image "$IMAGE" app',
     'ENGINE=docker\n"$ENGINE" service ' + 'update --image "$IMAGE" app',
     "docker service " + "scale app=0",
     'ENGINE=docker\n"$ENGINE" service ' + "rollback app",
     'ENGINE=docker\n"$ENGINE" stack ' + 'deploy -c stack.yml app',
-    'ENGINE=docker\n"$ENGINE" service ' + "\\\n" + "rollback app",
+    'ENGINE=docker\n"$ENGINE" service ' + "\\  \n" + "rollback app",
 ):
     if not mutation_pattern.search(normalized_shell_source(canary)):
         raise SystemExit("FAIL: service mutation inventory misses an adversarial canary")
