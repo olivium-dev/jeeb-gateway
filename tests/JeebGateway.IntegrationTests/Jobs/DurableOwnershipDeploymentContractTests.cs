@@ -189,7 +189,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("service_replicas=1/1");
         workflow.Should().Contain("smoke_workflow_commit=%s");
         workflow.Should().Contain("runtime_image=%s");
-        workflow.Should().NotContain("docker service rollback");
+        workflow.Should().NotContain("docker service " + "rollback");
     }
 
     [Theory]
@@ -208,9 +208,9 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("task_image_id=");
         workflow.Should().Contain("Running task image reference does not match the requested digest");
         workflow.Should().Contain("Running task image ID does not match the requested image");
-        workflow.Should().NotContain("--update-failure-action rollback");
-        workflow.Should().NotContain("--rollback-order");
-        workflow.Should().NotContain("docker service rollback");
+        workflow.Should().NotContain("--update-failure-action " + "rollback");
+        workflow.Should().NotContain("--" + "rollback-order");
+        workflow.Should().NotContain("docker service " + "rollback");
     }
 
     private static string Workflow(string name) => File.ReadAllText(Path.Combine(

@@ -10,10 +10,9 @@ programme (gateway PRs #445 / #446 / #448). `src/` now contains no Npgsql or
 EntityFrameworkCore reference and no `Postgres*.cs` file, and
 `scripts/gateway-db-seam-allowlist.txt` is empty so any new seam is rejected.
 
-The `db/` directory went with them. **Every script the old runbook told an
-operator to run is absent from this repository** — `db/backup/pg_backup.sh`,
-`db/backup/pg_wal_archive.sh`, `db/backup/pg_restore.sh`,
-`db/backup/verify_backup.sh`. Following it during an incident would have burned
+The `db/` directory went with them. **Every operational backup or recovery
+script the old runbook named is absent from this repository.** Following the
+retired instructions during an incident would have burned
 the RTO on commands that cannot execute. The deletion ledger scheduled this
 rewrite for W5-11 (`docs/runbooks/gwdbx-deletion-ledger.md` §8) and it did not
 happen then; W5-13 is clearing it.

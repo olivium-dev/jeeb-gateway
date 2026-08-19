@@ -3,10 +3,6 @@ name: Deploy to Production
 on:
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: "Image tag to deploy (must already be pushed to GHCR, e.g. run_id or v1.2.3)"
-        required: true
-        type: string
       confirm_production:
         description: "Type 'PRODUCTION' to confirm"
         required: true
@@ -23,19 +19,23 @@ jobs:
     steps:
       - name: Verify confirmation
         run: |
+          if [ "${{ github.repository }}" != "olivium-dev/jeeb-gateway" ]; then
+            echo "ERROR: production deploy may only run from the canonical repository."
+            exit 1
+          fi
           if [ "${{ inputs.confirm_production }}" != "PRODUCTION" ]; then
             echo "ERROR: confirm_production must be the exact string 'PRODUCTION'."
             echo "       This guard exists so production cannot be deployed by mis-click."
             exit 1
           fi
-          echo "Production deploy confirmed for tag ${{ inputs.image_tag }}"
+          echo "Production deploy confirmed for triggering commit ${{ github.sha }}"
 
   deploy:
     needs: guard
     uses: olivium-dev/jeeb-infrastructure/.github/workflows/swarm-deploy.yml@main
     with:
       service_name: jeeb-gateway
-      image_tag: ${{ inputs.image_tag }}
+      image_tag: ${{ github.sha }}
       environment: production
       published_port: "10000"
       target_port: "8080"

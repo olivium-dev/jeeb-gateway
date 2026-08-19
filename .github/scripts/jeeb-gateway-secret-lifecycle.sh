@@ -131,15 +131,6 @@ wait_for_stable_update() {
   fail "timed out waiting for service update"
 }
 
-wait_for_service_absent() {
-  local service_name=$1
-  for ((attempt = 1; attempt <= MAX_WAIT_ATTEMPTS; attempt++)); do
-    service_exists "$service_name" || return 0
-    sleep 1
-  done
-  fail "timed out waiting for failed create removal"
-}
-
 secret_is_referenced() {
   local candidate=$1
   local service_id
@@ -188,9 +179,8 @@ finalize() {
   if [[ "$service_existed" == 0 ]]; then
     if service_exists "$service_name"; then
       [[ "$(current_image "$service_name")" == "$attempted_image" ]] \
-        || fail "refusing to remove an unrelated service"
-      docker service rm "$service_name" >/dev/null
-      wait_for_service_absent "$service_name"
+        || fail "failed create left a service with an unexpected image"
+      fail "new service create failed; leaving the failed service in place for inspection"
     fi
     remove_inactive_managed_secret "$new_secret"
     return

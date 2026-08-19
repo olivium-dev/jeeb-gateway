@@ -232,10 +232,9 @@ jobs:
       - name: Build and push image (git-SHA tag)
         id: build
         run: |
-          TAG="${IMAGE}:sha-${GITHUB_SHA::12}"
-          docker build -t "$TAG" -t "${IMAGE}:latest" .
+          TAG="${IMAGE}:${GITHUB_SHA}"
+          docker build -t "$TAG" .
           docker push "$TAG"
-          docker push "${IMAGE}:latest"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Install cloudflared + write deploy key

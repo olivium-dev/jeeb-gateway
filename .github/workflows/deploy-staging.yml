@@ -2,29 +2,34 @@ name: Deploy to Staging
 
 on:
   workflow_call:
-    inputs:
-      image_tag:
-        description: "Image tag to deploy"
-        required: true
-        type: string
   workflow_dispatch:
-    inputs:
-      image_tag:
-        description: "Image tag to deploy (defaults to latest)"
-        required: false
-        type: string
-        default: "latest"
 
 concurrency:
   group: deploy-staging
   cancel-in-progress: false
 
 jobs:
+  guard:
+    name: Verify trusted caller and artifact identity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Accept only this repository's triggering commit
+        run: |
+          if [ "${{ github.repository }}" != "olivium-dev/jeeb-gateway" ]; then
+            echo "ERROR: reusable staging deploy rejected an untrusted caller."
+            exit 1
+          fi
+          case "${{ github.sha }}" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "ERROR: triggering commit is not a full Git SHA."; exit 1 ;;
+          esac
+
   deploy:
+    needs: guard
     uses: olivium-dev/jeeb-infrastructure/.github/workflows/swarm-deploy.yml@main
     with:
       service_name: jeeb-gateway
-      image_tag: ${{ inputs.image_tag || 'latest' }}
+      image_tag: ${{ github.sha }}
       environment: staging
       published_port: "10000"
       target_port: "8080"
