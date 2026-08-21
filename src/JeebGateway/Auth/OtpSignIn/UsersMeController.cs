@@ -26,11 +26,10 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// this controller orchestrates the read and translates vocabulary (opaque {customer,driver}
 /// &lt;-&gt; Jeeb contract {client,jeeber}).
 ///
-/// ADR-004 (upgrade-not-switch): there is NO role-switch ceremony. A client is UPGRADED to
-/// jeeber by real S03 KYC approval (the existing GrantRole → available_roles append), and the
-/// user's next gateway-minted session token (aud=jeeb-clients) carries their FULL role set —
-/// acting as jeeber is just exercising a jeeber-scoped route with that single session token.
-/// The former <c>POST /v1/users/me/role/switch</c> action (ADR-003 F-A) is therefore removed.
+/// Jeeber membership is additive: every account remains a client after S03 KYC approval adds
+/// Jeeber. <c>active_role</c> selects the current UI/persona without removing either membership,
+/// and the gateway-minted session (aud=jeeb-clients) carries the FULL role set. The
+/// <c>POST /v1/users/me/role/switch</c> action persists only that active-role selection.
 ///
 /// <list type="bullet">
 ///   <item><description>F-B <c>GET /v1/users/me</c> — userId from the BEARER (never the body, I4);
@@ -209,12 +208,12 @@ public sealed class UsersMeController : ControllerBase
     /// POST /v1/users/me/role/switch — switch the CURRENT (active) role of the caller's
     /// dual-role account. Body: <c>{ "role": "client" | "jeeber" }</c> (frozen Jeeb contract
     /// vocabulary). The gateway is a thin BFF: it validates the inbound contract role
-    /// (<c>invalid_role</c> 400 BEFORE any UM call — N6), translates it to the OPAQUE role
-    /// user-management understands, asks UM to PERSIST the active_role + RE-ISSUE the token
-    /// pair (UM is the token authority on this path — N11 split-signer / CP-C), updates the
+    /// (<c>invalid_role</c> 400 BEFORE any authority call — N6), translates it to the OPAQUE role
+    /// configured role authority understands, asks it to PERSIST the active_role, updates the
     /// local projection so the next gateway read reflects the switch, invalidates the /me
-    /// profile cache, and relays UM's tokens verbatim. A UM 403 (the user does not hold the
-    /// requested role — e.g. not yet KYC-approved as jeeber) maps straight to 403 (N5).
+    /// profile cache, and mints a fresh gateway-audience session carrying the full additive role
+    /// set. A role-authority rejection (the user does not hold the requested role — e.g. not yet
+    /// KYC-approved as jeeber) maps straight to 403 (N5).
     ///
     /// <para>Re-introduces the route the mobile <c>DioRoleSwitchRepository</c> calls
     /// (<c>POST /v1/users/me/role/switch</c>): the ADR-004 "upgrade-not-switch" removal left
@@ -239,8 +238,8 @@ public sealed class UsersMeController : ControllerBase
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauth))
             return unauth;
 
-        // N6 — validate the inbound Jeeb contract role and translate to OPAQUE BEFORE any UM
-        // call. Anything outside {client, jeeber} is invalid_role 400 (no upstream dialed).
+        // N6 — validate the inbound Jeeb contract role and translate to OPAQUE BEFORE any
+        // authority call. Anything outside {client, jeeber} is invalid_role 400 (no upstream dialed).
         var opaque = JeebRoleTranslator.ToOpaque(body?.Role);
         if (opaque is null)
         {
@@ -250,16 +249,8 @@ public sealed class UsersMeController : ControllerBase
 
         try
         {
-            // UM persists the active_role and re-issues a token PAIR; the gateway signs nothing.
-            // DEFECT-1 FIX (iter5): UM's re-issued token carries iss/aud=user-management, but every
-            // /v1/* route is [Authorize]'d to the GatewayBearerScheme (aud=jeeb-clients). Relaying
-            // UM's token verbatim (as the prior `AccessToken = result.AccessToken` did) handed the
-            // caller a token that 401s on the NEXT /v1/* call — a role switch broke the live session.
-            // ADR-cleanest fix (ADR-004 "single session token carries the full role set"): return NO
-            // replacement token. The active_role is ALREADY persisted by UM + projected locally
-            // below, and the caller's existing aud=jeeb-clients session stays valid across the switch
-            // (a stale active_role claim self-corrects on the next gateway-minted token via refresh /
-            // re-login; available_roles/active_role in THIS body are authoritative immediately).
+            // The configured authority persists active_role. With Role Service enabled the
+            // adapter never consults UM role state, avoiding split-brain after KYC grants.
             var result = await _dualRole.RoleSwitchAsync(userId, opaque, ct);
 
             // Project the switch locally so the next gateway-minted/read path reflects it, and
@@ -269,8 +260,7 @@ public sealed class UsersMeController : ControllerBase
             await _users.SwitchRoleAsync(userId, result.ActiveRole, ct);
             _cache.Remove(ProfileCacheKeys.ForUser(userId));
 
-            // Resolve the user's FULL available-role set for the response body (the re-issued
-            // UM token carries only the now-active role; available_roles must be the full set).
+            // Resolve the user's FULL additive role set for both the response and the new token.
             var opaqueAvailable = await ResolveAvailableRolesAsync(userId, ct);
             var contractAvailable = JeebRoleTranslator.ToContract(opaqueAvailable);
             if (contractAvailable.Length == 0)
@@ -286,8 +276,8 @@ public sealed class UsersMeController : ControllerBase
             // caller kept its old session, but that left the active_role claim stale until the next
             // login — and a mobile build that DOES adopt this token would be handed an empty string
             // and break. Minting a fresh gateway token here gives the app a usable session that
-            // immediately carries the new active_role, while NOT weakening auth (we still sign with
-            // the gateway key, the UM aud=user-management token is never relayed). Best-effort: if
+            // immediately carries the new active_role, while NOT weakening auth (we sign with the
+            // gateway key; no upstream token is relayed). Best-effort: if
             // the mint faults we degrade to empty tokens (old session stays valid) rather than 500.
             var accessToken = string.Empty;
             var refreshToken = string.Empty;
@@ -321,16 +311,16 @@ public sealed class UsersMeController : ControllerBase
         }
         catch (UserManagementRoleNotAvailableException)
         {
-            // N5 / ALT-1 — UM's role_not_available 403 (the user does not hold the requested
-            // role, e.g. not KYC-approved as jeeber). The mobile client maps 403 → kycGated.
+            // N5 / ALT-1 — role authority says the user does not hold the requested
+            // role (e.g. not KYC-approved as jeeber). The mobile client maps 403 → kycGated.
             return Problem(StatusCodes.Status403Forbidden, "role_not_available", "Role not available",
                 $"You do not currently hold the '{body!.Role}' role. Complete the required onboarding first.");
         }
         catch (UserManagementCallException ex)
         {
-            _log.LogWarning("v1/users/me/role/switch UM call failed (status {Status})", ex.StatusCode);
+            _log.LogWarning("v1/users/me/role/switch authority call failed (status {Status})", ex.StatusCode);
             return Problem(StatusCodes.Status502BadGateway, "upstream_fault", "Role switch upstream failure",
-                "The user-management service returned an unexpected status while switching the active role.");
+                "The role authority returned an unexpected status while switching the active role.");
         }
     }
 
