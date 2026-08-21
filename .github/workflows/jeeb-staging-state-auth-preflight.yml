@@ -1,0 +1,284 @@
+name: Jeeb staging state-auth pre-cutover preflight
+
+"on":
+  workflow_dispatch:
+    inputs:
+      expected_gateway_sha:
+        description: Exact deployed gateway source SHA to attest
+        required: true
+        type: string
+      state_route_mode:
+        description: State route generation currently deployed on .20
+        required: true
+        default: versioned
+        type: choice
+        options:
+          - versioned
+          - unversioned
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jeeb-staging-state-auth-preflight
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    environment: staging
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Bind workflow source to the deployed gateway release
+        env:
+          EXPECTED_GATEWAY_SHA: ${{ inputs.expected_gateway_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_GATEWAY_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo '::error::expected_gateway_sha must be one full lowercase commit SHA'; exit 2; }
+          [ "$EXPECTED_GATEWAY_SHA" = "$GITHUB_SHA" ] \
+            || { echo '::error::Run this workflow from the exact gateway ref being attested'; exit 2; }
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 8.0.404
+
+      - name: Prove all generated clients and both recorder implementations use the credential handler
+        run: |
+          set -euo pipefail
+          dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj \
+            -c Release \
+            --filter 'FullyQualifiedName~StateServiceCredentialProductionWiringTests' \
+            --logger 'console;verbosity=normal'
+
+      - name: Install pinned cloudflared and configure strict SSH
+        env:
+          SSH_HOST: ${{ secrets.JEEB_STAGING_SSH_HOST }}
+          SSH_USER: ${{ secrets.JEEB_STAGING_DEPLOY_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.JEEB_STAGING_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.JEEB_STAGING_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${SSH_HOST:?JEEB_STAGING_SSH_HOST is required}"
+          : "${SSH_USER:?JEEB_STAGING_DEPLOY_USER is required}"
+          : "${SSH_PRIVATE_KEY:?JEEB_STAGING_SSH_PRIVATE_KEY is required}"
+          : "${SSH_KNOWN_HOSTS:?JEEB_STAGING_SSH_KNOWN_HOSTS is required}"
+          curl -fsSL --retry 3 -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-linux-amd64.deb
+          printf '%s  %s\n' \
+            'c805c7c8102190c04dfc16e3b4cc4acc9007d5b19b3afbcd608ea6fed7645a43' \
+            cloudflared.deb | sha256sum --check --strict
+          sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
+          install -d -m 700 "$HOME/.ssh"
+          if printf '%s' "$SSH_PRIVATE_KEY" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          else
+            printf '%s' "$SSH_PRIVATE_KEY" | base64 --decode > "$HOME/.ssh/id_ed25519"
+          fi
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "$SSH_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null || {
+            echo '::error::Known-hosts secret does not pin JEEB_STAGING_SSH_HOST'
+            exit 1
+          }
+          {
+            printf '%s\n' 'Host jeeb-staging'
+            printf '  HostName %s\n' "$SSH_HOST"
+            printf '  User %s\n' "$SSH_USER"
+            printf '%s\n' \
+              '  IdentityFile ~/.ssh/id_ed25519' \
+              '  ProxyCommand cloudflared access ssh --hostname %h' \
+              '  UserKnownHostsFile ~/.ssh/known_hosts' \
+              '  StrictHostKeyChecking yes'
+          } > "$HOME/.ssh/config"
+          chmod 600 "$HOME/.ssh/config"
+
+      - name: Verify host identity
+        run: |
+          set -euo pipefail
+          ssh jeeb-staging 'set -eu
+            [ "$(hostname -s)" = "olivium-ephemerals" ]
+            ip -4 -o addr show scope global \
+              | awk '\''{ split($4, address, "/"); print address[1] }'\'' \
+              | grep -Fxq "192.168.2.20"'
+
+      - name: Verify exact deployed gateway source and running image
+        id: gateway
+        env:
+          EXPECTED_GATEWAY_SHA: ${{ inputs.expected_gateway_sha }}
+        run: |
+          set -euo pipefail
+          service=jeeb-staging-jeeb-gateway
+          deployed_sha=$(ssh jeeb-staging \
+            "docker service inspect '$service' --format '{{index .Spec.Labels \"com.olivium.jeeb.source-sha\"}}'")
+          [ "$deployed_sha" = "$EXPECTED_GATEWAY_SHA" ] \
+            || { echo '::error::Live gateway source label does not match the requested SHA'; exit 3; }
+          image=$(ssh jeeb-staging \
+            "docker service inspect '$service' --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}'")
+          [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] \
+            || { echo '::error::Live gateway image is not digest-pinned'; exit 3; }
+          ssh jeeb-staging bash -s -- "$service" "$image" \
+            < scripts/verify-swarm-service-image.sh
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Prove tolerant-state access for all five API families and attach evidence
+        id: evidence
+        env:
+          EXPECTED_GATEWAY_SHA: ${{ inputs.expected_gateway_sha }}
+          GATEWAY_IMAGE: ${{ steps.gateway.outputs.image }}
+          STATE_ROUTE_MODE: ${{ inputs.state_route_mode }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          evidence_file=evidence/state-auth-preflight.txt
+          evidence_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${EXPECTED_GATEWAY_SHA:0:16}"
+          families=state,cases,case-outbox,audit,work
+          recorders=ISagaBundleRecorder,IBroadcastEventRecorder
+          [[ "$evidence_id" =~ ^[0-9]+-[0-9]+-[0-9a-f]{16}$ ]]
+          {
+            printf 'gateway_source_sha=%s\n' "$EXPECTED_GATEWAY_SHA"
+            printf 'gateway_image=%s\n' "$GATEWAY_IMAGE"
+            printf 'run=%s/%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'evidence_id=%s\n' "$evidence_id"
+            printf 'phase=precutover-tolerant\n'
+            printf 'state_route_mode=%s\n' "$STATE_ROUTE_MODE"
+            printf 'families=%s\n' "$families"
+            printf 'recorders=%s\n' "$recorders"
+            printf 'source_auth_tests=passed\n'
+          } > "$evidence_file"
+
+          route_prefix=''
+          [ "$STATE_ROUTE_MODE" = unversioned ] || route_prefix='v1/'
+          ssh jeeb-staging bash -se -- "$route_prefix" <<'REMOTE' \
+            | tee -a "$evidence_file"
+          set -euo pipefail
+          prefix=$1
+          service=jeeb-staging-jeeb-gateway
+          mapfile -t containers < <(docker ps -q \
+            --filter "label=com.docker.swarm.service.name=$service")
+          [ "${#containers[@]}" -eq 1 ] \
+            || { echo 'gateway_container_count=invalid result=FAIL'; exit 10; }
+          docker exec "${containers[0]}" sh -eu -s -- "$prefix" <<'CONTAINER'
+          prefix=$1
+          token_file=/run/secrets/jeeb_state_service_token
+          [ -s "$token_file" ] || { echo 'credential_file=missing result=FAIL'; exit 11; }
+          base=http://jeeb-staging-jeeb-state-service:8080
+
+          status() {
+            auth_mode=$1
+            path=$2
+            if [ "$auth_mode" = owner ]; then
+              token=$(cat "$token_file")
+              output=$(wget -S -O /dev/null -T 5 \
+                --header="Authorization: Bearer $token" \
+                --header="X-Actor-Role: admin" \
+                "$base/$path" 2>&1 || true)
+              unset token
+            else
+              output=$(wget -S -O /dev/null -T 5 \
+                --header="X-Actor-Role: admin" \
+                "$base/$path" 2>&1 || true)
+            fi
+            printf '%s\n' "$output" \
+              | awk '/  HTTP\// { code=$2 } END { print code+0 }'
+          }
+
+          probe() {
+            family=$1
+            path=$2
+            anonymous=$(status anonymous "$path")
+            authenticated=$(status owner "$path")
+            case "$anonymous" in 2??) ;; *)
+              echo "family=$family anonymous=$anonymous authenticated=$authenticated result=FAIL"
+              exit 12;;
+            esac
+            case "$authenticated" in 2??) ;; *)
+              echo "family=$family anonymous=$anonymous authenticated=$authenticated result=FAIL"
+              exit 13;;
+            esac
+            echo "family=$family anonymous=$anonymous authenticated=$authenticated result=PASS"
+          }
+
+          probe state "${prefix}state/idempotency/jeeb-staging-auth-smoke-missing"
+          probe cases "${prefix}cases/00000000-0000-0000-0000-000000000001"
+          probe case-outbox "${prefix}case-outbox/dead-letters?limit=1"
+          probe audit "${prefix}audit-events?application=jeeb-gateway&limit=1"
+          probe work "${prefix}work-items/latest?application=jeeb-gateway&kind=auth-smoke&subjectRef=sha256%3Aauth-smoke"
+          CONTAINER
+          REMOTE
+
+          [ "$(grep -Ec '^family=(state|cases|case-outbox|audit|work) anonymous=2[0-9]{2} authenticated=2[0-9]{2} result=PASS$' "$evidence_file")" -eq 5 ] \
+            || { echo '::error::Evidence does not contain five successful family probes'; exit 4; }
+          evidence_sha=$(sha256sum "$evidence_file" | awk '{print $1}')
+          [[ "$evidence_sha" =~ ^[0-9a-f]{64}$ ]]
+
+          ssh jeeb-staging bash -se -- \
+            "$EXPECTED_GATEWAY_SHA" "$GATEWAY_IMAGE" "$evidence_id" "$evidence_sha" \
+            "$families" "$recorders" <<'REMOTE'
+          set -euo pipefail
+          expected_sha=$1
+          expected_image=$2
+          evidence_id=$3
+          evidence_sha=$4
+          families=$5
+          recorders=$6
+          service=jeeb-staging-jeeb-gateway
+          [[ "$expected_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$expected_image" =~ @sha256:[0-9a-f]{64}$ ]]
+          [[ "$evidence_id" =~ ^[0-9]+-[0-9]+-[0-9a-f]{16}$ ]]
+          [[ "$evidence_sha" =~ ^[0-9a-f]{64}$ ]]
+          [ "$families" = state,cases,case-outbox,audit,work ]
+          [ "$recorders" = ISagaBundleRecorder,IBroadcastEventRecorder ]
+          [ "$(docker service inspect "$service" --format '{{index .Spec.Labels "com.olivium.jeeb.source-sha"}}')" = "$expected_sha" ]
+          [ "$(docker service inspect "$service" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')" = "$expected_image" ]
+          service_id=$(docker service inspect "$service" --format '{{.ID}}')
+          mapfile -t before_tasks < <(docker service ps --filter desired-state=running \
+            --format '{{.ID}}' "$service")
+          [ "${#before_tasks[@]}" -eq 1 ]
+          docker service update --detach=false \
+            --label-add "com.olivium.jeeb.state-auth-preflight-id=$evidence_id" \
+            --label-add "com.olivium.jeeb.state-auth-preflight-sha256=$evidence_sha" \
+            --label-add 'com.olivium.jeeb.state-auth-preflight-result=passed' \
+            --label-add "com.olivium.jeeb.state-auth-preflight-families=$families" \
+            --label-add "com.olivium.jeeb.state-auth-preflight-recorders=$recorders" \
+            --label-add 'com.olivium.jeeb.state-auth-preflight-phase=precutover-tolerant' \
+            "$service" >/dev/null
+          [ "$(docker service inspect "$service" --format '{{.ID}}')" = "$service_id" ]
+          [ "$(docker service inspect "$service" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')" = "$expected_image" ]
+          mapfile -t after_tasks < <(docker service ps --filter desired-state=running \
+            --format '{{.ID}}' "$service")
+          [ "${#after_tasks[@]}" -eq 1 ] && [ "${after_tasks[0]}" = "${before_tasks[0]}" ] \
+            || { echo 'Metadata evidence attachment unexpectedly replaced the gateway task' >&2; exit 20; }
+          for pair in \
+            "state-auth-preflight-id=$evidence_id" \
+            "state-auth-preflight-sha256=$evidence_sha" \
+            'state-auth-preflight-result=passed' \
+            "state-auth-preflight-families=$families" \
+            "state-auth-preflight-recorders=$recorders" \
+            'state-auth-preflight-phase=precutover-tolerant'; do
+            key=${pair%%=*}
+            value=${pair#*=}
+            [ "$(docker service inspect "$service" --format "{{index .Spec.Labels \"com.olivium.jeeb.$key\"}}")" = "$value" ]
+          done
+          REMOTE
+
+          ssh jeeb-staging bash -s -- jeeb-staging-jeeb-gateway "$GATEWAY_IMAGE" \
+            < scripts/verify-swarm-service-image.sh
+          {
+            printf 'gateway_auth_release=%s\n' "$EXPECTED_GATEWAY_SHA"
+            printf 'gateway_auth_smoke_evidence=%s\n' "$evidence_id"
+            printf 'evidence_sha256=%s\n' "$evidence_sha"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "id=$evidence_id" >> "$GITHUB_OUTPUT"
+
+      - name: Upload redacted pre-cutover evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jeeb-staging-state-auth-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/state-auth-preflight.txt
+          if-no-files-found: error
+          retention-days: 30

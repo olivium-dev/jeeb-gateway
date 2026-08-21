@@ -180,7 +180,7 @@ jobs:
               JEEB_SECRET_KEY_BASE JEEB_INTERNAL_SERVICE_TOKEN \
               HEARTBEAT_REDIS_URL HEARTBEAT_SERVICE_AUTH_KEY HEARTBEAT_JWKS_URL \
               delivery_database_url state_secret_name notification_secret_name settlement_secret_name \
-              bundler_secret_name job_secret_name JWT_SIGNING_KEY UMJWT_SIGNING_KEY; do
+              bundler_secret_name job_secret_name JWT_SIGNING_KEY UMJWT_SIGNING_KEY GITHUB_SHA; do
               printf '%s=%q\n' "$variable" "${!variable}"
             done
             cat <<'REMOTE'
@@ -200,11 +200,27 @@ jobs:
           update_env=()
           create_env=()
           env_remove_args=()
+          label_update_args=()
+          label_create_args=()
           add_env() { update_env+=(--env-add "$1=$2"); create_env+=(--env "$1=$2"); }
           case "$REPOSITORY" in
             jeeb-gateway)
               service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
               : "${JWT_SIGNING_KEY:?JEEB_JWT_SIGNING_KEY is required}"
+              [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+              label_update_args+=(--label-add "com.olivium.jeeb.source-sha=$GITHUB_SHA")
+              label_create_args+=(--label "com.olivium.jeeb.source-sha=$GITHUB_SHA")
+              # Evidence applies only to the exact running source SHA. Every image deployment
+              # clears any prior pre-cutover attestation before the task template is changed.
+              for evidence_label in \
+                com.olivium.jeeb.state-auth-preflight-id \
+                com.olivium.jeeb.state-auth-preflight-sha256 \
+                com.olivium.jeeb.state-auth-preflight-result \
+                com.olivium.jeeb.state-auth-preflight-families \
+                com.olivium.jeeb.state-auth-preflight-recorders \
+                com.olivium.jeeb.state-auth-preflight-phase; do
+                label_update_args+=(--label-rm "$evidence_label")
+              done
               add_env ASPNETCORE_ENVIRONMENT Staging
               add_env ASPNETCORE_URLS http://+:8080
               add_env Jwt__SigningKey "$JWT_SIGNING_KEY"
@@ -428,12 +444,12 @@ jobs:
             docker service update --detach=false --replicas 1 --image "$IMAGE" --with-registry-auth \
               "${network_update_args[@]}" \
               "${secret_update_args[@]}" "${env_remove_args[@]}" \
-              "${update_env[@]}" "${common[@]}" "$service"
+              "${label_update_args[@]}" "${update_env[@]}" "${common[@]}" "$service"
           else
             docker service create --detach=false --name "$service" --replicas 1 --network "$network" \
               --publish "published=$published,target=$target,mode=host" \
               --with-registry-auth "${mount_args[@]}" "${secret_create_args[@]}" "${create_env[@]}" \
-              "${common[@]}" "$IMAGE"
+              "${label_create_args[@]}" "${common[@]}" "$IMAGE"
           fi
           ports=$(docker service inspect -f '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}' "$service")
           [ "$ports" = "${published}:${target}:host" ] || { echo "Unexpected ports: $ports" >&2; exit 1; }
@@ -448,6 +464,19 @@ jobs:
           if [ "$healthy" != true ]; then
             docker service ps --no-trunc "$service" | head -n 8 || true
             exit 1
+          fi
+          if [ "$REPOSITORY" = jeeb-gateway ]; then
+            [ "$(docker service inspect "$service" --format '{{index .Spec.Labels "com.olivium.jeeb.source-sha"}}')" = "$GITHUB_SHA" ]
+            for evidence_label in \
+              com.olivium.jeeb.state-auth-preflight-id \
+              com.olivium.jeeb.state-auth-preflight-sha256 \
+              com.olivium.jeeb.state-auth-preflight-result \
+              com.olivium.jeeb.state-auth-preflight-families \
+              com.olivium.jeeb.state-auth-preflight-recorders \
+              com.olivium.jeeb.state-auth-preflight-phase; do
+              [ -z "$(docker service inspect "$service" --format "{{index .Spec.Labels \"$evidence_label\"}}")" ] \
+                || { echo "Stale state-auth preflight label survived the gateway deployment: $evidence_label" >&2; exit 1; }
+            done
           fi
           REMOTE
           } | ssh jeeb-staging bash -se
