@@ -20,7 +20,7 @@ namespace JeebGateway.IntegrationTests;
 /// <list type="bullet">
 ///   <item><b>Fake-handler tests</b> (always run, CI-authoritative): feed the
 ///     LITERAL Elixir-shaped snake_case bodies and lock the JSON seam +
-///     dollars↔cents mapping + status collapse + 409/404/403 mapping.</item>
+///     dollars↔cents mapping + status preservation + 409/404/403 mapping.</item>
 ///   <item><b>Live-wire tests</b> (opt-in via <c>JEEB_OFFER_LIVE=1</c>): hit the
 ///     real upstream at <c>JEEB_OFFER_BASEURL</c> (default
 ///     http://192.168.2.50:10063) and assert the auth/error envelope the
@@ -213,7 +213,7 @@ public class OfferServiceClientContractTests
     }
 
     // -----------------------------------------------------------------------
-    // Adapter mapping seam (dollars↔cents, status collapse) through the store
+    // Adapter mapping seam (dollars↔cents, status preservation) through the store
     // -----------------------------------------------------------------------
 
     [Fact]
@@ -234,7 +234,29 @@ public class OfferServiceClientContractTests
 
         body.Should().Contain("\"fee_cents\":1550");
         offer.Fee.Should().Be(15.50m);
-        offer.Status.Should().Be(PendingOfferStatus.Pending); // "submitted" collapses to pending
+        offer.Status.Should().Be("submitted");
+    }
+
+    [Fact]
+    public async Task UpstreamStore_ListForRequest_Preserves_Upstream_Lifecycle_Statuses()
+    {
+        var statuses = new[] { "pending", "submitted", "edited", "accepted", "withdrawn", "expired", "rejected" };
+        var offers = string.Join(",", statuses.Select((status, index) =>
+            $$"""{"id":"offer-{{index}}","request_id":"{{RequestId}}","actor_id":"{{UserId}}","fee_cents":{{100 + index}},"eta_minutes":{{10 + index}},"status":"{{status}}"}"""));
+        HttpRequestMessage? captured = null;
+        var client = ClientCapturing(
+            HttpStatusCode.OK,
+            $$"""{"offers":[{{offers}}]}""",
+            (req, _) => captured = req);
+        var store = new UpstreamPendingOffersStore(client);
+
+        var result = await store.ListForRequestAsync(RequestId, CancellationToken.None, actingUserId: ClientId);
+
+        captured.Should().NotBeNull();
+        captured!.Method.Should().Be(HttpMethod.Get);
+        captured.RequestUri!.AbsolutePath.Should().Be($"/api/v1/requests/{RequestId}/offers");
+        captured.Headers.GetValues("x-user-id").Should().ContainSingle().Which.Should().Be(ClientId);
+        result.Select(o => o.Status).Should().Equal(statuses);
     }
 
     [Fact]
@@ -357,7 +379,7 @@ public class OfferServiceClientContractTests
             clientId: ClientId);
 
         offer.Id.Should().Be(OfferId);
-        offer.Status.Should().Be(PendingOfferStatus.Pending);
+        offer.Status.Should().Be("submitted");
         // Proves the bridge fired: submit, mirror, submit (3 upstream calls).
         seq.Calls.Should().HaveCount(3);
         seq.Calls[0].AbsolutePath.Should().Be($"/api/v1/requests/{RequestId}/offers");

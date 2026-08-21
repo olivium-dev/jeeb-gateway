@@ -18,10 +18,8 @@ namespace JeebGateway.Availability;
 ///     dollars → cents on the way out and back on the way in.</item>
 ///   <item><b>Status vocabulary.</b> offer-service emits
 ///     submitted/edited/withdrawn/accepted/rejected/expired/pending; the
-///     gateway's three-state model is pending/accepted/withdrawn. We collapse
-///     the live states (submitted/edited/pending) to <c>pending</c>, keep
-///     <c>accepted</c>, and treat every other terminal state as
-///     <c>withdrawn</c>.</item>
+///     gateway preserves those canonical upstream lifecycle values verbatim
+///     on read models so clients can render distinct states.</item>
 ///   <item><b>Conflict codes.</b> offer-service returns HTTP 409 with a typed
 ///     error code on submit; we translate it back into the same
 ///     <see cref="DuplicateOfferException"/> /
@@ -237,16 +235,11 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
     };
 
     /// <summary>
-    /// Collapse offer-service's seven-state vocabulary onto the gateway's
-    /// three states. Live (submitted / edited / pending) → pending; accepted →
-    /// accepted; every terminal non-accept state → withdrawn.
+    /// Preserve offer-service's lifecycle vocabulary verbatim. The gateway must
+    /// not invent product presentation labels here (for example, mobile may
+    /// render rejected as "superseded", but the BFF still returns rejected).
     /// </summary>
-    private static string MapStatus(string upstream) => upstream switch
-    {
-        "submitted" or "edited" or "pending" => PendingOfferStatus.Pending,
-        "accepted" => PendingOfferStatus.Accepted,
-        _ => PendingOfferStatus.Withdrawn
-    };
+    private static string MapStatus(string upstream) => upstream;
 
     private static bool IsDuplicateCode(string? code)
         => code is not null
