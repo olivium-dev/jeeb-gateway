@@ -105,6 +105,7 @@ public static class Capabilities
 
     // ── G3. Back-office essentials ────────────────────────────────────────────
     public const string AdminPortalAccess = "admin.portal.access";
+    public const string AdminCmsWrite = "admin.cms.write";
     public const string AdminCasesRead = "admin.cases.read";
     public const string AdminCasesUpdate = "admin.cases.update";
     public const string AdminCasesClose = "admin.cases.close";

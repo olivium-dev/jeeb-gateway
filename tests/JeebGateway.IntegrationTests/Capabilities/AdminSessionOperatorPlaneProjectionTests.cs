@@ -44,6 +44,7 @@ public sealed class AdminSessionOperatorPlaneProjectionTests
 
         session.Capabilities.Should().Contain(new[]
         {
+            Capabilities.AdminCmsWrite,
             Capabilities.UsersAdminManage,
             Capabilities.WalletManage,
             Capabilities.FinanceRead,
@@ -64,6 +65,7 @@ public sealed class AdminSessionOperatorPlaneProjectionTests
         var admin = await SessionFor(factory, Roles.Admin);
 
         support.Capabilities.Should().NotContain(KycReviewCapability);
+        support.Capabilities.Should().NotContain(Capabilities.AdminCmsWrite);
         support.Capabilities.Should().Contain(Capabilities.AdminPortalAccess,
             "the control must be a session that really did reach the projection, not a 403");
 

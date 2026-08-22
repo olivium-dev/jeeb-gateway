@@ -68,6 +68,7 @@ public sealed class AdminEssentialCapabilityTests
             .Content.ReadFromJsonAsync<AdminSessionResponse>();
 
         session!.Capabilities.Should().Contain(Capabilities.AdminCasesClose);
+        session.Capabilities.Should().Contain(Capabilities.AdminCmsWrite);
         session.Capabilities.Should().Contain(Capabilities.AdminSettlementsRead);
         session.Capabilities.Should().NotContain(Capabilities.AdminDeliveriesOperate);
         session.Capabilities.Should().NotContain(Capabilities.AdminSettlementsManage);
