@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using JeebGateway.service.ServiceFeedback;
 using FeedbackApiException = JeebGateway.service.ServiceFeedback.ApiException;
+using UserManagementClient = JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient;
 
 namespace JeebGateway.Controllers;
 
@@ -68,17 +69,20 @@ public sealed class JeebReviewsController : ControllerBase
     private const int ReportTtlSeconds = 180 * 24 * 60 * 60;
 
     private readonly ServiceFeedbackClient _feedback;
+    private readonly UserManagementClient _profiles;
     private readonly IRequestsStore _requests;
     private readonly JeebGateway.StateService.Idempotency.IIdempotencyStore _reports;
     private readonly ILogger<JeebReviewsController> _log;
 
     public JeebReviewsController(
         ServiceFeedbackClient feedback,
+        UserManagementClient profiles,
         IRequestsStore requests,
         JeebGateway.StateService.Idempotency.IIdempotencyStore reports,
         ILogger<JeebReviewsController> log)
     {
         _feedback = feedback;
+        _profiles = profiles;
         _requests = requests;
         _reports = reports;
         _log = log;
@@ -124,7 +128,9 @@ public sealed class JeebReviewsController : ControllerBase
         {
             var upstream = await _feedback.RatingsByRateeAsync(
                 JeebGateway.Ratings.FeedbackServiceRatingStore.StableGuid(id), safeSize, offset, ct);
-            return Ok(JeebReviewsProjection.ProjectReviewsPage(id, upstream, safePage, safeSize));
+            var reviewerDisplayNames = await ResolveReviewerDisplayNamesAsync(upstream, ct);
+            return Ok(JeebReviewsProjection.ProjectReviewsPage(
+                id, upstream, safePage, safeSize, reviewerDisplayNames));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -134,6 +140,51 @@ public sealed class JeebReviewsController : ControllerBase
         {
             return FeedbackReadProblem(ex);
         }
+    }
+
+    /// <summary>
+    /// Join the revealed feedback rows' opaque rater ids to Jeeb's canonical identity owner.
+    /// The shared feedback service remains product-agnostic (GR2); names cross neither into it
+    /// nor into blind status responses. A profile miss/fault is presentation-only and degrades
+    /// that row to the mobile's anonymous fallback rather than hiding valid review content.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, string?>> ResolveReviewerDisplayNamesAsync(
+        RateeReviewsResponse upstream,
+        CancellationToken ct)
+    {
+        var raterIds = (upstream.Reviews ?? Array.Empty<RateeReviewItem>())
+            .Where(static review => review.RevealedAt is not null && review.RaterId != Guid.Empty)
+            .Select(static review => review.RaterId)
+            .Distinct()
+            .ToArray();
+
+        if (raterIds.Length == 0)
+        {
+            return new Dictionary<Guid, string?>();
+        }
+
+        var resolved = await Task.WhenAll(raterIds.Select(async raterId =>
+        {
+            try
+            {
+                var profile = await _profiles.ProfileAsync(raterId.ToString(), ct);
+                return (RaterId: raterId, DisplayName: profile.Username);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(
+                    ex,
+                    "Review-list identity enrichment failed for rater {RaterId}; using anonymous attribution.",
+                    raterId);
+                return (RaterId: raterId, DisplayName: (string?)null);
+            }
+        }));
+
+        return resolved.ToDictionary(static row => row.RaterId, static row => row.DisplayName);
     }
 
     /// <summary>
@@ -255,6 +306,7 @@ public sealed class JeebReviewsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Submit([FromBody] JeebSubmitReviewRequest? body, CancellationToken ct)
     {
         if (!UserIdentity.TryGetUserId(HttpContext, out var callerId, out var unauthorized)) return unauthorized;
@@ -271,7 +323,7 @@ public sealed class JeebReviewsController : ControllerBase
 
         var parties = await ResolvePartiesAsync(body.DeliveryId, callerId, ct);
         if (parties.Result is not null) return parties.Result;
-        var (callerRole, raterId, rateeId) = parties.Value;
+        var (callerRole, raterId, rateeId, deliveryStatus) = parties.Value;
 
         List<string> tags;
         try
@@ -281,6 +333,11 @@ public sealed class JeebReviewsController : ControllerBase
         catch (ArgumentException ex)
         {
             return BadRequest(Problem400(ex.Message));
+        }
+
+        if (!JeebRatingEligibility.IsCompleted(deliveryStatus))
+        {
+            return StatusCode(StatusCodes.Status409Conflict, Problem409(deliveryStatus));
         }
 
         var request = new SubmitBlindRatingRequest
@@ -322,7 +379,7 @@ public sealed class JeebReviewsController : ControllerBase
 
         var parties = await ResolvePartiesAsync(deliveryId, callerId, ct);
         if (parties.Result is not null) return parties.Result;
-        var (_, raterId, _) = parties.Value;
+        var (_, raterId, _, _) = parties.Value;
 
         try
         {
@@ -347,7 +404,7 @@ public sealed class JeebReviewsController : ControllerBase
     /// parties — request-scoped, no stored state (ADR-0001). Mirrors
     /// <see cref="JeebRatingsController"/>'s party resolution.
     /// </summary>
-    private async Task<(IActionResult? Result, (JeebRatingRole Role, Guid RaterId, Guid RateeId) Value)> ResolvePartiesAsync(
+    private async Task<(IActionResult? Result, (JeebRatingRole Role, Guid RaterId, Guid RateeId, string DeliveryStatus) Value)> ResolvePartiesAsync(
         string deliveryId,
         string callerId,
         CancellationToken ct)
@@ -377,7 +434,7 @@ public sealed class JeebReviewsController : ControllerBase
         }
 
         var role = JeebRatingVocabulary.RoleFor(callerIsClient);
-        return (null, (role, raterId, rateeId));
+        return (null, (role, raterId, rateeId, delivery.Status));
     }
 
     private static ProblemDetails Problem400(string title) => new()
@@ -392,6 +449,14 @@ public sealed class JeebReviewsController : ControllerBase
         Title = title,
         Status = StatusCodes.Status403Forbidden,
         Type = "https://jeeb.dev/errors/not-a-party",
+    };
+
+    private static ProblemDetails Problem409(string deliveryStatus) => new()
+    {
+        Title = "Delivery is not complete.",
+        Detail = $"Ratings can only be submitted after delivery completion (current status: {deliveryStatus}).",
+        Status = StatusCodes.Status409Conflict,
+        Type = "https://jeeb.dev/errors/delivery-not-complete",
     };
 
     /// <summary>

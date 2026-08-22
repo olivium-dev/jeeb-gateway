@@ -79,6 +79,7 @@ public class JeebRatingsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Submit(
         string deliveryId,
@@ -100,7 +101,7 @@ public class JeebRatingsController : ControllerBase
 
         var parties = await ResolvePartiesAsync(deliveryId, callerId, ct);
         if (parties.Result is not null) return parties.Result;
-        var (callerRole, raterId, rateeId) = parties.Value;
+        var (callerRole, raterId, rateeId, deliveryStatus) = parties.Value;
 
         List<string> tags;
         try
@@ -110,6 +111,11 @@ public class JeebRatingsController : ControllerBase
         catch (ArgumentException ex)
         {
             return BadRequest(Problem400(ex.Message));
+        }
+
+        if (!JeebRatingEligibility.IsCompleted(deliveryStatus))
+        {
+            return StatusCode(StatusCodes.Status409Conflict, Problem409(deliveryStatus));
         }
 
         var request = new SubmitBlindRatingRequest
@@ -150,7 +156,7 @@ public class JeebRatingsController : ControllerBase
 
         var parties = await ResolvePartiesAsync(deliveryId, callerId, ct);
         if (parties.Result is not null) return parties.Result;
-        var (callerRole, raterId, _) = parties.Value;
+        var (callerRole, raterId, _, _) = parties.Value;
 
         try
         {
@@ -169,7 +175,7 @@ public class JeebRatingsController : ControllerBase
     /// parties. Returns a populated <see cref="ActionResult"/> on any failure
     /// (404 unknown delivery, 403 not-a-party, 400 non-GUID party ids).
     /// </summary>
-    private async Task<(IActionResult? Result, (JeebRatingRole Role, Guid RaterId, Guid RateeId) Value)> ResolvePartiesAsync(
+    private async Task<(IActionResult? Result, (JeebRatingRole Role, Guid RaterId, Guid RateeId, string DeliveryStatus) Value)> ResolvePartiesAsync(
         string deliveryId,
         string callerId,
         CancellationToken ct)
@@ -194,7 +200,7 @@ public class JeebRatingsController : ControllerBase
         }
 
         var role = JeebRatingVocabulary.RoleFor(callerIsClient);
-        return (null, (role, raterId, rateeId));
+        return (null, (role, raterId, rateeId, delivery.Status));
     }
 
     private static ProblemDetails Problem400(string title) => new()
@@ -209,6 +215,14 @@ public class JeebRatingsController : ControllerBase
         Title = title,
         Status = StatusCodes.Status403Forbidden,
         Type = "https://jeeb.dev/errors/not-a-party",
+    };
+
+    private static ProblemDetails Problem409(string deliveryStatus) => new()
+    {
+        Title = "Delivery is not complete.",
+        Detail = $"Ratings can only be submitted after delivery completion (current status: {deliveryStatus}).",
+        Status = StatusCodes.Status409Conflict,
+        Type = "https://jeeb.dev/errors/delivery-not-complete",
     };
 
     private IActionResult UpstreamDisabled() => Problem(
