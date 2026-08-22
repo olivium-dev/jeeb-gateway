@@ -95,16 +95,22 @@ public static class JeebReviewsProjection
     /// <c>DioReviewsRepository._parse</c> consumes. Pure shaping — no state, no HTTP.
     ///
     /// <para>The upstream is product-agnostic: opaque rater/ratee ids + score + comment.
-    /// The reviewer's name is NOT stored downstream (the shared service must not know Jeeb
-    /// identities — Golden Rule 2), so the row's <c>reviewerFirstName</c> is left empty;
-    /// the mobile parser renders an anonymous reviewer when it is blank (D58 — never a full
-    /// name). Score + comment + timestamp + the aggregate count/average are real, DB-backed
-    /// values from the revealed blind ratings. D59: while the jeeber has &lt;
+    /// Jeeb-side caller code may supply canonical user-management display names keyed by
+    /// the opaque rater id. This projection reduces them to the first name required by D58;
+    /// a missing/blank lookup stays empty so the client can render its localized anonymous
+    /// fallback. Identity is only projected for rows carrying the upstream reveal marker —
+    /// a defensive blind-rating gate even though the list-by-ratee endpoint itself promises
+    /// revealed rows only. Score + comment + timestamp + the aggregate count/average are real,
+    /// DB-backed values from the revealed blind ratings. D59: while the jeeber has &lt;
     /// <see cref="ColdStartReviewThreshold"/> reviews the aggregate <c>averageScore</c> is
     /// suppressed (null) and <c>coldStart</c> is true.</para>
     /// </summary>
     public static JeebReviewsPageResponse ProjectReviewsPage(
-        string jeeberId, RateeReviewsResponse upstream, int page, int pageSize)
+        string jeeberId,
+        RateeReviewsResponse upstream,
+        int page,
+        int pageSize,
+        IReadOnlyDictionary<Guid, string?>? reviewerDisplayNames = null)
     {
         if (upstream is null) return EmptyReviewsPage(jeeberId, page, pageSize);
 
@@ -115,7 +121,9 @@ public static class JeebReviewsProjection
             .Select(r => new JeebReviewItemResponse
             {
                 Id = r.Id.ToString(),
-                ReviewerFirstName = string.Empty, // opaque upstream — no identity (D58)
+                ReviewerFirstName = r.RevealedAt is null
+                    ? string.Empty
+                    : FirstName(reviewerDisplayNames, r.RaterId),
                 Score = r.Score,
                 Body = string.IsNullOrWhiteSpace(r.Comment) ? null : r.Comment,
                 CreatedAt = (r.RevealedAt ?? r.CreatedAt).ToString("o"),
@@ -140,6 +148,27 @@ public static class JeebReviewsProjection
             // D59 — suppress the aggregate until past the cold-start threshold.
             AverageScore = coldStart ? null : Math.Round(upstream.AverageRating, 2),
         };
+    }
+
+    /// <summary>
+    /// D58 privacy projection: expose the first whitespace-delimited name token only.
+    /// Missing identities deliberately stay blank; localization of the anonymous label
+    /// belongs to the mobile client, not this language-neutral wire contract.
+    /// </summary>
+    private static string FirstName(
+        IReadOnlyDictionary<Guid, string?>? reviewerDisplayNames,
+        Guid raterId)
+    {
+        if (reviewerDisplayNames is null
+            || !reviewerDisplayNames.TryGetValue(raterId, out var displayName)
+            || string.IsNullOrWhiteSpace(displayName))
+        {
+            return string.Empty;
+        }
+
+        return displayName.Trim()
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault() ?? string.Empty;
     }
 
     /// <summary>

@@ -119,6 +119,7 @@ public class JeebReviewsUpstreamSanitizationTests
             new CreateRequestInput { ClientId = clientId, Description = "sanitization-test delivery" },
             CancellationToken.None);
         await store.SetJeeberIdAsync(created.Id, jeeberId, CancellationToken.None);
+        await store.SetStatusAsync(created.Id, CanonicalDeliveryStatus.Done, CancellationToken.None);
         return created.Id;
     }
 

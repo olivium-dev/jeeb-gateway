@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using FluentAssertions;
 using JeebGateway.JeebReviews;
 using JeebGateway.service.ServiceFeedback;
@@ -48,6 +49,80 @@ public class JeebReviewsProjectionTests
         page.Page.Should().Be(1);
         page.PageSize.Should().Be(20);
     }
+
+    [Fact]
+    public void ProjectReviewsPage_Uses_First_Name_Only_For_A_Revealed_Row()
+    {
+        var raterId = Guid.NewGuid();
+        var upstream = ReviewsPage(new RateeReviewItem
+        {
+            Id = Guid.NewGuid(),
+            RaterId = raterId,
+            Score = 5,
+            CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-1),
+            RevealedAt = DateTimeOffset.UtcNow,
+        });
+
+        var page = JeebReviewsProjection.ProjectReviewsPage(
+            "jeeber-7",
+            upstream,
+            page: 1,
+            pageSize: 20,
+            new Dictionary<Guid, string?> { [raterId] = "  Nour   Khaled  " });
+
+        page.Items.Should().ContainSingle().Which.ReviewerFirstName.Should().Be("Nour");
+    }
+
+    [Fact]
+    public void ProjectReviewsPage_Missing_Name_Uses_Blank_Anonymous_Fallback()
+    {
+        var upstream = ReviewsPage(new RateeReviewItem
+        {
+            Id = Guid.NewGuid(),
+            RaterId = Guid.NewGuid(),
+            Score = 4,
+            CreatedAt = DateTimeOffset.UtcNow,
+            RevealedAt = DateTimeOffset.UtcNow,
+        });
+
+        var page = JeebReviewsProjection.ProjectReviewsPage(
+            "jeeber-7", upstream, page: 1, pageSize: 20, new Dictionary<Guid, string?>());
+
+        page.Items.Should().ContainSingle().Which.ReviewerFirstName.Should().BeEmpty(
+            "the language-neutral wire leaves localization of anonymous attribution to mobile");
+    }
+
+    [Fact]
+    public void ProjectReviewsPage_Does_Not_Expose_Identity_Without_Reveal_Marker()
+    {
+        var raterId = Guid.NewGuid();
+        var upstream = ReviewsPage(new RateeReviewItem
+        {
+            Id = Guid.NewGuid(),
+            RaterId = raterId,
+            Score = 5,
+            CreatedAt = DateTimeOffset.UtcNow,
+            RevealedAt = null,
+        });
+
+        var page = JeebReviewsProjection.ProjectReviewsPage(
+            "jeeber-7",
+            upstream,
+            page: 1,
+            pageSize: 20,
+            new Dictionary<Guid, string?> { [raterId] = "Nour Khaled" });
+
+        page.Items.Should().ContainSingle().Which.ReviewerFirstName.Should().BeEmpty(
+            "counterparty identity stays blind until the row is mutually revealed");
+    }
+
+    private static RateeReviewsResponse ReviewsPage(params RateeReviewItem[] reviews) => new()
+    {
+        RateeId = Guid.NewGuid(),
+        Reviews = reviews,
+        TotalReviewCount = reviews.Length,
+        AverageRating = reviews.Length == 0 ? 0 : reviews.Average(static review => review.Score),
+    };
 
     // ── status envelope (state mapping) ───────────────────────────────────────────
 

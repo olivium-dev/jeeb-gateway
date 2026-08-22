@@ -39,6 +39,7 @@ public class JeebReviewsRateeAggregateTests
 {
     private const string CallerGuid = "44444444-4444-4444-4444-444444444444";
     private const string JeeberGuid = "b4c26077-0985-40a1-b799-ec001bc9ad10";
+    private const string RaterGuid = "77777777-7777-7777-7777-777777777777";
     private const int RevealedReviewCount = 8;
     private const double UpstreamAverage = 4.875;
 
@@ -89,6 +90,65 @@ public class JeebReviewsRateeAggregateTests
         var resp = await client.GetAsync($"/v1/ratings/jeeb/reviews?jeeberId={JeeberGuid}");
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+    }
+
+    [Fact]
+    public async Task ListReviews_Resolves_Revealed_Rater_Via_UserManagement_And_Emits_First_Name_Only()
+    {
+        var feedback = new PathRecordingHandler(RateeReviewsResponder);
+        var profiles = new PathRecordingHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith(RaterGuid, StringComparison.OrdinalIgnoreCase))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = JsonContent.Create(new
+                    {
+                        userId = RaterGuid,
+                        username = "Nour Khaled",
+                    }),
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        });
+
+        using var factory = NewFactoryWithFeedbackStub(feedback, profiles);
+        var client = MintBearerClient(factory, CallerGuid);
+
+        var resp = await client.GetAsync(
+            $"/v1/ratings/jeeb/reviews?jeeberId={JeeberGuid}&page=1&pageSize=5");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var page = await resp.Content.ReadFromJsonAsync<ReviewsPage>();
+        page!.Items[0].ReviewerFirstName.Should().Be("Nour");
+        page.Items[0].ReviewerFirstName.Should().NotContain("Khaled",
+            "D58 permits first-name attribution only");
+        profiles.Paths.Should().ContainSingle(path =>
+            path.EndsWith($"/api/User/profile/{RaterGuid}", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ListReviews_Profile_Failure_Degrades_To_Blank_Without_Failing_Review_Read()
+    {
+        var feedback = new PathRecordingHandler(RateeReviewsResponder);
+        var profiles = new PathRecordingHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            {
+                Content = new StringContent("profile unavailable", Encoding.UTF8, "text/plain"),
+            });
+
+        using var factory = NewFactoryWithFeedbackStub(feedback, profiles);
+        var client = MintBearerClient(factory, CallerGuid);
+
+        var resp = await client.GetAsync(
+            $"/v1/ratings/jeeb/reviews?jeeberId={JeeberGuid}&page=1&pageSize=5");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "profile enrichment is optional presentation data, not review provenance");
+        var page = await resp.Content.ReadFromJsonAsync<ReviewsPage>();
+        page!.Items.Should().OnlyContain(row => row.ReviewerFirstName == string.Empty);
+        page.Items.Should().HaveCount(5, "valid revealed reviews must survive an identity outage");
     }
 
     [Fact]
@@ -144,7 +204,7 @@ public class JeebReviewsRateeAggregateTests
         var reviews = Enumerable.Range(0, 5).Select(i => new
         {
             id = Guid.NewGuid(),
-            raterId = Guid.NewGuid(),
+            raterId = i == 0 ? Guid.Parse(RaterGuid) : Guid.NewGuid(),
             score = 5,
             comment = i == 0 ? "On time and careful" : null,
             tags = Array.Empty<string>(),
@@ -194,7 +254,9 @@ public class JeebReviewsRateeAggregateTests
         EtaMinutes = 20,
     };
 
-    private static WebApplicationFactory<Program> NewFactoryWithFeedbackStub(HttpMessageHandler stub)
+    private static WebApplicationFactory<Program> NewFactoryWithFeedbackStub(
+        HttpMessageHandler stub,
+        HttpMessageHandler? profileStub = null)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.ConfigureTestServices(services =>
@@ -204,6 +266,15 @@ public class JeebReviewsRateeAggregateTests
                 {
                     var http = new HttpClient(stub) { BaseAddress = new Uri("http://feedback.test/") };
                     return new ServiceFeedbackClient("http://feedback.test/", http);
+                });
+
+                services.RemoveAll<UserManagementClient>();
+                services.AddScoped(_ =>
+                {
+                    var handler = profileStub ?? new PathRecordingHandler(
+                        _ => new HttpResponseMessage(HttpStatusCode.NotFound));
+                    var http = new HttpClient(handler) { BaseAddress = new Uri("http://um.test/") };
+                    return new UserManagementClient("http://um.test/", http);
                 });
             });
         });
