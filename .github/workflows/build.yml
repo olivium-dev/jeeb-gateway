@@ -13,6 +13,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      TEST_SHARD_A_M: '(FullyQualifiedName~JeebGateway.IntegrationTests.A|FullyQualifiedName~JeebGateway.IntegrationTests.B|FullyQualifiedName~JeebGateway.IntegrationTests.C|FullyQualifiedName~JeebGateway.IntegrationTests.D|FullyQualifiedName~JeebGateway.IntegrationTests.E|FullyQualifiedName~JeebGateway.IntegrationTests.F|FullyQualifiedName~JeebGateway.IntegrationTests.G|FullyQualifiedName~JeebGateway.IntegrationTests.H|FullyQualifiedName~JeebGateway.IntegrationTests.I|FullyQualifiedName~JeebGateway.IntegrationTests.J|FullyQualifiedName~JeebGateway.IntegrationTests.K|FullyQualifiedName~JeebGateway.IntegrationTests.L|FullyQualifiedName~JeebGateway.IntegrationTests.M)'
+      TEST_SHARD_REMAINDER: '(FullyQualifiedName!~JeebGateway.IntegrationTests.A&FullyQualifiedName!~JeebGateway.IntegrationTests.B&FullyQualifiedName!~JeebGateway.IntegrationTests.C&FullyQualifiedName!~JeebGateway.IntegrationTests.D&FullyQualifiedName!~JeebGateway.IntegrationTests.E&FullyQualifiedName!~JeebGateway.IntegrationTests.F&FullyQualifiedName!~JeebGateway.IntegrationTests.G&FullyQualifiedName!~JeebGateway.IntegrationTests.H&FullyQualifiedName!~JeebGateway.IntegrationTests.I&FullyQualifiedName!~JeebGateway.IntegrationTests.J&FullyQualifiedName!~JeebGateway.IntegrationTests.K&FullyQualifiedName!~JeebGateway.IntegrationTests.L&FullyQualifiedName!~JeebGateway.IntegrationTests.M)'
 
     steps:
       - uses: actions/checkout@v4
@@ -41,14 +44,20 @@ jobs:
       - name: Restore tests (locked)
         run: dotnet restore tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj --locked-mode
 
-      - name: Test
-        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal --filter "Quarantine!=timeout-flake"
+      - name: Build tests
+        run: dotnet build tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore
+
+      - name: Test shard A-M
+        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-build --no-restore --verbosity normal --filter "(Quarantine!=timeout-flake)&$TEST_SHARD_A_M"
+
+      - name: Test shard remainder
+        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-build --no-restore --verbosity normal --filter "(Quarantine!=timeout-flake)&$TEST_SHARD_REMAINDER"
 
       # Quarantined repeat timeout-flake victims still run, but cannot poison the merge baseline.
       - name: Quarantined timeout flakes (non-gating)
         if: ${{ !cancelled() }}
         continue-on-error: true
-        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore --verbosity normal --filter "Quarantine=timeout-flake"
+        run: dotnet test tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-build --no-restore --verbosity normal --filter "Quarantine=timeout-flake"
 
       - name: Assert lock files stayed unchanged
         run: git diff --exit-code -- src/JeebGateway/packages.lock.json tests/JeebGateway.IntegrationTests/packages.lock.json
