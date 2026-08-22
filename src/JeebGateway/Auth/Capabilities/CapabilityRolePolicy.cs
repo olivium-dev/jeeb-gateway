@@ -141,6 +141,7 @@ public static class CapabilityRolePolicy
             // G3. Back-office capabilities. Legacy `admin` remains a support lead
             // and finance reader, but is not a delivery or finance superuser.
             [Capabilities.AdminPortalAccess] = PortalOperators,
+            [Capabilities.AdminCmsWrite] = AdminOnly,
             [Capabilities.AdminCasesRead] = CaseReaders,
             [Capabilities.AdminCasesUpdate] = CaseWorkers,
             [Capabilities.AdminCasesClose] = CaseClosers,
