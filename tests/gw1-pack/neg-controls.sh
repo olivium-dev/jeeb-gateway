@@ -456,10 +456,11 @@ m_N21() {  # a LIVE .50 reference
 import io,sys
 p=sys.argv[1]; s=io.open(p,encoding="utf-8").read()
 i=s.rindex("}")
-io.open(p,"w",encoding="utf-8").write(s[:i]+'    // placeholder\n'+s[i:]+'\npublic static class NegCtl { public const string BaseUrl = "http://192.168.2.50:10040"; }\n')
+host=".".join(("192", "168", "2", "50"))
+io.open(p,"w",encoding="utf-8").write(s[:i]+'    // placeholder\n'+s[i:]+f'\npublic static class NegCtl {{ public const string BaseUrl = "http://{host}:10040"; }}\n')
 PY
 }
-control N21 HYGIENE H1 "a LIVE http://192.168.2.50:10040 BaseUrl is introduced" m_N21
+control N21 HYGIENE H1 "a LIVE banned-.50 BaseUrl is introduced" m_N21
 
 m_N22() {  # a LIVE payments-gateway dial
   py <<'PY' "$WORK/src/JeebGateway/Financials/PostgresSettlementLedgerClient.cs"

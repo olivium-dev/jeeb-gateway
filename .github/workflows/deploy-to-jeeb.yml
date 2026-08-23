@@ -74,14 +74,20 @@ on:
       server_user:     { description: 'SSH user',                        required: true, default: 'ec2-user' }
       jwt_issuer:                  { description: 'JWT issuer',                       required: true, default: 'https://jeeb.fds-1.com' }
       jwt_audience:                { description: 'JWT audience',                     required: true, default: 'jeeb-mobile' }
-      chat_base_url:               { description: 'Chat service base URL',            required: true, default: 'http://192.168.2.50:10028' }
-      user_management_base_url:    { description: 'User-management service base URL',  required: true, default: 'http://192.168.2.50:10001' }
-      wallet_base_url:             { description: 'Wallet service base URL',          required: true, default: 'http://192.168.2.50:10014' }
-      notification_base_url:       { description: 'Notification owner base URL',       required: true, default: 'http://127.0.0.1:11026' }
-      push_notification_base_url:  { description: 'Push-notification service base URL',required: true, default: 'http://192.168.2.50:10040' }
-      otp_base_url:                { description: 'OTP service base URL',             required: true, default: 'http://192.168.2.50:10037' }
-      matching_base_url:           { description: 'Matching service base URL (native host)', required: true, default: 'http://192.168.2.50:10025' }
-      delivery_base_url:           { description: 'Delivery service base URL (live Jeeb swarm publishes on :10055 — S07 H6c accept->delivery-create)', required: true, default: 'http://192.168.2.50:10055' }
+      # This workflow runs the gateway in a container. MSI's native-systemd
+      # 127.0.0.1 values therefore cannot be copied here: loopback would resolve
+      # inside the gateway container. Ambiguous destinations deliberately have no
+      # default and the pre-build target guard below requires the operator to supply
+      # a Swarm-reachable URL. The standalone matching-service leg is absent because
+      # that authority was retired (JEBV4-220 / E25).
+      chat_base_url:               { description: 'Chat service base URL (required; no inferred container target)',             required: true, default: '' }
+      user_management_base_url:    { description: 'User-management base URL (required; no inferred container target)',          required: true, default: '' }
+      wallet_base_url:             { description: 'Wallet service base URL (required; no inferred container target)',           required: true, default: '' }
+      notification_base_url:       { description: 'Notification owner base URL (required; no inferred container target)',       required: true, default: '' }
+      push_notification_base_url:  { description: 'Push-notification base URL (required; no inferred container target)',        required: true, default: '' }
+      otp_base_url:                { description: 'OTP service base URL (required; no inferred container target)',              required: true, default: '' }
+      delivery_base_url:           { description: 'Delivery service base URL (required; no inferred container target)',         required: true, default: '' }
+      voice_transcription_base_url: { description: 'Voice-transcription owner URL (required; no inferred container target)',    required: true, default: '' }
       # Auth:Otp:ApplicationId — the Jeeb tenant's ApplicationRef GUID in the SHARED
       # one-time-password service (JEB-1516). AuthOtpController forwards it on every
       # SendOTP/ValidateOTP (reads OtpSignInOptions.ApplicationId at AuthOtpController.cs:96/148).
@@ -94,12 +100,18 @@ on:
       # S03 / ADR-0004 — KYC + CDN BFF seam. The gateway is the only aggregator;
       # it proxies/composes the OWNING kyc-service (own jeeb_kyc PG, no sibling
       # calls) and the cdn-service signed-PUT broker, and on approve appends the
-      # jeeber role in user-management. Default-on against the LIVE swarm hosts.
+      # jeeber role in user-management. The flags remain default-on, but container
+      # destinations must be supplied explicitly because the native MSI loopback
+      # values are not reachable from this Swarm container.
       # These are plain (non-secret) base URLs + boolean flags, so workflow inputs,
       # not GitHub secrets. The values are also baked into appsettings.Production.json;
       # injecting them here makes the flag/host operator-controllable on every deploy.
-      kyc_base_url:                { description: 'Services__Kyc__BaseUrl — owning kyc-service (live swarm host)',  required: true, default: 'http://192.168.2.50:10074' }
-      cdn_base_url:                { description: 'Services__Cdn__BaseUrl — cdn-service signed-PUT broker (live swarm host)', required: true, default: 'http://192.168.2.50:10072' }
+      kyc_base_url:                { description: 'Services__Kyc__BaseUrl (required; no inferred container target)',            required: true, default: '' }
+      cdn_base_url:                { description: 'Services__Cdn__BaseUrl and private-artifact origin (required)',              required: true, default: '' }
+      state_base_url:              { description: 'JeebStateService__BaseUrl (required; no inferred container target)',         required: true, default: '' }
+      # ADR-0008/0010 records this exact MSI LAN target and a live 2026-08-16
+      # health observation. It is the only target here that is safe to prefill.
+      bundler_cms_base_url:        { description: 'BUNDLER_CMS_BASE_URL (documented MSI LAN target)', required: true, default: 'http://192.168.2.39:10056/' }
       # ── GENERIC FeatureFlags map (the spine flag overlay) ──────────────────────────
       # GitHub caps workflow_dispatch at 25 inputs; this workflow already hit that cap once
       # (the fixed `registry` constant was moved to a job-level env to claw a slot back —
@@ -133,8 +145,8 @@ on:
       #     Delivery is a settled authority and is not accepted as operator input;
       #     Offer remains in the map until its separate retirement.
       #     Future spine flags are added to the map's case table below — NO new input, NO cap risk.
-      #   * `whisper_fake`, `dev_endpoints`, and `swagger_ui` keep dedicated inputs because
-      #     their 3-state / secret-coupled semantics are load-bearing.
+      #   * `dev_endpoints` and `swagger_ui` keep dedicated inputs because their
+      #     3-state semantics are load-bearing.
       #   * Unknown keys are IGNORED with a warning (fail-open on parse, never fail the deploy
       #     on a typo); a value other than true/false is rejected (guardrail: no silent garbage
       #     into an env var).
@@ -144,21 +156,6 @@ on:
         description: 'Generic FeatureFlags overlay: comma-separated Key=Value. Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamChat. Empty = preserve running flags (baked appsettings defaults on fresh create). Delivery/Ratings authority and Heartbeat/DurableRequests environment locks are not operator inputs.'
         required: false
         default: ''
-      # S04 / Track C — REAL OpenAI Whisper STT seam. The gateway selects the real
-      # WhisperClient ONLY when Whisper__FakeTranscribe=false AND Whisper__ApiKey is
-      # present; otherwise it uses the network-free FakeWhisperClient. The OpenAI key
-      # is NEVER an input or committed value — it is the GitHub secret OPENAI_API_KEY,
-      # injected below as Whisper__ApiKey. Set whisper_fake='false' to arm real STT
-      # (requires the OPENAI_API_KEY secret to be set on this repo). Default 'true'
-      # keeps the deterministic fake so a no-arg deploy never depends on the key.
-      whisper_fake:
-        description: 'Whisper__FakeTranscribe. true (default) = deterministic fake STT; false = REAL OpenAI Whisper (requires OPENAI_API_KEY secret).'
-        required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
       # DEV-ONLY seed/inspect surface (/dev/*). This input is the ONLY supported way to
       # toggle Features__DevEndpoints__Enabled on the running gateway — never set it via a
       # manual `docker service update --env-add/--env-rm` from an operator shell, and never
@@ -225,6 +222,74 @@ jobs:
       IMAGE: ghcr.io/olivium-dev/jeeb-gateway
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate container-reachable upstream targets
+        env:
+          GATEWAY_TARGETS: |
+            chat_base_url=${{ inputs.chat_base_url }}
+            user_management_base_url=${{ inputs.user_management_base_url }}
+            wallet_base_url=${{ inputs.wallet_base_url }}
+            notification_base_url=${{ inputs.notification_base_url }}
+            push_notification_base_url=${{ inputs.push_notification_base_url }}
+            otp_base_url=${{ inputs.otp_base_url }}
+            delivery_base_url=${{ inputs.delivery_base_url }}
+            voice_transcription_base_url=${{ inputs.voice_transcription_base_url }}
+            kyc_base_url=${{ inputs.kyc_base_url }}
+            cdn_base_url=${{ inputs.cdn_base_url }}
+            state_base_url=${{ inputs.state_base_url }}
+            bundler_cms_base_url=${{ inputs.bundler_cms_base_url }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import ipaddress
+          import os
+          import socket
+          from urllib.parse import urlsplit
+
+          banned_host = ".".join(("192", "168", "2", "50"))
+          banned_ip = ipaddress.ip_address(banned_host)
+          failures = []
+
+          def parse_literal_ip(host):
+              try:
+                  parsed_ip = ipaddress.ip_address(host)
+              except ValueError:
+                  try:
+                      parsed_ip = ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(host)))
+                  except OSError:
+                      return None
+              if isinstance(parsed_ip, ipaddress.IPv6Address) and parsed_ip.ipv4_mapped:
+                  return parsed_ip.ipv4_mapped
+              return parsed_ip
+
+          for raw in os.environ["GATEWAY_TARGETS"].splitlines():
+              if not raw:
+                  continue
+              name, value = raw.split("=", 1)
+              value = value.strip()
+              if not value:
+                  failures.append(f"{name} is required and has no safe inferred Swarm target")
+                  continue
+
+              parsed = urlsplit(value)
+              host = (parsed.hostname or "").lower().rstrip(".")
+              literal_ip = parse_literal_ip(host)
+              if parsed.scheme not in {"http", "https"} or not host:
+                  failures.append(f"{name} must be an absolute HTTP(S) URL")
+              elif literal_ip == banned_ip:
+                  failures.append(f"{name} targets the owner-banned legacy host")
+              elif host == "localhost" or (literal_ip is not None and (literal_ip.is_loopback or literal_ip.is_unspecified)):
+                  failures.append(f"{name} uses container-local loopback, not a host-reachable target")
+              elif parsed.username or parsed.password:
+                  failures.append(f"{name} must not embed credentials")
+
+          if failures:
+              for failure in failures:
+                  print(f"::error::{failure}")
+              raise SystemExit("Refusing to build or deploy with unsafe upstream targets")
+
+          print("All workflow-managed gateway targets are explicit and container-reachable.")
+          PY
 
       - name: Log in to GHCR (password via stdin)
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
@@ -412,6 +477,22 @@ jobs:
           EXPORT_SECRET='$EXPORT_SECRET'
           JOB_SECRET='$JOB_SECRET'
           REQUESTED_IMAGE='$IMAGE_PATH'
+          # These keys came from the retired gateway-local matching and STT paths.
+          # Remove them on every update so an older service spec cannot preserve a
+          # banned destination or a provider credential after the source is fixed.
+          retired_env_args=(
+            --env-rm Services__Matching__BaseUrl
+            --env-rm Services__Chat__BaseUrl
+            --env-rm Services__UserManagement__BaseUrl
+            --env-rm Services__Wallet__BaseUrl
+            --env-rm Services__PushNotification__BaseUrl
+            --env-rm UserManagementApi__BaseUrl
+            --env-rm ServiceOTPApi__BaseUrl
+            --env-rm Whisper__FakeTranscribe
+            --env-rm Whisper__ApiKey
+            --env-rm OPENAI_API_KEY
+            --env-rm OLIVIUM_OPEN_AI_KEY
+          )
           state_secret_args=()
           if docker service inspect "\$SVC" >/dev/null 2>&1; then
             add_rotated_secret() {
@@ -435,6 +516,7 @@ jobs:
           if docker service ls --format '{{.Name}}' | grep -wq "\$SVC"; then
             docker service update --detach=false --replicas 1 --image "\$REQUESTED_IMAGE" --with-registry-auth \
               --update-order stop-first --update-failure-action pause --update-monitor 20s \
+              "\${retired_env_args[@]}" \
               --env-add Security__TokenMint__Enabled='true' \
               --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
               --env-add Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
@@ -443,21 +525,24 @@ jobs:
               --env-add UmJwt__Audience='user-management' \
               --env-add Services__Kyc__BaseUrl='${{ inputs.kyc_base_url }}' \
               --env-add Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
-              --env-add Services__Chat__BaseUrl='${{ inputs.chat_base_url }}' \
+              --env-add ChatServiceApi__BaseUrl='${{ inputs.chat_base_url }}' \
+              --env-add UserManagementServiceApi__BaseUrl='${{ inputs.user_management_base_url }}' \
+              --env-add WalletServiceApi__BaseUrl='${{ inputs.wallet_base_url }}' \
+              --env-add PushNotificationServiceApi__BaseUrl='${{ inputs.push_notification_base_url }}' \
+              --env-add Services__ServiceOTP__BaseUrl='${{ inputs.otp_base_url }}' \
               --env-add Services__Delivery__BaseUrl='${{ inputs.delivery_base_url }}' \
+              --env-add Services__VoiceTranscription__BaseUrl='${{ inputs.voice_transcription_base_url }}' \
               --env-add ServiceNotificationClient__BaseUrl='${{ inputs.notification_base_url }}' \
-              --env-add JeebStateService__BaseUrl='http://192.168.2.50:10073' \
+              --env-add JeebStateService__BaseUrl='${{ inputs.state_base_url }}' \
               --env-add JeebStateService__ServiceTokenFile='/run/secrets/jeeb_state_service_token' \
               --env-add DELIVERY_SERVICE_TOKEN_FILE='/run/secrets/delivery_service_token' \
               --env-add ServiceNotificationClient__ServiceTokenFile='/run/secrets/notification_service_token' \
-              --env-add BUNDLER_CMS_BASE_URL='http://192.168.2.50:10056/' \
+              --env-add BUNDLER_CMS_BASE_URL='${{ inputs.bundler_cms_base_url }}' \
               --env-add BUNDLER_CMS_BEARER_TOKEN_FILE='/run/secrets/bundler_cms_bearer_token' \
-              --env-add PRIVATE_ARTIFACT_STORE_BASE_URL='http://192.168.2.50:10072/' \
+              --env-add PRIVATE_ARTIFACT_STORE_BASE_URL='${{ inputs.cdn_base_url }}' \
               --env-add PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE='/run/secrets/private_artifact_store_bearer_token' \
               --env-add DATA_EXPORT_TOKEN_SIGNING_KEY_FILE='/run/secrets/data_export_token_signing_key' \
               --env-add InternalJobAuth__TokenFile='/run/secrets/jeeb_gateway_job_token' \
-              --env-add Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
-              --env-add Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               --env-add FeatureFlags__DurableRequests__Enabled='false' \
               --env-add FeatureFlags__Heartbeat__Enabled='false' \
               --env-add FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
@@ -465,6 +550,7 @@ jobs:
               --env-add FeatureFlags__UseUpstream__Delivery='true' \
               --env-add FeatureFlags__UseUpstream__Ratings='true' \
               --env-add FeatureFlags__UseUpstream__Chat='true' \
+              --env-add FeatureFlags__UseUpstream__Voice='true' \
               $FEATURE_FLAG_ARGS \
               $DEV_FLAG_ARG \
               $SWAGGER_FLAG_ARG \
@@ -485,30 +571,27 @@ jobs:
               --env UmJwt__SigningKey='${{ secrets.UMJWT_SIGNING_KEY }}' \
               --env UmJwt__Issuer='user-management' \
               --env UmJwt__Audience='user-management' \
-              --env Services__Chat__BaseUrl='${{ inputs.chat_base_url }}' \
-              --env Services__UserManagement__BaseUrl='${{ inputs.user_management_base_url }}' \
-              --env Services__Wallet__BaseUrl='${{ inputs.wallet_base_url }}' \
+              --env ChatServiceApi__BaseUrl='${{ inputs.chat_base_url }}' \
+              --env UserManagementServiceApi__BaseUrl='${{ inputs.user_management_base_url }}' \
+              --env WalletServiceApi__BaseUrl='${{ inputs.wallet_base_url }}' \
               --env ServiceNotificationClient__BaseUrl='${{ inputs.notification_base_url }}' \
-              --env JeebStateService__BaseUrl='http://192.168.2.50:10073' \
+              --env JeebStateService__BaseUrl='${{ inputs.state_base_url }}' \
               --env JeebStateService__ServiceTokenFile='/run/secrets/jeeb_state_service_token' \
               --env DELIVERY_SERVICE_TOKEN_FILE='/run/secrets/delivery_service_token' \
               --env ServiceNotificationClient__ServiceTokenFile='/run/secrets/notification_service_token' \
-              --env BUNDLER_CMS_BASE_URL='http://192.168.2.50:10056/' \
+              --env BUNDLER_CMS_BASE_URL='${{ inputs.bundler_cms_base_url }}' \
               --env BUNDLER_CMS_BEARER_TOKEN_FILE='/run/secrets/bundler_cms_bearer_token' \
-              --env PRIVATE_ARTIFACT_STORE_BASE_URL='http://192.168.2.50:10072/' \
+              --env PRIVATE_ARTIFACT_STORE_BASE_URL='${{ inputs.cdn_base_url }}' \
               --env PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE='/run/secrets/private_artifact_store_bearer_token' \
               --env DATA_EXPORT_TOKEN_SIGNING_KEY_FILE='/run/secrets/data_export_token_signing_key' \
               --env InternalJobAuth__TokenFile='/run/secrets/jeeb_gateway_job_token' \
-              --env Services__PushNotification__BaseUrl='${{ inputs.push_notification_base_url }}' \
-              --env UserManagementApi__BaseUrl='${{ inputs.user_management_base_url }}' \
-              --env Services__Matching__BaseUrl='${{ inputs.matching_base_url }}' \
+              --env PushNotificationServiceApi__BaseUrl='${{ inputs.push_notification_base_url }}' \
               --env Services__Delivery__BaseUrl='${{ inputs.delivery_base_url }}' \
-              --env ServiceOTPApi__BaseUrl='${{ inputs.otp_base_url }}' \
+              --env Services__VoiceTranscription__BaseUrl='${{ inputs.voice_transcription_base_url }}' \
+              --env Services__ServiceOTP__BaseUrl='${{ inputs.otp_base_url }}' \
               --env Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
               --env Services__Kyc__BaseUrl='${{ inputs.kyc_base_url }}' \
               --env Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
-              --env Whisper__FakeTranscribe='${{ inputs.whisper_fake }}' \
-              --env Whisper__ApiKey='${{ secrets.OPENAI_API_KEY }}' \
               --env FeatureFlags__DurableRequests__Enabled='false' \
               --env FeatureFlags__Heartbeat__Enabled='false' \
               --env FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
@@ -516,6 +599,7 @@ jobs:
               --env FeatureFlags__UseUpstream__Delivery='true' \
               --env FeatureFlags__UseUpstream__Ratings='true' \
               --env FeatureFlags__UseUpstream__Chat='true' \
+              --env FeatureFlags__UseUpstream__Voice='true' \
               --secret "source=\$STATE_SECRET,target=jeeb_state_service_token,mode=0444" \
               --secret "source=\$DELIVERY_SECRET,target=delivery_service_token,mode=0444" \
               --secret "source=\$NOTIFICATION_SECRET,target=notification_service_token,mode=0444" \

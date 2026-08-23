@@ -84,7 +84,7 @@ is_forbidden_env_key() {
   case "$1" in
     Security__TokenMint__Key|Jwt__SigningKey|Jwt__PhonePepper|\
     JeebJwt__SigningKey|JeebJwt__PhonePepper|JeebJwt__Issuer|JeebJwt__Audience|UmJwt__SigningKey|\
-    PushNotificationServiceApi__InternalApiKey|Whisper__ApiKey|\
+    PushNotificationServiceApi__InternalApiKey|Whisper__Api[Kk]ey|OPENAI_*|OLIVIUM_OPEN_*|\
     FeatureFlags__Heartbeat__ServiceAuthKey|DATABASE_URL|JEEB_DATABASE_URL|\
     GatewayPostgres__ConnectionString|WalletPostgres__ConnectionString)
       return 0

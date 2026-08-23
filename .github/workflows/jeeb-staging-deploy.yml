@@ -118,8 +118,6 @@ jobs:
           JEEB_RTC_SECRET_KEY_BASE: ${{ secrets.JEEB_RTC_SECRET_KEY_BASE }}
           JEEB_RTC_GUARDIAN_SECRET_KEY: ${{ secrets.JEEB_RTC_GUARDIAN_SECRET_KEY }}
           JEEB_REDIS_URL: ${{ secrets.JEEB_REDIS_URL }}
-          OPENAI_API_KEY_PRIMARY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_API_KEY_FALLBACK: ${{ secrets.OLIVIUM_OPEN_AI_KEY }}
           JEEB_SECRET_KEY_BASE: ${{ secrets.JEEB_SECRET_KEY_BASE }}
           JEEB_INTERNAL_SERVICE_TOKEN: ${{ secrets.JEEB_INTERNAL_SERVICE_TOKEN }}
           HEARTBEAT_REDIS_URL: ${{ secrets.HEARTBEAT_REDIS_URL }}
@@ -172,11 +170,10 @@ jobs:
               BUNDLER_CMS_BEARER_TOKEN \
               JEEB_GATEWAY_JOB_TOKEN
           fi
-          openai_api_key="${OPENAI_API_KEY_PRIMARY:-$OPENAI_API_KEY_FALLBACK}"
           {
             for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY JEEB_DATABASE_URL JEEB_DB_PASSWORD \
               JEEB_RTC_DATABASE_URL JEEB_RTC_SECRET_KEY_BASE \
-              JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_REDIS_URL openai_api_key \
+              JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_REDIS_URL \
               JEEB_SECRET_KEY_BASE JEEB_INTERNAL_SERVICE_TOKEN \
               HEARTBEAT_REDIS_URL HEARTBEAT_SERVICE_AUTH_KEY HEARTBEAT_JWKS_URL \
               delivery_database_url state_secret_name notification_secret_name settlement_secret_name \
@@ -194,6 +191,10 @@ jobs:
             ServiceOTPApi__BaseUrl
             GatewayPostgres__ConnectionString
             WalletPostgres__ConnectionString
+            Whisper__FakeTranscribe
+            Whisper__ApiKey
+            OPENAI_API_KEY
+            OLIVIUM_OPEN_AI_KEY
           )
           mount_args=()
           network_update_args=()
@@ -306,6 +307,9 @@ jobs:
               add_env FeatureFlags__UseUpstream__RemoteUserPreferences true
               add_env FeatureFlags__UseUpstream__Ratings true
               add_env FeatureFlags__UseUpstream__Ban true
+              # Voice bytes always cross the owning service boundary; the gateway
+              # has no local provider path or credential fallback.
+              add_env FeatureFlags__UseUpstream__Voice true
               # These upstreams are reachable, but their dormant gateway surfaces are not
               # part of this staging cutover. Keep the kill switches explicitly off while
               # wiring the real typed clients so a future enablement cannot inherit a stale
@@ -372,7 +376,6 @@ jobs:
               : "${JEEB_REDIS_URL:?JEEB_REDIS_URL is required}"
               add_env REDIS_URL "$JEEB_REDIS_URL"
               add_env APP_ENV production
-              add_env OPENAI_API_KEY "$openai_api_key"
               add_env WHISPER_FAKE_TRANSCRIBE 1
               ;;
             contract-signing-service)

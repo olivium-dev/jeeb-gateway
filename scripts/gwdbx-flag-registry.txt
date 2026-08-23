@@ -300,18 +300,6 @@ WeeklySettlement:Interval                            setting -
 WeeklySettlement:MaxBatchSize                        setting -
 WeeklySettlement:SettlementDay                       setting -
 WeeklySettlement:TimeZoneId                          setting -
-Whisper:ApiKey                                       setting -
-Whisper:BaseUrl                                      setting -
-Whisper:CircuitBreakerFailureThreshold               setting -
-Whisper:CircuitBreakerOpenDuration                   setting -
-Whisper:FakeTranscribe                               setting -
-Whisper:InitialBackoff                               setting -
-Whisper:Language                                     setting -
-Whisper:MaxAttempts                                  setting -
-Whisper:MaxBackoff                                   setting -
-Whisper:Model                                        setting -
-Whisper:Timeout                                      setting -
-
 # ---- setting: bound options knobs the pre-D2 code arm could not reach (D2) --
 # AddOptions<T>().Bind(...) sites — 4 in Extensions/*.cs, 2 in Program.cs — plus GetSection().Get<T>().
 BffServices:Keys                                     setting -

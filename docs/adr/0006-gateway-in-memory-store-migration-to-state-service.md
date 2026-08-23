@@ -99,7 +99,7 @@ that the current contract cannot satisfy.
 | `IAdminEscalationStore` (`InMemoryAdminEscalationStore`) | 1137 | `ListAsync` + `GetForDelivery` (secondary index). |
 | `IUsersStore` (`InMemoryUsersStore`) | 1345 | Read/query model mirroring user-management; not gateway-owned state — should read through `ServiceUserManagementClient`, not the KV. |
 | `IProhibitedItemsStore` / `IProhibitedItemSynonymRegistry` | 1195/1204 | **Not state** — config catalogs, re-seeded on boot; correctly in-process. No migration needed. |
-| `IAudioStore` (`InMemoryAudioStore`) | 1705 | Fire-and-forget retry buffer for raw audio bytes; the fallback queue is `Snapshot()`-only and nothing reads the bytes back. Pushing blobs into the opaque KV adds **zero** durability value and is an anti-pattern. No migration. |
+| `IAudioStore` (~~in-memory impl~~ — **RETIRED, 2026-08-23**) | ~~1705~~ | The gateway now forwards voice bytes only to voice-transcription-service. The local audio buffer, fallback queue, provider client, and retry/circuit path were deleted; provider storage and credentials belong to that owner service. No migration. |
 | `IAdminAuditLog` / `ITiersStore` / notifiers / push device-token + retry + dispatch | various | Audit log (append+list), tiers (config), notifiers/transports (transient delivery state). Not opaque-row state; out of scope. |
 
 **Net:** there is **no remaining store that is a clean create-once + GET-by-primary-key shape**
@@ -133,8 +133,9 @@ so we explicitly do **not** do that.
    version-checked updates; this generalises that to the opaque KV.
 
 3. **Stores that are NOT gateway-owned state stay out of scope:** `IUsersStore` (read-through
-   user-management), `IProhibitedItems*` (config catalog), `IAudioStore` (transient retry buffer),
-   notifiers/transports/audit-log. Moving these to the KV would not serve ADR-0001/0005.
+   user-management), `IProhibitedItems*` (config catalog), and notifiers/transports/audit-log.
+   The former `IAudioStore` path is retired: voice-transcription-service owns provider storage.
+   Moving any of these to the KV would not serve ADR-0001/0005.
 
 ### Migration order once the primitives land (highest value first)
 

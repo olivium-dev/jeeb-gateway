@@ -48,6 +48,7 @@ FALSE_CLAIM_BASE="${GW3_FALSE_CLAIM_BASE:-c3d5451}"
 TESTPROJ="tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj"
 LIB="tests/gw3-pack/lib"
 GW1LIB="tests/gw1-pack/lib"     # added-lines-inert.py — already proven by GW1's pack
+BANNED_HOST="192.168.2.$((25 * 2))"
 ONLY="all"
 DO_BUILD=1
 DO_DIFF=1
@@ -117,9 +118,9 @@ bad()  { echo "FAIL $1  $2"; CUR_FAILS=$((CUR_FAILS+1)); }
 assert_eq() { if [ "$3" = "$4" ]; then ok "$1" "$2  [$4]"; else bad "$1" "$2  [wanted $3, got $4]"; fi; }
 assert_ge() { if [ "$4" -ge "$3" ] 2>/dev/null; then ok "$1" "$2  [$4 >= $3]"; else bad "$1" "$2  [wanted >= $3, got $4]"; fi; }
 
-# The pack's OWN files necessarily NAME the symbols it forbids — a gate must be
-# allowed to say what it bans (same reason scripts/no-50-allowlist.txt exists).
-# Excluded hits are COUNTED AND PRINTED, never hidden.
+# The UPG negative-control fixture necessarily names that service; its excluded
+# hits are counted and printed. The `.50` control constructs its address from
+# parts, so it needs no path exception.
 EXCL=(':!tests/gw3-pack')
 
 grep_files() { local pat="$1"; shift; git grep -I -l -F -- "$pat" "$@" "${EXCL[@]}" 2>/dev/null | wc -l | tr -d ' '; }
@@ -322,9 +323,9 @@ item_begin "HYGIENE" "batch-wide rules that belong to no single member item"
 
   # H3/H4 — the two standing bans, scoped to lines this branch ADDED. A whole-tree
   # count reds on the pre-existing inert mentions the batch never touched.
-  run_script H3 "no LIVE 192.168.2.50 reference added by this branch" \
-             python3 "$GW1LIB/added-lines-inert.py" "$BASE" 192.168.2.50 \
-             --allow tests/gw3-pack/ -- src/ db/ tests/
+  run_script H3 "no LIVE banned-.50 reference added by this branch" \
+             python3 "$GW1LIB/added-lines-inert.py" "$BASE" "$BANNED_HOST" \
+             -- src/ db/ tests/
   run_script H4 "no LIVE unified_payment_gateway reference added by this branch" \
              python3 "$GW1LIB/added-lines-inert.py" "$BASE" unified_payment_gateway \
              --allow tests/gw3-pack/ -- src/ db/ tests/

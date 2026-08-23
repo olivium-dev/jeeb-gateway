@@ -145,7 +145,10 @@ emit_type() {
 
 # Statement-joined scan of every .cs file, not Program.cs only: 6 of the repo's options
 # classes bind through AddOptions<T>().Bind(...), four of them from Extensions/*.cs.
-CS_FILES="$(git ls-files -co --exclude-standard "$SRC" | grep -E '\.cs$' | sort -u)"
+CS_FILES="$(git ls-files -co --exclude-standard "$SRC" \
+  | grep -E '\.cs$' \
+  | while IFS= read -r file; do [ -f "$file" ] && printf '%s\n' "$file"; done \
+  | sort -u)"
 BOUND_TYPES="$(awk '
   FNR == 1 { stmt = "" }
   { stmt = stmt " " $0 }

@@ -35,7 +35,6 @@ local-owner DurableRequestsStore
 local-owner InMemoryAccountDeletionStore
 local-owner InMemoryAdminAuditLog
 local-owner InMemoryAdminEscalationStore
-local-owner InMemoryAudioStore
 local-owner InMemoryAvailabilityStore
 local-owner InMemoryDataExportNotifier
 local-owner InMemoryDataExportRatingsProvider
@@ -55,6 +54,5 @@ local-owner InMemoryRequestExpiryNotifier
 local-owner InMemoryRequestsStore
 local-owner InMemoryScheduledDeliveryNotifier
 local-owner InMemoryTiersStore
-local-owner InMemoryTranscriptionFallbackQueue
 local-owner InMemoryUsersStore
 local-owner NewRequestFanoutQueue
