@@ -111,16 +111,22 @@ public sealed class GenericEventDispatcherTests
     }
 
     [Fact]
-    public void The_silent_stamp_is_sourced_from_the_policy_and_only_for_a_silent_category()
+    public void The_silent_stamp_is_sourced_from_the_policy_and_no_live_category_is_silent()
     {
+        // 2026-08-23 reversal: a silent new_request never rendered on-device, so the
+        // fan-out record must carry its notification block and NO silent stamp.
         var newRequest = GenericEventDispatcher.BuildRecord(
             JeebGenericEventTypes.NewRequestEventType, "user-1", "req-1",
-            "T", "B", Routing, PushSilencePolicy.CategoryNewRequest);
+            "New delivery request", "Groceries • Small", Routing,
+            PushSilencePolicy.CategoryNewRequest);
         var chat = GenericEventDispatcher.BuildRecord(
             JeebGenericEventTypes.ChatMessageEventType, "user-1", "msg-1",
             "T", "B", Routing, PushSilencePolicy.CategoryChat);
 
-        newRequest.Data.Should().ContainKey("silent").WhoseValue.Should().Be("true");
+        newRequest.Data.Should().NotContainKey("silent",
+            "the new-request fan-out must reach the notification shade");
+        newRequest.Title.Should().Be("New delivery request");
+        newRequest.Body.Should().Be("Groceries • Small");
         chat.Data.Should().NotContainKey("silent",
             "a human-addressed push must keep its shade entry");
     }

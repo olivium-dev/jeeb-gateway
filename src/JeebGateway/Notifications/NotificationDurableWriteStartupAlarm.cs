@@ -6,11 +6,13 @@ namespace JeebGateway.Notifications;
 
 /// <summary>
 /// Emits the operator-visible authority alarm when durable notification writes
-/// remain disabled in a prod-like environment.
+/// remain disabled in a prod-like environment, and proves at boot that the
+/// notification owner credential actually resolves when they are enabled.
 /// </summary>
 internal sealed class NotificationDurableWriteStartupAlarm : IHostedService
 {
     internal const string AlarmEvent = "notif.durable_write.disabled_prod_like";
+    internal const string CredentialAlarmEvent = "notif.durable_write.credential_unresolvable";
 
     private readonly IConfiguration _configuration;
     private readonly IHostEnvironment _environment;
@@ -32,9 +34,14 @@ internal sealed class NotificationDurableWriteStartupAlarm : IHostedService
             NotificationRecordWriter.EnabledConfigurationKey);
         var isExemptEnvironment = _environment.IsDevelopment()
             || _environment.IsEnvironment("Testing");
-        if (enabled || isExemptEnvironment)
+        if (isExemptEnvironment)
         {
             return Task.CompletedTask;
+        }
+
+        if (enabled)
+        {
+            return VerifyCredentialResolvesAsync(cancellationToken);
         }
 
         _logger.LogCritical(
@@ -45,6 +52,26 @@ internal sealed class NotificationDurableWriteStartupAlarm : IHostedService
             false,
             _environment.EnvironmentName);
         return Task.CompletedTask;
+    }
+
+    // 608debf outage: the flag said "enabled" while the credential chain failed closed
+    // on every send. Resolving it here makes that state loud at the moment of boot.
+    private async Task VerifyCredentialResolvesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await NotificationServiceCredentialHandler.ReadTokenAsync(
+                _configuration, _logger, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex,
+                "event={event} environment={environment} " +
+                "DURABLE NOTIFICATION WRITES ARE ENABLED BUT THE NOTIFICATION SERVICE " +
+                "CREDENTIAL DOES NOT RESOLVE; EVERY PUSH HANDOVER WILL FAIL CLOSED.",
+                CredentialAlarmEvent,
+                _environment.EnvironmentName);
+        }
     }
 
     public Task StopAsync(CancellationToken cancellationToken)

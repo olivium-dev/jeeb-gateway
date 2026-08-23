@@ -166,6 +166,9 @@ public class NewRequestPushNotifierTests
         payload.Should().NotContainKey("data");
         ((string)payload["body"]!).Should().Contain("Pick up a package");
         ((string)payload["body"]!).Should().Contain($" • {TierName}");
+        // 2026-08-23: the fan-out must render in the shade — title/body present, never silent.
+        payload.Should().NotContainKey("silent");
+        ((string)payload["body"]!).Should().NotBeNullOrWhiteSpace();
     }
 
     [Fact] // G-U5 — under-notification must be LOUD, never silent.

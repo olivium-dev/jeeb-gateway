@@ -75,9 +75,9 @@ public enum PushDeliveryMode
 /// is <b>unreachable from any live caller</b>, and that is a fact about the codebase, not a
 /// defect in this policy. Since the 2026-07-27 reversal (below) <b>no catalog template key
 /// is silent at all</b>: every key in <see cref="CategoryByTemplateKey"/> resolves to
-/// <see cref="PushDeliveryMode.ShadeAndStored"/>, and the sole remaining silent category,
-/// <see cref="CategoryNewRequest"/>, has no template key and no centre writer — its push
-/// (<c>NewRequestPushNotifier</c>) never touches the centre. So the silent gate in
+/// <see cref="PushDeliveryMode.ShadeAndStored"/>, and since the 2026-08-23 reversal of
+/// <see cref="CategoryNewRequest"/> (measured: its silent fan-out never rendered on-device)
+/// <b>no category is silent either</b>. So the silent gate in
 /// <see cref="NotificationRecordWriter"/> suppresses <b>nothing</b> in production today; it
 /// is a guard pre-placed at the sole choke point, waiting for the first silent type that
 /// acquires a writer. Do not describe a green test suite here as proof that a silent push
@@ -111,7 +111,8 @@ public enum PushDeliveryMode
 /// <para><b>⚠️ OWNER RULING REVERSAL, 2026-07-27 — <c>delivery</c> IS A READABLE INBOX
 /// ROW.</b> The 2026-07-26 D4 line classified <c>delivery</c> as silent-only. That is
 /// <b>SUPERSEDED</b>. Delivery is now <b>shade + stored</b> alongside kyc / settlement /
-/// dispute / rating / chat, and <c>newRequest</c> is the ONLY silent-only category left.
+/// dispute / rating / chat; <c>newRequest</c> was the last silent-only category until its
+/// own 2026-08-23 reversal.
 /// This is what unblocked <c>jeeb.delivery_status_updated</c>'s centre writer (b02 step 6a):
 /// the writer and the four already-merged read paths that assume the row exists
 /// (<c>JeebNotificationsInboxController.PayloadRef</c>,
@@ -126,17 +127,8 @@ public static class PushSilencePolicy
     // Spelled as the mobile `NotificationCategory` enum names them
     // (jeeb-mobile lib/core/notifications/domain/notification_message.dart).
 
-    /// <summary>
-    /// Silent-only per D4 — the jeeber new-request feed refresh signal.
-    ///
-    /// <para><b>DORMANT, and deliberately so.</b> No catalog template key maps to this
-    /// category: the gateway's new-request push (<c>NewRequestPushNotifier</c>) holds no
-    /// <see cref="INotificationRecordWriter"/> and there is no <c>jeeb.new_request</c>
-    /// catalog template, so there is no centre write for this policy to suppress. The
-    /// category is declared because D4 names it, not because it is wired. Since the
-    /// 2026-07-27 reversal moved <see cref="CategoryDelivery"/> to the stored side, this is
-    /// the ONLY silent-only category left — see the class remarks.</para>
-    /// </summary>
+    /// <summary>Shade + stored. <b>REVERSED 2026-08-23</b> (was D4 silent-only): measured on-device,
+    /// the silent data-only fan-out never rendered, so jeebers missed new requests entirely.</summary>
     public const string CategoryNewRequest = "newRequest";
 
     /// <summary>
@@ -202,14 +194,15 @@ public static class PushSilencePolicy
     private static readonly IReadOnlyDictionary<string, PushDeliveryMode> ModeByCategory =
         new Dictionary<string, PushDeliveryMode>(StringComparer.Ordinal)
         {
-            // D4 · silent-only (pure refresh signal — the poll being replaced).
-            // ONE entry, not two: `delivery` was here until the 2026-07-27 reversal.
-            [CategoryNewRequest] = PushDeliveryMode.SilentRefresh,
+            // D4 · silent-only — EMPTY since the 2026-08-23 newRequest reversal (measured:
+            // a silent data-only fan-out never renders, so jeebers missed new requests).
 
             // D4 · shade + stored
             // `delivery` joined this block on 2026-07-27 (owner ruling: a delivery-status
             // change IS a readable inbox row). It is listed first so the reversal is
             // visible at the point of decision, not only in the doc comment.
+            // `newRequest` joined 2026-08-23: the fan-out push must reach the shade.
+            [CategoryNewRequest] = PushDeliveryMode.ShadeAndStored,
             [CategoryDelivery] = PushDeliveryMode.ShadeAndStored,
             [CategoryKyc] = PushDeliveryMode.ShadeAndStored,
             [CategorySettlement] = PushDeliveryMode.ShadeAndStored,

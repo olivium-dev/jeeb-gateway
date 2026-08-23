@@ -81,9 +81,12 @@ public sealed class GenericEventDispatcher : IGenericEventDispatcher
                     eventType, receiver, entityId, correlationId, upstreamStatus, LogLevel.Information);
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
             // The upstream can commit and then fail the response, so only a read-back can classify.
+            _logger.LogError(ex,
+                "event={event} eventType={eventType} recipientId={recipientId} entityId={entityId} ncid={ncid}",
+                "notif.generic_event.post_failed", eventType, receiver, entityId, correlationId);
         }
 
         var found = false;
@@ -94,8 +97,11 @@ public sealed class GenericEventDispatcher : IGenericEventDispatcher
                 .ContainsCorrelationIdAsync(receiver, correlationId, readBudget.Token)
                 .ConfigureAwait(false);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            _logger.LogError(ex,
+                "event={event} eventType={eventType} recipientId={recipientId} entityId={entityId} ncid={ncid}",
+                "notif.generic_event.readback_failed", eventType, receiver, entityId, correlationId);
             found = false;
         }
 
