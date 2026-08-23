@@ -79,6 +79,12 @@ public static class HealthCheckExtensions
         // matching-service readiness probe REMOVED (JEBV4-220 / E25) — the
         // standalone matching-service read path is retired; nothing dials it.
         AddDownstreamProbe(checks, config, "notification-service",    "ServiceNotificationClient:BaseUrl", healthPath: "health");
+        // 608debf outage: the credential chain failed closed while every health surface stayed
+        // green (the URL probe above hits the token-free public /health). In-process, no I/O.
+        checks.AddCheck<JeebGateway.Notifications.NotificationCredentialHealthCheck>(
+            JeebGateway.Notifications.NotificationCredentialHealthCheck.Name,
+            failureStatus: HealthStatus.Unhealthy,
+            tags: new[] { "ready" });
         AddDownstreamProbe(checks, config, "push-notification",       "PushNotificationServiceApi:BaseUrl", healthPath: "health");
         AddDownstreamProbe(checks, config, "delivery-service",        "Services:Delivery:BaseUrl",        healthPath: "health");
         AddDownstreamProbe(checks, config, "geolocation-service",     "Services:Geolocation:BaseUrl",     healthPath: "health");

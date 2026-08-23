@@ -2,6 +2,7 @@ using System.Net;
 using FluentAssertions;
 using JeebGateway.Notifications;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -43,7 +44,7 @@ public sealed class NotificationServiceTokenHandlerTests : IDisposable
     }
 
     [Fact]
-    public async Task Missing_mounted_token_fails_closed_before_network_call()
+    public async Task Missing_mounted_token_without_fallback_fails_closed_before_network_call()
     {
         var downstream = new RecordingHandler();
         using var client = Client(Path.Combine(_directory, "missing"), downstream);
@@ -51,8 +52,23 @@ public sealed class NotificationServiceTokenHandlerTests : IDisposable
         var act = () => client.GetAsync("notifications");
 
         await act.Should().ThrowAsync<InvalidOperationException>()
-            .WithMessage("*missing or outside the allowed size*");
+            .WithMessage("*No notification service credential is configured*");
         downstream.CallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Missing_mounted_token_falls_back_to_configured_api_token()
+    {
+        var downstream = new RecordingHandler();
+        using var client = Client(
+            Path.Combine(_directory, "missing"),
+            downstream,
+            ("ServiceNotificationClient:ApiToken", "native-msi-api-token"));
+
+        using var response = await client.GetAsync("notifications");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        downstream.LastHeaderValues.Should().Equal("native-msi-api-token");
     }
 
     [Fact]
@@ -79,15 +95,20 @@ public sealed class NotificationServiceTokenHandlerTests : IDisposable
         return path;
     }
 
-    private static HttpClient Client(string tokenFile, HttpMessageHandler downstream)
+    private static HttpClient Client(
+        string tokenFile,
+        HttpMessageHandler downstream,
+        params (string Key, string Value)[] extraConfig)
     {
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ServiceNotificationClient:ServiceTokenFile"] = tokenFile,
-            })
-            .Build();
-        var handler = new NotificationServiceTokenHandler(config)
+        var values = new Dictionary<string, string?>
+        {
+            ["ServiceNotificationClient:ServiceTokenFile"] = tokenFile,
+        };
+        foreach (var (key, value) in extraConfig) values[key] = value;
+        var config = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+        var handler = new NotificationServiceTokenHandler(
+            config,
+            NullLogger<NotificationServiceTokenHandler>.Instance)
         {
             InnerHandler = downstream,
         };

@@ -42,10 +42,51 @@ public sealed class NotificationDurableWriteStartupAlarmTests
     }
 
     [Fact]
-    public async Task Enabled_InProdLikeEnvironment_DoesNotLogAlarm()
+    public async Task Enabled_WithResolvableCredential_DoesNotLogAlarm()
+    {
+        var logger = new RecordingLogger<NotificationDurableWriteStartupAlarm>();
+        var alarm = NewAlarm(enabled: true, Environments.Production, logger,
+            ("ServiceNotificationClient:ServiceToken", "startup-alarm-resolvable-token"));
+
+        await alarm.StartAsync(CancellationToken.None);
+
+        logger.Entries.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Enabled_WithUnresolvableCredential_LogsCriticalCredentialAlarm()
     {
         var logger = new RecordingLogger<NotificationDurableWriteStartupAlarm>();
         var alarm = NewAlarm(enabled: true, Environments.Production, logger);
+
+        await alarm.StartAsync(CancellationToken.None);
+
+        logger.Entries.Should().ContainSingle(entry =>
+            entry.Level == LogLevel.Critical
+            && Equals(
+                entry.Properties["event"],
+                NotificationDurableWriteStartupAlarm.CredentialAlarmEvent)
+            && Equals(entry.Properties["environment"], Environments.Production));
+    }
+
+    [Fact]
+    public async Task Enabled_WithMissingTokenFileButEnvFallback_DoesNotLogCredentialAlarm()
+    {
+        var logger = new RecordingLogger<NotificationDurableWriteStartupAlarm>();
+        var alarm = NewAlarm(enabled: true, Environments.Production, logger,
+            ("ServiceNotificationClient:ServiceTokenFile", "/run/secrets/notification_service_token"),
+            ("ServiceNotificationClient:ApiToken", "native-msi-token"));
+
+        await alarm.StartAsync(CancellationToken.None);
+
+        logger.Entries.Should().NotContain(entry => entry.Level == LogLevel.Critical);
+    }
+
+    [Fact]
+    public async Task Enabled_InExemptEnvironment_DoesNotResolveCredential()
+    {
+        var logger = new RecordingLogger<NotificationDurableWriteStartupAlarm>();
+        var alarm = NewAlarm(enabled: true, "Testing", logger);
 
         await alarm.StartAsync(CancellationToken.None);
 
@@ -55,13 +96,16 @@ public sealed class NotificationDurableWriteStartupAlarmTests
     private static NotificationDurableWriteStartupAlarm NewAlarm(
         bool enabled,
         string environmentName,
-        RecordingLogger<NotificationDurableWriteStartupAlarm> logger)
+        RecordingLogger<NotificationDurableWriteStartupAlarm> logger,
+        params (string Key, string Value)[] extraConfig)
     {
+        var values = new Dictionary<string, string?>
+        {
+            [NotificationRecordWriter.EnabledConfigurationKey] = enabled.ToString(),
+        };
+        foreach (var (key, value) in extraConfig) values[key] = value;
         var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                [NotificationRecordWriter.EnabledConfigurationKey] = enabled.ToString(),
-            })
+            .AddInMemoryCollection(values)
             .Build();
         return new NotificationDurableWriteStartupAlarm(
             configuration,

@@ -206,8 +206,8 @@ public sealed class NotificationRecordWriterTests
     // against `jeeb.settlement_paid` (stored, one POST), differing in exactly one input.
     // The owner then ruled that a delivery-status change IS a readable inbox row, so
     // `delivery` moved to shade+stored — and with it, the LAST silent-classified catalog
-    // template key disappeared. `newRequest` is still silent but has no template key and no
-    // centre writer.
+    // template key disappeared. (`newRequest` stayed silent until its own 2026-08-23
+    // reversal; no category is silent today.)
     //
     // Consequence, stated plainly rather than hidden behind a green suite: the silent
     // branch of NotificationRecordWriter.WriteAsync is now UNREACHABLE for every real

@@ -18,30 +18,22 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public sealed class PushSilencePolicyTests
 {
-    // Owner ruling D4 (2026-07-26) as REVERSED for `delivery` on 2026-07-27.
-    // `newRequest` is now the only silent-only category; `delivery` moved to the stored
-    // list below. Asserted as a single-item Theory rather than folded into a Fact so that
-    // re-silencing a category is a one-line, reviewable diff here.
-    [Theory]
-    [InlineData(PushSilencePolicy.CategoryNewRequest)]
-    public void D4_SilentOnlyCategories_AreSilent(string category)
-        => PushSilencePolicy.ModeForCategory(category).Should()
-            .Be(PushDeliveryMode.SilentRefresh);
-
-    // The silent list above is now ONE entry, and a shrinking allow-list is the shape that
-    // rots into a vacuous test. Pin the count so that dropping `newRequest` — which would
-    // make D4_SilentOnlyCategories_AreSilent vanish rather than fail — is itself a failure.
+    // 2026-08-23 reversal: `newRequest` was the last silent-only category; its silent
+    // data-only fan-out never rendered on-device, so jeebers missed new requests entirely.
     [Fact]
-    public void ExactlyOneCategoryIsSilent_AndItIsNewRequest()
+    public void NoCategoryIsSilent_AfterTheNewRequestReversal()
         => PushSilencePolicy.Categories
             .Where(category => PushSilencePolicy.ModeForCategory(category)
                 == PushDeliveryMode.SilentRefresh)
-            .Should().BeEquivalentTo(new[] { PushSilencePolicy.CategoryNewRequest },
-                "2026-07-27 reversal: `delivery` is shade+stored, so `newRequest` is the "
-                + "only silent-only category left. A second entry here means someone "
-                + "silenced a human-addressed category");
+            .Should().BeEmpty(
+                "2026-08-23 reversal: `newRequest` moved to shade+stored because its "
+                + "silent fan-out never rendered; any entry here silences a "
+                + "human-addressed category and must be an explicit owner ruling");
 
     [Theory]
+    // `newRequest` moved from the silent list on 2026-08-23 (measured: a silent fan-out
+    // push never reaches the shade, so the reverse auction starved unnoticed).
+    [InlineData(PushSilencePolicy.CategoryNewRequest)]
     // Moved from the silent list by the owner ruling of 2026-07-27: a delivery-status
     // change IS a readable inbox row. This row is what makes the
     // jeeb.delivery_status_updated centre writer legal.
@@ -212,11 +204,10 @@ public sealed class PushSilencePolicyTests
     [Fact]
     public void NoCatalogTypeIsSilentToday_AndTheGateIsKeptAnyway()
         // The honest post-reversal state, pinned so nobody infers it from a green suite.
-        // Every catalog template key is now ShadeAndStored, so NotificationRecordWriter's
-        // silent gate suppresses nothing in production — `newRequest` is silent but has no
-        // template key and no centre writer. That makes the gate dormant, which is the
-        // intended state of a guard, NOT dead code to delete. This test also means the day
-        // a genuinely silent type is introduced, someone must come here and say so.
+        // Every catalog template key AND every category is now ShadeAndStored (2026-08-23),
+        // so NotificationRecordWriter's silent gate suppresses nothing in production.
+        // That makes the gate dormant, which is the intended state of a guard, NOT dead
+        // code to delete. The day a silent type is introduced, someone must come here.
         => PushSilencePolicy.TemplateKeys.Where(PushSilencePolicy.IsSilent).Should().BeEmpty(
             "after the 2026-07-27 reversal no catalog notification type is silent; if this "
             + "is red you have added one, and you must also add a writer-level test proving "
