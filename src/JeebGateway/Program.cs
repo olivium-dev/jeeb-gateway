@@ -397,6 +397,12 @@ builder.Services.AddHealthChecks()
     .AddCheck<JeebGateway.Auth.Oidc.AdminOidcConfigurationHealthCheck>(
         "admin-oidc-configuration",
         failureStatus: HealthStatus.Unhealthy,
+        tags: new[] { "ready" })
+    // 608debf outage: the credential chain failed closed while every health surface stayed
+    // green (the notification-service URL probe hits the token-free public /health).
+    .AddCheck<JeebGateway.Notifications.NotificationCredentialHealthCheck>(
+        JeebGateway.Notifications.NotificationCredentialHealthCheck.Name,
+        failureStatus: HealthStatus.Unhealthy,
         tags: new[] { "ready" });
 
 // ---------------------------------------------------------------------------

@@ -35,6 +35,9 @@ public static class GatewayHealthRoster
     public static readonly string[] InProcessChecks =
     {
         "admin-oidc-configuration",
+        // 2026-08-23: proves the notification owner credential resolves (608debf outage
+        // stayed green because no surface exercised the fail-closed credential chain).
+        JeebGateway.Notifications.NotificationCredentialHealthCheck.Name,
         "whisper",
         "jeeb-state-service",
     };
@@ -50,6 +53,7 @@ public static class GatewayHealthRoster
     /// undercounted: bundler-service was registered but undeclared.) 19 from the D1 fix,
     /// which added a role-service probe; back to 18 on 2026-08-16 when owner decision O8
     /// retired role-service outright — that probe was the aggregate's only Degraded entry,
-    /// verified against a real /health/ready read before and after.</summary>
-    public const int ExpectedReadyCount = 18;
+    /// verified against a real /health/ready read before and after. 19 from 2026-08-23:
+    /// notification-credential joined after the 608debf silent push outage.</summary>
+    public const int ExpectedReadyCount = 19;
 }
