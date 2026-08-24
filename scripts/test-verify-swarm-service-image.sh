@@ -21,7 +21,22 @@ case "$*" in
     [ "$mode" = mismatch ] && echo ghcr.io/olivium-dev/other@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa || echo "$image"
     ;;
   "service inspect service123 --format "*UpdateStatus*)
-    [ "$mode" = paused ] && echo paused || echo completed
+    case "$mode" in
+      paused) echo paused ;;
+      rollback_paused) echo rollback_paused ;;
+      rollback_completed) echo rollback_completed ;;
+      rollback_sequence)
+        state_file=${MOCK_STATE_FILE:?MOCK_STATE_FILE is required for rollback_sequence}
+        count=$(cat "$state_file")
+        if [ "$count" -eq 0 ]; then
+          echo 1 > "$state_file"
+          echo rollback_started
+        else
+          echo rollback_completed
+        fi
+        ;;
+      *) echo completed ;;
+    esac
     ;;
   "service inspect service123 --format "*Replicated.Replicas*) echo 1 ;;
   "service ps service123 --filter desired-state=running --format "*)
@@ -39,10 +54,22 @@ case "$*" in
 esac
 MOCK
 chmod +x "$TMP_DIR/bin/docker"
+cat > "$TMP_DIR/bin/sleep" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+chmod +x "$TMP_DIR/bin/sleep"
 
 PATH="$TMP_DIR/bin:$PATH" "$HERE/verify-swarm-service-image.sh" svc "$IMAGE"
 
-for mode in mismatch paused multiple wrong_service; do
+for mode in rollback_completed rollback_sequence; do
+  state_file="$TMP_DIR/${mode}.state"
+  printf '%s\n' 0 > "$state_file"
+  MOCK_MODE="$mode" MOCK_STATE_FILE="$state_file" PATH="$TMP_DIR/bin:$PATH" \
+    "$HERE/verify-swarm-service-image.sh" svc "$IMAGE"
+done
+
+for mode in mismatch paused rollback_paused multiple wrong_service; do
   if MOCK_MODE="$mode" PATH="$TMP_DIR/bin:$PATH" "$HERE/verify-swarm-service-image.sh" \
     svc "$IMAGE" >/dev/null 2>&1; then
     echo "expected verifier to reject $mode state" >&2

@@ -240,6 +240,37 @@ smoke = Path(".github/workflows/jeeb-staging-state-auth-smoke.yml").read_text()
 if "scripts/verify-swarm-service-image.sh" not in smoke or "--image" in smoke:
     raise SystemExit("FAIL: state-auth restart route lacks exact current-image verification")
 
+runtime_verifier = Path("scripts/verify-swarm-service-image.sh").read_text()
+
+
+def validate_runtime_verifier(text):
+    required = (
+        "initial|completed|rollback_completed) break",
+        "updating|rollback_started) sleep 4",
+        "initial|completed|rollback_completed) ;;",
+    )
+    missing = [token for token in required if token not in text]
+    if missing:
+        raise ValueError(f"rollback-aware runtime verifier drifted: {missing}")
+
+
+validate_runtime_verifier(runtime_verifier)
+for description, mutated in (
+    (
+        "rollback completed acceptance removed",
+        runtime_verifier.replace("|rollback_completed", ""),
+    ),
+    (
+        "rollback started polling removed",
+        runtime_verifier.replace("|rollback_started", ""),
+    ),
+):
+    try:
+        validate_runtime_verifier(mutated)
+    except ValueError:
+        continue
+    raise SystemExit(f"FAIL: runtime verifier negative control survived: {description}")
+
 deploy_text = {name: (workflow_dir / name).read_text() for name in expected_inventory}
 for name, text in deploy_text.items():
     if ":" + "latest" in text.lower():
@@ -259,6 +290,14 @@ for token in (
     '--' + 'rollback-order stop-first',
     'docker service ' + 'rollback --detach=false "\\$SVC"',
     'Deployed service spec does not match the requested immutable digest',
+    'REQUESTED_SERVICE: ${{ inputs.service_name }}',
+    'REQUESTED_HOST: ${{ inputs.server_hostname }}',
+    'STAGING_SSH_HOST: ${{ secrets.JEEB_STAGING_SSH_HOST }}',
+    '[ "$REQUESTED_SERVICE" = jeeb-staging-jeeb-gateway ]',
+    '[ "$REQUESTED_HOST" = "$STAGING_SSH_HOST" ]',
+    "*[!a-zA-Z0-9_.-]*)",
+    'canonical_service=$(ssh jeeb',
+    '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
 ):
     if token not in direct:
         raise SystemExit(f"FAIL: direct production deploy lacks commit/image/runtime proof: {token}")
@@ -358,7 +397,11 @@ for required_rollout in (
     "--update-order stop-first",
     "--update-failure-action " + "rollback",
     "--" + "rollback-order stop-first",
-    "docker service " + "rollback --detach=false \"$service\"",
+    "docker service inspect '$service' --format '{{json .Spec}}'",
+    "update?version=\\${expected_version}&rollback=" + "previous",
+    "registryAuthFrom=previous-spec",
+    "rollback CAS outcome did not reconcile to the exact incumbent",
+    "docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'",
     "Incumbent service image is not digest-pinned",
 ):
     if required_rollout not in staging_authority:
@@ -405,6 +448,12 @@ def validate_direct_rollout(text):
         "--" + "rollback-order stop-first",
         "docker service " + 'rollback --detach=false "\\$SVC"',
         "rollback_armed=false",
+        "Reject the staging bootstrap target",
+        '[ "$REQUESTED_SERVICE" = jeeb-staging-jeeb-gateway ]',
+        '[ "$REQUESTED_HOST" = "$STAGING_SSH_HOST" ]',
+        "*[!a-zA-Z0-9_.-]*)",
+        'canonical_service=$(ssh jeeb',
+        '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
     )
     missing = [token for token in required if token not in text]
     forbidden = [
@@ -418,6 +467,17 @@ def validate_direct_rollout(text):
     ]
     if missing or forbidden:
         raise ValueError(f"missing={missing}, forbidden={forbidden}")
+    staging_guard = text.index(
+        '[ "$REQUESTED_SERVICE" = jeeb-staging-jeeb-gateway ]'
+    )
+    host_guard = text.index('[ "$REQUESTED_HOST" = "$STAGING_SSH_HOST" ]')
+    first_external_mutation = text.index("docker login")
+    if not staging_guard < first_external_mutation or not host_guard < first_external_mutation:
+        raise ValueError("staging target guards must run before any external mutation")
+    canonical_guard = text.index('[ "$canonical_service" = jeeb-staging-jeeb-gateway ]')
+    first_remote_mutation = text.index("Remote GHCR login")
+    if not canonical_guard < first_remote_mutation:
+        raise ValueError("canonical staging service guard must precede remote mutation")
 
 
 def validate_staging_rollout(text):
@@ -427,6 +487,13 @@ def validate_staging_rollout(text):
         "remove_secret_target jeeb_gateway_umjwt",
         "--update-failure-action " + "rollback",
         "--" + "rollback-order stop-first",
+        "capture_remote_spec() {",
+        "docker service inspect '$service' --format '{{json .Spec}}'",
+        "update?version=\\${expected_version}&rollback=" + "previous",
+        "registryAuthFrom=previous-spec",
+        "docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'",
+        "probe_staging_realtime_descriptor",
+        "verify_bootstrap_flags",
     )
     missing = [token for token in required if token not in text]
     if missing or text.count(probe_command) != 2:
@@ -468,6 +535,52 @@ negative_controls = (
         "direct deploy reintroduces service creation",
         validate_direct_rollout,
         direct + "\n" + "docker service " + "create app\n",
+    ),
+    (
+        "direct staging service guard removed",
+        validate_direct_rollout,
+        direct.replace(
+            '[ "$REQUESTED_SERVICE" = jeeb-staging-jeeb-gateway ]',
+            '[ "$REQUESTED_SERVICE" = jeeb-staging-jeeb-gatewa ]',
+            1,
+        ),
+    ),
+    (
+        "direct staging host guard removed",
+        validate_direct_rollout,
+        direct.replace(
+            '[ "$REQUESTED_HOST" = "$STAGING_SSH_HOST" ]',
+            '[ "$REQUESTED_HOST" = "" ]',
+            1,
+        ),
+    ),
+    (
+        "direct staging service guard moved after first mutation",
+        validate_direct_rollout,
+        direct.replace(
+            '[ "$REQUESTED_SERVICE" = jeeb-staging-jeeb-gateway ]',
+            ':',
+            1,
+        ).replace(
+            "docker login ${{ env.REGISTRY }}",
+            "docker login ${{ env.REGISTRY }}\n"
+            + '[ "$REQUESTED_SERVICE" = jeeb-staging-jeeb-gateway ]',
+            1,
+        ),
+    ),
+    (
+        "direct canonical staging alias guard removed",
+        validate_direct_rollout,
+        direct.replace(
+            '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
+            '[ "$canonical_service" = jeeb-staging-jeeb-gatewa ]',
+            1,
+        ),
+    ),
+    (
+        "direct service-name input validation removed",
+        validate_direct_rollout,
+        direct.replace("*[!a-zA-Z0-9_.-]*)", "*)", 1),
     ),
     (
         "staging token mint gate disabled",

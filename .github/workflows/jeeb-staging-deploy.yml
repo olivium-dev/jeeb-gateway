@@ -197,46 +197,353 @@ jobs:
             secret_stage=$(mktemp -d)
             chmod 700 "$secret_stage"
             firebase_file="$secret_stage/firebase-admin.json"
+            probe_key_file="$secret_stage/staging-wss-probe-mint.key"
+            incumbent_spec="$secret_stage/incumbent-service-spec.json"
+            incumbent_version="$secret_stage/incumbent-service-version"
+            incumbent_id="$secret_stage/incumbent-service-id"
+            candidate_spec="$secret_stage/candidate-service-spec.json"
+            candidate_version="$secret_stage/candidate-service-version"
+            candidate_id="$secret_stage/candidate-service-id"
+            recovery_spec="$secret_stage/recovery-service-spec.json"
+            recovery_version="$secret_stage/recovery-service-version"
+            recovery_id="$secret_stage/recovery-service-id"
+            confirm_spec="$secret_stage/confirm-service-spec.json"
+            confirm_version="$secret_stage/confirm-service-version"
+            confirm_id="$secret_stage/confirm-service-id"
+            restored_spec="$secret_stage/restored-service-spec.json"
+            restored_version="$secret_stage/restored-service-version"
+            restored_id="$secret_stage/restored-service-id"
+            pre_update_spec="$secret_stage/pre-update-service-spec.json"
+            pre_update_version="$secret_stage/pre-update-service-version"
+            pre_update_id="$secret_stage/pre-update-service-id"
+            final_spec="$secret_stage/final-service-spec.json"
+            final_version="$secret_stage/final-service-version"
+            final_id="$secret_stage/final-service-id"
+            capture_remote_spec() {
+              local destination=$1 version_destination=$2 id_destination=$3
+              local attempt before after before_id after_id snapshot identity
+              for attempt in 1 2 3; do
+                : "$attempt"
+                snapshot=$(mktemp "$secret_stage/.service-spec.XXXXXX")
+                chmod 600 "$snapshot"
+                # Stable Service.ID + Version.Index reads bound each private full-Spec snapshot.
+                # shellcheck disable=SC2029
+                identity=$(ssh jeeb-staging \
+                  "docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'" \
+                  2>/dev/null) || identity=''
+                before_id=''; before=''
+                read -r before_id before <<< "$identity" || true
+                # shellcheck disable=SC2029
+                if [[ "$before_id" =~ ^[a-z0-9]+$ ]] && [[ "$before" =~ ^[0-9]+$ ]] \
+                  && ssh jeeb-staging \
+                    "docker service inspect '$service' --format '{{json .Spec}}'" \
+                    > "$snapshot" 2>/dev/null; then
+                  # shellcheck disable=SC2029
+                  identity=$(ssh jeeb-staging \
+                    "docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'" \
+                    2>/dev/null) || identity=''
+                  after_id=''; after=''
+                  read -r after_id after <<< "$identity" || true
+                  if [ "$before_id" = "$after_id" ] && [ "$before" = "$after" ] \
+                    && jq -e 'type == "object"' "$snapshot" >/dev/null; then
+                    mv "$snapshot" "$destination"
+                    chmod 600 "$destination"
+                    (umask 077; printf '%s\n' "$before" > "$version_destination")
+                    (umask 077; printf '%s\n' "$before_id" > "$id_destination")
+                    return 0
+                  fi
+                fi
+                rm -f -- "$snapshot"
+              done
+              return 1
+            }
+            verify_exact_candidate_before_disarm() {
+              capture_remote_spec "$final_spec" "$final_version" "$final_id" \
+                && cmp -s "$final_spec" "$candidate_spec" \
+                && cmp -s "$final_version" "$candidate_version" \
+                && cmp -s "$final_id" "$candidate_id"
+            }
             recover_exact_incumbent() {
               local recovery_ok=true
-              ssh jeeb-staging bash -s -- \
-                "$service" "$previous_image" "$published" "$health" <<'RECOVERY' \
-                || recovery_ok=false
-              set -euo pipefail
-              service=$1
-              expected_image=$2
-              published=$3
-              health=$4
-              rollback_ok=true
-              recovery_mode=automatic
-              [[ "$expected_image" =~ @sha256:[0-9a-f]{64}$ ]]
-              current_image=$(docker service inspect "$service" \
-                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)
-              if [ "$current_image" != "$expected_image" ]; then
-                recovery_mode=manual
-                docker service rollback --detach=false "$service" || rollback_ok=false
+              local recovery_mode current_image incumbent_hash restored_hash
+              local candidate_index confirm_index candidate_service_id confirm_service_id
+              local incumbent_service_id recovery_service_id restored_service_id
+              local cas_status restored_exact=false reconcile_cas=false
+              incumbent_service_id=$(<"$incumbent_id")
+              if ! capture_remote_spec "$recovery_spec" "$recovery_version" "$recovery_id"; then
+                echo 'RED: authoritative service Spec unavailable; recovery made no mutation' >&2
+                return 1
               fi
-              [ "$(docker service inspect "$service" \
-                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)" = "$expected_image" ] \
-                || rollback_ok=false
-              rollback_ready=false
-              for attempt in $(seq 1 40); do
-                if curl -fsS --max-time 5 \
-                  "http://127.0.0.1:${published}${health}" >/dev/null; then
-                  rollback_ready=true
-                  break
+              recovery_service_id=$(<"$recovery_id")
+              if [ "$recovery_service_id" = "$incumbent_service_id" ] \
+                && cmp -s "$recovery_spec" "$incumbent_spec"; then
+                recovery_mode=automatic
+              elif [ -s "$candidate_spec" ] && [ -s "$candidate_id" ]; then
+                candidate_service_id=$(<"$candidate_id")
+                if [ "$recovery_service_id" != "$candidate_service_id" ] \
+                  || ! cmp -s "$recovery_spec" "$candidate_spec"; then
+                  echo 'RED: service identity/Spec is neither exact incumbent nor exact candidate; recovery made no mutation' >&2
+                  return 1
                 fi
-                sleep 4
-              done
-              [ "$rollback_ready" = true ] || rollback_ok=false
-              [ "$rollback_ok" = true ]
-              echo "Verified ${recovery_mode} recovery to ${expected_image##*@}" >&2
+                if ! capture_remote_spec "$confirm_spec" "$confirm_version" "$confirm_id" \
+                  || ! cmp -s "$confirm_spec" "$candidate_spec"; then
+                  echo 'RED: service Spec drifted before rollback; recovery made no mutation' >&2
+                  return 1
+                fi
+                candidate_index=$(<"$candidate_version")
+                confirm_index=$(<"$confirm_version")
+                confirm_service_id=$(<"$confirm_id")
+                if [ "$candidate_index" != "$confirm_index" ] \
+                  || [ "$candidate_service_id" != "$confirm_service_id" ] \
+                  || ! [[ "$candidate_index" =~ ^[0-9]+$ ]]; then
+                  echo 'RED: service identity/Version.Index drifted before rollback; recovery made no mutation' >&2
+                  return 1
+                fi
+                recovery_mode=manual
+                # Docker's rollback CLI performs an unsafe fresh inspect before its
+                # update. Call the Engine API with the exact candidate Version.Index
+                # instead, so a third-state race is rejected atomically with 409.
+                # shellcheck disable=SC2029
+                cas_status=$(ssh jeeb-staging "set -euo pipefail
+                  service_id='$candidate_service_id'
+                  expected_version='$candidate_index'
+                  api_version=\$(docker version --format '{{.Server.APIVersion}}')
+                  [[ \"\$service_id\" =~ ^[a-z0-9]+\$ ]]
+                  [[ \"\$api_version\" =~ ^[0-9]+\\.[0-9]+\$ ]]
+                  curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+                    --unix-socket /var/run/docker.sock \
+                    --request POST --header 'Content-Type: application/json' \
+                    --data-binary @- \
+                    \"http://localhost/v\${api_version}/services/\${service_id}/update?version=\${expected_version}&rollback=previous&registryAuthFrom=previous-spec\"" \
+                    < "$candidate_spec") || cas_status=''
+                case "$cas_status" in
+                  200) ;;
+                  409)
+                    reconcile_cas=true
+                    ;;
+                  *)
+                    reconcile_cas=true
+                    ;;
+                esac
+              else
+                echo 'RED: service Spec is neither exact incumbent nor exact candidate; recovery made no mutation' >&2
+                return 1
+              fi
+              if [ "$reconcile_cas" = true ]; then
+                if ! capture_remote_spec "$restored_spec" "$restored_version" "$restored_id"; then
+                  echo 'RED: rollback CAS outcome is ambiguous and authoritative state is unavailable; no retry was attempted' >&2
+                  return 1
+                fi
+                restored_service_id=$(<"$restored_id")
+                if [ "$restored_service_id" = "$incumbent_service_id" ] \
+                  && cmp -s "$restored_spec" "$incumbent_spec"; then
+                  recovery_mode=ambiguous-reconciled
+                  restored_exact=true
+                else
+                  echo 'RED: rollback CAS outcome did not reconcile to the exact incumbent; no retry was attempted' >&2
+                  return 1
+                fi
+              fi
+              if [ "$recovery_ok" = true ]; then
+                for recovery_attempt in $(seq 1 40); do
+                  : "$recovery_attempt"
+                  if [ "$restored_exact" = true ]; then
+                    break
+                  fi
+                  if ! capture_remote_spec "$restored_spec" "$restored_version" "$restored_id"; then
+                    recovery_ok=false
+                    break
+                  fi
+                  restored_service_id=$(<"$restored_id")
+                  if [ "$restored_service_id" = "$incumbent_service_id" ] \
+                    && cmp -s "$restored_spec" "$incumbent_spec"; then
+                    restored_exact=true
+                    break
+                  fi
+                  if [ "$recovery_mode" != manual ] \
+                    || [ "$restored_service_id" != "$candidate_service_id" ] \
+                    || ! cmp -s "$restored_spec" "$candidate_spec"; then
+                    recovery_ok=false
+                    break
+                  fi
+                  sleep 4
+                done
+                [ "$restored_exact" = true ] || recovery_ok=false
+              fi
+              if [ "$recovery_ok" = true ]; then
+                incumbent_hash=$(sha256sum "$incumbent_spec" | awk '{print $1}')
+                restored_hash=$(sha256sum "$restored_spec" | awk '{print $1}')
+                [ "$incumbent_hash" = "$restored_hash" ] \
+                  && cmp -s "$restored_spec" "$incumbent_spec" \
+                  || recovery_ok=false
+              fi
+              if [ "$recovery_ok" = true ]; then
+                current_image=$(jq -er '.TaskTemplate.ContainerSpec.Image' "$restored_spec") \
+                  || recovery_ok=false
+                [ "$current_image" = "$previous_image" ] || recovery_ok=false
+              fi
+              if [ "$recovery_ok" = true ]; then
+                ssh jeeb-staging bash -s -- "$service" "$previous_image" \
+                  < scripts/verify-swarm-service-image.sh \
+                  || recovery_ok=false
+              fi
+              if [ "$recovery_ok" = true ]; then
+                ssh jeeb-staging bash -s -- "$published" "$health" <<'RECOVERY' \
+                  || recovery_ok=false
+                set -euo pipefail
+                published=$1
+                health=$2
+                rollback_ready=false
+                for attempt in $(seq 1 40); do
+                  if curl -fsS --max-time 5 \
+                    "http://127.0.0.1:${published}${health}" >/dev/null; then
+                    rollback_ready=true
+                    break
+                  fi
+                  sleep 4
+                done
+                [ "$rollback_ready" = true ]
           RECOVERY
+              fi
               if [ "$recovery_ok" = true ]; then
                 bash scripts/probe-staging-public-gateway-contract.sh \
                   || recovery_ok=false
               fi
+              if [ "$recovery_ok" = true ]; then
+                echo "Verified ${recovery_mode} recovery to the exact incumbent Spec" >&2
+              fi
               [ "$recovery_ok" = true ]
+            }
+            verify_bootstrap_flags() {
+              ssh jeeb-staging bash -s -- "$service" <<'FLAGS'
+                set -euo pipefail
+                service=$1
+                environment=$(docker service inspect "$service" \
+                  --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')
+                for expected_key in FeatureFlags__UseUpstream__Chat \
+                  FeatureFlags__UseUpstream__Realtime; do
+                  printf '%s\n' "$environment" | awk -F= -v expected="$expected_key" '
+                    tolower($1) == tolower(expected) {
+                      matches++
+                      if ($2 == "false") exact_false++
+                    }
+                    END { exit !(matches == 1 && exact_false == 1) }
+                  '
+                done
+          FLAGS
+            }
+            probe_staging_realtime_descriptor() {
+              STAGING_REALTIME_PROBE_KEY_FILE="$probe_key_file" python3 - <<'PY'
+          import hashlib
+          import hmac
+          import http.client
+          import json
+          import os
+          import ssl
+          import time
+          import uuid
+          from datetime import datetime, timezone
+
+          HOST = "app.jeeb.fds-1.com"
+          PATH = "/internal/ops/staging/realtime-probe-descriptor"
+          KEY_FILE = os.environ["STAGING_REALTIME_PROBE_KEY_FILE"]
+          MAX_BODY_BYTES = 1024 * 1024
+
+
+          def request(headers):
+              connection = http.client.HTTPSConnection(
+                  HOST,
+                  443,
+                  timeout=20,
+                  context=ssl.create_default_context(),
+              )
+              try:
+                  connection.request("POST", PATH, body=b"", headers=headers)
+                  response = connection.getresponse()
+                  body = response.read(MAX_BODY_BYTES + 1)
+                  if len(body) > MAX_BODY_BYTES:
+                      raise RuntimeError("descriptor response exceeded the private validation bound")
+                  response_headers = {name.lower(): value for name, value in response.getheaders()}
+                  return response.status, response_headers, body
+              finally:
+                  connection.close()
+
+
+          with open(KEY_FILE, "rb") as key_stream:
+              key = key_stream.read(4097)
+          if not 32 <= len(key) <= 4096:
+              raise RuntimeError("private descriptor key length is outside the accepted contract")
+
+          malformed_status, _, _ = request({})
+          if malformed_status != 400:
+              raise RuntimeError("malformed descriptor request did not return 400")
+
+          timestamp = str(int(time.time()))
+          forged_nonce = str(uuid.uuid4())
+          forged_headers = {
+              "X-Jeeb-Staging-Probe-Timestamp": timestamp,
+              "X-Jeeb-Staging-Probe-Nonce": forged_nonce,
+              "X-Jeeb-Staging-Probe-Signature": "0" * 64,
+          }
+          forged_status, _, _ = request(forged_headers)
+          if forged_status != 403:
+              raise RuntimeError("forged descriptor signature did not return 403")
+
+          nonce = str(uuid.uuid4())
+          timestamp = str(int(time.time()))
+          canonical = f"v1\nPOST\n{PATH}\n{timestamp}\n{nonce}".encode()
+          signature = hmac.new(key, canonical, hashlib.sha256).hexdigest()
+          headers = {
+              "X-Jeeb-Staging-Probe-Timestamp": timestamp,
+              "X-Jeeb-Staging-Probe-Nonce": nonce,
+              "X-Jeeb-Staging-Probe-Signature": signature,
+          }
+          status, response_headers, body = request(headers)
+          if status != 200:
+              raise RuntimeError("valid descriptor request did not return 200")
+          if "no-store" not in {
+              directive.strip().lower()
+              for directive in response_headers.get("cache-control", "").split(",")
+          }:
+              raise RuntimeError("descriptor response is missing Cache-Control: no-store")
+          if response_headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
+              raise RuntimeError("descriptor response is not application/json")
+
+          descriptor = json.loads(body)
+          expected_fields = {
+              "conversationId",
+              "topic",
+              "roleInConvo",
+              "socketUrl",
+              "token",
+              "ticket",
+              "expiresAt",
+          }
+          if set(descriptor) != expected_fields:
+              raise RuntimeError("descriptor response fields drifted")
+          conversation_id = "edge-probe-" + nonce
+          if descriptor["conversationId"] != conversation_id:
+              raise RuntimeError("descriptor conversationId does not bind the signed nonce")
+          if descriptor["topic"] != "jeeb:chat:" + conversation_id:
+              raise RuntimeError("descriptor topic does not bind the signed nonce")
+          if descriptor["roleInConvo"] != "client":
+              raise RuntimeError("descriptor role is not the subscribe-only client role")
+          if descriptor["socketUrl"] != "wss://app.jeeb.fds-1.com/socket/websocket":
+              raise RuntimeError("descriptor socket URL drifted")
+          for credential in ("token", "ticket"):
+              if not isinstance(descriptor[credential], str) or not descriptor[credential].strip():
+                  raise RuntimeError("descriptor returned an empty credential")
+          expires_at = datetime.fromisoformat(descriptor["expiresAt"].replace("Z", "+00:00"))
+          ttl = (expires_at.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+          if not 30 <= ttl <= 900:
+              raise RuntimeError("descriptor credential TTL is outside the accepted contract")
+
+          replay_status, _, _ = request(headers)
+          if replay_status != 409:
+              raise RuntimeError("replayed descriptor request did not return 409")
+
+          print("staging_realtime_descriptor_contract=ok")
+          PY
             }
             finish_deploy() {
               local status=$?
@@ -280,6 +587,7 @@ jobs:
               exit 1
             fi
             chmod 600 "$firebase_file"
+            (umask 077; printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" > "$probe_key_file")
             stream_secret "$state_secret_name" "$JEEB_STATE_SERVICE_TOKEN"
             stream_secret "$notification_secret_name" "$NOTIFICATION_SERVICE_TOKEN"
             stream_secret "$settlement_secret_name" "$SETTLEMENT_SERVICE_TOKEN"
@@ -297,18 +605,26 @@ jobs:
               JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_STAGING_WSS_PROBE_MINT_KEY \
               JEEB_RTC_MEMBERSHIP_TICKET_KEY \
               JEEB_FIREBASE_JSON
-            # The fixed service name is intentionally expanded by the runner.
-            # shellcheck disable=SC2029
-            previous_image=$(ssh jeeb-staging \
-              "docker service inspect '$service' --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}'")
+            capture_remote_spec "$incumbent_spec" "$incumbent_version" "$incumbent_id" || {
+              echo 'Incumbent service Spec could not be captured at a stable Version.Index' >&2
+              exit 1
+            }
+            previous_image=$(jq -er '.TaskTemplate.ContainerSpec.Image' "$incumbent_spec")
             [[ "$previous_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
               echo 'Incumbent service image is not digest-pinned; recovery target is unsafe' >&2
               exit 1
             }
           fi
-          rollback_armed=true
+          if ! capture_remote_spec "$pre_update_spec" "$pre_update_version" "$pre_update_id" \
+            || ! cmp -s "$pre_update_spec" "$incumbent_spec" \
+            || ! cmp -s "$pre_update_version" "$incumbent_version" \
+            || ! cmp -s "$pre_update_id" "$incumbent_id"; then
+            echo 'RED: incumbent service Spec drifted before update; deploy made no mutation' >&2
+            exit 1
+          fi
           EXPECTED_PREVIOUS_IMAGE=$previous_image
           : "$EXPECTED_PREVIOUS_IMAGE"
+          rollback_armed=true
           {
             for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY EXPECTED_PREVIOUS_IMAGE \
               state_secret_name notification_secret_name settlement_secret_name \
@@ -468,9 +784,10 @@ jobs:
               add_env FeatureFlags__UseUpstream__Voice true
               add_env FeatureFlags__UseUpstream__Delivery true
               add_env FeatureFlags__UseUpstream__Offer true
-              add_env FeatureFlags__UseUpstream__Chat true
+              # Bootstrap only. Activation is a separate, reviewed future change.
+              add_env FeatureFlags__UseUpstream__Chat false
               add_env FeatureFlags__UseUpstream__Otp true
-              add_env FeatureFlags__UseUpstream__Realtime true
+              add_env FeatureFlags__UseUpstream__Realtime false
               add_env FeatureFlags__UseUpstream__ContractSigning true
               add_env FeatureFlags__UseUpstream__FormBuilder true
               add_env FeatureFlags__UseUpstream__Cdn true
@@ -580,9 +897,21 @@ jobs:
           fi
           REMOTE
           } | ssh jeeb-staging bash -se
+          capture_remote_spec "$candidate_spec" "$candidate_version" "$candidate_id" || {
+            echo 'RED: candidate service Spec could not be captured authoritatively' >&2
+            exit 1
+          }
+          cmp -s "$candidate_id" "$incumbent_id" || {
+            echo 'RED: candidate service identity differs from the incumbent' >&2
+            exit 1
+          }
+          [ "$(jq -er '.TaskTemplate.ContainerSpec.Image' "$candidate_spec")" = "$IMAGE" ]
+          verify_bootstrap_flags
           ssh jeeb-staging bash -s -- jeeb-staging-jeeb-gateway "$IMAGE" \
             < scripts/verify-swarm-service-image.sh
           bash scripts/probe-staging-public-gateway-contract.sh
+          probe_staging_realtime_descriptor
+          verify_exact_candidate_before_disarm
           rollback_armed=false
 
       - name: Clean up isolated remote Docker credentials

@@ -221,6 +221,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Reject the staging bootstrap target
+        env:
+          REQUESTED_SERVICE: ${{ inputs.service_name }}
+          REQUESTED_HOST: ${{ inputs.server_hostname }}
+          STAGING_SSH_HOST: ${{ secrets.JEEB_STAGING_SSH_HOST }}
+        run: |
+          set -euo pipefail
+          : "${REQUESTED_SERVICE:?service_name is required}"
+          : "${REQUESTED_HOST:?server_hostname is required}"
+          case "$REQUESTED_SERVICE" in
+            *[!a-zA-Z0-9_.-]*)
+              echo '::error::service_name contains unsupported characters' >&2
+              exit 1
+              ;;
+          esac
+          if [ "$REQUESTED_SERVICE" = jeeb-staging-jeeb-gateway ]; then
+            echo '::error::The staging gateway can be changed only by jeeb-staging-deploy.yml bootstrap/activation phases' >&2
+            exit 1
+          fi
+          if [ -n "$STAGING_SSH_HOST" ] && [ "$REQUESTED_HOST" = "$STAGING_SSH_HOST" ]; then
+            echo '::error::The staging host can be changed only by staging-authorized workflows' >&2
+            exit 1
+          fi
+
       - name: Validate container-reachable upstream targets
         env:
           GATEWAY_TARGETS: |
@@ -329,6 +353,21 @@ jobs:
             StrictHostKeyChecking accept-new
           EOF
           chmod 600 ~/.ssh/config
+
+      - name: Reject aliases for the staging bootstrap service
+        env:
+          REQUESTED_SERVICE: ${{ inputs.service_name }}
+        run: |
+          set -euo pipefail
+          # Resolve names and Swarm IDs before registry login or secret/service mutation.
+          # shellcheck disable=SC2029
+          canonical_service=$(ssh jeeb \
+            "docker service inspect '$REQUESTED_SERVICE' --format '{{.Spec.Name}}'" \
+            2>/dev/null || true)
+          if [ "$canonical_service" = jeeb-staging-jeeb-gateway ]; then
+            echo '::error::The staging gateway can be changed only by jeeb-staging-deploy.yml bootstrap/activation phases' >&2
+            exit 1
+          fi
 
       - name: Remote GHCR login (token via stdin pipe)
         run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"

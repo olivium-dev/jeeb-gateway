@@ -201,6 +201,37 @@ public sealed class DurableOwnershipDeploymentContractTests
     }
 
     [Fact]
+    public void Generic_production_deploy_rejects_the_exact_staging_target_before_external_mutation()
+    {
+        var workflow = Workflow("deploy-to-jeeb.yml");
+        const string serviceGuard =
+            "[ \"$REQUESTED_SERVICE\" = jeeb-staging-jeeb-gateway ]";
+        const string hostGuard =
+            "[ \"$REQUESTED_HOST\" = \"$STAGING_SSH_HOST\" ]";
+        const string canonicalGuard =
+            "[ \"$canonical_service\" = jeeb-staging-jeeb-gateway ]";
+
+        workflow.Should().Contain("REQUESTED_SERVICE: ${{ inputs.service_name }}");
+        workflow.Should().Contain("REQUESTED_HOST: ${{ inputs.server_hostname }}");
+        workflow.Should().Contain("STAGING_SSH_HOST: ${{ secrets.JEEB_STAGING_SSH_HOST }}");
+        CountOccurrences(workflow, serviceGuard).Should().Be(1);
+        CountOccurrences(workflow, hostGuard).Should().Be(1);
+        CountOccurrences(workflow, canonicalGuard).Should().Be(1);
+        workflow.Should().Contain("*[!a-zA-Z0-9_.-]*)");
+        workflow.Should().Contain("canonical_service=$(ssh jeeb");
+
+        var firstExternalMutation = workflow.IndexOf("docker login", StringComparison.Ordinal);
+        workflow.IndexOf(serviceGuard, StringComparison.Ordinal)
+            .Should().BeLessThan(firstExternalMutation);
+        workflow.IndexOf(hostGuard, StringComparison.Ordinal)
+            .Should().BeLessThan(firstExternalMutation);
+        workflow.IndexOf(canonicalGuard, StringComparison.Ordinal)
+            .Should().BeLessThan(
+                workflow.IndexOf("Remote GHCR login", StringComparison.Ordinal),
+                "Swarm IDs and aliases must be rejected before any remote mutation");
+    }
+
+    [Fact]
     public void Scheduled_executor_uses_loopback_exact_contract_and_never_places_token_in_ssh_argv()
     {
         var workflow = Workflow("durable-work-sweep.yml");
@@ -256,6 +287,9 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("scripts/verify-swarm-service-image.sh");
         verifier.Should().Contain(".Spec.TaskTemplate.ContainerSpec.Image");
         verifier.Should().Contain(".UpdateStatus");
+        verifier.Should().Contain("initial|completed|rollback_completed) break");
+        verifier.Should().Contain("updating|rollback_started) sleep 4");
+        verifier.Should().Contain("initial|completed|rollback_completed) ;;");
         verifier.Should().Contain(".Spec.Mode.Replicated.Replicas");
         verifier.Should().Contain("desired-state=running");
         verifier.Should().Contain(".Status.State");
@@ -269,7 +303,12 @@ public sealed class DurableOwnershipDeploymentContractTests
             workflow.Should().Contain("--update-order stop-first");
             workflow.Should().Contain("--update-failure-action " + "rollback");
             workflow.Should().Contain("--" + "rollback-order stop-first");
-            workflow.Should().Contain("docker service " + "rollback --detach=false");
+            workflow.Should().Contain("docker service inspect '$service' --format '{{json .Spec}}'");
+            workflow.Should().Contain("docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'");
+            workflow.Should().Contain("update?version=\\${expected_version}&rollback=" + "previous");
+            workflow.Should().Contain("registryAuthFrom=previous-spec");
+            workflow.Should().Contain("rollback CAS outcome did not reconcile to the exact incumbent");
+            workflow.Should().NotContain("docker service " + "rollback");
             workflow.Should().Contain("Incumbent service image is not digest-pinned");
             workflow.Should().NotContain("--update-order start-first");
         }
@@ -294,6 +333,81 @@ public sealed class DurableOwnershipDeploymentContractTests
             workflow.Should().Contain("Incumbent service image is not digest-pinned");
             workflow.Should().NotContain("--update-order start-first");
         }
+    }
+
+    [Fact]
+    public void Jeeb_staging_is_a_non_activating_full_spec_bootstrap_with_all_live_gates_armed()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+
+        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Chat false");
+        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Realtime false");
+        workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Chat true");
+        workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Realtime true");
+        workflow[..workflow.IndexOf("permissions:", StringComparison.Ordinal)]
+            .Should().NotContain("inputs:");
+        workflow.Should().NotContain("${{ inputs.");
+
+        workflow.Should().Contain("capture_remote_spec() {");
+        workflow.Should().Contain("{{json .Spec}}");
+        workflow.Should().Contain("{{.ID}} {{.Version.Index}}");
+        workflow.Should().Contain("cmp -s \"$recovery_spec\" \"$incumbent_spec\"");
+        workflow.Should().Contain("cmp -s \"$recovery_spec\" \"$candidate_spec\"");
+        workflow.Should().Contain("cmp -s \"$confirm_spec\" \"$candidate_spec\"");
+        workflow.Should().Contain("candidate_index=$(<\"$candidate_version\")");
+        workflow.Should().Contain("confirm_index=$(<\"$confirm_version\")");
+        workflow.Should().Contain("candidate_service_id=$(<\"$candidate_id\")");
+        workflow.Should().Contain("confirm_service_id=$(<\"$confirm_id\")");
+        workflow.Should().Contain("registryAuthFrom=previous-spec");
+        workflow.Should().Contain("rollback CAS outcome did not reconcile to the exact incumbent");
+        workflow.Should().Contain("tolower($1) == tolower(expected)");
+        workflow.Should().Contain("matches == 1 && exact_false == 1");
+        workflow.Should().Contain("verify_exact_candidate_before_disarm() {");
+        workflow.Should().Contain("cmp -s \"$final_spec\" \"$candidate_spec\"");
+        workflow.Should().Contain("cmp -s \"$final_version\" \"$candidate_version\"");
+        workflow.Should().Contain("cmp -s \"$final_id\" \"$candidate_id\"");
+        CountOccurrences(workflow, "scripts/verify-swarm-service-image.sh").Should().Be(2,
+            "forward and recovery paths must each run the checked-in exact verifier");
+
+        var preUpdate = workflow.IndexOf(
+            "capture_remote_spec \"$pre_update_spec\" \"$pre_update_version\" \"$pre_update_id\"",
+            StringComparison.Ordinal);
+        var arm = workflow.IndexOf("rollback_armed=true", StringComparison.Ordinal);
+        var candidate = workflow.IndexOf(
+            "capture_remote_spec \"$candidate_spec\" \"$candidate_version\" \"$candidate_id\"",
+            arm,
+            StringComparison.Ordinal);
+        var flags = workflow.IndexOf("verify_bootstrap_flags", candidate, StringComparison.Ordinal);
+        var imageVerifier = workflow.IndexOf(
+            "scripts/verify-swarm-service-image.sh",
+            flags,
+            StringComparison.Ordinal);
+        var publicProbe = workflow.IndexOf(
+            "bash scripts/probe-staging-public-gateway-contract.sh",
+            imageVerifier,
+            StringComparison.Ordinal);
+        var descriptor = workflow.IndexOf(
+            "probe_staging_realtime_descriptor",
+            publicProbe,
+            StringComparison.Ordinal);
+        var finalCandidate = workflow.IndexOf(
+            "verify_exact_candidate_before_disarm",
+            descriptor,
+            StringComparison.Ordinal);
+        var disarm = workflow.IndexOf("rollback_armed=false", finalCandidate, StringComparison.Ordinal);
+
+        preUpdate.Should().BeLessThan(arm);
+        workflow.Should().Contain("rollback_armed=true\n          {");
+        arm.Should().BeLessThan(candidate);
+        candidate.Should().BeLessThan(flags);
+        flags.Should().BeLessThan(imageVerifier);
+        imageVerifier.Should().BeLessThan(publicProbe);
+        publicProbe.Should().BeLessThan(descriptor);
+        descriptor.Should().BeLessThan(finalCandidate);
+        finalCandidate.Should().BeLessThan(disarm);
+        workflow[(arm + "rollback_armed=true".Length)..]
+            .Split("rollback_armed=false", StringSplitOptions.None)
+            .Length.Should().Be(2, "there must be exactly one post-arm disarm");
     }
 
     private static string ShellFunction(string workflow, string name)
