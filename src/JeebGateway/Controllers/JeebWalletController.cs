@@ -2,10 +2,12 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Financials;
 using JeebGateway.Users;
 using JeebGateway.JeebWallet;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using ServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
 using WalletApiException = JeebGateway.service.ServiceWallet.ApiException;
 
@@ -47,15 +49,20 @@ public sealed class JeebWalletController : ControllerBase
 {
     private readonly ServiceWalletClient _wallet;
     private readonly IJeebWalletLedgerReader _ledger;
+    // OD-C3-5: the SAME options the guard and the commission debit read, so the
+    // balance shown is the currency the platform can actually debit.
+    private readonly CommissionCollectionOptions _feeCurrency;
     private readonly ILogger<JeebWalletController> _log;
 
     public JeebWalletController(
         ServiceWalletClient wallet,
         IJeebWalletLedgerReader ledger,
+        IOptions<CommissionCollectionOptions> feeCurrency,
         ILogger<JeebWalletController> log)
     {
         _wallet = wallet;
         _ledger = ledger;
+        _feeCurrency = feeCurrency.Value;
         _log = log;
     }
 
@@ -75,13 +82,15 @@ public sealed class JeebWalletController : ControllerBase
         try
         {
             var holder = await _wallet.WalletsAsync(holderId, ct);
-            return Ok(JeebWalletProjection.ProjectBalance(holder));
+            return Ok(JeebWalletProjection.ProjectBalance(
+                holder, _feeCurrency.CurrencyId, _feeCurrency.CurrencyCode));
         }
         catch (WalletApiException ex) when (ex.StatusCode == StatusCodes.Status404NotFound)
         {
             // No holder/wallet provisioned yet → an empty wallet, not an error
             // (matches the mobile "empty" affordability default).
-            return Ok(JeebWalletProjection.ProjectBalance(null));
+            return Ok(JeebWalletProjection.ProjectBalance(
+                null, _feeCurrency.CurrencyId, _feeCurrency.CurrencyCode));
         }
         catch (WalletApiException ex)
         {

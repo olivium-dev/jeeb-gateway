@@ -18,6 +18,8 @@ namespace JeebGateway.IntegrationTests.Bff;
 ///   * RequiredInProduction=false → skips validation regardless of env
 ///   * All required keys present → passes silently
 ///   * Bare URL form (Services:Foo) is accepted as equivalent to Services:Foo:BaseUrl
+///   * Production fee-currency parity: CommissionCollection:CurrencyId must equal
+///     PartnerWallet:CurrencyId and CommissionCollection:CurrencyCode must be set
 /// </summary>
 public class BffStartupValidatorTests
 {
@@ -249,6 +251,114 @@ public class BffStartupValidatorTests
             Options.Create(new DownstreamServicesOptions()),
             config,
             new HostEnv("Production"));
+
+        validator.Validate(); // does not throw
+    }
+
+    [Fact]
+    public void Throws_When_Commission_And_Partner_Currency_Mismatch_InProduction()
+    {
+        // c3 G3: the live 2-vs-1 incident — partner top-ups fund PartnerWallet:CurrencyId
+        // while the guard/debit read CommissionCollection:CurrencyId; divergence strands funds.
+        var config = BuildConfig(new Dictionary<string, string?>
+        {
+            // All required downstream BaseUrls present, so the ONLY verdict under
+            // test is the fee-currency parity guard.
+            ["Services:Auth:BaseUrl"] = "http://auth.test",
+            ["UserManagementServiceApi:BaseUrl"] = "http://user-management.test",
+            ["Services:Matching:BaseUrl"] = "http://matching.test",
+            ["Services:Geolocation:BaseUrl"] = "http://geo.test",
+            ["Services:Delivery:BaseUrl"] = "http://delivery.test",
+            ["CommissionCollection:CurrencyId"] = "1",
+            ["CommissionCollection:CurrencyCode"] = "USD",
+            ["PartnerWallet:CurrencyId"] = "2",
+        });
+
+        var validator = new BffStartupValidator(
+            Options.Create(new DownstreamServicesOptions { RequiredInProduction = true }),
+            config,
+            new HostEnv("Production"));
+
+        var act = () => validator.Validate();
+
+        act.Should().Throw<StartupConfigurationException>()
+            .Which.Message.Should().Contain("fee-currency mismatch");
+    }
+
+    [Fact]
+    public void Throws_When_Commission_CurrencyCode_Blank_InProduction()
+    {
+        // The guard hands this code back to the jeeber as the fee-currency label;
+        // an empty placeholder would ship a null/blank currency on the wire again.
+        var config = BuildConfig(new Dictionary<string, string?>
+        {
+            ["Services:Auth:BaseUrl"] = "http://auth.test",
+            ["UserManagementServiceApi:BaseUrl"] = "http://user-management.test",
+            ["Services:Matching:BaseUrl"] = "http://matching.test",
+            ["Services:Geolocation:BaseUrl"] = "http://geo.test",
+            ["Services:Delivery:BaseUrl"] = "http://delivery.test",
+            ["CommissionCollection:CurrencyId"] = "2",
+            ["CommissionCollection:CurrencyCode"] = "",
+            ["PartnerWallet:CurrencyId"] = "2",
+        });
+
+        var validator = new BffStartupValidator(
+            Options.Create(new DownstreamServicesOptions { RequiredInProduction = true }),
+            config,
+            new HostEnv("Production"));
+
+        var act = () => validator.Validate();
+
+        act.Should().Throw<StartupConfigurationException>()
+            .Which.Message.Should().Contain("CurrencyCode is empty");
+    }
+
+    [Fact]
+    public void Passes_When_Currencies_Aligned()
+    {
+        // The repo defaults after OD-C3-2: both ids 2, code USD — production needs
+        // no currency env override at all.
+        var config = BuildConfig(new Dictionary<string, string?>
+        {
+            ["Services:Auth:BaseUrl"] = "http://auth.test",
+            ["UserManagementServiceApi:BaseUrl"] = "http://user-management.test",
+            ["Services:Matching:BaseUrl"] = "http://matching.test",
+            ["Services:Geolocation:BaseUrl"] = "http://geo.test",
+            ["Services:Delivery:BaseUrl"] = "http://delivery.test",
+            ["CommissionCollection:CurrencyId"] = "2",
+            ["CommissionCollection:CurrencyCode"] = "USD",
+            ["PartnerWallet:CurrencyId"] = "2",
+        });
+
+        var validator = new BffStartupValidator(
+            Options.Create(new DownstreamServicesOptions { RequiredInProduction = true }),
+            config,
+            new HostEnv("Production"));
+
+        validator.Validate(); // does not throw
+    }
+
+    [Fact]
+    public void Skips_Currency_Check_In_Development()
+    {
+        // Pins the early-return contract: the parity guard is Production-only, so a
+        // mismatched dev config must still boot.
+        var config = BuildConfig(new Dictionary<string, string?>
+        {
+            ["Services:Auth:BaseUrl"] = "http://auth.test",
+            ["UserManagementServiceApi:BaseUrl"] = "http://user-management.test",
+            ["Services:Matching:BaseUrl"] = "http://matching.test",
+            ["Services:Geolocation:BaseUrl"] = "http://geo.test",
+            ["Services:Delivery:BaseUrl"] = "http://delivery.test",
+            ["CommissionCollection:CurrencyId"] = "1",
+            ["CommissionCollection:CurrencyCode"] = "USD",
+            ["PartnerWallet:CurrencyId"] = "2",
+        });
+
+        var validator = new BffStartupValidator(
+            Options.Create(new DownstreamServicesOptions { RequiredInProduction = true }),
+            config,
+            new HostEnv("Development"));
 
         validator.Validate(); // does not throw
     }

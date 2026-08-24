@@ -15,11 +15,23 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public class JeebWalletProjectionTests
 {
+    // OD-C3-5: the projection is pinned to the configured fee currency, so every
+    // fixture sits on the repo default pair (id 2 = "USD").
+    private const int FeeCurrencyId = 2;
+    private const string FeeCurrencyCode = "USD";
+
+    private static JeebWalletBalanceResponse Project(GetHolderWallets? holder) =>
+        JeebWalletProjection.ProjectBalance(holder, FeeCurrencyId, FeeCurrencyCode);
+
     private static Wallet ActiveWallet(double amount) =>
-        new() { IsActive = true, Amount = amount, CurrencyID = 1 };
+        new() { IsActive = true, Amount = amount, CurrencyID = FeeCurrencyId };
 
     private static Wallet InactiveWallet(double amount) =>
-        new() { IsActive = false, Amount = amount, CurrencyID = 1 };
+        new() { IsActive = false, Amount = amount, CurrencyID = FeeCurrencyId };
+
+    // Active + spendable, but NOT the fee currency (legacy Credit/1 rows are real).
+    private static Wallet OtherCurrencyWallet(double amount) =>
+        new() { IsActive = true, Amount = amount, CurrencyID = 1 };
 
     private static GetHolderWallets Holder(params Wallet[] wallets) =>
         new() { WalletHolder = new WalletHolder(), Wallets = new List<Wallet>(wallets) };
@@ -27,7 +39,7 @@ public class JeebWalletProjectionTests
     [Fact]
     public void ProjectBalance_Null_Holder_Is_Empty_Wallet()
     {
-        var view = JeebWalletProjection.ProjectBalance(null);
+        var view = Project(null);
 
         view.AvailableBalance.Should().Be(0);
         view.ReservedNow.Should().Be(0);
@@ -38,8 +50,7 @@ public class JeebWalletProjectionTests
     [Fact]
     public void ProjectBalance_Sums_Only_Active_Wallets()
     {
-        var view = JeebWalletProjection.ProjectBalance(
-            Holder(ActiveWallet(30), ActiveWallet(70), InactiveWallet(999)));
+        var view = Project(Holder(ActiveWallet(30), ActiveWallet(70), InactiveWallet(999)));
 
         view.AvailableBalance.Should().Be(100);
         view.AffordabilityState.Should().Be(JeebWalletProjection.Affordability.Enough);
@@ -48,7 +59,7 @@ public class JeebWalletProjectionTests
     [Fact]
     public void ProjectBalance_Zero_Available_Is_Empty_Affordability()
     {
-        var view = JeebWalletProjection.ProjectBalance(Holder(InactiveWallet(500)));
+        var view = Project(Holder(InactiveWallet(500)));
 
         view.AvailableBalance.Should().Be(0);
         view.AffordabilityState.Should().Be(JeebWalletProjection.Affordability.Empty);
@@ -57,27 +68,37 @@ public class JeebWalletProjectionTests
     [Fact]
     public void ProjectBalance_Small_Positive_Balance_Is_Low_Affordability()
     {
-        var view = JeebWalletProjection.ProjectBalance(Holder(ActiveWallet(5)));
+        var view = Project(Holder(ActiveWallet(5)));
 
         view.AvailableBalance.Should().Be(5);
         view.AffordabilityState.Should().Be(JeebWalletProjection.Affordability.Low);
     }
 
     [Fact]
-    public void ProjectBalance_Currency_Is_Null_So_Mobile_Applies_Its_Default()
+    public void ProjectBalance_Currency_Is_The_Configured_Fee_Code()
     {
-        // The generic wallet row exposes only a numeric CurrencyID, not an ISO code;
-        // the gateway must not fabricate one (it would be domain state). Null lets the
-        // mobile parser apply its documented default.
-        var view = JeebWalletProjection.ProjectBalance(Holder(ActiveWallet(50)));
+        // The projection names the SAME currency the commission debits, so the code
+        // is the configured fee code — never null, never fabricated per wallet row.
+        var view = Project(Holder(ActiveWallet(50)));
 
-        view.Currency.Should().BeNull();
+        view.Currency.Should().Be(FeeCurrencyCode);
+    }
+
+    [Fact]
+    public void ProjectBalance_Never_Combines_Currencies_In_Any_Sum()
+    {
+        // OD-C3-5: only fee-currency wallets contribute; a fatter foreign-currency
+        // wallet must not inflate the balance (nor the affordability bucket).
+        var view = Project(Holder(ActiveWallet(10), OtherCurrencyWallet(50)));
+
+        view.AvailableBalance.Should().Be(10m);
+        view.AffordabilityState.Should().Be(JeebWalletProjection.Affordability.Low);
     }
 
     // ----- R-M1 (G-01): cod_* float is never user-spendable balance -----
 
     private static Wallet TypedWallet(string? type, double amount) =>
-        new() { IsActive = true, Amount = amount, CurrencyID = 1, Type = type };
+        new() { IsActive = true, Amount = amount, CurrencyID = FeeCurrencyId, Type = type };
 
     [Theory]
     [InlineData("cod_earnings")]
@@ -87,8 +108,7 @@ public class JeebWalletProjectionTests
     [InlineData(" cod_earnings")]
     public void ProjectBalance_Excludes_Cod_Float_From_AvailableBalance(string codType)
     {
-        var view = JeebWalletProjection.ProjectBalance(
-            Holder(ActiveWallet(30), TypedWallet(codType, 5_000)));
+        var view = Project(Holder(ActiveWallet(30), TypedWallet(codType, 5_000)));
 
         view.AvailableBalance.Should().Be(30);
         view.AffordabilityState.Should().Be(JeebWalletProjection.Affordability.Enough);
@@ -97,7 +117,7 @@ public class JeebWalletProjectionTests
     [Fact]
     public void ProjectBalance_Cod_Float_Alone_Projects_As_An_Empty_Wallet()
     {
-        var view = JeebWalletProjection.ProjectBalance(Holder(TypedWallet("cod_earnings", 5_000)));
+        var view = Project(Holder(TypedWallet("cod_earnings", 5_000)));
 
         view.AvailableBalance.Should().Be(0);
         view.AffordabilityState.Should().Be(JeebWalletProjection.Affordability.Empty);
@@ -112,7 +132,7 @@ public class JeebWalletProjectionTests
     {
         // Control case: the filter must not be a blanket exclusion. Untyped wallets are
         // what every already-provisioned holder has today and must keep counting.
-        var view = JeebWalletProjection.ProjectBalance(Holder(TypedWallet(spendableType, 42)));
+        var view = Project(Holder(TypedWallet(spendableType, 42)));
 
         view.AvailableBalance.Should().Be(42);
     }
@@ -124,7 +144,7 @@ public class JeebWalletProjectionTests
     {
         // A balance with cents must serialize as a clean decimal (no double
         // fractional artifact) on the display contract.
-        var view = JeebWalletProjection.ProjectBalance(Holder(ActiveWallet(10.25), ActiveWallet(0.50)));
+        var view = Project(Holder(ActiveWallet(10.25), ActiveWallet(0.50)));
 
         view.AvailableBalance.Should().Be(10.75m);
         JsonSerializer.Serialize(view).Should().Contain("\"availableBalance\":10.75");

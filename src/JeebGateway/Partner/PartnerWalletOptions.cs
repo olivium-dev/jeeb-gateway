@@ -38,7 +38,7 @@ public sealed class PartnerWalletOptions
     /// holder's matching wallet among (possibly) several; NOT a money computation.
     /// </summary>
     [Range(1, int.MaxValue)]
-    public int CurrencyId { get; init; } = 1;
+    public int CurrencyId { get; init; } = 2;
 
     /// <summary>
     /// Upper bound (inclusive) the gateway rejects a single top-up/credit ABOVE with a 400 before

@@ -7,7 +7,8 @@ namespace JeebGateway.IntegrationTests.Fakes;
 public sealed class FakeWalletClient : ServiceWalletClient
 {
     public double Balance { get; set; } = 1_000_000;
-    public int CurrencyId { get; set; } = 1;
+    // Matches the repo fee-currency default: USD(2) in the wallet-service catalog.
+    public int CurrencyId { get; set; } = 2;
     public bool Unreachable { get; set; }
 
     public FakeWalletClient() : base("http://localhost", new HttpClient())

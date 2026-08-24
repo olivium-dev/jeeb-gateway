@@ -26,8 +26,13 @@ public sealed class CommissionCollectionOptions
     /// branches on it, so it stays generic rather than product vocabulary.</summary>
     public string Tag { get; set; } = "platform-fee";
 
-    /// <summary>Wallet-service currency id the fee is debited in. Matches <c>PartnerWallet:CurrencyId</c>.</summary>
-    public int CurrencyId { get; set; } = 1;
+    /// <summary>Wallet-service currency id the fee is debited in. Must match <c>PartnerWallet:CurrencyId</c>
+    /// — <c>BffStartupValidator</c> fails startup on a mismatch in Production.</summary>
+    public int CurrencyId { get; set; } = 2;
+
+    /// <summary>Display code paired with <see cref="CurrencyId"/> (2 = USD); the wallet guard
+    /// returns it as the fee currency on every balance answer.</summary>
+    public string CurrencyCode { get; set; } = "USD";
 }
 
 /// <summary>Everything the accept transition already knows. No settlement row exists yet.</summary>

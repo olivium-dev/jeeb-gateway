@@ -69,15 +69,21 @@ public sealed class WalletSufficiencyGuard : IWalletSufficiencyGuard
 {
     private readonly ServiceWalletClient _wallet;
     private readonly WalletGuardOptions _options;
+    private readonly int _feeCurrencyId;
+    private readonly string _feeCurrencyCode;
     private readonly ILogger<WalletSufficiencyGuard> _logger;
 
     public WalletSufficiencyGuard(
         ServiceWalletClient wallet,
         IOptions<WalletGuardOptions> options,
+        IOptions<CommissionCollectionOptions> feeCurrency,
         ILogger<WalletSufficiencyGuard> logger)
     {
         _wallet = wallet;
         _options = options.Value;
+        // Same options object the commission debit uses, so checked and charged share one currency.
+        _feeCurrencyId = feeCurrency.Value.CurrencyId;
+        _feeCurrencyCode = feeCurrency.Value.CurrencyCode;
         _logger = logger;
     }
 
@@ -101,34 +107,24 @@ public sealed class WalletSufficiencyGuard : IWalletSufficiencyGuard
             _logger.LogWarning(ex,
                 "WalletSufficiencyGuard: wallet-service unreachable for holder {HolderId}; "
                 + "FailMode={FailMode} (OQ1 pending owner ratification).", holderId, _options.FailMode);
-            return new WalletGuardResult(_options.IsFailOpen, requiredFee, null, null, DegradedByUpstreamFailure: true);
+            return new WalletGuardResult(_options.IsFailOpen, requiredFee, null, _feeCurrencyCode, DegradedByUpstreamFailure: true);
         }
 
-        var (available, currency) = ProjectSingleCurrencyBalance(holder);
+        var (available, currency) = ProjectFeeCurrencyBalance(holder);
         return new WalletGuardResult(available >= requiredFee, requiredFee, available, currency, DegradedByUpstreamFailure: false);
     }
 
     /// <summary>
-    /// Correction 6: unlike JeebWalletProjection, sum only the DOMINANT currency group —
-    /// a compare against a single-currency fee must not blend balances across currencies.
+    /// Correction 6 (c3): sum ONLY the spendable balance in the fee currency — the currency the
+    /// commission is actually debited in. No FX, no blend: a rate is NEVER applied here.
     /// </summary>
-    private static (decimal Available, string? Currency) ProjectSingleCurrencyBalance(GetHolderWallets? holder)
+    private (decimal Available, string Currency) ProjectFeeCurrencyBalance(GetHolderWallets? holder)
     {
-        // R-M1 (G-01): drop non-spendable cod_* legs BEFORE the currency grouping, or COD
-        // float could both inflate the balance and flip which currency group is dominant.
-        var active = (holder?.Wallets ?? new List<Wallet>())
-            .Where(w => w.IsActive && SpendableWalletTypes.IsSpendable(w.Type))
-            .ToList();
-        if (active.Count == 0) return (0m, null);
+        // R-M1 (G-01): non-spendable cod_* legs are dropped too, so COD float never pays the fee.
+        var available = (holder?.Wallets ?? new List<Wallet>())
+            .Where(w => w.IsActive && SpendableWalletTypes.IsSpendable(w.Type) && w.CurrencyID == _feeCurrencyId)
+            .Sum(w => (decimal)w.Amount);
 
-        var dominant = active
-            .GroupBy(w => w.CurrencyID)
-            .OrderByDescending(g => g.Count())
-            .ThenBy(g => g.Key)
-            .First();
-
-        // No ISO mapping exists anywhere in this codebase (JeebWalletProjection.ResolveCurrency);
-        // null is honest, not fabricated.
-        return ((decimal)dominant.Sum(w => w.Amount), null);
+        return (available, _feeCurrencyCode);
     }
 }

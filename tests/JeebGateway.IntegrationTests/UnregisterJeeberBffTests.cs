@@ -25,8 +25,10 @@ namespace JeebGateway.IntegrationTests;
 public sealed class UnregisterJeeberBffTests
 {
     private const string ZeroBalanceWalletJson = """{ "wallets": [] }""";
+    // OD-C3-5: the gate counts fee-currency spendable balance only, so the blocking
+    // wallet must sit on the fee currency (2 = USD) to be seen at all.
     private const string PositiveBalanceWalletJson =
-        """{ "wallets": [ { "currencyID": 1, "amount": 42.5, "isActive": true } ] }""";
+        """{ "wallets": [ { "currencyID": 2, "amount": 42.5, "isActive": true } ] }""";
 
     [Fact]
     public async Task Unregister_200_HappyPath_RevokesRole_And_FlipsActiveRole()

@@ -1,0 +1,12 @@
+{
+  "sourceCurrencyId": 1,
+  "targetCurrencyId": 2,
+  "systemCcy1WalletId": "386559f8-1da3-474b-9244-a25af4d8eb2c",
+  "holders": [
+    { "holderId": "0fabdeae-d6bf-4751-b6c0-09d264e2f263", "holderName": "devtool_jeeber_1786756300124", "expectedCcy1": 10.00 },
+    { "holderId": "4909ae40-b21c-4e90-87d0-55a34952cf5c", "holderName": "devtool_jeeber_1786759566286", "expectedCcy1": 5.00 },
+    { "holderId": "42b7d440-1cb1-410d-83e6-2a5fd9562265", "holderName": "devtool_jeeber_1786762767019", "expectedCcy1": 5.00 },
+    { "holderId": "fedb6e3b-0ab3-4e49-886f-d2047bb6f92a", "holderName": "devtool_jeeber_1786770772165", "expectedCcy1": 5.00 },
+    { "holderId": "5ae06873-25b6-466d-bc09-69b402570e7d", "holderName": "W407", "expectedCcy1": 5.00 }
+  ]
+}

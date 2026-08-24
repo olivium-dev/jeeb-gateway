@@ -129,6 +129,28 @@ public sealed class BffStartupValidator : IHostedService
                 + "registered one-time-password application id before starting the gateway.");
         }
 
+        // G3 fee-currency guard — guard/debit read CommissionCollection:CurrencyId while partner
+        // top-ups land in PartnerWallet:CurrencyId; silent divergence strands funds (live 2-vs-1).
+        if (_config.GetSection("CommissionCollection").Exists())
+        {
+            var commissionCcy = _config.GetValue<int>("CommissionCollection:CurrencyId");
+            var partnerCcy = _config.GetValue<int>("PartnerWallet:CurrencyId");
+            if (commissionCcy != partnerCcy)
+            {
+                problems.Add(
+                    $"fee-currency mismatch: CommissionCollection:CurrencyId={commissionCcy} but "
+                    + $"PartnerWallet:CurrencyId={partnerCcy}. Partner top-ups would fund one currency "
+                    + "while the guard/debit target another. Set both to the same wallet-service currency id.");
+            }
+
+            if (string.IsNullOrWhiteSpace(_config["CommissionCollection:CurrencyCode"]))
+            {
+                problems.Add(
+                    "CommissionCollection:CurrencyCode is empty. The wallet guard returns it to the "
+                    + "jeeber as the fee currency label; set the code paired with CurrencyId (USD for id 2).");
+            }
+        }
+
         if (problems.Count > 0)
         {
             throw new StartupConfigurationException(

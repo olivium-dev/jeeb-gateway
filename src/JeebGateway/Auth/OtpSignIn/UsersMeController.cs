@@ -1,5 +1,6 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
+using JeebGateway.Financials;
 using JeebGateway.JeebWallet;
 using JeebGateway.Requests;
 using JeebGateway.Services;
@@ -76,6 +77,9 @@ public sealed class UsersMeController : ControllerBase
     private readonly IJeeberForceOfflineOnUnregister _forceOffline;
     private readonly IPendingOffersStore _pendingOffers;
     private readonly IOptions<GatewayPublicOptions> _publicOptions;
+    // OD-C3-5: the fee-currency pin for the unregister balance gate — the same
+    // options the wallet guard and the commission debit read.
+    private readonly CommissionCollectionOptions _feeCurrency;
     private readonly ILogger<UsersMeController> _log;
 
     public UsersMeController(
@@ -92,6 +96,7 @@ public sealed class UsersMeController : ControllerBase
         IJeeberForceOfflineOnUnregister forceOffline,
         IPendingOffersStore pendingOffers,
         IOptions<GatewayPublicOptions> publicOptions,
+        IOptions<CommissionCollectionOptions> feeCurrency,
         ILogger<UsersMeController> log)
     {
         _umProfile = umProfile;
@@ -107,6 +112,7 @@ public sealed class UsersMeController : ControllerBase
         _forceOffline = forceOffline;
         _pendingOffers = pendingOffers;
         _publicOptions = publicOptions;
+        _feeCurrency = feeCurrency.Value;
         _log = log;
     }
 
@@ -408,7 +414,10 @@ public sealed class UsersMeController : ControllerBase
                     "The wallet balance check could not run; try again shortly.");
             }
 
-            if (JeebWalletProjection.ProjectBalance(holder).AvailableBalance > 0)
+            // OD-C3-5: gate on the FEE-currency spendable balance only — the currency
+            // the platform can actually debit; other-currency wallets never blend in.
+            if (JeebWalletProjection.ProjectBalance(
+                    holder, _feeCurrency.CurrencyId, _feeCurrency.CurrencyCode).AvailableBalance > 0)
             {
                 return Problem(StatusCodes.Status409Conflict, "positive_wallet_balance", "Positive wallet balance",
                     "Settle or withdraw your wallet balance before unregistering as a jeeber.");

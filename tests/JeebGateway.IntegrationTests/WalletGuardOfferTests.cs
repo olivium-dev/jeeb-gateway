@@ -37,7 +37,7 @@ public class WalletGuardOfferTests
         result.Allowed.Should().BeFalse();
         result.Required.Should().Be(5.0m);
         result.Available.Should().Be(1.0m);
-        result.Currency.Should().BeNull(); // no ISO mapping exists — honest, not fabricated.
+        result.Currency.Should().Be("USD");
     }
 
     [Fact]
@@ -51,18 +51,59 @@ public class WalletGuardOfferTests
     }
 
     [Fact]
-    public async Task CheckAsync_MultiCurrency_SumsOnlyTheDominantGroup()
+    public async Task CheckAsync_MultiCurrency_SumsOnlyTheFeeCurrencyGroup()
     {
         var holderId = Guid.NewGuid();
         var fake = new DominantCurrencyWalletClient(holderId);
         var guard = NewGuard(fake, "fail-closed");
 
-        // Dominant group (2 wallets, currency 1) totals 3.0; the lone currency-2 wallet
-        // (100.0) must NOT be blended in.
+        // Fee currency 2 totals 3.0; the lone currency-1 wallet (100.0) must NOT blend in.
         var result = await guard.CheckAsync(holderId, requiredFee: 3.0m, CancellationToken.None);
 
         result.Allowed.Should().BeTrue();
         result.Available.Should().Be(3.0m);
+        result.Currency.Should().Be("USD");
+    }
+
+    [Fact]
+    public async Task CheckAsync_PinsToFeeCurrency_EvenWhenAnotherCurrencyHasMoreWallets()
+    {
+        // Currency 1 carries more wallets; the pin follows the fee currency, not the count.
+        var holderId = Guid.NewGuid();
+        var guard = NewGuard(
+            new TypedWalletClient(holderId, ("jeeb", 2, 50.0), ("jeeb", 1, 0.0), ("bonus", 1, 0.0)),
+            "fail-closed");
+
+        var result = await guard.CheckAsync(holderId, requiredFee: 5.0m, CancellationToken.None);
+
+        result.Allowed.Should().BeTrue();
+        result.Available.Should().Be(50.0m);
+        result.Currency.Should().Be("USD");
+    }
+
+    [Fact]
+    public async Task CheckAsync_ReturnsConfiguredCurrencyCode()
+    {
+        var guard = NewGuard(new FakeWalletClient { Balance = 5.0 }, "fail-closed");
+
+        var result = await guard.CheckAsync(Guid.NewGuid(), requiredFee: 5.0m, CancellationToken.None);
+
+        result.Allowed.Should().BeTrue();
+        result.Currency.Should().Be("USD");
+    }
+
+    [Fact]
+    public async Task CheckAsync_NoWalletInFeeCurrency_ReturnsZeroInFeeCurrency()
+    {
+        // 100.0 sits on currency 1 — an honest zero in the fee currency, not an outage.
+        var guard = NewGuard(new FakeWalletClient { Balance = 100.0, CurrencyId = 1 }, "fail-closed");
+
+        var result = await guard.CheckAsync(Guid.NewGuid(), requiredFee: 1.0m, CancellationToken.None);
+
+        result.Allowed.Should().BeFalse();
+        result.Available.Should().Be(0m);
+        result.Currency.Should().Be("USD");
+        result.DegradedByUpstreamFailure.Should().BeFalse();
     }
 
     [Fact]
@@ -118,7 +159,7 @@ public class WalletGuardOfferTests
     public async Task CheckAsync_Ignores_NonSpendable_Cod_Types(string codType)
     {
         var holderId = Guid.NewGuid();
-        var guard = NewGuard(new TypedWalletClient(holderId, (codType, 1, 5_000.0)), "fail-closed");
+        var guard = NewGuard(new TypedWalletClient(holderId, (codType, 2, 5_000.0)), "fail-closed");
 
         var result = await guard.CheckAsync(holderId, requiredFee: 5.0m, CancellationToken.None);
 
@@ -137,7 +178,7 @@ public class WalletGuardOfferTests
         // Control case: were the pin a blanket exclusion, this would fail closed and block
         // every legitimate offer — untyped wallets are what live holders carry today.
         var holderId = Guid.NewGuid();
-        var guard = NewGuard(new TypedWalletClient(holderId, (spendableType, 1, 5.0)), "fail-closed");
+        var guard = NewGuard(new TypedWalletClient(holderId, (spendableType, 2, 5.0)), "fail-closed");
 
         var result = await guard.CheckAsync(holderId, requiredFee: 5.0m, CancellationToken.None);
 
@@ -146,14 +187,14 @@ public class WalletGuardOfferTests
     }
 
     [Fact]
-    public async Task CheckAsync_Cod_Types_Cannot_Flip_The_Dominant_Currency_Group()
+    public async Task CheckAsync_Cod_Types_On_The_Fee_Currency_Are_Still_Excluded()
     {
-        // Two cod_* legs on currency 2 would out-count the single spendable currency-1
-        // wallet and zero the compare if they were filtered after the grouping.
+        // Two fat cod_* legs sit on the fee currency itself: the pin narrows the currency,
+        // the spendable-type filter is what still keeps them out of the compare.
         var holderId = Guid.NewGuid();
         var guard = NewGuard(
             new TypedWalletClient(holderId,
-                (null, 1, 5.0), ("cod_earnings", 2, 900.0), ("cod_commission", 2, 900.0)),
+                (null, 2, 5.0), ("cod_earnings", 2, 900.0), ("cod_commission", 2, 900.0)),
             "fail-closed");
 
         var result = await guard.CheckAsync(holderId, requiredFee: 5.0m, CancellationToken.None);
@@ -162,8 +203,13 @@ public class WalletGuardOfferTests
         result.Available.Should().Be(5.0m);
     }
 
-    private static WalletSufficiencyGuard NewGuard(SwServiceWalletClient wallet, string failMode)
+    private static WalletSufficiencyGuard NewGuard(
+        SwServiceWalletClient wallet, string failMode, int feeCurrencyId = 2, string feeCurrencyCode = "USD")
         => new(wallet, Options.Create(new WalletGuardOptions { FailMode = failMode }),
+            Options.Create(new CommissionCollectionOptions
+            {
+                CurrencyId = feeCurrencyId, CurrencyCode = feeCurrencyCode,
+            }),
             NullLogger<WalletSufficiencyGuard>.Instance);
 
     // -----------------------------------------------------------------
@@ -188,6 +234,22 @@ public class WalletGuardOfferTests
         body["needed"]!.Value<decimal>().Should().Be(10.0m);
         body["available"]!.Value<decimal>().Should().Be(1.0m);
         body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/insufficient-wallet-balance");
+    }
+
+    [Fact]
+    public async Task Guard_ErrorPayload_NamesCurrency_NotNull()
+    {
+        // The jeeber must be told WHICH currency fell short — never a null label.
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 1.0 });
+        var (_, requestId) = await SeedRequestAsync(factory);
+        var jeeberId = Guid.NewGuid().ToString();
+
+        var resp = await JeeberClient(factory, jeeberId).PostAsJsonAsync(
+            $"/requests/{requestId}/offers", new { fee = 100m, etaMinutes = 30, note = (string?)null });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.PaymentRequired);
+        var body = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        body["currency"]!.Value<string>().Should().Be("USD");
     }
 
     [Fact]
@@ -476,8 +538,8 @@ public class WalletGuardOfferTests
         return c;
     }
 
-    /// <summary>Two active wallets on currency 1 (dominant, sums to 3.0) plus one lone
-    /// wallet on currency 2 (100.0) that must never blend into the compare.</summary>
+    /// <summary>Two active wallets on fee currency 2 (sums to 3.0) plus one lone wallet
+    /// on currency 1 (100.0) that must never blend into the compare.</summary>
     private sealed class DominantCurrencyWalletClient : SwServiceWalletClient
     {
         private readonly Guid _holderId;
@@ -490,9 +552,9 @@ public class WalletGuardOfferTests
                 WalletHolder = new JeebGateway.service.ServiceWallet.WalletHolder { HolderId = _holderId, IsActive = true },
                 Wallets = new List<JeebGateway.service.ServiceWallet.Wallet>
                 {
-                    new() { WalletId = Guid.NewGuid(), HolderId = _holderId, CurrencyID = 1, Amount = 2.0, IsActive = true },
-                    new() { WalletId = Guid.NewGuid(), HolderId = _holderId, CurrencyID = 1, Amount = 1.0, IsActive = true },
-                    new() { WalletId = Guid.NewGuid(), HolderId = _holderId, CurrencyID = 2, Amount = 100.0, IsActive = true },
+                    new() { WalletId = Guid.NewGuid(), HolderId = _holderId, CurrencyID = 2, Amount = 2.0, IsActive = true },
+                    new() { WalletId = Guid.NewGuid(), HolderId = _holderId, CurrencyID = 2, Amount = 1.0, IsActive = true },
+                    new() { WalletId = Guid.NewGuid(), HolderId = _holderId, CurrencyID = 1, Amount = 100.0, IsActive = true },
                 },
             });
 

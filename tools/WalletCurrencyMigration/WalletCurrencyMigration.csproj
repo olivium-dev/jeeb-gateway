@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>WalletCurrencyMigration</RootNamespace>
+    <AssemblyName>WalletCurrencyMigration</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- No Npgsql by design: this tool talks to wallet-service over HTTP only (OD-C3-3). -->
+    <ProjectReference Include="..\..\src\JeebGateway\JeebGateway.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="census-2026-08-24.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

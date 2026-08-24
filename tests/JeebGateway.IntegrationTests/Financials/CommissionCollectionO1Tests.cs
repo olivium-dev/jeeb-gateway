@@ -101,7 +101,7 @@ public class CommissionCollectionO1Tests
     public async Task Rung3_A_Cod_Wallet_Is_Never_The_Source_Of_A_Fee_Debit()
     {
         var handler = new StubWalletHandler();
-        handler.HolderWallets = Wallets((Guid.NewGuid(), 1, CodWalletType, true));
+        handler.HolderWallets = Wallets((Guid.NewGuid(), 2, CodWalletType, true));
         var client = NewDebitClient(handler);
 
         (await client.ResolveFeeWalletAsync(Jeeber, default))
@@ -110,7 +110,7 @@ public class CommissionCollectionO1Tests
         // Control: the SAME holder read returns a wallet id the moment a non-COD leg exists,
         // so the null above is a rejection and not an always-null read.
         handler.HolderWallets = Wallets(
-            (Guid.NewGuid(), 1, CodWalletType, true), (FeeWallet, 1, "jeeb", true));
+            (Guid.NewGuid(), 2, CodWalletType, true), (FeeWallet, 2, "jeeb", true));
         (await client.ResolveFeeWalletAsync(Jeeber, default)).Should().Be(FeeWallet);
     }
 
@@ -120,14 +120,14 @@ public class CommissionCollectionO1Tests
         var handler = new StubWalletHandler
         {
             HolderWallets = Wallets(
-                (Guid.NewGuid(), 1, "jeeb", false),   // deactivated
-                (Guid.NewGuid(), 2, "jeeb", true)),   // another currency
+                (Guid.NewGuid(), 2, "jeeb", false),   // deactivated
+                (Guid.NewGuid(), 1, "jeeb", true)),   // another currency
         };
         var client = NewDebitClient(handler);
 
         (await client.ResolveFeeWalletAsync(Jeeber, default)).Should().BeNull();
 
-        handler.HolderWallets = Wallets((FeeWallet, 1, "jeeb", true));
+        handler.HolderWallets = Wallets((FeeWallet, 2, "jeeb", true));
         (await client.ResolveFeeWalletAsync(Jeeber, default)).Should().Be(FeeWallet);
     }
 
@@ -540,9 +540,12 @@ public class CommissionCollectionO1Tests
     private static CommissionCollectionCommand Accept(decimal fee)
         => new(Guid.NewGuid().ToString(), Jeeber.ToString(), fee);
 
+    // Fee-currency defaults (2/"USD") match FakeWalletClient's default currency, so the guard
+    // sees the seeded balance instead of an off-currency zero.
     private static WalletSufficiencyGuard NewGuard(double balance)
         => new(new FakeWalletClient { Balance = balance },
             Options.Create(new WalletGuardOptions { FailMode = "fail-closed" }),
+            Options.Create(new CommissionCollectionOptions()),
             NullLogger<WalletSufficiencyGuard>.Instance);
 
     private static WalletCommissionCollector NewCollector(
@@ -552,7 +555,7 @@ public class CommissionCollectionO1Tests
             NullLogger<WalletCommissionCollector>.Instance);
 
     private static WalletCommissionDebitClient NewDebitClient(StubWalletHandler handler)
-        => new(new HttpClient(handler) { BaseAddress = new Uri("http://wallet.invalid/") }, currencyId: 1);
+        => new(new HttpClient(handler) { BaseAddress = new Uri("http://wallet.invalid/") }, currencyId: 2);
 
     private static Settlement SettledRow(decimal commission) => new()
     {
