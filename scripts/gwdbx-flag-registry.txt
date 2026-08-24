@@ -203,6 +203,7 @@ MaskedCalls:SessionDuration                          setting -
 MaskedCalls:TwilioAccountSid                         setting -
 MaskedCalls:TwilioAuthToken                          setting -
 MaskedCalls:TwilioProxyServiceSid                    setting -
+Operations:RealtimeProbe:MintKeyFile                 setting - # dedicated file-backed HMAC key for the staging WSS descriptor probe
 OtpHandover:ClientUnreachableWindow                  setting -
 OtpHandover:MaxAttempts                              setting -
 OtpHandover:SweepInterval                            setting -
