@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
+# This file intentionally retains an unreachable pause-only template for review.
+# shellcheck disable=SC2034,SC2317,SC2329
 set -euo pipefail
+
+# Owner block - forward-only promotion pending.
+echo '::error::Forward-only promotion pending owner-approved failure handling; no image, SSH, provider, secret, or Swarm mutation was attempted.' >&2
+exit 1
 
 readonly SECRET_TARGET=/app/appsettings.Production.json
 readonly MAX_WAIT_ATTEMPTS=60

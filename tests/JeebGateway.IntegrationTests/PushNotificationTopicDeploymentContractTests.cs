@@ -53,18 +53,20 @@ public sealed class PushNotificationTopicDeploymentContractTests
         handler.ApiKey.Should().Be(ConfiguredApiKey);
     }
 
-    public static IEnumerable<object[]> InvalidLifecycleInvocations() =>
+    public static IEnumerable<object[]> LifecycleInvocations() =>
     [
         ["unknown"],
         ["gc jeeb-gateway;docker-service-rm"],
         ["stabilize jeeb-gateway jeeb_gateway_appsettings_latest"],
         ["stabilize other-service jeeb_gateway_appsettings_12_1"],
         ["finalize 2 jeeb-gateway jeeb_gateway_appsettings_12_1 none"],
+        ["verify-safe jeeb-gateway jeeb_gateway_appsettings_12_1"],
+        ["gc jeeb-gateway"],
     ];
 
     [Theory]
-    [MemberData(nameof(InvalidLifecycleInvocations))]
-    public async Task SecretLifecycle_RejectsAdversarialIdentifiersBeforeDocker(string arguments)
+    [MemberData(nameof(LifecycleInvocations))]
+    public async Task SecretLifecycle_IsOwnerBlockedBeforeDockerForEveryInvocation(string arguments)
     {
         var repoRoot = LocateRepoRoot();
         var script = Path.Combine(repoRoot, ".github", "scripts", "jeeb-gateway-secret-lifecycle.sh");
@@ -76,13 +78,16 @@ public sealed class PushNotificationTopicDeploymentContractTests
         };
 
         using var process = Process.Start(startInfo)!;
+        var standardError = await process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
 
         process.ExitCode.Should().NotBe(0);
+        standardError.Should().Contain(
+            "Forward-only promotion pending owner-approved failure handling");
     }
 
     [Fact]
-    public void SecretLifecycle_PausesFailedUpdatesAndHasNoExecutableRollbackPath()
+    public void SecretLifecycle_IsInertAndRetainsOnlyAPauseOnFailureTemplate()
     {
         var repoRoot = LocateRepoRoot();
         var script = File.ReadAllText(Path.Combine(
@@ -91,6 +96,18 @@ public sealed class PushNotificationTopicDeploymentContractTests
             "scripts",
             "jeeb-gateway-secret-lifecycle.sh"));
 
+        const string ownerBlock = "Owner block - forward-only promotion pending";
+        const string ownerError =
+            "::error::Forward-only promotion pending owner-approved failure handling";
+        var blockIndex = script.IndexOf(ownerBlock, StringComparison.Ordinal);
+        var exitIndex = script.IndexOf("exit 1", blockIndex, StringComparison.Ordinal);
+        var firstDocker = script.IndexOf("docker service", StringComparison.Ordinal);
+
+        script.Should().Contain(ownerBlock);
+        script.Should().Contain(ownerError);
+        blockIndex.Should().BeLessThan(exitIndex);
+        exitIndex.Should().BeLessThan(firstDocker,
+            "direct invocation must stop before every Docker or secret mutation");
         script.Should().Contain("--update-failure-action pause");
         script.Should().Contain("forbidden automatic rollback state detected");
         script.Should().Contain("assert_exact_running_image \"$service_name\" \"$expected_image\"");

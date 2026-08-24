@@ -29,6 +29,11 @@ jobs:
     environment: staging
     timeout-minutes: 30
     steps:
+      - name: Owner block - forward-only promotion pending
+        run: |
+          echo '::error::Forward-only promotion pending owner-approved failure handling; no image, SSH, provider, secret, or Swarm mutation was attempted.' >&2
+          exit 1
+
       - name: Require explicit restart confirmation
         env:
           CONFIRM_RESTART: ${{ inputs.confirm_restart }}
@@ -254,7 +259,7 @@ jobs:
           trap - EXIT
 
       - name: Upload redacted evidence
-        if: always()
+        if: ${{ success() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jeeb-staging-state-auth-${{ github.run_id }}-${{ github.run_attempt }}

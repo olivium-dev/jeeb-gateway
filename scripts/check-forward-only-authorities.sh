@@ -209,6 +209,30 @@ smoke = Path(".github/workflows/jeeb-staging-state-auth-smoke.yml").read_text()
 if "scripts/verify-swarm-service-image.sh" not in smoke or "--image" in smoke:
     raise SystemExit("FAIL: state-auth restart route lacks exact current-image verification")
 
+
+def validate_owner_block(name, text, mutation_markers):
+    blocker = "Owner block - forward-only promotion pending"
+    loud_error = (
+        "::error::Forward-only promotion pending owner-approved failure handling; "
+        "no image, SSH, provider, secret, or Swarm mutation was attempted."
+    )
+    if text.count(blocker) != 1 or text.count(loud_error) != 1:
+        raise ValueError(f"{name} lacks the single loud owner promotion block")
+    block_position = text.index(blocker)
+    exit_position = text.index("exit 1", block_position)
+    mutation_positions = [
+        position
+        for marker in mutation_markers
+        if (position := text.find(marker, block_position)) != -1
+    ]
+    if len(mutation_positions) != len(mutation_markers):
+        raise ValueError(f"{name} mutation marker inventory drifted")
+    if not block_position < exit_position < min(mutation_positions):
+        raise ValueError(f"{name} owner block does not precede every mutation path")
+    if "if: always()" in text:
+        raise ValueError(f"{name} can bypass the owner block through an always() step")
+
+
 deploy_text = {name: (workflow_dir / name).read_text() for name in expected_inventory}
 for name, text in deploy_text.items():
     if ":" + "latest" in text.lower():
@@ -216,33 +240,38 @@ for name, text in deploy_text.items():
     if "github.sha" not in text and "GITHUB_SHA" not in text:
         raise SystemExit(f"FAIL: {name} does not derive its artifact from the triggering commit")
 
-    blocker = "Owner block - forward-only promotion pending"
-    loud_error = (
-        "::error::Forward-only promotion pending owner-approved failure handling; "
-        "no image, SSH, provider, secret, or Swarm mutation was attempted."
-    )
-    if text.count(blocker) != 1 or text.count(loud_error) != 1:
-        raise SystemExit(f"FAIL: {name} lacks the single loud owner promotion block")
-    block_position = text.index(blocker)
-    exit_position = text.index("exit 1", block_position)
-    mutation_markers = (
-        "docker/login-action@",
-        "docker login",
-        "docker build",
-        "docker/build-push-action@",
-        "ssh jeeb",
-        "docker service update",
-        "docker secret create",
-    )
-    mutation_positions = [
-        position
-        for marker in mutation_markers
-        if (position := text.find(marker, block_position)) != -1
-    ]
-    if not mutation_positions or not block_position < exit_position < min(mutation_positions):
-        raise SystemExit(f"FAIL: {name} owner block does not precede every mutation path")
-    if "if: always()" in text:
-        raise SystemExit(f"FAIL: {name} can bypass the owner block through an always() step")
+authorities = {
+    "deploy-to-jeeb.yml": (
+        deploy_text["deploy-to-jeeb.yml"],
+        ("docker login", "docker build", "ssh jeeb", "docker service update", "docker secret create"),
+    ),
+    "jeeb-staging-deploy.yml": (
+        deploy_text["jeeb-staging-deploy.yml"],
+        ("docker/login-action@", "docker/build-push-action@", "ssh jeeb-staging", "docker service update", "docker secret create"),
+    ),
+    "jeeb-staging-state-auth-smoke.yml": (
+        smoke,
+        ("actions/checkout@", "ssh jeeb-staging", "docker service update", "actions/upload-artifact@"),
+    ),
+    "jeeb-gateway-secret-lifecycle.sh": (
+        lifecycle,
+        ("docker service", "docker secret"),
+    ),
+}
+if len(authorities) != len(expected_mutation_inventory):
+    raise SystemExit("FAIL: owner-block authority inventory is incomplete")
+for name, (text, markers) in authorities.items():
+    try:
+        validate_owner_block(name, text, markers)
+    except ValueError as error:
+        raise SystemExit(f"FAIL: {error}") from error
+    mutated = text.replace("Owner block - forward-only promotion pending", "Promotion gate", 1)
+    try:
+        validate_owner_block(name, mutated, markers)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit(f"FAIL: {name} owner-block negative control survived")
 
 direct = deploy_text["deploy-to-jeeb.yml"]
 for token in (

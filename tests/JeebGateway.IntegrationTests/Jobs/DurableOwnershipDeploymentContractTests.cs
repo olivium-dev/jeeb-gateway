@@ -180,17 +180,21 @@ public sealed class DurableOwnershipDeploymentContractTests
     }
 
     [Fact]
-    public void Jeeb_staging_workflow_is_gateway_only_and_provider_secret_minimal()
+    public void Jeeb_staging_workflow_is_gateway_only_provider_secret_minimal_and_owner_blocked()
     {
         var workflow = Workflow("jeeb-staging-deploy.yml");
         var automaticRollback = "--update-failure-action " + "rollback";
-        var rollbackOrder = "--" + "rollback-order stop-first";
+        var rollbackOption = "--" + "rollback-order";
         var openAiSecret = "secrets.OPENAI" + "_API_KEY";
 
+        workflow.Should().Contain("Owner block - forward-only promotion pending");
+        workflow.Should().Contain("::error::Forward-only promotion pending owner-approved failure handling");
         workflow.Should().Contain("[ \"$REPOSITORY\" = jeeb-gateway ]");
-        workflow.Should().Contain("Selective gateway deploy requires the incumbent service");
-        workflow.Should().Contain(automaticRollback);
-        workflow.Should().Contain(rollbackOrder);
+        workflow.Should().Contain("Selective gateway deploy requires an incumbent service");
+        workflow.Should().Contain("--update-failure-action pause");
+        workflow.Should().NotContain(automaticRollback);
+        workflow.Should().NotContain(rollbackOption);
+        workflow.Should().NotContain("recover_exact_" + "incumbent");
         workflow.Should().Contain("--update-order stop-first");
         workflow.Should().Contain(".jeeb-deploy/ghcr-");
         workflow.Should().NotContain("docker service create");
@@ -198,6 +202,8 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().NotContain("secrets.JEEB_RTC_DATABASE_URL");
         workflow.Should().NotContain("secrets.JEEB_DATABASE_URL");
         workflow.Should().NotContain(openAiSecret);
+        workflow.IndexOf("Owner block - forward-only promotion pending", StringComparison.Ordinal)
+            .Should().BeLessThan(workflow.IndexOf("docker/login-action@", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -229,8 +235,14 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("UserKnownHostsFile ~/.ssh/known_hosts");
         workflow.Should().Contain("StrictHostKeyChecking yes");
         workflow.Should().NotContain("StrictHostKeyChecking accept-new");
+        workflow.Should().Contain("Owner block - forward-only promotion pending");
+        workflow.Should().Contain("--update-failure-action pause");
+        workflow.Should().NotContain("--update-failure-action " + "rollback");
+        workflow.Should().NotContain("docker service " + "rollback");
 
         var firstExternalMutation = workflow.IndexOf("docker login", StringComparison.Ordinal);
+        var ownerBlock = workflow.IndexOf(
+            "Owner block - forward-only promotion pending", StringComparison.Ordinal);
         var sshSetup = workflow.IndexOf("Install cloudflared + write deploy key", StringComparison.Ordinal);
         var canonicalGuardIndex = workflow.IndexOf(canonicalGuard, StringComparison.Ordinal);
         var build = workflow.IndexOf("docker build", StringComparison.Ordinal);
@@ -238,6 +250,7 @@ public sealed class DurableOwnershipDeploymentContractTests
             .Should().BeLessThan(firstExternalMutation);
         workflow.IndexOf(hostGuard, StringComparison.Ordinal)
             .Should().BeLessThan(firstExternalMutation);
+        ownerBlock.Should().BeLessThan(firstExternalMutation);
         sshSetup.Should().BeLessThan(canonicalGuardIndex);
         canonicalGuardIndex.Should().BeLessThan(firstExternalMutation,
             "Swarm IDs and aliases must be rejected before local registry mutation");
@@ -294,6 +307,10 @@ public sealed class DurableOwnershipDeploymentContractTests
     {
         var workflow = Workflow("jeeb-staging-state-auth-smoke.yml");
 
+        workflow.Should().Contain("Owner block - forward-only promotion pending");
+        workflow.Should().Contain("::error::Forward-only promotion pending owner-approved failure handling");
+        workflow.Should().Contain("if: ${{ success() }}");
+        workflow.Should().NotContain("if: always()");
         workflow.Should().Contain("case \"$anonymous\" in 401|403)");
         workflow.Should().Contain("case \"$authenticated\" in 2??) ;; *)");
         workflow.Should().NotContain("case \"$authenticated\" in 0|401|403)");
@@ -318,6 +335,8 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("staging_gateway_lock_acquire");
         workflow.Should().Contain("staging_gateway_lock_assert");
         workflow.Should().Contain("staging_gateway_lock_release");
+        workflow.IndexOf("Owner block - forward-only promotion pending", StringComparison.Ordinal)
+            .Should().BeLessThan(workflow.IndexOf("actions/checkout@", StringComparison.Ordinal));
         workflow.IndexOf("staging_gateway_lock_assert", StringComparison.Ordinal)
             .Should().BeLessThan(
                 workflow.IndexOf("docker service update --force", StringComparison.Ordinal));
@@ -326,20 +345,34 @@ public sealed class DurableOwnershipDeploymentContractTests
     [Theory]
     [InlineData("deploy-to-jeeb.yml")]
     [InlineData("jeeb-staging-deploy.yml")]
-    public void Gateway_deploys_use_the_environment_specific_safe_rollout_and_verify_exact_image(
+    public void Gateway_deploy_templates_are_owner_blocked_pause_only_and_verify_exact_image(
         string workflowName)
     {
         var workflow = Workflow(workflowName);
         var verifier = File.ReadAllText(Path.Combine(
             FindRepositoryRoot(), "scripts", "verify-swarm-service-image.sh"));
+        var automaticRollback = "--update-failure-action " + "rollback";
+        var rollbackOption = "--" + "rollback-order";
 
         workflow.Should().Contain("steps.immutable.outputs.image");
         workflow.Should().Contain("scripts/verify-swarm-service-image.sh");
+        workflow.Should().Contain("Owner block - forward-only promotion pending");
+        workflow.Should().Contain("::error::Forward-only promotion pending owner-approved failure handling");
+        workflow.Should().Contain("--update-order stop-first");
+        workflow.Should().Contain("--update-failure-action pause");
+        workflow.Should().NotContain(automaticRollback);
+        workflow.Should().NotContain(rollbackOption);
+        workflow.Should().NotContain("docker service " + "rollback");
+        workflow.Should().NotContain("recover_exact_" + "incumbent");
+        workflow.Should().NotContain("rollback_" + "armed");
+        workflow.Should().NotContain("--update-order start-first");
         verifier.Should().Contain(".Spec.TaskTemplate.ContainerSpec.Image");
         verifier.Should().Contain(".UpdateStatus");
-        verifier.Should().Contain("initial|completed|rollback_completed) break");
-        verifier.Should().Contain("updating|rollback_started) sleep 4");
-        verifier.Should().Contain("initial|completed|rollback_completed) ;;");
+        verifier.Should().Contain("initial|completed) break");
+        verifier.Should().Contain("updating) sleep 4");
+        verifier.Should().Contain("initial|completed) ;;");
+        verifier.Should().NotContain("rollback_" + "completed");
+        verifier.Should().NotContain("rollback_" + "started");
         verifier.Should().Contain(".Spec.Mode.Replicated.Replicas");
         verifier.Should().Contain("desired-state=running");
         verifier.Should().Contain(".Status.State");
@@ -350,46 +383,35 @@ public sealed class DurableOwnershipDeploymentContractTests
         verifier.Should().Contain("{{.Image}}");
         if (workflowName == "jeeb-staging-deploy.yml")
         {
-            workflow.Should().Contain("--update-order stop-first");
-            workflow.Should().Contain("--update-failure-action " + "rollback");
-            workflow.Should().Contain("--" + "rollback-order stop-first");
             workflow.Should().Contain("docker service inspect '$service' --format '{{json .Spec}}'");
             workflow.Should().Contain("docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'");
-            workflow.Should().Contain("update?version=\\${expected_version}&rollback=" + "previous");
-            workflow.Should().Contain("registryAuthFrom=previous-spec");
-            workflow.Should().Contain("rollback CAS outcome did not reconcile to the exact incumbent");
-            workflow.Should().NotContain("docker service " + "rollback");
+            workflow.Should().Contain("cmp -s \"$pre_update_spec\" \"$incumbent_spec\"");
+            workflow.Should().Contain("cmp -s \"$pre_update_version\" \"$incumbent_version\"");
+            workflow.Should().Contain("cmp -s \"$pre_update_id\" \"$incumbent_id\"");
+            workflow.Should().Contain("verify_exact_candidate_after_checks");
+            workflow.Should().Contain("EXPECTED_INCUMBENT_IMAGE");
             workflow.Should().Contain("Incumbent service image is not digest-pinned");
-            workflow.Should().NotContain("--update-order start-first");
         }
         else
         {
             const string runtimeVerifier = "base64 -d | bash -s -- \"\\$SVC\" \"\\$REQUESTED_IMAGE\"";
-            var arm = workflow.IndexOf("rollback_armed=true", StringComparison.Ordinal);
-            var runtimeVerifierIndex = workflow.IndexOf(runtimeVerifier, StringComparison.Ordinal);
-            arm.Should().BeGreaterThanOrEqualTo(0);
             CountOccurrences(workflow, runtimeVerifier).Should().Be(1);
-            var firstDisarmAfterArm = workflow.IndexOf(
-                "rollback_armed=false",
-                arm + "rollback_armed=true".Length,
-                StringComparison.Ordinal);
-            arm.Should().BeLessThan(runtimeVerifierIndex);
-            runtimeVerifierIndex.Should().BeLessThan(firstDisarmAfterArm,
-                "runtime identity verification must finish before the first recovery disarm");
-            workflow.Should().Contain("--update-order stop-first");
-            workflow.Should().Contain("--update-failure-action " + "rollback");
-            workflow.Should().Contain("--" + "rollback-order stop-first");
-            workflow.Should().Contain("docker service " + "rollback --detach=false");
-            workflow.Should().Contain("Incumbent service image is not digest-pinned");
-            workflow.Should().NotContain("--update-order start-first");
+            workflow.Should().Contain("Deployed service spec does not match the requested immutable digest");
         }
     }
 
     [Fact]
-    public void Jeeb_staging_is_a_non_activating_full_spec_bootstrap_with_all_live_gates_armed()
+    public void Jeeb_staging_is_an_owner_blocked_non_activating_full_spec_template()
     {
         var workflow = Workflow("jeeb-staging-deploy.yml");
+        var automaticRollback = "--update-failure-action " + "rollback";
 
+        workflow.Should().Contain("Owner block - forward-only promotion pending");
+        workflow.Should().Contain("--update-failure-action pause");
+        workflow.Should().NotContain(automaticRollback);
+        workflow.Should().NotContain("docker service " + "rollback");
+        workflow.Should().NotContain("recover_exact_" + "incumbent");
+        workflow.Should().NotContain("rollback_" + "armed");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Chat false");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Realtime false");
         workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Chat true");
@@ -401,43 +423,44 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("capture_remote_spec() {");
         workflow.Should().Contain("{{json .Spec}}");
         workflow.Should().Contain("{{.ID}} {{.Version.Index}}");
-        workflow.Should().Contain("cmp -s \"$recovery_spec\" \"$incumbent_spec\"");
-        workflow.Should().Contain("cmp -s \"$recovery_spec\" \"$candidate_spec\"");
-        workflow.Should().Contain("cmp -s \"$confirm_spec\" \"$candidate_spec\"");
-        workflow.Should().Contain("candidate_index=$(<\"$candidate_version\")");
-        workflow.Should().Contain("confirm_index=$(<\"$confirm_version\")");
-        workflow.Should().Contain("candidate_service_id=$(<\"$candidate_id\")");
-        workflow.Should().Contain("confirm_service_id=$(<\"$confirm_id\")");
-        workflow.Should().Contain("registryAuthFrom=previous-spec");
-        workflow.Should().Contain("rollback CAS outcome did not reconcile to the exact incumbent");
+        workflow.Should().Contain("cmp -s \"$pre_update_spec\" \"$incumbent_spec\"");
+        workflow.Should().Contain("cmp -s \"$pre_update_version\" \"$incumbent_version\"");
+        workflow.Should().Contain("cmp -s \"$pre_update_id\" \"$incumbent_id\"");
         workflow.Should().Contain("tolower($1) == tolower(expected)");
         workflow.Should().Contain("matches == 1 && exact_false == 1");
-        workflow.Should().Contain("verify_exact_candidate_before_disarm() {");
+        workflow.Should().Contain("verify_exact_candidate_after_checks() {");
         workflow.Should().Contain("cmp -s \"$final_spec\" \"$candidate_spec\"");
         workflow.Should().Contain("cmp -s \"$final_version\" \"$candidate_version\"");
         workflow.Should().Contain("cmp -s \"$final_id\" \"$candidate_id\"");
-        workflow.Should().Contain("cmp -s \"$terminal_id\" \"$incumbent_id\"");
-        workflow.Should().Contain("cmp -s \"$terminal_spec\" \"$incumbent_spec\"");
-        workflow.Should().Contain("RED: recovered service drifted after runtime/public verification");
         workflow.Should().Contain("group: jeeb-staging-gateway-mutation");
         workflow.Should().Contain("source scripts/staging-gateway-mutation-lock.sh");
         workflow.Should().Contain("staging_gateway_lock_acquire");
         workflow.Should().Contain("staging_gateway_lock_assert");
         workflow.Should().Contain("staging_gateway_lock_release");
-        CountOccurrences(workflow, "scripts/verify-swarm-service-image.sh").Should().Be(2,
-            "forward and recovery paths must each run the checked-in exact verifier");
+        workflow.Should().Contain(
+            "add_env Operations__RealtimeProbe__MintKeyFile /run/secrets/staging_wss_probe_mint_key");
+        workflow.Should().Contain(
+            "add_env Services__Realtime__GuardianSecretFile /run/secrets/realtime_guardian_secret");
+        workflow.Should().Contain(
+            "add_env Services__Realtime__MembershipTicketSigningKeyFile /run/secrets/realtime_membership_ticket_key");
+        workflow.Should().Contain(
+            "add_env Services__Realtime__PublicSocketUrl wss://app.jeeb.fds-1.com/socket/websocket");
+        CountOccurrences(workflow, "scripts/verify-swarm-service-image.sh").Should().Be(1,
+            "the inert forward template retains one exact candidate verifier");
 
+        var ownerBlock = workflow.IndexOf(
+            "Owner block - forward-only promotion pending", StringComparison.Ordinal);
+        var firstExternalMutation = workflow.IndexOf("docker/login-action@", StringComparison.Ordinal);
         var preUpdate = workflow.IndexOf(
             "capture_remote_spec \"$pre_update_spec\" \"$pre_update_version\" \"$pre_update_id\"",
             StringComparison.Ordinal);
-        var arm = workflow.IndexOf("rollback_armed=true", StringComparison.Ordinal);
         var candidate = workflow.IndexOf(
             "capture_remote_spec \"$candidate_spec\" \"$candidate_version\" \"$candidate_id\"",
-            arm,
+            preUpdate,
             StringComparison.Ordinal);
         var update = workflow.IndexOf(
             "docker service update --detach=false",
-            arm,
+            preUpdate,
             StringComparison.Ordinal);
         var readiness = workflow.IndexOf(
             "verify_candidate_readiness",
@@ -457,14 +480,12 @@ public sealed class DurableOwnershipDeploymentContractTests
             publicProbe,
             StringComparison.Ordinal);
         var finalCandidate = workflow.IndexOf(
-            "verify_exact_candidate_before_disarm",
+            "verify_exact_candidate_after_checks",
             descriptor,
             StringComparison.Ordinal);
-        var disarm = workflow.IndexOf("rollback_armed=false", finalCandidate, StringComparison.Ordinal);
 
-        preUpdate.Should().BeLessThan(arm);
-        workflow.Should().Contain("rollback_armed=true\n          {");
-        arm.Should().BeLessThan(update);
+        ownerBlock.Should().BeLessThan(firstExternalMutation);
+        preUpdate.Should().BeLessThan(update);
         update.Should().BeLessThan(candidate);
         candidate.Should().BeLessThan(readiness);
         readiness.Should().BeLessThan(flags);
@@ -472,10 +493,6 @@ public sealed class DurableOwnershipDeploymentContractTests
         imageVerifier.Should().BeLessThan(publicProbe);
         publicProbe.Should().BeLessThan(descriptor);
         descriptor.Should().BeLessThan(finalCandidate);
-        finalCandidate.Should().BeLessThan(disarm);
-        workflow[(arm + "rollback_armed=true".Length)..]
-            .Split("rollback_armed=false", StringSplitOptions.None)
-            .Length.Should().Be(2, "there must be exactly one post-arm disarm");
     }
 
     private static string ShellFunction(string workflow, string name)
