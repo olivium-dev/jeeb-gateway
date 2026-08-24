@@ -153,13 +153,15 @@ if not voice_input.search(direct):
 if direct.count("voice_transcription_base_url=${{ inputs.voice_transcription_base_url }}") != 1:
     violations.append((DIRECT_DEPLOY, 1, "voice owner target is missing from the pre-build URL guard"))
 voice_binding = "Services__VoiceTranscription__BaseUrl='${{ inputs.voice_transcription_base_url }}'"
-for prefix in ("--env-add ", "--env "):
-    if direct.count(prefix + voice_binding) != 1:
-        violations.append((DIRECT_DEPLOY, 1, f"voice owner target needs exactly one {prefix.strip()} binding"))
+if direct.count("--env-add " + voice_binding) != 1:
+    violations.append((DIRECT_DEPLOY, 1, "voice owner target needs exactly one update binding"))
+if "--env " + voice_binding in direct:
+    violations.append((DIRECT_DEPLOY, 1, "update-only deploy reintroduced a create-time voice binding"))
 voice_flag = "FeatureFlags__UseUpstream__Voice='true'"
-for prefix in ("--env-add ", "--env "):
-    if direct.count(prefix + voice_flag) != 1:
-        violations.append((DIRECT_DEPLOY, 1, f"voice owner route needs exactly one {prefix.strip()} enablement"))
+if direct.count("--env-add " + voice_flag) != 1:
+    violations.append((DIRECT_DEPLOY, 1, "voice owner route needs exactly one update enablement"))
+if "--env " + voice_flag in direct:
+    violations.append((DIRECT_DEPLOY, 1, "update-only deploy reintroduced a create-time voice enablement"))
 
 for expected in (
     "add_env FeatureFlags__UseUpstream__Voice true",

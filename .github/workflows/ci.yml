@@ -129,6 +129,18 @@ jobs:
       - name: Build test project
         run: dotnet build tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore
 
+      - name: Restore unit test project
+        run: dotnet restore tests/JeebGateway.UnitTests/JeebGateway.UnitTests.csproj
+
+      - name: Build unit test project
+        run: dotnet build tests/JeebGateway.UnitTests/JeebGateway.UnitTests.csproj -c Release --no-restore
+
+      - name: Run all unit tests
+        run: >-
+          dotnet test tests/JeebGateway.UnitTests/JeebGateway.UnitTests.csproj
+          -c Release --no-build --no-restore --verbosity normal
+          --logger "trx;LogFileName=unit-tests.trx"
+
       - name: Verify test shards are disjoint and exhaustive
         run: |
           set -euo pipefail

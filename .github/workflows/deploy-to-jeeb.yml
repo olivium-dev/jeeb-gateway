@@ -1,17 +1,18 @@
-# Deploy to Jeeb — zero-downtime Docker Swarm deploy over the Cloudflare tunnel.
+# Deploy to Jeeb — verified host-mode Docker Swarm deploy over the Cloudflare tunnel.
 #
 # Follows the olivium per-service deploy-to-<server>.yml pattern (workflow_dispatch
 # + cloudflared SSH + ghcr image + docker service), hardened per the locked deploy
 # policy (olivium-deployment/README.md):
-#   * controlled deploy: docker service UPDATE with failure-action=pause;
-#     CREATE only when the service is absent  -- NEVER `service rm` + `service create`
+#   * controlled deploy: update an existing digest-pinned service with automatic
+#     rollback plus exact-incumbent manual recovery; never delete or create a service
 #   * update order = stop-first: the published port uses mode=host on a
 #     single-node swarm, so start-first deadlocks ("host-mode port already in use
 #     on 1 node") because the old task still holds the host port. stop-first frees
 #     the port first (brief blip), which is correct for host-mode single node.
 #   * key-only SSH from a secret (fail-closed; no password in YAML, unlike legacy)
 #   * registry creds via GitHub secrets, never inlined (no demo-password literals)
-#   * HTTP health gate after deploy; failures remain paused for inspection
+#   * HTTP health gate before disarming recovery; every failure restores and verifies
+#     the exact incumbent digest
 #
 # This service is the stateless Jeeb gateway: a JWT BFF that aggregates owner
 # services via configured HTTP boundaries. It receives no database credential
@@ -120,25 +121,22 @@ on:
       # input per flag. `feature_flags` is a comma-separated list of `Key=Value` pairs whose
       # Key is the LAST segment of a `FeatureFlags:<...>:Enabled` (or `FeatureFlags:UseUpstream:<...>`)
       # config path; the deploy job maps each to its full `FeatureFlags__*` env var and injects
-      # it via --env-add on the SAME zero-downtime service update (and --env on first create).
+      # it via --env-add on the same update-only host-mode rollout.
       #
       # This input REPLACES the former dedicated `use_upstream_kyc` / `use_upstream_cdn`
       # boolean inputs (net -2 +1 = 24 inputs, one slot spare). It is ADDITIVE and
       # backward-compatible:
       #   * Empty (DEFAULT '') => emit NO map-driven flag mutation. On `docker service update
       #     --image ...` every unlisted env var is PRESERVED, so a no-arg deploy leaves all
-      #     FeatureFlags exactly as the running service had them. On a FRESH create the gateway
-      #     reads appsettings.Production.json, which already bakes UseUpstream.Kyc=true and
-      #     UseUpstream.Cdn=true — so dropping the two dedicated inputs changes NOTHING for a
-      #     default deploy (same true values, just sourced from committed config not an input).
+      #     FeatureFlags exactly as the running service had them.
       #   * Recognised keys (case-insensitive), each mapping to its env var:
       #       ConversationAutoCreate=<bool> -> FeatureFlags__ConversationAutoCreate__Enabled   (S05 H7/H9b / JEB-50)
       #       UseUpstreamKyc=<bool>         -> FeatureFlags__UseUpstream__Kyc                   (S03 / ADR-0004)
       #       UseUpstreamCdn=<bool>         -> FeatureFlags__UseUpstream__Cdn                   (S03 / ADR-0004)
       #       UseUpstreamOffer=<bool>       -> FeatureFlags__UseUpstream__Offer                 (S07 — auction/accept)
       #     NOTE: FeatureFlags__UseUpstream__Offer AND FeatureFlags__UseUpstream__Delivery are
-      #     ALSO injected UNCONDITIONALLY =true on every deploy (see the dedicated --env-add/--env
-      #     lines in the update & create branches below), so S07 routes through
+      #     ALSO injected UNCONDITIONALLY =true on every deploy (see the dedicated --env-add
+      #     lines in the update below), so S07 routes through
       #     UpstreamPendingOffersStore and S09/S13/S15 route through the canonical delivery
       #     state-machine (SM-1: Ordered/Picked/InTransit/AtDoor/Done, trigger-keyed PATCH,
       #     AtDoor OTP handover, settlement-on-Done) even when the map keys are omitted.
@@ -153,7 +151,7 @@ on:
       # Example: feature_flags='ConversationAutoCreate=true' arms H7 broadcasting auto-create
       # while leaving Kyc/Cdn at their baked-true defaults.
       feature_flags:
-        description: 'Generic FeatureFlags overlay: comma-separated Key=Value. Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamChat. Empty = preserve running flags (baked appsettings defaults on fresh create). Delivery/Ratings authority and Heartbeat/DurableRequests environment locks are not operator inputs.'
+        description: 'Generic FeatureFlags overlay: comma-separated Key=Value. Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamChat. Empty = preserve running flags. Delivery/Ratings authority and Heartbeat/DurableRequests environment locks are not operator inputs.'
         required: false
         default: ''
       # DEV-ONLY seed/inspect surface (/dev/*). This input is the ONLY supported way to
@@ -170,7 +168,7 @@ on:
       #   'true'                => env-add  Features__DevEndpoints__Enabled=true  (/dev/* ON).
       #   'false'               => env-rm   Features__DevEndpoints__Enabled       (scrub => 404).
       # Set 'true'/'false' ONLY when you intend to change the flag (e.g. arm/disarm the E2E
-      # seeding harness). Applied additively on the SAME zero-downtime `docker service update`
+      # seeding harness). Applied additively on the same stop-first `docker service update`
       # that injects Security__TokenMint__*.
       dev_endpoints:
         description: 'DEV-only /dev/* flag (Features__DevEndpoints__Enabled). preserve (default) = leave as-is; true = enable; false = scrub (404).'
@@ -194,7 +192,7 @@ on:
       #                           A fresh prod that never set the flag stays OFF (404).
       #   'true'                => env-add  Features__Swagger__Enabled=true  (/swagger* ON, admin-gated).
       #   'false'               => env-rm   Features__Swagger__Enabled       (scrub => 404).
-      # Applied additively on the SAME zero-downtime `docker service update` as dev_endpoints.
+      # Applied additively on the same stop-first `docker service update` as dev_endpoints.
       swagger_ui:
         description: 'Swagger /swagger* flag (Features__Swagger__Enabled). preserve (default) = leave as-is; true = enable (admin-gated, non-admin 404); false = scrub (404).'
         required: false
@@ -335,7 +333,7 @@ jobs:
       - name: Remote GHCR login (token via stdin pipe)
         run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"
 
-      - name: Zero-downtime deploy (update if exists, else create)
+      - name: Verified host-mode deploy with exact recovery
         env:
           IMAGE_PATH: ${{ steps.immutable.outputs.image }}
           STATE_SERVICE_TOKEN: ${{ secrets.JEEB_STATE_SERVICE_TOKEN }}
@@ -363,6 +361,8 @@ jobs:
           EXPORT_SECRET="jeeb_gateway_export_key_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           JOB_SECRET="jeeb_gateway_job_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           stream_secret() {
+            # The generated secret name is intentionally expanded by the runner.
+            # shellcheck disable=SC2029
             printf '%s' "$2" | ssh jeeb "docker secret create '$1' - >/dev/null"
           }
           stream_secret "$STATE_SECRET" "$STATE_SERVICE_TOKEN"
@@ -386,8 +386,8 @@ jobs:
           # false => env-rm   Features__DevEndpoints__Enabled       (scrub => endpoints OFF / 404)
           # Idempotent: env-add overwrites if present; `docker service update --env-rm` is a
           # no-op when the var is already absent, so an explicit false run never errors.
-          # Applied on the SAME update command as Security__TokenMint__* => one zero-downtime
-          # rollout (stop-first + pause-on-failure), never a separate out-of-band update.
+          # Applied on the same update command as Security__TokenMint__* => one stop-first,
+          # rollback-on-failure rollout, never a separate out-of-band update.
           case "${{ inputs.dev_endpoints }}" in
             true)
               DEV_FLAG_ARG="--env-add Features__DevEndpoints__Enabled=true"
@@ -406,7 +406,7 @@ jobs:
           # mirroring dev_endpoints. preserve => no mutation (current state persists across the
           # --image update). true => env-add (admin-gated /swagger* ON). false => env-rm (404).
           # Idempotent: env-add overwrites if present; --env-rm is a no-op when already absent.
-          # Applied on the SAME zero-downtime update command as DEV_FLAG_ARG / TokenMint.
+          # Applied on the same stop-first update command as DEV_FLAG_ARG / TokenMint.
           case "${{ inputs.swagger_ui }}" in
             true)
               SWAGGER_FLAG_ARG="--env-add Features__Swagger__Enabled=true"
@@ -424,11 +424,8 @@ jobs:
           # ── Generic FeatureFlags map parser ────────────────────────────────────────────
           # Parse the `feature_flags` comma-separated Key=Value overlay into --env-add args.
           # Each recognised key maps to its full FeatureFlags__* env var. Empty input => no
-          # args (a no-arg deploy preserves the running flags; a fresh create uses the
-          # appsettings.Production.json baked defaults). Value must be true/false. Unknown
-          # keys warn-and-skip (never fail the deploy on a typo). The SAME parsed string is
-          # used for both the update (--env-add) and create (--env) branches, so the two
-          # code paths can never drift. This REPLACES the former dedicated
+          # args, so a no-arg deploy preserves the running flags. Value must be true/false.
+          # Unknown keys warn-and-skip (never fail the deploy on a typo). This replaces the former dedicated
           # FeatureFlags__UseUpstream__Kyc/Cdn injections (now expressible via the map).
           FEATURE_FLAG_ARGS=""
           RAW_FLAGS="${{ inputs.feature_flags }}"
@@ -462,13 +459,13 @@ jobs:
           else
             echo "feature_flags=empty -> (no map-driven flag mutation; running flags / baked appsettings defaults preserved)"
           fi
-          # On first-create the service has no prior env to preserve, so the same map args are
-          # passed as --env (create uses --env, update uses --env-add; the FLAG token strings
-          # are identical aside from that one keyword, which we substitute below).
-          FEATURE_FLAG_CREATE_ARGS="${FEATURE_FLAG_ARGS//--env-add /--env }"
+          # The runner intentionally expands the versioned secret names and immutable
+          # image before sending this single update-only script to the pinned host.
+          # shellcheck disable=SC2087
           ssh jeeb bash -se <<EOF
           set -euo pipefail
           SVC='${{ inputs.service_name }}'; INT='${{ inputs.internal_port }}'; EXT='${{ inputs.external_port }}'
+          HEALTH='${{ inputs.health_path }}'
           STATE_SECRET='$STATE_SECRET'
           DELIVERY_SECRET='$DELIVERY_SECRET'
           NOTIFICATION_SECRET='$NOTIFICATION_SECRET'
@@ -493,29 +490,90 @@ jobs:
             --env-rm OPENAI_API_KEY
             --env-rm OLIVIUM_OPEN_AI_KEY
           )
+          docker service inspect "\$SVC" >/dev/null 2>&1 || {
+            echo 'Direct gateway deploy requires an incumbent digest-pinned service' >&2
+            exit 1
+          }
+          [ "\$(docker service inspect "\$SVC" --format '{{.Spec.Mode.Replicated.Replicas}}')" = 1 ] || {
+            echo 'Direct gateway service must retain exactly one replica' >&2
+            exit 1
+          }
+          current_ports=\$(docker service inspect "\$SVC" \
+            --format '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}')
+          [ "\$current_ports" = "\${EXT}:\${INT}:host" ] || {
+            echo 'Direct gateway service must retain the approved host-mode port' >&2
+            exit 1
+          }
+          previous_image=\$(docker service inspect "\$SVC" \
+            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+          [[ "\$previous_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
+            echo 'Incumbent service image is not digest-pinned; recovery target is unsafe' >&2
+            exit 1
+          }
+          rollback_armed=false
+          rollback_on_failure() {
+            local status=\$? current_image recovery_mode=automatic recovery_ok=true recovery_ready=false
+            trap - EXIT
+            set +e
+            if [ "\$status" -ne 0 ] && [ "\$rollback_armed" = true ]; then
+              current_image=\$(docker service inspect "\$SVC" \
+                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)
+              if [ "\$current_image" != "\$previous_image" ]; then
+                recovery_mode=manual
+                docker service rollback --detach=false "\$SVC" || recovery_ok=false
+              fi
+              [ "\$(docker service inspect "\$SVC" \
+                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)" = "\$previous_image" ] \
+                || recovery_ok=false
+              for attempt in \$(seq 1 30); do
+                if curl -fsS --max-time 5 "http://127.0.0.1:\${EXT}\${HEALTH}" >/dev/null; then
+                  recovery_ready=true
+                  break
+                fi
+                sleep 4
+              done
+              [ "\$recovery_ready" = true ] || recovery_ok=false
+              if [ "\$recovery_ok" = true ]; then
+                echo "Verified \${recovery_mode} recovery to \${previous_image##*@}" >&2
+              else
+                echo 'Exact-incumbent recovery verification failed' >&2
+                status=97
+              fi
+            fi
+            exit "\$status"
+          }
+          trap rollback_on_failure EXIT
           state_secret_args=()
-          if docker service inspect "\$SVC" >/dev/null 2>&1; then
-            add_rotated_secret() {
-              target="\$1"; source="\$2"
-              format="{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name \"\$target\"}}{{.SecretName}}{{\"\\n\"}}{{end}}{{end}}"
-              while IFS= read -r old_secret; do
-                [ -z "\$old_secret" ] || state_secret_args+=(--secret-rm "\$old_secret")
-              done < <(docker service inspect "\$SVC" --format "\$format")
-              state_secret_args+=(--secret-add "source=\$source,target=\$target,mode=0444")
-            }
-            add_rotated_secret jeeb_state_service_token "\$STATE_SECRET"
-            add_rotated_secret delivery_service_token "\$DELIVERY_SECRET"
-            add_rotated_secret notification_service_token "\$NOTIFICATION_SECRET"
-            add_rotated_secret bundler_cms_bearer_token "\$BUNDLER_SECRET"
-            add_rotated_secret private_artifact_store_bearer_token "\$ARTIFACT_SECRET"
-            add_rotated_secret data_export_token_signing_key "\$EXPORT_SECRET"
-            add_rotated_secret jeeb_gateway_job_token "\$JOB_SECRET"
-          fi
+          add_rotated_secret() {
+            target="\$1"; source="\$2"
+            format="{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name \"\$target\"}}{{.SecretName}}{{\"\\n\"}}{{end}}{{end}}"
+            while IFS= read -r old_secret; do
+              [ -z "\$old_secret" ] || state_secret_args+=(--secret-rm "\$old_secret")
+            done < <(docker service inspect "\$SVC" --format "\$format")
+            state_secret_args+=(--secret-add "source=\$source,target=\$target,mode=0444")
+          }
+          add_rotated_secret jeeb_state_service_token "\$STATE_SECRET"
+          add_rotated_secret delivery_service_token "\$DELIVERY_SECRET"
+          add_rotated_secret notification_service_token "\$NOTIFICATION_SECRET"
+          add_rotated_secret bundler_cms_bearer_token "\$BUNDLER_SECRET"
+          add_rotated_secret private_artifact_store_bearer_token "\$ARTIFACT_SECRET"
+          add_rotated_secret data_export_token_signing_key "\$EXPORT_SECRET"
+          add_rotated_secret jeeb_gateway_job_token "\$JOB_SECRET"
           [[ "\$REQUESTED_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
           docker pull "\$REQUESTED_IMAGE"
-          if docker service ls --format '{{.Name}}' | grep -wq "\$SVC"; then
-            docker service update --detach=false --replicas 1 --image "\$REQUESTED_IMAGE" --with-registry-auth \
-              --update-order stop-first --update-failure-action pause --update-monitor 20s \
+          rollout=(
+            --update-order stop-first
+            --update-parallelism 1
+            --update-monitor 20s
+            --update-failure-action rollback
+            --rollback-order stop-first
+            --rollback-parallelism 1
+            --rollback-monitor 20s
+            --rollback-failure-action pause
+          )
+          rollback_armed=true
+          docker service update --detach=false --replicas 1 --image "\$REQUESTED_IMAGE" --with-registry-auth \
+              "\${rollout[@]}" \
               "\${retired_env_args[@]}" \
               --env-add Security__TokenMint__Enabled='true' \
               --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
@@ -556,82 +614,28 @@ jobs:
               $SWAGGER_FLAG_ARG \
               "\${state_secret_args[@]}" \
               "\$SVC"
-          else
-            docker service create --detach=false --name "\$SVC" --replicas 1 \
-              --publish published=\$EXT,target=\$INT,mode=host \
-              --with-registry-auth \
-              --env ASPNETCORE_ENVIRONMENT='Production' \
-              --env DOTNET_EnableWriteXorExecute='0' \
-              --env Security__TokenMint__Enabled='true' \
-              --env Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
-              --env JeebJwt__SigningKey='${{ secrets.JEEB_JWT_SIGNING_KEY }}' \
-              --env JeebJwt__PhonePepper='${{ secrets.JEEB_JWT_PHONE_PEPPER }}' \
-              --env JeebJwt__Issuer='${{ inputs.jwt_issuer }}' \
-              --env JeebJwt__Audience='${{ inputs.jwt_audience }}' \
-              --env UmJwt__SigningKey='${{ secrets.UMJWT_SIGNING_KEY }}' \
-              --env UmJwt__Issuer='user-management' \
-              --env UmJwt__Audience='user-management' \
-              --env ChatServiceApi__BaseUrl='${{ inputs.chat_base_url }}' \
-              --env UserManagementServiceApi__BaseUrl='${{ inputs.user_management_base_url }}' \
-              --env WalletServiceApi__BaseUrl='${{ inputs.wallet_base_url }}' \
-              --env ServiceNotificationClient__BaseUrl='${{ inputs.notification_base_url }}' \
-              --env JeebStateService__BaseUrl='${{ inputs.state_base_url }}' \
-              --env JeebStateService__ServiceTokenFile='/run/secrets/jeeb_state_service_token' \
-              --env DELIVERY_SERVICE_TOKEN_FILE='/run/secrets/delivery_service_token' \
-              --env ServiceNotificationClient__ServiceTokenFile='/run/secrets/notification_service_token' \
-              --env BUNDLER_CMS_BASE_URL='${{ inputs.bundler_cms_base_url }}' \
-              --env BUNDLER_CMS_BEARER_TOKEN_FILE='/run/secrets/bundler_cms_bearer_token' \
-              --env PRIVATE_ARTIFACT_STORE_BASE_URL='${{ inputs.cdn_base_url }}' \
-              --env PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE='/run/secrets/private_artifact_store_bearer_token' \
-              --env DATA_EXPORT_TOKEN_SIGNING_KEY_FILE='/run/secrets/data_export_token_signing_key' \
-              --env InternalJobAuth__TokenFile='/run/secrets/jeeb_gateway_job_token' \
-              --env PushNotificationServiceApi__BaseUrl='${{ inputs.push_notification_base_url }}' \
-              --env Services__Delivery__BaseUrl='${{ inputs.delivery_base_url }}' \
-              --env Services__VoiceTranscription__BaseUrl='${{ inputs.voice_transcription_base_url }}' \
-              --env Services__ServiceOTP__BaseUrl='${{ inputs.otp_base_url }}' \
-              --env Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
-              --env Services__Kyc__BaseUrl='${{ inputs.kyc_base_url }}' \
-              --env Services__Cdn__BaseUrl='${{ inputs.cdn_base_url }}' \
-              --env FeatureFlags__DurableRequests__Enabled='false' \
-              --env FeatureFlags__Heartbeat__Enabled='false' \
-              --env FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
-              --env FeatureFlags__UseUpstream__Offer='true' \
-              --env FeatureFlags__UseUpstream__Delivery='true' \
-              --env FeatureFlags__UseUpstream__Ratings='true' \
-              --env FeatureFlags__UseUpstream__Chat='true' \
-              --env FeatureFlags__UseUpstream__Voice='true' \
-              --secret "source=\$STATE_SECRET,target=jeeb_state_service_token,mode=0444" \
-              --secret "source=\$DELIVERY_SECRET,target=delivery_service_token,mode=0444" \
-              --secret "source=\$NOTIFICATION_SECRET,target=notification_service_token,mode=0444" \
-              --secret "source=\$BUNDLER_SECRET,target=bundler_cms_bearer_token,mode=0444" \
-              --secret "source=\$ARTIFACT_SECRET,target=private_artifact_store_bearer_token,mode=0444" \
-              --secret "source=\$EXPORT_SECRET,target=data_export_token_signing_key,mode=0444" \
-              --secret "source=\$JOB_SECRET,target=jeeb_gateway_job_token,mode=0444" \
-              $FEATURE_FLAG_CREATE_ARGS \
-              --reserve-memory 256M \
-              "\$REQUESTED_IMAGE"
-          fi
-          EOF
-
-      - name: Verify exact deployed service image
-        env:
-          IMAGE_PATH: ${{ steps.immutable.outputs.image }}
-        run: |
-          set -euo pipefail
-          [[ "$IMAGE_PATH" =~ @sha256:[0-9a-f]{64}$ ]]
-          ssh jeeb bash -s -- '${{ inputs.service_name }}' "$IMAGE_PATH" \
-            < scripts/verify-swarm-service-image.sh
-
-      - name: Health gate (poll; leave failures paused)
-        run: |
-          ok=false
-          for i in $(seq 1 30); do
-            if ssh jeeb "curl -fsS -m 5 http://\$(hostname -I | awk '{print \$1}'):${{ inputs.external_port }}${{ inputs.health_path }} >/dev/null 2>&1"; then ok=true; break; fi
-            echo "health attempt $i ..."; sleep 4
+          [ "\$(docker service inspect "\$SVC" \
+            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')" = "\$REQUESTED_IMAGE" ] || {
+            echo 'Deployed service spec does not match the requested immutable digest' >&2
+            exit 1
+          }
+          current_ports=\$(docker service inspect "\$SVC" \
+            --format '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}')
+          [ "\$current_ports" = "\${EXT}:\${INT}:host" ] || {
+            echo 'Direct gateway host-mode port contract drifted during rollout' >&2
+            exit 1
+          }
+          healthy=false
+          for attempt in \$(seq 1 30); do
+            if curl -fsS --max-time 5 "http://127.0.0.1:\${EXT}\${HEALTH}" >/dev/null; then
+              healthy=true
+              break
+            fi
+            sleep 4
           done
-          ssh jeeb "docker service ps --no-trunc '${{ inputs.service_name }}' | head -6" || true
-          if [ "$ok" != true ]; then
-            echo "Health gate RED — service left in place for inspection"
+          if [ "\$healthy" != true ]; then
+            docker service ps --no-trunc "\$SVC" | head -n 8 || true
             exit 1
           fi
-          echo "Health OK on :${{ inputs.external_port }}${{ inputs.health_path }}"
+          rollback_armed=false
+          EOF

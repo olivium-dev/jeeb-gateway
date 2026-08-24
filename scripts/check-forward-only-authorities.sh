@@ -80,19 +80,24 @@ def normalized_shell_source(source):
     return re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", source)
 
 
-def is_required_staging_rollback(path, label, line):
-    """Allow only the fail-safe rollback forms required by the staging authority.
+def is_required_gateway_rollback(path, label, line):
+    """Allow only the fail-safe rollback forms required by gateway deploys.
 
-    Staging is a single-replica host-published fleet, so its order is deliberately
-    stop-first. This narrow exception does not authorize rollback commands anywhere
-    else and is backed by exact contract checks below.
+    Both gateway workflows update one replica on a host-published port, so their
+    order is deliberately stop-first. This narrow exception does not authorize
+    rollback commands elsewhere and is backed by exact contract checks below.
     """
-    if path != Path(".github/workflows/jeeb-staging-deploy.yml"):
+    if path not in {
+        Path(".github/workflows/deploy-to-jeeb.yml"),
+        Path(".github/workflows/jeeb-staging-deploy.yml"),
+    }:
         return False
     stripped = line.strip()
     allowed = {
         "service rollback": re.compile(
-            r'^docker service ' + r'rollback --detach=false "\$service" \|\| rollback_ok=false$'
+            r'^docker service '
+            + r'rollback --detach=false "(?:\$service|\\\$SVC)" '
+            + r'\|\| (?:rollback_ok|recovery_ok)=false$'
         ),
         "automatic rollback": re.compile(
             r'^--update-failure-action ' + r'rollback$'
@@ -169,7 +174,7 @@ for path, text in tracked:
                 and line.strip().startswith("u_N17()")
             ):
                 continue
-            if is_required_staging_rollback(path, label, line):
+            if is_required_gateway_rollback(path, label, line):
                 continue
             if pattern.search(line):
                 violations.append(f"{path}:{line_number}: {label}: {line.strip()}")
@@ -247,10 +252,23 @@ for token in (
     'steps.immutable.outputs.image',
     'GITHUB_OUTPUT',
     'sha256:',
-    'scripts/verify-swarm-service-image.sh',
+    'previous_image=',
+    'Incumbent service image is not digest-pinned; recovery target is unsafe',
+    '--update-order stop-first',
+    '--update-failure-action ' + 'rollback',
+    '--' + 'rollback-order stop-first',
+    'docker service ' + 'rollback --detach=false "\\$SVC"',
+    'Deployed service spec does not match the requested immutable digest',
 ):
     if token not in direct:
         raise SystemExit(f"FAIL: direct production deploy lacks commit/image/runtime proof: {token}")
+for forbidden_direct in (
+    'docker service ' + 'create',
+    '--update-order start-first',
+    '--update-failure-action pause',
+):
+    if forbidden_direct in direct:
+        raise SystemExit(f"FAIL: direct host-mode deploy contains unsafe rollout behavior: {forbidden_direct}")
 
 staging = deploy_text["jeeb-staging-deploy.yml"]
 for token in (
@@ -263,9 +281,9 @@ for token in (
     "add_env Gateway__PublicBaseUrl https://app.jeeb.fds-1.com",
     "add_env AdminPortal__AllowedOrigins__0 https://app.jeeb.fds-1.com",
     "add_env AdminPortal__AllowedOrigins__1 https://cms.jeeb.fds-1.com",
-    "Verify public HTTPS origin contract",
-    "https://jeeb.dev/errors/csrf_rejected",
-    "https://jeeb.dev/errors/origin_rejected",
+    "scripts/probe-staging-public-gateway-contract.sh",
+    "add_env Security__TokenMint__Enabled true",
+    "remove_secret_target jeeb_gateway_umjwt",
 ):
     if token not in staging:
         raise SystemExit(f"FAIL: staging deploy lacks commit/image/runtime proof: {token}")
@@ -321,10 +339,10 @@ for forbidden_control in (
         raise SystemExit(f"FAIL: removed authority/control was reintroduced: {forbidden_control}")
 
 required_counts = {
-    "FeatureFlags__DurableRequests__Enabled='false'": 2,
-    "FeatureFlags__Heartbeat__Enabled='false'": 2,
-    "FeatureFlags__UseUpstream__Delivery='true'": 2,
-    "FeatureFlags__UseUpstream__Ratings='true'": 2,
+    "FeatureFlags__DurableRequests__Enabled='false'": 1,
+    "FeatureFlags__Heartbeat__Enabled='false'": 1,
+    "FeatureFlags__UseUpstream__Delivery='true'": 1,
+    "FeatureFlags__UseUpstream__Ratings='true'": 1,
 }
 for token, count in required_counts.items():
     actual = workflow.count(token)
@@ -351,6 +369,139 @@ for forbidden_rollout in (
 ):
     if forbidden_rollout in staging_authority:
         raise SystemExit(f"FAIL: staging host-mode rollout drifted: {forbidden_rollout}")
+
+public_probe = Path("scripts/probe-staging-public-gateway-contract.sh").read_text()
+for token in (
+    "https://jeeb.dev/errors/csrf_rejected",
+    "https://jeeb.dev/errors/origin_rejected",
+    "expect_status 404",
+    "expect_status 400 'OTP request validation contract'",
+    "expect_status 401 'Token mint without a privileged credential'",
+    "expect_status 403 'Token mint with an invalid privileged credential'",
+    "invalid-staging-mint-probe-credential",
+    "--data '{}'",
+):
+    if token not in public_probe:
+        raise SystemExit(f"FAIL: staging public contract probe missing: {token}")
+
+ci_workflow = Path(".github/workflows/ci.yml").read_text()
+unit_test_command = (
+    "dotnet test tests/JeebGateway.UnitTests/JeebGateway.UnitTests.csproj"
+)
+for token in (
+    "dotnet restore tests/JeebGateway.UnitTests/JeebGateway.UnitTests.csproj",
+    "dotnet build tests/JeebGateway.UnitTests/JeebGateway.UnitTests.csproj",
+    unit_test_command,
+):
+    if token not in ci_workflow:
+        raise SystemExit(f"FAIL: CI does not compile and run the gateway unit suite: {token}")
+
+
+def validate_direct_rollout(text):
+    required = (
+        "previous_image=",
+        "--update-order stop-first",
+        "--update-failure-action " + "rollback",
+        "--" + "rollback-order stop-first",
+        "docker service " + 'rollback --detach=false "\\$SVC"',
+        "rollback_armed=false",
+    )
+    missing = [token for token in required if token not in text]
+    forbidden = [
+        token
+        for token in (
+            "docker service " + "create",
+            "--update-order start-first",
+            "--update-failure-action pause",
+        )
+        if token in text
+    ]
+    if missing or forbidden:
+        raise ValueError(f"missing={missing}, forbidden={forbidden}")
+
+
+def validate_staging_rollout(text):
+    probe_command = "bash scripts/probe-staging-public-gateway-contract.sh"
+    required = (
+        "add_env Security__TokenMint__Enabled true",
+        "remove_secret_target jeeb_gateway_umjwt",
+        "--update-failure-action " + "rollback",
+        "--" + "rollback-order stop-first",
+    )
+    missing = [token for token in required if token not in text]
+    if missing or text.count(probe_command) != 2:
+        raise ValueError(
+            f"missing={missing}, public_probe_count={text.count(probe_command)}"
+        )
+    armed = text.index("rollback_armed=true")
+    forward_public = text.index(probe_command, armed)
+    disarmed = text.index("rollback_armed=false", armed)
+    if not armed < forward_public < disarmed:
+        raise ValueError("public gates are not inside the armed recovery interval")
+
+
+def validate_unit_ci(text):
+    if unit_test_command not in text:
+        raise ValueError("unit test command missing")
+
+
+validate_direct_rollout(direct)
+validate_staging_rollout(staging_authority)
+validate_unit_ci(ci_workflow)
+
+negative_controls = (
+    (
+        "direct automatic recovery changed to pause",
+        validate_direct_rollout,
+        direct.replace(
+            "--update-failure-action " + "rollback",
+            "--update-failure-action pause",
+            1,
+        ),
+    ),
+    (
+        "direct host-mode rollout changed to start-first",
+        validate_direct_rollout,
+        direct.replace("--update-order stop-first", "--update-order start-first", 1),
+    ),
+    (
+        "direct deploy reintroduces service creation",
+        validate_direct_rollout,
+        direct + "\n" + "docker service " + "create app\n",
+    ),
+    (
+        "staging token mint gate disabled",
+        validate_staging_rollout,
+        staging_authority.replace(
+            "add_env Security__TokenMint__Enabled true",
+            "add_env Security__TokenMint__Enabled false",
+            1,
+        ),
+    ),
+    (
+        "staging exact-incumbent public recheck removed",
+        validate_staging_rollout,
+        staging_authority.replace(
+            "bash scripts/probe-staging-public-gateway-contract.sh", "", 1
+        ),
+    ),
+    (
+        "optional UMJWT target cleanup removed",
+        validate_staging_rollout,
+        staging_authority.replace("remove_secret_target jeeb_gateway_umjwt", ":", 1),
+    ),
+    (
+        "unit test execution removed",
+        validate_unit_ci,
+        ci_workflow.replace(unit_test_command, "", 1),
+    ),
+)
+for description, validator, mutated in negative_controls:
+    try:
+        validator(mutated)
+    except ValueError:
+        continue
+    raise SystemExit(f"FAIL: deployment policy negative control survived: {description}")
 
 program = Path("src/JeebGateway/Program.cs").read_text()
 for guard in (

@@ -113,8 +113,11 @@ jobs:
 
       - name: Log remote Docker in to GHCR
         run: |
+          # Local expansion of the run-scoped credential directory is intentional.
+          # shellcheck disable=SC2029
           ssh jeeb-staging \
             "install -d -m 700 \"\$HOME/.jeeb-deploy\" \"\$HOME/$REMOTE_DOCKER_CONFIG\""
+          # shellcheck disable=SC2029
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
             | ssh jeeb-staging \
                 "DOCKER_CONFIG=\"\$HOME/$REMOTE_DOCKER_CONFIG\" docker login ghcr.io -u '${{ github.actor }}' --password-stdin >/dev/null"
@@ -151,6 +154,11 @@ jobs:
           probe_secret_name=''
           membership_secret_name=''
           firebase_secret_name=''
+          service=jeeb-staging-jeeb-gateway
+          published=10000
+          health=/health/ready
+          previous_image=''
+          rollback_armed=false
           if [ "$REPOSITORY" = jeeb-gateway ]; then
             : "${JEEB_STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN is required}"
             : "${NOTIFICATION_SERVICE_TOKEN:?NOTIFICATION_SERVICE_TOKEN is required}"
@@ -189,20 +197,76 @@ jobs:
             secret_stage=$(mktemp -d)
             chmod 700 "$secret_stage"
             firebase_file="$secret_stage/firebase-admin.json"
-            cleanup_created_secrets() {
+            recover_exact_incumbent() {
+              local recovery_ok=true
+              ssh jeeb-staging bash -s -- \
+                "$service" "$previous_image" "$published" "$health" <<'RECOVERY' \
+                || recovery_ok=false
+              set -euo pipefail
+              service=$1
+              expected_image=$2
+              published=$3
+              health=$4
+              rollback_ok=true
+              recovery_mode=automatic
+              [[ "$expected_image" =~ @sha256:[0-9a-f]{64}$ ]]
+              current_image=$(docker service inspect "$service" \
+                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)
+              if [ "$current_image" != "$expected_image" ]; then
+                recovery_mode=manual
+                docker service rollback --detach=false "$service" || rollback_ok=false
+              fi
+              [ "$(docker service inspect "$service" \
+                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)" = "$expected_image" ] \
+                || rollback_ok=false
+              rollback_ready=false
+              for attempt in $(seq 1 40); do
+                if curl -fsS --max-time 5 \
+                  "http://127.0.0.1:${published}${health}" >/dev/null; then
+                  rollback_ready=true
+                  break
+                fi
+                sleep 4
+              done
+              [ "$rollback_ready" = true ] || rollback_ok=false
+              [ "$rollback_ok" = true ]
+              echo "Verified ${recovery_mode} recovery to ${expected_image##*@}" >&2
+          RECOVERY
+              if [ "$recovery_ok" = true ]; then
+                bash scripts/probe-staging-public-gateway-contract.sh \
+                  || recovery_ok=false
+              fi
+              [ "$recovery_ok" = true ]
+            }
+            finish_deploy() {
+              local status=$?
+              trap - EXIT
+              set +e
+              if [ "$status" -ne 0 ] && [ "$rollback_armed" = true ]; then
+                if ! recover_exact_incumbent; then
+                  echo 'Exact-incumbent recovery verification failed' >&2
+                  status=97
+                fi
+              fi
               rm -rf "$secret_stage"
               for created in "$jwt_secret_name" "$umjwt_secret_name" "$guardian_secret_name" \
                 "$probe_secret_name" "$membership_secret_name" "$firebase_secret_name" "$state_secret_name" \
                 "$notification_secret_name" "$settlement_secret_name" "$bundler_secret_name" \
                 "$job_secret_name"; do
+                # The generated secret name is intentionally expanded by the runner.
+                # shellcheck disable=SC2029
                 [ -z "$created" ] || ssh jeeb-staging "docker secret rm '$created' >/dev/null 2>&1 || true"
               done
+              exit "$status"
             }
-            trap cleanup_created_secrets EXIT
+            trap finish_deploy EXIT
             stream_secret() {
+              # The generated secret name is intentionally expanded by the runner.
+              # shellcheck disable=SC2029
               printf '%s' "$2" | ssh jeeb-staging "docker secret create '$1' - >/dev/null"
             }
             stream_secret_file() {
+              # shellcheck disable=SC2029
               ssh jeeb-staging "docker secret create '$1' - >/dev/null" < "$2"
             }
             if printf '%s' "$JEEB_FIREBASE_JSON" \
@@ -233,9 +297,20 @@ jobs:
               JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_STAGING_WSS_PROBE_MINT_KEY \
               JEEB_RTC_MEMBERSHIP_TICKET_KEY \
               JEEB_FIREBASE_JSON
+            # The fixed service name is intentionally expanded by the runner.
+            # shellcheck disable=SC2029
+            previous_image=$(ssh jeeb-staging \
+              "docker service inspect '$service' --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}'")
+            [[ "$previous_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
+              echo 'Incumbent service image is not digest-pinned; recovery target is unsafe' >&2
+              exit 1
+            }
           fi
+          rollback_armed=true
+          EXPECTED_PREVIOUS_IMAGE=$previous_image
+          : "$EXPECTED_PREVIOUS_IMAGE"
           {
-            for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY \
+            for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY EXPECTED_PREVIOUS_IMAGE \
               state_secret_name notification_secret_name settlement_secret_name \
               bundler_secret_name job_secret_name jwt_secret_name umjwt_secret_name \
               guardian_secret_name probe_secret_name membership_secret_name firebase_secret_name; do
@@ -244,42 +319,6 @@ jobs:
             cat <<'REMOTE'
           set -euo pipefail
           export DOCKER_CONFIG="$HOME/$REMOTE_DOCKER_CONFIG"
-          previous_image=''
-          was_update=false
-          rollback_armed=false
-          rollback_on_failure() {
-            local status=$? current_image rollback_ok=true rollback_ready=false
-            trap - EXIT
-            set +e
-            if [ "$status" -ne 0 ] && [ "$was_update" = true ] && [ "$rollback_armed" = true ]; then
-              current_image=$(docker service inspect "$service" \
-                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)
-              if [ "$current_image" != "$previous_image" ]; then
-                docker service rollback --detach=false "$service" || rollback_ok=false
-              fi
-              [ "$(docker service inspect "$service" \
-                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)" = "$previous_image" ] \
-                || rollback_ok=false
-              for attempt in $(seq 1 40); do
-                if curl -fsS --max-time 5 "http://127.0.0.1:${published}${health}" >/dev/null; then
-                  rollback_ready=true
-                  break
-                fi
-                sleep 4
-              done
-              [ "$rollback_ready" = true ] || rollback_ok=false
-              if [ "$rollback_ok" = true ]; then
-                echo "Verified automatic rollback to ${previous_image##*@}" >&2
-              else
-                echo 'Rollback verification failed' >&2
-                status=97
-              fi
-            fi
-            rm -f -- "$DOCKER_CONFIG/config.json"
-            rmdir -- "$DOCKER_CONFIG" 2>/dev/null || true
-            exit "$status"
-          }
-          trap rollback_on_failure EXIT
           network=jeeb-staging-net
           retired_gateway_env=(
             UnifiedPaymentGateway__BaseUrl
@@ -334,6 +373,7 @@ jobs:
               add_env AdminOidc__Enabled false
               add_env SuperLogin__OpenMode false
               add_env DemoUsers__Enabled false
+              add_env Security__TokenMint__Enabled true
               # Host-mode published ports traverse docker_gwbridge. Trust only
               # its exact gateway address, never the whole bridge or app overlay.
               add_env ForwardedHeaders__KnownProxies__0 "$published_port_proxy_ip"
@@ -395,8 +435,11 @@ jobs:
               add_rotated_secret "$bundler_secret_name" bundler_cms_bearer_token
               add_rotated_secret "$job_secret_name" jeeb_gateway_job_token
               add_rotated_secret "$jwt_secret_name" jeeb_gateway_jwt
-              [ -z "$umjwt_secret_name" ] || \
+              if [ -n "$umjwt_secret_name" ]; then
                 add_rotated_secret "$umjwt_secret_name" jeeb_gateway_umjwt
+              else
+                remove_secret_target jeeb_gateway_umjwt
+              fi
               add_rotated_secret "$guardian_secret_name" realtime_guardian_secret
               add_rotated_secret "$probe_secret_name" staging_wss_probe_mint_key
               add_rotated_secret "$membership_secret_name" realtime_membership_ticket_key
@@ -493,10 +536,10 @@ jobs:
             echo 'Gateway staging service must retain the approved host-mode port' >&2
             exit 1
           }
-          previous_image=$(docker service inspect "$service" \
+          current_image=$(docker service inspect "$service" \
             --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
-          [[ "$previous_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
-            echo 'Incumbent service image is not digest-pinned; rollback target is unsafe' >&2
+          [ "$current_image" = "$EXPECTED_PREVIOUS_IMAGE" ] || {
+            echo 'Incumbent service changed after the exact recovery digest was captured' >&2
             exit 1
           }
           if ! docker service inspect "$service" \
@@ -512,8 +555,6 @@ jobs:
             grep -Fq "$stale_gateway_network_id"; then
             network_update_args+=(--network-rm "$stale_gateway_network")
           fi
-          was_update=true
-          rollback_armed=true
           docker service update --detach=false --replicas 1 --image "$IMAGE" --with-registry-auth \
             "${network_update_args[@]}" \
             "${secret_update_args[@]}" "${env_remove_args[@]}" \
@@ -537,63 +578,19 @@ jobs:
             docker service ps --no-trunc "$service" | head -n 8 || true
             exit 1
           fi
-          rollback_armed=false
           REMOTE
           } | ssh jeeb-staging bash -se
-
-      - name: Verify exact deployed service image
-        env:
-          IMAGE: ${{ steps.immutable.outputs.image }}
-        run: |
-          set -euo pipefail
-          [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
           ssh jeeb-staging bash -s -- jeeb-staging-jeeb-gateway "$IMAGE" \
             < scripts/verify-swarm-service-image.sh
-
-      - name: Verify public HTTPS origin contract
-        run: |
-          set -euo pipefail
-          probe_origin() {
-            local host=$1 path=$2 supplied_scheme=$3 expected_type=$4
-            local response status body
-            response=$(curl --silent --show-error --connect-timeout 10 --max-time 20 \
-              --write-out $'\n%{http_code}' --request POST \
-              --header "Origin: ${supplied_scheme}://${host}" \
-              --header 'Sec-Fetch-Site: same-origin' \
-              "https://${host}${path}")
-            status=${response##*$'\n'}
-            body=${response%$'\n'*}
-            [ "$status" = 403 ]
-            jq -e --arg expected "$expected_type" '.type == $expected' <<< "$body" >/dev/null
-          }
-          csrf_type=https://jeeb.dev/errors/csrf_rejected
-          origin_type=https://jeeb.dev/errors/origin_rejected
-          probe_origin app.jeeb.fds-1.com /admin/v1/auth/refresh https "$csrf_type"
-          probe_origin app.jeeb.fds-1.com /admin/v1/auth/refresh http "$origin_type"
-          probe_origin cms.jeeb.fds-1.com /gateway/admin/v1/auth/refresh https "$csrf_type"
-          probe_origin cms.jeeb.fds-1.com /gateway/admin/v1/auth/refresh http "$origin_type"
-
-          for retired_path in /api/User/demo-users /api/User/super-login/users; do
-            status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-              "https://app.jeeb.fds-1.com${retired_path}")
-            [ "$status" = 404 ] || {
-              echo "Public debug login surface is still reachable: ${retired_path} -> ${status}" >&2
-              exit 1
-            }
-          done
-
-          otp_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-            --header 'Content-Type: application/json' --data '{}' \
-            https://app.jeeb.fds-1.com/v1/auth/otp/request)
-          [ "$otp_status" = 400 ] || {
-            echo "OTP route is not enabled with its normal validation contract: ${otp_status}" >&2
-            exit 1
-          }
+          bash scripts/probe-staging-public-gateway-contract.sh
+          rollback_armed=false
 
       - name: Clean up isolated remote Docker credentials
         if: always()
         run: |
           set -euo pipefail
+          # The run-scoped credential path is intentionally expanded by the runner.
+          # shellcheck disable=SC2029
           ssh jeeb-staging "set -eu
             credential_dir=\"\$HOME/$REMOTE_DOCKER_CONFIG\"
             case \"\$credential_dir\" in \"\$HOME/.jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}\") ;; *) exit 97 ;; esac
