@@ -459,6 +459,7 @@ jobs:
           else
             echo "feature_flags=empty -> (no map-driven flag mutation; running flags / baked appsettings defaults preserved)"
           fi
+          VERIFY_SWARM_SERVICE_IMAGE="$(base64 -w 0 scripts/verify-swarm-service-image.sh)"
           # The runner intentionally expands the versioned secret names and immutable
           # image before sending this single update-only script to the pinned host.
           # shellcheck disable=SC2087
@@ -550,7 +551,7 @@ jobs:
             while IFS= read -r old_secret; do
               [ -z "\$old_secret" ] || state_secret_args+=(--secret-rm "\$old_secret")
             done < <(docker service inspect "\$SVC" --format "\$format")
-            state_secret_args+=(--secret-add "source=\$source,target=\$target,mode=0444")
+            state_secret_args+=(--secret-add "source=\$source,target=\$target,uid=65532,gid=65532,mode=0400")
           }
           add_rotated_secret jeeb_state_service_token "\$STATE_SECRET"
           add_rotated_secret delivery_service_token "\$DELIVERY_SECRET"
@@ -637,5 +638,6 @@ jobs:
             docker service ps --no-trunc "\$SVC" | head -n 8 || true
             exit 1
           fi
+          printf '%s' '$VERIFY_SWARM_SERVICE_IMAGE' | base64 -d | bash -s -- "\$SVC" "\$REQUESTED_IMAGE"
           rollback_armed=false
           EOF

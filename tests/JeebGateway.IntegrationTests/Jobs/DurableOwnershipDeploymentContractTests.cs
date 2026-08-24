@@ -39,8 +39,10 @@ public sealed class DurableOwnershipDeploymentContractTests
             workflow.Should().Contain(
                 "target=$target_name,uid=65532,gid=65532,mode=0400");
         else
-            foreach (var target in targets)
-                workflow.Should().Contain($"target={target},mode=0444");
+            workflow.Should().Contain(
+                "source=\\$source,target=\\$target,uid=65532,gid=65532,mode=0400");
+
+        workflow.Should().NotContain("mode=0444");
 
         workflow.Should().Contain("JeebStateService__ServiceTokenFile");
         workflow.Should().Contain("/run/secrets/jeeb_state_service_token");
@@ -252,10 +254,18 @@ public sealed class DurableOwnershipDeploymentContractTests
         }
         else
         {
-            workflow.Should().Contain("--update-failure-action pause");
-            workflow.Should().NotContain("--update-failure-action " + "rollback");
-            workflow.Should().NotContain("--" + "rollback-order");
-            workflow.Should().NotContain("docker service " + "rollback");
+            const string runtimeVerifier = "base64 -d | bash -s -- \"\\$SVC\" \"\\$REQUESTED_IMAGE\"";
+            workflow.Should().Contain(runtimeVerifier);
+            workflow.IndexOf("rollback_armed=true", StringComparison.Ordinal).Should()
+                .BeLessThan(workflow.IndexOf(runtimeVerifier, StringComparison.Ordinal));
+            workflow.IndexOf(runtimeVerifier, StringComparison.Ordinal).Should()
+                .BeLessThan(workflow.LastIndexOf("rollback_armed=false", StringComparison.Ordinal));
+            workflow.Should().Contain("--update-order stop-first");
+            workflow.Should().Contain("--update-failure-action " + "rollback");
+            workflow.Should().Contain("--" + "rollback-order stop-first");
+            workflow.Should().Contain("docker service " + "rollback --detach=false");
+            workflow.Should().Contain("Incumbent service image is not digest-pinned");
+            workflow.Should().NotContain("--update-order start-first");
         }
     }
 
