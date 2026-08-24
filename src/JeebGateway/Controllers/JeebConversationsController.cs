@@ -699,6 +699,7 @@ public sealed class JeebConversationsController : ControllerBase
                 + "by mobile devices.");
         }
 
+        Response.Headers.CacheControl = "private, no-store";
         return Ok(new RealtimeChannelDescriptor
         {
             ConversationId = conversationId,

@@ -52,6 +52,7 @@ require(
         '[ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JWT_SIGNING_KEY" ]',
         '[ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JEEB_RTC_GUARDIAN_SECRET_KEY" ]',
         '[ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" ]',
+        "bash scripts/assert-distinct-staging-signing-keys.sh",
         "stream_secret \"$probe_secret_name\" \"$JEEB_STAGING_WSS_PROBE_MINT_KEY\"",
         "add_env Operations__RealtimeProbe__MintKeyFile /run/secrets/staging_wss_probe_mint_key",
         "add_env Services__Realtime__GuardianSecretFile /run/secrets/realtime_guardian_secret",
@@ -814,3 +815,4 @@ run_recovery_case post_verifier_drift 1 1 1 third
 
 echo "Actual recovery helper SSH/Engine adversarial harness PASSED (14 cases)"
 bash scripts/test-staging-gateway-mutation-lock.sh
+bash scripts/test-assert-distinct-staging-signing-keys.sh

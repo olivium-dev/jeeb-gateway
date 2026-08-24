@@ -464,6 +464,9 @@ public sealed class JeebConversationsBffTests
         var resp = await http.SendAsync(msg);
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        resp.Headers.CacheControl.Should().NotBeNull();
+        resp.Headers.CacheControl!.Private.Should().BeTrue();
+        resp.Headers.CacheControl.NoStore.Should().BeTrue();
         var json = JObject.Parse(await resp.Content.ReadAsStringAsync());
         json["topic"]!.Value<string>().Should().Be("jeeb:chat:conv-1");
         json["conversationId"]!.Value<string>().Should().Be("conv-1");

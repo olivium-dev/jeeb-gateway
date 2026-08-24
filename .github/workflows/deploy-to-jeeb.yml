@@ -359,15 +359,7 @@ jobs:
           REQUESTED_SERVICE: ${{ inputs.service_name }}
         run: |
           set -euo pipefail
-          # Resolve names and Swarm IDs before registry login or secret/service mutation.
-          # shellcheck disable=SC2029
-          canonical_service=$(ssh jeeb \
-            "docker service inspect '$REQUESTED_SERVICE' --format '{{.Spec.Name}}'" \
-            2>/dev/null || true)
-          if [ "$canonical_service" = jeeb-staging-jeeb-gateway ]; then
-            echo '::error::The staging gateway can be changed only by jeeb-staging-deploy.yml bootstrap/activation phases' >&2
-            exit 1
-          fi
+          bash scripts/reject-staging-gateway-alias.sh "$REQUESTED_SERVICE"
 
       - name: Log in to GHCR (password via stdin)
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin

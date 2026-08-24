@@ -209,7 +209,9 @@ public sealed class DurableOwnershipDeploymentContractTests
         const string hostGuard =
             "[ \"$REQUESTED_HOST\" = \"$STAGING_SSH_HOST\" ]";
         const string canonicalGuard =
-            "[ \"$canonical_service\" = jeeb-staging-jeeb-gateway ]";
+            "bash scripts/reject-staging-gateway-alias.sh \"$REQUESTED_SERVICE\"";
+        var aliasGuard = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(), "scripts", "reject-staging-gateway-alias.sh"));
 
         workflow.Should().Contain("REQUESTED_SERVICE: ${{ inputs.service_name }}");
         workflow.Should().Contain("REQUESTED_HOST: ${{ inputs.server_hostname }}");
@@ -218,7 +220,11 @@ public sealed class DurableOwnershipDeploymentContractTests
         CountOccurrences(workflow, hostGuard).Should().Be(1);
         CountOccurrences(workflow, canonicalGuard).Should().Be(1);
         workflow.Should().Contain("*[!a-zA-Z0-9_.-]*)");
-        workflow.Should().Contain("canonical_service=$(ssh jeeb");
+        aliasGuard.Should().Contain("if ! canonical_service=$(ssh jeeb");
+        aliasGuard.Should().Contain("''|*$'\\n'*|*[!a-zA-Z0-9_.-]*)");
+        aliasGuard.Should().Contain(
+            "[ \"$canonical_service\" = jeeb-staging-jeeb-gateway ]");
+        aliasGuard.Should().NotContain("2>/dev/null || true");
         workflow.Should().Contain("SSH_KNOWN_HOSTS: ${{ secrets.JEEB_SSH_KNOWN_HOSTS }}");
         workflow.Should().Contain("UserKnownHostsFile ~/.ssh/known_hosts");
         workflow.Should().Contain("StrictHostKeyChecking yes");
@@ -236,6 +242,35 @@ public sealed class DurableOwnershipDeploymentContractTests
         canonicalGuardIndex.Should().BeLessThan(firstExternalMutation,
             "Swarm IDs and aliases must be rejected before local registry mutation");
         firstExternalMutation.Should().BeLessThan(build);
+    }
+
+    [Fact]
+    public void Jeeb_staging_rejects_every_signing_key_family_collision_before_staging_secrets()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+        var contract = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(), "scripts", "assert-distinct-staging-signing-keys.sh"));
+
+        const string invocation = "bash scripts/assert-distinct-staging-signing-keys.sh";
+        workflow.Should().Contain(invocation);
+        foreach (var variable in new[]
+                 {
+                     "JWT_SIGNING_KEY",
+                     "UMJWT_SIGNING_KEY",
+                     "JEEB_RTC_GUARDIAN_SECRET_KEY",
+                     "JEEB_RTC_MEMBERSHIP_TICKET_KEY",
+                     "JEEB_STAGING_WSS_PROBE_MINT_KEY"
+                 })
+            contract.Should().Contain(variable);
+
+        contract.Should().Contain("for ((left = 0; left < ${#key_values[@]}; left += 1))");
+        contract.Should().Contain("for ((right = left + 1; right < ${#key_values[@]}; right += 1))");
+        var preflight = workflow.IndexOf(invocation, StringComparison.Ordinal);
+        var firstSecretName = workflow.IndexOf(
+            "state_secret_name=\"jeeb_staging_gateway_",
+            StringComparison.Ordinal);
+        preflight.Should().BeLessThan(firstSecretName,
+            "key-family collisions must fail before any secret name or object is staged");
     }
 
     [Fact]

@@ -185,6 +185,7 @@ jobs:
             [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" ]
             [ -z "$UMJWT_SIGNING_KEY" ] || \
               [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$UMJWT_SIGNING_KEY" ]
+            bash scripts/assert-distinct-staging-signing-keys.sh
             state_secret_name="jeeb_staging_gateway_state_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             notification_secret_name="jeeb_staging_gateway_notification_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             settlement_secret_name="jeeb_staging_gateway_settlement_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"

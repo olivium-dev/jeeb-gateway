@@ -279,6 +279,7 @@ for name, text in deploy_text.items():
         raise SystemExit(f"FAIL: {name} does not derive its artifact from the triggering commit")
 
 direct = deploy_text["deploy-to-jeeb.yml"]
+alias_guard = Path("scripts/reject-staging-gateway-alias.sh").read_text()
 for token in (
     'steps.immutable.outputs.image',
     'GITHUB_OUTPUT',
@@ -296,8 +297,7 @@ for token in (
     '[ "$REQUESTED_SERVICE" = jeeb-staging-jeeb-gateway ]',
     '[ "$REQUESTED_HOST" = "$STAGING_SSH_HOST" ]',
     "*[!a-zA-Z0-9_.-]*)",
-    'canonical_service=$(ssh jeeb',
-    '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
+    'bash scripts/reject-staging-gateway-alias.sh "$REQUESTED_SERVICE"',
 ):
     if token not in direct:
         raise SystemExit(f"FAIL: direct production deploy lacks commit/image/runtime proof: {token}")
@@ -308,6 +308,16 @@ for forbidden_direct in (
 ):
     if forbidden_direct in direct:
         raise SystemExit(f"FAIL: direct host-mode deploy contains unsafe rollout behavior: {forbidden_direct}")
+for token in (
+    'if ! canonical_service=$(ssh jeeb',
+    "''|*$'\\n'*|*[!a-zA-Z0-9_.-]*)",
+    '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
+    'Unable to resolve the canonical Swarm service; refusing deployment',
+):
+    if token not in alias_guard:
+        raise SystemExit(f"FAIL: canonical staging alias guard is missing: {token}")
+if "2>/dev/null || true" in alias_guard:
+    raise SystemExit("FAIL: canonical staging alias resolution remains fail-open")
 
 staging = deploy_text["jeeb-staging-deploy.yml"]
 for token in (
@@ -452,8 +462,7 @@ def validate_direct_rollout(text):
         '[ "$REQUESTED_SERVICE" = jeeb-staging-jeeb-gateway ]',
         '[ "$REQUESTED_HOST" = "$STAGING_SSH_HOST" ]',
         "*[!a-zA-Z0-9_.-]*)",
-        'canonical_service=$(ssh jeeb',
-        '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
+        'bash scripts/reject-staging-gateway-alias.sh "$REQUESTED_SERVICE"',
         "SSH_KNOWN_HOSTS: ${{ secrets.JEEB_SSH_KNOWN_HOSTS }}",
         "UserKnownHostsFile ~/.ssh/known_hosts",
         "StrictHostKeyChecking yes",
@@ -477,7 +486,9 @@ def validate_direct_rollout(text):
     first_external_mutation = text.index("docker login")
     if not staging_guard < first_external_mutation or not host_guard < first_external_mutation:
         raise ValueError("staging target guards must run before any external mutation")
-    canonical_guard = text.index('[ "$canonical_service" = jeeb-staging-jeeb-gateway ]')
+    canonical_guard = text.index(
+        'bash scripts/reject-staging-gateway-alias.sh "$REQUESTED_SERVICE"'
+    )
     ssh_setup = text.index("Install cloudflared + write deploy key")
     first_build = text.index("docker build")
     first_remote_mutation = text.index("Remote GHCR login")
@@ -617,8 +628,8 @@ negative_controls = (
         "direct canonical staging alias guard removed",
         validate_direct_rollout,
         direct.replace(
-            '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
-            '[ "$canonical_service" = jeeb-staging-jeeb-gatewa ]',
+            'bash scripts/reject-staging-gateway-alias.sh "$REQUESTED_SERVICE"',
+            ':',
             1,
         ),
     ),
@@ -626,13 +637,13 @@ negative_controls = (
         "direct canonical staging alias guard moved after local registry login",
         validate_direct_rollout,
         direct.replace(
-            '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
+            'bash scripts/reject-staging-gateway-alias.sh "$REQUESTED_SERVICE"',
             ":",
             1,
         ).replace(
             "docker login ${{ env.REGISTRY }}",
             "docker login ${{ env.REGISTRY }}\n"
-            + '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
+            + 'bash scripts/reject-staging-gateway-alias.sh "$REQUESTED_SERVICE"',
             1,
         ),
     ),
@@ -732,4 +743,5 @@ print(f"Audited {utf8_count} tracked UTF-8 files and {len(deploy_inventory)} dep
 print("Production/staging authority and immutable artifact locks are exact.")
 PY
 
+bash scripts/test-reject-staging-gateway-alias.sh
 echo "Forward-only authority audit PASSED"
